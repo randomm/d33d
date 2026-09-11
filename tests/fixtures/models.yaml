@@ -1,0 +1,60 @@
+# A6 golden fixture: the models.yaml the catalogues-and-roles tests assert
+# against. This is the *sample* shape the spec pins — providers (base +
+# ${ENV} key), models (id alias vs provider/model id, context_window,
+# params, ordered fallbacks, retries {count,on}), and the top-level roles
+# map with the three required keys (design / critique / classification).
+#
+# The fixture is read by tests/test_model_config.py (task-a scope) but is
+# shared: it also pins the exact providers/models that a task-d request_logs
+# row's (model_alias, model_id, provider) tuple references. If you change
+# this file, run the full `pytest -m "not slow"` suite — every workstream's
+# fixture assertions ride on it.
+#
+# NOTE on ${ENV}: this is the raw YAML text. Server-side, the catalogue
+# loader (task-a) resolves ${TRAIL_OPENERS_LLM_KEY} and ${PAID_AZURE_LLM_KEY}
+# against the environment at load time; an unset var must fail loudly for
+# that provider. The raw value must never be echoed back by any endpoint.
+
+providers:
+  trailopeners:
+    base: https://llm.trailopeners.com/v1
+    key: ${TRAIL_OPENERS_LLM_KEY}
+  paid-azure:
+    base: https://paid-azure.example.com/v1
+    key: ${PAID_AZURE_LLM_KEY}
+    default:
+      temperature: 0.3
+      max_tokens: 4096
+
+models:
+  - id: design-primary              # stable client-facing alias
+    provider: trailopeners
+    model: RedHatAI/Qwen3.8-27B-INT4 # volatile provider id
+    context_window: 262144
+    params:
+      temperature: 0.2
+      max_tokens: 8192
+    fallbacks: [design-backup]
+    retries:
+      count: 2
+      on: [timeout, 5xx]
+  - id: design-backup
+    provider: paid-azure
+    model: Qwen/Qwen2.5-32B-Instruct
+    context_window: 131072
+    fallbacks: []
+  - id: critique-primary
+    provider: trailopeners
+    model: RedHatAI/Qwen3.8-27B-INT4
+    context_window: 262144
+    fallbacks: [design-primary]
+  - id: classification-primary
+    provider: trailopeners
+    model: RedHatAI/Qwen3.8-27B-INT4
+    context_window: 32768
+    fallbacks: []
+
+roles:
+  design: design-primary
+  critique: critique-primary
+  classification: classification-primary
