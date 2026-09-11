@@ -184,15 +184,28 @@ def _parse_orca_result_json(outdir: Path) -> tuple[int, str, int | None]:
         data = json.loads(result_file.read_text())
     except (json.JSONDecodeError, OSError) as e:
         return -1, f"result.json unreadable: {e}", None
-    return_code = int(data.get("return_code", -1))
-    error_string = str(data.get("error_string", ""))
+    if not isinstance(data, dict):
+        return -1, "result.json is not a JSON object", None
+    raw_rc = data.get("return_code", -1)
+    plates = data.get("sliced_plates")
     objects = None
-    plates = data.get("sliced_plates") or []
-    for plate in plates:
-        plate_objects = plate.get("objects") or []
-        if plate_objects:
-            objects = (objects or 0) + len(plate_objects)
-    return return_code, error_string, objects
+    plate_objects_ok = True
+    if not isinstance(plates, list):
+        plate_objects_ok = False
+    else:
+        for plate in plates:
+            if not isinstance(plate, dict):
+                plate_objects_ok = False
+                break
+            plate_objects = plate.get("objects")
+            if not isinstance(plate_objects, (list, tuple)):
+                plate_objects_ok = False
+                break
+            if plate_objects:
+                objects = (objects or 0) + len(plate_objects)
+    if isinstance(raw_rc, int) and plate_objects_ok:
+        return raw_rc, str(data.get("error_string", "")), objects
+    return -1, "result.json has an unexpected shape", None
 
 
 def _first_gcode(outdir: Path) -> Path | None:
