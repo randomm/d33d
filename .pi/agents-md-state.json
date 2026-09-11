@@ -1,0 +1,62 @@
+[
+  {
+    "key": "omit:quality-gates",
+    "value": "no gate commands could be derived from the project manifest",
+    "provenance": "auto",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "omit:commands",
+    "value": "no commands could be derived from the project manifest",
+    "provenance": "auto",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "omit:environment",
+    "value": "no recognised manifest was detected",
+    "provenance": "auto",
+    "date": "2026-09-11"
+  },
+  {
+    "key": "operator:coverage",
+    "value": ">80%",
+    "provenance": "asked",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "operator:review-blocking",
+    "value": "Only HIGH/CRITICAL blocks merge",
+    "provenance": "asked",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "operator:merge-authority",
+    "value": "Agents can merge",
+    "provenance": "asked",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "operator:constraints",
+    "value": "omit",
+    "provenance": "asked",
+    "date": "2026-09-10"
+  },
+  {
+    "key": "quality-gates",
+    "value": "agent",
+    "provenance": "detected",
+    "date": "2026-09-11"
+  },
+  {
+    "key": "commands",
+    "value": "agent",
+    "provenance": "detected",
+    "date": "2026-09-11"
+  },
+  {
+    "key": "architecture-notes",
+    "value": "agent",
+    "provenance": "detected",
+    "date": "2026-09-11"
+  }
+]
