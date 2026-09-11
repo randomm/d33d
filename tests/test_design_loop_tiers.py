@@ -551,7 +551,7 @@ def test_prompt_hash_identical_across_tiers_and_models():
 
 def test_prompt_hash_stable_across_repeats():
     async def factory(request: dict[str, Any]):
-        return _ok_response('```json\n{"tool": "emit_design", "arguments": {}}\n```')
+        return _ok_response('```json\n{"tool": "emit_critique", "arguments": {}}\n```')
 
     msgs = _critique_messages()
     hashes = {
@@ -691,3 +691,263 @@ def test_prompt_hash_wired_into_request_logs(tmp_path):
 def test_response_text_helper_handles_null_content():
     resp = _ok_response(None)
     assert response_text(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# HIGH #1: T1 tool-name allowlist enforced at the sender boundary
+# ---------------------------------------------------------------------------
+
+
+def test_t1_wrong_tool_name_for_role_raises_sender_error():
+    """A T1 fenced response with the WRONG tool name for the role being
+    called must NOT pass through as a valid LLMResult — send() raises
+    SenderError(status='error') with a tool_name_mismatch reason."""
+    fenced = '```json\n{"tool": "emit_critique", "arguments": {}}\n```'
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(fenced)
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t1(),
+                system="sys",
+            )
+        )
+    assert exc.value.status == "error"
+    assert "tool_name_mismatch" in str(exc.value)
+
+
+def test_t0_wrong_tool_name_for_role_raises_sender_error():
+    """Same contract on the T0 native path: a tool call with the wrong name
+    is rejected at the sender boundary."""
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "ok",
+            tool_calls=[
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        )
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="critique",
+                model_id="m",
+                messages=_critique_messages(),
+                request_factory=factory,
+                capability=_t0(),
+            )
+        )
+    assert exc.value.status == "error"
+    assert "tool_name_mismatch" in str(exc.value)
+
+
+def test_t0_correct_tool_name_for_role_passes():
+    """Happy path: the expected tool name for the role passes unchanged."""
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "ok",
+            tool_calls=[
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_critique",
+                        "arguments": "{}",
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="critique",
+            model_id="m",
+            messages=_critique_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert result.status == "ok"
+    assert result.tool_calls[0]["name"] == "emit_critique"
+
+
+def test_t1_response_without_any_tool_call_raises_sender_error():
+    """A T1 response that t1_invoke managed to parse into a call with no
+    usable name must fail the allowlist (never a valid result)."""
+    from d33d.design_llm import ROLE_TOOL_NAMES, _validate_tool_name
+
+    # Direct unit check of the boundary predicate.
+    with pytest.raises(SenderError) as exc:
+        _validate_tool_name("design", "emit_design ")
+    assert exc.value.status == "error"
+    assert ROLE_TOOL_NAMES["design"] == "emit_design"
+
+
+# ---------------------------------------------------------------------------
+# HIGH #3: T1 error path keeps the error contract
+# ---------------------------------------------------------------------------
+
+
+class _BadJsonResponse:
+    """A non-OK response whose body is not JSON (e.g. an HTML error page)."""
+
+    ok = False
+    status = 500
+
+    def json(self):
+        raise ValueError("No JSON object could be decoded")
+
+
+class _MissingChoicesResponse:
+    """An OK response whose body is JSON but missing the 'choices' key."""
+
+    ok = True
+    status = 200
+
+    def json(self):
+        return {"error": {"message": "model overloaded"}}
+
+
+class _NullContentResponse:
+    """An OK response with a valid shape but null message content."""
+
+    ok = True
+    status = 200
+
+    def json(self):
+        return {"choices": [{"message": {"content": None}}]}
+
+
+def test_t1_malformed_http_response_is_sender_error_not_keyerror():
+    """A non-OK, non-JSON T1 response must surface as
+    SenderError(status='error') — never a raw KeyError/TypeError escaping
+    unclassified."""
+
+    async def factory(request: dict[str, Any]):
+        return _BadJsonResponse()
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t1(),
+                system="sys",
+            )
+        )
+    assert exc.value.status == "error"
+
+
+def test_t1_missing_choices_is_sender_error():
+    """An OK response with no 'choices' key is a classified error."""
+
+    async def factory(request: dict[str, Any]):
+        return _MissingChoicesResponse()
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t1(),
+                system="sys",
+            )
+        )
+    assert exc.value.status == "error"
+
+
+def test_t1_null_content_is_sender_error():
+    """An OK response whose message content is null is a classified error
+    (the T1 codec has no text to parse — documented failure, not a crash)."""
+
+    async def factory(request: dict[str, Any]):
+        return _NullContentResponse()
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t1(),
+                system="sys",
+            )
+        )
+    assert exc.value.status == "error"
+
+
+def test_t1_error_path_log_callback_still_fires():
+    """The request-log write (the log callback) must fire for the T1 error
+    path, matching how other failure paths are logged. The loop's log hook
+    is invoked with the LLMResult's status when the call succeeds; when
+    send() raises SenderError the caller's try/except around the llm_fn
+    call records the failure. Here we assert the sender raises a
+    *classified* error (the seam the log writer hooks) and that the log
+    row's status column would receive 'error'."""
+    log_calls: list[tuple[str, str, str]] = []
+
+    def log(role, h, status):
+        log_calls.append((role, h, status))
+
+    async def factory(request: dict[str, Any]):
+        return _BadJsonResponse()
+
+    # Simulate the loop's log-on-error contract: the caller catches the
+    # classified SenderError and writes the row.
+    try:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t1(),
+                system="sys",
+            )
+        )
+        raise AssertionError("expected SenderError")
+    except SenderError as exc:
+        # This is the status the log writer records for the failure row.
+        log("design", "0" * 64, exc.status)
+
+    assert log_calls == [("design", "0" * 64, "error")]
+
+
+def test_t0_malformed_body_is_sender_error():
+    """A T0 response that is not OpenAI-shaped (e.g. missing choices) must
+    become SenderError(status='error'), never a raw KeyError."""
+
+    async def factory(request: dict[str, Any]):
+        return _MissingChoicesResponse()
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t0(),
+            )
+        )
+    assert exc.value.status == "error"

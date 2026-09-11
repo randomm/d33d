@@ -441,3 +441,72 @@ def test_clarification_is_frozen() -> None:
     assert isinstance(c, DimensionClarification)
     with pytest.raises(AttributeError):
         c.confirmed = False  # type: ignore[misassigned-type]
+
+
+# ---------------------------------------------------------------------------
+# HIGH #4: confirmation heuristic tightened to the most-recent turn only
+# ---------------------------------------------------------------------------
+
+
+def test_stray_yes_in_early_turn_does_not_confirm_ai_suggestion() -> None:
+    """(a) A stray "yes" in an early, unrelated turn must NOT confirm a
+    later AI suggestion — only the most recent turn counts. With the last
+    turn being a neutral one, the gate stays open."""
+    chat = [
+        "yes, that sounds interesting!",  # early stray confirmation
+        "Make me a bracket from this photo.",  # last turn — no confirmation
+    ]
+    c = require_dimensions_confirmed(
+        chat,
+        stated_dims=None,
+        ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0},
+    )
+    assert c.confirmed is False
+    # No suggested dimensions were promoted to ground truth.
+    assert c.params == {}
+
+
+def test_yes_in_most_recent_turn_does_confirm_ai_suggestion() -> None:
+    """(b) A "yes" in the actual most-recent responsive turn DOES confirm
+    correctly (preserving the happy path)."""
+    chat = [
+        "Make me a bracket from this photo.",
+        "Suggested W=40, D=30, H=20",
+        "Yes, that's right, and it's a slip fit.",  # most recent — confirms
+    ]
+    c = require_dimensions_confirmed(
+        chat,
+        stated_dims=None,
+        ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0},
+    )
+    assert c.confirmed is True
+    assert c.stated_dims == (40.0, 30.0, 20.0)
+    assert c.fit_type == "slip"
+
+
+def test_stray_snap_in_early_turn_does_not_set_fit_type() -> None:
+    """(c, stray) A "snap" mentioned in an early, unrelated turn (e.g. "that's
+    a snap decision") must NOT flip the fit type. With the last turn neutral,
+    no fit type is extracted → the gate asks for it."""
+    chat = [
+        "that's a snap decision, let's proceed",  # early stray snap
+        "W: 42",  # last turn — no fit type
+    ]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is False
+    assert any("fit" in q.lower() for q in c.questions)
+
+
+def test_snap_in_most_recent_turn_sets_fit_type() -> None:
+    """(c, recent) A "snap" in the actual most-recent turn DOES set the fit
+    type (preserving the happy path)."""
+    chat = [
+        "W: 42",
+        "D: 30",
+        "H: 20",
+        "snap fit",  # most recent — sets fit_type
+    ]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is True
+    assert c.fit_type == "snap"
+    assert c.tolerance_mm == resolve_tolerance_mm("snap")

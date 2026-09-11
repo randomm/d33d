@@ -226,26 +226,46 @@ def _extract_stated(
     return out
 
 
+def _last_user_turn(chat_history: list[str]) -> str:
+    """The most recent turn in the history ('' for an empty history).
+
+    The confirmation contract (see :func:`_confirmed_suggestion_tokens` and
+    :func:`_extract_fit_type`) is deliberately narrow: only the LAST turn
+    is scanned, so a stray "yes" or "snap" from earlier in the conversation
+    can never silently promote an AI suggestion into ground truth used for
+    physical part-fit tolerances.
+    """
+    if not chat_history:
+        return ""
+    return str(chat_history[-1])
+
+
 def _confirmed_suggestion_tokens(chat_history: list[str]) -> set[str]:
     """Tokens the user used to confirm AI suggestions.
 
-    A bare "yes"/"confirm" confirms the whole suggestion; "confirm W"
-    confirms axis W specifically. The AI's own suggestion messages are NOT
-    user turns (the caller passes the user's chat history), so any
-    confirmatory language here is a USER acceptance.
+    CONFIRMATION CONTRACT (tightened): only the MOST RECENT chat turn is
+    scanned — never the full history. A bare "yes"/"confirm"/"ok" in the
+    last turn confirms the whole suggestion; "confirm W" in the last turn
+    confirms axis W specifically. A stray confirmatory token in an earlier,
+    unrelated turn has NO effect: confirmation must be the user's current
+    response to the suggestion on the table, not a memory of something said
+    ten turns ago. (The AI's own suggestion messages are NOT user turns —
+    the caller passes the user's chat history — so any confirmatory
+    language in the last user turn is a USER acceptance.)
     """
     tokens: set[str] = set()
+    text = _last_user_turn(chat_history)
+    if not text:
+        return tokens
     confirm_re = re.compile(
         r"\b(confirm|confirmed|yes|yep|correct|right|accept|ok|okay)\b",
         re.IGNORECASE,
     )
-    for turn in chat_history:
-        text = str(turn)
-        if confirm_re.search(text):
-            tokens.add("suggested")
-            for axis in DIMENSION_AXES:
-                if re.search(rf"\b{axis}\b", text, re.IGNORECASE):
-                    tokens.add(f"suggested:{axis}")
+    if confirm_re.search(text):
+        tokens.add("suggested")
+        for axis in DIMENSION_AXES:
+            if re.search(rf"\b{axis}\b", text, re.IGNORECASE):
+                tokens.add(f"suggested:{axis}")
     return tokens
 
 
@@ -253,16 +273,25 @@ def _extract_fit_type(
     chat_history: list[str], stated_dims: dict[str, Any] | None
 ) -> FitType | None:
     """The fit type the user stated in chat or via ``stated_dims``
-    (``fit_type``/``fit`` key). None if not yet stated (the agent must ask)."""
+    (``fit_type``/``fit`` key). None if not yet stated (the agent must ask).
+
+    CONFIRMATION CONTRACT (tightened): only the MOST RECENT chat turn is
+    scanned for a fit-type keyword — never the full history. A "snap" (or
+    "slip"/"press"/"interference") mentioned in an earlier, unrelated turn
+    (e.g. "that's a snap decision") must NOT flip the fit type; the fit type
+    is what the user says in response to the agent's proactive fit-type
+    question, i.e. in the current turn.
+    """
     if stated_dims:
         raw = stated_dims.get("fit_type") or stated_dims.get("fit")
         if isinstance(raw, str) and raw.strip().lower() in _FIT_TYPE_SET:
             return raw.strip().lower()  # type: ignore[return-value]
-    for turn in chat_history or []:
-        text = str(turn).lower()
-        for fit in ("slip", "press", "interference", "snap"):
-            if re.search(rf"\b{fit}\b", text):
-                return fit  # type: ignore[return-value]
+    text = _last_user_turn(chat_history).lower()
+    if not text:
+        return None
+    for fit in ("slip", "press", "interference", "snap"):
+        if re.search(rf"\b{fit}\b", text):
+            return fit  # type: ignore[return-value]
     return None
 
 

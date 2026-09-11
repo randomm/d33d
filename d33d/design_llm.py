@@ -64,6 +64,18 @@ RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 #: logical tools (one per role) — the fence carries the payload regardless.
 T1_TOOL_NAMES: tuple[str, ...] = ("emit_design", "emit_critique", "emit_classification")
 
+#: The SINGLE tool name a given role is allowed to emit.  ``send`` enforces
+#: this at the sender boundary (a call with the wrong tool name is never
+#: returned as a valid :class:`LLMResult`) — the shape-based extraction
+#: downstream (``design_loop._scad_from_result``,
+#: ``critique_protocol.parse_critique``) is a secondary check, never the
+#: primary defense.
+ROLE_TOOL_NAMES: dict[str, str] = {
+    "design": "emit_design",
+    "critique": "emit_critique",
+    "classification": "emit_classification",
+}
+
 
 class SenderError(RuntimeError):
     """The endpoint answered non-OK, or the tier has no tool channel.
@@ -92,9 +104,44 @@ class LLMResult:
     usage: dict[str, int] = field(default_factory=dict)
 
 
+def _validate_tool_name(role: str, call_name: Any) -> None:
+    """Raise :class:`SenderError` (``status='error'``) iff the parsed tool
+    call's name is not the one the called role is allowed to emit.
+
+    A ``None``/empty name (a response with no usable tool call) is rejected
+    the same way — a design role that answered with bare prose, or a
+    critique role that emitted ``emit_design``'s name, both fail here before
+    ``send`` returns anything the caller could mistake for a valid result.
+    """
+    expected = ROLE_TOOL_NAMES.get(role)
+    if expected is None:
+        return  # unknown role: no tool contract to enforce
+    if not isinstance(call_name, str) or call_name != expected:
+        raise SenderError(
+            f"tool_name_mismatch: role {role!r} must emit {expected!r}, "
+            f"got {call_name!r}",
+            status="error",
+        )
+
+
 def response_message(response: Any) -> dict[str, Any]:
-    """The message object from an OpenAI-shaped response body."""
-    return response.json()["choices"][0]["message"]
+    """The message object from an OpenAI-shaped response body.
+
+    Defensive: a non-dict body, a missing/empty ``choices`` list, a non-dict
+    ``choices[0]`` or a non-dict ``message`` raises ``TypeError`` (never a
+    raw ``KeyError``/``TypeError``) so callers can classify the failure
+    instead of crashing with an unclassified exception.
+    """
+    data = response.json()
+    if not isinstance(data, dict):
+        raise TypeError("LLM response body is not a JSON object")
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        raise TypeError("LLM response has no usable choices[0]")
+    message = choices[0].get("message")
+    if not isinstance(message, dict):
+        raise TypeError("LLM response has no usable choices[0].message")
+    return message
 
 
 def response_text(response: Any) -> str:
@@ -276,8 +323,15 @@ async def send(
                 user_message=_last_user_text(messages),
                 tool_names=list(T1_TOOL_NAMES),
             )
-        except RuntimeError as exc:
-            raise SenderError(str(exc), status="error") from exc
+        except (RuntimeError, KeyError, TypeError, ValueError) as exc:
+            # RuntimeError is t1_invoke's own documented failure; KeyError /
+            # TypeError / ValueError are the belt-and-suspenders catch for
+            # any residual raw shape error in the T1 codec path — every one
+            # of these becomes a classified error (request-log write still
+            # fires), never an unclassified exception.
+            raise SenderError(
+                str(exc) or exc.__class__.__name__, status="error"
+            ) from exc
 
         # The reported request_body is the dialect-converted logical shape
         # (what goes on the wire); the T1 codec's internal envelope (system
@@ -293,6 +347,10 @@ async def send(
         prompt_hash = canonical_hash(
             role=role, messages=body["messages"], system=system
         )
+        # Tool-name allowlist: the parsed T1 call must carry the name this
+        # role is allowed to emit, or the response is rejected here — a
+        # mismatched name never reaches the caller as a valid result.
+        _validate_tool_name(role, call.name)
         tool_calls: tuple[dict[str, Any], ...] = (
             {"name": call.name, "arguments": call.arguments},
         )
@@ -322,15 +380,29 @@ async def send(
             f"LLM call for role {role!r} failed: HTTP {getattr(resp, 'status', '?')}",
             status="error",
         )
-    msg = resp.json()["choices"][0]["message"]
-    raw_calls = msg.get("tool_calls") or []
-    tool_calls = tuple(
-        {
-            "name": tc.get("function", {}).get("name"),
-            "arguments": tc.get("function", {}).get("arguments"),
-        }
-        for tc in raw_calls
-    )
+    try:
+        msg = response_message(resp)
+        raw_calls = msg.get("tool_calls") or []
+        tool_calls = tuple(
+            {
+                "name": tc.get("function", {}).get("name"),
+                "arguments": tc.get("function", {}).get("arguments"),
+            }
+            for tc in raw_calls
+            if isinstance(tc, dict)
+        )
+    except (ValueError, AttributeError, TypeError) as exc:
+        # Malformed (non-OpenAI-shaped) body: classified error, never a raw
+        # KeyError/TypeError escaping unclassified.
+        raise SenderError(
+            f"LLM response for role {role!r} was not OpenAI-shaped: {exc}",
+            status="error",
+        ) from exc
+    # Tool-name allowlist: the T0 tool call must carry the name this role is
+    # allowed to emit, or the response is rejected here — a mismatched name
+    # never reaches the caller as a valid result.
+    for tc in tool_calls:
+        _validate_tool_name(role, tc.get("name"))
     content = msg.get("content")
     return LLMResult(
         content=content if isinstance(content, str) else "",

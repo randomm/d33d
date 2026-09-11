@@ -164,8 +164,15 @@ async def t1_invoke(
 
     ``request_factory(request) -> response`` mirrors the probe edge:
     ``response.ok`` and ``response.json()`` with an OpenAI-shaped body.
-    Raises ``RuntimeError`` only when the model still fails after all
+    Raises ``RuntimeError`` when the model still fails after all
     corrective retries (the agent loop handles that like any tool error).
+
+    Every non-OK or malformed HTTP response (missing ``choices``, a
+    non-list, a non-dict message, a null/non-string content) is a
+    *protocol* failure, not a crash: it raises the documented
+    ``RuntimeError`` here — never a raw ``KeyError``/``TypeError`` — so
+    the sender can classify it as ``SenderError(status='error')`` and the
+    request-log write for the failure still fires.
     """
     fragment = build_t1_system_fragment(tool_names)
     base_messages: list[dict[str, Any]] = [
@@ -178,11 +185,42 @@ async def t1_invoke(
         if attempt > 0:
             messages.append({"role": "user", "content": corrective_message(last_text)})
         resp = await request_factory({"messages": messages})
-        data = resp.json()
-        last_text = data["choices"][0]["message"]["content"] or ""
+        last_text = _response_content(resp) or ""
         call = parse_t1_tool_call(last_text)
         if call is not None:
             return call
     raise RuntimeError(
         f"T1 tool call failed after {corrective_retries + 1} attempts: {last_text!r}"
     )
+
+
+def _response_content(resp: Any) -> str | None:
+    """The message content of an OpenAI-shaped response body, or None.
+
+    Defensive shape validation: a non-OK response, a non-JSON body, a
+    missing/empty ``choices`` list, a non-dict ``message`` or a
+    null/non-string ``content`` all yield ``None`` (the caller raises the
+    documented ``RuntimeError``) — a raw ``KeyError``/``TypeError`` never
+    escapes this function.
+    """
+    if not getattr(resp, "ok", False):
+        return None
+    try:
+        data = resp.json()
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    choices = data.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    if not isinstance(message, dict):
+        return None
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    return None

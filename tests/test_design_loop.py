@@ -42,10 +42,12 @@ from d33d.design_llm import LLMResult, send
 from d33d.design_loop import (
     GATE_REASON_BITS,
     MAX_ITERATIONS,
+    MAX_SCAD_SOURCE_BYTES,
     NO_IMPROVEMENT_LIMIT,
     BboxInfo,
     DesignResult,
     Score,
+    _scad_from_result,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -649,3 +651,72 @@ def test_named_param_block_preserved_not_stripped():
     assert "W = 20;" in result.best.scad_source
     assert "D = 25;" in result.best.scad_source
     assert "H = 30;" in result.best.scad_source
+
+
+# ---------------------------------------------------------------------------
+# SCAD extraction: fenced fallback gate + size cap (HIGH #2 regression)
+# ---------------------------------------------------------------------------
+
+
+def test_scad_fallback_extracts_fenced_scad_block():
+    """(a) A raw response with a fenced ```scad block is correctly
+    extracted as the SCAD source (no tool call needed)."""
+    for fence_lang in ("scad", "openscad", ""):
+        content = f"Here is the design:\n```{fence_lang}\n{GOOD_SCAD}\n```\nDone."
+        result = _llm_result(content=content, tool_calls=())
+        extracted = _scad_from_result(result)
+        # The fence's inner content includes the trailing newline before
+        # the closing fence; compare after stripping that single artifact.
+        assert extracted.rstrip() == GOOD_SCAD.rstrip()
+
+
+def test_scad_fallback_rejects_unfenced_prose_as_failure():
+    """(b) A raw response with NO fence and NO tool call is treated as a
+    clean failure — the raw prose is NEVER sent to the render worker (empty
+    source → the render worker's failure classification handles it)."""
+    prose = "I'm sorry, but I cannot generate OpenSCAD code for this request."
+    result = _llm_result(content=prose, tool_calls=())
+    assert _scad_from_result(result) == ""
+    # The loop's failure routing sees the empty source (a scored failure,
+    # not garbage fed to the render worker as a design).
+    assert _scad_from_result(result) != prose
+
+
+def test_scad_fallback_tool_call_path_not_subject_to_fence_scan():
+    """The tool-call arguments.scad path is used verbatim (the fence scan
+    only applies when the tool call carries no valid scad argument)."""
+    result = _llm_result(
+        content="no fence here at all",
+        tool_calls=({"name": "emit_design", "arguments": {"scad": GOOD_SCAD}},),
+    )
+    assert _scad_from_result(result) == GOOD_SCAD
+
+
+def test_scad_source_over_tool_call_path_is_size_capped():
+    """(c) An oversized SCAD source via the tool-call path is rejected as a
+    failure (empty source, nothing unbounded reaches the render worker)."""
+    oversized = "W = 20;\n" + ("// pad\n" * (MAX_SCAD_SOURCE_BYTES + 1024))
+    result = _llm_result(
+        content="",
+        tool_calls=({"name": "emit_design", "arguments": {"scad": oversized}},),
+    )
+    assert _scad_from_result(result) == ""
+
+
+def test_scad_source_over_fenced_fallback_path_is_size_capped():
+    """(c, fenced path) An oversized fenced SCAD block is rejected the same
+    way — the cap applies to EVERY extraction path, not just tool calls."""
+    oversized = "cube(1);\n" + ("// pad\n" * (MAX_SCAD_SOURCE_BYTES + 1024))
+    result = _llm_result(content=f"```scad\n{oversized}\n```", tool_calls=())
+    assert _scad_from_result(result) == ""
+
+
+def test_scad_source_at_cap_is_accepted():
+    """A source exactly at the cap passes (the cap is >, not >=)."""
+    header = "W = 20;\n"
+    pad = "x" * (MAX_SCAD_SOURCE_BYTES - len(header.encode("utf-8")))
+    at_cap = header + pad
+    # Wrap in a fence: the fence's inner content is the source verbatim
+    # (no extra trailing newline before the closing fence in this case).
+    result = _llm_result(content=f"```scad\n{at_cap}```", tool_calls=())
+    assert _scad_from_result(result) == at_cap

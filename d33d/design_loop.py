@@ -362,21 +362,53 @@ def _design_messages(
     return [{"role": "user", "content": parts}]
 
 
+#: The upper bound on any .scad source reaching the render worker (bytes),
+#: matching the render worker's 256 KiB stderr truncation convention.  An
+#: oversized source is a scored failure (never sent to the worker), whether
+#: it arrived via the tool call or the fenced fallback.
+MAX_SCAD_SOURCE_BYTES = 256 * 1024
+
+#: The fenced-SCAD fallback extractor: ```scad / ```openscad / bare ```
+#: fences, non-greedy to the first closing fence.
+_SCAD_FENCE_RE = re.compile(
+    r"```(?:scad|openscad)?[ \t]*\r?\n(.*?)```",
+    re.DOTALL,
+)
+
+
 def _scad_from_result(result: LLMResult) -> str:
     """The .scad source from a design-role LLMResult.
 
     The fenced-JSON protocol (T0 tool_calls or T1 synthesized tool_calls)
-    carries ``arguments.scad``; a plain fenced/scad content block is the
-    fallback. Parameter structure is PRESERVED verbatim — the response is
-    never re-templated or stripped here.
+    carries ``arguments.scad``; the fallback is a fenced SCAD block
+    (```scad / ```openscad / bare ```) extracted from the content by regex.
+    Raw, UNFENCED prose (a refusal, a chat response) is NEVER used as SCAD
+    source — the loop routes that through the render worker's failure
+    classification as a scored failure instead of sending garbage to the
+    render worker. Parameter structure is PRESERVED verbatim — the response
+    is never re-templated or stripped here.
+
+    Every extraction path is size-capped at :data:`MAX_SCAD_SOURCE_BYTES`;
+    an oversized source is treated as a failure (empty source → the render
+    worker's failure classification handles it, the loop's normal
+    repair/exhaustion logic applies, and nothing unbounded reaches the
+    worker).
     """
+    candidate: str | None = None
     for call in result.tool_calls:
         args = call.get("arguments")
         if isinstance(args, dict) and isinstance(args.get("scad"), str):
-            return args["scad"]
-    if isinstance(result.content, str) and result.content.strip():
-        return result.content
-    return ""
+            candidate = args["scad"]
+            break
+    if candidate is None and isinstance(result.content, str):
+        for m in _SCAD_FENCE_RE.finditer(result.content):
+            candidate = m.group(1)
+            break
+    if candidate is None:
+        return ""
+    if len(candidate.encode("utf-8", "replace")) > MAX_SCAD_SOURCE_BYTES:
+        return ""
+    return candidate
 
 
 # ---------------------------------------------------------------------------
