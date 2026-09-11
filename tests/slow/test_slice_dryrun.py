@@ -19,11 +19,13 @@ target slicer.
 
 from __future__ import annotations
 
+import inspect
 import tempfile
 from pathlib import Path
 
 import pytest
 
+from d33d import print_validation as pv
 from d33d.slicer import (
     SliceDryRunResult,
     available_slicers,
@@ -143,6 +145,20 @@ def test_over_envelope_slices_fail_loudly():
     # driver surfaced a non-empty diagnosable error, not the exact text.
     assert result.error_string or result.detail, "failure had no diagnosable error"
     assert result.return_code != 0 or result.return_code == -1
+
+
+def test_validate_stl_default_is_real_slicer():
+    """Wiring proof for the slow/real-hardware path: when validate_stl is
+    called WITHOUT an explicit slice_dry_run_fn override, the default must
+    be the real ``slicer.slice_dry_run`` (not a stub). This is the wiring
+    contract that makes gate 6 load-bearing on a real-hardware box where a
+    slicer binary is installed."""
+    sig = inspect.signature(pv.validate_stl)
+    default_fn = sig.parameters["slice_dry_run_fn"].default
+    assert default_fn is slice_dry_run, (
+        f"validate_stl's default slice_dry_run_fn is {default_fn!r}, "
+        "expected the real slicer.slice_dry_run"
+    )
 
 
 def test_missing_input_reported_as_failure():

@@ -15,6 +15,22 @@ import pytest
 import trimesh
 
 from d33d import print_validation as pv
+from d33d.slicer import SliceDryRunResult
+
+
+def _passing_slice_fn(model_path: str, output_dir: str | None) -> SliceDryRunResult:
+    """Injected gate-6 stub that passes without a real slicer binary (see
+    test_validation_pipeline._passing_slice_fn for the full rationale)."""
+    return SliceDryRunResult(
+        ok=True,
+        slicer="stub",
+        gcode_path="stub.gcode",
+        gcode_lines=1,
+        return_code=0,
+        error_string="",
+        objects=1,
+        detail="fast-layer stub (no real slicer binary needed)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -78,7 +94,7 @@ def test_watertight_gate_reports_independently(valid_stl, tmp_path):
     faces = [(0, 1, 2), (0, 2, 3)]
     m = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
     m.export(str(p))
-    result = pv.validate_stl(str(p))
+    result = pv.validate_stl(str(p), slice_dry_run_fn=_passing_slice_fn)
     assert not result.ok
     assert result.error_class is not None
     # A flat mesh fails the watertight gate (it's not a closed surface)
@@ -113,6 +129,7 @@ def test_winding_gate_reports_independently():
     assert "winding" != "watertight"
     # The pipeline source has a separate winding assertion
     import inspect
+
     src = inspect.getsource(pv.validate_stl)
     assert "is_winding_consistent" in src
     assert "is_watertight" in src
@@ -125,7 +142,9 @@ def test_dimension_gate_reports_independently(tmp_path):
     p = tmp_path / "wrong_size.stl"
     unit.export(p)
     # Stated dims are much larger than actual
-    result = pv.validate_stl(str(p), stated_mm=(100.0, 100.0, 100.0))
+    result = pv.validate_stl(
+        str(p), stated_mm=(100.0, 100.0, 100.0), slice_dry_run_fn=_passing_slice_fn
+    )
     assert not result.ok
     assert "dimension" in result.error_class
 
@@ -144,6 +163,7 @@ def test_volume_gate_reports_independently():
     assert "volume" in pv.ALL_ERROR_CLASSES
     # The pipeline source has a volume check
     import inspect
+
     src = inspect.getsource(pv.validate_stl)
     assert "volume" in src
 
@@ -151,7 +171,7 @@ def test_volume_gate_reports_independently():
 def test_envelope_gate_reports_independently(valid_stl, over_envelope_stl):
     """A mesh that fails the envelope gate gets its own diagnosable class
     and does NOT export a 3MF."""
-    result = pv.validate_stl(str(over_envelope_stl))
+    result = pv.validate_stl(str(over_envelope_stl), slice_dry_run_fn=_passing_slice_fn)
     assert not result.ok
     assert "envelope" in result.error_class
     assert result.export_3mf is None
@@ -162,7 +182,7 @@ def test_slice_dry_run_is_own_gate(valid_stl):
     check. A mesh that passes watertight+winding can still fail at the
     slice dry run. In the fast layer the slice dry run is stubbed to pass,
     but the gate must be independently diagnosable."""
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     # The slice gate passes (stubbed), and the error class would be
     # "slice" if it failed, not "watertight" or "winding"
@@ -190,7 +210,7 @@ def test_envelope_read_by_centring_and_gate(valid_stl):
     it fails."""
     env = pv.QIDI_PLUS_5_ENVELOPE_MM
     # Within envelope
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     # Exceeds envelope
     slab = trimesh.creation.box((400.0, 20.0, 20.0))
@@ -199,6 +219,6 @@ def test_envelope_read_by_centring_and_gate(valid_stl):
     d = tempfile.mkdtemp()
     p = str(Path(d) / "over.stl")
     slab.export(p)
-    result2 = pv.validate_stl(p)
+    result2 = pv.validate_stl(p, slice_dry_run_fn=_passing_slice_fn)
     assert not result2.ok
     assert "envelope" in result2.error_class

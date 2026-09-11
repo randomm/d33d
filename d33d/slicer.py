@@ -327,8 +327,14 @@ def slice_dry_run(
         )
         outdir = Path(output_dir) if output_dir else (gcode.parent if gcode else Path())
         if gcode is not None:
+            # result.json is the Orca-family's machine-readable verdict.
+            # Missing or corrupt (json_rc == -1) is a FAILURE, not a
+            # default pass: G-code alone proves the binary ran, but the
+            # plate may be empty (over-envelope, unsupported) and only
+            # result.json says whether the slice is usable. Same stricter
+            # semantics as the PrusaSlicer path (process exit code only).
             json_rc, json_err, objects = _parse_orca_result_json(outdir)
-            ok = json_rc == 0 if json_rc != -1 else True
+            ok = json_rc == 0
             return SliceDryRunResult(
                 ok=ok,
                 slicer="qidi",
@@ -356,10 +362,13 @@ def slice_dry_run(
         )
         outdir = Path(output_dir) if output_dir else (gcode.parent if gcode else Path())
         if gcode is not None:
+            # Missing/corrupt result.json (json_rc == -1) is a failure,
+            # not a default pass — same semantics as the QIDI branch above
+            # and the PrusaSlicer path.
             json_rc, json_err, objects = (
                 _parse_orca_result_json(outdir) if outdir else (-1, "", None)
             )
-            ok = json_rc == 0 if json_rc != -1 else True
+            ok = json_rc == 0
             return SliceDryRunResult(
                 ok=ok,
                 slicer="orca",

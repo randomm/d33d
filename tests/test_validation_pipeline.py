@@ -16,6 +16,28 @@ import pytest
 import trimesh
 
 from d33d import print_validation as pv
+from d33d.slicer import SliceDryRunResult
+
+
+def _passing_slice_fn(model_path: str, output_dir: str | None) -> SliceDryRunResult:
+    """Injected gate-6 stub that passes without a real slicer binary.
+
+    Proves the WIRING and gate ORDER (a mesh that clears watertight/winding
+    still reaches gate 6 and only the slice gate can veto it) without
+    requiring a slicer binary on the fast-layer machine. The real driver
+    (``d33d.slicer.slice_dry_run``) is the default and is exercised by the
+    slow layer in tests/slow/test_slice_dryrun.py.
+    """
+    return SliceDryRunResult(
+        ok=True,
+        slicer="stub",
+        gcode_path="stub.gcode",
+        gcode_lines=1,
+        return_code=0,
+        error_string="",
+        objects=1,
+        detail="fast-layer stub (no real slicer binary needed)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +141,7 @@ def test_fix_normals_runs_after_repair(valid_stl):
     # (fix_normals after repair), but we can't directly test the wrong order
     # without a mesh that repair inverts. Instead we assert the pipeline
     # function calls fix_normals after repair by checking the result.
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
 
 
@@ -155,6 +177,7 @@ def test_winding_gate_is_independently_diagnosable():
     # the watertight check). We verify this by checking that the source
     # code has a separate winding assertion.
     import inspect
+
     src = inspect.getsource(pv.validate_stl)
     # The winding check must be a separate assertion, not part of the
     # watertight check
@@ -190,8 +213,10 @@ def test_winding_inverted_fixture_is_valid(tmp_path):
 def test_holey_mesh_repaired_to_watertight(holey_stl):
     """A non-watertight mesh with open faces must be closed by the
     trimesh+pymeshfix repair chain into a watertight, winding-consistent mesh."""
-    result = pv.validate_stl(str(holey_stl))
-    assert result.ok, f"Expected holey mesh to repair cleanly, got: {result.error_class}"
+    result = pv.validate_stl(str(holey_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert result.ok, (
+        f"Expected holey mesh to repair cleanly, got: {result.error_class}"
+    )
 
 
 def test_holey_mesh_preserves_dimensions(holey_stl):
@@ -207,7 +232,9 @@ def test_holey_mesh_preserves_dimensions(holey_stl):
     d = tempfile.mkdtemp()
     p = Path(d) / "holey.stl"
     box.export(p)
-    result = pv.validate_stl(str(p), stated_mm=(20.0, 20.0, 20.0))
+    result = pv.validate_stl(
+        str(p), stated_mm=(20.0, 20.0, 20.0), slice_dry_run_fn=_passing_slice_fn
+    )
     assert result.ok
     assert result.parts[0].bbox_mm is not None
     bbox = result.parts[0].bbox_mm
@@ -225,7 +252,7 @@ def test_holey_mesh_preserves_dimensions(holey_stl):
 def test_over_envelope_fails_loudly(valid_stl, over_envelope_stl):
     """A mesh exceeding the QIDI Plus 5 build envelope on any axis must
     fail the envelope gate and NOT export a 3MF."""
-    result = pv.validate_stl(str(over_envelope_stl))
+    result = pv.validate_stl(str(over_envelope_stl), slice_dry_run_fn=_passing_slice_fn)
     assert not result.ok
     assert "envelope" in result.error_class
     # No 3MF should have been written
@@ -234,7 +261,7 @@ def test_over_envelope_fails_loudly(valid_stl, over_envelope_stl):
 
 def test_within_envelope_passes(valid_stl):
     """A mesh within the envelope passes the envelope gate."""
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
 
 
@@ -259,7 +286,7 @@ def test_centring_uses_envelope(valid_stl):
     # The pipeline must centre the mesh within the envelope
     # We verify by checking that the output mesh's bbox is within the envelope
     env = pv.QIDI_PLUS_5_ENVELOPE_MM
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     assert result.parts[0].bbox_mm is not None
     bbox = result.parts[0].bbox_mm
@@ -293,7 +320,7 @@ def test_zero_volume_fails(valid_stl):
     faces = [(0, 1, 2), (0, 2, 3)]
     m = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
     m.export(p)
-    result = pv.validate_stl(str(p))
+    result = pv.validate_stl(str(p), slice_dry_run_fn=_passing_slice_fn)
     assert not result.ok
     # A flat mesh is not watertight, so it fails the watertight gate
     assert result.error_class in ("watertight", "volume")
@@ -315,7 +342,7 @@ def test_degenerate_face_count_fails():
         process=False,
     )
     m.export(p)
-    result = pv.validate_stl(str(p))
+    result = pv.validate_stl(str(p), slice_dry_run_fn=_passing_slice_fn)
     assert not result.ok
     # A single-triangle mesh is not watertight, so it fails the watertight gate
     assert result.error_class in ("watertight", "volume")
@@ -332,22 +359,75 @@ def test_slice_dry_run_is_separate_gate(valid_stl):
     slice dry run."""
     # In the fast layer we stub the slice dry run. The gate must be
     # independently diagnosable.
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     # The slice gate is its own class, not a generic validation failure
     assert result.error_class is None or "slice" not in result.error_class
 
 
-def test_slice_dry_run_failure_is_own_class():
+def test_slice_dry_run_failure_is_own_class(valid_stl):
     """A slice dry run failure must be its own diagnosable error class,
-    not folded into 'not watertight'. In the fast layer the slice dry run
-    is stubbed, so we verify the error class enum includes 'slice' as a
-    distinct class."""
-    # The error class enum must include 'slice' as its own class
-    assert "slice" in pv.ALL_ERROR_CLASSES
-    # And it must be distinct from 'watertight' and 'winding'
-    assert "slice" != "watertight"
-    assert "slice" != "winding"
+    not folded into 'not watertight'. Proves gate 6 is now LOAD-BEARING,
+    not a stub: injecting a failing slice driver must make the whole
+    pipeline fail with error_class="slice" (the gate is real and wired
+    through, not a hard-coded pass)."""
+
+    def _failing_slice_fn(model_path: str, output_dir: str | None) -> SliceDryRunResult:
+        return SliceDryRunResult(
+            ok=False,
+            slicer="stub",
+            gcode_path=None,
+            gcode_lines=0,
+            return_code=-1,
+            error_string="simulated slicer failure",
+            objects=None,
+            detail="simulated slicer failure",
+        )
+
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_failing_slice_fn)
+    assert not result.ok
+    assert result.error_class == "slice"
+    # No 3MF should be written when gate 6 fails
+    assert result.export_3mf is None
+
+
+# ---------------------------------------------------------------------------
+# Input validation regressions
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_stated_mm_is_clean_failure(valid_stl):
+    """A 2-tuple (or 4-tuple) stated_mm must produce a clean ValidationResult
+    with ok=False, not an uncaught IndexError escaping the pipeline."""
+    result = pv.validate_stl(str(valid_stl), stated_mm=(20.0, 20.0))
+    assert not result.ok
+    assert result.error_class == "dimension"
+    # And a 4-tuple
+    result2 = pv.validate_stl(str(valid_stl), stated_mm=(20.0, 20.0, 20.0, 20.0))
+    assert not result2.ok
+    assert result2.error_class == "dimension"
+
+
+def test_non_string_units_does_not_crash(valid_stl, tmp_path):
+    """A mesh whose .units attribute is a non-string (e.g. an int) must not
+    crash _force_mm with an AttributeError. trimesh does not strictly
+    type-validate .units, so the pipeline must guard with isinstance."""
+    import trimesh as _tm
+
+    unit = _tm.creation.box((1.0, 1.0, 1.0))
+    unit.apply_scale(20.0)
+    path = tmp_path / "units_int.stl"
+    unit.export(path)
+    loaded = _tm.load(str(path), process=False)
+    if isinstance(loaded, _tm.Scene):
+        loaded = next(iter(loaded.geometry.values()))
+    # Force .units to a non-string, non-None value (int) to exercise the
+    # isinstance guard in _force_mm
+    loaded.units = 42  # type: ignore[assignment]
+    # _force_mm must not raise
+    result = pv._force_mm(loaded)  # type: ignore[arg-type]
+    # And the result must have string "millimeter" units
+    assert result.units == "millimeter"
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +440,7 @@ def test_return_contract_is_shaped_for_n_parts(valid_stl):
     {"parts": [Part], "assembly": {"joints": [], "layout": []},
      "export": {"3mf": path}}
     so multi-part is not a retrofit later."""
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     # parts is a list
     assert isinstance(result.parts, list)

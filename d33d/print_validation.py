@@ -32,16 +32,17 @@ Seven-gate order (deterministic, human-free):
 
 from __future__ import annotations
 
-import math
 import os
 import tempfile
-from dataclasses import dataclass, field
-from pathlib import Path
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import numpy as np
-import trimesh
 import pymeshfix as pmf
+import trimesh
+
+from d33d import slicer
 
 # ---------------------------------------------------------------------------
 # Named constants
@@ -182,9 +183,17 @@ def _check_dimensions(
 
 def _force_mm(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     """Force the mesh to millimetres. STL is unitless; if the mesh has
-    non-mm units, convert them. If units are None (unitless), assume mm."""
+    non-mm units, convert them. If units are None (unitless), assume mm.
+
+    ``mesh.units`` is not strictly type-validated by trimesh, so a
+    non-string value is guarded with ``isinstance`` — a non-string
+    ``units`` (or a unit trimesh cannot convert from) silently falls
+    back to assuming mm, a known accepted simplification.
+    """
     units = mesh.units
-    if units is None or units.lower() in ("mm", "millimeter", "millimetres"):
+    if units is None or (
+        isinstance(units, str) and units.lower() in ("mm", "millimeter", "millimetres")
+    ):
         mesh.units = "millimeter"
         return mesh
     try:
@@ -299,26 +308,6 @@ def _auto_orient(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
 
 
 # ---------------------------------------------------------------------------
-# Slicing (stubbed in fast layer)
-# ---------------------------------------------------------------------------
-
-
-def _slice_dry_run(mesh: trimesh.Trimesh, output_dir: str) -> tuple[bool, str]:
-    """Run a slice dry run on the repaired mesh.
-
-    In the fast layer, this is stubbed to pass. The real slicer (QIDI
-    Studio / OrcaSlicer / PrusaSlicer) runs in the slow layer
-    (tests/slow/test_slice_dryrun.py).
-
-    Returns (success, error_message).
-    """
-    # Fast-layer stub: the mesh is already validated as watertight and
-    # winding-consistent. A real slicer would be invoked here.
-    # The slow layer will replace this with a real slicer invocation.
-    return True, ""
-
-
-# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -327,6 +316,9 @@ def validate_stl(
     stl_path: str,
     stated_mm: tuple[float, float, float] | None = None,
     output_dir: str | None = None,
+    slice_dry_run_fn: Callable[
+        [str, str | None], slicer.SliceDryRunResult
+    ] = slicer.slice_dry_run,
 ) -> ValidationResult:
     """Run the full validation pipeline on an STL file.
 
@@ -336,10 +328,25 @@ def validate_stl(
             the dimension gate is skipped.
         output_dir: Directory to write the 3MF output. If None, a
             temporary directory is used.
+        slice_dry_run_fn: Gate 6's slice driver, injected for testability
+            (same pattern as the render worker). Defaults to the real
+            ``d33d.slicer.slice_dry_run``; on a machine without a slicer
+            binary it fails closed (ok=False) rather than passing stubs.
+            Fast tests inject a stub so wiring and gate order stay
+            exercisable without a real slicer binary.
 
     Returns:
         ValidationResult with ok/error_class, parts, assembly, export.
     """
+    # Input validation: stated_mm must be exactly 3 axes. A 2- or 4-tuple
+    # would otherwise escape as an uncaught IndexError in _check_dimensions.
+    if stated_mm is not None and len(stated_mm) != 3:
+        return _fail(
+            "dimension",
+            None,
+            f"stated_mm must be a 3-tuple (X, Y, Z), got length {len(stated_mm)}",
+        )
+
     # Determine output directory
     if output_dir is None:
         output_dir = tempfile.mkdtemp(prefix="d33d_3mf_")
@@ -372,7 +379,9 @@ def validate_stl(
 
     # Check for empty/degenerate mesh early
     if len(mesh.faces) == 0 or len(mesh.vertices) == 0:
-        return _fail("load_error", _part_from_mesh(mesh), "Mesh has no faces or vertices")
+        return _fail(
+            "load_error", _part_from_mesh(mesh), "Mesh has no faces or vertices"
+        )
 
     # Gate 3: watertight AND winding-consistent (separate assertions)
     #
@@ -447,14 +456,37 @@ def validate_stl(
     if mesh.volume <= 0:
         return _fail("volume", _part_from_mesh(mesh), f"Volume is {mesh.volume}")
     if len(mesh.faces) < MIN_FACES:
-        return _fail("volume", _part_from_mesh(mesh), f"Face count {len(mesh.faces)} < {MIN_FACES}")
+        return _fail(
+            "volume",
+            _part_from_mesh(mesh),
+            f"Face count {len(mesh.faces)} < {MIN_FACES}",
+        )
     if len(mesh.faces) > MAX_FACES:
-        return _fail("volume", _part_from_mesh(mesh), f"Face count {len(mesh.faces)} > {MAX_FACES}")
+        return _fail(
+            "volume",
+            _part_from_mesh(mesh),
+            f"Face count {len(mesh.faces)} > {MAX_FACES}",
+        )
 
-    # Gate 6: slice dry run (its own gate, stubbed in fast layer)
-    slice_ok, slice_err = _slice_dry_run(mesh, output_dir)
-    if not slice_ok:
-        return _fail("slice", _part_from_mesh(mesh), f"Slice dry run failed: {slice_err}")
+    # Gate 6: slice dry run (its own gate, driven by the real slicer via
+    # slice_dry_run_fn; fails closed on an unconfigured machine).
+    # Export the repaired mesh to a temp STL first: the slicer binary
+    # reads a mesh file, not a trimesh object.
+    slice_model = os.path.join(output_dir, "slice_model.stl")
+    mesh.export(slice_model)
+    try:
+        slice_result = slice_dry_run_fn(slice_model, output_dir)
+    except Exception as e:
+        # An injected stub is never expected to raise; the real driver
+        # returns a fail result rather than raising, so a raise means the
+        # driver itself crashed — fail the gate, don't crash the pipeline.
+        return _fail("slice", _part_from_mesh(mesh), f"Slice dry run crashed: {e}")
+    if not slice_result.ok:
+        return _fail(
+            "slice",
+            _part_from_mesh(mesh),
+            f"Slice dry run failed: {slice_result.error_string or slice_result.detail}",
+        )
 
     # Gate 7: fits the build plate
     env = QIDI_PLUS_5_ENVELOPE_MM
@@ -515,7 +547,9 @@ def _centre_mesh(mesh: trimesh.Trimesh) -> None:
 def _part_from_mesh(mesh: trimesh.Trimesh) -> Part:
     """Create a Part dataclass from a mesh."""
     extents = mesh.extents
-    bbox_mm = tuple(float(x) for x in extents) if extents is not None else (0.0, 0.0, 0.0)
+    bbox_mm = (
+        tuple(float(x) for x in extents) if extents is not None else (0.0, 0.0, 0.0)
+    )
     vol = float(mesh.volume) if mesh.volume > 0 else 0.0
     return Part(
         name="part_0",

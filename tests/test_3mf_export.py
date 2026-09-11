@@ -14,6 +14,22 @@ import pytest
 import trimesh
 
 from d33d import print_validation as pv
+from d33d.slicer import SliceDryRunResult
+
+
+def _passing_slice_fn(model_path: str, output_dir: str | None) -> SliceDryRunResult:
+    """Injected gate-6 stub that passes without a real slicer binary (see
+    test_validation_pipeline._passing_slice_fn for the full rationale)."""
+    return SliceDryRunResult(
+        ok=True,
+        slicer="stub",
+        gcode_path="stub.gcode",
+        gcode_lines=1,
+        return_code=0,
+        error_string="",
+        objects=1,
+        detail="fast-layer stub (no real slicer binary needed)",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +43,7 @@ def valid_stl(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="module")
 def validated(valid_stl) -> pv.ValidationResult:
-    result = pv.validate_stl(str(valid_stl))
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok
     return result
 
