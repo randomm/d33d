@@ -1,0 +1,108 @@
+{
+  "_comment": [
+    "A10 golden fixture: two request_logs rows (model A and model B) that were called on the SAME prompt.",
+    "The message lists below are structurally identical (same role, same text, same image placeholder, same tool-call arguments) -- they differ only in the resolved model id / provider strings, which must NOT be part of the prompt canonical hash.",
+    "A diff of the two log rows joined on prompt_hash must show: identical prompt_hash, different model_alias / model_id, comparable tokens and latency. This is the acceptance-criterion #5 comparison surface.",
+    "The 'model_alias' / 'model_id' / 'provider' fields are request_logs row fields, NOT part of the hash input. The hash is computed from (role, system, messages) only."
+  ],
+  "model_a_request": [
+    {
+      "role": "system",
+      "content": "You are d33d's design role. Given a reference photo and stated dimensions, emit OpenSCAD 2026.01.19 code as a single fenced block."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHB"}
+        },
+        {
+          "type": "text",
+          "text": "Design a   dovetail   hinge bracket, 40mm x 20mm x 3mm, with a 15mm pin bore."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "emit_openscad",
+            "arguments": "{\"width_mm\": 40, \"height_mm\": 20, \"thickness_mm\": 3, \"pin_bore_mm\": 15}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "{\"ok\": true, \"stl_bytes\": 48210}"
+    },
+    {
+      "role": "user",
+      "content": "Now critique the render against the photo."
+    }
+  ],
+  "model_b_request": [
+    {
+      "role": "system",
+      "content": "You are d33d's design role. Given a reference photo and stated dimensions, emit OpenSCAD 2026.01.19 code as a single fenced block."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "Design a dovetail hinge bracket, 40mm x 20mm x 3mm, with a 15mm pin bore."
+        },
+        {
+          "type": "image_url",
+          "image_url": {"url": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHB"}
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": null,
+      "tool_calls": [
+        {
+          "id": "call_001",
+          "type": "function",
+          "function": {
+            "name": "emit_openscad",
+            "arguments": "{\"pin_bore_mm\": 15, \"width_mm\": 40, \"thickness_mm\": 3, \"height_mm\": 20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "call_001",
+      "content": "{\"ok\": true, \"stl_bytes\": 48210}"
+    },
+    {
+      "role": "user",
+      "content": "Now critique the render against the photo."
+    }
+  ],
+  "row_a": {
+    "model_alias": "design-primary",
+    "model_id": "RedHatAI/Qwen3.8-27B-INT4",
+    "provider": "trailopeners",
+    "role": "design",
+    "status": "ok",
+    "prompt_tokens": 412
+  },
+  "row_b": {
+    "model_alias": "design-backup",
+    "model_id": "Qwen/Qwen2.5-32B-Instruct",
+    "provider": "paid-azure",
+    "role": "design",
+    "status": "ok",
+    "prompt_tokens": 398
+  }
+}
