@@ -36,6 +36,7 @@ from d33d import db as db_mod
 # ---------------------------------------------------------------------------
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
+_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB — bounded read chunk size
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
 
 _GIT_USER_EMAIL = "d33d@local"
@@ -226,13 +227,22 @@ def create_projects_router() -> APIRouter:
                 detail=f"content type {file_content_type!r} not allowed (must be image/png or image/jpeg)",
             )
 
-        # Read the file bytes with size enforcement
-        content = await file.read()
-        if len(content) > MAX_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"file exceeds {MAX_UPLOAD_BYTES} byte limit",
-            )
+        # Read the file bytes in bounded chunks; abort with 413 as soon as
+        # the running total exceeds the cap (never buffers the whole
+        # upload first — an unbounded read would defeat the limit).
+        buf = bytearray()
+        while True:
+            chunk = await file.read(_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if len(buf) > MAX_UPLOAD_BYTES:
+                buf.clear()
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"file exceeds {MAX_UPLOAD_BYTES} byte limit",
+                )
+        content = bytes(buf)
 
         # Determine a safe filename
         original_name = getattr(file, "filename", None) or "photo"

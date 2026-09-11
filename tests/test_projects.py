@@ -22,11 +22,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
-from d33d.projects import (
-    ALLOWED_CONTENT_TYPES,
-    MAX_UPLOAD_BYTES,
-    create_projects_router,
-)
+from d33d.projects import ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,7 +71,8 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
 
 @pytest.fixture
 def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
-    """A ``create_app`` with the projects router mounted.
+    """A ``create_app`` instance (the projects router is mounted by the
+    factory itself — no manual wiring in tests).
 
     The ``git_repo_path`` for new projects is overridden to use ``tmp_path``
     so the test repos are cleaned up by pytest's tmp_path fixture.
@@ -100,10 +97,6 @@ def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
         master_key_path=app_paths["key"],
         catalogue_path=app_paths["cat"],
     )
-
-    # Mount the projects router
-    projects_router = create_projects_router()
-    app.include_router(projects_router)
 
     yield app
 

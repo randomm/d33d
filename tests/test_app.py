@@ -215,6 +215,77 @@ def test_put_models_writes_yaml_and_hot_reloads(app, app_paths, env_key):
     assert body["models"][0]["model"] == "RedHatAI/Qwen3.8-27B-INT4"
 
 
+def test_put_models_semantically_broken_yaml_leaves_disk_file_untouched(
+    app, app_paths, env_key
+):
+    """Regression: a PUT of semantically broken YAML (missing required
+    roles) → 400, the live catalogue is unchanged, AND the on-disk file
+    still holds the ORIGINAL content — validate-before-write means a
+    broken edit can never reach ``loader.path`` (a restart would not load
+    the broken file)."""
+    broken = MODELS_YAML[: MODELS_YAML.index("roles:")]
+    # Sanity: the broken document is valid YAML but fails semantic
+    # validation (no roles block at all).
+    _doc = yaml.safe_load(broken)
+    assert isinstance(_doc, dict)
+    assert "roles" not in _doc
+
+    async def _call(client):
+        ok = await client.put("/api/config/models", content=MODELS_YAML)
+        assert ok.status_code == 200
+        original_on_disk = app_paths["cat"].read_text()
+
+        r = await client.put("/api/config/models", content=broken)
+        r2 = await client.get("/api/config/models")
+        disk_now = app_paths["cat"].read_text()
+        return r, r2, original_on_disk, disk_now
+
+    r, r2, original_on_disk, disk_now = _run_async(app, _call)
+    assert r.status_code == 400
+    assert "error" in r.json()
+    # (b) In-memory catalogue still the original.
+    assert r2.status_code == 200
+    assert r2.json()["models"][0]["id"] == "design-primary"
+    # (c) On-disk file is byte-for-byte the original, not the broken YAML.
+    assert disk_now == original_on_disk
+    assert "roles:" in disk_now
+
+
+def test_put_models_rejects_literal_provider_key(app, app_paths, env_key):
+    """Regression: a PUT with a literal (non-`${ENV}`) provider key → 400
+    and nothing is written to disk — plaintext keys must never reach
+    models.yaml; keys live Fernet-encrypted in provider_credentials."""
+    literal_yaml = MODELS_YAML.replace(
+        'key: "${TRAIL_OPENERS_LLM_KEY}"', 'key: "sk-fake123-not-a-real-key"'
+    )
+
+    async def _call(client):
+        return await client.put("/api/config/models", content=literal_yaml)
+
+    r = _run_async(app, _call)
+    assert r.status_code == 400
+    assert "environment variable" in r.json()["error"]
+    # Nothing written to disk, and the plaintext key is not on disk.
+    assert (
+        not app_paths["cat"].exists()
+        or "sk-fake123" not in app_paths["cat"].read_text()
+    )
+    assert "sk-fake123" not in r.text
+
+
+def test_put_models_oversized_body_returns_413(app, env_key):
+    """Regression: a PUT body over the 1 MB cap → 413 without buffering
+    an unbounded body; the catalogue is untouched."""
+    big = "x" * (2 * 1024 * 1024)  # 2 MB > 1 MB cap
+
+    async def _call(client):
+        return await client.put("/api/config/models", content=big)
+
+    r = _run_async(app, _call)
+    assert r.status_code == 413
+    assert "error" in r.json()
+
+
 def test_put_models_bad_yaml_returns_400_and_keeps_last_known_good(
     app, app_paths, env_key
 ):
@@ -430,6 +501,42 @@ def test_app_state_wiring_after_lifespan(app, app_paths, env_key):
     # The CredentialStore and the shared conn operate on the same table
     # (the store was constructed with the same Connection object).
     assert store._conn is conn
+
+
+def test_create_app_registers_projects_router(app):
+    """Regression: ``create_app()`` alone (no manual ``include_router`` in
+    this test) must make ``GET /api/projects`` reachable — before the fix,
+    the router was never mounted in the production factory and this
+    returned 404 (only the test fixtures masked the gap by wiring the
+    router themselves)."""
+
+    async def _call(client):
+        return await client.get("/api/projects")
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200, r.text  # not 404 route-not-found
+    assert r.json() == []  # empty list, no projects yet
+
+
+def test_create_app_registers_streaming_router(app):
+    """Regression: ``create_app()`` alone must make ``GET /api/stream/{id}``
+    reachable — a real SSE response (``text/event-stream``), not 404."""
+
+    async def _call(client):
+        return await client.get("/api/stream/1")
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200, r.text  # not 404 route-not-found
+    assert r.headers["content-type"].startswith("text/event-stream")
+    # Project 1 does not exist → exactly one error event, per the SSE
+    # contract for a missing project.
+    assert "event: error" in r.text
+
+
+def test_create_app_inits_event_sources(app):
+    """``create_app()`` must initialise ``app.state.event_sources`` as an
+    empty dict (the SSE endpoint reads it at request time)."""
+    assert getattr(app.state, "event_sources", None) == {}
 
 
 def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):

@@ -22,7 +22,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
-from d33d.streaming import create_streaming_router, format_sse
+from d33d.streaming import format_sse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -108,18 +108,14 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
 
 @pytest.fixture
 def app_with_streaming(app_paths: dict[str, Path]):
-    """A ``create_app`` with the streaming router mounted and an empty
-    ``event_sources`` dict on ``app.state``."""
-    app = create_app(
+    """A ``create_app`` instance — the streaming router (and the empty
+    ``event_sources`` dict on ``app.state``) are wired by the factory
+    itself; no manual mounting in tests."""
+    return create_app(
         app_paths["db"],
         master_key_path=app_paths["key"],
         catalogue_path=app_paths["cat"],
     )
-    streaming_router = create_streaming_router()
-    app.include_router(streaming_router)
-    # Register the event_sources dict (per-project async iterators)
-    app.state.event_sources = {}
-    return app
 
 
 # ---------------------------------------------------------------------------
@@ -161,11 +157,6 @@ def test_sse_content_type(app_with_streaming):
         pid = create_r.json()["id"]
         return await client.get(f"/api/stream/{pid}")
 
-    # We need the projects router too
-    from d33d.projects import create_projects_router
-
-    app_with_streaming.include_router(create_projects_router())
-
     r = _run_async(app_with_streaming, _call)
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/event-stream")
@@ -183,10 +174,6 @@ def test_sse_no_event_source_yields_done(app_with_streaming):
             async for chunk in response.aiter_text():
                 chunks.append(chunk)
             return "".join(chunks)
-
-    from d33d.projects import create_projects_router
-
-    app_with_streaming.include_router(create_projects_router())
 
     raw = _run_async(app_with_streaming, _call)
     events = parse_sse_stream(raw)
@@ -217,10 +204,6 @@ def test_sse_streams_progress_token_done(app_with_streaming):
             async for chunk in response.aiter_text():
                 chunks.append(chunk)
             return "".join(chunks)
-
-    from d33d.projects import create_projects_router
-
-    app_with_streaming.include_router(create_projects_router())
 
     raw = _run_async(app_with_streaming, _call)
     events = parse_sse_stream(raw)
@@ -255,10 +238,6 @@ def test_sse_error_event_terminates_stream(app_with_streaming):
                 chunks.append(chunk)
             return "".join(chunks)
 
-    from d33d.projects import create_projects_router
-
-    app_with_streaming.include_router(create_projects_router())
-
     raw = _run_async(app_with_streaming, _call)
     events = parse_sse_stream(raw)
 
@@ -291,10 +270,6 @@ def test_sse_headers(app_with_streaming):
         create_r = await client.post("/api/projects", json={"name": "Header Test"})
         pid = create_r.json()["id"]
         return await client.get(f"/api/stream/{pid}")
-
-    from d33d.projects import create_projects_router
-
-    app_with_streaming.include_router(create_projects_router())
 
     r = _run_async(app_with_streaming, _call)
     assert r.headers.get("cache-control") == "no-cache"

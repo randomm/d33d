@@ -21,15 +21,20 @@ name — appears in any response body. ``CredentialStore.get_key`` is
 server-internal and is not wired to any route.
 
 Project CRUD, photo upload, and the SSE endpoint (``d33d/projects.py`` /
-``d33d/streaming.py``) are a sibling workstream: they register their routers
-on the shared ``app.state`` objects this factory creates, and are out of
-scope here.
+``d33d/streaming.py``) are sibling workstreams: this factory mounts their
+routers (``create_projects_router`` / ``create_streaming_router``) on the
+app it builds, and ``app.state.event_sources`` (the dict the SSE endpoint
+reads) is initialised empty at build time. The HTTP endpoints themselves
+are out of scope for this module.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import tempfile
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -40,12 +45,51 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from d33d import db
 from d33d.config import ModelCatalogueLoader, hot_reload
-from d33d.config.catalogue import Catalogue, CatalogueError, ResolutionError
+from d33d.config.catalogue import (
+    Catalogue,
+    CatalogueError,
+    ResolutionError,
+    load_catalogue,
+)
 from d33d.config.resolve import resolve_model
+from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
+from d33d.streaming import create_streaming_router
 
 #: Stub SPA page served at ``/`` until issue #6 ships the real build.
 #: Static HTML — not a React build, per the ticket.
+#: Hard cap on the ``PUT /api/config/models`` body. A models.yaml catalogue
+#: is a few KB in practice; anything bigger is not a legitimate edit and is
+#: rejected before it can consume unbounded memory.
+MAX_CATALOGUE_BODY_BYTES = 1024 * 1024  # 1 MB
+
+#: ``${ENV_VAR}`` key reference (reused from the catalogue module — the
+#: PUT boundary only accepts this form for provider keys).
+_ENV_VAR_KEY_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+
+def _find_literal_provider_keys(doc: dict[str, Any]) -> list[str]:
+    """Names of providers whose ``key`` is a literal (not ``${ENV_VAR}``).
+
+    HTTP-boundary check only: a LAN-reachable ``PUT /api/config/models``
+    must never persist a plaintext API key into ``models.yaml`` — keys are
+    stored Fernet-encrypted in ``provider_credentials`` and the catalogue
+    references environment variables. The catalogue module's own loader
+    still accepts literals when loading a trusted local file.
+    """
+    bad: list[str] = []
+    providers = doc.get("providers")
+    if not isinstance(providers, dict):
+        return bad
+    for name, spec in providers.items():
+        key = spec.get("key") if isinstance(spec, dict) else None
+        if key is not None and (
+            not isinstance(key, str) or not _ENV_VAR_KEY_RE.match(key)
+        ):
+            bad.append(str(name))
+    return bad
+
+
 STUB_HTML: str = """<!doctype html>
 <html>
   <head>
@@ -184,6 +228,10 @@ def create_app(
     app.state.conn: db.Connection | None = None
     app.state.master_key: bytes | None = None
     app.state.credential_store: cred.CredentialStore | None = None
+    # The SSE endpoint (streaming.py) reads this dict at request time; it
+    # maps ``project_id -> AsyncIterator[(event, data)]`` and starts empty
+    # (no active streams until a future ticket wires the design loop).
+    app.state.event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] = {}
 
     @app.get("/", response_class=HTMLResponse)
     async def stub_page() -> HTMLResponse:
@@ -205,49 +253,119 @@ def create_app(
 
     @app.put("/api/config/models")
     async def put_models(request: Request) -> JSONResponse:
-        """Full-YAML replacement: write to ``catalogue_path``, then
-        ``hot_reload``. A bad file (``CatalogueError``) → 400, and the
-        last-known-good catalogue stays live (the loader's live catalogue
-        is untouched by the failed reload)."""
-        body = await request.body()
+        """Full-YAML replacement of ``catalogue_path``.
+
+        Bound the body (413 on a too-large request), then validate the
+        catalogue — first the untrusted-input boundary checks (YAML syntax,
+        mapping shape, env-var-only provider keys), then a full semantic
+        load of the candidate written to a unique temp file. Only after
+        validation succeeds does the candidate ``os.replace`` onto the real
+        path and ``hot_reload`` swap the in-memory catalogue. A failure at
+        any stage returns 400 and leaves the on-disk file and the live
+        catalogue exactly as they were (last-known-good, both on disk and
+        in memory).
+        """
         loader: ModelCatalogueLoader = app.state.catalogue_loader
+        declared = request.headers.get("content-length")
         try:
-            # Validate first: parse the body to confirm it is valid YAML
-            # with the right shape, then write, then reload. If the parse
-            # fails we never touch the file on disk.
-            try:
-                doc = yaml.safe_load(body.decode("utf-8"))
-            except (yaml.YAMLError, UnicodeDecodeError) as e:
+            if declared is not None:
+                declared_len = int(declared)
+            else:
+                declared_len = 0
+        except ValueError:
+            declared_len = 0
+
+        # Bounded read: never buffer more than cap+1 bytes.
+        cap = MAX_CATALOGUE_BODY_BYTES
+        if declared_len > cap:
+            # Reject early; still drain what the client sends so the
+            # connection stays usable.
+            await request.body()
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"body exceeds {cap} byte limit"},
+            )
+        body_parts: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > cap:
+                await request.body()  # drain the remainder
                 return JSONResponse(
-                    status_code=400,
-                    content={"error": f"invalid YAML: {e}"},
+                    status_code=413,
+                    content={"error": f"body exceeds {cap} byte limit"},
                 )
-            if not isinstance(doc, dict):
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "top level must be a mapping"},
-                )
-            # Write atomically: temp file + rename (no partial write).
-            loader.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = loader.path.with_suffix(loader.path.suffix + ".tmp")
-            tmp.write_bytes(body)
-            os.replace(tmp, loader.path)
-            new_cat, _ = hot_reload(loader)
-            app.state.catalogue = new_cat
-            return JSONResponse(content=_serialise_catalogue(new_cat))
-        except CatalogueError as e:
-            # Bad file → 400, last-known-good stays live (loader.live is
-            # unchanged by the failed reload in hot_reload).
-            app.state.catalogue = loader.live
+            body_parts.append(chunk)
+        body = b"".join(body_parts)
+
+        try:
+            doc = yaml.safe_load(body.decode("utf-8"))
+        except (yaml.YAMLError, UnicodeDecodeError) as e:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"catalogue error: {e.message}"},
+                content={"error": f"invalid YAML: {e}"},
+            )
+        if not isinstance(doc, dict):
+            return JSONResponse(
+                status_code=400,
+                content={"error": "top level must be a mapping"},
+            )
+
+        # HTTP-boundary key check: a literal (non-`${ENV}`) provider key
+        # would persist plaintext key material into models.yaml, bypassing
+        # the Fernet-encrypted provider_credentials storage. Env vars only.
+        bad_keys = _find_literal_provider_keys(doc)
+        if bad_keys:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": (
+                        f"provider key(s) for {sorted(bad_keys)} must be an "
+                        f'environment variable reference (e.g. "${{SOME_VAR}}")'
+                    )
+                },
+            )
+
+        # Validate the candidate on a unique temp file BEFORE touching the
+        # real path. A semantically broken catalogue can never reach disk
+        # at ``loader.path``.
+        try:
+            loader.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_fd, tmp_name = tempfile.mkstemp(
+                dir=str(loader.path.parent), suffix=".models.tmp"
             )
         except OSError as e:
             return JSONResponse(
                 status_code=500,
-                content={"error": f"could not write catalogue: {e}"},
+                content={"error": f"could not prepare catalogue write: {e}"},
             )
+        tmp_path = Path(tmp_name)
+        try:
+            os.write(tmp_fd, body)
+            os.close(tmp_fd)
+            try:
+                load_catalogue(tmp_path)
+            except CatalogueError as e:
+                return JSONResponse(
+                    status_code=400,
+                    content={"error": f"catalogue error: {e.message}"},
+                )
+            # Candidate validated → swap it onto the real path and reload
+            # (the reload re-validates the same file and must now succeed).
+            os.replace(tmp_path, loader.path)
+            tmp_path = None
+            new_cat, _ = hot_reload(loader)
+            app.state.catalogue = new_cat
+            return JSONResponse(content=_serialise_catalogue(new_cat))
+        finally:
+            if tmp_path is not None and tmp_path.exists():
+                tmp_path.unlink(missing_ok=True)
+
+    # Mount the sibling workstream routers (project CRUD + photo upload,
+    # SSE streaming) — the production app is complete from create_app()
+    # alone; no extra wiring at the entrypoint.
+    app.include_router(create_projects_router())
+    app.include_router(create_streaming_router())
 
     @app.get("/api/settings/credentials")
     async def list_credentials() -> list[dict[str, str]]:
@@ -327,6 +445,7 @@ def create_app(
 
 
 __all__ = [
+    "MAX_CATALOGUE_BODY_BYTES",
     "STUB_HTML",
     "create_app",
 ]
