@@ -1,0 +1,101 @@
+# BOSL2 Pinning Policy
+
+## Pinned tag
+
+The render worker image vendors BOSL2 from GitHub at build time. The tag is
+supplied via the `--build-arg BOSL2_TAG` Dockerfile build-arg, which has **no
+default** — a build without it fails loudly at the `ARG` / `RUN` line.
+
+Current pinned tag: **`v2.0.755`**
+
+Build command:
+
+```bash
+docker build --platform=linux/amd64 \
+  --build-arg BOSL2_TAG=v2.0.755 \
+  -t d33d-render-worker:latest .
+```
+
+## Why pin to a tag (not `main` or a rolling ref)
+
+1. **Reproducibility** — the same image build must produce the same render
+   output every time. A rolling ref would silently change the BOSL2 API
+   between builds, breaking the determinism contract (byte-identical STL and
+   CSG across runs) and potentially breaking the six-view PNG output.
+
+2. **Vulnerability / behaviour audit** — a specific tag is a fixed commit.
+   We can diff between tags, audit the diff, and decide whether to upgrade.
+
+3. **The LLM critique loop is trained on a fixed BOSL2 API surface** —
+   the cheatsheet in `prompts/bosl2-cheatsheet.md` is generated against a
+   specific tag. Upgrading the tag without updating the cheatsheet and
+   re-running the evals would produce a mismatch between what the LLM is
+   told and what BOSL2 actually exposes.
+
+## Upgrade policy
+
+Upgrading the pinned BOSL2 tag is a **breaking change** that requires:
+
+1. A GitHub issue describing the reason for the upgrade (bug fix, security
+   patch, new API needed by a ticket).
+2. Verification that `prompts/bosl2-cheatsheet.md` is still accurate against
+   the new tag — run the cheatsheet test
+   (`tests/fast/test_bosl2_cheatsheet.py`) against the new tag before
+   committing the tag bump.
+3. A re-run of the slow-layer BOSL2 smoke test
+   (`tests/slow/test_bosl2.py`) to confirm the image still builds and renders
+   correctly with the new tag.
+4. An update to the `BOSL2_TAG` value in the `Dockerfile` (and the build
+   command in this document).
+5. A re-run of the full eval suite (ticket #8) before merging.
+
+## Base image pinning
+
+The base image is pinned to `docker.io/openscad/openscad:trixie` — the
+Debian trixie (13) variant. This tag is a rolling ref that updates as new
+OpenSCAD releases are published to the trixie suite.
+
+### Empirical CLI verification
+
+Before using any `--camera` or `--projection` flag, the flags must be
+verified against the pinned base image by running `openscad --help` inside
+the image. The following flags were verified present in
+`docker.io/openscad/openscad:trixie` (OpenSCAD version 2026.01.19) on
+2026-09-11:
+
+| Flag | Present | Notes |
+|------|---------|-------|
+| `--camera` | Yes | `=translate_x,y,z,rot_x,y,z,dist` or `=eye_x,y,z,center_x,y,z` |
+| `--autocenter` | Yes | Adjusts camera to look at object's centre |
+| `--projection` | Yes | `(o)rtho` or `(p)erspective` |
+| `--imgsize` | Yes | `=width,height` |
+| `--render` | Yes | Full geometry evaluation (not preview) |
+| `--colorscheme` | Yes | `=*Cornfield \| Metallic \| … \| Tomorrow Night \| …` |
+| `--backend` | Yes | `CGAL` (old/slow) or `Manifold` (new/fast, default) |
+| `--D` | Yes | `-Dname=value` pre-define |
+
+The `--colorscheme` flag is used in `entrypoint.sh` with the value
+`"Tomorrow Night"` to produce a dark background that makes the model
+geometry stand out clearly in the PNG renders.
+
+### Camera tuple verification
+
+The `--camera` flag accepts a 7-element tuple: `tx,ty,tz,rx,ry,rz,dist`.
+The camera rotations are applied **about the origin** (after `--autocenter`
+has shifted the origin to the object's bounding-box centre). The following
+mappings were verified empirically on 2026-09-11 using a three-slab test
+model (red slab at x=0, blue slab at z=0, green slab at z=20):
+
+| View | Camera tuple | Verification result |
+|------|-------------|---------------------|
+| front (`view_00`) | `0,0,0,0,0,0,40` | Camera on -Z axis; red slab (x=0) visible as a full face on the left half of the image; blue slab (z=0) not visible (facing away); green slab (z=20) visible as a thin line at the top edge |
+| back (`view_01`) | `0,0,0,0,180,0,40` | 180° about Y; red slab (x=0) visible as a full face on the right half; small red triangle at bottom-right corner confirms the view is from +Z |
+| left (`view_02`) | `0,0,0,0,90,0,40` | 90° about Y; red slab (x=0) visible as a thin vertical strip on the left edge (edge-on view of the x=0 face); blue slab (z=0) visible as a thin horizontal strip at the bottom |
+| right (`view_03`) | `0,0,0,0,-90,0,40` | -90° about Y; red slab (x=0) visible as a thin vertical strip on the right edge (edge-on from the opposite side); blue slab (z=0) visible as a thin horizontal strip at the bottom |
+| top (`view_04`) | `0,0,0,90,0,0,40` | 90° about X (looking down from +Z); red slab (x=0) visible as a full square on the right side (the x=0 face is now facing up); green slab (z=20) not visible (it's the top face, facing toward the camera) |
+| iso (`view_05`) | `0,0,0,0,45,45,55` | 45° about Y + 45° about Z; three coloured faces meet at a visible corner — the classic isometric corner view. The red face (x=0) is on the left, the blue face (z=0) is on the right, and the green face (z=20) is visible as a thin strip at the bottom-left edge |
+
+These camera tuples are the single source of truth for the `VIEWS` constant
+in `d33d/__init__.py` (ticket: core workstream) and for the `VIEW_CAMERAS`
+array in `entrypoint.sh`. They must be updated together in the same commit
+if a future OpenSCAD build changes the camera rotation semantics.
