@@ -1,0 +1,57 @@
+cli mode, Current OrcaSlicer Version 2.5.0-dev
+Will start to read model file now, file count :1
+allow_multicolor_oneplate 1, allow_rotations 1 skip_modified_gcodes 0 avoid_extrusion_cali_region 0 loaded_filament_ids size 0, clone_objects size 0, skip_useless_pick 0, allow_newer_file 0, allow_mix_temp 0
+plate_to_slice=0, normative_check=1, use_first_fila_as_default=0
+read model file:/Users/janni/projects/d33d/tmp/issue-4/spike/box20.stl
+object box20.stl, id :5, from stl or other 3mf
+run:before load settings, file count=0
+current printer , new printer , current process , new process 
+current printer inherits , new printer inherits , current process inherits , new process inherits 
+old 3mf, no compatible printers, set to compatible
+old printer , inherited from , old process , inherited from  ,compatible 1
+no filament colors found in projects
+total 1 models, 0 objects
+3778, remove_wrapping_detect 0, old value 0
+translate_old 0, shrink_to_new_bed 0, old bed size {200, 200, 100}
+reset_size:before size: plate_width 0, plate_depth 0, plate_height 0
+reset_size:after size: plate_width 200, plate_depth 200, plate_height 100
+set_pos_and_size: plate_id 0, before, origin {0,0,0}, plate_width 0, plate_depth 0, plate_height 0
+set_pos_and_size: with_instance_move 0, after, origin {0,0,0}, plate_width 200, plate_depth 200, plate_height 100
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+set_pos_and_size: plate_id 1, before, origin {0,0,0}, plate_width 0, plate_depth 0, plate_height 0
+set_pos_and_size: with_instance_move 0, after, origin {240,0,0}, plate_width 200, plate_depth 200, plate_height 100
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
+will start transforms, commands count 0
+finished model pre-process commands
+before arrange, need_arrange=1, duplicate_count 0, filament_color_changed 0
+Arrange full params: {"min_obj_distance":0,"accuracy":1.000000,"parallel":1,"allow_rotations":1,"do_final_align":1,"allow_multi_materials_on_same_plate":1,"avoid_extrusion_cali_region":0,"is_seq_print":0,"bed_shrink_x":3.400000,"bed_shrink_y":3.400000,"brim_skirt_distance":2.400000,"clearance_height_to_rod":40.000000,"clearance_height_to_lid":120.000000,"clearance_radius":40.000000,"printable_height":100.000000,
+arrange: items selected before arranging: 1
+arrange: items unselected before arranging: 0
+start 1 th arranging...
+finished 1 th arranging...
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
+rebuild_plates_after_arrangement:before rebuild, plates count 1, recycle_plates 1
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
+add_instance: plate 0 , m_ready_for_slice changes to 1
+rebuild_plates_after_arrangement:after rebuild, plates count 1
+Need to slice for plate 0, total plate count 1 partplates!
+Plate 1: pre_check 1, start
+update_print_volume_state, print_volume {0, 0, 0} to {200, 200, 100}, got 1 printable istances
+plate 1: load cached data success, go on.
+apply, Line 1205: enter
+apply, has_scarf_joint_seam:false
+apply 1470: found full_config_diff changed.
+apply 1811: found print object changed.
+apply 2051: finished,  this 0xa33125000, m_modified_count 1, apply_status 1, m_support_used 0
+set no_check to 0:
+new_printer_name: , current_printer_system_name , is_bbl_vendor_preset 0
+got error when validate: Relative extruder addressing requires resetting the extruder position at each layer to prevent loss of floating point accuracy. Add "G92 E0" to layer_gcode.
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 0 , update slice result from 0 to 0
+~PrintObject: this=0xa32db1000, m_shared_object 0
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
+update_slice_result_valid_state: plate 1 , update slice result from 0 to 0
