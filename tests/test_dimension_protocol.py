@@ -510,3 +510,99 @@ def test_snap_in_most_recent_turn_sets_fit_type() -> None:
     assert c.confirmed is True
     assert c.fit_type == "snap"
     assert c.tolerance_mm == resolve_tolerance_mm("snap")
+
+
+# ---------------------------------------------------------------------------
+# HIGH #5: confirmation heuristic must reject ambiguous/questioning turns
+# ---------------------------------------------------------------------------
+
+
+def test_questioning_yes_does_not_confirm_ai_suggestion() -> None:
+    """The review's exact counter-example: "Yes, but why did you pick 40
+    and not 50?" is a QUESTION about the suggestion, not an acceptance —
+    it must NOT promote the AI pre-fill into ground truth."""
+    chat = [
+        "Suggested W=40, D=30, H=20",
+        "Yes, but why did you pick 40 and not 50?",
+    ]
+    c = require_dimensions_confirmed(
+        chat,
+        stated_dims=None,
+        ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0},
+    )
+    assert c.confirmed is False
+    assert c.params == {}
+
+
+def test_genuine_short_confirmations_still_confirm() -> None:
+    """Happy path preserved: clean, short affirmative last turns confirm
+    the AI pre-fill (the fit type stated_dims still closes the gate)."""
+    for last in ("yes", "yes that's correct", "ok confirmed"):
+        chat = ["Suggested W=40, D=30, H=20", last]
+        c = require_dimensions_confirmed(
+            chat,
+            stated_dims={"fit_type": "slip"},
+            ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0},
+        )
+        assert c.confirmed is True, last
+        assert c.stated_dims == (40.0, 30.0, 20.0), last
+
+
+def test_negation_with_yes_does_not_confirm_ai_suggestion() -> None:
+    """A hedging/negating turn that also contains "yes" ("well yes and no,
+    let's not use 40") must NOT confirm the pre-fill."""
+    chat = [
+        "Suggested W=40, D=30, H=20",
+        "well yes and no, let's not use 40",
+    ]
+    c = require_dimensions_confirmed(
+        chat,
+        stated_dims=None,
+        ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0},
+    )
+    assert c.confirmed is False
+    assert c.params == {}
+
+
+def test_questioning_snap_does_not_set_fit_type() -> None:
+    """A questioning/negating last turn mentioning "snap" must NOT flip the
+    fit type to snap ("that's a snap decision, why would you choose snap
+    fit?")."""
+    chat = [
+        "W: 42",
+        "D: 30",
+        "H: 20",
+        "that's a snap decision, why would you choose snap fit?",
+    ]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is False
+    assert any("fit" in q.lower() for q in c.questions)
+
+
+def test_negating_snap_does_not_set_fit_type() -> None:
+    """A negating last turn mentioning "snap" ("no, not a snap fit") must
+    NOT set the fit type."""
+    chat = [
+        "W: 42",
+        "D: 30",
+        "H: 20",
+        "no, not a snap fit",
+    ]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is False
+    assert any("fit" in q.lower() for q in c.questions)
+
+
+def test_clean_short_snap_still_sets_fit_type() -> None:
+    """Happy path preserved: a clean, short affirmative last turn with a
+    fit keyword ("yes, snap fit") still sets the fit type."""
+    chat = [
+        "W: 42",
+        "D: 30",
+        "H: 20",
+        "yes, snap fit",
+    ]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is True
+    assert c.fit_type == "snap"
+    assert c.tolerance_mm == resolve_tolerance_mm("snap")

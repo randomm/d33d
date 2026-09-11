@@ -240,32 +240,90 @@ def _last_user_turn(chat_history: list[str]) -> str:
     return str(chat_history[-1])
 
 
+def _is_clean_affirmation(text: str, *, with_keyword: bool = False) -> bool:
+    """True if ``text`` is a SHORT, unambiguous affirmative response.
+
+    This is a deliberately conservative heuristic soft-gate, NOT a
+    confirmation-intent classifier: it only accepts turns that (b) are
+    short enough to be a plain acceptance (under ~20 words — a long turn
+    that merely contains the word "yes" is more likely conversational),
+    and (c) carry none of the disqualifying signals: a question mark (a
+    question is not a confirmation), negation words (no/not/...), or a
+    hedging/confrontation marker (but/why/because/instead/although).
+
+    ``with_keyword=False`` (the default) additionally requires an explicit
+    affirmative token (yes/confirm/ok/correct/...); ``with_keyword=True``
+    admits a turn as affirmative when it names the fit-type keyword itself
+    (a clean "snap fit" or "it's a slip fit" IS the answer to the
+    fit-type question — no "yes" needed).
+
+    The known residual risk — a short turn that happens to be affirmative
+    yet not responsive to the pending suggestion — is honestly documented
+    as residual: callers building a real UI confirmation flow should
+    prefer an explicit structured confirmation signal over this text
+    heuristic when one becomes available, rather than relying on this
+    layer alone.
+    """
+    tokens = re.findall(r"[a-z']+", text.lower())
+    if not tokens or len(tokens) > 19:
+        return False
+    if "?" in text:
+        return False
+    if set(tokens) & {
+        "no",
+        "not",
+        "nope",
+        "nah",
+        "wrong",
+        "incorrect",
+        "reconsider",
+    }:
+        return False
+    if set(tokens) & {"but", "why", "because", "instead", "although", "however"}:
+        return False
+    if re.search(
+        r"\b(confirm|confirmed|yes|yep|correct|right|accept|ok|okay)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    if with_keyword:
+        return bool(
+            re.search(r"\b(slip|press|interference|snap)\b", text, re.IGNORECASE)
+        )
+    return False
+
+
 def _confirmed_suggestion_tokens(chat_history: list[str]) -> set[str]:
     """Tokens the user used to confirm AI suggestions.
 
-    CONFIRMATION CONTRACT (tightened): only the MOST RECENT chat turn is
-    scanned — never the full history. A bare "yes"/"confirm"/"ok" in the
-    last turn confirms the whole suggestion; "confirm W" in the last turn
-    confirms axis W specifically. A stray confirmatory token in an earlier,
-    unrelated turn has NO effect: confirmation must be the user's current
-    response to the suggestion on the table, not a memory of something said
-    ten turns ago. (The AI's own suggestion messages are NOT user turns —
-    the caller passes the user's chat history — so any confirmatory
-    language in the last user turn is a USER acceptance.)
+    CONFIRMATION CONTRACT (tightened twice — see
+    :func:`_is_clean_affirmation`): only the MOST RECENT chat turn is
+    scanned (never the full history), and that turn must be a SHORT,
+    unambiguous affirmative response — containing an affirmative token, no
+    question mark, no negation (no/not/...), and no hedging marker
+    (but/why/...). A turn like "Yes, but why did you pick 40 and not 50?"
+    is a QUESTION about the suggestion, not an acceptance of it, and must
+    NOT promote the AI pre-fill into ground truth. A stray confirmatory
+    token in an earlier, unrelated turn has NO effect.
+
+    This is a heuristic soft-gate, not a full confirmation-intent
+    classifier: a short affirmative turn that is not actually responsive
+    to the pending suggestion is a known residual risk. Callers building a
+    real UI confirmation flow should prefer an explicit structured
+    confirmation signal over this text heuristic when one becomes
+    available.
     """
     tokens: set[str] = set()
     text = _last_user_turn(chat_history)
     if not text:
         return tokens
-    confirm_re = re.compile(
-        r"\b(confirm|confirmed|yes|yep|correct|right|accept|ok|okay)\b",
-        re.IGNORECASE,
-    )
-    if confirm_re.search(text):
-        tokens.add("suggested")
-        for axis in DIMENSION_AXES:
-            if re.search(rf"\b{axis}\b", text, re.IGNORECASE):
-                tokens.add(f"suggested:{axis}")
+    if not _is_clean_affirmation(text):
+        return tokens
+    tokens.add("suggested")
+    for axis in DIMENSION_AXES:
+        if re.search(rf"\b{axis}\b", text, re.IGNORECASE):
+            tokens.add(f"suggested:{axis}")
     return tokens
 
 
@@ -275,22 +333,32 @@ def _extract_fit_type(
     """The fit type the user stated in chat or via ``stated_dims``
     (``fit_type``/``fit`` key). None if not yet stated (the agent must ask).
 
-    CONFIRMATION CONTRACT (tightened): only the MOST RECENT chat turn is
-    scanned for a fit-type keyword — never the full history. A "snap" (or
-    "slip"/"press"/"interference") mentioned in an earlier, unrelated turn
-    (e.g. "that's a snap decision") must NOT flip the fit type; the fit type
-    is what the user says in response to the agent's proactive fit-type
-    question, i.e. in the current turn.
+    CONFIRMATION CONTRACT (tightened twice — see
+    :func:`_is_clean_affirmation`): only the MOST RECENT chat turn is
+    scanned for a fit-type keyword — never the full history — and that
+    turn must be a SHORT, unambiguous affirmative response: no question
+    mark, no negation (no/not/...), no hedging marker (but/why/...). A
+    "snap" (or "slip"/"press"/"interference") in a questioning or negating
+    turn (e.g. "that's a snap decision, why would you choose snap fit?")
+    must NOT flip the fit type; the fit type is what the user says in a
+    clean acceptance in response to the agent's proactive fit-type
+    question.
+
+    As with dimension confirmation, this is a heuristic soft-gate, not a
+    full intent classifier: a real UI confirmation flow should prefer an
+    explicit structured confirmation signal over this text heuristic when
+    one becomes available.
     """
     if stated_dims:
         raw = stated_dims.get("fit_type") or stated_dims.get("fit")
         if isinstance(raw, str) and raw.strip().lower() in _FIT_TYPE_SET:
             return raw.strip().lower()  # type: ignore[return-value]
-    text = _last_user_turn(chat_history).lower()
-    if not text:
+    text = _last_user_turn(chat_history)
+    if not text or not _is_clean_affirmation(text, with_keyword=True):
         return None
+    low = text.lower()
     for fit in ("slip", "press", "interference", "snap"):
-        if re.search(rf"\b{fit}\b", text):
+        if re.search(rf"\b{fit}\b", low):
             return fit  # type: ignore[return-value]
     return None
 
