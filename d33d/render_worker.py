@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -202,6 +203,47 @@ def build_docker_argv(
     for key, value in params.defines.items():
         argv.extend(["-D", f"{key}={value}"])
     return argv
+
+
+def run_container(argv: list[str], timeout_s: int) -> subprocess.CompletedProcess:
+    """Execute a ``docker run`` argv with a wall-clock timeout.
+
+    ``subprocess.run`` enforces ``timeout_s`` on the whole call; on
+    ``TimeoutExpired`` the container (started without ``--rm`` by
+    ``build_docker_argv``) is killed and removed before returning, since
+    nothing else in the render lifecycle would ever clean it up.
+
+    A timed-out run returns a sentinel ``CompletedProcess`` with
+    ``returncode == 124`` (the ``timeout`` row documented on
+    :func:`classify`); the caller maps it via
+    ``classify(timed_out=True, exit_code=proc.returncode, ...)`` — the
+    ``timed_out`` flag is the authoritative signal, 124 is just the
+    recorded exit code. ``build_docker_argv`` bounds memory, cpus and
+    pids but NOT wall-clock time, so without this wrapper the ``timeout``
+    class in the closed ``ErrorClass`` enum is unreachable for a runaway
+    ``.scad``.
+
+    The caller contract: pass ``params.timeout_s`` (default 120s) as
+    ``timeout_s``.
+    """
+    try:
+        return subprocess.run(argv, timeout=timeout_s, capture_output=True, check=False)
+    except subprocess.TimeoutExpired:
+        name = _argv_container_name(argv)
+        if name:
+            subprocess.run(["docker", "kill", name], capture_output=True, check=False)
+            subprocess.run(["docker", "rm", name], capture_output=True, check=False)
+        return subprocess.CompletedProcess(
+            args=argv, returncode=124, stdout=b"", stderr=b""
+        )
+
+
+def _argv_container_name(argv: list[str]) -> str | None:
+    """The ``-n`` / ``--name`` value of a ``docker run`` argv, or ``None``."""
+    for i, tok in enumerate(argv[:-1]):
+        if tok in ("--name", "-n"):
+            return argv[i + 1]
+    return None
 
 
 def truncate_stderr(stderr: bytes | str) -> str:
