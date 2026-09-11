@@ -68,6 +68,87 @@ MAX_CATALOGUE_BODY_BYTES = 1024 * 1024  # 1 MB
 _ENV_VAR_KEY_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 
 
+async def _read_bounded_body(request: Request, cap: int) -> bytes | JSONResponse:
+    """Read the request body, bounded to ``cap`` bytes.
+
+    Returns the full body on success, or a 413 ``JSONResponse`` to return
+    to the client as-is. Never buffers more than ``cap``+1 bytes: an
+    oversized declared Content-Length is rejected after draining, and an
+    oversized streamed body aborts mid-stream.
+    """
+    declared = request.headers.get("content-length")
+    try:
+        declared_len = int(declared) if declared is not None else 0
+    except ValueError:
+        declared_len = 0
+
+    if declared_len > cap:
+        # Reject early; still drain what the client sends so the
+        # connection stays usable.
+        await request.body()
+        return JSONResponse(
+            status_code=413,
+            content={"error": f"body exceeds {cap} byte limit"},
+        )
+
+    body_parts: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            await request.body()  # drain the remainder
+            return JSONResponse(
+                status_code=413,
+                content={"error": f"body exceeds {cap} byte limit"},
+            )
+        body_parts.append(chunk)
+    return b"".join(body_parts)
+
+
+def _validate_and_install_candidate(
+    loader: ModelCatalogueLoader, body: bytes, app: FastAPI
+) -> JSONResponse:
+    """Write the candidate catalogue to a unique temp file, validate it
+    semantically, and — only on success — ``os.replace`` it onto the real
+    path and ``hot_reload`` the in-memory catalogue.
+
+    A semantically broken catalogue can never reach disk at
+    ``loader.path``; on any failure the temp file is removed and a 400
+    (validation) or 500 (I/O) ``JSONResponse`` is returned.
+    """
+    try:
+        loader.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(loader.path.parent), suffix=".models.tmp"
+        )
+    except OSError as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"could not prepare catalogue write: {e}"},
+        )
+    tmp_path = Path(tmp_name)
+    try:
+        os.write(tmp_fd, body)
+        os.close(tmp_fd)
+        try:
+            load_catalogue(tmp_path)
+        except CatalogueError as e:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"catalogue error: {e.message}"},
+            )
+        # Candidate validated → swap it onto the real path and reload
+        # (the reload re-validates the same file and must now succeed).
+        os.replace(tmp_path, loader.path)
+        tmp_path = None
+        new_cat, _ = hot_reload(loader)
+        app.state.catalogue = new_cat
+        return JSONResponse(content=_serialise_catalogue(new_cat))
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
 def _find_literal_provider_keys(doc: dict[str, Any]) -> list[str]:
     """Names of providers whose ``key`` is a literal (not ``${ENV_VAR}``).
 
@@ -255,48 +336,19 @@ def create_app(
     async def put_models(request: Request) -> JSONResponse:
         """Full-YAML replacement of ``catalogue_path``.
 
-        Bound the body (413 on a too-large request), then validate the
+        Read-bounded body (413 on a too-large request), then validate the
         catalogue — first the untrusted-input boundary checks (YAML syntax,
         mapping shape, env-var-only provider keys), then a full semantic
-        load of the candidate written to a unique temp file. Only after
-        validation succeeds does the candidate ``os.replace`` onto the real
-        path and ``hot_reload`` swap the in-memory catalogue. A failure at
-        any stage returns 400 and leaves the on-disk file and the live
-        catalogue exactly as they were (last-known-good, both on disk and
-        in memory).
+        load of the candidate. Only after validation succeeds does the
+        candidate ``os.replace`` onto the real path and ``hot_reload`` swap
+        the in-memory catalogue. A failure at any stage returns 400 and
+        leaves the on-disk file and the live catalogue exactly as they were
+        (last-known-good, both on disk and in memory).
         """
-        loader: ModelCatalogueLoader = app.state.catalogue_loader
-        declared = request.headers.get("content-length")
-        try:
-            if declared is not None:
-                declared_len = int(declared)
-            else:
-                declared_len = 0
-        except ValueError:
-            declared_len = 0
-
-        # Bounded read: never buffer more than cap+1 bytes.
-        cap = MAX_CATALOGUE_BODY_BYTES
-        if declared_len > cap:
-            # Reject early; still drain what the client sends so the
-            # connection stays usable.
-            await request.body()
-            return JSONResponse(
-                status_code=413,
-                content={"error": f"body exceeds {cap} byte limit"},
-            )
-        body_parts: list[bytes] = []
-        total = 0
-        async for chunk in request.stream():
-            total += len(chunk)
-            if total > cap:
-                await request.body()  # drain the remainder
-                return JSONResponse(
-                    status_code=413,
-                    content={"error": f"body exceeds {cap} byte limit"},
-                )
-            body_parts.append(chunk)
-        body = b"".join(body_parts)
+        result = await _read_bounded_body(request, MAX_CATALOGUE_BODY_BYTES)
+        if isinstance(result, JSONResponse):
+            return result
+        body = result
 
         try:
             doc = yaml.safe_load(body.decode("utf-8"))
@@ -326,40 +378,7 @@ def create_app(
                 },
             )
 
-        # Validate the candidate on a unique temp file BEFORE touching the
-        # real path. A semantically broken catalogue can never reach disk
-        # at ``loader.path``.
-        try:
-            loader.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_fd, tmp_name = tempfile.mkstemp(
-                dir=str(loader.path.parent), suffix=".models.tmp"
-            )
-        except OSError as e:
-            return JSONResponse(
-                status_code=500,
-                content={"error": f"could not prepare catalogue write: {e}"},
-            )
-        tmp_path = Path(tmp_name)
-        try:
-            os.write(tmp_fd, body)
-            os.close(tmp_fd)
-            try:
-                load_catalogue(tmp_path)
-            except CatalogueError as e:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": f"catalogue error: {e.message}"},
-                )
-            # Candidate validated → swap it onto the real path and reload
-            # (the reload re-validates the same file and must now succeed).
-            os.replace(tmp_path, loader.path)
-            tmp_path = None
-            new_cat, _ = hot_reload(loader)
-            app.state.catalogue = new_cat
-            return JSONResponse(content=_serialise_catalogue(new_cat))
-        finally:
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
+        return _validate_and_install_candidate(app.state.catalogue_loader, body, app)
 
     # Mount the sibling workstream routers (project CRUD + photo upload,
     # SSE streaming) — the production app is complete from create_app()

@@ -406,6 +406,44 @@ def test_upload_photo_accepts_jpeg(app_with_projects):
 # ---------------------------------------------------------------------------
 
 
+def test_upload_photo_sanitizes_commit_message(app_with_projects):
+    """A malicious filename (embedded newlines + shell metacharacters) must
+    never reach the git commit message: the message stays a single line of
+    safe alnum+``._-`` characters (regression test for the commit-message
+    injection sink in the per-project repo's commit history)."""
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    evil_name = "a\n$(whoami);rm -rf / # " + """" ' `""" + ".png"
+
+    async def _call(client):
+        create_r = await client.post(
+            "/api/projects", json={"name": "Commit Sanitize Test"}
+        )
+        pid = create_r.json()["id"]
+        repo_path = Path(create_r.json()["git_repo_path"])
+        files = {"file": (evil_name, png_bytes, "image/png")}
+        r = await client.post(f"/api/projects/{pid}/photos", files=files)
+        # Full commit message of the upload commit, raw body format.
+        msg = _git(repo_path, "log", "-1", "--format=%B").stdout
+        return r, msg
+
+    r, msg = _run_async(app_with_projects, _call)
+    assert r.status_code == 201
+    # The message body is exactly one line: the subject ("photo: …") plus
+    # git's own trailing newline — no embedded newlines survived.
+    body = msg.rstrip("\n")
+    assert "\n" not in body, f"commit message contains a newline: {msg!r}"
+    assert body.startswith("photo: ")
+    subject = body[len("photo: ") :]
+    # Only safe alnum + . _ - characters — newlines and shell metachars
+    # ( $( ) ; ' " ` # ) were all stripped from the filename.
+    assert all(c.isalnum() or c in "._-" for c in subject), (
+        f"commit subject contains unsafe characters: {subject!r}"
+    )
+    assert "$(whoami)" not in msg
+    assert "rm -rf" not in msg
+    assert len(subject) <= 200
+
+
 def test_max_upload_bytes_is_20mb():
     """The committed bound is 20 MB."""
     assert MAX_UPLOAD_BYTES == 20 * 1024 * 1024

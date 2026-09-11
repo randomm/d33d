@@ -42,6 +42,25 @@ ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
 
+# Commit-message messages are stored in the per-project git repo's history,
+# which downstream consumers (git log parsing, shell tooling, template
+# interpolation) treat as data. Sanitize the message text with a strict
+# safe-character filter so user-supplied filenames can never inject newlines
+# or shell metacharacters into the commit history.
+_MAX_COMMIT_MESSAGE_LEN = 200
+
+
+def _sanitize_commit_message(text: str) -> str:
+    """Reduce ``text`` to a single line of safe alnum+``._-`` characters.
+
+    Mirrors the filename-sanitization filter (defensively stricter than the
+    caller needs): any character outside the safe set — including newlines,
+    shell metacharacters, and other punctuation — is dropped, and the result
+    is capped at ``_MAX_COMMIT_MESSAGE_LEN`` characters.
+    """
+    safe = "".join(c for c in text if c.isalnum() or c in "._-")
+    return safe[:_MAX_COMMIT_MESSAGE_LEN]
+
 
 # ---------------------------------------------------------------------------
 # Git helpers (local only, no network)
@@ -250,6 +269,10 @@ def create_projects_router() -> APIRouter:
         safe_name = (
             "".join(c for c in safe_name if c.isalnum() or c in "._-") or "photo"
         )
+        # Commit-message text is sanitized separately (stricter, capped) so
+        # the repo's commit history can never carry newlines or shell
+        # metacharacters derived from the user-supplied filename.
+        commit_subject = _sanitize_commit_message(original_name) or "photo"
         # Ensure extension matches the declared type
         if file_content_type == "image/png":
             if "." in safe_name:
@@ -272,7 +295,7 @@ def create_projects_router() -> APIRouter:
 
         # Commit the photo to the git repo
         try:
-            commit_all(repo_path, f"photo: {safe_name}")
+            commit_all(repo_path, f"photo: {commit_subject}")
         except RuntimeError as e:
             # Clean up the file but keep the repo consistent
             dest.unlink(missing_ok=True)
