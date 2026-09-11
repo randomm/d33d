@@ -22,11 +22,29 @@ Security invariants:
 from __future__ import annotations
 
 import os
-import sqlite3
 import stat
 from pathlib import Path
+from typing import TYPE_CHECKING, Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
+
+
+class _DBLike(Protocol):
+    """Duck type: ``db.Connection`` or a bare ``sqlite3.Connection``.
+
+    Both expose ``execute(sql, params)`` and ``commit()``, which is all
+    ``CredentialStore`` needs. ``CredentialStore`` takes this protocol so
+    tests can pass a raw ``sqlite3.Connection`` without a wrapper, and the
+    production path passes the real ``d33d.db.Connection``. No isinstance
+    check — the contract is the two methods.
+    """
+
+    def execute(self, sql: str, params: tuple) -> object: ...
+    def commit(self) -> None: ...
+
+
+if TYPE_CHECKING:
+    from d33d import db as _db  # noqa: F401  (annotation-only, avoids circular import)
 
 
 def get_or_create_master_key(path: Path) -> bytes:
@@ -58,28 +76,32 @@ def get_or_create_master_key(path: Path) -> bytes:
 
 
 class CredentialStore:
-    """Encrypted credential storage backed by a ``provider_credentials`` table.
+    """Encrypted credential storage on top of ``d33d.db``'s ``provider_credentials`` table.
 
-    The table schema (owned by ticket #3-task-d):
-    ```sql
-    CREATE TABLE provider_credentials (
-      provider TEXT PRIMARY KEY,
-      model_name TEXT NOT NULL DEFAULT '',
-      key_ciphertext BLOB NOT NULL
-    )
-    ```
+    Operates on the SAME table that ``d33d.db.Connection`` creates (schema owned by
+    ticket #3-task-d, columns ``id, provider_id, model_alias, key_ciphertext``).
+    ``CredentialStore`` does not invent its own schema or create any tables — it
+    assumes the table already exists (created by ``d33d.db.connect()``). Pointing
+    it at a database without that table raises ``sqlite3.OperationalError``.
 
     Usage (server-side only — never expose to browser-facing code):
     ```python
-    key = get_or_create_master_key(Path("/volume/d33d/master.key"))
-    store = CredentialStore(conn=sqlite3_conn, master_key=key)
-    store.store_key("trailopeners", "RedHatAI/Qwen3.8-27B-INT4", "sk-...")
-    rows = store.list_credentials()  # [{"provider": "trailopeners", "model_name": "..."}]
+    from d33d import db
+    conn = db.connect("/volume/d33d/d33d.sqlite3")
+    store = CredentialStore(conn, master_key)   # conn is db.Connection
+    store.store_key("trailopeners", "design-primary", "sk-...")
+    rows = store.list_credentials()  # [{"provider_id": "trailopeners", "model_alias": "..."}]
     secret = store.get_key("trailopeners")  # "sk-..." (server-internal)
     ```
+
+    The ``provider`` argument to ``store_key`` / ``get_key`` is the value stored
+    in ``provider_id`` (the provider *name*, e.g. ``"trailopeners"``).
+    ``model_name`` in the old API maps to ``model_alias`` in the real schema.
     """
 
-    def __init__(self, conn: sqlite3.Connection, master_key: bytes) -> None:
+    def __init__(self, conn: _DBLike, master_key: bytes) -> None:
+        # _DBLike accepts db.Connection (production) or sqlite3.Connection (tests);
+        # both expose execute/commit, which is all CredentialStore uses.
         self._conn = conn
         self._fernet = Fernet(master_key)
 
@@ -98,9 +120,10 @@ class CredentialStore:
             raise ValueError("secret must be non-empty")
         ciphertext = self._fernet.encrypt(secret.encode("utf-8"))
         self._conn.execute(
-            "INSERT INTO provider_credentials (provider, model_name, key_ciphertext) "
+            "INSERT INTO provider_credentials (provider_id, model_alias, key_ciphertext) "
             "VALUES (?, ?, ?) "
-            "ON CONFLICT(provider) DO UPDATE SET model_name=excluded.model_name, "
+            "ON CONFLICT(provider_id, model_alias) DO UPDATE SET "
+            "model_alias=excluded.model_alias, "
             "key_ciphertext=excluded.key_ciphertext",
             (provider, model_name, ciphertext),
         )
@@ -115,7 +138,7 @@ class CredentialStore:
         "unusable", not "crash".
         """
         row = self._conn.execute(
-            "SELECT key_ciphertext FROM provider_credentials WHERE provider = ?",
+            "SELECT key_ciphertext FROM provider_credentials WHERE provider_id = ?",
             (provider,),
         ).fetchone()
         if row is None:
@@ -133,8 +156,11 @@ class CredentialStore:
         This is the endpoint-boundary method. The HTTP handler serialises
         the return value to JSON and sends it to the browser. No field in
         the returned rows contains the plaintext key or the ciphertext.
+
+        Keys are named ``provider_id`` and ``model_alias`` to match the
+        real ``d33d.db`` schema columns.
         """
         rows = self._conn.execute(
-            "SELECT provider, model_name FROM provider_credentials ORDER BY provider"
+            "SELECT provider_id, model_alias FROM provider_credentials ORDER BY provider_id"
         ).fetchall()
-        return [{"provider": r[0], "model_name": r[1]} for r in rows]
+        return [{"provider_id": r[0], "model_alias": r[1]} for r in rows]

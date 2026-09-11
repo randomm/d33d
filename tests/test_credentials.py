@@ -13,25 +13,19 @@ No Docker, no network — pure local file/DB semantics (sqlite3 :memory:).
 from __future__ import annotations
 
 import os
-import sqlite3
 from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
 
+from d33d import db as _db
 from d33d.security import credentials as cred
 
 
-def _mkdb() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE provider_credentials ("
-        "  provider TEXT PRIMARY KEY,"
-        "  model_name TEXT NOT NULL DEFAULT '',"
-        "  key_ciphertext BLOB NOT NULL"
-        ")"
-    )
-    return conn
+def _mkdb() -> _db.Connection:
+    """A real ``db.connect()``-created in-memory database (the SAME table
+    CredentialStore operates on — not a hand-rolled schema)."""
+    return _db.connect(":memory:")
 
 
 def _master_key_file(tmp_path: Path) -> Path:
@@ -68,8 +62,8 @@ def test_list_returns_names_only_no_key_material(tmp_path: Path) -> None:
     store.store_key("trailopeners", "RedHatAI/Qwen3.8-27B-INT4", secret)
     rows = store.list_credentials()
     assert secret not in str(rows)
-    assert rows[0]["provider"] == "trailopeners"
-    assert rows[0]["model_name"] == "RedHatAI/Qwen3.8-27B-INT4"
+    assert rows[0]["provider_id"] == "trailopeners"
+    assert rows[0]["model_alias"] == "RedHatAI/Qwen3.8-27B-INT4"
     # No field name containing "key" in the row
     for field_name in rows[0]:
         assert "key" not in field_name.lower(), (
@@ -101,7 +95,7 @@ def test_master_key_rotation_reports_unusable_not_silent_loss(tmp_path: Path) ->
     assert store2.get_key("p") is None
     # The row is still there — not silently lost
     rows = store2.list_credentials()
-    assert any(r["provider"] == "p" for r in rows)
+    assert any(r["provider_id"] == "p" for r in rows)
 
 
 def test_master_key_file_permissions_restricted(tmp_path: Path) -> None:
@@ -117,3 +111,45 @@ def test_store_key_with_empty_secret_rejected(tmp_path: Path) -> None:
     store, _ = _store(tmp_path)
     with pytest.raises(ValueError):
         store.store_key("p", "m", "")
+
+
+def test_round_trip_through_real_db_connection_schema(tmp_path: Path) -> None:
+    """Regression (HIGH #3): store_key → get_key → list_credentials round-trips
+    through a REAL ``db.connect()``-created database (not a hand-rolled schema),
+    proving CredentialStore and d33d.db agree on the ``provider_credentials``
+    table shape (columns ``id, provider_id, model_alias, key_ciphertext``).
+    """
+    conn = _db.connect(":memory:")
+    try:
+        key = cred.get_or_create_master_key(tmp_path / "master.key")
+        store = cred.CredentialStore(conn=conn, master_key=key)
+
+        # Round-trip through the real schema
+        secret = "sk-real-round-trip-abc123"
+        store.store_key("trailopeners", "RedHatAI/Qwen3.8-27B-INT4", secret)
+        assert store.get_key("trailopeners") == secret
+
+        # Overwrite (ON CONFLICT on the real UNIQUE(provider_id, model_alias))
+        store.store_key("trailopeners", "RedHatAI/Qwen3.8-27B-INT4", "sk-rotated")
+        assert store.get_key("trailopeners") == "sk-rotated"
+
+        # Multiple providers
+        store.store_key("provider-b", "model-b", "sk-b")
+
+        # list_credentials returns names only, no key material
+        rows = store.list_credentials()
+        assert len(rows) == 2
+        # No field name containing "key" in any row
+        for row in rows:
+            for field_name in row:
+                assert "key" not in field_name.lower()
+            # Fields match the real schema column names
+            assert "provider_id" in row
+            assert "model_alias" in row
+
+        # The names-only view must not leak ciphertext
+        for row in rows:
+            for v in row.values():
+                assert not (isinstance(v, str) and v.startswith("gAAA"))
+    finally:
+        conn.close()

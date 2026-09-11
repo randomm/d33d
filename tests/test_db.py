@@ -157,7 +157,7 @@ def test_transcripts_require_existing_project(conn: db.Connection) -> None:
 def test_provider_credentials_round_trip_and_names_only(
     conn: db.Connection,
 ) -> None:
-    cred_id = conn.put_credential(
+    conn.put_credential(
         provider_id="trailopeners",
         model_alias="design-primary",
         key_ciphertext=b"fernet-ciphertext-bytes",
@@ -169,9 +169,11 @@ def test_provider_credentials_round_trip_and_names_only(
     assert names[0]["model_alias"] == "design-primary"
     # The names-only view must NOT expose the ciphertext column.
     assert "key_ciphertext" not in names[0]
-    # The raw row round-trips the BLOB exactly.
-    raw = conn.get_credential(cred_id)
-    assert raw["key_ciphertext"] == b"fernet-ciphertext-bytes"
+    # No public ciphertext accessor exists on the DB layer (HIGH #2):
+    # the ciphertext is owned by d33d.security.credentials.CredentialStore,
+    # not by Connection — an HTTP handler reaching for this class cannot
+    # leak key material via repr/logging/pickle of a Connection row.
+    assert not hasattr(conn, "get_credential")
 
 
 def test_request_logs_round_trip_with_prompt_hash(conn: db.Connection) -> None:

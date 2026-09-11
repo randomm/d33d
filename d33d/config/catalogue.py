@@ -44,9 +44,18 @@ class Provider:
     base: str
     #: Resolved key (from ``${ENV}`` interpolation or a literal). Never
     #: serialized into any response body — server-side only.
-    key: str = ""
+    key: str = field(default="", repr=False)
     #: Provider defaults. Lowest precedence in the override cascade.
     defaults: dict[str, Any] = field(default_factory=dict)
+
+    def __repr__(self) -> str:
+        # The generated repr excludes ``key`` (repr=False); pin the redacted
+        # form explicitly so ``repr(provider)`` / ``str(provider)`` can never
+        # surface the live API key, even if field ordering changes.
+        return (
+            f"Provider(name={self.name!r}, base={self.base!r}, "
+            f"key='***redacted***', defaults={self.defaults!r})"
+        )
 
 
 @dataclass(frozen=True)

@@ -298,21 +298,18 @@ class Connection:
         ).fetchone()
         return int(row["id"])
 
-    def get_credential(self, credential_id: int) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            "SELECT * FROM provider_credentials WHERE id = ?", (credential_id,)
-        ).fetchone()
-        return dict(row) if row is not None else None
-
     def list_credentials(self) -> list[dict[str, Any]]:
         """Names-only view (what the HTTP list endpoint returns).
 
         Per the hard invariant, the ciphertext column is NEVER selected
         here. The HTTP layer (task-b) can safely serialise this list into
-        a JSON response without any key material leaking.
+        a JSON response without any key material leaking. There is no
+        public ``get_credential`` accessor: ciphertext access is owned by
+        ``d33d.security.credentials.CredentialStore``, not the DB layer —
+        an HTTP handler reaching for this class cannot leak key material.
         """
         rows = self._conn.execute(
-            "SELECT id, provider_id, model_alias FROM provider_credentials ORDER BY id ASC"
+            "SELECT provider_id, model_alias FROM provider_credentials ORDER BY provider_id ASC"
         ).fetchall()
         return [dict(r) for r in rows]
 

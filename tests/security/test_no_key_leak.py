@@ -14,24 +14,18 @@ that any endpoint implementation built on these primitives cannot leak.
 from __future__ import annotations
 
 import json
-import sqlite3
 import uuid
 from pathlib import Path
 
+from d33d import db as _db
 from d33d.security import credentials as cred
 from d33d.security import sanitize
 
 
-def _mkdb() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
-    conn.execute(
-        "CREATE TABLE provider_credentials ("
-        "  provider TEXT PRIMARY KEY,"
-        "  model_name TEXT NOT NULL DEFAULT '',"
-        "  key_ciphertext BLOB NOT NULL"
-        ")"
-    )
-    return conn
+def _mkdb() -> _db.Connection:
+    """A real ``db.connect()``-created in-memory database (the SAME table
+    CredentialStore operates on — not a hand-rolled schema)."""
+    return _db.connect(":memory:")
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +51,7 @@ def test_list_credentials_never_contains_key_material(tmp_path: Path) -> None:
             assert "key" not in field_name.lower(), (
                 f"key field in list response: {field_name}"
             )
-            assert field_name in ("provider", "model_name"), (
+            assert field_name in ("provider_id", "model_alias"), (
                 f"unexpected field in list response: {field_name}"
             )
 

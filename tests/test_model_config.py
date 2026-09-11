@@ -111,6 +111,32 @@ def test_env_interpolation_resolves_provider_key_from_env(
     assert cat.providers["openai-compat"].key == "static-secret"
 
 
+def test_provider_repr_and_str_never_leak_key_value() -> None:
+    """Regression: a live API key must not surface via repr()/str() of a
+    Provider (or a RoleResolution embedding one). HIGH #1 — no repr leak."""
+    from d33d.config.catalogue import ModelEntry, Provider, RoleResolution
+
+    p = Provider(
+        name="p",
+        base="https://x/v1",
+        key="test-secret-key-xyz123",
+        defaults={"temperature": 0.5},
+    )
+    assert "test-secret-key-xyz123" not in repr(p)
+    assert "test-secret-key-xyz123" not in str(p)
+    # The redaction marker should be present
+    assert "redacted" in repr(p)
+
+    # A RoleResolution embedding a Provider must also not leak via repr
+    r = RoleResolution(
+        role="design",
+        entry=ModelEntry(id="alias", provider="p", model="m/1"),
+        provider=p,
+        via_fallback=False,
+    )
+    assert "test-secret-key-xyz123" not in repr(r)
+
+
 def test_env_interpolation_unset_var_fails_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
