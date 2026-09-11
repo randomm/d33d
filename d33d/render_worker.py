@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -108,6 +109,11 @@ DEFAULT_MEMORY_LIMIT = "2g"
 DEFAULT_CPU_LIMIT = "2"
 DEFAULT_PID_LIMIT = 512
 DEFAULT_TIMEOUT_S = 120
+
+#: Wall-clock bound on the ``docker kill``/``docker rm`` cleanup calls in
+#: ``run_container`` — a hung Docker daemon is correlated with the stuck
+#: render they clean up, so these must never block indefinitely.
+_CLEANUP_TIMEOUT_S = 15
 
 #: ``render-<8 hex chars from uuid4>`` — pinned as the testable contract;
 #: container and volume share the name.
@@ -231,11 +237,42 @@ def run_container(argv: list[str], timeout_s: int) -> subprocess.CompletedProces
     except subprocess.TimeoutExpired:
         name = _argv_container_name(argv)
         if name:
-            subprocess.run(["docker", "kill", name], capture_output=True, check=False)
-            subprocess.run(["docker", "rm", name], capture_output=True, check=False)
+            _cleanup_container(name)
         return subprocess.CompletedProcess(
             args=argv, returncode=124, stdout=b"", stderr=b""
         )
+
+
+def _cleanup_container(name: str) -> None:
+    """``docker kill`` then ``docker rm`` a named container, each bounded
+    by ``_CLEANUP_TIMEOUT_S``.
+
+    Both calls are best-effort: a hung daemon (correlated failure with the
+    stuck render) or a failed removal must not propagate — the run still
+    classifies as ``timeout`` either way. A hung or failed cleanup leaves
+    the container leaked, so each failure path logs a warning naming the
+    container so the leak is discoverable in logs.
+    """
+    for verb in ("kill", "rm"):
+        argv = ["docker", verb, name]
+        try:
+            proc = subprocess.run(
+                argv, timeout=_CLEANUP_TIMEOUT_S, capture_output=True, check=False
+            )
+        except subprocess.TimeoutExpired:
+            print(
+                f"[render_worker] WARNING: 'docker {verb} {name}' timed out after "
+                f"{_CLEANUP_TIMEOUT_S}s; container may be leaked",
+                file=sys.stderr,
+            )
+            return
+        if proc.returncode != 0:
+            print(
+                f"[render_worker] WARNING: 'docker {verb} {name}' exited {proc.returncode}; "
+                f"container may be leaked",
+                file=sys.stderr,
+            )
+            return
 
 
 def _argv_container_name(argv: list[str]) -> str | None:
