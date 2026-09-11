@@ -193,6 +193,7 @@ _RE_TRAILING_SEMICOLON = re.compile(
 # Dataclasses
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class ClassifiedFailure:
     """A classified LLM output failure.
@@ -317,6 +318,7 @@ _REPAIR_INSTRUCTIONS: dict[OpenSCADFailureClass, str] = {
 # Classification function
 # ---------------------------------------------------------------------------
 
+
 def _classify_syntax_error(stderr: str) -> OpenSCADFailureClass:
     """Classify a syntax_error by inspecting the stderr output for
     specific failure patterns.
@@ -394,7 +396,13 @@ def classify_failure(
             repairable=True,
         )
 
-    if error_class in ("timeout", "oom", "container_error", "artifact_error", "empty_model"):
+    if error_class in (
+        "timeout",
+        "oom",
+        "container_error",
+        "artifact_error",
+        "empty_model",
+    ):
         return ClassifiedFailure(
             failure_class=error_class,  # type: ignore[arg-type]
             evidence=stderr[:256] if stderr else f"Render worker class: {error_class}",
@@ -463,6 +471,7 @@ def detect_magic_numbers(
 # ---------------------------------------------------------------------------
 # Repair routing
 # ---------------------------------------------------------------------------
+
 
 def route_repair(
     *,

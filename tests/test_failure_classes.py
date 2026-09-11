@@ -302,7 +302,9 @@ def test_route_repair_returns_directive_for_repairable() -> None:
         evidence="semicolon after translate",
         repairable=True,
     )
-    directive = fc.route_repair(classified=classified, scad_source="translate([1,2,3]); cube(5);")
+    directive = fc.route_repair(
+        classified=classified, scad_source="translate([1,2,3]); cube(5);"
+    )
     assert directive is not None
     assert directive.failure_class == "trailing_semicolon"
     assert "semicolon" in directive.instruction.lower()
@@ -351,7 +353,9 @@ def test_route_repair_directive_is_structured_not_raw_dump() -> None:
         evidence="ERROR: difference() operand order",
         repairable=True,
     )
-    directive = fc.route_repair(classified=classified, scad_source="difference() { cube(5); }")
+    directive = fc.route_repair(
+        classified=classified, scad_source="difference() { cube(5); }"
+    )
     assert directive is not None
     # The instruction should be a repair directive, not the raw stderr
     assert "operand" in directive.instruction.lower()
@@ -607,7 +611,10 @@ def test_geometrically_wrong_requires_vision_loop() -> None:
         scad_source="cube([20, 25, 30]);",
     )
     assert directive is not None
-    assert "vision" in directive.instruction.lower() or "geometry" in directive.instruction.lower()
+    assert (
+        "vision" in directive.instruction.lower()
+        or "geometry" in directive.instruction.lower()
+    )
 
 
 # ---------------------------------------------------------------------------

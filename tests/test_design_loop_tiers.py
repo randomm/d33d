@@ -82,10 +82,16 @@ def _ok_response(content: str | None = "hi", tool_calls: list | None = None):
     message: dict[str, Any] = {"content": content}
     if tool_calls is not None:
         message["tool_calls"] = tool_calls
-    return FakeResponse(200, {"choices": [{"message": message}], "usage": {
-        "prompt_tokens": 11,
-        "completion_tokens": 7,
-    }})
+    return FakeResponse(
+        200,
+        {
+            "choices": [{"message": message}],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+            },
+        },
+    )
 
 
 def _t0() -> CapabilityResult:
@@ -102,15 +108,23 @@ def _t1() -> CapabilityResult:
 
 def _t2() -> CapabilityResult:
     return CapabilityResult(
-        tools=False, json_schema=False, vision=True, max_images=0,
-        fenced_json=False, validated=True,
+        tools=False,
+        json_schema=False,
+        vision=True,
+        max_images=0,
+        fenced_json=False,
+        validated=True,
     )
 
 
 def _t3() -> CapabilityResult:
     return CapabilityResult(
-        tools=False, json_schema=False, vision=False, max_images=0,
-        fenced_json=False, validated=True,
+        tools=False,
+        json_schema=False,
+        vision=False,
+        max_images=0,
+        fenced_json=False,
+        validated=True,
     )
 
 
@@ -183,9 +197,7 @@ def test_t0_sends_native_tools_and_passes_through_tool_calls():
     assert body["temperature"] == 0.2
     # OpenAI dialect: image parts stay inline in content.
     content = body["messages"][0]["content"]
-    assert any(
-        isinstance(p, dict) and p.get("type") == "image_url" for p in content
-    )
+    assert any(isinstance(p, dict) and p.get("type") == "image_url" for p in content)
     assert "images" not in body["messages"][0]
 
     assert isinstance(result, LLMResult)
@@ -356,9 +368,7 @@ def test_ollama_dialect_moves_images_into_array():
     # fenced-JSON fragment) is the T1 framing; the dialect conversion is a
     # property of the logical body, independent of the T1 codec.
     async def factory(request: dict[str, Any]):
-        return _ok_response(
-            '```json\n{"tool": "emit_design", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_design", "arguments": {}}\n```')
 
     result = _run(
         send(
@@ -383,9 +393,7 @@ def test_ollama_dialect_moves_images_into_array():
 
 def test_ollama_dialect_six_views_plus_reference_payload():
     async def factory(request: dict[str, Any]):
-        return _ok_response(
-            '```json\n{"tool": "emit_critique", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_critique", "arguments": {}}\n```')
 
     result = _run(
         send(
@@ -412,9 +420,7 @@ def test_t1_ollama_wire_shape_matches_logical_dialect():
 
     async def factory(request: dict[str, Any]):
         sent.append(request)
-        return _ok_response(
-            '```json\n{"tool": "emit_critique", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_critique", "arguments": {}}\n```')
 
     result = _run(
         send(
@@ -447,7 +453,10 @@ def test_to_ollama_messages_non_vision_drops_images_keeps_placeholder():
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "[image removed — model does not support vision]"},
+                {
+                    "type": "text",
+                    "text": "[image removed — model does not support vision]",
+                },
                 {"type": "image_url", "image_url": {"url": IMAGE_URL}},
                 {"type": "text", "text": "go"},
             ],
@@ -498,10 +507,16 @@ def test_openai_dialect_keeps_inline_parts():
 
 def test_prompt_hash_identical_across_tiers_and_models():
     async def factory0(request: dict[str, Any]):
-        return _ok_response("ok", tool_calls=[
-            {"id": "c", "type": "function",
-             "function": {"name": "emit_design", "arguments": "{}"}},
-        ])
+        return _ok_response(
+            "ok",
+            tool_calls=[
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {"name": "emit_design", "arguments": "{}"},
+                },
+            ],
+        )
 
     async def factory1(request: dict[str, Any]):
         return _ok_response('```json\n{"tool": "emit_design", "arguments": {}}\n```')
@@ -536,9 +551,7 @@ def test_prompt_hash_identical_across_tiers_and_models():
 
 def test_prompt_hash_stable_across_repeats():
     async def factory(request: dict[str, Any]):
-        return _ok_response(
-            '```json\n{"tool": "emit_design", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_design", "arguments": {}}\n```')
 
     msgs = _critique_messages()
     hashes = {
@@ -559,9 +572,7 @@ def test_prompt_hash_stable_across_repeats():
 
 def test_prompt_hash_changes_when_view_set_or_param_block_changes():
     async def factory(request: dict[str, Any]):
-        return _ok_response(
-            '```json\n{"tool": "emit_critique", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_critique", "arguments": {}}\n```')
 
     def _critique_with(text: str) -> list[dict[str, Any]]:
         return [{"role": "user", "content": text}]
@@ -599,9 +610,7 @@ def test_prompt_hash_changes_when_view_set_or_param_block_changes():
 
 def test_prompt_hash_excludes_model_id_including_ollama_dialect():
     async def factory(request: dict[str, Any]):
-        return _ok_response(
-            '```json\n{"tool": "emit_design", "arguments": {}}\n```'
-        )
+        return _ok_response('```json\n{"tool": "emit_design", "arguments": {}}\n```')
 
     r_openai = _run(
         send(
@@ -637,10 +646,16 @@ def test_prompt_hash_wired_into_request_logs(tmp_path):
 
     async def factory(request: dict[str, Any]):
         sent.append(request)
-        return _ok_response("ok", tool_calls=[
-            {"id": "c", "type": "function",
-             "function": {"name": "emit_design", "arguments": "{}"}},
-        ])
+        return _ok_response(
+            "ok",
+            tool_calls=[
+                {
+                    "id": "c",
+                    "type": "function",
+                    "function": {"name": "emit_design", "arguments": "{}"},
+                },
+            ],
+        )
 
     result = _run(
         send(
