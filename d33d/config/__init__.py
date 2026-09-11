@@ -3,8 +3,9 @@
 The YAML catalogue is the source of truth. This subpackage exposes the core:
 load/validate and atomic hot-reload (:mod:`~d33d.config.catalogue`), and
 role->alias->provider resolution with the override cascade
-(:mod:`~d33d.config.resolve`). Capability probing (T0-T3) and the T1
-fenced-JSON protocol are a separate workstream.
+(:mod:`~d33d.config.resolve`), plus capability probing (T0-T3)
+(:mod:`~d33d.config.probes`) and the T1 fenced-JSON protocol
+(:mod:`~d33d.config.t1_protocol`).
 """
 
 from __future__ import annotations
