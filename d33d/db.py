@@ -1,6 +1,6 @@
 """Shared SQLite schema for the FastAPI backend (issue #3, task-d scope).
 
-This module owns the four tables the backend needs that are NOT the model
+This module owns the five tables the backend needs that are NOT the model
 catalogue (the catalogue lives in YAML — see task-a):
 
 * ``projects``             — project metadata. The per-project git repo
@@ -26,6 +26,15 @@ catalogue (the catalogue lives in YAML — see task-a):
                               two rows called on the same prompt through
                               different models share the hash and can be
                               diffed purely from the logs.
+* ``project_dimensions``   — the CLARIFY-before-code confirmed dimension
+                              set, persisted alongside the transcript (one
+                              row per project, keyed by project_id).
+                              ``params`` is the named-parameter map
+                              (JSON: W/D/H in mm plus tolerance_mm / fit_type)
+                              that the #3 bbox gate compares against. "Active
+                              version" promotion is issue #7's concern — this
+                              table only persists the confirmed set, it does
+                              not manage version history.
 
 Design choices:
   - SQLite in WAL mode so a single FastAPI writer does not lock out a
@@ -93,6 +102,17 @@ CREATE TABLE IF NOT EXISTS provider_credentials (
     key_ciphertext BLOB NOT NULL,
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE(provider_id, model_alias)
+);
+
+CREATE TABLE IF NOT EXISTS project_dimensions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    fit_type      TEXT    NOT NULL,
+    tolerance_mm  REAL    NOT NULL,
+    params        TEXT    NOT NULL,
+    confirmed_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at    TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE(project_id)
 );
 
 CREATE TABLE IF NOT EXISTS request_logs (
@@ -312,6 +332,60 @@ class Connection:
             "SELECT provider_id, model_alias FROM provider_credentials ORDER BY provider_id ASC"
         ).fetchall()
         return [dict(r) for r in rows]
+
+    # -- project_dimensions -------------------------------------------------
+
+    def put_dimensions(
+        self,
+        *,
+        project_id: int,
+        fit_type: str,
+        tolerance_mm: float,
+        params: dict[str, float],
+    ) -> int:
+        """Insert or replace the confirmed dimension set for a project.
+
+        ``params`` is the named-parameter map (W/D/H in mm plus the resolved
+        FDM tolerance) — stored JSON-encoded in ``params`` so the #3 bbox
+        gate has a record to compare against. ``fit_type`` / ``tolerance_mm``
+        are denormalised onto the row (not buried in the JSON) so a
+        query can filter on them without parsing. "Active version" promotion
+        is issue #7's concern — this is the alongside-the-transcript record
+        only, no version history.
+        """
+        self._conn.execute(
+            "INSERT INTO project_dimensions (project_id, fit_type, tolerance_mm, params)"
+            " VALUES (?, ?, ?, ?) ON CONFLICT(project_id)"
+            " DO UPDATE SET fit_type = excluded.fit_type,"
+            " tolerance_mm = excluded.tolerance_mm,"
+            " params = excluded.params,"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            (project_id, fit_type, tolerance_mm, json.dumps(params)),
+        )
+        self._conn.commit()
+        row = self._conn.execute(
+            "SELECT id FROM project_dimensions WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        return int(row["id"])
+
+    def get_dimensions(self, project_id: int) -> dict[str, Any] | None:
+        """The confirmed dimension set for a project (None if not yet
+        confirmed — i.e. the CLARIFY gate has not passed for this project).
+
+        Returns the row with ``params`` decoded back to a dict (the
+        named-parameter map) so a caller can reconstruct the W/D/H triple
+        and the resolved FDM tolerance without hand-parsing JSON.
+        """
+        row = self._conn.execute(
+            "SELECT * FROM project_dimensions WHERE project_id = ?",
+            (project_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        out = dict(row)
+        out["params"] = json.loads(out.get("params") or "{}")
+        return out
 
     # -- request_logs -------------------------------------------------------
 
