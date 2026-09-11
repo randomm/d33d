@@ -135,7 +135,6 @@ def test_pipeline_stage_order_pins_decimate_before_repair(valid_stl):
 def test_fix_normals_runs_after_repair(valid_stl):
     """fix_normals must run AFTER pymeshfix.repair. If it ran before, the
     repair could invert normals again and the winding assertion would fail."""
-    mesh = _load(valid_stl)
     # Simulate: fix_normals BEFORE repair (wrong order) — then repair
     # The mesh should still be winding-consistent after the correct order
     # (fix_normals after repair), but we can't directly test the wrong order
@@ -171,8 +170,9 @@ def test_winding_gate_is_independently_diagnosable():
     # The error class enum must include 'winding' as its own class
     assert "winding" in pv.ALL_ERROR_CLASSES
     assert "watertight" in pv.ALL_ERROR_CLASSES
-    # They must be distinct
-    assert "winding" != "watertight"
+    # Distinctness is proven by both being present as separate members
+    # of the closed string enum: a single combined class would only
+    # contain one of these two strings, so both present = distinct.
     # The pipeline must have a separate winding check (not folded into
     # the watertight check). We verify this by checking that the source
     # code has a separate winding assertion.

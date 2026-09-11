@@ -136,7 +136,7 @@ def test_3mf_loads_in_trimesh(validated):
     # trimesh may return a Scene or a Trimesh
     if isinstance(loaded, trimesh.Scene):
         assert len(loaded.geometry) == 1
-        geo = list(loaded.geometry.values())[0]
+        geo = next(iter(loaded.geometry.values()))
         assert geo.is_watertight
         assert geo.is_winding_consistent
         assert geo.volume > 0
@@ -151,7 +151,7 @@ def test_3mf_units_are_millimeters(validated):
     assert validated.export_3mf is not None
     loaded = trimesh.load(validated.export_3mf, process=False)
     if isinstance(loaded, trimesh.Scene):
-        geo = list(loaded.geometry.values())[0]
+        geo = next(iter(loaded.geometry.values()))
         assert geo.units == "millimeter" or geo.units == "mm"
     else:
         assert loaded.units == "millimeter" or loaded.units == "mm"

@@ -32,6 +32,7 @@ Seven-gate order (deterministic, human-free):
 
 from __future__ import annotations
 
+import logging
 import os
 import tempfile
 from collections.abc import Callable
@@ -43,6 +44,8 @@ import pymeshfix as pmf
 import trimesh
 
 from d33d import slicer
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Named constants
@@ -121,7 +124,7 @@ class Part:
     bbox_mm: tuple[float, float, float] | None
     volume_mm3: float
     face_count: int
-    mesh: "trimesh.Trimesh"
+    mesh: trimesh.Trimesh
 
 
 @dataclass(frozen=True)
@@ -199,8 +202,11 @@ def _force_mm(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     try:
         mesh.convert_units("mm")
         mesh.units = "millimeter"
-    except Exception:
-        # Unknown unit — assume mm and flag for the caller
+    except (ValueError, LookupError, KeyError) as e:
+        # Unknown unit — assume mm and flag for the caller. trimesh
+        # raises KeyError/ValueError for units it cannot convert from
+        # (unit_registry lookup + conversion arithmetic).
+        logger.warning("Unconvertible mesh unit %r, assuming mm: %s", units, e)
         mesh.units = "millimeter"
     return mesh
 
@@ -248,7 +254,10 @@ def _decimate(mesh: trimesh.Trimesh, factor: float = 0.5) -> trimesh.Trimesh:
         if isinstance(decimated, trimesh.Trimesh) and len(decimated.faces) >= MIN_FACES:
             return decimated
         return mesh
-    except Exception:
+    except (ValueError, AttributeError, RuntimeError) as e:
+        # trimesh decimation is optional tooling; on failure (missing
+        # meshio-voxels backend, degenerate input) keep the original mesh.
+        logger.warning("Decimation failed, keeping original mesh: %s", e)
         return mesh
 
 
@@ -298,10 +307,6 @@ def _auto_orient(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     Z (up) for a stable base. More sophisticated orientation (e.g.
     minimising support material) is out of scope for v1.
     """
-    extents = mesh.extents
-    # Find the shortest axis
-    shortest = int(np.argmin(extents))
-    # If the shortest axis is not already Z, we would need to rotate.
     # For v1, we leave orientation as-is and rely on the slicer's
     # auto-orient. This is a placeholder.
     return mesh
@@ -368,7 +373,14 @@ def validate_stl(
             mesh = loaded
         if not isinstance(mesh, trimesh.Trimesh):
             return _fail("load_error", None)
-    except Exception as e:
+    except ValueError as e:
+        # trimesh.load raises ValueError for a missing file ("string is
+        # not a file") and for parse failures; the loader dispatches on
+        # extension and the STL backend itself raises ValueError on
+        # malformed data. OSError covers the edge case where the file
+        # exists at dispatch time but fails on read.
+        return _fail("load_error", None, f"Failed to load STL: {e}")
+    except OSError as e:
         return _fail("load_error", None, f"Failed to load STL: {e}")
 
     # Force mm
@@ -415,9 +427,10 @@ def validate_stl(
             verts, faces = _pymeshfix_repair(mesh)
             mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
             mesh = _merge_and_clean_preserve_winding(mesh)
-        except Exception:
-            # pymeshfix failed — use the pre-repair mesh
-            pass
+        except (ValueError, RuntimeError) as e:
+            # pymeshfix failed (degenerate input / repair failure) — use
+            # the pre-repair mesh; the watertight re-check below decides.
+            logger.warning("pymeshfix repair failed, using pre-repair mesh: %s", e)
         # Re-check watertight after repair
         if not mesh.is_watertight:
             return _fail(
@@ -476,10 +489,12 @@ def validate_stl(
     mesh.export(slice_model)
     try:
         slice_result = slice_dry_run_fn(slice_model, output_dir)
-    except Exception as e:
+    except (OSError, RuntimeError) as e:
         # An injected stub is never expected to raise; the real driver
         # returns a fail result rather than raising, so a raise means the
         # driver itself crashed — fail the gate, don't crash the pipeline.
+        # OSError covers a missing/unreadable slicer binary; RuntimeError
+        # covers a driver crash.
         return _fail("slice", _part_from_mesh(mesh), f"Slice dry run crashed: {e}")
     if not slice_result.ok:
         return _fail(
@@ -501,7 +516,11 @@ def validate_stl(
     # Export 3MF
     try:
         mesh.export(output_3mf)
-    except Exception as e:
+    except (OSError, NotImplementedError, ValueError) as e:
+        # trimesh export can raise OSError (disk/IO), NotImplementedError
+        # for an unsupported export format, or ValueError for a bad
+        # file object — any of these is a diagnosable export failure, not
+        # a pipeline crash.
         return _fail("export_error", _part_from_mesh(mesh), f"3MF export failed: {e}")
 
     part = Part(

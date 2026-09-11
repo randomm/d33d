@@ -8,7 +8,6 @@ the acceptance gate.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pytest
@@ -123,10 +122,13 @@ def test_winding_gate_reports_independently():
     2. The pipeline source code has a separate winding assertion
     3. The winding check is NOT folded into the watertight check
     """
-    # 'winding' is a distinct error class
+    # 'winding' is a distinct error class: it must appear in the closed
+    # enum as its own entry, distinct from 'watertight'. (The two names
+    # are distinct members of a string enum, so membership in both is
+    # what proves the distinction — a single combined class would only
+    # contain one of these strings.)
     assert "winding" in pv.ALL_ERROR_CLASSES
     assert "watertight" in pv.ALL_ERROR_CLASSES
-    assert "winding" != "watertight"
     # The pipeline source has a separate winding assertion
     import inspect
 
@@ -208,7 +210,6 @@ def test_envelope_read_by_centring_and_gate(valid_stl):
     """The envelope constant is read by both the centring transform and
     the acceptance gate. A mesh within the envelope passes; one exceeding
     it fails."""
-    env = pv.QIDI_PLUS_5_ENVELOPE_MM
     # Within envelope
     result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
     assert result.ok

@@ -9,10 +9,7 @@ dominates (small stated dims) and where 1% dominates (large dims).
 
 from __future__ import annotations
 
-import math
-
 from d33d.print_validation import dimension_error_ok
-
 
 # ---------------------------------------------------------------------------
 # The pinned expression
@@ -32,8 +29,8 @@ def test_exact_threshold_passes():
 def test_threshold_plus_epsilon_fails():
     """At threshold+epsilon the gate FAILS. The error must exceed the
     threshold. For stated=100mm, threshold=1.0mm, so we need actual < 99.0
-    (i.e. error > 1.0mm). We use actual = stated - threshold - eps."""
-    eps = 1e-4
+    (i.e. error > 1.0mm). We use actual = stated - threshold - eps
+    (eps = 1e-4, inlined below)."""
     # 1% dominates: stated=100mm, threshold=1.0mm
     # actual = 100 - 1.0 - eps = 98.9999 -> error = 1.0001 > 1.0 -> FAILS
     assert dimension_error_ok(actual=98.9999, stated=100.0) is False
@@ -72,7 +69,9 @@ def test_half_mm_dominates_small_dims():
     # stated=49mm: 1%=0.49mm, threshold=0.5mm (0.5 still dominates)
     assert dimension_error_ok(actual=49.49, stated=49.0) is True
     assert dimension_error_ok(actual=49.5, stated=49.0) is True  # boundary
-    assert dimension_error_ok(actual=48.4999, stated=49.0) is False  # error=0.5001 > 0.5
+    assert (
+        dimension_error_ok(actual=48.4999, stated=49.0) is False
+    )  # error=0.5001 > 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -85,13 +84,19 @@ def test_one_percent_dominates_large_dims():
     clause dominates."""
     # stated=100mm: 1%=1.0mm, threshold=1.0mm
     assert dimension_error_ok(actual=99.0, stated=100.0) is True  # boundary
-    assert dimension_error_ok(actual=98.9999, stated=100.0) is False  # error=1.0001 > 1.0
+    assert (
+        dimension_error_ok(actual=98.9999, stated=100.0) is False
+    )  # error=1.0001 > 1.0
     # stated=200mm: 1%=2.0mm, threshold=2.0mm
     assert dimension_error_ok(actual=198.0, stated=200.0) is True  # boundary
-    assert dimension_error_ok(actual=197.9999, stated=200.0) is False  # error=2.0001 > 2.0
+    assert (
+        dimension_error_ok(actual=197.9999, stated=200.0) is False
+    )  # error=2.0001 > 2.0
     # stated=500mm: 1%=5.0mm, threshold=5.0mm
     assert dimension_error_ok(actual=495.0, stated=500.0) is True  # boundary
-    assert dimension_error_ok(actual=494.9999, stated=500.0) is False  # error=5.0001 > 5.0
+    assert (
+        dimension_error_ok(actual=494.9999, stated=500.0) is False
+    )  # error=5.0001 > 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +109,9 @@ def test_each_axis_is_independent():
     independently."""
     # X passes, Y fails
     assert dimension_error_ok(actual=20.0, stated=20.0) is True  # X: 0 error
-    assert dimension_error_ok(actual=21.0, stated=20.0) is False  # Y: 1mm error, threshold=max(0.2,0.5)=0.5mm
+    assert (
+        dimension_error_ok(actual=21.0, stated=20.0) is False
+    )  # Y: 1mm error, threshold=max(0.2,0.5)=0.5mm
     # Z passes
     assert dimension_error_ok(actual=30.0, stated=30.0) is True
 
@@ -136,5 +143,11 @@ def test_rule_is_single_expression():
     for stated_val in (2.0, 10.0, 100.0, 500.0):
         threshold = max(0.01 * stated_val, 0.5)
         assert dimension_error_ok(actual=stated_val, stated=stated_val) is True
-        assert dimension_error_ok(actual=stated_val + threshold * 0.5, stated=stated_val) is True
-        assert dimension_error_ok(actual=stated_val + threshold * 1.5, stated=stated_val) is False
+        assert (
+            dimension_error_ok(actual=stated_val + threshold * 0.5, stated=stated_val)
+            is True
+        )
+        assert (
+            dimension_error_ok(actual=stated_val + threshold * 1.5, stated=stated_val)
+            is False
+        )
