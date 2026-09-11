@@ -1,0 +1,4 @@
+# Placeholder. Ticket #1 (render worker) fills this directory with the
+# containment suite. The suite exercises Docker-dependent code, so its
+# tests will carry the `slow` marker and run only on the linux/amd64
+# target box, never in CI.

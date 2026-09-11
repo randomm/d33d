@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "d33d"
+version = "0.0.1"
+description = "d33d: parametric 3D design loop (OpenSCAD-driven) with 3MF print validation. Shell package — application code lands in later tickets."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "trimesh",
+    "pytest",
+]
+
+[tool.setuptools]
+packages = ["d33d"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: tests that require Docker (run only on the linux/amd64 target box, never in CI)",
+]
