@@ -57,7 +57,9 @@ class FakeResponse:
         return self.body
 
 
-def chat_response(*, content: Any = "ok", tool_calls: list | None = None) -> FakeResponse:
+def chat_response(
+    *, content: Any = "ok", tool_calls: list | None = None
+) -> FakeResponse:
     message: dict[str, Any] = {"role": "assistant", "content": content}
     if tool_calls is not None:
         message["tool_calls"] = tool_calls
@@ -87,7 +89,9 @@ class ScriptedTransport:
                             "type": "function",
                             "function": {
                                 "name": "answer",
-                                "arguments": json.dumps(self.script.get("tools_ok", {})),
+                                "arguments": json.dumps(
+                                    self.script.get("tools_ok", {})
+                                ),
                             },
                         }
                     ],
@@ -103,9 +107,7 @@ class ScriptedTransport:
 
 
 def test_tier_from_declared_full_t0():
-    assert (
-        tier_from_declared(tools=True, json_schema=True, vision=True) == Tier.T0
-    )
+    assert tier_from_declared(tools=True, json_schema=True, vision=True) == Tier.T0
 
 
 def test_tier_without_json_schema_drops_to_t1():
@@ -117,9 +119,7 @@ def test_tier_without_tools_is_t1():
 
 
 def test_tier_without_vision_and_no_fenced_is_t3():
-    assert (
-        tier_from_declared(tools=False, json_schema=False, vision=False) == Tier.T3
-    )
+    assert tier_from_declared(tools=False, json_schema=False, vision=False) == Tier.T3
 
 
 def test_tier_t2_when_vision_but_no_tools():
@@ -214,7 +214,9 @@ def test_single_image_cap_degrades_max_images_to_1():
 
     async def factory(request: dict[str, Any]) -> FakeResponse:
         content = request["json"]["messages"][0]["content"]
-        images = [p for p in content if isinstance(p, dict) and p.get("type") == "image_url"]
+        images = [
+            p for p in content if isinstance(p, dict) and p.get("type") == "image_url"
+        ]
         if len(images) == 2:
             return FakeResponse(400, {"error": "max 1 image"})
         return await transport(request)
@@ -246,7 +248,9 @@ def test_probe_failure_degrades_to_t3_without_raising():
 
 
 def test_declared_caps_probed_capabilities():
-    declared = CapabilityResult(tools=False, json_schema=False, vision=True, max_images=1)
+    declared = CapabilityResult(
+        tools=False, json_schema=False, vision=True, max_images=1
+    )
     transport = ScriptedTransport(script={"tools_ok": {}})
     result = _run(
         probe_capabilities(
@@ -417,7 +421,9 @@ def test_t1_invoke_completes_tool_call_with_corrective_retry():
 
 def test_t1_invoke_raises_after_exhausting_retries():
     async def factory(request: dict[str, Any]) -> FakeResponse:
-        return FakeResponse(200, {"choices": [{"message": {"content": "still no json"}}]})
+        return FakeResponse(
+            200, {"choices": [{"message": {"content": "still no json"}}]}
+        )
 
     with pytest.raises(RuntimeError):
         _run(
@@ -436,7 +442,11 @@ def test_t1_invoke_sends_corrective_message_on_retry():
         FakeResponse(200, {"choices": [{"message": {"content": "bad"}}]}),
         FakeResponse(
             200,
-            {"choices": [{"message": {"content": '{"tool": "answer", "arguments": {}}'}}]},
+            {
+                "choices": [
+                    {"message": {"content": '{"tool": "answer", "arguments": {}}'}}
+                ]
+            },
         ),
     ]
 

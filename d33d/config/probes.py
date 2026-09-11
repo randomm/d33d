@@ -19,7 +19,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "CapabilityCache",
     "CapabilityResult",
@@ -199,6 +203,7 @@ async def probe_capabilities(
             vision = content is not None and len(str(content).strip()) > 0
             max_images = 1 if vision else 0
     except Exception:
+        logger.warning("probe 1 (one image) failed, degrading vision", exc_info=True)
         vision = False
         max_images = 0
 
@@ -230,6 +235,9 @@ async def probe_capabilities(
             else:
                 max_images = 1
         except Exception:
+            logger.warning(
+                "probe 2 (two images) failed, keeping cap at 1", exc_info=True
+            )
             max_images = 1
 
     # --- Probe 3: one tool definition ---------------------------------------
@@ -268,7 +276,7 @@ async def probe_capabilities(
                 tools = True
                 json_schema = True
     except Exception:
-        pass
+        logger.warning("probe 3 (tool calling) failed, degrading", exc_info=True)
 
     result = CapabilityResult(
         tools=tools,
