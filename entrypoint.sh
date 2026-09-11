@@ -10,8 +10,14 @@
 #   2. CSG export
 #   3–8. Six PNG renders (front, back, left, right, top, iso)
 #
-# A non-zero exit on the STL invocation (step 1) aborts the remaining seven.
-# Each invocation's stderr is appended to /work/render.log.
+# A non-zero exit on the STL invocation (step 1) aborts the remaining seven
+# immediately. A non-zero exit on any of the remaining SEVEN invocations does
+# NOT abort the run — the remaining invocations still execute and the entrypoint
+# exits non-zero so the caller can classify (the class-5 "artifact_error" row is
+# exactly this shape: STL present but a later PNG/CSG invocation failed). This is
+# required because `set -e` is active: without the per-step `||` guards, a single
+# failed openscad call would silently kill the whole entrypoint before the PNGs
+# run. Each invocation's stderr is appended to /work/render.log.
 #
 # Camera tuples (verified empirically against openscad/openscad:trixie, OpenSCAD 2026.01.19):
 #   The --camera flag uses: translate_x,translate_y,translate_z,rot_x,rot_y,rot_z,dist
@@ -73,31 +79,42 @@ COMMON_FLAGS=(
 
 echo "[entrypoint] Starting render of ${SCAD_FILE}" >&2
 
-# ── Step 1: STL export ──────────────────────────────────────────────────────
+# Track non-zero exits from the seven non-ABORTING steps (CSG + 6 PNGs).
+# The STL step is the only one that aborts immediately (see below).
+max_exit=0
+
+# ── Step 1: STL export (ABORTING on failure) ────────────────────────────────
 echo "[entrypoint] Step 1/8: STL export" >&2
+# NOTE: under `set -e`, a failing command in a condition (||, if, while) does
+# not trigger errexit, so `openscad ... || stl_exit=$?` is safe: the script
+# survives the failure, records the exit code, and the `if` below decides.
+stl_exit=0
 openscad \
     "${COMMON_FLAGS[@]}" \
     "${DEFINES_ARGS[@]}" \
     -o "${STL_FILE}" \
     "${SCAD_FILE}" \
-    2>>"${LOG_FILE}"
-stl_exit=$?
+    2>>"${LOG_FILE}" \
+    || stl_exit=$?
 
 if [ "${stl_exit}" -ne 0 ]; then
     echo "[entrypoint] STL export failed with exit code ${stl_exit} — aborting remaining steps" >&2
     exit "${stl_exit}"
 fi
 
-# ── Step 2: CSG export ──────────────────────────────────────────────────────
+# ── Step 2: CSG export (non-aborting) ───────────────────────────────────────
 echo "[entrypoint] Step 2/8: CSG export" >&2
+csg_exit=0
 openscad \
     "${COMMON_FLAGS[@]}" \
     "${DEFINES_ARGS[@]}" \
     -o "${CSG_FILE}" \
     "${SCAD_FILE}" \
-    2>>"${LOG_FILE}"
+    2>>"${LOG_FILE}" \
+    || csg_exit=$?
+[ "${csg_exit}" -ne 0 ] && { echo "[entrypoint] CSG export failed (exit ${csg_exit}) — continuing" >&2; max_exit=${csg_exit}; }
 
-# ── Steps 3–8: Six PNG renders ──────────────────────────────────────────────
+# ── Steps 3–8: Six PNG renders (non-aborting) ───────────────────────────────
 # Camera tuples: (tx, ty, tz, rx, ry, rz, dist)
 # Values verified empirically against openscad/openscad:trixie (OpenSCAD 2026.01.19).
 # See the comment block at the top of this file for the full derivation.
@@ -127,6 +144,7 @@ for i in 0 1 2 3 4 5; do
     png_file="${WORKDIR}/${name}.png"
 
     echo "[entrypoint] Step ${step}/8: PNG ${name}" >&2
+    png_exit=0
     openscad \
         "${COMMON_FLAGS[@]}" \
         "${DEFINES_ARGS[@]}" \
@@ -135,12 +153,21 @@ for i in 0 1 2 3 4 5; do
         --colorscheme "Tomorrow Night" \
         -o "${png_file}" \
         "${SCAD_FILE}" \
-        2>>"${LOG_FILE}"
+        2>>"${LOG_FILE}" \
+        || png_exit=$?
+    [ "${png_exit}" -ne 0 ] && { echo "[entrypoint] PNG ${name} failed (exit ${png_exit}) — continuing" >&2; max_exit=${png_exit}; }
 done
-
-echo "[entrypoint] All 8 steps complete." >&2
 
 # List outputs for the caller to verify
 ls -la "${STL_FILE}" "${CSG_FILE}" "${WORKDIR}"/view_*.png 2>&1 >&2 || true
 
+# A non-aborting step failed: report the highest exit code so the caller can
+# classify (the caller owns the classification table; the entrypoint only
+# signals failure and lets the harvest happen). Exit non-zero if any step failed.
+if [ "${max_exit}" -ne 0 ]; then
+    echo "[entrypoint] Completed with failures (max exit ${max_exit})." >&2
+    exit "${max_exit}"
+fi
+
+echo "[entrypoint] All 8 steps complete." >&2
 exit 0

@@ -99,3 +99,35 @@ These camera tuples are the single source of truth for the `VIEWS` constant
 in `d33d/__init__.py` (ticket: core workstream) and for the `VIEW_CAMERAS`
 array in `entrypoint.sh`. They must be updated together in the same commit
 if a future OpenSCAD build changes the camera rotation semantics.
+
+### Entrypoint failure semantics (spec-critical invariant)
+
+The entrypoint runs **eight** sequential `openscad` invocations. The failure
+rule is asymmetric and load-bearing:
+
+- **STL step (step 1) is the only aborting step.** A non-zero exit on the STL
+  invocation exits the entrypoint immediately with that code — the remaining
+  seven are not attempted.
+- **The other seven steps (CSG + six PNGs) are non-aborting.** A non-zero exit
+  on any of them is recorded (the maximum exit code is tracked) and the run
+  **continues to completion**; the entrypoint then exits non-zero at the end so
+  the *caller* can classify and harvest the partial artifact set.
+
+This is required because the entrypoint runs under `set -e`. Without the
+per-step `|| var=$?` guards, a single failed `openscad` call (e.g. a PNG that
+fails while the STL succeeded) would be killed by `set -e` *before* the
+remaining PNGs ran, silently dropping them and making the run unclassifiable.
+
+The "STL present but a later PNG/CSG invocation failed" shape is the
+spec's **class-5 `artifact_error`** — a real, reachable outcome that the
+classification table (owned by the Python caller, not the entrypoint) depends
+on being able to observe. The entrypoint's only job in that case is to:
+
+1. not abort (run all eight invocations),
+2. leave the partial artifacts in `/work` for the caller to harvest, and
+3. exit non-zero (the max failing exit code) so the caller knows a step failed.
+
+Do **not** "fix" write failures by relaxing `--read-only` or by removing the
+`||` guards — a render that writes only to the rw `/work` volume must succeed
+with `--read-only` on the rootfs, and the guards are what preserve the
+class-5 contract.
