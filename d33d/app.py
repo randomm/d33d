@@ -158,7 +158,9 @@ def create_app(
         app starts with an empty in-memory catalogue.
     """
     db_path_p = Path(db_path)
-    data_dir = db_path_p.parent if db_path_p.parent not in (Path(""), Path(".")) else Path(".")
+    data_dir = (
+        db_path_p.parent if db_path_p.parent not in (Path(""), Path(".")) else Path(".")
+    )
     state_master_key_path = (
         Path(master_key_path)
         if master_key_path is not None
@@ -265,21 +267,26 @@ def create_app(
         try:
             data = json.loads(body)
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            return JSONResponse(status_code=400, content={"error": f"invalid JSON: {e}"})
+            return JSONResponse(
+                status_code=400, content={"error": f"invalid JSON: {e}"}
+            )
         provider = data.get("provider")
         model_alias = data.get("model_alias")
         secret = data.get("secret")
         if not isinstance(provider, str) or not provider:
             return JSONResponse(
-                status_code=400, content={"error": "'provider' must be a non-empty string"}
+                status_code=400,
+                content={"error": "'provider' must be a non-empty string"},
             )
         if not isinstance(model_alias, str) or not model_alias:
             return JSONResponse(
-                status_code=400, content={"error": "'model_alias' must be a non-empty string"}
+                status_code=400,
+                content={"error": "'model_alias' must be a non-empty string"},
             )
         if not isinstance(secret, str) or not secret:
             return JSONResponse(
-                status_code=400, content={"error": "'secret' must be a non-empty string"}
+                status_code=400,
+                content={"error": "'secret' must be a non-empty string"},
             )
         store = app.state.credential_store
         assert store is not None

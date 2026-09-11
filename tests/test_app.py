@@ -38,7 +38,6 @@ from httpx import ASGITransport, AsyncClient
 
 from d33d.app import STUB_HTML, create_app
 
-
 # ---------------------------------------------------------------------------
 # Shared YAML fixture (a minimal valid catalogue with one ${ENV} key so we
 # can pin that the env var is resolved at load time, never echoed back).
@@ -101,9 +100,12 @@ def app(app_paths: dict[str, Path]):
 
 def _run_async(app: Any, coro_factory) -> Any:
     """Drive an async app under a fresh event loop, running the lifespan."""
+
     async def _run():
         async with app.router.lifespan_context(app):
-            client = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+            client = AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            )
             async with client:
                 return await coro_factory(client)
 
@@ -181,7 +183,12 @@ def test_app_starts_without_env_var_set(app, monkeypatch):
 
     r, r2 = _run_async(app, _call)
     assert r.status_code == 200
-    assert r.json() == {"source": str(app.state.catalogue_path), "providers": {}, "models": [], "roles": {}}
+    assert r.json() == {
+        "source": str(app.state.catalogue_path),
+        "providers": {},
+        "models": [],
+        "roles": {},
+    }
     assert r2.status_code == 200
 
 
