@@ -129,18 +129,32 @@ class CredentialStore:
         )
         self._conn.commit()
 
-    def get_key(self, provider: str) -> str | None:
+    def get_key(self, provider: str, model_alias: str | None = None) -> str | None:
         """Decrypt and return the key for ``provider``.
+
+        If ``model_alias`` is given, the exact ``(provider, model_alias)`` row
+        is looked up (0 or 1 row, guaranteed by the UNIQUE constraint).
+        If ``model_alias`` is omitted, returns an arbitrary-but-deterministic
+        (alphabetically first) alias's key, intended for the common
+        single-alias-per-provider case.
 
         Returns ``None`` if the provider has no row, or if the ciphertext
         cannot be decrypted (rotated/tampered MASTER_KEY). Never raises on
         decryption failure — the invariant is that a bad key reports
         "unusable", not "crash".
         """
-        row = self._conn.execute(
-            "SELECT key_ciphertext FROM provider_credentials WHERE provider_id = ?",
-            (provider,),
-        ).fetchone()
+        if model_alias is None:
+            row = self._conn.execute(
+                "SELECT key_ciphertext FROM provider_credentials "
+                "WHERE provider_id = ? ORDER BY model_alias LIMIT 1",
+                (provider,),
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT key_ciphertext FROM provider_credentials "
+                "WHERE provider_id = ? AND model_alias = ?",
+                (provider, model_alias),
+            ).fetchone()
         if row is None:
             return None
         try:

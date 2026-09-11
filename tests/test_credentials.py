@@ -78,6 +78,26 @@ def test_overwrite_replaces_prior_ciphertext(tmp_path: Path) -> None:
     assert store.get_key("p") == "second-key"
 
 
+def test_get_key_multi_alias_provider_does_not_crash(tmp_path: Path) -> None:
+    """Regression (HIGH): a provider with 2+ stored aliases (UNIQUE is
+    provider_id, model_alias) must not crash get_key — exact-alias lookups
+    return the right key, and the no-alias fallback deterministically
+    returns the alphabetically first alias's key."""
+    store, _ = _store(tmp_path)
+    store.store_key("trailopeners", "model-b", "sk-b-secret")
+    store.store_key("trailopeners", "model-a", "sk-a-secret")
+
+    # No alias: deterministic first-alias ("model-a" < "model-b"), no crash
+    assert store.get_key("trailopeners") == "sk-a-secret"
+
+    # Exact alias lookups
+    assert store.get_key("trailopeners", "model-a") == "sk-a-secret"
+    assert store.get_key("trailopeners", "model-b") == "sk-b-secret"
+
+    # Unknown alias on a known provider: None, no crash
+    assert store.get_key("trailopeners", "nonexistent-alias") is None
+
+
 def test_get_key_missing_provider_returns_none(tmp_path: Path) -> None:
     store, _ = _store(tmp_path)
     assert store.get_key("does-not-exist") is None
