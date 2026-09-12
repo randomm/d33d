@@ -47,22 +47,144 @@ RENDER_FLAG="--render"
 
 # Parse params.json if present — defines are -Dname=value pairs
 # (params.json is optional; the caller writes it only when defines are set)
+#
+# python3 and jq are NOT in the base image (openscad/openscad:trixie), so this
+# is a hand-written awk scanner over the "defines" object's character stream.
+# Unlike the earlier sed/grep/cut pipeline, it:
+#   - honors JSON string escapes (a defines value containing \" no longer
+#     truncates or corrupts the parsed value),
+#   - isolates exactly the "defines" object's brace depth, so a defines value
+#     is never confused with sibling top-level keys (e.g. "timeout_s"),
+#   - loudly rejects a non-string defines value (number/object/array/bool/
+#     null) instead of silently pairing the key with the wrong token or
+#     emitting zero -D args with no warning — the entrypoint aborts before
+#     any openscad invocation runs, since a malformed params.json is a caller
+#     bug, not a partial-render failure covered by the STL/PNG step contract.
 DEFINES_ARGS=()
 if [ -f "${WORKDIR}/params.json" ]; then
-    # Use python3 if available, otherwise fall back to a simple sed-based approach.
-    # python3 is NOT in the base image, so we use a minimal awk parser.
-    # params.json format: {"defines": {"NAME": "value", ...}, ...}
-    # The values are strings — the caller has already escaped them.
-    # For this first implementation we parse with a grep/sed pipeline.
-    # A more robust parser would be added in a follow-up ticket.
-    while IFS= read -r line; do
-        # Lines look like:   "NAME": "value"
-        name=$(echo "$line" | sed 's/^ *//' | cut -d'"' -f2)
-        value=$(echo "$line" | cut -d'"' -f4)
+    defines_tsv="$(mktemp)"
+    if ! awk '
+        BEGIN { in_defines = 0; depth = 0; found_defines = 0; done = 0; bad = 0 }
+        done { next }
+        {
+            line = $0
+            if (!found_defines) {
+                if (match(line, /"defines"[[:space:]]*:[[:space:]]*\{/)) {
+                    found_defines = 1
+                    in_defines = 1
+                    depth = 0
+                    line = substr(line, RSTART + RLENGTH - 1)
+                } else {
+                    next
+                }
+            }
+            if (in_defines) {
+                n = length(line)
+                i = 1
+                key = ""
+                while (i <= n) {
+                    c = substr(line, i, 1)
+                    if (key != "" && (c == "{" || c == "[")) {
+                        print "[entrypoint] defines[" key "] is not a string value" > "/dev/stderr"
+                        bad = 1
+                        key = ""
+                        nest = 1
+                        i++
+                        while (i <= n && nest > 0) {
+                            cc = substr(line, i, 1)
+                            if (cc == "{" || cc == "[") { nest++ }
+                            else if (cc == "}" || cc == "]") { nest-- }
+                            i++
+                        }
+                        continue
+                    }
+                    if (c == "{") { depth++; i++; continue }
+                    if (c == "}") {
+                        depth--
+                        i++
+                        if (depth == 0) {
+                            in_defines = 0
+                            done = 1
+                            if (key != "") {
+                                print "[entrypoint] defines key \"" key "\" has no value" > "/dev/stderr"
+                                bad = 1
+                            }
+                            break
+                        }
+                        continue
+                    }
+                    if (c == ",") {
+                        if (key != "") {
+                            print "[entrypoint] defines key \"" key "\" has no value" > "/dev/stderr"
+                            bad = 1
+                            key = ""
+                        }
+                        i++
+                        continue
+                    }
+                    if (c ~ /[[:space:]]/) { i++; continue }
+                    if (c == "\"") {
+                        j = i + 1
+                        s = ""
+                        while (j <= n) {
+                            cj = substr(line, j, 1)
+                            if (cj == "\\") {
+                                s = s substr(line, j, 2)
+                                j += 2
+                                continue
+                            }
+                            if (cj == "\"") { break }
+                            s = s cj
+                            j++
+                        }
+                        if (j > n) {
+                            print "[entrypoint] unterminated string in defines near \"" s "\"" > "/dev/stderr"
+                            bad = 1
+                            i = n + 1
+                            continue
+                        }
+                        if (key == "") {
+                            key = s
+                        } else {
+                            print key "\t" s
+                            key = ""
+                        }
+                        i = j + 1
+                        continue
+                    }
+                    if (c == ":") { i++; continue }
+                    if (key != "") {
+                        print "[entrypoint] defines[" key "] is not a string value" > "/dev/stderr"
+                        bad = 1
+                        key = ""
+                        while (i <= n) {
+                            cc = substr(line, i, 1)
+                            if (cc == "," || cc == "}") { break }
+                            i++
+                        }
+                        continue
+                    }
+                    i++
+                }
+            }
+        }
+        END {
+            if (found_defines == 1 && done == 0) {
+                print "[entrypoint] defines object in params.json is unterminated" > "/dev/stderr"
+                bad = 1
+            }
+            if (bad) exit 1
+        }
+    ' "${WORKDIR}/params.json" > "${defines_tsv}"; then
+        echo "[entrypoint] Malformed \"defines\" in params.json — aborting before render" >&2
+        rm -f "${defines_tsv}"
+        exit 1
+    fi
+    while IFS=$'\t' read -r name value; do
+        [ -z "${name}" ] && continue
         DEFINES_ARGS+=("-D${name}=${value}")
-    done < <(sed -n '/"defines"/,/^ *}/p' "${WORKDIR}/params.json" \
-             | grep -E '^[[:space:]]*"[A-Za-z_][A-Za-z0-9_]*":' \
-             | grep -v '"defines"' || true)
+    done < "${defines_tsv}"
+    rm -f "${defines_tsv}"
 fi
 
 # Common flags shared by all openscad invocations.
@@ -81,7 +203,13 @@ echo "[entrypoint] Starting render of ${SCAD_FILE}" >&2
 
 # Track non-zero exits from the seven non-ABORTING steps (CSG + 6 PNGs).
 # The STL step is the only one that aborts immediately (see below).
+# FAILED_STEPS additionally names *which* of the seven steps failed — the
+# stderr line per step already existed, but the aggregate max_exit alone
+# loses which specific view(s)/CSG failed, forcing a re-read of render.log
+# to find out. This is purely additive: it does not change max_exit, the
+# STL-abort rule, or the final exit code.
 max_exit=0
+declare -a FAILED_STEPS=()
 
 # ── Step 1: STL export (ABORTING on failure) ────────────────────────────────
 echo "[entrypoint] Step 1/8: STL export" >&2
@@ -112,7 +240,7 @@ openscad \
     "${SCAD_FILE}" \
     2>>"${LOG_FILE}" \
     || csg_exit=$?
-[ "${csg_exit}" -ne 0 ] && { echo "[entrypoint] CSG export failed (exit ${csg_exit}) — continuing" >&2; max_exit=${csg_exit}; }
+[ "${csg_exit}" -ne 0 ] && { echo "[entrypoint] CSG export failed (exit ${csg_exit}) — continuing" >&2; max_exit=${csg_exit}; FAILED_STEPS+=("csg:${csg_exit}"); }
 
 # ── Steps 3–8: Six PNG renders (non-aborting) ───────────────────────────────
 # Camera tuples: (tx, ty, tz, rx, ry, rz, dist)
@@ -155,7 +283,7 @@ for i in 0 1 2 3 4 5; do
         "${SCAD_FILE}" \
         2>>"${LOG_FILE}" \
         || png_exit=$?
-    [ "${png_exit}" -ne 0 ] && { echo "[entrypoint] PNG ${name} failed (exit ${png_exit}) — continuing" >&2; max_exit=${png_exit}; }
+    [ "${png_exit}" -ne 0 ] && { echo "[entrypoint] PNG ${name} failed (exit ${png_exit}) — continuing" >&2; max_exit=${png_exit}; FAILED_STEPS+=("${name}:${png_exit}"); }
 done
 
 # List outputs for the caller to verify
@@ -164,8 +292,12 @@ ls -la "${STL_FILE}" "${CSG_FILE}" "${WORKDIR}"/view_*.png 2>&1 >&2 || true
 # A non-aborting step failed: report the highest exit code so the caller can
 # classify (the caller owns the classification table; the entrypoint only
 # signals failure and lets the harvest happen). Exit non-zero if any step failed.
+# FAILED_STEPS names every step that failed (e.g. "view_04_top:1") so the
+# caller can see which artifact(s) to expect missing/invalid without parsing
+# render.log — max_exit and the exit code are unchanged by this diagnostic.
 if [ "${max_exit}" -ne 0 ]; then
-    echo "[entrypoint] Completed with failures (max exit ${max_exit})." >&2
+    failed_list="${FAILED_STEPS[*]}"
+    echo "[entrypoint] Completed with failures (max exit ${max_exit}); failed steps: ${failed_list}" >&2
     exit "${max_exit}"
 fi
 
