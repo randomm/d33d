@@ -606,3 +606,132 @@ def test_clean_short_snap_still_sets_fit_type() -> None:
     assert c.confirmed is True
     assert c.fit_type == "snap"
     assert c.tolerance_mm == resolve_tolerance_mm("snap")
+
+
+# ---------------------------------------------------------------------------
+# Item 1: the no_fit fit type is reachable via natural language
+#
+# The generic negation-word set contains "no", which disqualified the valid
+# fit-type name "no_fit" — a user typing "no fit" / "no-fit" / "nofit" could
+# never select the no-fit fit type. The no-fit phrase match takes precedence
+# over the negation disqualifier, so "no fit" (with stated dims) yields a
+# confirmed clarification with fit_type "no_fit".
+# ---------------------------------------------------------------------------
+
+
+def test_no_fit_phrase_in_last_turn_sets_no_fit_fit_type() -> None:
+    """A last turn of "no fit" / "no-fit" / "nofit" with all dims stated
+    yields a confirmed clarification with fit_type "no_fit" (tolerance 0.0),
+    even though the generic negation set contains "no"."""
+    for last in ("no fit", "no-fit", "nofit"):
+        chat = ["W: 42", "D: 30", "H: 20", last]
+        c = require_dimensions_confirmed(chat, None)
+        assert c.confirmed is True, last
+        assert c.fit_type == "no_fit", last
+        assert c.tolerance_mm == 0.0, last
+
+
+def test_bare_no_still_disqualifies_fit_type() -> None:
+    """The no_fit phrase branch is a phrase match only — a bare "no" is a
+    negation, not a fit-type answer, and must not set any fit type."""
+    chat = ["W: 42", "D: 30", "H: 20", "no"]
+    c = require_dimensions_confirmed(chat, None)
+    assert c.confirmed is False
+    assert any("fit" in q.lower() for q in c.questions)
+
+
+def test_no_fit_turn_does_not_confirm_ai_suggestion() -> None:
+    """The no_fit phrase branch lives only in the fit-type path: a "no fit"
+    turn must NOT register as a dimension-suggestion confirmation (the base
+    affirmative path still rejects it as negation), so the ai_suggested
+    pre-fill stays unconfirmed. The gate can still close — but only via the
+    user's chat-stated dims + the no_fit fit type, never via the pre-fill
+    (the suggested surfacing is untouched)."""
+    chat = [
+        "W: 42",
+        "D: 30",
+        "H: 20",
+        "no fit",
+    ]
+    c = require_dimensions_confirmed(
+        chat, stated_dims=None, ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0}
+    )
+    # Ground truth is the user's stated 42/30/20, not the pre-filled 40/30/20.
+    assert c.stated_dims == (42.0, 30.0, 20.0)
+    assert c.fit_type == "no_fit"
+    # The suggestion itself was never promoted to ground truth (no "suggested"
+    # token in the last turn) — it is only surfaced as a suggestion.
+    assert c.suggested == {"W": 40.0, "D": 30.0, "H": 20.0}
+
+
+def test_no_fit_turn_alone_keeps_gate_closed() -> None:
+    """A "no fit" turn with no stated dims anywhere: the suggestion pre-fill
+    is not confirmed (base path rejects it as negation), so the gate stays
+    open on the dimensions even though the fit type resolves to no_fit."""
+    chat = [
+        "Make me a bracket from this photo.",
+        "no fit",
+    ]
+    c = require_dimensions_confirmed(
+        chat, stated_dims=None, ai_suggested={"W": 40.0, "D": 30.0, "H": 20.0}
+    )
+    assert c.confirmed is False
+    assert c.params == {}
+    # The fit type WAS resolved (that's the whole point of the phrase branch),
+    # so no fit-type question is asked — only the dimension question.
+    assert not any("fit type" in q.lower() for q in c.questions)
+    assert any("H" in q for q in c.questions)
+
+
+def test_no_fit_phrase_must_be_tight_form() -> None:
+    """Only the tight no-fit / no-fit / nofit phrase form clears the
+    negation gate for fit-type purposes — unrelated phrases containing
+    "no" ("no, that fit is wrong") must not set a fit type."""
+    for last in ("no, that fit is wrong", "I don't need no fit"):
+        chat = ["W: 42", "D: 30", "H: 20", last]
+        c = require_dimensions_confirmed(chat, None)
+        assert c.confirmed is False, last
+        assert any("fit" in q.lower() for q in c.questions), last
+
+
+def test_stated_dims_fit_type_no_fit_still_works() -> None:
+    """The existing stated_dims structured path for no_fit is unaffected."""
+    c = require_dimensions_confirmed(
+        ["W: 42", "D: 30", "H: 20"], stated_dims={"fit_type": "no_fit"}
+    )
+    assert c.confirmed is True
+    assert c.fit_type == "no_fit"
+
+
+# ---------------------------------------------------------------------------
+# Item 2: malformed ai_suggested pre-fills degrade, never crash
+#
+# The suggested-surfacing comprehension runs values through the same
+# _coerce helper as _extract_stated, so an LLM-derived malformed pre-fill
+# ({"W": "x"} / {"W": None}) degrades to a missing suggested entry instead
+# of raising ValueError/TypeError.
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_ai_suggested_does_not_raise() -> None:
+    """Non-numeric ai_suggested values degrade to a missing suggested entry
+    instead of raising (the parallel _extract_stated path already did this).
+    Valid numeric pre-fills (ints, numeric strings) still surface."""
+    c = require_dimensions_confirmed(
+        ["Make me a bracket from this photo."],
+        stated_dims=None,
+        ai_suggested={"W": "x", "D": 30.0, "H": None},
+    )
+    assert c.confirmed is False
+    # Only the valid numeric pre-fill surfaces; W and H are absent.
+    assert c.suggested == {"D": 30.0}
+
+
+def test_numeric_string_ai_suggested_surfaces() -> None:
+    """Numeric strings coerce like the _extract_stated path does."""
+    c = require_dimensions_confirmed(
+        ["Make me a bracket from this photo."],
+        stated_dims=None,
+        ai_suggested={"W": 40.0, "D": "30", "H": 20},
+    )
+    assert c.suggested == {"W": 40.0, "D": 30.0, "H": 20.0}

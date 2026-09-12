@@ -370,6 +370,17 @@ MAX_SCAD_SOURCE_BYTES = 256 * 1024
 
 #: The fenced-SCAD fallback extractor: ```scad / ```openscad / bare ```
 #: fences, non-greedy to the first closing fence.
+#:
+#: The bare-fence fallback DELIBERATELY accepts ANY fenced code block, not
+#: just ```scad / ```openscad-labeled ones. That is intentional and pinned
+#: by existing tests (tests/test_design_loop.py); do NOT tighten the regex.
+#: A mis-extracted non-SCAD payload is safe in practice because the
+#: downstream backstops catch it: the render worker runs in a sandbox
+#: (--network none, no privileged mounts) and every candidate is size-capped
+#: at :data:`MAX_SCAD_SOURCE_BYTES` above; anything that is not valid OpenSCAD
+#: simply fails compilation and is routed through the render worker's failure
+#: classification as a scored failure, feeding the loop's normal repair /
+#: exhaustion logic.
 _SCAD_FENCE_RE = re.compile(
     r"```(?:scad|openscad)?[ \t]*\r?\n(.*?)```",
     re.DOTALL,

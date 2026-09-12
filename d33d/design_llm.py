@@ -43,6 +43,7 @@ from typing import Any, Literal
 from d33d.config.probes import CapabilityResult
 from d33d.config.t1_protocol import t1_invoke
 from d33d.prompt_hash import canonical_hash
+from d33d.response_shape import response_message_shape
 
 __all__ = [
     "Dialect",
@@ -135,11 +136,8 @@ def response_message(response: Any) -> dict[str, Any]:
     data = response.json()
     if not isinstance(data, dict):
         raise TypeError("LLM response body is not a JSON object")
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
-        raise TypeError("LLM response has no usable choices[0]")
-    message = choices[0].get("message")
-    if not isinstance(message, dict):
+    message = response_message_shape(data)
+    if message is None:
         raise TypeError("LLM response has no usable choices[0].message")
     return message
 

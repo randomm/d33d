@@ -33,6 +33,7 @@ from d33d.config.t1_protocol import (
     parse_t1_tool_call,
     t1_invoke,
 )
+from d33d.response_shape import response_message_shape
 
 
 def _run(coro):
@@ -471,3 +472,16 @@ def test_t1_invoke_sends_corrective_message_on_retry():
 
 def test_max_corrective_retries_is_one():
     assert MAX_CORRECTIVE_RETRIES == 1
+
+
+def test_response_message_shape_helper_valid_and_violating_shapes():
+    """The shared OpenAI response-shape helper returns the message dict
+    for a valid body and None on any shape violation (non-dict body,
+    empty or non-list choices, non-dict choices[0], non-dict message).
+    Covers the t1 half of the design_llm/t1_protocol dedup."""""
+    assert response_message_shape(
+        {"choices": [{"message": {"content": None}}]}
+    ) == {"content": None}
+    assert response_message_shape({"choices": []}) is None  # empty choices
+    assert response_message_shape({"choices": ["x"]}) is None  # non-dict choices[0]
+    assert response_message_shape({"choices": [{}]}) is None  # missing message
