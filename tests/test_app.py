@@ -321,7 +321,9 @@ def test_put_models_non_numeric_content_length_is_rejected_up_front(
     assert r2.json()["models"] == []
 
 
-def test_put_models_non_numeric_content_length_small_body_passes(app, app_paths, env_key):
+def test_put_models_non_numeric_content_length_small_body_passes(
+    app, app_paths, env_key
+):
     """The Content-Length default-to-cap change must not break the normal
     path: a small PUT whose transport declares a numeric Content-Length
     (httpx's default for ``content=``) still succeeds."""
@@ -384,6 +386,7 @@ def test_put_models_hot_reload_non_catalogue_error_is_split_state_500(
     # app.state.catalogue.
     assert g.status_code == 200
     assert g.json()["models"][0]["id"] == "design-primary"
+
     # Retry recovers: the next PUT succeeds (hot_reload patched back).
     async def _retry(client):
         return await client.put("/api/config/models", content=new_yaml)
@@ -1114,9 +1117,7 @@ def test_module_registry_does_not_block_the_event_loop(app):
             order.append("fast")
             return resp
 
-        slow_resp, fast_resp = await asyncio.gather(
-            _slow_request(), _fast_request()
-        )
+        slow_resp, fast_resp = await asyncio.gather(_slow_request(), _fast_request())
         return slow_resp, fast_resp, order
 
     slow_resp, fast_resp, order = _run_async(app, _call)
