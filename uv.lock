@@ -207,11 +207,15 @@ dependencies = [
     { name = "networkx" },
     { name = "pydantic" },
     { name = "pymeshfix" },
-    { name = "pytest" },
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "trimesh" },
     { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+test = [
+    { name = "pytest" },
 ]
 
 [package.metadata]
@@ -223,12 +227,13 @@ requires-dist = [
     { name = "networkx" },
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "pymeshfix" },
-    { name = "pytest" },
+    { name = "pytest", marker = "extra == 'test'" },
     { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "trimesh" },
     { name = "uvicorn", specifier = ">=0.27" },
 ]
+provides-extras = ["test"]
 
 [[package]]
 name = "fastapi"
