@@ -240,6 +240,52 @@ def test_exactly_max_call_sites_is_allowed() -> None:
     assert len(result.registry_names) == MAX_CALL_SITES
 
 
+def test_scene_export_exception_isolates_bad_mesh_and_preserves_rest_of_registry() -> None:
+    """Regression: adversarial-review round 2. Every harvested STL is
+    attacker-influenced (an OpenSCAD render driven by untrusted .scad
+    source) and ``trimesh.load`` is guarded against it, but the final
+    ``scene.export(file_type="glb")`` call — operating on the SAME
+    attacker-influenced mesh data — previously had no equivalent
+    protection: an export failure (e.g. a degenerate mesh trimesh.load
+    accepted but export chokes on) propagated as an unhandled exception,
+    discarding every OTHER call-site's already-succeeded geometry and
+    surfacing as an unclassified 500 from the route. A single mesh that
+    fails at export time must classify as artifact_error and the
+    remaining geometries must still assemble into a GLB."""
+    stl_bytes = _box_stl_bytes()
+
+    def _fake_run(argv, **kwargs):
+        if "openscad" in argv:
+            return _completed(0)
+        if any("cat > /work/" in a for a in argv):
+            return _completed(0)
+        if any("cat /work/" in a for a in argv):
+            return _completed(0, stdout=stl_bytes)
+        return _completed(0)
+
+    def _fake_scene_export(self, *args, **kwargs):
+        # Whole-scene export (both meshes present) always fails; the
+        # per-mesh isolation probe fails ONLY for the scene containing
+        # "base" so "base" is deterministically the poisoned mesh, and
+        # the final retry (with only "cap" surviving) succeeds.
+        if "base" in self.geometry:
+            raise ValueError("corrupt geometry, cannot triangulate")
+        return b"stub-glb-bytes"
+
+    with patch("subprocess.run", side_effect=_fake_run), patch(
+        "trimesh.Scene.export", new=_fake_scene_export
+    ):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "artifact_error"
+    assert result.failures[0].site.name == "base"
+    # "base" was isolated as the poisoned mesh; "cap" still contributes
+    # to the assembled (retried) registry.
+    assert result.registry_names == ("cap",)
+    assert result.glb_bytes == b"stub-glb-bytes"
+
+
 def test_trimesh_load_exception_classifies_artifact_error_without_aborting_registry() -> None:
     """If trimesh.load ever raises on a harvested STL (e.g. a future
     trimesh version or an unusual OpenSCAD STL variant), the call-site

@@ -47,8 +47,12 @@ import re
 import subprocess
 import uuid
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from trimesh.exchange.stl import HeaderError as _StlHeaderError
+
+if TYPE_CHECKING:
+    import trimesh
 
 from d33d.render_worker import (
     DEFAULT_TIMEOUT_S,
@@ -231,12 +235,51 @@ def parse_call_sites(source: str) -> list[CallSite]:
         if candidate not in BUILTIN_PRIMITIVES and candidate != "module":
             literal_names.add(candidate)
 
+    # Per-base-name "next ordinal to try" cursor. Regression: adversarial
+    # review round 2. A naive disambiguation loop that rescans forward
+    # one ordinal at a time from EACH call's own count is O(N^2) when an
+    # attacker supplies N call-sites to one module name plus N sacrificial
+    # ``module m_k(){}`` definitions that force every ordinal to collide
+    # (~4000 colliding call-sites took >1s of pure CPU; ~40000, reachable
+    # within the route's 1MB body cap, would take minutes — all BEFORE
+    # MAX_CALL_SITES is ever checked in build_registry_glb). The cursor
+    # below is monotonically non-decreasing per base name across the
+    # whole parse, so each call-site's search resumes where the LAST
+    # collision for that name left off rather than restarting from
+    # ``ordinal`` every time — amortized O(1) per call-site regardless of
+    # how many literal names collide.
+    next_ordinal: dict[str, int] = {}
+
+    def _next_registry_name(name: str) -> str:
+        ordinal = next_ordinal.get(name, 1)
+        registry_name = name if ordinal == 1 else f"{name}_{ordinal}"
+        while (registry_name in literal_names and registry_name != name) or (
+            registry_name in used_registry_names
+        ):
+            ordinal += 1
+            registry_name = f"{name}_{ordinal}"
+        next_ordinal[name] = ordinal + 1
+        return registry_name
+
     sites: list[CallSite] = []
-    counts: dict[str, int] = {}
     used_registry_names: set[str] = set()
     depth = 0
     pos = 0
     n = len(clean)
+    # Running (1-indexed line, start-offset-of-current-line) cursor,
+    # advanced incrementally as the scan crosses each ``\n`` — never
+    # recomputed from position 0. Regression: adversarial-review round 2.
+    # ``clean.count("\n", 0, m.start())``/``clean.rfind("\n", 0, ...)``
+    # each re-scan the ENTIRE prefix of the source for every call-site,
+    # which is O(N) per site and therefore O(N^2) total for N call-sites
+    # — this was the actual dominant cost behind the quadratic-parse
+    # finding (profiled: >90% of wall-clock at N=15000), not the ordinal
+    # disambiguation loop above (which the cursor-based
+    # ``_next_registry_name`` already made O(1) amortized). Tracking the
+    # line/line-start incrementally makes the whole scan O(N) total.
+    line = 1
+    line_start = 0
+    scan_pos = 0
     while pos < n:
         ch = clean[pos]
         if ch == "{":
@@ -252,22 +295,15 @@ def parse_call_sites(source: str) -> list[CallSite]:
             if m is not None and m.start(1) not in def_name_starts:
                 name = m.group(1)
                 if name not in BUILTIN_PRIMITIVES and name != "module":
-                    counts[name] = counts.get(name, 0) + 1
-                    ordinal = counts[name]
-                    registry_name = name if ordinal == 1 else f"{name}_{ordinal}"
-                    # Bump the ordinal past any literal name (a real
-                    # module/call identifier elsewhere in the source) or
-                    # any registry_name already handed out, so two
-                    # DIFFERENT call-sites never end up sharing one key.
-                    while (
-                        registry_name in literal_names and registry_name != name
-                    ) or registry_name in used_registry_names:
-                        ordinal += 1
-                        registry_name = f"{name}_{ordinal}"
+                    registry_name = _next_registry_name(name)
                     used_registry_names.add(registry_name)
-                    line_start = clean.rfind("\n", 0, m.start()) + 1
-                    line = clean.count("\n", 0, m.start()) + 1
-                    col = m.start(1) - line_start
+                    call_start = m.start(1)
+                    while scan_pos < call_start:
+                        if clean[scan_pos] == "\n":
+                            line += 1
+                            line_start = scan_pos + 1
+                        scan_pos += 1
+                    col = call_start - line_start
                     sites.append(
                         CallSite(
                             name=name,
@@ -708,10 +744,81 @@ def build_registry_glb(
             glb_bytes=None, registry_names=(), failures=tuple(failures)
         )
 
-    scene = trimesh.Scene(geometries)
-    glb_bytes = scene.export(file_type="glb")
+    site_by_registry_name = {site.registry_name: site for site in sites}
+    glb_bytes, exported_names, export_failures = _export_scene_isolating_bad_meshes(
+        geometries, site_by_registry_name
+    )
+    failures.extend(export_failures)
     return RegistryBuildResult(
         glb_bytes=glb_bytes,
-        registry_names=tuple(geometries.keys()),
+        registry_names=exported_names,
         failures=tuple(failures),
     )
+
+
+def _export_scene_isolating_bad_meshes(
+    geometries: dict[str, trimesh.Trimesh],
+    site_by_registry_name: dict[str, CallSite],
+) -> tuple[bytes | None, tuple[str, ...], list[ModuleRenderFailure]]:
+    """Export ``geometries`` as one named GLB scene, isolating and
+    excluding whichever individual mesh (if any) trips ``scene.export``.
+
+    Regression: adversarial-review round 2. Every harvested mesh here
+    came from an OpenSCAD render of untrusted, LLM-generated ``.scad``
+    source — the exact same attacker-influenced-data threat model that
+    ``trimesh.load`` is explicitly guarded against a few lines earlier in
+    ``build_registry_glb``. ``trimesh.Scene.export`` operates on that
+    same data and previously had no equivalent protection: an export
+    failure propagated unhandled, discarding every OTHER call-site's
+    already-succeeded render and surfacing as an unclassified 500 from
+    the route — contradicting this module's own "a single bad module
+    never discards the whole registry" guarantee.
+
+    On a whole-scene export failure, isolates the poisoned mesh by
+    exporting each geometry individually (the same ``(ValueError, OSError,
+    _StlHeaderError)`` classes already trusted for ``trimesh.load``),
+    classifies every mesh that fails alone as ``artifact_error``, and
+    retries the scene export with only the survivors. This never
+    recurses arbitrarily deep — one bisection pass is enough since each
+    remaining failure, if any, is isolated by the same per-mesh probe.
+    """
+    import trimesh  # host-side only, matches build_registry_glb's import style
+
+    try:
+        glb_bytes = trimesh.Scene(geometries).export(file_type="glb")
+        return bytes(glb_bytes), tuple(geometries.keys()), []
+    except (ValueError, OSError, _StlHeaderError) as e:
+        whole_scene_error = str(e)
+
+    failures: list[ModuleRenderFailure] = []
+    survivors: dict[str, trimesh.Trimesh] = {}
+    for registry_name, mesh in geometries.items():
+        try:
+            trimesh.Scene({registry_name: mesh}).export(file_type="glb")
+        except (ValueError, OSError, _StlHeaderError) as e:
+            site = site_by_registry_name.get(registry_name)
+            if site is not None:
+                failures.append(
+                    ModuleRenderFailure(
+                        site=site, error_class="artifact_error", stderr=str(e)
+                    )
+                )
+            continue
+        survivors[registry_name] = mesh
+
+    if not survivors:
+        return None, (), failures
+
+    # The per-mesh probe above already proved every survivor exports
+    # alone; re-raising here would mean the ORIGINAL whole-scene failure
+    # was caused by something other than any single mesh (e.g. a
+    # combined-scene-only edge case) — surface that distinctly rather
+    # than silently returning an empty registry.
+    try:
+        glb_bytes = trimesh.Scene(survivors).export(file_type="glb")
+    except (ValueError, OSError, _StlHeaderError) as e:
+        raise RuntimeError(
+            "scene export failed even after isolating every individually-"
+            f"exportable mesh (original error: {whole_scene_error}): {e}"
+        ) from e
+    return bytes(glb_bytes), tuple(survivors.keys()), failures

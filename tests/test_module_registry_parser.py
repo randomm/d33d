@@ -11,6 +11,8 @@ No Docker required — pure text parsing.
 
 from __future__ import annotations
 
+import time
+
 from d33d.module_registry import CallSite, isolate_call_site, parse_call_sites
 
 
@@ -198,6 +200,35 @@ def test_call_site_records_column_offset_for_positional_isolation() -> None:
 
 def test_empty_source_returns_empty_list() -> None:
     assert parse_call_sites("") == []
+
+
+def test_ordinal_disambiguation_is_not_quadratic_in_adversarial_collision_source() -> None:
+    """Regression: adversarial-review round 2. A source built from N
+    calls to the same module name PLUS N sacrificial ``module m_k(){}``
+    definitions that force every auto-generated ordinal to collide made
+    the ordinal-disambiguation ``while`` loop rescan from scratch per
+    call-site, an O(N^2) blowup: ~4000 colliding call-sites took over a
+    second of pure CPU in this parser alone, comfortably reachable within
+    the HTTP route's 1MB body cap (MAX_CALL_SITES rejects the count only
+    AFTER parse_call_sites has already returned). Disambiguation must be
+    amortized O(1) per call-site regardless of how many literal names
+    collide, so parsing itself stays cheap for any body-size-bounded
+    input."""
+    n = 4000
+    defs = "".join(f"module m_{k}(){{cube([1,1,1]);}}\n" for k in range(2, n + 2))
+    source = "module m(){cube([1,1,1]);}\n" + defs + "m();\n" * n
+
+    start = time.perf_counter()
+    sites = parse_call_sites(source)
+    elapsed = time.perf_counter() - start
+
+    assert len(sites) == n
+    registry_names = [s.registry_name for s in sites]
+    assert len(registry_names) == len(set(registry_names))
+    # Generous bound: linear-time parsing of this ~150KB source should
+    # take a small fraction of a second; the quadratic version took over
+    # 1.2s for this exact input on the same hardware.
+    assert elapsed < 0.5, f"parse_call_sites took {elapsed:.3f}s — quadratic regression"
 
 
 def test_call_site_is_frozen_dataclass_with_expected_fields() -> None:
