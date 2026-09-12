@@ -221,6 +221,18 @@ export default function App({ renders = [], client }: AppProps) {
       // an all-whitespace string would pass a naive truthiness check but
       // still be meaningless as an edit instruction.
       const trimmed = text.trim();
+
+      // Bail before constructing/appending anything if there's no project to
+      // send to — a message (and any attached selection) must never render
+      // as sent when the region-edit request that would justify it can
+      // never fire. Checked ahead of selectionToAttach/userMsg construction
+      // so a pending selection is never displayed as "submitted" while
+      // still sitting untouched in state.
+      if (projectId === null) {
+        setStreamError("No project selected");
+        return;
+      }
+
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
       const userMsg: ChatMessage = {
@@ -239,11 +251,6 @@ export default function App({ renders = [], client }: AppProps) {
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      if (projectId === null) {
-        setStreamError("No project selected");
-        return;
-      }
-
       if (selectionToAttach) {
         // Clear immediately so a slow createRegionEdit response can't race a
         // second send into re-attaching the same pending selection.
@@ -257,8 +264,16 @@ export default function App({ renders = [], client }: AppProps) {
             instruction: trimmed,
           })
           .catch((e) => {
+            // The request failed (network error, or a 4xx/5xx from the
+            // server) after the pending selection was already cleared —
+            // restore it so the user doesn't have to redraw the lasso, and
+            // say plainly that THIS is what failed (the chat message
+            // above already shows the selection thumbnail as sent, so a
+            // generic error would leave that looking correct).
+            setPendingSelection(selectionToAttach);
+            const detail = e instanceof Error ? e.message : "unknown error";
             setStreamError(
-              e instanceof Error ? e.message : "Failed to submit region edit",
+              `Region edit failed — selection restored, please resend: ${detail}`,
             );
           });
       }

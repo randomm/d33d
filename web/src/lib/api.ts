@@ -137,6 +137,25 @@ export const MAX_REGION_EDIT_MODULE_IDS = 10;
  *  (matches `ViewId` in `DimensionCanvas.tsx`). */
 export type RegionEditViewId = "front" | "back" | "left" | "right" | "top" | "iso";
 
+/** Runtime-checkable form of `RegionEditViewId`, matching
+ *  `REGION_EDIT_VIEW_IDS` in `d33d/app.py` (the server 422s any `view_id`
+ *  outside this set via `RegionEditRequest`'s field validator). The type
+ *  alone only guards compile-time call sites — tests asserting the actual
+ *  request body a mock captured need a runtime set to check against. */
+export const REGION_EDIT_VIEW_IDS: readonly RegionEditViewId[] = [
+  "front",
+  "back",
+  "left",
+  "right",
+  "top",
+  "iso",
+];
+
+/** Hard cap on the base64-decoded `marked_png_base64` body, matching
+ *  `MAX_REGION_EDIT_IMAGE_BYTES` in `d33d/app.py` (the route 413s above
+ *  this). */
+export const MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024;
+
 /** One vertex of the lasso polygon. Coordinate space is caller-dependent:
  *  `DimensionCanvas`'s photo-overlay lasso emits photo-pixel coordinates
  *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`

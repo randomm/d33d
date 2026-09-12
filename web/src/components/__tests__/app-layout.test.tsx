@@ -773,4 +773,88 @@ describe("App region-selection (lasso) wiring", () => {
     );
     assertValidRegionEditRequest(call[1]);
   });
+
+  it("restores the pending selection and surfaces an honest error when createRegionEdit rejects", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockRejectedValue(new Error("422 Unprocessable"));
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalled());
+
+    // The failure must be surfaced honestly (never swallowed, never shown
+    // as success) AND the selection must be recoverable — not lost, forcing
+    // a redraw.
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("422 Unprocessable");
+    });
+    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+  });
+
+  it("does NOT attach a selection to the chat message when there is no project to send it to", async () => {
+    // Simulate the createProject round-trip never resolving (or having
+    // failed) so projectId stays null while the module fixture (loaded
+    // independently of projectId) is already ready and a lasso can be drawn.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("No project selected");
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+    // Bailing on "no project" must happen BEFORE the message (and any
+    // selection thumbnail) is ever appended to the transcript — a message
+    // that looks sent but never went anywhere would be misleading. And the
+    // selection stays pending so it's not lost.
+    expect(
+      screen.queryAllByTestId(/^chat-msg-/).some((el) =>
+        el.textContent?.includes("make the wing thinner"),
+      ),
+    ).toBe(false);
+    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+  });
 });
