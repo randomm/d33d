@@ -422,12 +422,81 @@ def test_non_string_units_does_not_crash(valid_stl, tmp_path):
     if isinstance(loaded, _tm.Scene):
         loaded = next(iter(loaded.geometry.values()))
     # Force .units to a non-string, non-None value (int) to exercise the
-    # isinstance guard in _force_mm
-    loaded.units = 42  # type: ignore[assignment]
-    # _force_mm must not raise
-    result = pv._force_mm(loaded)  # type: ignore[arg-type]
+    # isinstance guard in _force_mm. trimesh's own ``units`` setter
+    # stringifies before storing, so set the raw metadata key directly —
+    # the guard exists for a raw, non-string metadata value.
+    loaded.metadata["units"] = 42
+    # _force_mm must not raise; a non-string unit still falls back to mm
+    result, error = pv._force_mm(loaded)  # type: ignore[arg-type]
+    assert error is None
     # And the result must have string "millimeter" units
+    assert result is not None
     assert result.units == "millimeter"
+
+
+def test_unconvertible_unit_is_clean_failure(valid_stl):
+    """A mesh whose STRING units are unconvertible (neither mm nor a unit
+    trimesh knows) must be signalled by _force_mm as a clean failure,
+    not silently assumed to be mm (which would let the mesh pass every
+    downstream gate at the wrong physical scale)."""
+    loaded = _load(valid_stl)
+    loaded.units = "foobar"
+    # _force_mm must signal a clean failure, not swallow it, and must not
+    # reset units to "millimeter" on the failed mesh.
+    result_mesh, error = pv._force_mm(loaded)
+    assert result_mesh is None
+    assert error is not None
+    assert "foobar" in error
+
+
+def test_unconvertible_unit_pipeline_failure(monkeypatch, valid_stl):
+    """Pipeline-level: when the loaded mesh carries an unconvertible string
+    unit, validate_stl must return a clean load_error rather than crashing
+    or silently assuming mm."""
+    real_load = trimesh.load
+
+    def _load_with_units(path, **kwargs):
+        loaded = real_load(path, **kwargs)
+        assert isinstance(loaded, trimesh.Trimesh)
+        loaded.units = "foobar"
+        return loaded
+
+    monkeypatch.setattr(trimesh, "load", _load_with_units)
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert not result.ok
+    assert result.error_class == "load_error"
+    assert result.export_3mf is None
+
+
+# ---------------------------------------------------------------------------
+# Gate 6: intermediate STL export wrap
+# ---------------------------------------------------------------------------
+
+
+def test_gate6_stl_export_failure_is_export_error(
+    monkeypatch, valid_stl, tmp_path
+):
+    """A disk-full/permissions error at the gate-6 intermediate STL export
+    (mesh.export(slice_model)) must return a clean export_error result,
+    not an unhandled crash — same contract as the final 3MF export."""
+    calls = {"n": 0}
+    real_export = trimesh.Trimesh.export
+
+    def _failing_stl_export(self, file_obj, **kwargs):
+        if str(file_obj).endswith("slice_model.stl"):
+            calls["n"] += 1
+            raise OSError("simulated disk full")
+        return real_export(self, file_obj, **kwargs)
+
+    monkeypatch.setattr(trimesh.Trimesh, "export", _failing_stl_export)
+    result = pv.validate_stl(
+        str(valid_stl),
+        slice_dry_run_fn=_passing_slice_fn,
+        output_dir=str(tmp_path),
+    )
+    assert not result.ok
+    assert result.error_class == "export_error"
+    assert result.export_3mf is None
 
 
 # ---------------------------------------------------------------------------

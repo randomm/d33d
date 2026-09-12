@@ -184,31 +184,40 @@ def _check_dimensions(
 # ---------------------------------------------------------------------------
 
 
-def _force_mm(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
+def _force_mm(
+    mesh: trimesh.Trimesh,
+) -> tuple[trimesh.Trimesh | None, str | None]:
     """Force the mesh to millimetres. STL is unitless; if the mesh has
     non-mm units, convert them. If units are None (unitless), assume mm.
 
-    ``mesh.units`` is not strictly type-validated by trimesh, so a
-    non-string value is guarded with ``isinstance`` — a non-string
-    ``units`` (or a unit trimesh cannot convert from) silently falls
-    back to assuming mm, a known accepted simplification.
+    Returns ``(mesh, None)`` on success, or ``(None, message)`` when a
+    string unit that is not mm cannot be converted by trimesh — the
+    caller must treat that as a clean ``load_error`` pipeline failure
+    rather than silently assuming mm, which would let a genuinely
+    non-mm mesh pass every downstream gate at the wrong physical scale.
+
+    ``mesh.units`` is not strictly type-validated at the Python level, so
+    the read is guarded with ``isinstance`` — a non-string ``units``
+    (trimesh's own ``units`` setter stringifies before storing, but a
+    mesh built from raw metadata can hold anything) skips conversion and
+    falls back to assuming mm, a known accepted simplification.
     """
     units = mesh.units
-    if units is None or (
-        isinstance(units, str) and units.lower() in ("mm", "millimeter", "millimetres")
-    ):
+    if units is None or not isinstance(units, str):
         mesh.units = "millimeter"
-        return mesh
+        return mesh, None
+    if units.lower() in ("mm", "millimeter", "millimetres"):
+        mesh.units = "millimeter"
+        return mesh, None
     try:
         mesh.convert_units("mm")
         mesh.units = "millimeter"
     except (ValueError, LookupError, KeyError) as e:
-        # Unknown unit — assume mm and flag for the caller. trimesh
-        # raises KeyError/ValueError for units it cannot convert from
-        # (unit_registry lookup + conversion arithmetic).
-        logger.warning("Unconvertible mesh unit %r, assuming mm: %s", units, e)
-        mesh.units = "millimeter"
-    return mesh
+        # A string unit trimesh cannot convert from: fail cleanly so the
+        # downstream gates never operate on a mesh at the wrong scale.
+        logger.error("Unconvertible mesh unit %r: %s", units, e)
+        return None, f"Mesh has unconvertible unit {units!r}: {e}"
+    return mesh, None
 
 
 def _merge_and_clean(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -383,8 +392,13 @@ def validate_stl(
     except OSError as e:
         return _fail("load_error", None, f"Failed to load STL: {e}")
 
-    # Force mm
-    mesh = _force_mm(mesh)
+    # Force mm. A string unit trimesh cannot convert from is a clean
+    # load_error, not a silent fall-back to mm (which would let a
+    # genuinely non-mm mesh pass every downstream gate at the wrong
+    # physical scale).
+    mesh, unit_error = _force_mm(mesh)
+    if mesh is None:
+        return _fail("load_error", None, unit_error or "Unconvertible mesh unit")
 
     # Centre the mesh within the build envelope
     _centre_mesh(mesh)
@@ -486,7 +500,15 @@ def validate_stl(
     # Export the repaired mesh to a temp STL first: the slicer binary
     # reads a mesh file, not a trimesh object.
     slice_model = os.path.join(output_dir, "slice_model.stl")
-    mesh.export(slice_model)
+    try:
+        mesh.export(slice_model)
+    except (OSError, NotImplementedError, ValueError) as e:
+        # The intermediate STL export is an export step like the final 3MF
+        # export: a disk-full or permissions error here is a diagnosable
+        # export failure, not an unhandled pipeline crash.
+        return _fail(
+            "export_error", _part_from_mesh(mesh), f"STL export failed: {e}"
+        )
     try:
         slice_result = slice_dry_run_fn(slice_model, output_dir)
     except (OSError, RuntimeError) as e:

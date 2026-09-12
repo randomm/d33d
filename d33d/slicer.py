@@ -29,6 +29,15 @@ the linux/amd64 box without source changes.
 
 This module NEVER vendors or builds a slicer binary; it only locates,
 invokes, and interprets one.
+
+Success contract (pinned): for the Orca-family (QIDI / Orca) branch,
+``result.json``'s ``return_code`` is the SOLE authority for the success
+verdict. The process exit code is NOT co-equal — it is recorded for
+diagnostics only. Only ``return_code == 0`` in a well-formed ``result.json``
+marks the slice usable; a missing, corrupt, or ``return_code != 0``
+``result.json`` is a failure (fail-closed). For the PrusaSlicer fallback
+there is no ``result.json``, so the process exit code IS the success
+signal.
 """
 
 from __future__ import annotations
@@ -187,23 +196,26 @@ def _parse_orca_result_json(outdir: Path) -> tuple[int, str, int | None]:
     if not isinstance(data, dict):
         return -1, "result.json is not a JSON object", None
     raw_rc = data.get("return_code", -1)
+    # return_code and sliced_plates are validated INDEPENDENTLY: a valid
+    # integer return_code with a malformed sliced_plates must still surface
+    # the slicer's real verdict and error_string (item 6) rather than being
+    # discarded for a generic shape-violation message. The objects count
+    # degrades to None when sliced_plates is malformed, but the return code
+    # and error text are preserved.
     plates = data.get("sliced_plates")
     objects = None
-    plate_objects_ok = True
-    if not isinstance(plates, list):
-        plate_objects_ok = False
-    else:
+    if isinstance(plates, list):
         for plate in plates:
             if not isinstance(plate, dict):
-                plate_objects_ok = False
+                objects = None
                 break
             plate_objects = plate.get("objects")
-            if not isinstance(plate_objects, (list, tuple)):
-                plate_objects_ok = False
+            if not isinstance(plate_objects, list):
+                objects = None
                 break
             if plate_objects:
                 objects = (objects or 0) + len(plate_objects)
-    if isinstance(raw_rc, int) and plate_objects_ok:
+    if isinstance(raw_rc, int):
         return raw_rc, str(data.get("error_string", "")), objects
     return -1, "result.json has an unexpected shape", None
 
@@ -335,69 +347,79 @@ def slice_dry_run(
     # QIDI Studio first (target printer).
     qidi_bin = find_slicer("qidi")
     if qidi_bin:
-        rc, stderr_tail, gcode = slice_orca_family(
+        process_rc, stderr_tail, gcode = slice_orca_family(
             qidi_bin, model, output_dir, timeout_s
         )
         outdir = Path(output_dir) if output_dir else (gcode.parent if gcode else Path())
         if gcode is not None:
-            # result.json is the Orca-family's machine-readable verdict.
-            # Missing or corrupt (json_rc == -1) is a FAILURE, not a
+            # result.json is the Orca-family's machine-readable verdict and
+            # is the SOLE authority for success here: result.json's
+            # return_code decides, the process exit code does NOT.
+            # (documented contract — see module docstring). Missing or
+            # corrupt result.json (json_rc == -1) is a FAILURE, not a
             # default pass: G-code alone proves the binary ran, but the
             # plate may be empty (over-envelope, unsupported) and only
-            # result.json says whether the slice is usable. Same stricter
-            # semantics as the PrusaSlicer path (process exit code only).
+            # result.json says whether the slice is usable.
             json_rc, json_err, objects = _parse_orca_result_json(outdir)
             ok = json_rc == 0
+            gcode_lines = _count_gcode_lines(gcode)
             return SliceDryRunResult(
                 ok=ok,
                 slicer="qidi",
                 gcode_path=str(gcode),
-                gcode_lines=_count_gcode_lines(gcode),
+                gcode_lines=gcode_lines,
                 return_code=json_rc,
                 error_string=json_err if not ok else "",
                 objects=objects,
-                detail=f"QIDI Studio produced {gcode.name} ({_count_gcode_lines(gcode)} lines)",
+                detail=(
+                    f"QIDI Studio produced {gcode.name} ({gcode_lines} lines)"
+                    + (f" (process exit {process_rc})" if process_rc else "")
+                ),
             )
         json_rc, json_err, _ = (
             _parse_orca_result_json(outdir) if outdir else (-1, "", None)
         )
         return _fail(
             "qidi",
-            f"QIDI Studio produced no G-code (exit {rc}): {stderr_tail or json_err}",
+            f"QIDI Studio produced no G-code (exit {process_rc}): {stderr_tail or json_err}",
             error_string=stderr_tail or json_err,
         )
 
     # OrcaSlicer (same family; intermediate fallback).
     orca_bin = find_slicer("orca")
     if orca_bin:
-        rc, stderr_tail, gcode = slice_orca_family(
+        process_rc, stderr_tail, gcode = slice_orca_family(
             orca_bin, model, output_dir, timeout_s
         )
         outdir = Path(output_dir) if output_dir else (gcode.parent if gcode else Path())
         if gcode is not None:
-            # Missing/corrupt result.json (json_rc == -1) is a failure,
-            # not a default pass — same semantics as the QIDI branch above
-            # and the PrusaSlicer path.
+            # result.json's return_code is the sole authority for success
+            # (process exit code is not co-equal). Missing/corrupt
+            # result.json (json_rc == -1) is a failure, not a default pass.
             json_rc, json_err, objects = (
                 _parse_orca_result_json(outdir) if outdir else (-1, "", None)
             )
             ok = json_rc == 0
+            gcode_lines = _count_gcode_lines(gcode)
             return SliceDryRunResult(
                 ok=ok,
                 slicer="orca",
                 gcode_path=str(gcode),
-                gcode_lines=_count_gcode_lines(gcode),
+                gcode_lines=gcode_lines,
                 return_code=json_rc,
                 error_string=json_err if not ok else "",
                 objects=objects,
-                detail=f"OrcaSlicer produced {gcode.name} ({_count_gcode_lines(gcode)} lines)",
+                detail=(
+                    f"OrcaSlicer produced {gcode.name} ({gcode_lines} lines)"
+                    + (f" (process exit {process_rc})" if process_rc else "")
+                ),
             )
         json_rc, json_err, _ = (
             _parse_orca_result_json(outdir) if outdir else (-1, "", None)
         )
         return _fail(
             "orca",
-            f"OrcaSlicer produced no G-code (exit {rc}): {stderr_tail or json_err}",
+            f"OrcaSlicer produced no G-code (exit {process_rc}): {stderr_tail or json_err}",
             error_string=stderr_tail or json_err,
         )
 
@@ -406,17 +428,18 @@ def slice_dry_run(
     if prusa_bin:
         rc, stderr_tail, gcode = slice_prusa(prusa_bin, model, output_dir, timeout_s)
         if gcode is not None:
+            gcode_lines = _count_gcode_lines(gcode)
             return SliceDryRunResult(
                 ok=rc == 0,
                 slicer="prusa",
                 gcode_path=str(gcode),
-                gcode_lines=_count_gcode_lines(gcode),
+                gcode_lines=gcode_lines,
                 return_code=rc,
                 error_string="" if rc == 0 else stderr_tail,
                 objects=None,
                 detail=(
                     f"PrusaSlicer fallback produced {gcode.name} "
-                    f"({_count_gcode_lines(gcode)} lines); production slice is done in the GUI"
+                    f"({gcode_lines} lines); production slice is done in the GUI"
                 ),
             )
         return _fail(
