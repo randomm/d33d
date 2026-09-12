@@ -45,144 +45,97 @@ IMG_SIZE="800,800"
 PROJECTION="o"   # orthographic
 RENDER_FLAG="--render"
 
-# Parse params.json if present — defines are -Dname=value pairs
+# Parse params.json if present — defines become -Dname=value pairs
 # (params.json is optional; the caller writes it only when defines are set)
 #
-# python3 and jq are NOT in the base image (openscad/openscad:trixie), so this
-# is a hand-written awk scanner over the "defines" object's character stream.
-# Unlike the earlier sed/grep/cut pipeline, it:
-#   - honors JSON string escapes (a defines value containing \" no longer
-#     truncates or corrupts the parsed value),
-#   - isolates exactly the "defines" object's brace depth, so a defines value
-#     is never confused with sibling top-level keys (e.g. "timeout_s"),
-#   - loudly rejects a non-string defines value (number/object/array/bool/
-#     null) instead of silently pairing the key with the wrong token or
-#     emitting zero -D args with no warning — the entrypoint aborts before
-#     any openscad invocation runs, since a malformed params.json is a caller
-#     bug, not a partial-render failure covered by the STL/PNG step contract.
+# The AUTHORITATIVE validation of params.json — real JSON parsing, the
+# defines-value size cap, and the rejection of control characters in keys
+# and values — lives in the Python caller (d33d.render_worker.parse_defines),
+# which runs BEFORE docker run. A malformed or out-of-bounds params.json
+# aborts the render on the host, so the entrypoint never sees one.
+#
+# This block is a second, deliberately TRIVIAL gate: it keeps the entrypoint
+# safe even for a caller that skips validation. python3 and jq are NOT in the
+# base image (openscad/openscad:trixie), so the gate is a one-line-per-pair
+# awk check — it extracts the "defines" object (the first top-level key whose
+# value is an object) and walks its "key": "value" pairs, requiring every
+# string to be a well-formed single-line JSON string and every value to stay
+# under a fixed length. A value can only carry a literal tab if it is
+# escaped (\\t), which the one-line shape forbids, so no tab can ever reach
+# the -D flag line. Any violation (malformed JSON, a non-string or oversized
+# value, an unclosed object) aborts the entrypoint before any openscad
+# invocation runs, since a malformed params.json is a caller bug, not a
+# partial-render failure covered by the STL/PNG step contract.
 DEFINES_ARGS=()
 if [ -f "${WORKDIR}/params.json" ]; then
     defines_tsv="$(mktemp)"
     if ! awk '
-        BEGIN { in_defines = 0; depth = 0; found_defines = 0; done = 0; bad = 0 }
-        done { next }
-        {
-            line = $0
-            if (!found_defines) {
-                if (match(line, /"defines"[[:space:]]*:[[:space:]]*\{/)) {
-                    found_defines = 1
-                    in_defines = 1
-                    depth = 0
-                    line = substr(line, RSTART + RLENGTH - 1)
-                } else {
-                    next
-                }
-            }
-            if (in_defines) {
-                n = length(line)
-                i = 1
-                key = ""
-                while (i <= n) {
-                    c = substr(line, i, 1)
-                    if (key != "" && (c == "{" || c == "[")) {
-                        print "[entrypoint] defines[" key "] is not a string value" > "/dev/stderr"
-                        bad = 1
-                        key = ""
-                        nest = 1
-                        i++
-                        while (i <= n && nest > 0) {
-                            cc = substr(line, i, 1)
-                            if (cc == "{" || cc == "[") { nest++ }
-                            else if (cc == "}" || cc == "]") { nest-- }
-                            i++
-                        }
-                        continue
-                    }
-                    if (c == "{") { depth++; i++; continue }
-                    if (c == "}") {
-                        depth--
-                        i++
-                        if (depth == 0) {
-                            in_defines = 0
-                            done = 1
-                            if (key != "") {
-                                print "[entrypoint] defines key \"" key "\" has no value" > "/dev/stderr"
-                                bad = 1
-                            }
-                            break
-                        }
-                        continue
-                    }
-                    if (c == ",") {
-                        if (key != "") {
-                            print "[entrypoint] defines key \"" key "\" has no value" > "/dev/stderr"
-                            bad = 1
-                            key = ""
-                        }
-                        i++
-                        continue
-                    }
-                    if (c ~ /[[:space:]]/) { i++; continue }
-                    if (c == "\"") {
-                        j = i + 1
-                        s = ""
-                        while (j <= n) {
-                            cj = substr(line, j, 1)
-                            if (cj == "\\") {
-                                s = s substr(line, j, 2)
-                                j += 2
-                                continue
-                            }
-                            if (cj == "\"") { break }
-                            s = s cj
-                            j++
-                        }
-                        if (j > n) {
-                            print "[entrypoint] unterminated string in defines near \"" s "\"" > "/dev/stderr"
-                            bad = 1
-                            i = n + 1
-                            continue
-                        }
-                        if (key == "") {
-                            key = s
-                        } else {
-                            print key "\t" s
-                            key = ""
-                        }
-                        i = j + 1
-                        continue
-                    }
-                    if (c == ":") { i++; continue }
-                    if (key != "") {
-                        print "[entrypoint] defines[" key "] is not a string value" > "/dev/stderr"
-                        bad = 1
-                        key = ""
-                        while (i <= n) {
-                            cc = substr(line, i, 1)
-                            if (cc == "," || cc == "}") { break }
-                            i++
-                        }
-                        continue
-                    }
-                    i++
-                }
-            }
-        }
+        BEGIN { DEF = 4096; found = 0 }
+        { lines[NR] = $0 }
         END {
-            if (found_defines == 1 && done == 0) {
-                print "[entrypoint] defines object in params.json is unterminated" > "/dev/stderr"
-                bad = 1
+            text = ""
+            for (i = 1; i <= NR; i++) text = text lines[i] "\n"
+            rest = text
+            while (match(rest, /"defines"[[:space:]]*:/) > 0) {
+                after = substr(rest, RSTART + RLENGTH)
+                if (after ~ /^[[:space:]]*\{/) {
+                    found = 1
+                    body = substr(after, index(after, "{") + 1)
+                    break
+                }
+                rest = substr(rest, RSTART + RLENGTH)
             }
-            if (bad) exit 1
+            if (!found) {
+                print "[entrypoint] params.json: no \"defines\" object (must be absent or an object)" > "/dev/stderr"
+                exit 1
+            }
+            rest = body
+            while (1) {
+                # Skip any leading comma or whitespace between pairs
+                while (match(rest, /^[[:space:]]*,[[:space:]]*/) > 0) {
+                    rest = substr(rest, RLENGTH + 1)
+                }
+                # If next is the closing brace, we are done
+                if (rest ~ /^\}/) break
+                m = match(rest, /^[[:space:]]*"[^"]*"[[:space:]]*:/)
+                if (m == 0) break
+                # Extract the key: first " ... second " in key_match
+                key_match = substr(rest, m, RLENGTH)
+                q1 = index(key_match, "\"")
+                if (q1 == 0) { key = "" } else {
+                    after_q1 = substr(key_match, q1 + 1)
+                    q2 = index(after_q1, "\"")
+                    if (q2 == 0) { key = "" } else {
+                        key = substr(after_q1, 1, q2 - 1)
+                    }
+                }
+                rest = substr(rest, m + RLENGTH)
+                if (!match(rest, /^[[:space:]]*"[^\"]*"/)) {
+                    print "[entrypoint] params.json: defines value is not a well-formed single-line string" > "/dev/stderr"
+                    exit 1
+                }
+                s = substr(rest, RSTART + 1, RLENGTH - 1)
+                # s starts at the opening quote of the value string
+                if (length(s) - 2 > DEF) {
+                    print "[entrypoint] params.json: defines value exceeds " DEF " characters" > "/dev/stderr"
+                    exit 1
+                }
+                print key "=" substr(s, 2, length(s) - 2)
+                rest = substr(rest, RSTART + RLENGTH)
+            }
+            if (rest !~ /^[[:space:]]*\}[[:space:]]*([,}\]])/) {
+                print "[entrypoint] params.json: defines object is not closed — malformed JSON" > "/dev/stderr"
+                exit 1
+            }
         }
     ' "${WORKDIR}/params.json" > "${defines_tsv}"; then
-        echo "[entrypoint] Malformed \"defines\" in params.json — aborting before render" >&2
+        echo "[entrypoint] Malformed params.json — aborting before render" >&2
         rm -f "${defines_tsv}"
         exit 1
     fi
-    while IFS=$'\t' read -r name value; do
-        [ -z "${name}" ] && continue
-        DEFINES_ARGS+=("-D${name}=${value}")
+    while IFS= read -r pair; do
+        [ -z "${pair}" ] && continue
+        DEFINES_ARGS+=("-D${pair}")
     done < "${defines_tsv}"
     rm -f "${defines_tsv}"
 fi

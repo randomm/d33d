@@ -199,9 +199,66 @@ def _validate_timeout_s(value: int) -> int:
 #: render they clean up, so these must never block indefinitely.
 _CLEANUP_TIMEOUT_S = 15
 
+#: Upper bound on the length of a single defines value, in characters.
+#: The caller only sets small macro values (dimensions, booleans, enum
+#: strings); a value above this bound is treated as a caller bug (possibly
+#: a runaway LLM output) and rejected. Matches the ``DEF`` constant in
+#: ``entrypoint.sh`` so both layers enforce the same limit.
+DEFINES_VALUE_MAX_CHARS = 4096
+
+#: Characters (ordinals < 32 or == 127) that must not appear in a defines
+#: key or value. A tab in a value would silently split the TSV that the
+#: entrypoint's ``read`` loop uses; other control characters are equally
+#: ambiguous in a ``-D`` flag. Rejecting them outright is simpler and safer
+#: than escaping them.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 #: ``render-<8 hex chars from uuid4>`` — pinned as the testable contract;
 #: container and volume share the name.
 NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
+
+
+def parse_defines(params_json_text: str) -> dict[str, str]:
+    """Parse a ``params.json`` text payload and return the validated
+    ``defines`` map.
+
+    This is the **authoritative** validation for the ``params.json`` file
+    written by the caller into the work volume before ``docker run``.
+    It runs on the host where Python's ``json`` module is available — the
+    entrypoint's awk gate is a second, trivially simple layer that keeps
+    the container safe even if this validation is skipped.
+
+    Raises ``ValueError`` (the render caller maps this to
+    ``error_class="container_error"``) on:
+
+    - the text is not valid JSON
+    - the top-level value is not a JSON object
+    - ``defines`` is present but is not an object
+    - a defines key is not a string
+    - a defines value is not a string
+    - a defines key or value contains a tab, newline, or other control
+      character (ord < 32 or == 127) — a tab in a value would silently
+      split the TSV the entrypoint reads, and other control characters
+      are equally ambiguous in a ``-D`` flag
+    - a defines value exceeds ``DEFINES_VALUE_MAX_CHARS`` characters
+
+    Returns an empty dict when ``defines`` is absent (the caller only
+    writes the key when it has defines to pass).
+    """
+    try:
+        data = json.loads(params_json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"params.json is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise TypeError("params.json must be a JSON object at the top level")
+    raw = data.get("defines")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"params.json 'defines' must be an object, got {type(raw).__name__}"
+        )
+    return _validate_defines_map(raw)
 
 #: The eight on-volume artifacts a fully successful run produces.
 ARTIFACT_STL = "model.stl"
@@ -216,6 +273,45 @@ def new_render_name() -> str:
 def validate_render_name(name: str) -> bool:
     """True iff ``name`` matches ``render-<8 hex chars>``."""
     return bool(NAME_PATTERN_RE.match(name))
+
+
+def _validate_defines_map(raw: Any) -> dict[str, str]:
+    """Validate a raw ``defines`` dict (from JSON or in-memory) and return
+    a clean ``dict[str, str]``.
+
+    Shared by :func:`parse_defines` (raw-text path) and
+    ``RenderParams.from_dict`` (in-memory path) so both enforce the same
+    invariants: keys and values must be strings, no control characters,
+    and values must be at most ``DEFINES_VALUE_MAX_CHARS`` characters.
+    """
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"defines must be a dict/object, got {type(raw).__name__}"
+        )
+    result: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            raise TypeError(f"defines key {k!r} is not a string")
+        if not isinstance(v, str):
+            raise TypeError(
+                f"defines[{k!r}] value {v!r} is not a string "
+                f"(got {type(v).__name__})"
+            )
+        if _CONTROL_CHAR_RE.search(k):
+            raise ValueError(
+                f"defines key {k!r} contains a control character"
+            )
+        if _CONTROL_CHAR_RE.search(v):
+            raise ValueError(
+                f"defines[{k!r}] value contains a control character"
+            )
+        if len(v) > DEFINES_VALUE_MAX_CHARS:
+            raise ValueError(
+                f"defines[{k!r}] value is {len(v)} characters, "
+                f"exceeding the {DEFINES_VALUE_MAX_CHARS} character cap"
+            )
+        result[k] = v
+    return result
 
 
 @dataclass(frozen=True)
@@ -239,6 +335,7 @@ class RenderParams:
     pids_limit: int = DEFAULT_PID_LIMIT
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "defines", _validate_defines_map(self.defines))
         object.__setattr__(self, "timeout_s", _validate_timeout_s(self.timeout_s))
         object.__setattr__(
             self, "memory_limit", _validate_memory_limit(self.memory_limit)
@@ -257,9 +354,14 @@ class RenderParams:
         params.json can never raise the resource ceilings above the DoS
         guard's intent; out-of-range or malformed values raise
         ``ValueError``.
+
+        ``defines`` values are validated for control characters and the
+        ``DEFINES_VALUE_MAX_CHARS`` size cap — the same invariants
+        enforced by :func:`parse_defines` for the raw-text path.
         """
+        raw_defines = data.get("defines")
         return cls(
-            defines={str(k): str(v) for k, v in (data.get("defines") or {}).items()},
+            defines=raw_defines if raw_defines is not None else {},
             timeout_s=int(data.get("timeout_s", DEFAULT_TIMEOUT_S)),
             memory_limit=str(data.get("memory_limit", DEFAULT_MEMORY_LIMIT)),
             cpus=str(data.get("cpus", DEFAULT_CPU_LIMIT)),
