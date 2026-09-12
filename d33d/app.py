@@ -50,6 +50,7 @@ runs N isolated openscad renders and returns real named geometry.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
@@ -636,12 +637,21 @@ def create_app(
 
         Delegates to ``app.state.build_registry_glb`` (the real
         ``d33d.module_registry.build_registry_glb`` in production;
-        injectable in tests so no Docker is spawned). A ``.scad`` with no
-        top-level module call-sites is a valid, empty registry — 200 with
-        ``status: "empty"``, never a fabricated GLB or a 500. A PARTIAL
-        registry (some call-sites failed their isolated render) still
-        returns the GLB body for every module that DID succeed; the
-        failed module names are surfaced in the
+        injectable in tests so no Docker is spawned). Every call-site's
+        isolated render is a sequential ``subprocess.run`` round-trip
+        (create volume -> populate -> openscad -> harvest -> remove
+        volume), so ``build_fn`` itself runs on a worker thread via
+        ``asyncio.to_thread`` — called directly, it would block THIS
+        process's single event loop for the full multi-call-site Docker
+        round-trip, starving every other concurrent request (SSE
+        streams, unrelated projects' routes, health checks) for the
+        entire duration, not just serialising this one endpoint.
+
+        A ``.scad`` with no top-level module call-sites is a valid, empty
+        registry — 200 with ``status: "empty"``, never a fabricated GLB
+        or a 500. A PARTIAL registry (some call-sites failed their
+        isolated render) still returns the GLB body for every module
+        that DID succeed; the failed module names are surfaced in the
         ``X-Module-Registry-Failed`` response header (comma-separated) so
         the caller can show which regions are unavailable without
         discarding the rest of the registry.
@@ -653,7 +663,9 @@ def create_app(
 
         build_fn = request.app.state.build_registry_glb
         try:
-            result: RegistryBuildResult = build_fn(body.scad_source)
+            result: RegistryBuildResult = await asyncio.to_thread(
+                build_fn, body.scad_source
+            )
         except TooManyCallSitesError as e:
             raise HTTPException(
                 status_code=413,

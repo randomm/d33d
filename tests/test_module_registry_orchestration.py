@@ -17,7 +17,11 @@ from unittest.mock import patch
 import pytest
 import trimesh
 
-from d33d.module_registry import MAX_CALL_SITES, TooManyCallSitesError, build_registry_glb
+from d33d.module_registry import (
+    MAX_CALL_SITES,
+    TooManyCallSitesError,
+    build_registry_glb,
+)
 
 TWO_MODULE_SCAD = """
 module base() { cube([20,20,20]); }
@@ -165,9 +169,8 @@ def test_too_many_call_sites_raises_before_any_docker_invocation() -> None:
     container work."""
     hostile_source = "module m(){cube([1,1,1]);}\n" + "m();\n" * (MAX_CALL_SITES + 1)
 
-    with patch("subprocess.run") as mock_run:
-        with pytest.raises(TooManyCallSitesError) as exc_info:
-            build_registry_glb(hostile_source)
+    with patch("subprocess.run") as mock_run, pytest.raises(TooManyCallSitesError) as exc_info:
+        build_registry_glb(hostile_source)
 
     mock_run.assert_not_called()
     assert exc_info.value.count == MAX_CALL_SITES + 1

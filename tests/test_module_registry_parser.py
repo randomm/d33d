@@ -11,7 +11,7 @@ No Docker required — pure text parsing.
 
 from __future__ import annotations
 
-from d33d.module_registry import CallSite, parse_call_sites
+from d33d.module_registry import CallSite, isolate_call_site, parse_call_sites
 
 
 def test_simple_flat_call_sites() -> None:
@@ -156,6 +156,46 @@ def test_call_site_records_source_line_number() -> None:
     assert sites[0].line == 2
 
 
+def test_ordinal_suffix_never_collides_with_a_real_module_name() -> None:
+    """Regression: adversarial-review round 2. A design with both a
+    ``leg()`` module AND a distinct ``leg_2()`` module previously
+    produced two call-sites with the SAME registry_name ("leg_2") — the
+    second ``leg()`` call's auto-generated ordinal suffix collided with
+    the literal ``leg_2`` module name, silently overwriting one mesh with
+    the other in the assembled registry. Ordinal suffixes must skip past
+    any literal module identifier declared or called elsewhere in the
+    source."""
+    source = (
+        "module leg() { cylinder(h=40, r=3); }\n"
+        "module leg_2() { cylinder(h=20, r=2); }\n"
+        "leg();\n"
+        "leg();\n"
+        "leg_2();\n"
+    )
+    sites = parse_call_sites(source)
+    registry_names = [s.registry_name for s in sites]
+    assert len(registry_names) == len(set(registry_names)), (
+        f"registry names must be pairwise distinct, got {registry_names}"
+    )
+    # The literal leg_2() call must keep its own natural name.
+    leg_2_call = sites[-1]
+    assert leg_2_call.name == "leg_2"
+    assert leg_2_call.registry_name == "leg_2"
+    # The second leg() call must NOT have been assigned "leg_2" (that name
+    # belongs to the real leg_2() module's own call-site above).
+    second_leg_call = sites[1]
+    assert second_leg_call.name == "leg"
+    assert second_leg_call.registry_name != "leg_2"
+
+
+def test_call_site_records_column_offset_for_positional_isolation() -> None:
+    source = "module leg(){cube([1,1,1]);}\nleg(); leg();\n"
+    sites = parse_call_sites(source)
+    assert len(sites) == 2
+    assert sites[0].col == 0
+    assert sites[1].col == source.split("\n")[1].index("leg();", 1)
+
+
 def test_empty_source_returns_empty_list() -> None:
     assert parse_call_sites("") == []
 
@@ -165,3 +205,26 @@ def test_call_site_is_frozen_dataclass_with_expected_fields() -> None:
     assert site.name == "base"
     assert site.registry_name == "base"
     assert site.line == 1
+    assert site.col == 0
+
+
+def test_two_calls_to_same_module_on_one_line_isolate_distinct_occurrences() -> None:
+    """Regression: adversarial-review round 2. Two calls to the SAME
+    module on one source line (``leg(); leg();``) previously produced
+    byte-IDENTICAL isolated sources for both call-sites, because
+    ``isolate_call_site`` masked only the first unmodified occurrence of
+    the name on the line regardless of which site was being isolated —
+    the second call's own geometry was never actually rendered; a
+    duplicate of the first was silently substituted under its
+    registry_name. Positional (``site.col``) targeting must isolate each
+    occurrence independently."""
+    source = "module leg(){cube([1,1,1]);}\nleg(); leg();\n"
+    sites = parse_call_sites(source)
+    assert len(sites) == 2
+
+    first_isolated = isolate_call_site(source, sites[0])
+    second_isolated = isolate_call_site(source, sites[1])
+
+    assert first_isolated != second_isolated
+    assert first_isolated.split("\n")[1] == "!leg(); leg();"
+    assert second_isolated.split("\n")[1] == "leg(); !leg();"

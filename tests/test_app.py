@@ -920,3 +920,61 @@ def test_module_registry_rejects_oversized_scad_source(app):
 
     r = _run_async(app, _call)
     assert r.status_code == 422
+
+
+def test_module_registry_does_not_block_the_event_loop(app):
+    """Regression: adversarial-review round 2. build_registry_glb is a
+    synchronous, subprocess-driven function that can take up to ~4.3
+    hours worst-case (MAX_CALL_SITES sequential Docker round-trips); the
+    route must run it via asyncio.to_thread so a slow/large registry
+    build cannot stall the event loop and starve every OTHER concurrent
+    request on the same process. Simulated here with a blocking
+    time.sleep inside the injected build function (time.sleep, not
+    asyncio.sleep, is the point: it proves the call really runs off the
+    event loop's own thread) racing an unrelated fast request that must
+    complete first if — and only if — the registry build is offloaded.
+    """
+    import time
+
+    from d33d import module_registry as mr
+
+    def _slow_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        time.sleep(0.3)
+        return mr.RegistryBuildResult(
+            glb_bytes=b"glb", registry_names=("m",), failures=()
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _slow_build
+
+        order: list[str] = []
+
+        async def _slow_request():
+            resp = await client.post(
+                f"/api/projects/{project_id}/module-registry",
+                json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+            )
+            order.append("slow")
+            return resp
+
+        async def _fast_request():
+            await asyncio.sleep(0.05)
+            resp = await client.get("/api/config/models")
+            order.append("fast")
+            return resp
+
+        slow_resp, fast_resp = await asyncio.gather(
+            _slow_request(), _fast_request()
+        )
+        return slow_resp, fast_resp, order
+
+    slow_resp, fast_resp, order = _run_async(app, _call)
+    assert slow_resp.status_code == 200
+    assert fast_resp.status_code == 200
+    # If build_registry_glb blocked the event loop, the fast request
+    # (dispatched 50ms after the slow one, itself near-instant) could
+    # only ever complete AFTER the slow one finishes its 300ms sleep.
+    # Running the blocking call in a worker thread lets the fast request
+    # finish first.
+    assert order == ["fast", "slow"], order

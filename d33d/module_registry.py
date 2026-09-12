@@ -48,6 +48,8 @@ import subprocess
 import uuid
 from dataclasses import dataclass
 
+from trimesh.exchange.stl import HeaderError as _StlHeaderError
+
 from d33d.render_worker import (
     DEFAULT_TIMEOUT_S,
     ErrorClass,
@@ -130,13 +132,21 @@ class CallSite:
     call to a given module, ``name_2``/``name_3``/... for subsequent
     calls to the SAME module name, so a lasso pick is never ambiguous
     even when a design calls the same module more than once (e.g. four
-    identical ``leg()`` calls). ``line`` is the 1-indexed source line the
-    call-site starts on, used to build the ``!``-masked isolation source.
+    identical ``leg()`` calls). Ordinal suffixes are chosen disjoint from
+    every LITERAL module name found anywhere else in the source (not just
+    previously-assigned registry_names), so a module named e.g. ``leg_2``
+    can never collide with the second ``leg()`` call's auto-generated
+    name. ``line`` is the 1-indexed source line the call-site starts on.
+    ``col`` is the 0-indexed character offset of the call's name token
+    WITHIN that line, so :func:`isolate_call_site` can mask the exact
+    occurrence intended even when two calls to the same module share one
+    source line (e.g. ``leg(); leg();``).
     """
 
     name: str
     registry_name: str
     line: int
+    col: int = 0
 
 
 def strip_comments(source: str) -> str:
@@ -190,10 +200,16 @@ def parse_call_sites(source: str) -> list[CallSite]:
 
     Duplicate calls to the same module name are all enumerated, each with
     a distinct ``registry_name`` (``name``, ``name_2``, ``name_3``, ...)
-    so a lasso pick is never ambiguous. Results are ordered by source
-    position (top-level call-sites are the discovery order the registry
-    presents; three.js scene-graph order is not otherwise meaningful —
-    only NAMES are pinned per the binding architecture).
+    so a lasso pick is never ambiguous. The ordinal suffix is chosen
+    disjoint from every LITERAL module identifier that appears anywhere
+    else in the source (both other call-sites' bare ``name`` and
+    ``module name(...)`` definition headers) — never just the set of
+    registry_names already assigned — so an auto-generated ``leg_2``
+    can never silently collide with a REAL module also named ``leg_2``.
+    Results are ordered by source position (top-level call-sites are the
+    discovery order the registry presents; three.js scene-graph order is
+    not otherwise meaningful — only NAMES are pinned per the binding
+    architecture).
     """
     clean = strip_comments(source)
 
@@ -202,8 +218,21 @@ def parse_call_sites(source: str) -> list[CallSite]:
     # bare identifier matches ``_CALL_RE`` too.
     def_name_starts: set[int] = {m.start(1) for m in _MODULE_DEF_RE.finditer(clean)}
 
+    # Every literal identifier that could plausibly appear as a
+    # registry_name collision target: all ``module name(...)`` header
+    # names, plus every bare call-site name (builtins excluded — they
+    # never become registry entries so they can never collide with one).
+    literal_names: set[str] = {m.group(1) for m in _MODULE_DEF_RE.finditer(clean)}
+    for m in _CALL_RE.finditer(clean):
+        if m.start(1) in def_name_starts:
+            continue
+        candidate = m.group(1)
+        if candidate not in BUILTIN_PRIMITIVES and candidate != "module":
+            literal_names.add(candidate)
+
     sites: list[CallSite] = []
     counts: dict[str, int] = {}
+    used_registry_names: set[str] = set()
     depth = 0
     pos = 0
     n = len(clean)
@@ -225,9 +254,26 @@ def parse_call_sites(source: str) -> list[CallSite]:
                     counts[name] = counts.get(name, 0) + 1
                     ordinal = counts[name]
                     registry_name = name if ordinal == 1 else f"{name}_{ordinal}"
+                    # Bump the ordinal past any literal name (a real
+                    # module/call identifier elsewhere in the source) or
+                    # any registry_name already handed out, so two
+                    # DIFFERENT call-sites never end up sharing one key.
+                    while (
+                        registry_name in literal_names and registry_name != name
+                    ) or registry_name in used_registry_names:
+                        ordinal += 1
+                        registry_name = f"{name}_{ordinal}"
+                    used_registry_names.add(registry_name)
+                    line_start = clean.rfind("\n", 0, m.start()) + 1
                     line = clean.count("\n", 0, m.start()) + 1
+                    col = m.start(1) - line_start
                     sites.append(
-                        CallSite(name=name, registry_name=registry_name, line=line)
+                        CallSite(
+                            name=name,
+                            registry_name=registry_name,
+                            line=line,
+                            col=col,
+                        )
                     )
                 pos = m.end()
                 continue
@@ -242,29 +288,39 @@ def parse_call_sites(source: str) -> list[CallSite]:
 
 def isolate_call_site(source: str, site: CallSite) -> str:
     """Return a modified ``.scad`` source with ``!`` prefixed onto the
-    LINE containing ``site`` — the ``!`` modifier isolates that
-    subtree's geometry for a single render invocation (empirically
-    verified: ``!`` alone suffices, no ``*``/``%`` needed on the sibling
-    call-sites).
+    EXACT call-site identified by ``site.line``/``site.col`` — the ``!``
+    modifier isolates that subtree's geometry for a single render
+    invocation (empirically verified: ``!`` alone suffices, no ``*``/``%``
+    needed on the sibling call-sites).
 
-    Only the FIRST unmodified occurrence of the bare call on that exact
-    source line is prefixed, so ``translate(...) leg();`` -> ``translate
-    (...) !leg();`` (the modifier binds to the immediately-following
-    primitive/module call per OpenSCAD's grammar, not to the transform).
-    A line already carrying a modifier character for this call is left
-    as-is if the call name is already ``!``-prefixed; this function is
-    only ever invoked once per site.
+    Targeting is POSITIONAL (``site.col``, the 0-indexed offset of the
+    call's name token within its line), not "first occurrence of this
+    name on the line" — required so that two calls to the SAME module on
+    one source line (``leg(); leg();``) each isolate their own distinct
+    occurrence rather than both masking the first one. A line already
+    carrying a modifier character immediately before the targeted name is
+    left as-is (defensive; ``parse_call_sites`` does not enumerate
+    already-``!``-prefixed calls as fresh sites in practice, but a
+    direct caller passing a mismatched ``site`` must not corrupt the
+    source under a different call).
     """
     lines = source.split("\n")
     idx = site.line - 1
     if idx < 0 or idx >= len(lines):
         return source
     line = lines[idx]
-    pattern = re.compile(r"(?<![A-Za-z0-9_!%#*])" + re.escape(site.name) + r"\s*\(")
-    new_line, count = pattern.subn(f"!{site.name}(", line, count=1)
-    if count == 0:
+    col = site.col
+    if col < 0 or col > len(line):
         return source
-    lines[idx] = new_line
+    if line[col : col + len(site.name)] != site.name:
+        # The recorded column no longer matches this exact source line
+        # (stale/mismatched CallSite) — refuse to guess at a substitute
+        # occurrence, since masking the wrong call silently produces
+        # wrong geometry under the caller's intended registry_name.
+        return source
+    if col > 0 and line[col - 1] in "!%#*":
+        return source
+    lines[idx] = line[:col] + "!" + line[col:]
     return "\n".join(lines)
 
 
@@ -286,11 +342,26 @@ DEFAULT_OPENSCAD_IMAGE = "docker.io/openscad/openscad:trixie"
 #: can enqueue an effectively unbounded amount of sequential Docker work
 #: on the single render host. 64 comfortably covers any real assembly
 #: (the golden-set fixtures never exceed a few dozen top-level modules)
-#: while keeping worst-case wall-clock bounded to
-#: ``MAX_CALL_SITES * DEFAULT_TIMEOUT_S``. A source with more call-sites
-#: than this is rejected via ``TooManyCallSitesError`` before any Docker
-#: invocation — never silently truncated, so an over-long registry is
-#: surfaced to the caller instead of quietly dropping modules.
+#: while keeping worst-case wall-clock bounded. Per call-site, the worst
+#: case is FIVE sequential subprocess round-trips, not one:
+#: ``_create_named_volume`` (``_HELPER_TIMEOUT_S``) + ``_write_file_
+#: into_volume`` (``_HELPER_TIMEOUT_S``) + the openscad render itself
+#: (``DEFAULT_TIMEOUT_S``) + ``_read_file_from_volume`` (``_HELPER_
+#: TIMEOUT_S``) + ``_remove_named_volume`` (``_HELPER_TIMEOUT_S``), i.e.
+#: ``4 * _HELPER_TIMEOUT_S + DEFAULT_TIMEOUT_S`` per site, not just
+#: ``DEFAULT_TIMEOUT_S``. So the true worst-case bound is
+#: ``MAX_CALL_SITES * (4 * _HELPER_TIMEOUT_S + DEFAULT_TIMEOUT_S)``
+#: (with the defaults below, ~4.3 hours), not the smaller
+#: ``MAX_CALL_SITES * DEFAULT_TIMEOUT_S`` a per-site-single-timeout
+#: reading would suggest. Because that bound is real wall-clock, not
+#: just render-host load, the HTTP route
+#: (``d33d.app.create_module_registry``) runs ``build_registry_glb`` via
+#: ``asyncio.to_thread`` rather than awaiting it directly, so a slow
+#: build cannot stall the process's event loop for other requests. A
+#: source with more call-sites than this cap is rejected via
+#: ``TooManyCallSitesError`` before any Docker invocation — never
+#: silently truncated, so an over-long registry is surfaced to the
+#: caller instead of quietly dropping modules.
 MAX_CALL_SITES = 64
 
 
@@ -554,9 +625,16 @@ def build_registry_glb(
                     file_type="stl",
                     process=False,
                 )
-            except Exception as e:  # noqa: BLE001 - any trimesh load failure
-                # is a per-module artifact problem, never a whole-registry
-                # abort: the harvested bytes are attacker-influenced (an
+            except (ValueError, OSError, _StlHeaderError) as e:
+                # Mirrors d33d.print_validation's own trimesh.load catch
+                # (ValueError for parse failures / "not a file", OSError
+                # for read failures) plus trimesh's own STL-specific
+                # HeaderError (a bare Exception subclass, so ValueError
+                # alone would miss it) — the full surface trimesh.load
+                # itself is documented and observed to raise for
+                # malformed/truncated binary STL. Any of these is a
+                # per-module artifact problem, never a whole-registry
+                # abort. The harvested bytes are attacker-influenced (an
                 # OpenSCAD render driven by untrusted .scad source), so a
                 # malformed/unparseable STL must classify and let every
                 # OTHER call-site's already-succeeded render still stand.
