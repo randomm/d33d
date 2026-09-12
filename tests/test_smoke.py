@@ -8,7 +8,9 @@ tests that will carry it.
 
 
 def test_import_and_version() -> None:
+    import importlib.metadata
+
     import d33d
 
     assert hasattr(d33d, "__version__")
-    assert d33d.__version__ == "0.0.1"
+    assert d33d.__version__ == importlib.metadata.version("d33d")
