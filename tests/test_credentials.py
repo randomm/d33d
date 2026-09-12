@@ -12,6 +12,7 @@ No Docker, no network — pure local file/DB semantics (sqlite3 :memory:).
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -103,7 +104,70 @@ def test_get_key_missing_provider_returns_none(tmp_path: Path) -> None:
     assert store.get_key("does-not-exist") is None
 
 
-def test_master_key_rotation_reports_unusable_not_silent_loss(tmp_path: Path) -> None:
+def test_get_key_missing_provider_does_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A simple missing-row lookup is normal/expected — it must not emit a
+    WARNING (that's reserved for the decrypt-failure / rotated-key case, so
+    on-call triage can distinguish the two by log level alone)."""
+    store, _ = _store(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="d33d.security.credentials"):
+        assert store.get_key("does-not-exist") is None
+    assert not caplog.records
+
+
+def test_get_key_multi_alias_fallback_logs_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """model_alias=None on a multi-alias provider silently picks the
+    alphabetically-first alias — that selection must be logged at WARNING
+    (naming provider and the alias chosen, never key material) so a
+    cross-model key mix-up isn't silent."""
+    store, _ = _store(tmp_path)
+    store.store_key("trailopeners", "model-b", "sk-b-secret")
+    store.store_key("trailopeners", "model-a", "sk-a-secret")
+
+    with caplog.at_level(logging.WARNING, logger="d33d.security.credentials"):
+        assert store.get_key("trailopeners") == "sk-a-secret"
+
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].message
+    assert "trailopeners" in msg
+    assert "model-a" in msg
+    assert "sk-a-secret" not in msg
+
+
+def test_get_key_single_alias_no_fallback_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A single-alias provider looked up with model_alias=None is the
+    common case (not an ambiguous fallback) — no warning expected."""
+    store, _ = _store(tmp_path)
+    store.store_key("trailopeners", "only-model", "sk-secret")
+
+    with caplog.at_level(logging.WARNING, logger="d33d.security.credentials"):
+        assert store.get_key("trailopeners") == "sk-secret"
+
+    assert not caplog.records
+
+
+def test_get_key_exact_alias_lookup_does_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Passing an explicit model_alias is never a fallback — no warning."""
+    store, _ = _store(tmp_path)
+    store.store_key("trailopeners", "model-a", "sk-a-secret")
+    store.store_key("trailopeners", "model-b", "sk-b-secret")
+
+    with caplog.at_level(logging.WARNING, logger="d33d.security.credentials"):
+        assert store.get_key("trailopeners", "model-a") == "sk-a-secret"
+
+    assert not caplog.records
+
+
+def test_master_key_rotation_reports_unusable_not_silent_loss(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     conn = _mkdb()
     key1 = cred.get_or_create_master_key(tmp_path / "master.key")
     store1 = cred.CredentialStore(conn=conn, master_key=key1)
@@ -112,10 +176,22 @@ def test_master_key_rotation_reports_unusable_not_silent_loss(tmp_path: Path) ->
     # must surface as unusable (None), not raise, not silently disappear.
     key2 = Fernet.generate_key()
     store2 = cred.CredentialStore(conn=conn, master_key=key2)
-    assert store2.get_key("p") is None
+    with caplog.at_level(logging.WARNING, logger="d33d.security.credentials"):
+        assert store2.get_key("p") is None
     # The row is still there — not silently lost
     rows = store2.list_credentials()
     assert any(r["provider_id"] == "p" for r in rows)
+
+    # A decrypt failure (rotated/tampered MASTER_KEY) must be distinguishable
+    # from a simple missing-row lookup via a WARNING naming provider/alias —
+    # and must never contain the ciphertext or plaintext key material.
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].message
+    assert caplog.records[0].levelno == logging.WARNING
+    assert "p" in msg
+    assert "m" in msg
+    assert "some-secret" not in msg
+    assert "gAAA" not in msg
 
 
 def test_master_key_file_permissions_restricted(tmp_path: Path) -> None:
@@ -125,6 +201,37 @@ def test_master_key_file_permissions_restricted(tmp_path: Path) -> None:
     cred.get_or_create_master_key(key_file)
     mode = key_file.stat().st_mode & 0o777
     assert mode == 0o600, f"MASTER_KEY file must be 0o600, got {oct(mode)}"
+
+
+def test_master_key_no_leftover_tmp_file_after_success(tmp_path: Path) -> None:
+    """The tmp-then-replace flow must not leave the .tmp sibling behind
+    after a successful get_or_create_master_key call."""
+    if os.name != "posix":
+        pytest.skip("chmod is POSIX-only")
+    key_file = tmp_path / "master.key"
+    cred.get_or_create_master_key(key_file)
+    tmp_file = key_file.with_suffix(key_file.suffix + ".tmp")
+    assert not tmp_file.exists()
+
+
+def test_master_key_survives_stale_tmp_file_from_crashed_run(tmp_path: Path) -> None:
+    """A leftover .tmp file from a crashed prior run must not turn key
+    generation into a hard failure (the O_EXCL create must tolerate/replace
+    a stale tmp, not raise FileExistsError)."""
+    if os.name != "posix":
+        pytest.skip("chmod is POSIX-only")
+    key_file = tmp_path / "master.key"
+    tmp_file = key_file.with_suffix(key_file.suffix + ".tmp")
+    tmp_file.write_bytes(b"stale-partial-write-from-a-crash")
+
+    key = cred.get_or_create_master_key(key_file)
+
+    assert key_file.exists()
+    assert not tmp_file.exists()
+    mode = key_file.stat().st_mode & 0o777
+    assert mode == 0o600
+    # Re-reading returns the same persisted key
+    assert cred.get_or_create_master_key(key_file) == key
 
 
 def test_store_key_with_empty_secret_rejected(tmp_path: Path) -> None:
