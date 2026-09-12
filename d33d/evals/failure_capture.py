@@ -498,11 +498,12 @@ def default_run_design_loop_hook(
     failures are structurally excluded (no ``is_eval`` flag).
 
     The caller's ``kwargs`` carry the design-loop arguments PLUS the
-    hook's ``model`` and ``prompt_version`` (the app adds those from the
-    resolved role and the ``log`` hook's canonical hash); the closure
-    strips them before forwarding to the real loop (which doesn't
-    accept them). A test that needs a stub loop (or no hook) overwrites
-    ``app.state.run_design_loop`` after ``create_app`` returns.
+    hook's ``model``, ``prompt_version`` and ``request`` (the app adds
+    those from the resolved role, the canonical prompt hash, and the
+    user's request text); the closure strips them before forwarding to
+    the real loop (which doesn't accept them). A test that needs a
+    stub loop (or no hook) overwrites ``app.state.run_design_loop``
+    after ``create_app`` returns.
     """
     from d33d import design_loop as _dl
 
@@ -511,9 +512,12 @@ def default_run_design_loop_hook(
     def _hooked(**kwargs: Any) -> Any:
         hook_model = kwargs.pop("model", None)
         hook_prompt_version = kwargs.pop("prompt_version", None)
+        hook_request = kwargs.pop("request", None)
         hook_photo = kwargs.get("photo")
         hook_region_mark = kwargs.get("region_mark")
-        hook_request = str(kwargs.get("request") or kwargs.get("chat_history") or "")
+        request = str(
+            hook_request or kwargs.get("chat_history") or ""
+        )
         result = real_run(**kwargs)
         try:
             if result is not None:
@@ -521,7 +525,7 @@ def default_run_design_loop_hook(
                     design_result=result,
                     photo=hook_photo,
                     region_mark=hook_region_mark,
-                    request=hook_request,
+                    request=request,
                     model=hook_model,
                     prompt_version=str(hook_prompt_version or ""),
                     output_scad=str(

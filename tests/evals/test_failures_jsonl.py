@@ -583,6 +583,7 @@ def test_app_hook_closure_appends_on_exhausted(tmp_path: Path, monkeypatch):
         llm_fn=lambda *a: None,
         model=_llm_result("model-x"),
         prompt_version="deadbeef",
+        request="make it a cube",
     )
     assert result is not None
     assert result.status == "exhausted"
@@ -591,10 +592,11 @@ def test_app_hook_closure_appends_on_exhausted(tmp_path: Path, monkeypatch):
     assert events[0].failure_class == "empty_model"
     assert events[0].model == "model-x"
     assert events[0].prompt_version == "deadbeef"
-    # The design-loop kwargs (model/prompt_version) are NOT forwarded to
+    # The hook kwargs (model/prompt_version/request) are NOT forwarded to
     # the real loop — the loop doesn't accept them.
     assert "model" not in calls[0]
     assert "prompt_version" not in calls[0]
+    assert "request" not in calls[0]
 
 
 def test_app_hook_closure_no_append_on_pass(tmp_path: Path, monkeypatch):
@@ -615,6 +617,7 @@ def test_app_hook_closure_no_append_on_pass(tmp_path: Path, monkeypatch):
         llm_fn=lambda *a: None,
         model=_llm_result("model-x"),
         prompt_version="deadbeef",
+        request="make it a cube",
     )
     assert not out.exists()
 
@@ -639,6 +642,7 @@ def test_app_hook_closure_swallows_hook_errors(tmp_path: Path, monkeypatch):
         llm_fn=lambda *a: None,
         model=_llm_result("model-x"),
         prompt_version="deadbeef",
+        request="make it a cube",
     )
     assert result.status == "exhausted"
 
@@ -658,6 +662,216 @@ def test_app_state_run_design_loop_is_hooked(tmp_path: Path, monkeypatch):
     )
     assert app.state.run_design_loop is not None
     assert callable(app.state.run_design_loop)
-    # The hook is the default closure (it calls ``run_design_loop`` with
-    # the design-loop kwargs plus model/prompt_version).
+    # The production closure takes (app, **kwargs) — the finalize route's
+    # signature check calls it with app + the loop's kwargs.
+    import inspect as _inspect
+
+    sig = _inspect.signature(app.state.run_design_loop)
+    assert "app" in sig.parameters
     assert app.state.failures_jsonl_path is not None
+
+
+def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypatch):
+    """The production ``run_design_loop`` wired by ``create_app`` runs the
+    real design loop and, on an exhausted result, appends one line to
+    ``app.state.failures_jsonl_path`` (issue #9 — production gate failures
+    auto-archived). Monkeypatches the real loop, the capability probe, and
+    the model resolution so no live LLM/Docker/catalogue is needed.
+
+    The hook's ``default_run_design_loop_hook`` is monkeypatched to call
+    the fake loop directly (skipping the real loop's required kwargs) so
+    the test isolates the hook's archive behavior from the loop's
+    internal pipeline.
+    """
+    from d33d.app import create_app
+    from d33d.config import catalogue as cat_mod
+    from d33d.config import probes as probe_mod
+    from d33d.config import resolve as resolve_mod
+    from d33d.evals.failure_capture import read_failure_events
+
+    class _Entry:
+        model = "model-x"
+
+    class _Provider:
+        base = "http://127.0.0.1:1"
+        key = "k"
+
+    class _Cat:
+        def __init__(self) -> None:
+            self.providers = {"p": _Provider()}
+
+    class _Res:
+        entry = _Entry()
+        provider = _Provider()
+
+    def _exhausted_result(**kwargs):
+        class _Best:
+            scad_source = "cube([1,1,1]);"
+
+        class _Result:
+            status = "exhausted"
+            best = _Best()
+            failure_reason = "empty_model"
+
+        return _Result()
+
+    monkeypatch.setattr(cat_mod, "load_catalogue", lambda *a, **k: _Cat())
+    monkeypatch.setattr(resolve_mod, "resolve_model", lambda *a, **k: _Res())
+
+    async def _fake_probe(**kwargs):
+        from d33d.config.probes import CapabilityResult
+
+        return CapabilityResult(
+            tools=True, json_schema=True, vision=False, max_images=0
+        )
+
+    monkeypatch.setattr(probe_mod, "probe_capabilities", _fake_probe)
+
+    # Monkeypatch the hook to skip the real loop and return the fake result
+    # (the hook normally calls ``real_run(**kwargs)`` after popping
+    # model/prompt_version/request — we skip that and return the fake
+    # result directly, then invoke the hook's archive logic via the real
+    # ``record_production_failure``).
+    from d33d.evals import failure_capture as fc
+
+    def _fake_hook(*, path):
+        def _hooked(**kwargs):
+            model = kwargs.pop("model", None)
+            pv = kwargs.pop("prompt_version", None)
+            req = kwargs.pop("request", None)
+            photo = kwargs.get("photo")
+            result = _exhausted_result()
+            fc.record_production_failure(
+                design_result=result,
+                photo=photo,
+                region_mark=None,
+                request=str(req or ""),
+                model=model,
+                prompt_version=str(pv or ""),
+                output_scad=result.best.scad_source,
+                path=path,
+            )
+            return result
+
+        return _hooked
+
+    monkeypatch.setattr(fc, "default_run_design_loop_hook", _fake_hook)
+
+    monkeypatch.delenv("D33D_FAILURES_JSONL", raising=False)
+    # Point the failures sink at a fresh tmp_path file (the test's own
+    # tmp_path, not the repo's evals/failures.jsonl).
+    app = create_app(
+        tmp_path / "d33d.sqlite3",
+        master_key_path=tmp_path / "master.key",
+        catalogue_path=tmp_path / "models.yaml",
+        spa_dist_dir=tmp_path / "no-dist",
+    )
+    app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+    loop = app.state.run_design_loop
+    result = loop(
+        app=app,
+        photo="/photos/ref.png",
+        request="make it a cube",
+        stated_dims=(10, 10, 10),
+    )
+    assert result.status == "exhausted"
+    events = read_failure_events(app.state.failures_jsonl_path)
+    assert len(events) == 1
+    assert events[0].failure_class == "empty_model"
+    assert events[0].model == "model-x"
+    assert events[0].request == "make it a cube"
+
+
+def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
+    """The production loop appends nothing to failures.jsonl on a passing
+    design loop (nothing to archive) — the hook fires only on an
+    exhausted result."""
+    from d33d.app import create_app
+    from d33d.config import catalogue as cat_mod
+    from d33d.config import probes as probe_mod
+    from d33d.config import resolve as resolve_mod
+    from d33d.evals.failure_capture import read_failure_events
+
+    class _Entry:
+        model = "model-x"
+
+    class _Provider:
+        base = "http://127.0.0.1:1"
+        key = "k"
+
+    class _Cat:
+        def __init__(self) -> None:
+            self.providers = {"p": _Provider()}
+
+    class _Res:
+        entry = _Entry()
+        provider = _Provider()
+
+    def _passing_result(**kwargs):
+        class _Best:
+            scad_source = "cube([1,1,1]);"
+
+        class _Result:
+            status = "pass"
+            best = _Best()
+            failure_reason = None
+
+        return _Result()
+
+    monkeypatch.setattr(cat_mod, "load_catalogue", lambda *a, **k: _Cat())
+    monkeypatch.setattr(resolve_mod, "resolve_model", lambda *a, **k: _Res())
+
+    async def _fake_probe(**kwargs):
+        from d33d.config.probes import CapabilityResult
+
+        return CapabilityResult(
+            tools=True, json_schema=True, vision=False, max_images=0
+        )
+
+    monkeypatch.setattr(probe_mod, "probe_capabilities", _fake_probe)
+
+    from d33d.evals import failure_capture as fc
+
+    def _fake_hook(*, path):
+        def _hooked(**kwargs):
+            model = kwargs.pop("model", None)
+            pv = kwargs.pop("prompt_version", None)
+            req = kwargs.pop("request", None)
+            photo = kwargs.get("photo")
+            result = _passing_result()
+            fc.record_production_failure(
+                design_result=result,
+                photo=photo,
+                region_mark=None,
+                request=str(req or ""),
+                model=model,
+                prompt_version=str(pv or ""),
+                output_scad=result.best.scad_source,
+                path=path,
+            )
+            return result
+
+        return _hooked
+
+    monkeypatch.setattr(fc, "default_run_design_loop_hook", _fake_hook)
+
+    monkeypatch.delenv("D33D_FAILURES_JSONL", raising=False)
+    # Point the failures sink at a fresh tmp_path file (the test's own
+    # tmp_path, not the repo's evals/failures.jsonl).
+    app = create_app(
+        tmp_path / "d33d.sqlite3",
+        master_key_path=tmp_path / "master.key",
+        catalogue_path=tmp_path / "models.yaml",
+        spa_dist_dir=tmp_path / "no-dist",
+    )
+    app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+    loop = app.state.run_design_loop
+    result = loop(
+        app=app,
+        photo="/photos/ref.png",
+        request="make it a cube",
+        stated_dims=(10, 10, 10),
+    )
+    assert result.status == "pass"
+    events = read_failure_events(app.state.failures_jsonl_path)
+    assert events == []

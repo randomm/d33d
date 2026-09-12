@@ -122,10 +122,16 @@ class FinalizeBody:
         params: dict[str, Any] | None,
         name: str | None,
         message: str,
+        photo: str | None = None,
+        request: str | None = None,
+        stated_dims: tuple[float, float, float] | None = None,
     ) -> None:
         self.params = params
         self.name = name
         self.message = message
+        self.photo = photo
+        self.request = request
+        self.stated_dims = stated_dims
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +443,13 @@ def create_versions_router() -> APIRouter:
         # IterationRecord has no .params, so the route falls back to the
         # body's params or the latest version's snapshot when
         # getattr(best, 'params') is not a non-empty dict.
+        #
+        # The route inspects the injected seam's signature before calling:
+        # a production loop (``_build_production_design_loop``) takes
+        # (app, **kwargs) and is called that way; a test stub that takes
+        # no args is called with none (backward-compat with existing
+        # stubs). The inspection is a static contract check, not a
+        # per-call dynamic behavior change.
         run_loop = request.app.state.run_design_loop
         if run_loop is None:
             raise HTTPException(status_code=503, detail="design loop not wired")
@@ -458,13 +471,25 @@ def create_versions_router() -> APIRouter:
             params = dict(latest["params"]) if latest is not None else {}
 
         try:
-            result = run_loop()
+            if _loop_takes_app(run_loop):
+                result = run_loop(
+                    app=request.app,
+                    photo=body.photo,
+                    request=body.request or body.message,
+                    stated_dims=body.stated_dims,
+                )
+            else:
+                result = run_loop()
             if inspect.isawaitable(result):
                 result = await result
-        except (OSError, RuntimeError, ValueError) as e:
+        except (OSError, RuntimeError, TypeError, ValueError) as e:
             # Bounded infra-error set around the injected loop: a raised
             # loop must be a structured 502, not a bare unclassified 500
-            # (the same discipline as create_module_registry).
+            # (the same discipline as create_module_registry). TypeError
+            # covers a real loop called with an unexpected kwargs
+            # contract (e.g. a missing required design-loop argument on
+            # an unconfigured project) — it is an infra failure, not a
+            # user error.
             logger.exception(
                 "design loop failed for project_id=%s (type=%s)",
                 project_id,
@@ -516,6 +541,26 @@ def create_versions_router() -> APIRouter:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _loop_takes_app(run_loop: Any) -> bool:
+    """The injected design-loop seam's signature check.
+
+    True when the seam's callable takes an ``app`` keyword argument (the
+    production ``_build_production_design_loop`` closure does); False
+    otherwise (test stubs that take no args, or stubs that take a
+    different signature — the route calls them with no args for
+    backward-compat). The check is a static ``inspect.signature`` read
+    over the seam's ``__call__`` / function wrapper, not a per-call
+    dynamic behavior change.
+    """
+    import inspect as _inspect
+
+    try:
+        sig = _inspect.signature(run_loop)
+    except (TypeError, ValueError):
+        return False
+    return "app" in sig.parameters
 
 
 def _raise_mapped(e: Exception) -> None:
@@ -623,7 +668,32 @@ async def _parse_finalize_body(request: Request):
     message = data.get("message", "")
     if not isinstance(message, str):
         raise HTTPException(status_code=422, detail="'message' must be a string")
-    return FinalizeBody(params=params, name=name, message=message)
+    photo = data.get("photo")
+    if photo is not None and not isinstance(photo, str):
+        raise HTTPException(status_code=422, detail="'photo' must be a string")
+    request = data.get("request")
+    if request is not None and not isinstance(request, str):
+        raise HTTPException(status_code=422, detail="'request' must be a string")
+    stated_dims = data.get("stated_dims")
+    if stated_dims is not None:
+        if not isinstance(stated_dims, (list, tuple)) or len(stated_dims) != 3:
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' must be a 3-element array"
+            )
+        try:
+            stated_dims = tuple(float(d) for d in stated_dims)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' must be numeric"
+            ) from None
+    return FinalizeBody(
+        params=params,
+        name=name,
+        message=message,
+        photo=photo,
+        request=request,
+        stated_dims=stated_dims,
+    )
 
 
 __all__ = [

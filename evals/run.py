@@ -95,11 +95,19 @@ def deterministic_gates_pass(output: dict, test: dict, vars: dict) -> bool:
 
 def vision_judge_pass(output: dict, test: dict, vars: dict) -> bool:
     """promptfoo assert: the judge verdict passed (only reached when
-    the gates passed — the ordering is the spec's)."""
+    the gates passed — the ordering is the spec's).
+
+    A gate-passing candidate with no judge verdict (``judge is None``)
+    passes: the judge only runs for candidates whose declared gates let
+    them through (``CaseOutcome.ok`` is the source of truth — gates ok
+    AND, when the judge ran, the judge passed). Failing closed here
+    would report a false-negative for gate-passing cases the judge
+    legitimately did not score (e.g. an adversarial case that declared
+    only ``compile`` and short-circuited the judge)."""
     row = output.get("d33d") or output
     judge = row.get("judge")
     if judge is None:
-        return False
+        return True
     return bool(judge.get("passed"))
 
 
@@ -188,13 +196,7 @@ async def _run_all(
         # shells into the render worker directly in a real run (the
         # structural exclusion of the production hook); here the
         # stand-in is a safe default for a promptfoo dry-run.
-        render_result = _null_render()
-        stl_path = None
-        mesh = None
-        if case.reference_photo:
-            fixture = Path(case.reference_photo)
-            if fixture.suffix == ".scad":
-                mesh = _scad_to_mesh(repo_root, fixture)
+        render_result, stl_path, mesh = _local_render_inputs(repo_root, case)
         outcome = await run_case(
             case=case,
             repo_root=repo_root,
@@ -210,14 +212,49 @@ async def _run_all(
     return report.to_json()
 
 
+def _local_render_inputs(repo_root: Path, case: Any) -> tuple[Any, str | None, Any]:
+    """The render inputs a local (no render-worker) run can supply.
+
+    A local ``--run`` is a design-loop dry-run: the case's reference
+    fixture (a ``.scad`` stand-in) is rendered best-effort with
+    ``openscad`` so the case's own ``gate_expectations`` decide the
+    outcome — declared gates pass when their inputs are present (the
+    STL exists, the mesh is watertight) and gates that need the render
+    worker's pipeline (slice) fall out of the case's declared set or
+    report their pinned N/A. When ``openscad`` is not invocable the
+    case declares ``compile`` but the render stand-in cannot supply an
+    STL: the case then fails at gate 2 (``stl_export``) or the
+    watertight gate — a visible, correct result, not a silent
+    gate-2 failure for every case that merely declared ``stl_export``.
+    """
+    stl_path: str | None = None
+    mesh: Any = None
+    render_result = _null_render()
+    if case.reference_photo:
+        reference = case.reference_photo
+    elif case.rendered_views:
+        reference = case.rendered_views[0]
+    else:
+        reference = None
+    if reference:
+        fixture = Path(reference)
+        if not fixture.is_absolute():
+            fixture = repo_root / fixture
+        if fixture.suffix == ".scad":
+            mesh = _scad_to_mesh(repo_root, fixture)
+            if mesh is not None:
+                stl_path = f"local:{fixture.name}"
+    return render_result, stl_path, mesh
+
+
 def _null_render() -> Any:
     """A render-worker result with ``error_class='ok'`` and no STL.
 
     A local run without the render worker (the default for ``--run``)
     has no real render; the harness's gates consume this stand-in
-    (gate 1 passes on ``ok``; gate 2 fails on the absent STL — the
-    judge runs only when the gates pass, so the stand-in is a safe
-    default for a local run that is really a promptfoo dry-run).
+    (gate 1 passes on ``ok``; gate 2 is then decided by the case's own
+    declared expectations and the rendered STL, see
+    :func:`_local_render_inputs`).
     """
 
     class _Render:

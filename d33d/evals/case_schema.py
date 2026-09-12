@@ -82,8 +82,9 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 #: The seven deterministic gates, in the fixed ticket order. Gates 1–7
-#: run before any judge; the judge (gate 8) is out of scope for the
-#: golden-set schema — it is a holdout-only concern of the harness.
+#: run before any judge; the judge is stage 8 (the last stage, not a
+#: gate) and is out of scope for the golden-set schema — it is a
+#: holdout-only concern of the harness.
 GATE_NAMES: tuple[str, ...] = (
     "compile",
     "stl_export",
@@ -98,7 +99,9 @@ GATE_NAMES: tuple[str, ...] = (
 #: when its delegate is absent — gate 6 when no headless slicer is
 #: invocable, gate 7 when #7's 2D→3D convention has not landed.
 GATE_NA_MARKERS: dict[str, str] = {
-    "slice_dry_run": "N/A, slicer not available headless",
+    # Both markers match the gate modules' NA_REASON strings exactly
+    # (d33d.evals.slice_gate.NA_REASON / d33d.evals.region_gate.NA_REASON).
+    "slice_dry_run": "N/A — slicer not available headless",
     "region_containment": "N/A, containment convention not available",
 }
 

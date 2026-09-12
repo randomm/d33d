@@ -136,3 +136,79 @@ def test_config_rejects_missing_gates_assert(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="deterministic_gates_pass"):
         load_promptfoo_config(cfg, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# The two promptfoo custom asserts (the CLI calls these via evals/run.py)
+# ---------------------------------------------------------------------------
+
+
+_RUN_PY = REPO_ROOT / "evals" / "run.py"
+
+
+def _load_run_module():
+    """Import ``evals/run.py`` as a module (the tests run from the repo
+    root, but the module lives at ``evals/run.py`` — not a package).
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("evals_run", _RUN_PY)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_vision_judge_pass_passes_when_judge_none() -> None:
+    """A gate-passing candidate with no judge verdict passes (not a
+    false-negative): the judge only runs for candidates whose declared
+    gates let them through (``CaseOutcome.ok`` is the source of truth)."""
+    run = _load_run_module()
+    row = {"gates": {"compile": {"status": "pass"}}, "judge": None}
+    assert run.vision_judge_pass(row, {}, {}) is True
+
+
+def test_vision_judge_pass_passes_when_judge_passed() -> None:
+    run = _load_run_module()
+    row = {"gates": {"compile": {"status": "pass"}}, "judge": {"passed": True}}
+    assert run.vision_judge_pass(row, {}, {}) is True
+
+
+def test_vision_judge_pass_fails_when_judge_failed() -> None:
+    run = _load_run_module()
+    row = {"gates": {"compile": {"status": "pass"}}, "judge": {"passed": False}}
+    assert run.vision_judge_pass(row, {}, {}) is False
+
+
+def test_deterministic_gates_pass_passes_when_all_gates_pass() -> None:
+    run = _load_run_module()
+    row = {"gates": {"compile": {"status": "pass"}, "stl_export": {"status": "pass"}}}
+    assert run.deterministic_gates_pass(row, {}, {}) is True
+
+
+def test_deterministic_gates_pass_fails_when_any_gate_fails() -> None:
+    run = _load_run_module()
+    row = {"gates": {"compile": {"status": "fail"}, "stl_export": {"status": "pass"}}}
+    assert run.deterministic_gates_pass(row, {}, {}) is False
+
+
+def test_deterministic_gates_pass_passes_when_no_gates() -> None:
+    run = _load_run_module()
+    row = {"gates": {}}
+    assert run.deterministic_gates_pass(row, {}, {}) is True
+
+
+# ---------------------------------------------------------------------------
+# N/A marker alignment (GATE_NA_MARKERS vs the gate modules' NA_REASON)
+# ---------------------------------------------------------------------------
+
+
+def test_gate_na_markers_match_gate_modules() -> None:
+    """``GATE_NA_MARKERS`` pins the exact N/A string each gate reports —
+    a mismatch would make a test asserting the pin against the gate's
+    output fail (the pin and the gate's ``NA_REASON`` must agree)."""
+    from d33d.evals.case_schema import GATE_NA_MARKERS
+    from d33d.evals.region_gate import NA_REASON as REGION_NA
+    from d33d.evals.slice_gate import NA_REASON as SLICE_NA
+
+    assert GATE_NA_MARKERS["slice_dry_run"] == SLICE_NA
+    assert GATE_NA_MARKERS["region_containment"] == REGION_NA
