@@ -19,9 +19,14 @@
  *     accumulation (six renders × non-indexed meshes would leak otherwise).
  *   - Multi-solid STL (ASCII multi-solid → `geometry.groups.length > 1`)
  *     gets each group centred and given its own material.
- *   - The scene uses the three.js Y-up convention. If a future ticket
- *     inlines a 3MF (Z-up), it must apply `rotation.set(-Math.PI/2, 0, 0)`
- *     and adjust `camera.up` — this viewer does NOT rotate loaded meshes.
+ *   - The scene uses the three.js Y-up convention. OpenSCAD/STL models are
+ *     Z-up (CAD convention: +Z is the model's "top"), so every loaded mesh
+ *     root is rotated -PI/2 about X and the camera's up axis is set to +Z
+ *     (applyZUpToYUp). The viewport top of the screen is the model's top.
+ *   - 3MF is Z-up as well; if a future ticket inlines a 3MF it must apply
+ *     the SAME rotation (rotation.set(-Math.PI/2, 0, 0) + camera.up) — the
+ *     viewer's Y-up scene assumption is documented so the #7 work does not
+ *     silently double-rotate.
  */
 
 import { useEffect, useRef } from 'react';
@@ -87,6 +92,10 @@ const BG_COLOR = 0x1a1a2e;
  * This is mandatory: STLLoader returns non-indexed BufferGeometry, and six
  * renders × non-indexed meshes accumulate GPU memory. Without explicit
  * disposal, the viewer leaks VRAM on every model swap.
+ *
+ * `traverse` includes the root object itself, so a top-level mesh (or the
+ * loaded scene root for a GLB) has its geometry/materials disposed too —
+ * not only the nested children.
  */
 export function disposeObject(obj: THREE.Object3D): void {
   obj.traverse((child) => {
@@ -121,7 +130,10 @@ export function disposeObject(obj: THREE.Object3D): void {
  *
  * The mesh is treated as millimetres — no scaling is applied.
  */
-export async function loadSTL(buffer: ArrayBuffer): Promise<LoadResult> {
+export async function loadSTL(
+  buffer: ArrayBuffer,
+  camera?: THREE.Camera,
+): Promise<LoadResult> {
   try {
     const loader = new STLLoader();
     const geometry = loader.parse(buffer);
@@ -180,6 +192,9 @@ export async function loadSTL(buffer: ArrayBuffer): Promise<LoadResult> {
     const box = new THREE.Box3().setFromObject(object);
     const size = box.getSize(new THREE.Vector3());
 
+    // Z-up source → Y-up scene (applyZUpToYUp): model's +Z → scene's +Y.
+    if (camera) applyZUpToYUp(object, camera);
+
     return {
       ok: true,
       mesh: { object, format: 'stl' },
@@ -193,13 +208,39 @@ export async function loadSTL(buffer: ArrayBuffer): Promise<LoadResult> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Coordinate convention (Z-up source data → Y-up scene)
+// ---------------------------------------------------------------------------
+
+/**
+ * Rotate a Z-up source model into the viewer's Y-up scene.
+ *
+ * OpenSCAD and STL are Z-up: +Z is the model's "up" (CAD convention). three.js
+ * scenes are Y-up, so a Z-up model must be rotated -PI/2 about X to display
+ * correctly (model's +Z → scene's +Y). We also set the camera's up axis to +Z
+ * so OrbitControls orbits around the model's true vertical — without that the
+ * damped orbit axis would be the model's front-back axis. (Equivalently: the
+ * viewport top of the screen is the model's top.)
+ *
+ * Applied to the loaded object root (not per-mesh) so the multi-solid group
+ * and single mesh both end up oriented the same way. The scene camera itself
+ * is NOT rotated — the camera is the viewer's coordinate frame.
+ */
+export function applyZUpToYUp(object: THREE.Object3D, camera: THREE.Camera): void {
+  object.rotation.set(-Math.PI / 2, 0, 0);
+  camera.up.set(0, 0, 1);
+}
+
 /**
  * Load a binary GLB ArrayBuffer into a three.js Object3D.
  *
  * GLB is a binary container for glTF; GLTFLoader.parse handles the
  * binary directly. The loaded scene is treated as millimetres.
  */
-export async function loadGLB(buffer: ArrayBuffer): Promise<LoadResult> {
+export async function loadGLB(
+  buffer: ArrayBuffer,
+  camera?: THREE.Camera,
+): Promise<LoadResult> {
   try {
     const loader = new GLTFLoader();
     const gltf = await new Promise<{ scene: THREE.Scene }>((resolve, reject) => {
@@ -212,6 +253,9 @@ export async function loadGLB(buffer: ArrayBuffer): Promise<LoadResult> {
     gltf.scene.position.sub(center);
 
     const size = box.getSize(new THREE.Vector3());
+
+    // Z-up source → Y-up scene (applyZUpToYUp): model's +Z → scene's +Y.
+    if (camera) applyZUpToYUp(gltf.scene, camera);
 
     return {
       ok: true,
@@ -232,8 +276,9 @@ export async function loadGLB(buffer: ArrayBuffer): Promise<LoadResult> {
 export async function loadMesh(
   buffer: ArrayBuffer,
   format: 'stl' | 'glb',
+  camera?: THREE.Camera,
 ): Promise<LoadResult> {
-  return format === 'stl' ? loadSTL(buffer) : loadGLB(buffer);
+  return format === 'stl' ? loadSTL(buffer, camera) : loadGLB(buffer, camera);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +463,9 @@ export function ModelViewer({
       return;
     }
 
-    loadMesh(data, format).then((result) => {
+    // Pass the scene camera so loaders can align Z-up source data to the
+    // Y-up scene (applyZUpToYUp sets the object rotation AND camera.up).
+    loadMesh(data, format, camera).then((result) => {
       if (result.ok && result.mesh) {
         scene.add(result.mesh.object);
         currentMeshRef.current = result.mesh.object;

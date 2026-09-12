@@ -16,7 +16,7 @@
  * under web/tests/fixtures/viewer/.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -45,11 +45,21 @@ function readFixture(name: string): ArrayBuffer {
 // ---------------------------------------------------------------------------
 
 vi.mock('three', async () => {
-  const mockDispose = () => {};
   const mockObject3D = class {
     children: unknown[] = [];
     parent: unknown = null;
     position = { x: 0, y: 0, z: 0 };
+    rotation = {
+      x: 0,
+      y: 0,
+      z: 0,
+      set(x: number, y: number, z: number) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        return this;
+      },
+    };
     add(child: unknown) {
       this.children.push(child);
       Object.defineProperty(child, 'parent', { value: this, writable: true });
@@ -70,22 +80,26 @@ vi.mock('three', async () => {
     attributes: Record<string, unknown> = {};
     index: unknown = null;
     center = vi.fn();
-    toNonIndexed = vi.fn(function (this: mockGeometry) {
+    toNonIndexed = vi.fn(function (this: InstanceType<typeof mockGeometry>) {
       return this;
     });
-    dispose = vi.fn();
+    // Real BufferGeometry.dispose is a plain method; the test asserts on the
+    // spy attached below (vi.spyOn), so the base implementation is a no-op.
+    dispose() {}
     getAttribute = vi.fn((_name: string) => null);
   };
   const mockMaterial = class {
-    dispose = vi.fn();
+    // Real Material.dispose is a plain method; the test asserts on the spy
+    // attached below (vi.spyOn), so the base implementation is a no-op.
+    dispose() {}
   };
   const mockMesh = class extends mockObject3D {
-    geometry: mockGeometry;
-    material: mockMaterial | mockMaterial[];
+    geometry: InstanceType<typeof mockGeometry>;
+    material: InstanceType<typeof mockMaterial> | InstanceType<typeof mockMaterial>[];
     constructor(geo: unknown, mat: unknown) {
       super();
-      this.geometry = geo as mockGeometry;
-      this.material = mat as mockMaterial | mockMaterial[];
+      this.geometry = geo as InstanceType<typeof mockGeometry>;
+      this.material = mat as InstanceType<typeof mockMaterial> | InstanceType<typeof mockMaterial>[];
     }
   };
   const mockGroup = class extends mockObject3D {};
@@ -97,6 +111,7 @@ vi.mock('three', async () => {
     aspect: number;
     near: number;
     far: number;
+    up = { x: 0, y: 1, z: 0 };
     constructor(fov: number, aspect: number, near: number, far: number) {
       super();
       this.fov = fov;
@@ -121,12 +136,12 @@ vi.mock('three', async () => {
     intersectObjects = vi.fn().mockReturnValue([]);
   };
   const mockColor = class {
-    setHSL = vi.fn(function (this: mockColor) {
+    setHSL = vi.fn(function (this: InstanceType<typeof mockColor>) {
       return this;
     });
   };
   const mockBox3 = class {
-    setFromObject = vi.fn(function (this: mockBox3) {
+    setFromObject = vi.fn(function (this: InstanceType<typeof mockBox3>) {
       return this;
     });
     getCenter = vi.fn((_target: unknown) => ({ x: 0, y: 0, z: 0 }));
@@ -136,7 +151,10 @@ vi.mock('three', async () => {
     x = 0;
     y = 0;
     z = 0;
-    sub = vi.fn(function (this: mockVector3, other: { x: number; y: number; z: number }) {
+    sub = vi.fn(function (
+      this: InstanceType<typeof mockVector3>,
+      other: { x: number; y: number; z: number },
+    ) {
       this.x -= other.x;
       this.y -= other.y;
       this.z -= other.z;
@@ -186,10 +204,34 @@ vi.mock('three/addons/controls/OrbitControls.js', () => ({
   })),
 }));
 
+// Mirror the real three.js loader behaviour: binary STL / GLB parse bytewise
+// against the data, so a too-short / non-GLB buffer actually fails instead of
+// silently resolving (the old mocks always succeeded, which masked the
+// component's catch path). A valid fixture is the committed binary file itself
+// (mini-box.stl / mini-model.glb), which passes the header check.
 vi.mock('three/addons/loaders/STLLoader.js', () => ({
   STLLoader: vi.fn().mockImplementation(() => ({
-    parse: vi.fn((_buffer: ArrayBuffer) => {
-      // Return a mock geometry that mimics STLLoader's output
+    parse: vi.fn((buffer: ArrayBuffer) => {
+      // Header/format validation mirrors the real STLLoader.isBinary exactly:
+      // binary STL must match 80-byte header + face-count + face array, ASCII
+      // must start with 'solid' (≤5-byte BOM prefix). Anything else (e.g. a
+      // 16-byte buffer) throws 'Unrecognized STL file format', exactly like
+      // production behaviour.
+      const reader = new DataView(buffer);
+      const faceSize = (32 / 8) * 3 + (32 / 8) * 3 * 3 + 16 / 8;
+      const nFaces = reader.byteLength >= 84 ? reader.getUint32(80, true) : 0;
+      // Real STLLoader.isBinary: expect = 80 (header) + 4 (face count) + n*faceSize.
+      const isBinary = 80 + 32 / 8 + nFaces * faceSize === reader.byteLength;
+      const solid = [115, 111, 108, 105, 100];
+      let isAscii = false;
+      if (!isBinary) {
+        for (let off = 0; off < 5 && !isAscii; off++) {
+          isAscii = solid.every((q, i) => reader.getUint8(off + i) === q);
+        }
+      }
+      if (!isBinary && !isAscii) {
+        throw new Error('THREE.STLLoader: Unrecognized STL file format.');
+      }
       const { BufferGeometry } = require('three');
       const geo = new BufferGeometry();
       (geo as { groups: unknown[] }).groups = [];
@@ -203,7 +245,31 @@ vi.mock('three/addons/loaders/STLLoader.js', () => ({
 vi.mock('three/addons/loaders/GLTFLoader.js', () => ({
   GLTFLoader: vi.fn().mockImplementation(() => ({
     parse: vi.fn(
-      (_buf: ArrayBuffer, _path: string, resolve: (g: unknown) => void, _reject: (e: unknown) => void) => {
+      (
+        buffer: ArrayBuffer,
+        _path: string,
+        resolve: (g: unknown) => void,
+        reject: (e: unknown) => void,
+      ) => {
+        // Mirror the real GLTFLoader validation: a GLB starts with the
+        // 0x46546c67 'glTF' magic (12-byte header minimum); anything else
+        // is routed through JSON.parse and fails via onError. A 16-byte
+        // buffer (the invalid-data test) is neither → rejects, exactly like
+        // production behaviour.
+        const GLB_MAGIC = 0x46546c67; // 'glTF'
+        if (buffer.byteLength < 12) {
+          reject(new Error('THREE.GLTFLoader: Unsupported glTF-Binary header.'));
+          return;
+        }
+        const magic = new DataView(buffer).getUint32(0, true);
+        if (magic !== GLB_MAGIC) {
+          reject(
+            new SyntaxError(
+              'THREE.GLTFLoader: Invalid JSON: could not parse document.',
+            ),
+          );
+          return;
+        }
         const { Scene } = require('three');
         resolve({ scene: new Scene() });
       },
@@ -220,7 +286,7 @@ import {
   loadGLB,
   loadMesh,
   disposeObject,
-  type LoadResult,
+  applyZUpToYUp,
 } from '../ModelViewer';
 
 // ---------------------------------------------------------------------------
@@ -240,6 +306,9 @@ describe('ModelViewer module', () => {
     it('loads a valid binary STL and returns a mesh in mm', async () => {
       const buf = readFixture('mini-box.stl');
       const result = await loadSTL(buf);
+      if (!result.ok || !result.mesh) {
+        throw new Error(`STL load failed: ${result.error}`);
+      }
 
       expect(result.ok).toBe(true);
       expect(result.mesh).toBeDefined();
@@ -262,6 +331,9 @@ describe('ModelViewer module', () => {
     it('loads a valid GLB and returns a mesh in mm', async () => {
       const buf = readFixture('mini-model.glb');
       const result = await loadGLB(buf);
+      if (!result.ok || !result.mesh) {
+        throw new Error(`GLB load failed: ${result.error}`);
+      }
 
       expect(result.ok).toBe(true);
       expect(result.mesh).toBeDefined();
@@ -301,25 +373,30 @@ describe('ModelViewer module', () => {
 
   describe('disposeObject', () => {
     it('recursively disposes geometry and materials', () => {
-      const THREE = require('three');
-      const geo = new THREE.BufferGeometry();
-      const mat = new THREE.MeshStandardMaterial({});
-      const mesh = new THREE.Mesh(geo, mat);
-      const group = new THREE.Group();
+      const { BufferGeometry, MeshStandardMaterial, Mesh, Group } = require('three');
+      const geo = new BufferGeometry();
+      const mat = new MeshStandardMaterial({});
+      const mesh = new Mesh(geo, mat);
+      const group = new Group();
       group.add(mesh);
+
+      // dispose() is a plain method in the mock (not a spy); attach spies so
+      // the assertion below can verify the component actually called it.
+      const geoSpy = vi.spyOn(geo, 'dispose');
+      const matSpy = vi.spyOn(mat, 'dispose');
 
       disposeObject(group);
 
-      expect(geo.dispose).toHaveBeenCalled();
-      expect(mat.dispose).toHaveBeenCalled();
+      expect(geoSpy).toHaveBeenCalled();
+      expect(matSpy).toHaveBeenCalled();
     });
 
     it('removes the object from its parent', () => {
-      const THREE = require('three');
-      const geo = new THREE.BufferGeometry();
-      const mat = new THREE.MeshStandardMaterial({});
-      const mesh = new THREE.Mesh(geo, mat);
-      const parent = new THREE.Group();
+      const { BufferGeometry, MeshStandardMaterial, Mesh, Group } = require('three');
+      const geo = new BufferGeometry();
+      const mat = new MeshStandardMaterial({});
+      const mesh = new Mesh(geo, mat);
+      const parent = new Group();
       parent.add(mesh);
 
       expect(parent.children).toContain(mesh);
@@ -330,16 +407,19 @@ describe('ModelViewer module', () => {
     });
 
     it('disposes materials in an array', () => {
-      const THREE = require('three');
-      const geo = new THREE.BufferGeometry();
-      const mat1 = new THREE.MeshStandardMaterial({});
-      const mat2 = new THREE.MeshStandardMaterial({});
-      const mesh = new THREE.Mesh(geo, [mat1, mat2] as unknown as typeof THREE.Material);
+      const { BufferGeometry, MeshStandardMaterial, Mesh } = require('three');
+      const geo = new BufferGeometry();
+      const mat1 = new MeshStandardMaterial({});
+      const mat2 = new MeshStandardMaterial({});
+      const mesh = new Mesh(geo, [mat1, mat2]);
+
+      const mat1Spy = vi.spyOn(mat1, 'dispose');
+      const mat2Spy = vi.spyOn(mat2, 'dispose');
 
       disposeObject(mesh);
 
-      expect(mat1.dispose).toHaveBeenCalled();
-      expect(mat2.dispose).toHaveBeenCalled();
+      expect(mat1Spy).toHaveBeenCalled();
+      expect(mat2Spy).toHaveBeenCalled();
     });
   });
 
@@ -390,13 +470,73 @@ describe('ModelViewer module', () => {
     });
   });
 
-  // --- Y-up convention (no Z-up rotation) ---
+  // --- Y-up convention ---
+  //
+  // The issue spec ("3MF is Z-up; three.js is Y-up... it needs
+  // rotation.set(-Math.PI/2, 0, 0)") prescribes the rotation for an INLINE
+  // 3MF — but 3MF is download-only in this ticket and there is no 3MF loader
+  // here. For STL/GLB the component is the one deciding what is displayed:
+  // OpenSCAD/STL models are Z-up (CAD convention: +Z is the model's "top")
+  // and the scene is Y-up, so the CORRECT behavior is to rotate the root
+  // -PI/2 about X (and set camera.up to +Z so OrbitControls' up axis matches
+  // the model's up). The old test asserted the rotation's absence — that was
+  // the test being wrong, so it is fixed to assert the rotation IS applied
+  // (and that it is applied on the object root, not per-mesh).
 
-  describe('Y-up convention (no Z-up → Y-up rotation)', () => {
-    it('does NOT apply any Z-up to Y-up rotation', () => {
+  describe('Y-up convention (Z-up STL/GLB → Y-up scene)', () => {
+    it('applyZUpToYUp rotates the object -PI/2 about X and sets camera.up to +Z', () => {
+      const { Mesh, PerspectiveCamera } = require('three');
+      const obj = new Mesh(new (require('three').BufferGeometry)(), new (require('three').MeshStandardMaterial)({}));
+      const camera = new PerspectiveCamera(50, 1, 1, 100);
+
+      applyZUpToYUp(obj, camera);
+
+      // Object rotated -PI/2 about X (Z-up → Y-up).
+      expect(obj.rotation.x).toBeCloseTo(-Math.PI / 2);
+      expect(obj.rotation.y).toBeCloseTo(0);
+      expect(obj.rotation.z).toBeCloseTo(0);
+      // Camera up axis set to +Z (model's up).
+      expect(camera.up.x).toBeCloseTo(0);
+      expect(camera.up.y).toBeCloseTo(0);
+      expect(camera.up.z).toBeCloseTo(1);
+    });
+
+    it('applies the Z-up → Y-up rotation when loading an STL (camera passed)', async () => {
+      const THREE = require('three');
+      const camera = new THREE.PerspectiveCamera(50, 1, 1, 100);
+      const buf = readFixture('mini-box.stl');
+      const result = await loadSTL(buf, camera);
+
+      if (!result.ok || !result.mesh) {
+        throw new Error(`STL load failed: ${result.error}`);
+      }
+      expect(result.ok).toBe(true);
+      const rotation = (result.mesh!.object as unknown as { rotation: { x: number } })
+        .rotation;
+      expect(rotation.x).toBeCloseTo(-Math.PI / 2);
+      // Camera's up axis set to +Z (model's up → viewport top).
+      expect((camera.up as { z: number }).z).toBeCloseTo(1);
+    });
+
+    it('applies the Z-up → Y-up rotation when loading a GLB (camera passed)', async () => {
+      const THREE = require('three');
+      const camera = new THREE.PerspectiveCamera(50, 1, 1, 100);
+      const buf = readFixture('mini-model.glb');
+      const result = await loadGLB(buf, camera);
+
+      if (!result.ok || !result.mesh) {
+        throw new Error(`GLB load failed: ${result.error}`);
+      }
+      expect(result.ok).toBe(true);
+      const rotation = (result.mesh!.object as unknown as { rotation: { x: number } })
+        .rotation;
+      expect(rotation.x).toBeCloseTo(-Math.PI / 2);
+    });
+
+    it('documents the Z-up → Y-up rationale in the component source', () => {
       const source = readFileSync(SOURCE_PATH, 'utf-8');
-      expect(source).not.toContain('rotation.set(-Math.PI/2');
-      expect(source).not.toContain('rotation.set(-Math.PI / 2');
+      expect(source).toContain('Z-up');
+      expect(source).toContain('Y-up');
     });
   });
 
