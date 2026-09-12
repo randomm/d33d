@@ -651,6 +651,36 @@ def containment_threshold_pct() -> float:
         return DEFAULT_CONTAINMENT_THRESHOLD_PCT
 
 
+#: Decimal places vertex coordinates are rounded to before signature
+#: comparison — enough to survive floating-point noise from mesh I/O
+#: while still distinguishing genuinely different vertex positions.
+_CHANGED_FACES_DECIMALS = 6
+
+
+def _face_signature_rows(mesh: trimesh.Trimesh, decimals: int) -> np.ndarray:
+    """Per-face signature rows: each face's 3 vertices, rounded and taken
+    in ascending VERTEX-INDEX order (matching the original per-face
+    ``sorted(face)`` canonicalisation — sorted by index, not by
+    coordinate value), flattened to one row of 9 floats per face.
+
+    Vectorized: one bulk ``np.round`` over all vertices, one fancy-index
+    gather of per-face vertex blocks (``vertices[faces_sorted]``) — no
+    per-face Python loop.
+    """
+    faces_sorted = np.sort(mesh.faces, axis=1)
+    rounded_vertices = np.round(mesh.vertices, decimals)
+    blocks = rounded_vertices[faces_sorted]  # (n_faces, 3, 3)
+    return blocks.reshape(blocks.shape[0], -1)
+
+
+def _as_void_rows(rows: np.ndarray) -> np.ndarray:
+    """View each row of a 2D float array as one opaque structured record,
+    so ``np.isin``/``np.unique`` treat whole rows as atomic values for
+    fast set-membership without a per-row Python loop."""
+    contiguous = np.ascontiguousarray(rows)
+    return contiguous.view([("", contiguous.dtype)] * contiguous.shape[1]).reshape(-1)
+
+
 def changed_faces(pre_mesh: trimesh.Trimesh, post_mesh: trimesh.Trimesh) -> np.ndarray:
     """Return the indices (into ``post_mesh.faces``) of triangles that are
     new relative to ``pre_mesh``.
@@ -661,57 +691,31 @@ def changed_faces(pre_mesh: trimesh.Trimesh, post_mesh: trimesh.Trimesh) -> np.n
     noise from mesh I/O, rather than by face-index identity (which is not
     meaningful across two independently-generated meshes with different
     topology/vertex ordering).
+
+    Vectorized with numpy end to end (no per-face Python loop): vertices
+    are rounded in bulk, gathered per-face via fancy indexing, and
+    membership against the pre-mesh's signatures is computed with
+    ``np.isin`` over an opaque per-row view — behaviourally identical to
+    (not merely approximating) the original set-based comparison,
+    including the index-order canonicalisation.
     """
-    decimals = 6
+    decimals = _CHANGED_FACES_DECIMALS
 
-    def _face_signatures(
-        mesh: trimesh.Trimesh,
-    ) -> set[tuple[tuple[float, float, float], ...]]:
-        signatures = set()
-        for face in mesh.faces:
-            verts = tuple(
-                tuple(np.round(mesh.vertices[idx], decimals)) for idx in sorted(face)
-            )
-            signatures.add(verts)
-        return signatures
+    if len(post_mesh.faces) == 0:
+        return np.array([], dtype=np.int64)
 
-    pre_signatures = _face_signatures(pre_mesh)
+    pre_rows = _face_signature_rows(pre_mesh, decimals)
+    post_rows = _face_signature_rows(post_mesh, decimals)
 
-    changed_idx = []
-    for i, face in enumerate(post_mesh.faces):
-        verts = tuple(
-            tuple(np.round(post_mesh.vertices[idx], decimals)) for idx in sorted(face)
-        )
-        if verts not in pre_signatures:
-            changed_idx.append(i)
+    if len(pre_rows) == 0:
+        # Nothing in pre_mesh to match against — every post face changed.
+        return np.arange(len(post_rows), dtype=np.int64)
 
-    return np.array(changed_idx, dtype=np.int64)
+    pre_void = _as_void_rows(pre_rows)
+    post_void = _as_void_rows(post_rows)
 
-
-def _triangle_area(vertices: np.ndarray) -> float:
-    """Area of one triangle given its 3 vertices (shape (3, 3))."""
-    a, b, c = vertices
-    return float(np.linalg.norm(np.cross(b - a, c - a)) / 2.0)
-
-
-def _fraction_outside_bbox(
-    triangle_vertices: np.ndarray,
-    bbox_min: BBoxCorner,
-    bbox_max: BBoxCorner,
-) -> float:
-    """Fraction of a single triangle's centroid-sampled area outside the
-    axis-aligned box [bbox_min, bbox_max].
-
-    A triangle is treated as either fully inside or fully outside the
-    region, decided by its centroid — sufficient precision for the
-    containment gate's own tolerance band (a handful of percent) without
-    requiring a full triangle/box clipping implementation.
-    """
-    centroid = triangle_vertices.mean(axis=0)
-    lo = np.asarray(bbox_min, dtype=np.float64)
-    hi = np.asarray(bbox_max, dtype=np.float64)
-    inside = bool(np.all(centroid >= lo) and np.all(centroid <= hi))
-    return 0.0 if inside else 1.0
+    is_new = ~np.isin(post_void, pre_void)
+    return np.nonzero(is_new)[0].astype(np.int64)
 
 
 def spillover_fraction(
@@ -725,22 +729,38 @@ def spillover_fraction(
     Returns 0.0 when there are no changed faces (nothing to be outside).
     The denominator is the total area of the changed triangles only — the
     metric measures spillover of the EDIT, not of the whole mesh.
+
+    Vectorized with numpy end to end (no per-face Python loop): all
+    triangle areas are computed at once via cross products over
+    ``mesh.vertices[mesh.faces[changed_face_indices]]``, the bbox-
+    containment test (a triangle is inside/outside decided by its
+    centroid, matching the original per-triangle behaviour) is a single
+    broadcast comparison over all centroids, and the result is reduced
+    with numpy sums.
     """
     if len(changed_face_indices) == 0:
         return 0.0
 
-    total_area = 0.0
-    outside_area = 0.0
-    for idx in changed_face_indices:
-        face = mesh.faces[idx]
-        tri_vertices = mesh.vertices[face]
-        area = _triangle_area(tri_vertices)
-        total_area += area
-        outside_area += area * _fraction_outside_bbox(tri_vertices, bbox_min, bbox_max)
+    changed_idx = np.asarray(changed_face_indices, dtype=np.int64)
+    faces = mesh.faces[changed_idx]
+    tri_vertices = mesh.vertices[faces]  # (n_changed, 3, 3)
 
+    a = tri_vertices[:, 0, :]
+    b = tri_vertices[:, 1, :]
+    c = tri_vertices[:, 2, :]
+    cross = np.cross(b - a, c - a)
+    areas = np.linalg.norm(cross, axis=1) / 2.0
+
+    centroids = tri_vertices.mean(axis=1)
+    lo = np.asarray(bbox_min, dtype=np.float64)
+    hi = np.asarray(bbox_max, dtype=np.float64)
+    inside = np.all(centroids >= lo, axis=1) & np.all(centroids <= hi, axis=1)
+    outside_area = np.where(inside, 0.0, areas)
+
+    total_area = float(areas.sum())
     if total_area <= 0.0:
         return 0.0
-    return outside_area / total_area
+    return float(outside_area.sum() / total_area)
 
 
 def check_containment(

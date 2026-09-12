@@ -76,7 +76,7 @@ describe("ChatPanel", () => {
           content: "open up this spiral",
           selection: {
             thumbnail: "data:image/png;base64,AAA",
-            viewId: "view_05_iso",
+            viewId: "iso",
             moduleIds: ["curl_3", "curl_4"],
           },
         },
@@ -103,7 +103,7 @@ describe("ChatPanel", () => {
           content: "open up this spiral",
           selection: {
             thumbnail: "data:image/png;base64,AAA",
-            viewId: "view_05_iso",
+            viewId: "iso",
             moduleIds: ["curl_3"],
           },
         },
@@ -115,7 +115,7 @@ describe("ChatPanel", () => {
           content: "just this part",
           selection: {
             thumbnail: "data:image/png;base64,BBB",
-            viewId: "view_00_front",
+            viewId: "front",
             moduleIds: ["ear_wire"],
           },
         },
@@ -157,7 +157,7 @@ describe("ChatPanel", () => {
           content: "open up this spiral",
           selection: {
             thumbnail: "data:image/png;base64,AAA",
-            viewId: "view_05_iso",
+            viewId: "iso",
             moduleIds: ["curl_3"],
           },
         },

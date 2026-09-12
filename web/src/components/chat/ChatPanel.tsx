@@ -14,6 +14,7 @@
 
 import { useRef, useEffect, useState, type FormEvent } from "react";
 import type { RenderImage } from "../../App";
+import type { RegionEditViewId } from "../../lib/api";
 
 /**
  * Marker colour for region-selection marks (lasso, thumbnails).
@@ -33,7 +34,7 @@ export interface ChatMessageSelection {
   /** The composited red-marked view PNG, as a data URL or relative URL. */
   thumbnail: string;
   /** Which of the six views the selection was drawn on. */
-  viewId: string;
+  viewId: RegionEditViewId;
   /** Ranked module identifiers the selection resolved to (top-most first). */
   moduleIds: string[];
 }

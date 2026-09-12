@@ -161,6 +161,14 @@ vi.mock('three', async () => {
       return this;
     });
   };
+  const mockVector2 = class {
+    x: number;
+    y: number;
+    constructor(x = 0, y = 0) {
+      this.x = x;
+      this.y = y;
+    }
+  };
   const mockAmbientLight = class extends mockObject3D {};
   const mockDirectionalLight = class extends mockObject3D {};
   const mockBufferAttribute = class {
@@ -180,6 +188,7 @@ vi.mock('three', async () => {
     Raycaster: mockRaycaster,
     Color: mockColor,
     Box3: mockBox3,
+    Vector2: mockVector2,
     Vector3: mockVector3,
     AmbientLight: mockAmbientLight,
     DirectionalLight: mockDirectionalLight,

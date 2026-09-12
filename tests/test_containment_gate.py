@@ -253,3 +253,40 @@ def test_check_containment_no_changes_is_trivially_contained(
     result = pv.check_containment(base_mesh, base_mesh, bbox_min, bbox_max)
     assert result.ok is True
     assert result.spillover_pct == pytest.approx(0.0, abs=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# Vectorized-performance regression (six-lens review findings #1/#2):
+# changed_faces() and spillover_fraction() must be numpy-vectorized, not a
+# pure-Python per-face loop, so they stay usable up to MAX_FACES
+# (5,000,000). A large mesh proves the vectorized path completes quickly;
+# the fixture-based tests above prove behavioural equivalence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_changed_faces_and_spillover_fraction_fast_on_large_mesh() -> None:
+    """On an ~82k-face mesh, both functions must complete in well under a
+    second each. The pure-Python per-face loop this replaces takes on the
+    order of 1-2 seconds combined at this size (measured directly against
+    the pre-vectorization implementation); a vectorized numpy
+    implementation completes in a small fraction of that."""
+    import time
+
+    pre_mesh = trimesh.creation.icosphere(subdivisions=6)
+    post_mesh = trimesh.creation.icosphere(subdivisions=6)
+    post_mesh.apply_translation((0.001, 0.0, 0.0))
+
+    t0 = time.perf_counter()
+    changed = pv.changed_faces(pre_mesh, post_mesh)
+    t1 = time.perf_counter()
+    assert (t1 - t0) < 0.5, f"changed_faces took {t1 - t0:.3f}s, expected vectorized speed"
+
+    fraction = pv.spillover_fraction(
+        post_mesh, changed, (-100.0, -100.0, -100.0), (100.0, 100.0, 100.0)
+    )
+    t2 = time.perf_counter()
+    assert (t2 - t1) < 0.5, (
+        f"spillover_fraction took {t2 - t1:.3f}s, expected vectorized speed"
+    )
+    assert 0.0 <= fraction <= 1.0

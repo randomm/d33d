@@ -906,6 +906,58 @@ def test_module_registry_too_many_call_sites_returns_413(app):
     assert r.status_code == 413
 
 
+def test_module_registry_infra_failure_returns_classified_container_error(app):
+    """Regression: six-lens review finding #3. Any failure other than
+    TooManyCallSitesError inside the threaded build (Docker daemon
+    unreachable, docker binary missing, or the RuntimeError
+    _export_scene_isolating_bad_meshes raises when even the per-mesh-
+    isolated export fails) must not escape as a bare unclassified 500.
+    It must be caught, logged with context, and surfaced as a 502 with a
+    JSON body carrying error_class='container_error' (the closed
+    ErrorClass enum's infra-failure value) — never the raw exception
+    text."""
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise RuntimeError("scene export failed even after isolating every mesh: boom")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error_class"] == "container_error"
+    assert "boom" not in body["error"]
+
+
+def test_module_registry_missing_docker_binary_returns_classified_container_error(app):
+    """FileNotFoundError (docker binary missing / daemon unreachable via
+    a failed subprocess spawn) is also caught and classified, not just
+    RuntimeError."""
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error_class"] == "container_error"
+    assert "docker" not in body["error"].lower()
+
+
 def test_module_registry_rejects_oversized_scad_source(app):
     """scad_source has a max_length bound matching the other body-
     accepting routes' size caps in this file — defense-in-depth

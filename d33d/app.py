@@ -63,8 +63,10 @@ import asyncio
 import base64
 import binascii
 import json
+import logging
 import os
 import re
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -95,6 +97,8 @@ from d33d.module_registry import (
 from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
+
+logger = logging.getLogger(__name__)
 
 #: Stub SPA page served at ``/`` until issue #6 ships the real build.
 #: Static HTML — not a React build, per the ticket.
@@ -686,6 +690,29 @@ def create_app(
                     f"{e.count} call-sites exceeds the {MAX_CALL_SITES} limit "
                     "per registry build"
                 ),
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            # Bounded infra-error set around the threaded build: Docker
+            # daemon unreachable / docker binary missing (OSError, e.g.
+            # FileNotFoundError, and subprocess.SubprocessError), or the
+            # RuntimeError _export_scene_isolating_bad_meshes raises when
+            # even the per-mesh-isolated scene export fails. None of
+            # these are a diagnosable validation failure of the request
+            # itself, so they must not escape as a bare unclassified 500
+            # (bypassing the project's closed ErrorClass discipline) or
+            # leak raw exception text to the client.
+            logger.exception(
+                "module-registry build failed for project_id=%s "
+                "(scad_source length=%d)",
+                project_id,
+                len(body.scad_source),
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "module registry build failed",
+                    "error_class": "container_error",
+                },
             )
 
         if result.glb_bytes is None:

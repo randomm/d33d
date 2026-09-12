@@ -452,7 +452,7 @@ export function resolveLassoSelection(
     // Raycaster.setFromCamera.
     const ndcX = (sample.x / viewportWidth) * 2 - 1;
     const ndcY = -(sample.y / viewportHeight) * 2 + 1;
-    raycaster.setFromCamera({ x: ndcX, y: ndcY } as THREE.Vector2, camera);
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
 
     const hits = raycaster.intersectObjects([moduleGroup], true);
     if (hits.length === 0) continue;
