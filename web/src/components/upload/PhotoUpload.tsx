@@ -20,8 +20,31 @@ const ALLOWED_TYPES = ["image/png", "image/jpeg"];
 interface PhotoUploadProps {
   /** Optional project ID — when absent, the component is in "no project yet" mode. */
   projectId?: number;
-  onUploaded: (photoPath: string) => void;
+  /**
+   * Called once the photo is stored server-side. `width`/`height` are the
+   * image's natural pixel dimensions (read client-side via `Image.onload`)
+   * so callers — e.g. DimensionCanvas — can map click coordinates back to
+   * the actual photo instead of assuming a fixed size.
+   */
+  onUploaded: (photoPath: string, width: number, height: number) => void;
   onError?: (message: string) => void;
+}
+
+/** Read a File's natural pixel dimensions by loading it into an <img>. */
+function readImageDimensions(file: File): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new window.Image();
+    img.onload = () => {
+      resolve({ width: img.naturalWidth, height: img.naturalHeight });
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to read image dimensions"));
+    };
+    img.src = url;
+  });
 }
 
 type UploadState = "idle" | "uploading" | "success" | "error";
@@ -81,9 +104,10 @@ export function PhotoUpload({
         throw new Error("Upload response missing source_photo_path");
       }
       const data = parsed as { source_photo_path: string };
+      const { width, height } = await readImageDimensions(file);
       setState("success");
       setPreviewUrl(URL.createObjectURL(file));
-      onUploaded(data.source_photo_path);
+      onUploaded(data.source_photo_path, width, height);
     } catch (e) {
       setState("error");
       const msg = e instanceof Error ? e.message : "Upload failed";

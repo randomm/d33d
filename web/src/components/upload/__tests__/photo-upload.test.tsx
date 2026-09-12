@@ -10,6 +10,37 @@ import { PhotoUpload } from "../PhotoUpload";
 const mockFetch = vi.fn();
 vi.stubGlobal("fetch", mockFetch);
 
+// jsdom's Image doesn't decode real pixels from a fake blob URL, so it never
+// fires onload with meaningful naturalWidth/naturalHeight. Stub the global
+// Image constructor to fire onload synchronously-ish with fixed test
+// dimensions, matching the "read natural dimensions client-side" contract
+// PhotoUpload relies on.
+const TEST_IMAGE_WIDTH = 1200;
+const TEST_IMAGE_HEIGHT = 900;
+
+class FakeImage {
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  naturalWidth = TEST_IMAGE_WIDTH;
+  naturalHeight = TEST_IMAGE_HEIGHT;
+  private _src = "";
+  set src(value: string) {
+    this._src = value;
+    // Fire onload asynchronously, mirroring real <img> loading behavior.
+    queueMicrotask(() => this.onload?.());
+  }
+  get src() {
+    return this._src;
+  }
+}
+
+vi.stubGlobal("Image", FakeImage);
+if (!URL.revokeObjectURL) {
+  URL.revokeObjectURL = vi.fn();
+} else {
+  vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+}
+
 const projectId = 1;
 const onUploaded = vi.fn();
 const onError = vi.fn();
@@ -74,7 +105,11 @@ describe("PhotoUpload", () => {
       expect(mockFetch).toHaveBeenCalled();
     }, { timeout: 3000 });
     await waitFor(() => {
-      expect(onUploaded).toHaveBeenCalledWith("/repo/photos/test.png");
+      expect(onUploaded).toHaveBeenCalledWith(
+        "/repo/photos/test.png",
+        TEST_IMAGE_WIDTH,
+        TEST_IMAGE_HEIGHT,
+      );
     }, { timeout: 3000 });
   });
 
@@ -112,6 +147,29 @@ describe("PhotoUpload", () => {
       );
     });
     expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("reports the uploaded image's real natural dimensions, not a hardcoded size", async () => {
+    const file = makeFile("image/png", 1024, "test.png");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ source_photo_path: "/repo/photos/test.png" }),
+    });
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onUploaded).toHaveBeenCalled();
+    });
+
+    const [, width, height] = onUploaded.mock.calls[0];
+    expect(width).toBe(TEST_IMAGE_WIDTH);
+    expect(height).toBe(TEST_IMAGE_HEIGHT);
+    expect(width).not.toBe(800);
+    expect(height).not.toBe(600);
   });
 
   it("treats a 200 response where source_photo_path is not a string as an error", async () => {

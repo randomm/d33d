@@ -45,6 +45,9 @@ export default function App({ renders = [], client }: AppProps) {
   const [pinnedParams, setPinnedParams] = useState<PinnedParam[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
+  const [photoDimensions, setPhotoDimensions] = useState<{ width: number; height: number } | null>(
+    null,
+  );
   const [streamError, setStreamError] = useState<string | null>(null);
 
   // Create the (single, default) project on mount.
@@ -86,42 +89,50 @@ export default function App({ renders = [], client }: AppProps) {
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
 
-      void apiClient.streamEvents(projectId, {
-        onToken: (text) => {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + text } : m,
-            ),
-          );
-        },
-        // Progress events (render pipeline steps) will feed the viewer/
-        // validation pane once the design-loop-to-SSE wiring (a future
-        // ticket per issue #23) produces actual model artifacts. For now
-        // there is no render/model data flowing through the app to attach
-        // this to, so progress is a no-op placeholder.
-        onProgress: () => {},
-        onDone: () => {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
-          );
-        },
-        onError: (data) => {
-          setMessages((prev) =>
-            prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
-          );
-          setStreamError(typeof data.message === "string" ? data.message : "Stream error");
-        },
-      });
+      void apiClient
+        .streamEvents(projectId, {
+          onToken: (text) => {
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === assistantId ? { ...m, content: m.content + text } : m,
+              ),
+            );
+          },
+          // Progress events (render pipeline steps) will feed the viewer/
+          // validation pane once the design-loop-to-SSE wiring (a future
+          // ticket per issue #23) produces actual model artifacts. For now
+          // there is no render/model data flowing through the app to attach
+          // this to, so progress is a no-op placeholder.
+          onProgress: () => {},
+          onDone: () => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+            );
+          },
+          onError: (data) => {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+            );
+            setStreamError(typeof data.message === "string" ? data.message : "Stream error");
+          },
+        })
+        // streamEvents rethrows after onError on a mid-stream failure so
+        // callers that care can observe it; here onError already updated
+        // the user-facing error state, so swallow the rejection to avoid
+        // it surfacing as an unhandled promise rejection in the browser.
+        .catch(() => {});
     },
     [projectId, apiClient],
   );
 
-  const handlePhotoUploaded = useCallback((photoPath: string) => {
+  const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
     // Photo upload success — the photo path is now stored server-side.
     // The chat panel picks up the new photo context on next interaction.
     // Also feed the DimensionCanvas so the operator can draw a scale
-    // anchor against the uploaded reference photo.
+    // anchor against the uploaded reference photo, using its real pixel
+    // dimensions (not a hardcoded guess) for coordinate mapping.
     setPhotoSrc(photoPath);
+    setPhotoDimensions({ width, height });
   }, []);
 
   const togglePinParam = useCallback((name: string, value: number) => {
@@ -145,11 +156,11 @@ export default function App({ renders = [], client }: AppProps) {
           renders={renders}
         />
         <PhotoUpload projectId={projectId ?? undefined} onUploaded={handlePhotoUploaded} onError={setStreamError} />
-        {photoSrc && (
+        {photoSrc && photoDimensions && (
           <DimensionCanvas
             photoSrc={photoSrc}
-            photoWidth={800}
-            photoHeight={600}
+            photoWidth={photoDimensions.width}
+            photoHeight={photoDimensions.height}
           />
         )}
         <PinnedParamStrip

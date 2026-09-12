@@ -39,10 +39,41 @@ vi.mock("../viewer/ModelViewer", () => ({
 // the right photoSrc once a photo is uploaded, so a lightweight mock is the
 // right boundary.
 vi.mock("../canvas/DimensionCanvas", () => ({
-  DimensionCanvas: (props: { photoSrc: string }) => (
-    <div data-testid="dimension-canvas-container" data-photo-src={props.photoSrc} />
+  DimensionCanvas: (props: { photoSrc: string; photoWidth: number; photoHeight: number }) => (
+    <div
+      data-testid="dimension-canvas-container"
+      data-photo-src={props.photoSrc}
+      data-photo-width={props.photoWidth}
+      data-photo-height={props.photoHeight}
+    />
   ),
 }));
+
+// jsdom's Image never fires onload with real pixel data from a fake blob URL
+// (same limitation as photo-upload.test.tsx) — stub it so PhotoUpload's
+// dimension-reading step resolves deterministically in these App-level tests.
+const TEST_IMAGE_WIDTH = 1024;
+const TEST_IMAGE_HEIGHT = 768;
+
+class FakeImage {
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  naturalWidth = TEST_IMAGE_WIDTH;
+  naturalHeight = TEST_IMAGE_HEIGHT;
+  private _src = "";
+  set src(value: string) {
+    this._src = value;
+    queueMicrotask(() => this.onload?.());
+  }
+  get src() {
+    return this._src;
+  }
+}
+
+vi.stubGlobal("Image", FakeImage);
+if (!URL.revokeObjectURL) {
+  URL.revokeObjectURL = vi.fn();
+}
 
 const PROJECT: Project = {
   id: 7,
@@ -280,5 +311,55 @@ describe("App photo upload wiring", () => {
     await waitFor(() => {
       expect(screen.getByTestId("dimension-canvas-container")).toBeTruthy();
     });
+    const el = screen.getByTestId("dimension-canvas-container");
+    expect(el.getAttribute("data-photo-width")).toBe(String(TEST_IMAGE_WIDTH));
+    expect(el.getAttribute("data-photo-height")).toBe(String(TEST_IMAGE_HEIGHT));
+    // Regression: DimensionCanvas must receive the photo's real dimensions,
+    // not the previously-hardcoded 800x600 literals.
+    expect(el.getAttribute("data-photo-width")).not.toBe("800");
+    expect(el.getAttribute("data-photo-height")).not.toBe("600");
+  });
+});
+
+describe("App streamEvents rejection handling", () => {
+  it("does not surface an unhandled promise rejection when streamEvents rejects after onError", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    // Mirrors the real ApiClient.streamEvents contract: on a mid-stream
+    // failure it invokes onError with the user-facing message, then
+    // rethrows so callers that care can still observe the rejection.
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onError?.({ message: "stream interrupted: boom" });
+      throw new Error("stream interrupted: boom");
+    });
+
+    const unhandledRejections: unknown[] = [];
+    const onUnhandledRejection = (e: PromiseRejectionEvent) => {
+      unhandledRejections.push(e.reason);
+    };
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
+
+    try {
+      render(<App client={client} />);
+      await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+      // The onError path still updates UI state as expected.
+      await waitFor(() => {
+        expect(screen.getByTestId("app-error").textContent).toContain(
+          "stream interrupted",
+        );
+      });
+
+      // Give the rejected promise's microtask queue a chance to fire an
+      // unhandledrejection event if the App failed to catch it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(unhandledRejections).toHaveLength(0);
+    } finally {
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
+    }
   });
 });
