@@ -85,16 +85,24 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
 
 
 @pytest.fixture
-def app(app_paths: dict[str, Path]):
+def app(app_paths: dict[str, Path], tmp_path: Path):
     """A ``create_app`` instance pointing at the isolated paths.
 
     The caller must run the lifespan (``async with app.router.lifespan_context(app)``)
     so the shared ``Connection`` and ``CredentialStore`` are wired.
+
+    ``spa_dist_dir`` is pinned to a guaranteed-nonexistent path under
+    ``tmp_path`` so this test's stub-page assertions are isolated from
+    whatever may or may not exist at the real ``web/dist`` on the
+    machine running the suite (e.g. after a local ``npm run build`` —
+    see ``tests/test_spa_static.py`` for the dedicated dist-serving
+    tests, which set ``spa_dist_dir`` explicitly).
     """
     return create_app(
         app_paths["db"],
         master_key_path=app_paths["key"],
         catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
     )
 
 

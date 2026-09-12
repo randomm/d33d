@@ -42,6 +42,7 @@ from typing import Any
 import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from d33d import db
 from d33d.config import ModelCatalogueLoader, hot_reload
@@ -171,6 +172,13 @@ def _find_literal_provider_keys(doc: dict[str, Any]) -> list[str]:
     return bad
 
 
+#: Vite's build output directory (``web/dist``), relative to the repo
+#: root. Mounted at ``/`` when it exists (production/after ``npm run
+#: build``); falls back to :data:`STUB_HTML` when it does not (CI, tests,
+#: or a fresh checkout before the SPA has been built) so app startup never
+#: crashes on a missing directory.
+_SPA_DIST_DIR: Path = Path(__file__).resolve().parent.parent / "web" / "dist"
+
 STUB_HTML: str = """<!doctype html>
 <html>
   <head>
@@ -267,6 +275,7 @@ def create_app(
     *,
     master_key_path: str | Path | None = None,
     catalogue_path: str | Path | None = None,
+    spa_dist_dir: str | Path | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -281,6 +290,12 @@ def create_app(
       ``catalogue_path``: the ``models.yaml`` file the app serves/edits.
         Defaults to ``<data_dir>/models.yaml``. Created on first save; the
         app starts with an empty in-memory catalogue.
+      ``spa_dist_dir``: directory containing the built SPA (Vite's
+        ``web/dist`` output: ``index.html`` + hashed assets). Defaults to
+        ``<repo root>/web/dist``. When the directory does not exist (CI,
+        tests, or a fresh checkout before ``npm run build`` has run), the
+        app falls back to :data:`STUB_HTML` at ``/`` instead of mounting
+        static files — startup never crashes on a missing dist dir.
     """
     db_path_p = Path(db_path)
     data_dir = (
@@ -295,6 +310,9 @@ def create_app(
         Path(catalogue_path)
         if catalogue_path is not None
         else _default_catalogue_path(data_dir)
+    )
+    state_spa_dist_dir = (
+        Path(spa_dist_dir) if spa_dist_dir is not None else _SPA_DIST_DIR
     )
 
     app = FastAPI(lifespan=_lifespan)
@@ -314,10 +332,16 @@ def create_app(
     # (no active streams until a future ticket wires the design loop).
     app.state.event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] = {}
 
-    @app.get("/", response_class=HTMLResponse)
-    async def stub_page() -> HTMLResponse:
-        """Stub SPA page — static HTML until issue #6's build exists."""
-        return HTMLResponse(content=STUB_HTML)
+    spa_index = state_spa_dist_dir / "index.html"
+    serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
+
+    if not serve_spa_build:
+
+        @app.get("/", response_class=HTMLResponse)
+        async def stub_page() -> HTMLResponse:
+            """Stub SPA page — served when ``web/dist`` has not been built
+            yet (CI, tests, fresh checkout). Static HTML fallback."""
+            return HTMLResponse(content=STUB_HTML)
 
     @app.get("/api/config/models")
     async def get_models() -> dict[str, Any]:
@@ -458,6 +482,21 @@ def create_app(
                 "provider": res.entry.provider,
                 "via_fallback": res.via_fallback,
             }
+        )
+
+    # Static SPA serving — mounted LAST, at the root path. All ``/api/*``
+    # routers are registered above; Starlette's Router matches routes in
+    # registration order and returns on the first full match, so this
+    # catch-all mount can never shadow an already-registered API route. It
+    # only serves paths none of the API routers claimed (verified: see
+    # tests/test_spa_static.py). ``html=True`` makes ``StaticFiles`` serve
+    # ``index.html`` for ``/`` and any unmatched sub-path, which is the SPA
+    # client-side-routing fallback.
+    if serve_spa_build:
+        app.mount(
+            "/",
+            StaticFiles(directory=state_spa_dist_dir, html=True),
+            name="spa",
         )
 
     return app

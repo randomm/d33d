@@ -250,6 +250,33 @@ export class ApiClient {
     );
   }
 
+  // -- 3MF export (follow-up wiring) ---------------------------------------------
+  //
+  // NOTE: The backend 3MF-generation endpoint does NOT exist yet. The actual
+  // 3MF pipeline lives in d33d/print_validation.py (Python, ticket #3) and is
+  // not exposed via HTTP in this ticket's scope. This method is the client-side
+  // plumbing that the Export3MF component uses; it will return a 404 until the
+  // backend route is added. The component's download-trigger UI and API-call
+  // plumbing are wired and tested; actual 3MF generation is a follow-up.
+
+  /**
+   * Download a 3MF file for the project.
+   *
+   * Follow-up wiring: the backend route ``GET /api/projects/{id}/model.3mf``
+   * does not yet exist (3MF is produced by ``d33d/print_validation.py`` but
+   * not exposed via HTTP). This method is the client-side plumbing — the
+   * Export3MF component calls it to fetch the 3MF blob and trigger a browser
+   * download. It will return a 404 until the backend endpoint is added.
+   */
+  async downloadModel3MF(projectId: number): Promise<Blob> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${projectId}/model.3mf`,
+      { method: "GET" },
+    );
+    if (!res.ok) await throwFor(res);
+    return res.blob();
+  }
+
   // -- SSE streaming ------------------------------------------------------------
 
   /**
