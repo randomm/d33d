@@ -49,7 +49,14 @@ vi.mock("../viewer/ModelViewer", async () => {
       props.onReady?.({
         scene: {} as never,
         camera: {} as never,
-        renderer: { domElement: document.createElement("canvas") } as never,
+        renderer: {
+          domElement: document.createElement("canvas"),
+          getSize: (target: { x: number; y: number }) => {
+            target.x = 600;
+            target.y = 400;
+            return target;
+          },
+        } as never,
         controls: {} as never,
         raycaster: {} as never,
       });

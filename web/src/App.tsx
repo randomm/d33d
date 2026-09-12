@@ -16,7 +16,7 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { Object3D } from "three";
+import { Vector2, type Object3D } from "three";
 import { ChatPanel, type ChatMessage } from "./components/chat/ChatPanel";
 import { PhotoUpload } from "./components/upload/PhotoUpload";
 import { PinnedParamStrip, type PinnedParam } from "./components/strip/PinnedParamStrip";
@@ -99,10 +99,18 @@ export default function App({ renders = [], client }: AppProps) {
       }
 
       const canvas = handle.renderer.domElement;
+      // CSS-pixel viewport size, NOT canvas.width/canvas.height (the
+      // WebGL drawing-buffer size, which renderer.setPixelRatio scales by
+      // devicePixelRatio). ViewportLassoOverlay's points come from
+      // getBoundingClientRect() — always CSS pixels — so the NDC
+      // conversion in resolveLassoSelection must divide by the same
+      // CSS-pixel dimensions or every raycast mis-registers on any
+      // DPR!==1 display.
+      const cssSize = handle.renderer.getSize(new Vector2());
       const { ranked, primary } = resolveLassoSelection(
         event.points,
-        canvas.width,
-        canvas.height,
+        cssSize.x,
+        cssSize.y,
         handle.camera,
         handle.raycaster,
         moduleGroup,
