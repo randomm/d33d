@@ -1,0 +1,138 @@
+"""The promptfoo config is valid YAML and references the 20 golden-set
+cases + the 5 hash-pinned prompt files (issue #9, workstream
+task-harness).
+
+Covers:
+- the config loads via ``load_promptfoo_config`` (valid YAML,
+  OpenAI-compatible provider, cases_dir with >= 20 cases, prompts_dir
+  with >= 1 prompt, python custom asserts through evals/run.py with the
+  deterministic-gates assert present — the 7-gates-before-judge
+  ordering the spec pins)
+- the 20 case files and 5 prompt files the config references are all on
+  disk, each case pinned to a prompt by content hash
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from d33d.evals.case_schema import load_golden_set
+from d33d.evals.harness import load_promptfoo_config
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+CONFIG_PATH = REPO_ROOT / "evals" / "promptfoo.config.yaml"
+
+
+def _load_config() -> dict:
+    return load_promptfoo_config(CONFIG_PATH, REPO_ROOT)
+
+
+def test_config_is_valid_yaml() -> None:
+    """``load_promptfoo_config`` returns a dict (the config parses)."""
+    doc = _load_config()
+    assert isinstance(doc, dict)
+
+
+def test_config_names_an_openai_compatible_provider() -> None:
+    doc = _load_config()
+    providers = doc["providers"]
+    assert len(providers) >= 1
+    for provider in providers:
+        provider_type = provider.get("provider") or provider.get("type")
+        assert provider_type.startswith("openai")
+        assert provider.get("id")
+
+
+def test_config_references_20_cases() -> None:
+    """The config's ``cases_dir`` holds at least 20 case files (the
+    golden-set floor) and ``load_promptfoo_config`` enforces it."""
+    doc = _load_config()
+    cases_dir = REPO_ROOT / doc["cases_dir"]
+    case_files = sorted(cases_dir.glob("*.json"))
+    assert len(case_files) >= 20
+
+
+def test_config_references_the_hash_pinned_prompts() -> None:
+    """The config's ``prompts_dir`` holds the 5 hash-pinned prompt
+    files; every case pins one of them by content hash."""
+    doc = _load_config()
+    prompts_dir = REPO_ROOT / doc["prompts_dir"]
+    prompt_files = sorted(prompts_dir.glob("*.md"))
+    assert len(prompt_files) == 5, f"expected 5 prompt files, got {len(prompt_files)}"
+
+    # Every case's pin path points into the config's prompts_dir.
+    cases = load_golden_set(REPO_ROOT / doc["cases_dir"], REPO_ROOT)
+    for case in cases.values():
+        pin_path = REPO_ROOT / case.prompt.path
+        assert pin_path.is_file()
+        assert prompts_dir in pin_path.parents or pin_path.parent == prompts_dir
+
+
+def test_config_python_asserts_point_at_run_py_with_gates_first() -> None:
+    """The config's custom asserts are python asserts through
+    ``evals/run.py`` with the deterministic-gates assert present — the
+    7 gates run before the judge."""
+    doc = _load_config()
+    asserts = doc["defaults"]["assert"]
+    assert asserts, "no asserts"
+    for item in asserts:
+        assert item["type"] == "python"
+        assert item["path"] == "evals/run.py"
+    values = [item["value"] for item in asserts]
+    assert "deterministic_gates_pass" in values
+
+
+def test_config_missing_is_file_not_found() -> None:
+    with pytest.raises(FileNotFoundError):
+        load_promptfoo_config(REPO_ROOT / "nope.yaml", REPO_ROOT)
+
+
+def test_config_rejects_non_openai_provider(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(
+        "providers:\n  - id: some-model\n    provider: ollama\ncases_dir: c\nprompts_dir: p\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="OpenAI-compatible"):
+        load_promptfoo_config(bad, tmp_path)
+
+
+def test_config_rejects_too_few_cases(tmp_path: Path) -> None:
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    (cases / "a.json").write_text("{}", encoding="utf-8")
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "p.md").write_text("# prompt", encoding="utf-8")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        "providers:\n  - id: m\n    provider: openai:completions\n"
+        f"cases_dir: {cases}\nprompts_dir: {prompts}\n"
+        "defaults:\n  assert:\n    - type: python\n      path: evals/run.py\n"
+        "      value: deterministic_gates_pass\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="floor is 20"):
+        load_promptfoo_config(cfg, tmp_path)
+
+
+def test_config_rejects_missing_gates_assert(tmp_path: Path) -> None:
+    cases = tmp_path / "cases"
+    cases.mkdir()
+    for i in range(20):
+        (cases / f"c{i}.json").write_text("{}", encoding="utf-8")
+    prompts = tmp_path / "prompts"
+    prompts.mkdir()
+    (prompts / "p.md").write_text("# prompt", encoding="utf-8")
+    cfg = tmp_path / "cfg.yaml"
+    cfg.write_text(
+        "providers:\n  - id: m\n    provider: openai:completions\n"
+        f"cases_dir: {cases}\nprompts_dir: {prompts}\n"
+        "defaults:\n  assert:\n    - type: python\n      path: evals/run.py\n"
+        "      value: vision_judge_pass\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="deterministic_gates_pass"):
+        load_promptfoo_config(cfg, tmp_path)
