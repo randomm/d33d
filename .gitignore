@@ -26,3 +26,6 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# pi-rukas driver state (machine-local, never committed)
+.pi/work-state/
