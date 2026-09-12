@@ -89,6 +89,10 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
+from d33d.evals.failure_capture import (
+    default_failures_path,
+    default_run_design_loop_hook,
+)
 from d33d.module_registry import (
     MAX_CALL_SITES,
     RegistryBuildResult,
@@ -540,6 +544,16 @@ def create_app(
     # the real d33d.design_loop.run_design_loop closure when the
     # design-loop-to-SSE pipeline lands.
     app.state.run_design_loop = None
+    # The failures.jsonl path the production design-loop hook appends to
+    # (issue #9, workstream task-failures). Defaults to the repo-relative
+    # ``evals/failures.jsonl``; overridable via env var for tests / runs
+    # that want a different sink. The hook fires only on an EXHAUSTED
+    # loop (a pass appends nothing), and the eval harness's assert path
+    # never calls this hook (structural exclusion — see
+    # d33d/evals/failure_capture.py).
+    app.state.failures_jsonl_path = Path(
+        os.environ.get("D33D_FAILURES_JSONL") or default_failures_path()
+    )
 
     spa_index = state_spa_dist_dir / "index.html"
     serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
@@ -619,6 +633,19 @@ def create_app(
     app.include_router(create_projects_router())
     app.include_router(create_streaming_router())
     app.include_router(create_versions_router())
+
+    # Production design-loop wiring (issue #9, workstream task-failures):
+    # ``app.state.run_design_loop`` is the real ``d33d.design_loop.
+    # run_design_loop`` wrapped in the failures.jsonl hook. The hook
+    # fires ONLY on an exhausted loop and ONLY here — the promptfoo
+    # assert path (issue #9, task-harness) shells into the render worker
+    # directly and never calls this closure, so eval-run failures are
+    # structurally excluded from the file (no ``is_eval`` flag).
+    # A test that needs a stub loop (or no hook) overwrites
+    # ``app.state.run_design_loop`` after ``create_app`` returns.
+    app.state.run_design_loop = default_run_design_loop_hook(
+        path=app.state.failures_jsonl_path
+    )
 
     @app.get("/api/settings/credentials")
     async def list_credentials() -> list[dict[str, str]]:

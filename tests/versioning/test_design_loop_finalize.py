@@ -119,6 +119,10 @@ def test_finalize_without_injected_loop_is_503(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
+        # ``create_app`` now wires the production hook (issue #9) into
+        # ``app.state.run_design_loop``; the 503 path requires the seam
+        # to be explicitly unset.
+        app_with_versions.state.run_design_loop = None
         return await client.post(f"/api/projects/{pid}/finalize", json={})
 
     r = run_async(app_with_versions, _call)
