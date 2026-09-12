@@ -14,3 +14,17 @@ jobs:
           python-version: "3.12"
       - run: pip install -e .
       - run: pytest -m "not slow"
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm ci
+        working-directory: web
+      - run: npm run type-check
+        working-directory: web
+      - run: npm test
+        working-directory: web
