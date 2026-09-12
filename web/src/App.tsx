@@ -36,6 +36,14 @@ import { compositeMarkedPng } from "./lib/markedPng";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 
+// ModelViewer and ViewportLassoOverlay each default independently to
+// 600x400 when given no explicit size — that only lines up by
+// coincidence. Pass one shared size to both so the lasso's click
+// coordinate space can never drift from the canvas the raycast (and
+// compositeMarkedPng) actually read from.
+const VIEWER_WIDTH = 600;
+const VIEWER_HEIGHT = 400;
+
 export interface RenderImage {
   /** view filename, e.g. "view_00_front.png" */
   filename: string;
@@ -307,11 +315,15 @@ export default function App({ renders = [], client }: AppProps) {
           <ModelViewer
             data={moduleFixtureData}
             format="glb"
+            width={VIEWER_WIDTH}
+            height={VIEWER_HEIGHT}
             onReady={handleViewerReady}
             onLoaded={handleViewerLoaded}
           />
           <ViewportLassoOverlay
             viewId="front"
+            width={VIEWER_WIDTH}
+            height={VIEWER_HEIGHT}
             onLassoCompleted={handleLassoCompleted}
             disabled={moduleGroup === null}
           />
