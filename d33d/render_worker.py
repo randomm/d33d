@@ -224,6 +224,12 @@ class RenderParams:
 
     ``defines`` is a flat string map passed as ``-Dname=value``; ``{}``
     means no defines.
+
+    Every instance is range-validated in ``__post_init__`` regardless of
+    construction path, so a ``RenderParams`` object can never carry
+    out-of-bounds resource values into ``build_docker_argv`` — not via
+    ``from_dict``, not via a direct constructor call, not via any future
+    code path. Out-of-range or malformed values raise ``ValueError``.
     """
 
     defines: dict[str, str] = field(default_factory=dict)
@@ -232,29 +238,32 @@ class RenderParams:
     cpus: str = DEFAULT_CPU_LIMIT
     pids_limit: int = DEFAULT_PID_LIMIT
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "timeout_s", _validate_timeout_s(self.timeout_s))
+        object.__setattr__(
+            self, "memory_limit", _validate_memory_limit(self.memory_limit)
+        )
+        object.__setattr__(self, "cpus", _validate_cpus(self.cpus))
+        object.__setattr__(self, "pids_limit", _validate_pids_limit(self.pids_limit))
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RenderParams:
         """Parse a params dict; unknown keys are ignored, missing keys
         fall back to the module defaults.
 
         ``timeout_s``, ``memory_limit``, ``cpus`` and ``pids_limit`` are
-        range-validated against the module bounds (see ``MIN_*``/``MAX_*``
-        constants) so a malicious or malformed params.json can never raise
-        the resource ceilings above the DoS guard's intent; out-of-range
-        or malformed values raise ``ValueError``.
+        range-validated (via ``__post_init__``) against the module bounds
+        (see ``MIN_*``/``MAX_*`` constants) so a malicious or malformed
+        params.json can never raise the resource ceilings above the DoS
+        guard's intent; out-of-range or malformed values raise
+        ``ValueError``.
         """
         return cls(
             defines={str(k): str(v) for k, v in (data.get("defines") or {}).items()},
-            timeout_s=_validate_timeout_s(
-                int(data.get("timeout_s", DEFAULT_TIMEOUT_S))
-            ),
-            memory_limit=_validate_memory_limit(
-                str(data.get("memory_limit", DEFAULT_MEMORY_LIMIT))
-            ),
-            cpus=_validate_cpus(str(data.get("cpus", DEFAULT_CPU_LIMIT))),
-            pids_limit=_validate_pids_limit(
-                int(data.get("pids_limit", DEFAULT_PID_LIMIT))
-            ),
+            timeout_s=int(data.get("timeout_s", DEFAULT_TIMEOUT_S)),
+            memory_limit=str(data.get("memory_limit", DEFAULT_MEMORY_LIMIT)),
+            cpus=str(data.get("cpus", DEFAULT_CPU_LIMIT)),
+            pids_limit=int(data.get("pids_limit", DEFAULT_PID_LIMIT)),
         )
 
 

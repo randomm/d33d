@@ -135,3 +135,51 @@ def test_build_docker_argv_rejects_out_of_range_dict_params() -> None:
     # calling it directly with a dict instead of a RenderParams instance.
     with pytest.raises(ValueError):
         rw.build_docker_argv("image", "render-deadbeef", params={"cpus": "1000"})
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"memory_limit": "999g"},
+        {"cpus": "1000"},
+        {"pids_limit": 999999},
+        {"timeout_s": 100000},
+        {"memory_limit": "1m"},
+        {"cpus": "0"},
+        {"pids_limit": 0},
+        {"timeout_s": 0},
+    ],
+)
+def test_direct_construction_rejects_out_of_range_params(kwargs: dict) -> None:
+    # Validation must live in __post_init__, not only in from_dict — a
+    # direct RenderParams(...) call with out-of-bounds values must also
+    # raise, closing the bypass that build_docker_argv(params=<instance>)
+    # would otherwise expose.
+    with pytest.raises(ValueError):
+        rw.RenderParams(**kwargs)
+
+
+def test_direct_construction_accepts_in_range_params() -> None:
+    # The happy path through the direct constructor must still work and
+    # carry the values through unmodified.
+    p = rw.RenderParams(
+        defines={"A": "1"},
+        timeout_s=60,
+        memory_limit="1g",
+        cpus="4",
+        pids_limit=256,
+    )
+    assert p.defines == {"A": "1"}
+    assert p.timeout_s == 60
+    assert p.memory_limit == "1g"
+    assert p.cpus == "4"
+    assert p.pids_limit == 256
+
+
+def test_build_docker_argv_rejects_out_of_range_params_instance() -> None:
+    # build_docker_argv accepts a RenderParams instance directly. With
+    # validation in __post_init__, an out-of-bounds instance can no longer
+    # be constructed in the first place — this test documents that the
+    # bypass path is closed at construction, not just at the argv builder.
+    with pytest.raises(ValueError):
+        rw.RenderParams(cpus="1000")
