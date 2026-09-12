@@ -295,6 +295,104 @@ def test_put_models_oversized_body_returns_413(app, env_key):
     assert "error" in r.json()
 
 
+def test_put_models_non_numeric_content_length_is_rejected_up_front(
+    app, app_paths, env_key
+):
+    """Regression: a PUT with a NON-NUMERIC Content-Length header and an
+    oversized streamed body → 413 before the body is read (the header
+    defaults to the cap); the on-disk file stays absent and the in-memory
+    catalogue is still empty."""
+    big = "x" * (2 * 1024 * 1024)  # 2 MB > 1 MB cap
+
+    async def _call(client):
+        r = await client.put(
+            "/api/config/models",
+            content=big,
+            headers={"Content-Length": "not-a-number"},
+        )
+        r2 = await client.get("/api/config/models")
+        return r, r2
+
+    r, r2 = _run_async(app, _call)
+    assert r.status_code == 413
+    assert "error" in r.json()
+    assert not app_paths["cat"].exists()
+    assert r2.status_code == 200
+    assert r2.json()["models"] == []
+
+
+def test_put_models_non_numeric_content_length_small_body_passes(app, app_paths, env_key):
+    """The Content-Length default-to-cap change must not break the normal
+    path: a small PUT whose transport declares a numeric Content-Length
+    (httpx's default for ``content=``) still succeeds."""
+
+    async def _call(client):
+        return await client.put("/api/config/models", content=MODELS_YAML)
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    assert app_paths["cat"].is_file()
+
+
+def test_put_models_hot_reload_non_catalogue_error_is_split_state_500(
+    app, app_paths, env_key, monkeypatch
+):
+    """Regression: ``os.replace`` succeeds but ``hot_reload`` raises a
+    non-``CatalogueError`` (e.g. an OSError re-reading the just-written
+    file) → an explicit 500 explaining the disk/memory split state, never
+    an unhandled exception and never a rollback of the valid on-disk
+    write. The on-disk file holds the NEW catalogue while
+    ``app.state.catalogue`` still holds the OLD one, and a retry of the
+    same PUT recovers the split state."""
+    import d33d.app as app_module
+
+    # A second, DISTINCT valid catalogue so the split state is observable
+    # as a disk-vs-memory divergence (the 200-path PUT installed
+    # MODELS_YAML; the failing PUT installs NEW_YAML onto disk).
+    new_yaml = MODELS_YAML.replace("design-primary", "second-model")
+    assert new_yaml != MODELS_YAML
+
+    async def _call(client):
+        ok = await client.put("/api/config/models", content=MODELS_YAML)
+        assert ok.status_code == 200
+        return ok
+
+    _run_async(app, _call)  # establish the old catalogue
+
+    def _boom(loader):
+        raise OSError("re-reading the just-written file failed")
+
+    monkeypatch.setattr(app_module, "hot_reload", _boom)
+
+    async def _failing_put(client):
+        r = await client.put("/api/config/models", content=new_yaml)
+        g = await client.get("/api/config/models")
+        return r, g
+
+    r, g = _run_async(app, _failing_put)
+    monkeypatch.undo()
+
+    assert r.status_code == 500
+    err = r.json()["error"]
+    # The message names the split state and the recovery path.
+    assert "disk" in err and "still holds" in err
+    assert "retry" in err or "restart" in err
+    # Disk holds the NEW catalogue (no rollback of the valid write).
+    on_disk = yaml.safe_load(app_paths["cat"].read_text())
+    assert on_disk["models"][0]["id"] == "second-model"
+    # Memory still holds the OLD catalogue — the 500 path must not set
+    # app.state.catalogue.
+    assert g.status_code == 200
+    assert g.json()["models"][0]["id"] == "design-primary"
+    # Retry recovers: the next PUT succeeds (hot_reload patched back).
+    async def _retry(client):
+        return await client.put("/api/config/models", content=new_yaml)
+
+    r2 = _run_async(app, _retry)
+    assert r2.status_code == 200
+    assert r2.json()["models"][0]["id"] == "second-model"
+
+
 def test_put_models_bad_yaml_returns_400_and_keeps_last_known_good(
     app, app_paths, env_key
 ):
