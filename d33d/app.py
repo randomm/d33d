@@ -68,6 +68,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -89,6 +90,7 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
+from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
     RegistryBuildResult,
@@ -535,11 +537,28 @@ def create_app(
     # never spawn Docker; production wiring is the real
     # ``d33d.module_registry.build_registry_glb`` (default below).
     app.state.build_registry_glb = build_registry_glb
-    # The design-loop runner for FINALIZE (issue #8) — injected (same seam
-    # as build_registry_glb) so tests wire a stub loop; production wires
-    # the real d33d.design_loop.run_design_loop closure when the
-    # design-loop-to-SSE pipeline lands.
-    app.state.run_design_loop = None
+    # The design-loop runner for FINALIZE (issue #8/#9) — injected (same
+    # seam as build_registry_glb) so tests wire a stub loop. Production
+    # wires the REAL d33d.design_loop.run_design_loop (resolved per call
+    # from the live catalogue + render worker) wrapped in the
+    # failures.jsonl hook: an exhausted loop appends one line to
+    # ``app.state.failures_jsonl_path`` (issue #9 — production gate
+    # failures auto-archived). The hook fires only on an EXHAUSTED loop
+    # (a pass appends nothing), and the eval harness's assert path never
+    # calls this closure (structural exclusion — see
+    # d33d/evals/failure_capture.py). The wrapper is lazily built on first
+    # call so an empty catalogue at startup is not a wiring error.
+    app.state.run_design_loop = _build_production_design_loop()
+    # The failures.jsonl path the production design-loop hook appends to
+    # (issue #9, workstream task-failures). Defaults to the repo-relative
+    # ``evals/failures.jsonl``; overridable via env var for tests / runs
+    # that want a different sink. The hook fires only on an EXHAUSTED
+    # loop (a pass appends nothing), and the eval harness's assert path
+    # never calls this hook (structural exclusion — see
+    # d33d/evals/failure_capture.py).
+    app.state.failures_jsonl_path = Path(
+        os.environ.get("D33D_FAILURES_JSONL") or default_failures_path()
+    )
 
     spa_index = state_spa_dist_dir / "index.html"
     serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
@@ -853,6 +872,278 @@ def create_app(
         )
 
     return app
+
+
+def _http_request_factory(base_url: str, api_key: str):
+    """The production HTTP edge for one provider endpoint.
+
+    ``request(body) -> response`` (httpx-shaped: ``.ok`` / ``.json()``);
+    the key stays in the ``Authorization: Bearer`` header, never in a
+    request body or message (the key never reaches the browser)."""
+    import httpx
+
+    async def _factory(body: dict[str, Any]) -> httpx.Response:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            return await client.post(
+                f"{base_url.rstrip('/')}/chat/completions",
+                json=body,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+
+    return _factory
+
+
+def _production_render_fn(scad_source: str, defines: dict[str, str]):
+    """One render-worker run for the design loop (issue #4's pipeline).
+
+    Ephemeral named Docker volume (no host bind mounts); the ``.scad``
+    source is copied into the volume, the pinned OpenSCAD image compiles
+    under the worker's container contract (``build_docker_argv``), and
+    :func:`d33d.render_worker.classify` maps the run onto the closed
+    7-class ``error_class`` enum. Any exception in the pipeline is a
+    ``container_error`` — a loop render failure is a classified render
+    outcome, never an unclassified raise.
+    """
+    import json as _json
+    import tempfile
+
+    from d33d.render_worker import (
+        RenderParams,
+        RenderResult,
+        build_docker_argv,
+        classify,
+        new_render_name,
+        run_container,
+        truncate_stderr,
+    )
+
+    name = new_render_name()
+    volume = f"d33d-render-{name}"
+    start = time.monotonic()
+    try:
+        subprocess.run(
+            ["docker", "volume", "create", volume],
+            capture_output=True,
+            check=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            host_tmp = Path(tmp)
+            src = host_tmp / "src"
+            src.mkdir()
+            (src / "model.scad").write_text(scad_source, encoding="utf-8")
+            params = RenderParams(defines=dict(defines))
+            (src / "params.json").write_text(
+                _json.dumps({"defines": params.defines}), encoding="utf-8"
+            )
+            # Copy the source into the named volume via a helper container
+            # (named volumes are only writable from a container bound to
+            # them — no host bind mounts).
+            helper_argv = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                f"{volume}:/work",
+                "--volume",
+                f"{tmp}:/host:ro",
+                "busybox:latest",
+                "cp",
+                "/host/src/model.scad",
+                "/work/model.scad",
+                "/host/src/params.json",
+                "/work/params.json",
+            ]
+            subprocess.run(helper_argv, capture_output=True, check=False)
+            argv = build_docker_argv(
+                image="docker.io/openscad/openscad:trixie",
+                name=name,
+                workdir_volume=volume,
+                params=params,
+            )
+            proc = run_container(argv, timeout_s=params.timeout_s)
+            duration_ms = int((time.monotonic() - start) * 1000)
+            stderr = truncate_stderr(proc.stderr)
+
+            def _harvest() -> tuple[Path, Path, list[Path]]:
+                out = host_tmp / "out"
+                out.mkdir()
+                harvest_argv = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--volume",
+                    f"{volume}:/work",
+                    "--volume",
+                    f"{out}:/host",
+                    "busybox:latest",
+                    "sh",
+                    "-c",
+                    (
+                        "cp /work/model.stl /host/ 2>/dev/null; "
+                        "cp /work/model.csg /host/ 2>/dev/null; "
+                        "for i in 0 1 2 3 4 5; do "
+                        "cp /work/view$i.png /host/ 2>/dev/null; done; true"
+                    ),
+                ]
+                subprocess.run(harvest_argv, capture_output=True, check=False)
+                stl = out / "model.stl"
+                csg = out / "model.csg"
+                views = [out / f"view{i}.png" for i in range(6)]
+                return stl, csg, views
+
+            if proc.returncode != 0:
+                error_class = classify(
+                    exit_code=proc.returncode,
+                    stl_path=None,
+                    stderr=stderr,
+                    timed_out=proc.returncode == 124,
+                )
+                return RenderResult(
+                    ok=False,
+                    exit_code=proc.returncode,
+                    duration_ms=duration_ms,
+                    error_class=error_class,
+                    stderr=stderr,
+                    stl=None,
+                    csg=None,
+                    views=(),
+                )
+
+            stl, csg, views = _harvest()
+            vertex_count = 0
+            watertight = False
+            volume_mm3 = 0.0
+            if stl.is_file():
+                try:
+                    import trimesh
+
+                    mesh = trimesh.load(str(stl), process=False)
+                    vertex_count = len(mesh.vertices)
+                    watertight = bool(mesh.is_watertight)
+                    volume_mm3 = float(mesh.volume)
+                except (OSError, ValueError):
+                    pass
+            views_ok = all(v.is_file() for v in views)
+            error_class = classify(
+                exit_code=proc.returncode,
+                stl_path=str(stl) if stl.is_file() else None,
+                csg_path=str(csg) if csg.is_file() else None,
+                views=[str(v) for v in views] if views_ok else None,
+                stderr=stderr,
+                timed_out=proc.returncode == 124,
+                vertex_count=vertex_count,
+                watertight=watertight,
+                volume=volume_mm3,
+            )
+            return RenderResult(
+                ok=error_class == "ok",
+                exit_code=proc.returncode,
+                duration_ms=duration_ms,
+                error_class=error_class,
+                stderr=stderr,
+                stl=str(stl) if stl.is_file() else None,
+                csg=str(csg) if csg.is_file() else None,
+                views=tuple(str(v) for v in views) if views_ok else (),
+            )
+    except (OSError, RuntimeError, ValueError) as e:
+        return RenderResult(
+            ok=False,
+            exit_code=1,
+            duration_ms=0,
+            error_class="container_error",
+            stderr=f"render pipeline error: {e}",
+            stl=None,
+            csg=None,
+            views=(),
+        )
+    finally:
+        try:
+            subprocess.run(
+                ["docker", "volume", "rm", "-f", volume],
+                capture_output=True,
+                check=False,
+            )
+        except OSError:
+            pass
+
+
+def _build_production_design_loop():
+    """The production ``run_design_loop`` closure (issue #9).
+
+    Lazily resolves the design-role model from the live catalogue on each
+    call (the model is configured, never hardcoded; the catalogue is the
+    source of truth and hot-reloads), probes its capability tier, and runs
+    the real ``d33d.design_loop.run_design_loop`` wrapped in the
+    failures.jsonl hook: an exhausted loop appends one line to
+    ``app.state.failures_jsonl_path``. The hook (``default_run_design_loop_hook``)
+    fires ONLY on an exhausted result and ONLY here — the eval harness's
+    assert path never calls this closure, so eval-run failures are
+    structurally excluded from the file (no ``is_eval`` flag). The hook's
+    ``model`` / ``prompt_version`` kwargs are added by this wrapper and
+    popped before the real loop runs. A test that needs a stub loop (or no
+    hook) overwrites ``app.state.run_design_loop`` after ``create_app``
+    returns.
+
+    The closure is ``async`` (the finalize route awaits awaitable loop
+    results): the capability probe is awaited natively instead of being
+    ``asyncio.run``-nested inside the already-running event loop, which
+    ``asyncio.run`` forbids with ``RuntimeError``.
+    """
+    from d33d.config.catalogue import load_catalogue
+    from d33d.config.probes import probe_capabilities
+    from d33d.config.resolve import resolve_model
+    from d33d.design_loop import make_llm_fn
+    from d33d.evals.failure_capture import default_run_design_loop_hook
+    from d33d.prompt_hash import canonical_hash
+
+    async def _loop(app_state: Any, **kwargs: Any) -> Any:
+        catalogue_path: Path = app_state.catalogue_path
+        cat = load_catalogue(catalogue_path)
+        res = resolve_model(cat, "design")
+        provider = cat.providers[next(iter(cat.providers))]
+        api_key = provider.key
+        factory = _http_request_factory(res.provider.base, api_key)
+        capability = await probe_capabilities(
+            base_url=res.provider.base,
+            model_id=res.entry.model,
+            api_key=api_key,
+            request_factory=factory,
+        )
+        # The canonical hash of the design-role prompt (role + messages,
+        # as ``d33d.design_llm.send`` computes it for each call) — the
+        # join key that makes "prompt v7 fails case 12 which v5 passed"
+        # readable.
+        prompt_version = canonical_hash(
+            role="design", messages=[{"role": "user", "content": ""}]
+        )
+        llm_fn = make_llm_fn(
+            cat,
+            {"design": factory, "critique": factory},
+            {"design": capability, "critique": capability},
+        )
+        request = str(kwargs.get("request") or kwargs.get("chat_history") or "")
+        return default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
+            photo=kwargs.get("photo"),
+            chat_history=kwargs.get("chat_history") or (),
+            stated_dims=kwargs.get("stated_dims"),
+            render_fn=_production_render_fn,
+            llm_fn=llm_fn,
+            request=request,
+            model=res.entry.model,
+            prompt_version=prompt_version,
+        )
+
+    def _wrapper(app: Any, **kwargs: Any) -> Any:
+        return _loop(app.state, **kwargs)
+
+    return _wrapper
 
 
 __all__ = [

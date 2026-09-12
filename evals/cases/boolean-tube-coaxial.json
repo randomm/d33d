@@ -1,0 +1,23 @@
+{
+  "case_id": "boolean-tube-coaxial",
+  "kind": "boolean_topology",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/boolean_topology_v1.md",
+    "sha256": "a19ff63c4279ae8f5253909ab6d752fcb61b83c137e93ae2899b24b54d8ead52"
+  },
+  "request": "A tube: outer cylinder 30 mm diameter, inner hole 12 mm diameter, both 40 mm tall, coaxial.",
+  "expected_dims": {
+    "x": 30,
+    "y": 30,
+    "z": 40
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ]
+}

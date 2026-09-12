@@ -1,0 +1,24 @@
+{
+  "case_id": "photo-bracket-l",
+  "kind": "photo_recreation",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/photo_recreation_v1.md",
+    "sha256": "adc3d457ef286bb38efec469730943963bba0a001111a21d000742aee5e63965"
+  },
+  "request": "Recreate the L-bracket from the reference photo: 40 mm arms, 12 mm thick, 8 mm tall, 45-degree mitered inside corner.",
+  "reference_photo": "evals/cases/fixtures/qwen-baseline.scad",
+  "expected_dims": {
+    "x": 40,
+    "y": 40,
+    "z": 8
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ]
+}

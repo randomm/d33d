@@ -119,10 +119,87 @@ def test_finalize_without_injected_loop_is_503(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
+        # ``create_app`` now wires the production hook (issue #9) into
+        # ``app.state.run_design_loop``; the 503 path requires the seam
+        # to be explicitly unset.
+        app_with_versions.state.run_design_loop = None
         return await client.post(f"/api/projects/{pid}/finalize", json={})
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 503
+
+
+def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
+    """(CRITICAL regression) The FINALIZE route, with the PRODUCTION-shape
+    seam (``(app, **kwargs)`` — the signature of
+    ``d33d.app._build_production_design_loop``), must call the loop with
+    the full design-loop kwargs contract — ``photo``, ``stated_dims``,
+    ``render_fn``, ``llm_fn``, ``model``, ``prompt_version`` and a
+    non-empty ``request`` — not zero kwargs (the old call was a bare
+    ``run_loop()`` whose missing mandatory kwargs escaped the route's
+    bounded exception set as an unclassified ``TypeError`` and left the
+    failures.jsonl hook an empty ``request`` that
+    ``FailureEvent(min_length=1)`` would silently drop).
+
+    The loop is mocked to capture the kwargs and return a pass result,
+    so the test exercises the route's seam branch without a live LLM,
+    Docker render, or catalogue.
+    """
+
+    captured: dict = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # The real production closure is async; a stub of the same
+        # production shape ((app, **kwargs)) captures the kwargs and
+        # returns a pass result — the route must await it and call it
+        # with the full design-loop kwargs contract, not zero kwargs.
+        async def _loop(app, **kwargs):
+            captured.update(kwargs)
+            return _StubResult("pass", {"W": 10})
+
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a 20mm wide bracket"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    for key in ("photo", "stated_dims", "render_fn", "llm_fn", "model", "prompt_version"):
+        assert key in captured, f"missing design-loop kwarg {key!r}"
+    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    assert callable(captured["render_fn"])
+    assert callable(captured["llm_fn"])
+    assert isinstance(captured["prompt_version"], str) and captured["prompt_version"]
+    # ``request`` is always a non-empty string (empty would make the
+    # failures.jsonl hook silently drop the line for an exhausted loop).
+    assert isinstance(captured["request"], str) and captured["request"]
+    assert captured["request"] == "make a 20mm wide bracket"
+
+
+def test_finalize_production_seam_no_body_supplies_nonempty_request(app_with_versions):
+    """(HIGH 3 regression) A FINALIZE with an empty body must still give
+    the hook a non-empty ``request`` — the route falls back to a
+    deterministic placeholder so ``FailureEvent.request`` (``min_length=1``)
+    validates and the failures.jsonl line is never silently dropped."""
+
+    captured: dict = {}
+
+    async def _loop_awaited(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop_awaited
+        return await client.post(f"/api/projects/{pid}/finalize", json={})
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert isinstance(captured.get("request"), str) and captured["request"]
 
 
 def test_finalize_async_loop_result_is_awaited(app_with_versions):

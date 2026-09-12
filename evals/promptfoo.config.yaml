@@ -1,0 +1,60 @@
+# promptfoo harness config — the eval harness for issue #9.
+#
+# This is the single YAML the promptfoo CLI runs. It references the 20
+# golden-set cases in evals/cases/ and the 5 hash-pinned prompt files in
+# evals/prompts/ (the pin is the case file's ``prompt.sha256`` — the
+# runner re-checks every pin via d33d.evals.case_schema.check_prompt_pin
+# before a run, so a prompt edit without a re-pin fails loudly).
+#
+# Provider: any OpenAI-compatible endpoint. The model is CONFIGURED,
+# never hardcoded — the ``id`` is a process-env reference resolved from
+# the models.yaml catalogue (d33d.config.resolve.resolve_model); the
+# day-1 default is RedHatAI/Qwen3.8-27B-INT4 at llm.trailopeners.com/v1
+# with the key in TRAIL_OPENERS_LLM_KEY. The key stays server-side (the
+# Authorization header) and never reaches the browser.
+#
+# Ordering: the 7 deterministic gates (deterministic_gates_pass) run
+# BEFORE the vision judge (vision_judge_pass) — a gate failure
+# short-circuits the judge (d33d.evals.harness.run_case enforces this
+# structurally; the assert order here mirrors it for the CLI path).
+#
+# Image inputs: photo cases carry a reference photo and rendered views;
+# the harness inlines them as base64 data: URIs in the message parts
+# (d33d.evals.harness.case_messages) when the file is an on-disk image.
+
+description: "d33d eval harness — 20 golden-set cases, 7 gates before the judge"
+
+providers:
+  # Any OpenAI-compatible endpoint. ``id`` is the concrete model id
+  # (resolved from the catalogue via env — never hardcoded); ``apiBaseUrl``
+  # is the endpoint base. The key is TRAIL_OPENERS_LLM_KEY (server-side).
+  - id: "{{process.env.D33D_EVAL_MODEL_ID}}"
+    provider: openai:completions
+    apiBaseUrl: "{{process.env.D33D_EVAL_BASE_URL}}"
+    config:
+      model: "{{process.env.D33D_EVAL_MODEL_ID}}"
+      temperature: 0.0
+      max_tokens: 4096
+
+# The 20 golden-set cases, one JSON file each under cases_dir. The
+# runner loads them via d33d.evals.case_schema.load_golden_set (which
+# re-checks every prompt pin and the seed mix of 20).
+cases_dir: evals/cases
+
+# The 5 hash-pinned prompt files (the case files reference them by
+# SHA-256 of the content — a drift fails the suite).
+prompts_dir: evals/prompts
+
+defaults:
+  # Custom python asserts, in the spec order: the 7 deterministic gates
+  # BEFORE the vision judge. Both point at this file (evals/run.py) —
+  # promptfoo imports the named function and calls it with
+  # (output, test, vars). A failing gate short-circuits the judge assert
+  # (the harness enforces the same order structurally).
+  assert:
+    - type: python
+      path: evals/run.py
+      value: deterministic_gates_pass
+    - type: python
+      path: evals/run.py
+      value: vision_judge_pass

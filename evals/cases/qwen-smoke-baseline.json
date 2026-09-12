@@ -1,0 +1,31 @@
+{
+  "case_id": "qwen-smoke-baseline",
+  "kind": "primitive",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/photo_recreation_v1.md",
+    "sha256": "adc3d457ef286bb38efec469730943963bba0a001111a21d000742aee5e63965"
+  },
+  "request": "Recreate the reference object: a 25\u00d730\u00d750 mm block with a 12 mm diameter hole through the full height, centered. One reference photo plus three rendered views \u2192 OpenSCAD. Scored on compile, watertightness, parameter fidelity (bbox) and slice success.",
+  "reference_photo": "evals/cases/fixtures/qwen-baseline.scad",
+  "rendered_views": [
+    "evals/cases/fixtures/qwen-view-01.png",
+    "evals/cases/fixtures/qwen-view-02.png",
+    "evals/cases/fixtures/qwen-view-03.png"
+  ],
+  "expected_dims": {
+    "x": 25,
+    "y": 30,
+    "z": 50
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ],
+  "is_baseline": true,
+  "baseline_note": "Baseline every future model is measured against \u2014 not a gate blocking the model's use (operator confirmed it works)."
+}

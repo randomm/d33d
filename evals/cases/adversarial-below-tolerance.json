@@ -1,0 +1,17 @@
+{
+  "case_id": "adversarial-below-tolerance",
+  "kind": "adversarial",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/adversarial_v1.md",
+    "sha256": "60af96e776bfe91a3e3a36bc30ba833e93217f08773ced43f4b2c538aaa6366f"
+  },
+  "request": "A 30\u00d730\u00d710 mm plate with a 0.4 mm wide slot cut across the middle \u2014 detail below print tolerance for a 0.4 mm nozzle.",
+  "gate_expectations": [
+    "compile"
+  ],
+  "adversarial": {
+    "expected_outcome": "clearance_applied",
+    "diagnostic": "0.4 mm slot is below the 1 mm print tolerance \u2014 either apply a clearance to >= 1 mm with a note, or refuse with a diagnostic reason"
+  }
+}
