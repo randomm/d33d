@@ -53,6 +53,7 @@ from trimesh.exchange.stl import HeaderError as _StlHeaderError
 from d33d.render_worker import (
     DEFAULT_TIMEOUT_S,
     ErrorClass,
+    _cleanup_container,
     build_docker_argv,
     run_container,
 )
@@ -450,19 +451,42 @@ def _helper_argv(image: str, name: str, volume: str, shell_cmd: str) -> list[str
     return argv
 
 
+class HelperTimeoutError(RuntimeError):
+    """Raised by :func:`_write_file_into_volume` when the populate helper
+    container does not exit within its bounded timeout. Distinct from the
+    generic ``RuntimeError`` a non-zero exit raises so the caller can
+    classify this as ``timeout`` rather than ``container_error``.
+    """
+
+
 def _write_file_into_volume(
     image: str, volume: str, filename: str, content: bytes, timeout_s: int
 ) -> None:
     """Populate ``filename`` inside the named volume's ``/work`` via a
     short-lived helper container fed ``content`` on stdin. Raises
-    ``RuntimeError`` on a non-zero exit — a populate failure is an
-    infrastructure error, never a per-module render classification.
+    ``RuntimeError`` on a non-zero exit, or :class:`HelperTimeoutError` if
+    the helper container does not exit within ``timeout_s`` — a populate
+    failure is an infrastructure error, never a per-module render
+    classification.
+
+    On timeout, mirrors ``render_worker.run_container``'s own cleanup
+    contract: the helper container was started without ``--rm`` (by
+    ``build_docker_argv``, so ``run_container`` can ``docker inspect`` an
+    OOM-killed run elsewhere), so nothing else would ever kill/remove a
+    hung populate container — this reuses ``render_worker._cleanup_container``
+    directly rather than leaving it leaked on the Docker host.
     """
     name = f"registry-put-{uuid.uuid4().hex[:8]}"
     argv = _helper_argv(image, name, volume, f"cat > /work/{filename}")
-    proc = subprocess.run(
-        argv, input=content, timeout=timeout_s, capture_output=True, check=False
-    )
+    try:
+        proc = subprocess.run(
+            argv, input=content, timeout=timeout_s, capture_output=True, check=False
+        )
+    except subprocess.TimeoutExpired:
+        _cleanup_container(name)
+        raise HelperTimeoutError(
+            f"populating {filename} into volume {volume} timed out after {timeout_s}s"
+        ) from None
     if proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"failed to populate {filename} into volume {volume}: {stderr}")
@@ -491,25 +515,42 @@ def _read_file_from_volume(
 
 
 def _create_named_volume(volume: str) -> None:
-    subprocess.run(
-        ["docker", "volume", "create", volume],
-        timeout=_HELPER_TIMEOUT_S,
-        capture_output=True,
-        check=False,
-    )
+    """Best-effort volume create. A hang here is lower-severity than a
+    hung populate/harvest CONTAINER (no long-lived container is started
+    by ``docker volume create``), but a bare ``subprocess.TimeoutExpired``
+    would still propagate uncaught and abort the whole registry build on
+    a stalled Docker daemon — caught here for the same reason ``_write_
+    file_into_volume``/``_read_file_from_volume`` catch it: a hung helper
+    invocation must never discard every already-succeeded call-site.
+    """
+    try:
+        subprocess.run(
+            ["docker", "volume", "create", volume],
+            timeout=_HELPER_TIMEOUT_S,
+            capture_output=True,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _remove_named_volume(volume: str) -> None:
     """Best-effort cleanup — mirrors the render worker's own best-effort
     ``docker kill``/``docker rm`` convention. A leaked volume is a warning,
     never a raised exception (the registry build's own result must not be
-    lost because cleanup failed)."""
-    subprocess.run(
-        ["docker", "volume", "rm", volume],
-        timeout=_HELPER_TIMEOUT_S,
-        capture_output=True,
-        check=False,
-    )
+    lost because cleanup failed). Runs from a ``finally`` block in
+    ``build_registry_glb``, so a bare ``subprocess.TimeoutExpired`` here
+    must not propagate either — it would replace whatever exception (or
+    successful return) was already in flight."""
+    try:
+        subprocess.run(
+            ["docker", "volume", "rm", volume],
+            timeout=_HELPER_TIMEOUT_S,
+            capture_output=True,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def build_registry_glb(
@@ -569,6 +610,13 @@ def build_registry_glb(
                     isolated_source.encode("utf-8"),
                     _HELPER_TIMEOUT_S,
                 )
+            except HelperTimeoutError as e:
+                failures.append(
+                    ModuleRenderFailure(
+                        site=site, error_class="timeout", stderr=str(e)
+                    )
+                )
+                continue
             except RuntimeError as e:
                 failures.append(
                     ModuleRenderFailure(

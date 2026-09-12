@@ -105,6 +105,49 @@ def test_nonzero_openscad_exit_classifies_container_error() -> None:
     assert result.glb_bytes is None
 
 
+def test_populate_helper_timeout_classifies_timeout_cleans_up_container_and_preserves_partial_registry() -> None:
+    """A hung populate-helper container (``registry-put-*``) must not
+    abort the whole registry build, must not leak the container it
+    started (started without ``--rm`` per ``build_docker_argv``), and
+    must classify as ``timeout`` — not propagate ``subprocess.
+    TimeoutExpired`` uncaught, which would discard every already-
+    succeeded call-site and never reach the route's error classification
+    at all."""
+    stl_bytes = _box_stl_bytes()
+    cleanup_calls: list[list[str]] = []
+
+    def _fake_run(argv, **kwargs):
+        if argv[:2] == ["docker", "kill"] or argv[:2] == ["docker", "rm"]:
+            cleanup_calls.append(argv)
+            return _completed(0)
+        if any("cat > /work/" in a for a in argv):
+            # First call-site's populate helper hangs; second succeeds.
+            if not any(c[:2] == ["docker", "kill"] for c in cleanup_calls):
+                raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+            return _completed(0)
+        if "openscad" in argv:
+            return _completed(0)
+        if any("cat /work/" in a for a in argv):
+            return _completed(0, stdout=stl_bytes)
+        return _completed(0)
+
+    with patch("subprocess.run", side_effect=_fake_run):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "timeout"
+    assert result.failures[0].site.name == "base"
+    # The SECOND call-site still succeeded — partial registry preserved,
+    # not discarded by the first call-site's uncaught TimeoutExpired.
+    assert result.registry_names == ("cap",)
+    assert result.glb_bytes is not None
+    # The hung helper container was killed and removed, not leaked.
+    assert any(c[:2] == ["docker", "kill"] for c in cleanup_calls)
+    assert any(c[:2] == ["docker", "rm"] for c in cleanup_calls)
+    killed_name = next(c[2] for c in cleanup_calls if c[:2] == ["docker", "kill"])
+    assert killed_name.startswith("registry-put-")
+
+
 def test_openscad_timeout_classifies_as_timeout() -> None:
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:

@@ -38,14 +38,23 @@ regenerate any OpenSCAD source — that wiring into the design loop
 Also defined here: ``POST /api/projects/{id}/module-registry`` (issue #7,
 workstream task-a) — the named-module registry route that IS the wiring
 path ``region-edits``' ``module_ids`` and ``ModelViewer.tsx``'s
-``resolveLassoSelection`` both assume exists. Given ``.scad`` source, it
+``resolveLassoSelection`` are BUILT to consume. Given ``.scad`` source, it
 calls ``d33d.module_registry.build_registry_glb`` (injected via
 ``app.state.build_registry_glb`` so tests never spawn Docker) and returns
-the assembled named GLB as ``model/gltf-binary`` — exactly what
+the assembled named GLB as ``model/gltf-binary`` — exactly the shape
 ``ModelViewer.loadGLB`` parses, with ``mesh.name`` on each node set to
-the registry's per-call-site name. This route is real plumbing over a
-real capability, not another honest stub: the registry module actually
+the registry's per-call-site name. The route itself is real plumbing over
+a real capability, not another honest stub: the registry module actually
 runs N isolated openscad renders and returns real named geometry.
+
+NOT yet wired end-to-end, however: the SPA shell (``web/src/App.tsx``)
+has no source of ``scad_source`` to call this route with — the design-
+loop-to-SSE-to-model pipeline that would produce OpenSCAD source in the
+browser is issue #23's own documented future-ticket deferral (``App.tsx``
+mounts ``ModelViewer`` with ``data={null}`` for exactly this reason), so
+no frontend code calls ``POST .../module-registry`` yet. That is a
+separate, already-tracked gap, not something this route's own
+correctness depends on.
 """
 
 from __future__ import annotations
@@ -632,8 +641,12 @@ def create_app(
         """Build the named OpenSCAD module registry for ``scad_source``
         and return it as a GLB — the wiring path ``ModelViewer.loadGLB``
         and ``resolveLassoSelection`` (``web/src/components/viewer/
-        ModelViewer.tsx``) actually consume, and the source of the
+        ModelViewer.tsx``) are built to consume, and the source of the
         ``module_ids`` ``POST /api/projects/{id}/region-edits`` accepts.
+        No frontend code calls this route yet — the SPA shell has no
+        ``scad_source`` to send it until the design-loop-to-SSE pipeline
+        (issue #23's own tracked future ticket) lands; this route and its
+        orchestration are independently real and tested regardless.
 
         Delegates to ``app.state.build_registry_glb`` (the real
         ``d33d.module_registry.build_registry_glb`` in production;
