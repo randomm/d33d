@@ -57,9 +57,11 @@ from d33d.render_worker import (
 
 __all__ = [
     "BUILTIN_PRIMITIVES",
+    "MAX_CALL_SITES",
     "CallSite",
     "ModuleRenderFailure",
     "RegistryBuildResult",
+    "TooManyCallSitesError",
     "build_registry_glb",
     "isolate_call_site",
     "parse_call_sites",
@@ -276,6 +278,36 @@ def isolate_call_site(source: str, site: CallSite) -> str:
 #: the same convention).
 DEFAULT_OPENSCAD_IMAGE = "docker.io/openscad/openscad:trixie"
 
+#: Hard cap on the number of call-sites one ``build_registry_glb`` call
+#: will orchestrate. Each call-site spawns a real sequential Docker
+#: volume-create + populate-container + openscad-container + harvest-
+#: container + volume-rm lifecycle; without a cap a small ``.scad``
+#: SOURCE built from a repeated call pattern (e.g. ``"m();\n" * 100000``)
+#: can enqueue an effectively unbounded amount of sequential Docker work
+#: on the single render host. 64 comfortably covers any real assembly
+#: (the golden-set fixtures never exceed a few dozen top-level modules)
+#: while keeping worst-case wall-clock bounded to
+#: ``MAX_CALL_SITES * DEFAULT_TIMEOUT_S``. A source with more call-sites
+#: than this is rejected via ``TooManyCallSitesError`` before any Docker
+#: invocation — never silently truncated, so an over-long registry is
+#: surfaced to the caller instead of quietly dropping modules.
+MAX_CALL_SITES = 64
+
+
+class TooManyCallSitesError(ValueError):
+    """Raised by :func:`build_registry_glb` when ``parse_call_sites``
+    enumerates more than :data:`MAX_CALL_SITES` call-sites, before any
+    Docker volume/container is created. Callers (the HTTP route) map
+    this to a 413/422 response rather than letting the request tie up
+    the render host for ``O(N * timeout_s)``.
+    """
+
+    def __init__(self, count: int) -> None:
+        self.count = count
+        super().__init__(
+            f"{count} call-sites exceeds the {MAX_CALL_SITES} limit per registry build"
+        )
+
 
 @dataclass(frozen=True)
 class ModuleRenderFailure:
@@ -435,10 +467,17 @@ def build_registry_glb(
     every OTHER call-site's isolated render still contributes (a single
     bad module never discards the whole registry). ``glb_bytes`` is
     ``None`` iff there are zero call-sites or every one of them failed.
+
+    Raises :class:`TooManyCallSitesError` if ``parse_call_sites`` finds
+    more than :data:`MAX_CALL_SITES` entries — checked BEFORE any Docker
+    volume/container is created, so a hostile ``source`` cannot enqueue
+    unbounded sequential container work.
     """
     import trimesh  # host-side only, mirrors print_validation's import style
 
     sites = parse_call_sites(source)
+    if len(sites) > MAX_CALL_SITES:
+        raise TooManyCallSitesError(len(sites))
     geometries: dict[str, trimesh.Trimesh] = {}
     failures: list[ModuleRenderFailure] = []
 
@@ -509,11 +548,24 @@ def build_registry_glb(
                 continue
 
             assert stl_bytes is not None  # narrowed by _classify_isolated_render
-            mesh = trimesh.load(
-                trimesh.util.wrap_as_stream(stl_bytes),
-                file_type="stl",
-                process=False,
-            )
+            try:
+                mesh = trimesh.load(
+                    trimesh.util.wrap_as_stream(stl_bytes),
+                    file_type="stl",
+                    process=False,
+                )
+            except Exception as e:  # noqa: BLE001 - any trimesh load failure
+                # is a per-module artifact problem, never a whole-registry
+                # abort: the harvested bytes are attacker-influenced (an
+                # OpenSCAD render driven by untrusted .scad source), so a
+                # malformed/unparseable STL must classify and let every
+                # OTHER call-site's already-succeeded render still stand.
+                failures.append(
+                    ModuleRenderFailure(
+                        site=site, error_class="artifact_error", stderr=str(e)
+                    )
+                )
+                continue
             if isinstance(mesh, trimesh.Scene):
                 mesh = next(iter(mesh.geometry.values()), None)
             if mesh is None or mesh.vertices.shape[0] == 0:

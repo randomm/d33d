@@ -881,3 +881,42 @@ def test_module_registry_partial_failure_still_returns_glb_and_reports_failures(
     assert r.status_code == 200
     assert r.content == b"partial-glb"
     assert r.headers["x-module-registry-failed"] == "cap"
+
+
+def test_module_registry_too_many_call_sites_returns_413(app):
+    """When the injected build function raises TooManyCallSitesError
+    (the real d33d.module_registry.build_registry_glb's guard against a
+    hostile scad_source enumerating more than MAX_CALL_SITES call-sites),
+    the route must surface a 413 rather than a 500 — the cap is meant to
+    protect the render host, not crash the request handler."""
+    from d33d.module_registry import TooManyCallSitesError
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise TooManyCallSitesError(999)
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 413
+
+
+def test_module_registry_rejects_oversized_scad_source(app):
+    """scad_source has a max_length bound matching the other body-
+    accepting routes' size caps in this file — defense-in-depth
+    alongside build_registry_glb's own MAX_CALL_SITES guard."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "x" * (1024 * 1024 + 1)},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422

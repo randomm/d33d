@@ -76,7 +76,12 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
-from d33d.module_registry import RegistryBuildResult, build_registry_glb
+from d33d.module_registry import (
+    MAX_CALL_SITES,
+    RegistryBuildResult,
+    TooManyCallSitesError,
+    build_registry_glb,
+)
 from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
@@ -307,9 +312,17 @@ class ModuleRegistryRequest(BaseModel):
     single-render contract already renders. This route does not persist
     ``scad_source``; it is a pure function of the given source in, named
     GLB out.
+
+    ``max_length`` bounds the raw source the same way
+    ``MAX_CATALOGUE_BODY_BYTES``/``MAX_REGION_EDIT_IMAGE_BYTES`` bound
+    the other body-accepting routes in this file — without it, a small
+    request body built from a repeated call pattern can still enumerate
+    far more than ``MAX_CALL_SITES`` call-sites (checked separately, see
+    ``d33d.module_registry.build_registry_glb``), so this is
+    defense-in-depth rather than the sole guard against that.
     """
 
-    scad_source: str = Field(min_length=1)
+    scad_source: str = Field(min_length=1, max_length=1024 * 1024)
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +652,16 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found")
 
         build_fn = request.app.state.build_registry_glb
-        result: RegistryBuildResult = build_fn(body.scad_source)
+        try:
+            result: RegistryBuildResult = build_fn(body.scad_source)
+        except TooManyCallSitesError as e:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"{e.count} call-sites exceeds the {MAX_CALL_SITES} limit "
+                    "per registry build"
+                ),
+            )
 
         if result.glb_bytes is None:
             return JSONResponse(
