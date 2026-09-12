@@ -12,6 +12,8 @@ different arity, ``VIEWS`` and this test move together in the same commit.
 
 from __future__ import annotations
 
+import pytest
+
 import d33d.render_worker as rw
 
 EXPECTED_FIVE_VIEWS = [
@@ -71,3 +73,113 @@ def test_render_flags_include_render_and_colorscheme() -> None:
 
 def test_render_size_is_800x800() -> None:
     assert rw.RENDER_SIZE == (800, 800)
+
+
+def test_default_params_pass_range_validation() -> None:
+    # The module defaults must always be valid; from_dict({}) exercises
+    # the same validation path as every explicit override.
+    params = rw.RenderParams.from_dict({})
+    assert params.memory_limit == rw.DEFAULT_MEMORY_LIMIT
+    assert params.cpus == rw.DEFAULT_CPU_LIMIT
+    assert params.pids_limit == rw.DEFAULT_PID_LIMIT
+    assert params.timeout_s == rw.DEFAULT_TIMEOUT_S
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("memory_limit", "999g"),  # far above MAX_MEMORY_MB
+        ("memory_limit", "1m"),  # far below MIN_MEMORY_MB
+        ("memory_limit", "not-a-size"),  # malformed
+        ("cpus", "1000"),  # far above MAX_CPUS
+        ("cpus", "0"),  # at/below MIN_CPUS
+        ("cpus", "nope"),  # malformed
+        ("pids_limit", 999999),  # far above MAX_PID_LIMIT
+        ("pids_limit", 0),  # below MIN_PID_LIMIT
+        ("timeout_s", 100000),  # far above MAX_TIMEOUT_S
+        ("timeout_s", 0),  # below MIN_TIMEOUT_S
+    ],
+)
+def test_out_of_range_or_malformed_params_raise_value_error(
+    key: str, value: object
+) -> None:
+    # A malicious or malformed params.json must never silently raise the
+    # resource ceilings above the DoS guard's intent.
+    with pytest.raises(ValueError):
+        rw.RenderParams.from_dict({key: value})
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("memory_limit", "64m"),  # MIN_MEMORY_MB boundary
+        ("memory_limit", "8g"),  # MAX_MEMORY_MB boundary (8192 MiB)
+        ("cpus", "0.1"),  # MIN_CPUS boundary
+        ("cpus", "8"),  # MAX_CPUS boundary
+        ("pids_limit", 16),  # MIN_PID_LIMIT boundary
+        ("pids_limit", 2048),  # MAX_PID_LIMIT boundary
+        ("timeout_s", 1),  # MIN_TIMEOUT_S boundary
+        ("timeout_s", 900),  # MAX_TIMEOUT_S boundary
+    ],
+)
+def test_in_range_boundary_params_are_accepted(key: str, value: object) -> None:
+    params = rw.RenderParams.from_dict({key: value})
+    assert getattr(params, key) == (
+        str(value) if key in ("memory_limit", "cpus") else value
+    )
+
+
+def test_build_docker_argv_rejects_out_of_range_dict_params() -> None:
+    # build_docker_argv accepts a raw dict and routes it through
+    # RenderParams.from_dict — the range guard must not be bypassable by
+    # calling it directly with a dict instead of a RenderParams instance.
+    with pytest.raises(ValueError):
+        rw.build_docker_argv("image", "render-deadbeef", params={"cpus": "1000"})
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"memory_limit": "999g"},
+        {"cpus": "1000"},
+        {"pids_limit": 999999},
+        {"timeout_s": 100000},
+        {"memory_limit": "1m"},
+        {"cpus": "0"},
+        {"pids_limit": 0},
+        {"timeout_s": 0},
+    ],
+)
+def test_direct_construction_rejects_out_of_range_params(kwargs: dict) -> None:
+    # Validation must live in __post_init__, not only in from_dict — a
+    # direct RenderParams(...) call with out-of-bounds values must also
+    # raise, closing the bypass that build_docker_argv(params=<instance>)
+    # would otherwise expose.
+    with pytest.raises(ValueError):
+        rw.RenderParams(**kwargs)
+
+
+def test_direct_construction_accepts_in_range_params() -> None:
+    # The happy path through the direct constructor must still work and
+    # carry the values through unmodified.
+    p = rw.RenderParams(
+        defines={"A": "1"},
+        timeout_s=60,
+        memory_limit="1g",
+        cpus="4",
+        pids_limit=256,
+    )
+    assert p.defines == {"A": "1"}
+    assert p.timeout_s == 60
+    assert p.memory_limit == "1g"
+    assert p.cpus == "4"
+    assert p.pids_limit == 256
+
+
+def test_build_docker_argv_rejects_out_of_range_params_instance() -> None:
+    # build_docker_argv accepts a RenderParams instance directly. With
+    # validation in __post_init__, an out-of-bounds instance can no longer
+    # be constructed in the first place — this test documents that the
+    # bypass path is closed at construction, not just at the argv builder.
+    with pytest.raises(ValueError):
+        rw.RenderParams(cpus="1000")

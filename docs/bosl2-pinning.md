@@ -1,18 +1,33 @@
 # BOSL2 Pinning Policy
 
-## Pinned tag
+## Pinned tag and commit
 
 The render worker image vendors BOSL2 from GitHub at build time. The tag is
 supplied via the `--build-arg BOSL2_TAG` Dockerfile build-arg, which has **no
 default** — a build without it fails loudly at the `ARG` / `RUN` line.
 
+A git tag ref is mutable: upstream can retarget (move) a tag to point at a
+different commit at any time, without changing the tag name. Pinning the tag
+name alone is therefore not a supply-chain guarantee — a compromised or
+retargeted tag ref would silently vendor different code into every render.
+To close that gap, the build also requires `--build-arg BOSL2_COMMIT`, the
+exact commit SHA the tag is expected to resolve to. After the shallow clone,
+the Dockerfile runs `git rev-parse HEAD` inside the vendored checkout and
+compares it against `BOSL2_COMMIT`; a mismatch fails the build loudly instead
+of silently accepting the retargeted code.
+
 Current pinned tag: **`v2.0.755`**
+Current pinned commit: **`4e031aafe189efcf4eb0250c24d3216b6a429458`**
+(verified via `git ls-remote https://github.com/BelfrySCAD/BOSL2 v2.0.755`
+on 2026-09-11; `v2.0.755` is a lightweight tag pointing directly at this
+commit)
 
 Build command:
 
 ```bash
 docker build --platform=linux/amd64 \
   --build-arg BOSL2_TAG=v2.0.755 \
+  --build-arg BOSL2_COMMIT=4e031aafe189efcf4eb0250c24d3216b6a429458 \
   -t d33d-render-worker:latest .
 ```
 
@@ -45,8 +60,10 @@ Upgrading the pinned BOSL2 tag is a **breaking change** that requires:
 3. A re-run of the slow-layer BOSL2 smoke test
    (`tests/slow/test_bosl2.py`) to confirm the image still builds and renders
    correctly with the new tag.
-4. An update to the `BOSL2_TAG` value in the `Dockerfile` (and the build
-   command in this document).
+4. Resolution of the new tag's commit SHA (`git ls-remote <repo> <tag>`) and
+   an update to both the `BOSL2_TAG` and `BOSL2_COMMIT` values in the build
+   command(s) in this document — the two must always be updated together in
+   the same commit, never `BOSL2_TAG` alone.
 5. A re-run of the full eval suite (ticket #8) before merging.
 
 ## Base image pinning

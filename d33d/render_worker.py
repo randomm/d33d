@@ -110,14 +110,155 @@ DEFAULT_CPU_LIMIT = "2"
 DEFAULT_PID_LIMIT = 512
 DEFAULT_TIMEOUT_S = 120
 
+#: Range bounds for params.json overrides. A malicious or malformed
+#: params.json must never be able to raise the resource ceilings above
+#: the DoS guard's intent — ``RenderParams.from_dict`` rejects anything
+#: outside these bounds with a ``ValueError`` rather than forwarding it
+#: verbatim to ``docker run``.
+MIN_MEMORY_MB = 64
+MAX_MEMORY_MB = 8192
+MIN_CPUS = 0.1
+MAX_CPUS = 8.0
+MIN_PID_LIMIT = 16
+MAX_PID_LIMIT = 2048
+MIN_TIMEOUT_S = 1
+MAX_TIMEOUT_S = 900
+
+#: ``docker --memory`` suffix -> bytes-per-unit multiplier, matching the
+#: units \ ``docker run --memory`` itself accepts.
+_MEMORY_UNIT_BYTES: dict[str, int] = {
+    "b": 1,
+    "k": 1024,
+    "m": 1024**2,
+    "g": 1024**3,
+}
+
+_MEMORY_LIMIT_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)([bkmg]?)$")
+
+
+def _parse_memory_limit_mb(value: str) -> float:
+    """Parse a ``docker --memory``-style string (e.g. ``"2g"``, ``"512m"``)
+    into megabytes. Raises ``ValueError`` on any value that does not
+    match the accepted ``<number><unit>`` shape (unit one of b/k/m/g,
+    case-insensitive; bare numbers are bytes, matching Docker's own
+    default unit)."""
+    match = _MEMORY_LIMIT_RE.match(value.strip().lower())
+    if not match:
+        raise ValueError(
+            f"memory_limit {value!r} is not a valid docker --memory value "
+            "(expected <number>[b|k|m|g])"
+        )
+    number_s, unit = match.groups()
+    number = float(number_s)
+    unit_bytes = _MEMORY_UNIT_BYTES[unit or "b"]
+    return (number * unit_bytes) / (1024**2)
+
+
+def _validate_memory_limit(value: str) -> str:
+    mb = _parse_memory_limit_mb(value)
+    if not (MIN_MEMORY_MB <= mb <= MAX_MEMORY_MB):
+        raise ValueError(
+            f"memory_limit {value!r} ({mb:.1f} MiB) is out of the allowed range "
+            f"[{MIN_MEMORY_MB}, {MAX_MEMORY_MB}] MiB"
+        )
+    return value
+
+
+def _validate_cpus(value: str) -> str:
+    try:
+        cpus = float(value)
+    except ValueError as exc:
+        raise ValueError(f"cpus {value!r} is not a valid number") from exc
+    if not (MIN_CPUS <= cpus <= MAX_CPUS):
+        raise ValueError(
+            f"cpus {value!r} is out of the allowed range [{MIN_CPUS}, {MAX_CPUS}]"
+        )
+    return value
+
+
+def _validate_pids_limit(value: int) -> int:
+    if not (MIN_PID_LIMIT <= value <= MAX_PID_LIMIT):
+        raise ValueError(
+            f"pids_limit {value!r} is out of the allowed range "
+            f"[{MIN_PID_LIMIT}, {MAX_PID_LIMIT}]"
+        )
+    return value
+
+
+def _validate_timeout_s(value: int) -> int:
+    if not (MIN_TIMEOUT_S <= value <= MAX_TIMEOUT_S):
+        raise ValueError(
+            f"timeout_s {value!r} is out of the allowed range "
+            f"[{MIN_TIMEOUT_S}, {MAX_TIMEOUT_S}]"
+        )
+    return value
+
+
 #: Wall-clock bound on the ``docker kill``/``docker rm`` cleanup calls in
 #: ``run_container`` — a hung Docker daemon is correlated with the stuck
 #: render they clean up, so these must never block indefinitely.
 _CLEANUP_TIMEOUT_S = 15
 
+#: Upper bound on the length of a single defines value, in characters.
+#: The caller only sets small macro values (dimensions, booleans, enum
+#: strings); a value above this bound is treated as a caller bug (possibly
+#: a runaway LLM output) and rejected. Matches the ``DEF`` constant in
+#: ``entrypoint.sh`` so both layers enforce the same limit.
+DEFINES_VALUE_MAX_CHARS = 4096
+
+#: Characters (ordinals < 32 or == 127) that must not appear in a defines
+#: key or value. A tab in a value would silently split the TSV that the
+#: entrypoint's ``read`` loop uses; other control characters are equally
+#: ambiguous in a ``-D`` flag. Rejecting them outright is simpler and safer
+#: than escaping them.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
+
 #: ``render-<8 hex chars from uuid4>`` — pinned as the testable contract;
 #: container and volume share the name.
 NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
+
+
+def parse_defines(params_json_text: str) -> dict[str, str]:
+    """Parse a ``params.json`` text payload and return the validated
+    ``defines`` map.
+
+    This is the **authoritative** validation for the ``params.json`` file
+    written by the caller into the work volume before ``docker run``.
+    It runs on the host where Python's ``json`` module is available — the
+    entrypoint's awk gate is a second, trivially simple layer that keeps
+    the container safe even if this validation is skipped.
+
+    Raises ``ValueError`` (the render caller maps this to
+    ``error_class="container_error"``) on:
+
+    - the text is not valid JSON
+    - the top-level value is not a JSON object
+    - ``defines`` is present but is not an object
+    - a defines key is not a string
+    - a defines value is not a string
+    - a defines key or value contains a tab, newline, or other control
+      character (ord < 32 or == 127) — a tab in a value would silently
+      split the TSV the entrypoint reads, and other control characters
+      are equally ambiguous in a ``-D`` flag
+    - a defines value exceeds ``DEFINES_VALUE_MAX_CHARS`` characters
+
+    Returns an empty dict when ``defines`` is absent (the caller only
+    writes the key when it has defines to pass).
+    """
+    try:
+        data = json.loads(params_json_text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"params.json is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise TypeError("params.json must be a JSON object at the top level")
+    raw = data.get("defines")
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"params.json 'defines' must be an object, got {type(raw).__name__}"
+        )
+    return _validate_defines_map(raw)
 
 #: The eight on-volume artifacts a fully successful run produces.
 ARTIFACT_STL = "model.stl"
@@ -134,12 +275,57 @@ def validate_render_name(name: str) -> bool:
     return bool(NAME_PATTERN_RE.match(name))
 
 
+def _validate_defines_map(raw: Any) -> dict[str, str]:
+    """Validate a raw ``defines`` dict (from JSON or in-memory) and return
+    a clean ``dict[str, str]``.
+
+    Shared by :func:`parse_defines` (raw-text path) and
+    ``RenderParams.from_dict`` (in-memory path) so both enforce the same
+    invariants: keys and values must be strings, no control characters,
+    and values must be at most ``DEFINES_VALUE_MAX_CHARS`` characters.
+    """
+    if not isinstance(raw, dict):
+        raise TypeError(
+            f"defines must be a dict/object, got {type(raw).__name__}"
+        )
+    result: dict[str, str] = {}
+    for k, v in raw.items():
+        if not isinstance(k, str):
+            raise TypeError(f"defines key {k!r} is not a string")
+        if not isinstance(v, str):
+            raise TypeError(
+                f"defines[{k!r}] value {v!r} is not a string "
+                f"(got {type(v).__name__})"
+            )
+        if _CONTROL_CHAR_RE.search(k):
+            raise ValueError(
+                f"defines key {k!r} contains a control character"
+            )
+        if _CONTROL_CHAR_RE.search(v):
+            raise ValueError(
+                f"defines[{k!r}] value contains a control character"
+            )
+        if len(v) > DEFINES_VALUE_MAX_CHARS:
+            raise ValueError(
+                f"defines[{k!r}] value is {len(v)} characters, "
+                f"exceeding the {DEFINES_VALUE_MAX_CHARS} character cap"
+            )
+        result[k] = v
+    return result
+
+
 @dataclass(frozen=True)
 class RenderParams:
     """The ``params.json`` payload, with the four overridable defaults.
 
     ``defines`` is a flat string map passed as ``-Dname=value``; ``{}``
     means no defines.
+
+    Every instance is range-validated in ``__post_init__`` regardless of
+    construction path, so a ``RenderParams`` object can never carry
+    out-of-bounds resource values into ``build_docker_argv`` — not via
+    ``from_dict``, not via a direct constructor call, not via any future
+    code path. Out-of-range or malformed values raise ``ValueError``.
     """
 
     defines: dict[str, str] = field(default_factory=dict)
@@ -148,12 +334,34 @@ class RenderParams:
     cpus: str = DEFAULT_CPU_LIMIT
     pids_limit: int = DEFAULT_PID_LIMIT
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "defines", _validate_defines_map(self.defines))
+        object.__setattr__(self, "timeout_s", _validate_timeout_s(self.timeout_s))
+        object.__setattr__(
+            self, "memory_limit", _validate_memory_limit(self.memory_limit)
+        )
+        object.__setattr__(self, "cpus", _validate_cpus(self.cpus))
+        object.__setattr__(self, "pids_limit", _validate_pids_limit(self.pids_limit))
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> RenderParams:
         """Parse a params dict; unknown keys are ignored, missing keys
-        fall back to the module defaults."""
+        fall back to the module defaults.
+
+        ``timeout_s``, ``memory_limit``, ``cpus`` and ``pids_limit`` are
+        range-validated (via ``__post_init__``) against the module bounds
+        (see ``MIN_*``/``MAX_*`` constants) so a malicious or malformed
+        params.json can never raise the resource ceilings above the DoS
+        guard's intent; out-of-range or malformed values raise
+        ``ValueError``.
+
+        ``defines`` values are validated for control characters and the
+        ``DEFINES_VALUE_MAX_CHARS`` size cap — the same invariants
+        enforced by :func:`parse_defines` for the raw-text path.
+        """
+        raw_defines = data.get("defines")
         return cls(
-            defines={str(k): str(v) for k, v in (data.get("defines") or {}).items()},
+            defines=raw_defines if raw_defines is not None else {},
             timeout_s=int(data.get("timeout_s", DEFAULT_TIMEOUT_S)),
             memory_limit=str(data.get("memory_limit", DEFAULT_MEMORY_LIMIT)),
             cpus=str(data.get("cpus", DEFAULT_CPU_LIMIT)),
@@ -398,14 +606,24 @@ def derive_ok(
     """True iff ``exit 0`` AND all eight artifacts exist AND the six PNGs
     are valid/non-blank AND the STL loads in trimesh with vertex count >
     0. That last clause exists because a ``.scad`` can compile cleanly to
-    empty geometry."""
-    if exit_code != 0:
-        return False
-    if not (isinstance(stl_path, str) and stl_path):
-        return False
-    if not _csg_and_views_valid(csg_path, views):
-        return False
-    return _stl_valid(stl_path, vertex_count, watertight, volume)
+    empty geometry.
+
+    Derived from :func:`classify` rather than re-implementing the ``ok``
+    predicate by hand, so the two can never silently diverge — ``ok`` iff
+    ``classify(...) == "ok"``.
+    """
+    return (
+        classify(
+            exit_code=exit_code,
+            stl_path=stl_path,
+            csg_path=csg_path,
+            views=views,
+            vertex_count=vertex_count,
+            watertight=watertight,
+            volume=volume,
+        )
+        == "ok"
+    )
 
 
 @dataclass(frozen=True)
