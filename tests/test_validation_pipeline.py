@@ -420,6 +420,7 @@ def test_keep_out_gate_rejects_origin_notch(
     )
     assert not r.ok
     assert "envelope" in r.error_class
+    assert "keep-out" in r.message
     assert r.export_3mf is None
 
     # Y passes (Y-min > 13.0)
@@ -498,13 +499,13 @@ def test_keep_out_source_invariant_reads_named_constant():
     # Extract the keep-out block (from 'keep_out' assignment to the next
     # 'Export 3MF' comment or end of function) and check for bare literals.
     ko_match = re.search(
-        r"keep_out\s*=\s*QIDI_PLUS_5_KEEP_OUT_MM",
+        r"QIDI_PLUS_5_KEEP_OUT_MM",
         src,
     )
     assert ko_match is not None, (
-        "gate-7 must assign keep_out = QIDI_PLUS_5_KEEP_OUT_MM "
-        "(or an equivalent named-constant read); no bare 9.0/13.0 literals "
-        "allowed at the gate site"
+        "gate-7 must reference QIDI_PLUS_5_KEEP_OUT_MM "
+        "(the named constant is the single source of truth); no bare "
+        "9.0/13.0 literals allowed at the gate site"
     )
 
 
@@ -565,6 +566,10 @@ def test_fits_envelope_but_overlaps_keep_out_fails_loudly(
     )
     assert not result.ok
     assert "envelope" in result.error_class
+    # The keep-out branch must be distinguishable from a plain
+    # over-envelope failure by its detail message (same "envelope" class).
+    assert "keep-out" in result.message
+    assert "gate7/envelope" not in result.message
     assert result.export_3mf is None
 
 

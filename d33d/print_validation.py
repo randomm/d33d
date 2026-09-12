@@ -148,6 +148,7 @@ class ValidationResult:
 
     ok: bool
     error_class: ErrorClass | None
+    message: str | None  # the diagnosable detail from the failing gate
     parts: list[Part]
     assembly_joints: list[Any]  # reserved, empty in v1
     assembly_layout: list[Any]  # reserved, empty in v1
@@ -534,7 +535,10 @@ def validate_stl(
             f"Slice dry run failed: {slice_result.error_string or slice_result.detail}",
         )
 
-    # Gate 7: fits the build plate (7a: per-axis extent, 7b: keep-out).
+    # Gate 7: fits the build plate — one gate with two branches, both
+    # reported under the single "envelope" error class:
+    #   7a: per-axis extent within the envelope
+    #   7b: post-centre position clears the bed keep-out zone
     env = QIDI_PLUS_5_ENVELOPE_MM
     for i in range(3):
         if bbox_mm[i] > env[i]:
@@ -544,9 +548,10 @@ def validate_stl(
                 f"gate7/envelope: dimension {i} ({bbox_mm[i]}mm) exceeds "
                 f"envelope {env[i]}mm",
             )
-
-    # Gate 7b: keep-out zone (see _check_bed_keep_out).
-    keep_out_error = _check_bed_keep_out(mesh)
+    # 7b: keep-out zone within the same gate. The gate site references the
+    # named constant directly so no bare 9.0/13.0 literals ever reach the
+    # gate (source invariant on validate_stl):
+    keep_out_error = _check_bed_keep_out(mesh, QIDI_PLUS_5_KEEP_OUT_MM)
     if keep_out_error is not None:
         return _fail("envelope", _part_from_mesh(mesh), keep_out_error)
 
@@ -571,6 +576,7 @@ def validate_stl(
     return ValidationResult(
         ok=True,
         error_class=None,
+        message=None,
         parts=[part],
         assembly_joints=[],
         assembly_layout=[],
@@ -600,8 +606,11 @@ def _centre_mesh(mesh: trimesh.Trimesh) -> None:
         mesh.apply_translation(target_centre - current_centre)
 
 
-def _check_bed_keep_out(mesh: trimesh.Trimesh) -> str | None:
-    """Gate 7b: check the post-centre position against the bed keep-out.
+def _check_bed_keep_out(
+    mesh: trimesh.Trimesh, keep_out: tuple[float, float]
+) -> str | None:
+    """Gate 7b (the keep-out branch of gate 7): check the post-centre
+    position against the bed keep-out.
 
     Rejects a part whose post-centre position overlaps the bed's lower-left
     non-printable rectangle. The check is AND over the two axes — a part
@@ -610,17 +619,19 @@ def _check_bed_keep_out(mesh: trimesh.Trimesh) -> str | None:
     (mesh.bounds[0]), not extents, and does not subtract env/2 — the mesh
     is already translated by _centre_mesh.
 
+    The keep-out boundary is passed by the gate site as the named constant
+    (QIDI_PLUS_5_KEEP_OUT_MM) so no bare 9.0/13.0 literals reach the gate.
+
     Returns an error message prefixed ``gate7/keep-out:`` for log triage,
     or None if the part clears the zone.
     """
-    keep_out = QIDI_PLUS_5_KEEP_OUT_MM
     if (
         mesh.bounds[0][0] <= keep_out[0]
         and mesh.bounds[0][1] <= keep_out[1]
     ):
         return (
             f"gate7/keep-out: post-centre position ({mesh.bounds[0][0]:.2f}, "
-            f"{mesh.bounds[0][1]:.2f}) overlaps the bed keep-out zone "
+            f"{mesh.bounds[0][1]:.2f}) overlaps the bed notch keep-out zone "
             f"({keep_out[0]}x{keep_out[1]}mm)"
         )
     return None
@@ -651,6 +662,7 @@ def _fail(
     return ValidationResult(
         ok=False,
         error_class=error_class,
+        message=message or None,
         parts=[part] if part else [],
         assembly_joints=[],
         assembly_layout=[],
