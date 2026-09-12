@@ -38,15 +38,12 @@ import json
 import sys
 from pathlib import Path
 
+from d33d.evals.failure_capture import FailureEvent
+
 # Make the repo root importable (the script lives at ``evals/``).
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-
-from d33d.evals.failure_capture import (  # noqa: E402
-    FailureEvent,
-    read_failure_events,
-)
 
 
 def fold(

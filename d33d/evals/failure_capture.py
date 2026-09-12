@@ -55,10 +55,9 @@ import json
 import logging
 import threading
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -201,7 +200,7 @@ class FailureEvent(BaseModel):
             )
         return failure_class
 
-    def validate(self) -> "FailureEvent":
+    def validate(self) -> FailureEvent:
         """Re-validate this instance's ``failure_class``.
 
         A fresh model instance (already constructed with a valid class)
@@ -275,7 +274,7 @@ def make_failure_event(
     """
     _validate_failure_class(failure_class, allow_gate_reasons=allow_gate_reasons)
     ts = (
-        (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
+        (now or datetime.now(UTC)).astimezone(UTC).isoformat()
     )
     eid = event_id or uuid.uuid4().hex
     return FailureEvent(
@@ -334,9 +333,8 @@ def append_failure_line(
         )
     target = Path(path) if path is not None else default_failures_path()
     target.parent.mkdir(parents=True, exist_ok=True)
-    with _append_lock:
-        with open(target, "ab") as f:
-            f.write(line.encode("utf-8"))
+    with _append_lock, open(target, "ab") as f:
+        f.write(line.encode("utf-8"))
     return target
 
 
@@ -555,6 +553,6 @@ __all__ = [
     "default_failures_path",
     "default_run_design_loop_hook",
     "make_failure_event",
-    "record_production_failure",
     "read_failure_events",
+    "record_production_failure",
 ]

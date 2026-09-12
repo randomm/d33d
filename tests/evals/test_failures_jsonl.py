@@ -21,9 +21,7 @@ Covers the ticket's test surface for this workstream:
 from __future__ import annotations
 
 import concurrent.futures
-import threading
 from pathlib import Path
-from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -38,10 +36,9 @@ from d33d.evals.failure_capture import (
     default_failures_path,
     default_run_design_loop_hook,
     make_failure_event,
-    record_production_failure,
     read_failure_events,
+    record_production_failure,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

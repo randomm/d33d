@@ -127,7 +127,7 @@ def test_missing_prompt_file_is_an_error(tmp_path: Path) -> None:
 def test_prompt_version_is_attribution_per_case() -> None:
     """Each case carries a prompt_version — so a report line reads
     'prompt v7 fails case X' without any other lookup."""
-    for cid, c in _load().items():
+    for c in _load().values():
         # version tag is present, well-formed, and distinct from the hash
         assert c.prompt.prompt_version != c.prompt.sha256
         assert c.prompt.prompt_version.startswith("v")

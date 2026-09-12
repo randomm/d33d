@@ -26,13 +26,11 @@ The threshold is always read via the named environment variable
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 import trimesh
 
 from d33d import print_validation as pv
-from d33d.evals.region_gate import NA_REASON, RegionGateResult, run_region_gate
+from d33d.evals.region_gate import NA_REASON, run_region_gate
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -238,9 +236,21 @@ def test_result_type_is_frozen_dataclass(
     post_mesh_pass: trimesh.Trimesh,
     region_bbox: tuple[tuple[float, float, float], tuple[float, float, float]],
 ) -> None:
-    """RegionGateResult is a frozen dataclass — mutation raises."""
+    """RegionGateResult is a frozen dataclass — field assignment raises.
+
+    ``dataclasses.replace`` is the sanctioned way to get a modified copy
+    (it never mutates the original); a direct assignment to a declared
+    field on the original is the freeze contract and raises
+    ``AttributeError``.
+    """
+    import dataclasses
+
     bbox_min, bbox_max = region_bbox
     result = run_region_gate(pre_mesh, post_mesh_pass, bbox_min, bbox_max)
+    original_status = result.status
+    replaced = dataclasses.replace(result, status="fail")
+    assert replaced.status == "fail"
+    assert result.status == original_status  # the original is untouched
     with pytest.raises(AttributeError):
         result.status = "fail"  # type: ignore[misc]
 

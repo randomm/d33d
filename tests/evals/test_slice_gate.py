@@ -17,17 +17,14 @@ precedence and fallback) and the gate passes/fails on its verdict.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 from unittest.mock import patch
 
-import pytest
 import trimesh
 
 from d33d import slicer
 from d33d.evals.slice_gate import (
     SLICE_GATE_LABEL,
-    SliceGateResult,
     run_slice_gate,
 )
 from d33d.slicer import SliceDryRunResult

@@ -23,7 +23,6 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from d33d import failure_classes as fc
 from d33d import print_validation as pv
 from d33d.evals import gates as eg
 from d33d.render_worker import classify as rw_classify

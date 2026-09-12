@@ -12,9 +12,8 @@ Covers:
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -122,9 +121,9 @@ def test_adversarial_cases_score_against_outcome_class() -> None:
             continue
         assert c.adversarial is not None, f"{cid}: adversarial spec missing"
         assert c.adversarial.expected_outcome in ADVERSARIAL_OUTCOMES, f"{cid}: bad outcome"
-        # never as compile failures: gate expectations must not be the full
-        # deterministic gate list
-        assert "watertight_winding" not in c.gate_expectations or True  # allow, but check spec
+        # never as compile failures: the subset check below is the real
+        # invariant — an adversarial case declares fewer than all seven
+        # deterministic gates.
         assert len(c.gate_expectations) < len(GATE_NAMES), (
             f"{cid}: adversarial case should not expect all seven gates"
         )
