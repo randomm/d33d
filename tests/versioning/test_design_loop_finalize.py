@@ -205,13 +205,29 @@ def test_finalize_production_seam_no_body_supplies_nonempty_request(app_with_ver
 def test_finalize_async_loop_result_is_awaited(app_with_versions):
     """The loop may be async (the real run_design_loop is); the route must
     await it — a sync-only path would return the coroutine object and blow
-    up on ``.status``."""
+    up on ``.status``.
+
+    Seams the "no nested asyncio.run" contract: inside the FastAPI
+    request handler (a coroutine running on the server's event loop)
+    the injected loop is AWAITED inside the running loop — the result
+    comes back fully resolved. If the route (or the seam) bridged via
+    a nested ``asyncio.run``, that call would raise ``RuntimeError(
+    'cannot be called from a running event loop')`` inside the
+    request — an uncaught 500, never the 201 + resolved params
+    asserted here. A sync-only path would instead leave an un-awaited
+    coroutine and blow up on ``.status`` (also never 201)."""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
 
         async def _loop():
+            # Runs inside the server's event loop: ``get_running_loop``
+            # only succeeds here because the coroutine is driven by the
+            # FastAPI request cycle, not a nested ``asyncio.run`` (which
+            # would raise RuntimeError the moment it executes).
+            import asyncio as _a
+            _a.get_running_loop()  # running loop present → awaited
             return _StubResult("pass", {"W": 10})
 
         app_with_versions.state.run_design_loop = _loop

@@ -52,6 +52,7 @@ from d33d.design_loop import (
     make_llm_fn,
     no_improvement,
     run_design_loop,
+    run_design_loop_async,
     score,
 )
 from d33d.failure_classes import (
@@ -633,6 +634,63 @@ def test_stated_dims_and_extra_defines_travel_as_named_params_to_render():
     assert captured[0]["D"] == "12.0"
     assert captured[0]["H"] == "14.0"
     assert captured[0]["clearance_slip"] == "0.3"
+
+
+def test_async_and_sync_entry_points_produce_identical_result():
+    """Async/sync parity: driving ``run_design_loop_async`` directly with
+    the same ``_run_loop``-style sync fakes as the sync ``run_design_loop``
+    yields a dataclass-equal terminal ``DesignResult`` — the two entry
+    points are the same loop core (the sync entry is a thin ``asyncio.run``
+    wrapper), so a branch divergence would surface as an equality gap on
+    the terminal result.
+
+    The fakes are deliberately sync callables: the async core tolerates
+    sync ``render_fn``/``llm_fn`` via its ``_call`` await-or-not helper,
+    so the existing ``_run_loop``-style fakes work unmodified.
+    """
+    llm = [_scad_llm(GOOD_SCAD), _scad_llm(BAD_SCAD), _scad_llm(GOOD_SCAD)]
+    renders = [
+        _render(),
+        _render(error_class="syntax_error", stderr="ERROR: x"),
+        _render(),
+    ]
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        return BboxInfo(99.0, 25.0, 30.0, 1.0)  # x off → bbox gate fails
+
+    def _drive(fn):
+        i = {"n": 0}
+
+        def llm_fn(role, messages, system):
+            return llm[min(i["n"], len(llm) - 1)]
+
+        def render_fn(scad, defines):
+            r = renders[min(i["n"], len(renders) - 1)]
+            i["n"] += 1
+            return r
+
+        return fn(
+            photo=PHOTO,
+            stated_dims=STATED,
+            render_fn=render_fn,
+            llm_fn=llm_fn,
+            bbox_fn=bbox_fn,
+        )
+
+    sync_result = _drive(run_design_loop)
+    async_result = asyncio.run(_drive(run_design_loop_async))
+    assert sync_result == async_result  # full dataclass equality
+    # The named fields are equal individually (the parity contract).
+    for field in ("status", "iterations", "failure_reason", "iterations_used"):
+        assert getattr(sync_result, field) == getattr(async_result, field), field
+    assert sync_result.best == async_result.best
+    assert sync_result.best.score == async_result.best.score
+    # Sanity: the scripted 3 → 1 → 3 trajectory is exhausted, not passed.
+    assert sync_result.status == "exhausted"
+    assert sync_result.iterations_used == 3
+    assert sync_result.best.iteration == 1
 
 
 def test_named_param_block_preserved_not_stripped():
