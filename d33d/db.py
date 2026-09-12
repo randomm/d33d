@@ -52,11 +52,14 @@ Design choices:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -232,6 +235,10 @@ class Connection:
             out["last_activity"] = json.loads(raw_la) if raw_la else None
         except (TypeError, ValueError):
             out["last_activity"] = None
+            logger.warning(
+                "project %s: corrupt last_activity JSON, falling back to None",
+                out.get("id"),
+            )
         return out
 
     def update_project(

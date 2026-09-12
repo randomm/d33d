@@ -329,22 +329,37 @@ export default function App({ renders = [], client }: AppProps) {
   }, []);
 
   // The compare view (two viewports + the param diff table) — fetched once
-  // two versions have been selected (the prioritized surface).
+  // two distinct versions have been selected (the prioritized surface).
   const [compareResult, setCompareResult] = useState<VersionCompare | null>(null);
+  const [compareError, setCompareError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
     if (projectId === null || compareIds === null) {
       setCompareResult(null);
+      setCompareError(null);
       return;
     }
+    // Skip the fetch when both ids are the same (the first click sets
+    // [id, id] as a pending selection without a network call).
+    if (compareIds[0] === compareIds[1]) {
+      setCompareResult(null);
+      setCompareError(null);
+      return;
+    }
+    setCompareError(null);
     apiClient
       .compareVersions(projectId, compareIds[0], compareIds[1])
       .then((res) => {
         if (!cancelled) setCompareResult(res);
       })
-      .catch(() => {
-        if (!cancelled) setCompareResult(null);
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setCompareResult(null);
+          setCompareError(
+            `Compare failed: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+        }
       });
     return () => {
       cancelled = true;
@@ -569,6 +584,11 @@ export default function App({ renders = [], client }: AppProps) {
                 versions have been selected from the timeline. */}
             {compareIds !== null && compareResult !== null && (
               <div data-testid="compare-pane">
+                {compareError && (
+                  <p data-testid="compare-error" role="alert">
+                    {compareError}
+                  </p>
+                )}
                 <CompareView
                   compare={compareResult}
                   aId={compareIds[0]}

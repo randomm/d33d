@@ -139,6 +139,15 @@ class ProjectUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A project row with the raw git-repo path removed (git invisibility
+    — the on-disk path names a git repo and is never exposed in an API
+    response)."""
+    out = dict(row)
+    out.pop("git_repo_path", None)
+    return out
+
+
 def create_projects_router() -> APIRouter:
     """Build and return the projects router.
 
@@ -167,9 +176,7 @@ def create_projects_router() -> APIRouter:
             conn.delete_project(project_id)
             raise HTTPException(status_code=500, detail=f"git init failed: {e}")
         # Git invisibility: the raw on-disk repo path is never exposed.
-        row = dict(row)
-        row.pop("git_repo_path", None)
-        return row
+        return _public_project_row(row)
 
     @router.get("/{project_id}")
     async def get_project(request: Request, project_id: int) -> dict[str, Any]:
@@ -177,20 +184,14 @@ def create_projects_router() -> APIRouter:
         row = conn.get_project(project_id)
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
-        # Git invisibility: the raw on-disk repo path is never exposed
-        # (not even the field name — it names a git repo).
-        row = dict(row)
-        row.pop("git_repo_path", None)
-        return row
+        return _public_project_row(row)
 
     @router.get("")
     async def list_projects(request: Request) -> list[dict[str, Any]]:
         conn: db_mod.Connection = request.app.state.conn
         out = []
         for r in conn.list_projects():
-            d = dict(r)
-            d.pop("git_repo_path", None)
-            out.append(d)
+            out.append(_public_project_row(r))
         return out
 
     @router.patch("/{project_id}")
@@ -209,9 +210,7 @@ def create_projects_router() -> APIRouter:
         )
         updated = conn.get_project(project_id)
         assert updated is not None
-        updated = dict(updated)
-        updated.pop("git_repo_path", None)
-        return updated
+        return _public_project_row(updated)
 
     @router.delete("/{project_id}", status_code=204)
     async def delete_project(request: Request, project_id: int) -> None:

@@ -79,7 +79,10 @@ export interface VersionTimelineEntry {
   archived: boolean;
   thumbnail: string | null;
   created_at: string;
-  /** Diff badge: params changed vs the parent (0 for the first version). */
+  /** Diff badge: params changed vs the parent (0 for the first version).
+   *  Present on the timeline (GET /versions) but NOT on the single-version
+   *  GET /versions/{id} — the diff badge is computed in the timeline route
+   *  from the parent pointer. */
   diff_count: number;
 }
 
@@ -797,7 +800,11 @@ export class ApiClient {
     }
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, init);
     if (res.status === expectedStatus && res.status >= 200 && res.status < 300) {
-      if (res.status === 204) return undefined as T;
+      if (res.status === 204) {
+        // 204 No Content — the caller must use `Promise<void>` (not a typed
+        // body) so T is never cast to undefined for a body-shaped return.
+        return undefined as unknown as T;
+      }
       return (await res.json()) as T;
     }
     await throwFor(res);

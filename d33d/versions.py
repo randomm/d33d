@@ -247,7 +247,7 @@ class VersionService:
         va = self.get_version(project_id, a_id)
         vb = self.get_version(project_id, b_id)
         if va is None or vb is None:
-            raise KeyError("version not found")
+            raise LookupError("version not found")
         added, removed, changed = diff_params(va["params"], vb["params"])
         return {
             "project_id": project_id,
@@ -269,19 +269,41 @@ class VersionService:
             },
         }
 
+    def library_cards(self) -> list[dict[str, Any]]:
+        """Project library grid: one card per project with name, tags, notes,
+        current_version, last_activity, and the latest version's thumbnail.
+        (Single query per project for the latest version; the N+1 is
+        acceptable at personal-app scale — the index on (project_id, id)
+        keeps each lookup O(log n).)"""
+        out = []
+        for row in self.conn.list_projects():
+            latest = self.latest_version(row["id"])
+            card = {
+                "id": row["id"],
+                "name": row["name"],
+                "tags": row["tags"],
+                "notes": row["notes"],
+                "current_version": row.get("current_version"),
+                "last_activity": row.get("last_activity"),
+                "thumbnail": (latest or {}).get("thumbnail"),
+            }
+            out.append(card)
+        return out
+
     # -- serialization helper ----------------------------------------------
 
-    async def _with_project_lock(self, project_id: int, fn):
+    async def _with_project_lock(
+        self, project_id: int, fn: Callable[[], Any]
+    ) -> Any:
         """Serialize version writes for one project (AND across projects,
         since git + a shared SQLite write path must be single-writer).
 
-        Held across the sync fn so concurrent creates on the same project
-        queue: each reads the chain head under the lock, so parent
-        pointers always point at the true latest (the chain stays linear).
+        ``fn`` must be a zero-arg callable that returns a coroutine (an
+        ``async def`` body) or a plain sync result. The coroutine is
+        created when ``fn()`` is called — inside the locked region — so
+        the lock is held for the full body.
         """
         async with self._write_lock, self._lock_for(project_id):
-            if hasattr(fn, "__await__"):
-                return await fn
             result = fn()
             if hasattr(result, "__await__"):
                 return await result
@@ -314,7 +336,7 @@ class VersionService:
         """
         return await self._with_project_lock(
             project_id,
-            self._make_create_call(
+            lambda: self._run_create(
                 project_id,
                 params,
                 name=name,
@@ -324,12 +346,6 @@ class VersionService:
                 thumbnail=thumbnail,
             ),
         )
-
-    def _make_create_call(self, *args, **kwargs):
-        """Build the coroutine the write lock will await (avoids a
-        lambda-captured-coroutine warning: the coroutine is created inside
-        the locked region)."""
-        return self._run_create(*args, **kwargs)
 
     async def _run_create(
         self,
@@ -389,28 +405,30 @@ class VersionService:
         repo_dir = Path(project["git_repo_path"])
         versions_dir = repo_dir / "versions"
         vdir = versions_dir / str(version_id)
-        vdir.mkdir(parents=True, exist_ok=True)
-        (vdir / PARAMS_FILENAME).write_text(
-            json.dumps(params, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        commit_subject = (
-            f"version: {version_name}"
-            if restored_from is None
-            else f"restored from version {restored_from}: {version_name}"
-        )
         try:
+            vdir.mkdir(parents=True, exist_ok=True)
+            (vdir / PARAMS_FILENAME).write_text(
+                json.dumps(params, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            commit_subject = (
+                f"version: {version_name}"
+                if restored_from is None
+                else f"restored from version {restored_from}: {version_name}"
+            )
             _commit_versions_file(
                 repo_dir,
                 versions_dir,
                 f"{version_id}/{PARAMS_FILENAME}",
                 commit_subject,
             )
-        except RuntimeError as e:
-            # Keep DB and git consistent: roll the row back.
+        except (RuntimeError, OSError) as e:
+            # Keep DB, git, and filesystem consistent: roll back the row
+            # and clean up the snapshot file if the write succeeded.
+            (vdir / PARAMS_FILENAME).unlink(missing_ok=True)
             self.conn.raw.execute("DELETE FROM versions WHERE id = ?", (version_id,))
             self.conn.commit()
-            raise RuntimeError(f"git commit failed: {e}") from e
+            raise RuntimeError(f"version commit failed: {e}") from e
 
         # Advance the project pointer + activity (inside the write
         # lock, same writer as the version row above).
@@ -490,11 +508,17 @@ class VersionService:
                 raise RuntimeError(f"git commit failed: {e}") from e
             # Re-point the project pointer to the chosen version (the
             # marker commit above records the switch in git history).
-            self.conn.update_project(
-                project_id,
-                current_version=version_id,
-                last_activity=(target["id"], target["name"]),
-            )
+            try:
+                self.conn.update_project(
+                    project_id,
+                    current_version=version_id,
+                    last_activity=(target["id"], target["name"]),
+                )
+            except Exception:
+                # The marker commit exists in git but the DB update failed.
+                # The divergence is observable via the marker file; re-raise
+                # so the caller knows the state is not fully consistent.
+                raise
             return self._public_project(self.conn.get_project(project_id))
 
         return await self._with_project_lock(project_id, _set_main)
@@ -585,13 +609,18 @@ class VersionService:
                     forked_from=(project_id, version_id),
                 )
                 self.conn.update_project(new_project_id, current_version=seed["id"])
-            except Exception:
+            except (LookupError, ValueError, VersionConflictError, RuntimeError, OSError) as e:
                 # Roll back: remove the new project's repo + row so a
                 # failed branch never leaves an orphan variant card.
                 import shutil
 
                 shutil.rmtree(Path(new_repo), ignore_errors=True)
-                self.conn.delete_project(new_project_id)
+                try:
+                    self.conn.delete_project(new_project_id)
+                except Exception:
+                    # The repo is already removed; if the DB row deletion
+                    # also fails the orphan row is still observable in logs.
+                    pass
                 raise
             return {
                 "project": self._public_project(self.conn.get_project(new_project_id)),

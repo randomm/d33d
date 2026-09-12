@@ -12,77 +12,11 @@ Covers the project-library contract:
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from d33d.app import create_app
-
-
-def _run_async(app: Any, coro_factory) -> Any:
-    async def _run():
-        async with app.router.lifespan_context(app):
-            client = AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            )
-            async with client:
-                return await coro_factory(client)
-
-    return asyncio.run(_run())
-
-
-@pytest.fixture
-def app_paths(tmp_path):
-    return {
-        "db": tmp_path / "d33d.sqlite3",
-        "key": tmp_path / "master.key",
-        "cat": tmp_path / "models.yaml",
-    }
-
-
-@pytest.fixture
-def app_with_versions(app_paths, tmp_path):
-    import d33d.db as db_mod
-
-    original_default = db_mod._default_git_path
-
-    def _tmp_default_git_path(name: str) -> str:
-        import uuid
-
-        slug = uuid.uuid4().hex[:12]
-        base = tmp_path / "repos" / slug
-        base.mkdir(parents=True, exist_ok=True)
-        return str(base)
-
-    db_mod._default_git_path = _tmp_default_git_path
-
-    app = create_app(
-        app_paths["db"],
-        master_key_path=app_paths["key"],
-        catalogue_path=app_paths["cat"],
-    )
-    yield app
-    db_mod._default_git_path = original_default
-
-
-async def _create_project(client: AsyncClient, **kw) -> dict:
-    body = {"name": "lib project"}
-    body.update(kw)
-    r = await client.post("/api/projects", json=body)
-    assert r.status_code == 201, r.text
-    return r.json()
-
-
-async def _create_version(client, pid, params, **kw) -> dict:
-    body = {"params": params}
-    body.update(kw)
-    r = await client.post(f"/api/projects/{pid}/versions", json=body)
-    assert r.status_code == 201, r.text
-    return r.json()
-
-
+from tests.versioning.helpers import (
+    create_project,
+    create_version,
+    run_async,
+)
 # ---------------------------------------------------------------------------
 # (a) library grid: name, last-activity, thumbnail
 # ---------------------------------------------------------------------------
@@ -90,10 +24,12 @@ async def _create_version(client, pid, params, **kw) -> dict:
 
 def test_library_returns_name_last_activity_and_thumbnail(app_with_versions):
     async def _call(client):
-        p1 = await _create_project(
-            client, name="the desk bracket", tags=["desk"], notes="for the studio"
+        p1 = await create_project(client, name="the desk bracket")
+        await client.patch(
+            f"/api/projects/{p1['id']}",
+            json={"tags": ["desk"], "notes": "for the studio"},
         )
-        v1 = await _create_version(client, p1["id"], {"W": 20}, name="bracket v1")
+        v1 = await create_version(client, p1["id"], {"W": 20}, name="bracket v1")
         # Set a thumbnail on v1 (it becomes the project's card thumbnail —
         # the latest version's thumbnail).
         await client.patch(
@@ -101,7 +37,7 @@ def test_library_returns_name_last_activity_and_thumbnail(app_with_versions):
             json={"thumbnail": "/thumbs/bracket-iso.png"},
         )
         # A second project with no versions (empty card fields).
-        p2 = await _create_project(client, name="empty project")
+        p2 = await create_project(client, name="empty project")
 
         r = await client.get("/api/library")
         cards = r.json()
@@ -109,7 +45,7 @@ def test_library_returns_name_last_activity_and_thumbnail(app_with_versions):
         p2_card = next(c for c in cards if c["id"] == p2["id"])
         return p1_card, p2_card
 
-    p1_card, p2_card = _run_async(app_with_versions, _call)
+    p1_card, p2_card = run_async(app_with_versions, _call)
 
     # (a) name, last-activity timestamp, and thumbnail present.
     assert p1_card["name"] == "the desk bracket"
@@ -137,19 +73,16 @@ def test_search_filters_by_name_tags_and_notes(app_with_versions):
     endpoint carries all three fields; no server-side search param)."""
 
     async def _call(client):
-        await _create_project(
-            client, name="the desk bracket", tags=["desk"], notes="studio shelf"
-        )
-        await _create_project(
-            client, name="wall hook", tags=["wall"], notes="holds the lamp"
-        )
-        await _create_project(
-            client, name="lamp arm", tags=["desk", "light"], notes="articulated arm"
-        )
+        p1 = await create_project(client, name="the desk bracket")
+        await client.patch(f"/api/projects/{p1['id']}", json={"tags": ["desk"], "notes": "studio shelf"})
+        p2 = await create_project(client, name="wall hook")
+        await client.patch(f"/api/projects/{p2['id']}", json={"tags": ["wall"], "notes": "holds the lamp"})
+        p3 = await create_project(client, name="lamp arm")
+        await client.patch(f"/api/projects/{p3['id']}", json={"tags": ["desk", "light"], "notes": "articulated arm"})
         cards = (await client.get("/api/library")).json()
         return cards
 
-    cards = _run_async(app_with_versions, _call)
+    cards = run_async(app_with_versions, _call)
 
     def _matches(cards, needle: str) -> list[dict]:
         n = needle.lower()
@@ -182,17 +115,17 @@ def test_opening_project_resumes_at_latest_version_with_timeline(
     latest version plus the full history."""
 
     async def _call(client):
-        p = await _create_project(client, name="resume me")
+        p = await create_project(client, name="resume me")
         pid = p["id"]
-        v1 = await _create_version(client, pid, {"W": 20}, name="v1")
-        v2 = await _create_version(client, pid, {"W": 25}, name="v2")
-        v3 = await _create_version(client, pid, {"W": 30}, name="v3")
+        v1 = await create_version(client, pid, {"W": 20}, name="v1")
+        v2 = await create_version(client, pid, {"W": 25}, name="v2")
+        v3 = await create_version(client, pid, {"W": 30}, name="v3")
 
         opened = (await client.get(f"/api/projects/{pid}")).json()
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         return pid, v1["id"], v2["id"], v3["id"], opened, timeline
 
-    pid, v1, v2, v3, opened, timeline = _run_async(app_with_versions, _call)
+    pid, v1, v2, v3, opened, timeline = run_async(app_with_versions, _call)
 
     # The opened project points at the LATEST version (resume state).
     assert opened["current_version"] == v3

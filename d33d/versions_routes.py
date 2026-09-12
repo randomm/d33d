@@ -109,7 +109,12 @@ class FinalizeBody:
     in ``_parse_finalize_body`` so non-dict bodies map to clean 400/422s).
     """
 
-    def __init__(self, params, name, message) -> None:
+    def __init__(
+        self,
+        params: dict[str, Any] | None,
+        name: str | None,
+        message: str,
+    ) -> None:
         self.params = params
         self.name = name
         self.message = message
@@ -121,6 +126,12 @@ class DesignLoopHandle:
     The injected loop returns an object with ``.status`` (``"pass"`` |
     ``"exhausted"``) and ``.best`` (the best candidate). Tests inject a
     stub with the same shape (see the finalize contract tests).
+
+    In the production code path ``best`` is an ``IterationRecord`` from
+    ``d33d.design_loop`` (which has no ``params`` attribute); the
+    finalize route therefore falls back to the body's ``params`` or the
+    latest version's snapshot when ``getattr(best, 'params')`` is not a
+    non-empty dict. The ``Any`` annotation reflects this duck-typed seam.
     """
 
     def __init__(self, status: str, best: Any) -> None:
@@ -190,9 +201,8 @@ def create_versions_router() -> APIRouter:
         return out
 
     # -- compare (the prioritized surface) --------------------------------------
-    # NOTE: registered BEFORE the numeric ``{version_id}`` routes so
-    # Starlette's registration-order matching sees "compare" as a literal
-    # (it would otherwise be parsed as a version id → 422).
+    # ``compare`` is a literal segment in a distinct route pattern; it cannot
+    # collide with the ``{version_id}`` segment — no ordering dependency.
 
     @router.get("/api/projects/{project_id}/versions/compare")
     async def compare(
@@ -358,20 +368,7 @@ def create_versions_router() -> APIRouter:
         thumbnail for each project (search over names/tags/notes is
         client-side over these full rows)."""
         svc = _service(request)
-        out = []
-        for row in svc.conn.list_projects():
-            latest = svc.latest_version(row["id"])
-            card = {
-                "id": row["id"],
-                "name": row["name"],
-                "tags": row["tags"],
-                "notes": row["notes"],
-                "current_version": row.get("current_version"),
-                "last_activity": row.get("last_activity"),
-                "thumbnail": (latest or {}).get("thumbnail"),
-            }
-            out.append(card)
-        return out
+        return svc.library_cards()
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
@@ -397,7 +394,7 @@ def create_versions_router() -> APIRouter:
         content = await _read_bounded_source(request)
         try:
             data = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             raise HTTPException(status_code=400, detail="invalid JSON body")
         source = data.get("source") if isinstance(data, dict) else None
         if not isinstance(source, str):
@@ -410,9 +407,11 @@ def create_versions_router() -> APIRouter:
             from d33d.projects import commit_all
 
             commit_all(Path(row["git_repo_path"]), "design source update")
-        except RuntimeError:
+        except RuntimeError as e:
             # The raw git output names the repo on disk — never leak it.
-            raise HTTPException(status_code=500, detail="design source commit failed")
+            raise HTTPException(
+                status_code=500, detail="design source commit failed"
+            ) from e
         # Git invisibility: the on-disk path is server-internal; the
         # response names only the repo-relative file, never the absolute
         # path (which names the repo's on-disk location).
@@ -456,10 +455,12 @@ def create_versions_router() -> APIRouter:
                 detail=f"design loop did not pass validation: {result.status}",
             )
 
-        # On a pass, the version's params are the best candidate's named
-        # parameters (the loop's named-param gate verified them) — the full
-        # snapshot of the accepted design. The body's params only seed
-        # up front; the loop's result is authoritative.
+        # The loop's result is authoritative: on a pass the version's params
+        # are the best candidate's named parameters (the loop's named-param
+        # gate verified them). The body's params only seed up front; the
+        # loop's result overwrites them here. If the loop's result has no
+        # usable param set (e.g. the real IterationRecord has no .params),
+        # fall back to the seed (body params or latest-version snapshot).
         named = getattr(result.best, "params", None)
         if isinstance(named, dict) and named:
             params = dict(named)
@@ -505,7 +506,12 @@ def _raise_mapped(e: Exception) -> None:
 
 
 async def _call(fn, *args: Any) -> Any:
-    """Call a service method, mapping its exception taxonomy to HTTP."""
+    """Call a service method, mapping its exception taxonomy to HTTP.
+
+    ``fn`` is a sync service method (all current callers are sync); the
+    ``hasattr(result, "__await__")`` check is kept for forward-compat
+    with async service methods but is never exercised today.
+    """
     try:
         result = fn(*args)
         if hasattr(result, "__await__"):

@@ -13,79 +13,13 @@ All non-slow: local git + SQLite only.
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
-import pytest
 from httpx import ASGITransport, AsyncClient
 
-from d33d.app import create_app
-
-
-def _run_async(app: Any, coro_factory) -> Any:
-    async def _run():
-        async with app.router.lifespan_context(app):
-            client = AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            )
-            async with client:
-                return await coro_factory(client)
-
-    return asyncio.run(_run())
-
-
-@pytest.fixture
-def app_paths(tmp_path):
-    return {
-        "db": tmp_path / "d33d.sqlite3",
-        "key": tmp_path / "master.key",
-        "cat": tmp_path / "models.yaml",
-    }
-
-
-@pytest.fixture
-def app_with_versions(app_paths, tmp_path):
-    import d33d.db as db_mod
-
-    original_default = db_mod._default_git_path
-
-    def _tmp_default_git_path(name: str) -> str:
-        import uuid
-
-        slug = uuid.uuid4().hex[:12]
-        base = tmp_path / "repos" / slug
-        base.mkdir(parents=True, exist_ok=True)
-        return str(base)
-
-    db_mod._default_git_path = _tmp_default_git_path
-
-    app = create_app(
-        app_paths["db"],
-        master_key_path=app_paths["key"],
-        catalogue_path=app_paths["cat"],
-    )
-    yield app
-    db_mod._default_git_path = original_default
-
-
-async def _create_project(
-    client: AsyncClient, name: str = "persist test", **kw
-) -> dict:
-    body = {"name": name}
-    body.update(kw)
-    r = await client.post("/api/projects", json=body)
-    assert r.status_code == 201, r.text
-    return r.json()
-
-
-async def _create_version(client, pid, params, **kw) -> dict:
-    body = {"params": params}
-    body.update(kw)
-    r = await client.post(f"/api/projects/{pid}/versions", json=body)
-    assert r.status_code == 201, r.text
-    return r.json()
-
-
+from tests.versioning.helpers import (
+    create_project,
+    create_version,
+    run_async,
+)
 # ---------------------------------------------------------------------------
 # (a) reopening resumes at the latest version with the full timeline intact
 # ---------------------------------------------------------------------------
@@ -97,10 +31,10 @@ def test_reopening_resumes_at_latest_version_full_timeline(app_with_versions):
     the project row pointing at the latest version."""
 
     async def _call(client):
-        pid = (await _create_project(client))["id"]
-        v1 = await _create_version(client, pid, {"W": 20, "H": 25}, name="first")
-        v2 = await _create_version(client, pid, {"W": 24}, name="second")
-        v3 = await _create_version(client, pid, {"W": 24, "H": 30}, name="third")
+        pid = (await create_project(client))["id"]
+        v1 = await create_version(client, pid, {"W": 20, "H": 25}, name="first")
+        v2 = await create_version(client, pid, {"W": 24}, name="second")
+        v3 = await create_version(client, pid, {"W": 24, "H": 30}, name="third")
         # "Reopen": a FRESH client over the same app/DB (a new session).
         # The lifespan (and thus the DB connection) stays open — closing
         # the browser never drops the backend state.
@@ -112,7 +46,7 @@ def test_reopening_resumes_at_latest_version_full_timeline(app_with_versions):
             timeline = (await fresh.get(f"/api/projects/{pid}/versions")).json()
         return pid, v1["id"], v2["id"], v3["id"], row, timeline
 
-    pid, v1, v2, v3, row, timeline = _run_async(app_with_versions, _call)
+    pid, v1, v2, v3, row, timeline = run_async(app_with_versions, _call)
     # The timeline is fully intact, in order.
     assert [v["id"] for v in timeline] == [v1, v2, v3]
     # The project points at the latest version.
@@ -131,14 +65,14 @@ def test_project_metadata_survives_round_trip(app_with_versions, tmp_path):
     current_version all persist across a session boundary."""
 
     async def _call(client):
-        project = await _create_project(
-            client,
-            name="metadata project",
-            tags=["desk", "bracket"],
-            notes="a desk bracket for the studio",
-        )
+        project = await create_project(client, name="metadata project")
         pid = project["id"]
-        await _create_version(client, pid, {"W": 20}, name="v1")
+        # Patch the tags/notes (create_project only sets name).
+        await client.patch(
+            f"/api/projects/{pid}",
+            json={"tags": ["desk", "bracket"], "notes": "a desk bracket for the studio"},
+        )
+        await create_version(client, pid, {"W": 20}, name="v1")
 
         # Upload a source photo (1x1 PNG, png content-type).
         png_bytes = (
@@ -161,7 +95,7 @@ def test_project_metadata_survives_round_trip(app_with_versions, tmp_path):
             row = (await fresh.get(f"/api/projects/{pid}")).json()
         return row, photo
 
-    row, photo = _run_async(app_with_versions, _call)
+    row, photo = run_async(app_with_versions, _call)
     assert row["tags"] == ["desk", "bracket"]
     assert row["notes"] == "a desk bracket for the studio"
     assert row["source_photo_path"] == photo["source_photo_path"]
@@ -175,7 +109,7 @@ def test_project_metadata_survives_round_trip(app_with_versions, tmp_path):
 
 def test_fresh_project_has_empty_timeline_no_error(app_with_versions):
     async def _call(client):
-        pid = (await _create_project(client))["id"]
+        pid = (await create_project(client))["id"]
         r = await client.get(f"/api/projects/{pid}/versions")
         gallery = await client.get(f"/api/projects/{pid}/gallery")
         library = await client.get("/api/library")
@@ -187,7 +121,7 @@ def test_fresh_project_has_empty_timeline_no_error(app_with_versions):
             library.json(),
         )
 
-    status, timeline, gallery_status, gallery, library = _run_async(
+    status, timeline, gallery_status, gallery, library = run_async(
         app_with_versions, _call
     )
     assert status == 200
@@ -212,14 +146,13 @@ def test_notes_last_activity_and_archive_round_trip(app_with_versions):
     action depend on these fields existing and persisting."""
 
     async def _call(client):
-        project = await _create_project(
-            client,
-            name="round trip project",
-            tags=["desk"],
-            notes="bracket for the studio shelf",
-        )
+        project = await create_project(client, name="round trip project")
         pid = project["id"]
-        v1 = await _create_version(client, pid, {"W": 20}, name="v1")
+        await client.patch(
+            f"/api/projects/{pid}",
+            json={"tags": ["desk"], "notes": "bracket for the studio shelf"},
+        )
+        v1 = await create_version(client, pid, {"W": 20}, name="v1")
         # Pin + archive v1 (the gallery archive action).
         await client.patch(
             f"/api/projects/{pid}/versions/{v1['id']}",
@@ -235,7 +168,7 @@ def test_notes_last_activity_and_archive_round_trip(app_with_versions):
             timeline = (await fresh.get(f"/api/projects/{pid}/versions")).json()
             return row, timeline
 
-    row, timeline = _run_async(app_with_versions, _call)
+    row, timeline = run_async(app_with_versions, _call)
     # Project.notes round-trips (free-text outcome notes).
     assert row["notes"] == "bracket for the studio shelf"
     # Project.last_activity is stamped (the library card's activity field —

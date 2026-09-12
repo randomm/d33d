@@ -13,65 +13,7 @@ every competitor surveyed). Covers:
 
 from __future__ import annotations
 
-import asyncio
-from typing import Any
-
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from d33d.app import create_app
-
-
-def _run_async(app: Any, coro_factory) -> Any:
-    async def _run():
-        async with app.router.lifespan_context(app):
-            client = AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            )
-            async with client:
-                return await coro_factory(client)
-
-    return asyncio.run(_run())
-
-
-@pytest.fixture
-def app_paths(tmp_path):
-    return {
-        "db": tmp_path / "d33d.sqlite3",
-        "key": tmp_path / "master.key",
-        "cat": tmp_path / "models.yaml",
-    }
-
-
-@pytest.fixture
-def app_with_versions(app_paths, tmp_path):
-    import d33d.db as db_mod
-
-    original_default = db_mod._default_git_path
-
-    def _tmp_default_git_path(name: str) -> str:
-        import uuid
-
-        slug = uuid.uuid4().hex[:12]
-        base = tmp_path / "repos" / slug
-        base.mkdir(parents=True, exist_ok=True)
-        return str(base)
-
-    db_mod._default_git_path = _tmp_default_git_path
-
-    app = create_app(
-        app_paths["db"],
-        master_key_path=app_paths["key"],
-        catalogue_path=app_paths["cat"],
-    )
-    yield app
-    db_mod._default_git_path = original_default
-
-
-async def _create_project(client: AsyncClient) -> int:
-    r = await client.post("/api/projects", json={"name": "compare test"})
-    assert r.status_code == 201, r.text
-    return int(r.json()["id"])
+from tests.versioning.helpers import create_project, run_async
 
 
 async def _make_versions(client, pid):
@@ -104,7 +46,8 @@ def test_compare_returns_param_sets_and_diff_table(app_with_versions):
     diff table (added/removed/changed)."""
 
     async def _call(client):
-        pid = await _create_project(client)
+        proj = await create_project(client)
+        pid = proj["id"]
         va, vb, _ = await _make_versions(client, pid)
         r = await client.get(
             f"/api/projects/{pid}/versions/compare",
@@ -112,7 +55,7 @@ def test_compare_returns_param_sets_and_diff_table(app_with_versions):
         )
         return va, vb, r
 
-    va, vb, r = _run_async(app_with_versions, _call)
+    va, vb, r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
     body = r.json()
 
@@ -134,7 +77,8 @@ def test_compare_diff_is_symmetric(app_with_versions):
     mirrored: added <-> removed, changed unchanged)."""
 
     async def _call(client):
-        pid = await _create_project(client)
+        proj = await create_project(client)
+        pid = proj["id"]
         va, _, vc = await _make_versions(client, pid)
         r1 = await client.get(
             f"/api/projects/{pid}/versions/compare",
@@ -146,7 +90,7 @@ def test_compare_diff_is_symmetric(app_with_versions):
         )
         return r1.json(), r2.json()
 
-    ab, ba = _run_async(app_with_versions, _call)
+    ab, ba = run_async(app_with_versions, _call)
     # A→C: 'brim' is removed. C→A: 'brim' is added.
     assert ab["diff"]["removed"] == ["brim"]
     assert ab["diff"]["added"] == []
@@ -162,7 +106,8 @@ def test_compare_with_itself_yields_empty_diff(app_with_versions):
     changed."""
 
     async def _call(client):
-        pid = await _create_project(client)
+        proj = await create_project(client)
+        pid = proj["id"]
         va, _, _ = await _make_versions(client, pid)
         r = await client.get(
             f"/api/projects/{pid}/versions/compare",
@@ -170,7 +115,7 @@ def test_compare_with_itself_yields_empty_diff(app_with_versions):
         )
         return r
 
-    r = _run_async(app_with_versions, _call)
+    r = run_async(app_with_versions, _call)
     assert r.status_code == 200
     diff = r.json()["diff"]
     assert diff == {"added": [], "removed": [], "changed": [], "count": 0}
@@ -182,7 +127,8 @@ def test_compare_response_has_no_geometry(app_with_versions):
     payload, no vertex/face data)."""
 
     async def _call(client):
-        pid = await _create_project(client)
+        proj = await create_project(client)
+        pid = proj["id"]
         va, vb, _ = await _make_versions(client, pid)
         r = await client.get(
             f"/api/projects/{pid}/versions/compare",
@@ -190,7 +136,7 @@ def test_compare_response_has_no_geometry(app_with_versions):
         )
         return r
 
-    r = _run_async(app_with_versions, _call)
+    r = run_async(app_with_versions, _call)
     body = r.json()
     # No geometry keys anywhere in the response.
     text = r.text.lower()
@@ -206,10 +152,11 @@ def test_compare_response_has_no_geometry(app_with_versions):
 
 def test_compare_unknown_version_is_404(app_with_versions):
     async def _call(client):
-        pid = await _create_project(client)
+        proj = await create_project(client)
+        pid = proj["id"]
         return await client.get(
             f"/api/projects/{pid}/versions/compare", params={"a": 1, "b": 999}
         )
 
-    r = _run_async(app_with_versions, _call)
+    r = run_async(app_with_versions, _call)
     assert r.status_code == 404
