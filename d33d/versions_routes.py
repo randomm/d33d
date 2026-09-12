@@ -565,8 +565,8 @@ def _finalize_loop_kwargs(
     - ``stated_dims`` — the body's dims, else the named W/D/H parameters
       from the latest version's snapshot (0.0 for any unset axis — the
       dimension gate then measures, never fabricates).
-    - ``render_fn`` — the production render worker (``d33d.app.
-      _production_render_fn``). ``llm_fn`` — a no-op async edge: the
+    - ``render_fn`` — the production render worker (``d33d.render_worker.
+      render_for_design_loop``). ``llm_fn`` — a no-op async edge: the
       production closure builds its OWN ``llm_fn`` from the live catalogue
       and does not consume this kwarg; the key is present so the seam's
       full contract (``photo``, ``stated_dims``, ``render_fn``, ``llm_fn``)
@@ -579,8 +579,8 @@ def _finalize_loop_kwargs(
       readable), and the user's request text (guaranteed non-empty — the
       failures.jsonl line is un-archivable without it).
     """
-    from d33d.app import _production_render_fn
     from d33d.config.catalogue import CatalogueError, ResolutionError
+    from d33d.render_worker import render_for_design_loop
     from d33d.prompt_hash import canonical_hash
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:
@@ -626,7 +626,7 @@ def _finalize_loop_kwargs(
         "photo": photo,
         "chat_history": (),
         "stated_dims": stated_dims,
-        "render_fn": _production_render_fn,
+        "render_fn": render_for_design_loop,
         "llm_fn": _noop_llm_fn,
         "model": model,
         "prompt_version": prompt_version,
