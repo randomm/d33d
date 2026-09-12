@@ -35,6 +35,7 @@ from d33d.evals.failure_capture import (
     append_failure_line,
     default_failures_path,
     default_run_design_loop_hook,
+    default_run_design_loop_hook_sync,
     make_failure_event,
     read_failure_events,
     record_production_failure,
@@ -567,14 +568,14 @@ def test_app_hook_closure_appends_on_exhausted(tmp_path: Path, monkeypatch):
     out = tmp_path / "failures.jsonl"
     calls = []
 
-    def fake_real_run(**kwargs):
+    async def fake_real_run(**kwargs):
         calls.append(kwargs)
         return _exhausted_result("empty_model", scad="cube();")
 
-    # Monkeypatch the real run that the hook imports by default.
+    # Monkeypatch the real async run that the hook awaits by default.
     import d33d.design_loop as dl
-    monkeypatch.setattr(dl, "run_design_loop", fake_real_run)
-    hook = default_run_design_loop_hook(path=out)
+    monkeypatch.setattr(dl, "run_design_loop_async", fake_real_run)
+    hook = default_run_design_loop_hook_sync(path=out)
     result = hook(
         photo="/photos/ref.png",
         chat_history=["make it a cube"],
@@ -603,12 +604,12 @@ def test_app_hook_closure_no_append_on_pass(tmp_path: Path, monkeypatch):
     """The app's hook closure appends nothing on a passing loop."""
     out = tmp_path / "failures.jsonl"
 
-    def fake_real_run(**kwargs):
+    async def fake_real_run(**kwargs):
         return _passing_result()
 
     import d33d.design_loop as dl
-    monkeypatch.setattr(dl, "run_design_loop", fake_real_run)
-    hook = default_run_design_loop_hook(path=out)
+    monkeypatch.setattr(dl, "run_design_loop_async", fake_real_run)
+    hook = default_run_design_loop_hook_sync(path=out)
     hook(
         photo="/photos/ref.png",
         chat_history=["make it a cube"],
@@ -622,17 +623,51 @@ def test_app_hook_closure_no_append_on_pass(tmp_path: Path, monkeypatch):
     assert not out.exists()
 
 
+def test_app_hook_async_path_awaits_and_appends_on_exhausted(tmp_path: Path, monkeypatch):
+    """The async hook (returned by ``default_run_design_loop_hook``) is
+    ``async def``: awaiting it runs the async loop and appends on an
+    exhausted result — the path the FastAPI finalize route uses."""
+    out = tmp_path / "failures.jsonl"
+
+    async def fake_real_run(**kwargs):
+        return _exhausted_result("empty_model", scad="cube();")
+
+    import asyncio as _asyncio
+
+    import d33d.design_loop as dl
+    monkeypatch.setattr(dl, "run_design_loop_async", fake_real_run)
+    hook = default_run_design_loop_hook(path=out)
+
+    async def _drive():
+        return await hook(
+            photo="/photos/ref.png",
+            chat_history=["make it a cube"],
+            stated_dims=(10, 10, 10),
+            render_fn=lambda *a: None,
+            llm_fn=lambda *a: None,
+            model=_llm_result("model-x"),
+            prompt_version="deadbeef",
+            request="make it a cube",
+        )
+
+    result = _asyncio.run(_drive())
+    assert result.status == "exhausted"
+    events = read_failure_events(out)
+    assert len(events) == 1
+    assert events[0].failure_class == "empty_model"
+
+
 def test_app_hook_closure_swallows_hook_errors(tmp_path: Path, monkeypatch):
     """A hook failure (e.g. disk-full) is logged, never raised — the
     design result is still returned."""
     out = tmp_path / "failures.jsonl"
 
-    def fake_real_run(**kwargs):
+    async def fake_real_run(**kwargs):
         return _exhausted_result("empty_model", scad="cube();")
 
     import d33d.design_loop as dl
-    monkeypatch.setattr(dl, "run_design_loop", fake_real_run)
-    hook = default_run_design_loop_hook(path=out)
+    monkeypatch.setattr(dl, "run_design_loop_async", fake_real_run)
+    hook = default_run_design_loop_hook_sync(path=out)
     # Make the append fail by pointing at a directory.
     result = hook(
         photo="/photos/ref.png",
@@ -735,7 +770,7 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
     from d33d.evals import failure_capture as fc
 
     def _fake_hook(*, path):
-        def _hooked(**kwargs):
+        async def _hooked(**kwargs):
             model = kwargs.pop("model", None)
             pv = kwargs.pop("prompt_version", None)
             req = kwargs.pop("request", None)
@@ -839,7 +874,7 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
     from d33d.evals import failure_capture as fc
 
     def _fake_hook(*, path):
-        def _hooked(**kwargs):
+        async def _hooked(**kwargs):
             model = kwargs.pop("model", None)
             pv = kwargs.pop("prompt_version", None)
             req = kwargs.pop("request", None)
