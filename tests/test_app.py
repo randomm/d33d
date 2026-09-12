@@ -351,7 +351,16 @@ def test_put_models_hot_reload_non_catalogue_error_is_split_state_500(
     # A second, DISTINCT valid catalogue so the split state is observable
     # as a disk-vs-memory divergence (the 200-path PUT installed
     # MODELS_YAML; the failing PUT installs NEW_YAML onto disk).
-    new_yaml = MODELS_YAML.replace("design-primary", "second-model")
+    # Built by mutating the PARSED document (rename the alias consistently
+    # in models + roles) rather than string-replacing the raw YAML, so the
+    # result is guaranteed to stay a structurally valid catalogue.
+    new_doc = yaml.safe_load(MODELS_YAML)
+    new_doc["models"][0]["id"] = "second-model"
+    new_doc["roles"] = {
+        k: "second-model" if v == "design-primary" else v
+        for k, v in new_doc["roles"].items()
+    }
+    new_yaml = yaml.safe_dump(new_doc)
     assert new_yaml != MODELS_YAML
 
     async def _call(client):
