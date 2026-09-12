@@ -117,19 +117,28 @@ async def _read_bounded_body(request: Request, cap: int) -> bytes | JSONResponse
 
     Returns the full body on success, or a 413 ``JSONResponse`` to return
     to the client as-is. Never buffers more than ``cap``+1 bytes: an
-    oversized declared Content-Length is rejected after draining, and an
-    oversized streamed body aborts mid-stream.
+    oversized declared Content-Length is rejected after a bounded drain,
+    and an oversized streamed body aborts mid-stream. An absent or
+    non-numeric Content-Length is defaulted to the cap itself so the
+    request is rejected up front rather than relying solely on the
+    mid-stream abort (a request with no declared length would otherwise
+    fall straight through to the streaming path).
     """
     declared = request.headers.get("content-length")
     try:
-        declared_len = int(declared) if declared is not None else 0
+        declared_len = int(declared) if declared is not None else None
     except ValueError:
-        declared_len = 0
+        declared_len = None
+    if declared_len is None:
+        declared_len = cap
 
     if declared_len > cap:
-        # Reject early; still drain what the client sends so the
-        # connection stays usable.
-        await request.body()
+        # Reject early; still drain what the client sends — chunk by
+        # chunk, never via ``await request.body()`` (which would buffer
+        # the entire remainder in memory) — so the connection stays
+        # usable without an unbounded buffer.
+        async for _ in request.stream():
+            pass
         return JSONResponse(
             status_code=413,
             content={"error": f"body exceeds {cap} byte limit"},
@@ -140,7 +149,10 @@ async def _read_bounded_body(request: Request, cap: int) -> bytes | JSONResponse
     async for chunk in request.stream():
         total += len(chunk)
         if total > cap:
-            await request.body()  # drain the remainder
+            # Bounded drain of the remainder (see the header-reject path
+            # above): read-and-discard, never full-body buffering.
+            async for _ in request.stream():
+                pass
             return JSONResponse(
                 status_code=413,
                 content={"error": f"body exceeds {cap} byte limit"},
@@ -185,7 +197,33 @@ def _validate_and_install_candidate(
         # (the reload re-validates the same file and must now succeed).
         os.replace(tmp_path, loader.path)
         tmp_path = None
-        new_cat, _ = hot_reload(loader)
+        try:
+            new_cat, _ = hot_reload(loader)
+        except CatalogueError as e:
+            # Unexpected after a successful replace, but the loader is
+            # authoritative: surface as a 500 without touching state.
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"catalogue reload failed: {e.message}"},
+            )
+        except Exception as e:  # noqa: BLE001  # intentional catch-all (issue #25): the split-state 500 must be explicit for ANY non-CatalogueError
+            # Disk/memory split state: ``os.replace`` already swapped the
+            # new catalogue onto disk, but the in-memory swap did not
+            # happen — ``app.state.catalogue`` still holds the old one
+            # until the next successful reload or restart. Do NOT roll
+            # back the on-disk write (it is valid); a retry of the same
+            # PUT recovers the split state.
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": (
+                        f"catalogue write completed but in-memory reload "
+                        f"failed ({e.__class__.__name__}: {e}); disk now "
+                        f"holds the new catalogue but app state still holds "
+                        f"the old one — retry the PUT or restart to recover"
+                    )
+                },
+            )
         app.state.catalogue = new_cat
         return JSONResponse(content=_serialise_catalogue(new_cat))
     finally:
