@@ -27,6 +27,7 @@ consistent with the project's sync test style (no ``pytest-asyncio``).
 from __future__ import annotations
 
 import asyncio
+import base64
 import textwrap
 import uuid
 from pathlib import Path
@@ -547,6 +548,195 @@ def test_create_app_inits_event_sources(app):
     assert getattr(app.state, "event_sources", None) == {}
 
 
+# ---------------------------------------------------------------------------
+# Region-scoped edit request (issue #7, workstream task-c) — HONEST STUB
+#
+# This route accepts and validates a lasso-selection payload and returns
+# 202 Accepted with status "deferred". It never regenerates OpenSCAD
+# source — that wiring is out of scope for this ticket (see the module
+# docstring on d33d.app.RegionEditRequest).
+# ---------------------------------------------------------------------------
+
+#: A minimal valid 1x1 PNG, base64-encoded — small enough to exercise the
+#: base64-decode + size-bound path without a real render artifact.
+_TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _region_edit_body(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "module_ids": ["curl_3", "curl_4"],
+        "view_id": "front",
+        "marked_png_base64": _TINY_PNG_BASE64,
+        "polygon": [
+            {"x": 10.0, "y": 10.0},
+            {"x": 50.0, "y": 10.0},
+            {"x": 30.0, "y": 40.0},
+        ],
+        "instruction": "open up this spiral, it's too tight to print",
+    }
+    body.update(overrides)
+    return body
+
+
+async def _create_project(client: AsyncClient) -> int:
+    r = await client.post("/api/projects", json={"name": "filigree earring"})
+    assert r.status_code == 201, r.text
+    return int(r.json()["id"])
+
+
+def test_region_edit_accepted_returns_202_deferred(app):
+    """A well-formed region-edit request against a real project returns
+    202 with an explicit ``status: "deferred"`` body — never a fabricated
+    success/edit result, since no regeneration happens."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(),
+        )
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["project_id"] == project_id
+    assert body["status"] == "deferred"
+    assert body["module_ids"] == ["curl_3", "curl_4"]
+    assert body["view_id"] == "front"
+    # The honest-stub contract: no field claims an edit/regeneration result.
+    assert "scad" not in body
+    assert "result" not in body
+
+
+def test_region_edit_unknown_project_returns_404(app):
+    """A region-edit request against a project id that does not exist is
+    a 404, matching every other per-project route's not-found contract."""
+
+    async def _call(client):
+        return await client.post(
+            "/api/projects/999/region-edits",
+            json=_region_edit_body(),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"].lower()
+
+
+def test_region_edit_rejects_empty_module_ids(app):
+    """``module_ids`` must carry at least one ranked identifier — the
+    whole point of #7 is resolving to named modules, never an empty or
+    pixel-coordinate-only selection."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(module_ids=[]),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_more_than_ten_module_ids(app):
+    """Set-of-Mark caps ranked regions at ~10 (spec: small open models
+    confuse more IDs than that) — an over-long list is rejected, not
+    silently truncated."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(module_ids=[f"m{i}" for i in range(11)]),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_unknown_view_id(app):
+    """``view_id`` must be one of the six render-worker views — an
+    unrecognised view id is a validation error, not silently accepted."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(view_id="bottom-left-diagonal"),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_degenerate_polygon(app):
+    """Fewer than 3 polygon vertices cannot enclose an area — rejected,
+    mirroring ``DimensionCanvas.tsx``'s ``isValidPolygon`` client-side
+    check (defence in depth: the server must not trust the client)."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(
+                polygon=[{"x": 1.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
+            ),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_invalid_base64_image(app):
+    """A ``marked_png_base64`` that is not valid base64 is a 400, not a
+    500 — the route must validate before attempting to use the bytes."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(marked_png_base64="not-valid-base64!!!"),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 400
+
+
+def test_region_edit_rejects_oversized_image(app):
+    """A base64 payload that decodes larger than
+    ``MAX_REGION_EDIT_IMAGE_BYTES`` is rejected with 413, mirroring the
+    photo-upload route's size cap."""
+    # ~6 MB of raw 'A' bytes, base64-encoded — decodes over the 5 MB cap.
+    oversized = base64.b64encode(b"A" * (6 * 1024 * 1024)).decode("ascii")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(marked_png_base64=oversized),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 413
+
+
+def test_region_edit_rejects_empty_instruction(app):
+    """An empty edit instruction is rejected — the request must carry
+    what the user actually asked for, not just the selection geometry."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(instruction=""),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
 def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):
     """The app starts with an empty in-memory catalogue — no
     ``models.yaml`` required on disk until the first ``PUT``. (The
@@ -568,3 +758,275 @@ def test_main_module_importable():
     import d33d.main as m
 
     assert callable(m.main)
+
+
+# ---------------------------------------------------------------------------
+# Named module registry (issue #7's core deliverable) — wiring test
+#
+# POST /api/projects/{id}/module-registry is the HTTP boundary the
+# frontend viewer (ModelViewer.loadGLB) actually calls to get the named
+# GLB it needs for resolveLassoSelection. The route delegates to
+# d33d.module_registry.build_registry_glb, injected via app.state so this
+# test never spawns Docker — the Docker-driven path itself is covered by
+# tests/slow/test_module_registry_docker.py.
+# ---------------------------------------------------------------------------
+
+
+def test_module_registry_returns_glb_bytes(app):
+    """A well-formed request with .scad source returns 200 with a GLB
+    body — the exact bytes d33d.module_registry.build_registry_glb
+    produced, served as model/gltf-binary so ModelViewer.loadGLB can
+    consume it directly."""
+    from d33d import module_registry as mr
+
+    stub_glb = b"glTF-stub-bytes"
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        assert "base" in source
+        return mr.RegistryBuildResult(
+            glb_bytes=stub_glb, registry_names=("base",), failures=()
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module base() { cube([1,1,1]); } base();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "model/gltf-binary"
+    assert r.content == stub_glb
+
+
+def test_module_registry_unknown_project_returns_404(app):
+    async def _call(client):
+        return await client.post(
+            "/api/projects/999/module-registry",
+            json={"scad_source": "cube([1,1,1]);"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 404
+
+
+def test_module_registry_rejects_empty_scad_source(app):
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": ""},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_module_registry_no_call_sites_returns_empty_registry(app):
+    """A .scad with zero top-level module call-sites (bare primitives
+    only) resolves to a 200 with an explicit empty-registry body rather
+    than a fabricated GLB or a 500 — the honest-stub convention this
+    codebase already uses for region-edits."""
+    from d33d import module_registry as mr
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        return mr.RegistryBuildResult(glb_bytes=None, registry_names=(), failures=())
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "cube([1,1,1]);"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["registry_names"] == []
+    assert body["status"] == "empty"
+
+
+def test_module_registry_partial_failure_still_returns_glb_and_reports_failures(app):
+    """When SOME call-sites failed to isolate-render but at least one
+    succeeded, the route still returns the GLB (never discards a partial
+    registry) plus the failed module names in a response header/body
+    field so the caller can surface which regions are unavailable."""
+    from d33d import module_registry as mr
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        return mr.RegistryBuildResult(
+            glb_bytes=b"partial-glb",
+            registry_names=("base",),
+            failures=(
+                mr.ModuleRenderFailure(
+                    site=mr.CallSite(name="cap", registry_name="cap", line=3),
+                    error_class="empty_model",
+                    stderr="",
+                ),
+            ),
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module base() {} module cap() {} base(); cap();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    assert r.content == b"partial-glb"
+    assert r.headers["x-module-registry-failed"] == "cap"
+
+
+def test_module_registry_too_many_call_sites_returns_413(app):
+    """When the injected build function raises TooManyCallSitesError
+    (the real d33d.module_registry.build_registry_glb's guard against a
+    hostile scad_source enumerating more than MAX_CALL_SITES call-sites),
+    the route must surface a 413 rather than a 500 — the cap is meant to
+    protect the render host, not crash the request handler."""
+    from d33d.module_registry import TooManyCallSitesError
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise TooManyCallSitesError(999)
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 413
+
+
+def test_module_registry_infra_failure_returns_classified_container_error(app):
+    """Regression: six-lens review finding #3. Any failure other than
+    TooManyCallSitesError inside the threaded build (Docker daemon
+    unreachable, docker binary missing, or the RuntimeError
+    _export_scene_isolating_bad_meshes raises when even the per-mesh-
+    isolated export fails) must not escape as a bare unclassified 500.
+    It must be caught, logged with context, and surfaced as a 502 with a
+    JSON body carrying error_class='container_error' (the closed
+    ErrorClass enum's infra-failure value) — never the raw exception
+    text."""
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise RuntimeError("scene export failed even after isolating every mesh: boom")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error_class"] == "container_error"
+    assert "boom" not in body["error"]
+
+
+def test_module_registry_missing_docker_binary_returns_classified_container_error(app):
+    """FileNotFoundError (docker binary missing / daemon unreachable via
+    a failed subprocess spawn) is also caught and classified, not just
+    RuntimeError."""
+
+    def _fake_build(source: str, **kwargs: Any):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 502
+    body = r.json()
+    assert body["error_class"] == "container_error"
+    assert "docker" not in body["error"].lower()
+
+
+def test_module_registry_rejects_oversized_scad_source(app):
+    """scad_source has a max_length bound matching the other body-
+    accepting routes' size caps in this file — defense-in-depth
+    alongside build_registry_glb's own MAX_CALL_SITES guard."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "x" * (1024 * 1024 + 1)},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_module_registry_does_not_block_the_event_loop(app):
+    """Regression: adversarial-review round 2. build_registry_glb is a
+    synchronous, subprocess-driven function that can take up to ~4.3
+    hours worst-case (MAX_CALL_SITES sequential Docker round-trips); the
+    route must run it via asyncio.to_thread so a slow/large registry
+    build cannot stall the event loop and starve every OTHER concurrent
+    request on the same process. Simulated here with a blocking
+    time.sleep inside the injected build function (time.sleep, not
+    asyncio.sleep, is the point: it proves the call really runs off the
+    event loop's own thread) racing an unrelated fast request that must
+    complete first if — and only if — the registry build is offloaded.
+    """
+    import time
+
+    from d33d import module_registry as mr
+
+    def _slow_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        time.sleep(0.3)
+        return mr.RegistryBuildResult(
+            glb_bytes=b"glb", registry_names=("m",), failures=()
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _slow_build
+
+        order: list[str] = []
+
+        async def _slow_request():
+            resp = await client.post(
+                f"/api/projects/{project_id}/module-registry",
+                json={"scad_source": "module m(){cube([1,1,1]);} m();"},
+            )
+            order.append("slow")
+            return resp
+
+        async def _fast_request():
+            await asyncio.sleep(0.05)
+            resp = await client.get("/api/config/models")
+            order.append("fast")
+            return resp
+
+        slow_resp, fast_resp = await asyncio.gather(
+            _slow_request(), _fast_request()
+        )
+        return slow_resp, fast_resp, order
+
+    slow_resp, fast_resp, order = _run_async(app, _call)
+    assert slow_resp.status_code == 200
+    assert fast_resp.status_code == 200
+    # If build_registry_glb blocked the event loop, the fast request
+    # (dispatched 50ms after the slow one, itself near-instant) could
+    # only ever complete AFTER the slow one finishes its 300ms sleep.
+    # Running the blocking call in a worker thread lets the fast request
+    # finish first.
+    assert order == ["fast", "slow"], order

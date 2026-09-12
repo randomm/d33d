@@ -161,6 +161,14 @@ vi.mock('three', async () => {
       return this;
     });
   };
+  const mockVector2 = class {
+    x: number;
+    y: number;
+    constructor(x = 0, y = 0) {
+      this.x = x;
+      this.y = y;
+    }
+  };
   const mockAmbientLight = class extends mockObject3D {};
   const mockDirectionalLight = class extends mockObject3D {};
   const mockBufferAttribute = class {
@@ -180,6 +188,7 @@ vi.mock('three', async () => {
     Raycaster: mockRaycaster,
     Color: mockColor,
     Box3: mockBox3,
+    Vector2: mockVector2,
     Vector3: mockVector3,
     AmbientLight: mockAmbientLight,
     DirectionalLight: mockDirectionalLight,
@@ -287,7 +296,11 @@ import {
   loadMesh,
   disposeObject,
   applyZUpToYUp,
+  pointInPolygon,
+  samplePolygonInterior,
+  resolveLassoSelection,
 } from '../ModelViewer';
+import type { ScreenPoint } from '../ModelViewer';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -567,5 +580,216 @@ describe('ModelViewer module', () => {
       expect(source).toContain('STLLoader');
       expect(source).toContain('GLTFLoader');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lasso region → named module resolution (#6, workstream task-b)
+// ---------------------------------------------------------------------------
+
+describe('pointInPolygon', () => {
+  const square: ScreenPoint[] = [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ];
+
+  it('returns true for a point inside the polygon', () => {
+    expect(pointInPolygon({ x: 5, y: 5 }, square)).toBe(true);
+  });
+
+  it('returns false for a point outside the polygon', () => {
+    expect(pointInPolygon({ x: 20, y: 20 }, square)).toBe(false);
+  });
+
+  it('handles a concave polygon correctly', () => {
+    // A "C" shape / notch: point in the notch is outside.
+    const notched: ScreenPoint[] = [
+      { x: 0, y: 0 },
+      { x: 10, y: 0 },
+      { x: 10, y: 4 },
+      { x: 4, y: 4 },
+      { x: 4, y: 6 },
+      { x: 10, y: 6 },
+      { x: 10, y: 10 },
+      { x: 0, y: 10 },
+    ];
+    expect(pointInPolygon({ x: 7, y: 5 }, notched)).toBe(false); // in the notch
+    expect(pointInPolygon({ x: 2, y: 5 }, notched)).toBe(true); // in the solid part
+  });
+});
+
+describe('samplePolygonInterior', () => {
+  it('returns an empty array for a degenerate (<3 point) polygon', () => {
+    expect(samplePolygonInterior([{ x: 0, y: 0 }, { x: 1, y: 1 }])).toEqual([]);
+  });
+
+  it('returns only points inside the polygon bounding box that pass the interior test', () => {
+    const square: ScreenPoint[] = [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 100 },
+      { x: 0, y: 100 },
+    ];
+    const samples = samplePolygonInterior(square, 4);
+    expect(samples.length).toBeGreaterThan(0);
+    for (const s of samples) {
+      expect(pointInPolygon(s, square)).toBe(true);
+    }
+  });
+
+  it('denser grids produce more (or equal) samples for the same polygon', () => {
+    const square: ScreenPoint[] = [
+      { x: 0, y: 0 },
+      { x: 100, y: 0 },
+      { x: 100, y: 100 },
+      { x: 0, y: 100 },
+    ];
+    const coarse = samplePolygonInterior(square, 4);
+    const fine = samplePolygonInterior(square, 12);
+    expect(fine.length).toBeGreaterThanOrEqual(coarse.length);
+  });
+});
+
+/** A minimal fake THREE.Raycaster/Camera pair for resolveLassoSelection
+ *  unit tests — these test the ranking/occlusion CONTRACT (nearest-first
+ *  wins, unnamed hits are skipped, empty polygon → empty result), not the
+ *  three.js internals (which are exercised by the mocked module above for
+ *  the loader/disposal tests). */
+function makeFakeRaycaster(
+  hitsByPixel: (ndcX: number, ndcY: number) => { object: { name: string } }[],
+) {
+  let lastNdc: { x: number; y: number } | null = null;
+  return {
+    setFromCamera: (ndc: { x: number; y: number }) => {
+      lastNdc = ndc;
+    },
+    intersectObjects: () => {
+      if (!lastNdc) return [];
+      return hitsByPixel(lastNdc.x, lastNdc.y);
+    },
+  };
+}
+
+describe('resolveLassoSelection', () => {
+  const triangle: ScreenPoint[] = [
+    { x: 0, y: 0 },
+    { x: 100, y: 0 },
+    { x: 50, y: 100 },
+  ];
+
+  it('returns an empty ranked list and null primary when the polygon hits no geometry', () => {
+    const raycaster = makeFakeRaycaster(() => []);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolveLassoSelection(
+      triangle,
+      200,
+      200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+      4,
+    );
+    expect(result.ranked).toEqual([]);
+    expect(result.primary).toBeNull();
+  });
+
+  it('ranks module names by nearest-hit count, descending, with the top module as primary', () => {
+    // Every sample resolves to 'curl_3' in the fake raycaster — the single
+    // named module should end up primary with all samples counted.
+    const raycaster = makeFakeRaycaster(() => [{ object: { name: 'curl_3' } }]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolveLassoSelection(
+      triangle,
+      200,
+      200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+      6,
+    );
+    expect(result.primary).toBe('curl_3');
+    expect(result.ranked).toHaveLength(1);
+    expect(result.ranked[0].name).toBe('curl_3');
+    expect(result.ranked[0].hitCount).toBeGreaterThan(0);
+  });
+
+  it('only counts the NEAREST hit per sample (occlusion for free)', () => {
+    // Two overlapping modules at every sample point; nearest-first order
+    // means only the first array element counts towards ranking.
+    const raycaster = makeFakeRaycaster(() => [
+      { object: { name: 'curl_4' } }, // nearest
+      { object: { name: 'ear_wire' } }, // occluded behind curl_4
+    ]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolveLassoSelection(
+      triangle,
+      200,
+      200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+      6,
+    );
+    expect(result.primary).toBe('curl_4');
+    expect(result.ranked.find((r) => r.name === 'ear_wire')).toBeUndefined();
+  });
+
+  it('ranks multiple distinct modules by their respective hit counts', () => {
+    // Alternate which module is hit based on NDC x sign, so both
+    // 'curl_3' and 'curl_4' accumulate hits but in different counts.
+    const raycaster = makeFakeRaycaster((ndcX) => [
+      { object: { name: ndcX < 0 ? 'curl_3' : 'curl_4' } },
+    ]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolveLassoSelection(
+      triangle,
+      200,
+      200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+      8,
+    );
+    expect(result.ranked.length).toBeGreaterThanOrEqual(1);
+    // Ranked descending by hit count.
+    for (let i = 1; i < result.ranked.length; i++) {
+      expect(result.ranked[i - 1].hitCount).toBeGreaterThanOrEqual(
+        result.ranked[i].hitCount,
+      );
+    }
+  });
+
+  it('skips hits with an empty/unnamed object.name (cannot resolve to a module id)', () => {
+    const raycaster = makeFakeRaycaster(() => [{ object: { name: '' } }]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolveLassoSelection(
+      triangle,
+      200,
+      200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+      4,
+    );
+    expect(result.ranked).toEqual([]);
+    expect(result.primary).toBeNull();
+  });
+
+  it('never reads per-face/per-vertex colour — resolution is via object.name only', () => {
+    // Structural assertion: the function signature never receives a
+    // colour buffer/material, and the source never references `.color`
+    // in the resolution path — this is the negative test for the dead
+    // server-side OpenSCAD colour-ID pass (spec: color() is discarded by
+    // --render/STL export and difference() cut faces take the
+    // subtracted object's colour, corrupting IDs exactly where filigree
+    // lassos land).
+    const source = readFileSync(SOURCE_PATH, 'utf-8');
+    const fnStart = source.indexOf('export function resolveLassoSelection');
+    const fnEnd = source.indexOf('\n// ', fnStart + 1);
+    const fnSource = source.slice(fnStart, fnEnd === -1 ? undefined : fnEnd);
+    expect(fnSource).not.toMatch(/\.color\b/);
+    expect(fnSource).toContain('.name');
   });
 });

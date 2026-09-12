@@ -26,13 +26,47 @@ routers (``create_projects_router`` / ``create_streaming_router``) on the
 app it builds, and ``app.state.event_sources`` (the dict the SSE endpoint
 reads) is initialised empty at build time. The HTTP endpoints themselves
 are out of scope for this module.
+
+Also defined here: ``POST /api/projects/{id}/region-edits`` (issue #7,
+workstream task-c) — the region-scoped edit request route. It is an
+HONEST STUB: it validates and accepts a lasso-selection payload (ranked
+module identifiers, marked PNG, polygon, view id, instruction) and
+returns 202 Accepted with a ``status: "deferred"`` body. It does not
+regenerate any OpenSCAD source — that wiring into the design loop
+(``d33d/design_loop.py``, issue #5) is explicitly out of scope here.
+
+Also defined here: ``POST /api/projects/{id}/module-registry`` (issue #7,
+workstream task-a) — the named-module registry route that IS the wiring
+path ``region-edits``' ``module_ids`` and ``ModelViewer.tsx``'s
+``resolveLassoSelection`` are BUILT to consume. Given ``.scad`` source, it
+calls ``d33d.module_registry.build_registry_glb`` (injected via
+``app.state.build_registry_glb`` so tests never spawn Docker) and returns
+the assembled named GLB as ``model/gltf-binary`` — exactly the shape
+``ModelViewer.loadGLB`` parses, with ``mesh.name`` on each node set to
+the registry's per-call-site name. The route itself is real plumbing over
+a real capability, not another honest stub: the registry module actually
+runs N isolated openscad renders and returns real named geometry.
+
+NOT yet wired end-to-end, however: the SPA shell (``web/src/App.tsx``)
+has no source of ``scad_source`` to call this route with — the design-
+loop-to-SSE-to-model pipeline that would produce OpenSCAD source in the
+browser is issue #23's own documented future-ticket deferral (``App.tsx``
+mounts ``ModelViewer`` with ``data={null}`` for exactly this reason), so
+no frontend code calls ``POST .../module-registry`` yet. That is a
+separate, already-tracked gap, not something this route's own
+correctness depends on.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import json
+import logging
 import os
 import re
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -40,9 +74,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
 
 from d33d import db
 from d33d.config import ModelCatalogueLoader, hot_reload
@@ -53,9 +88,17 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
+from d33d.module_registry import (
+    MAX_CALL_SITES,
+    RegistryBuildResult,
+    TooManyCallSitesError,
+    build_registry_glb,
+)
 from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
+
+logger = logging.getLogger(__name__)
 
 #: Stub SPA page served at ``/`` until issue #6 ships the real build.
 #: Static HTML — not a React build, per the ticket.
@@ -270,6 +313,113 @@ def _serialise_catalogue(cat: Catalogue) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Named module registry (issue #7, workstream task-a)
+# ---------------------------------------------------------------------------
+
+
+class ModuleRegistryRequest(BaseModel):
+    """Body of ``POST /api/projects/{id}/module-registry``.
+
+    ``scad_source`` is the parametric OpenSCAD the design loop produced
+    for the project (see ``d33d.design_loop``) — the SAME source the
+    single-render contract already renders. This route does not persist
+    ``scad_source``; it is a pure function of the given source in, named
+    GLB out.
+
+    ``max_length`` bounds the raw source the same way
+    ``MAX_CATALOGUE_BODY_BYTES``/``MAX_REGION_EDIT_IMAGE_BYTES`` bound
+    the other body-accepting routes in this file — without it, a small
+    request body built from a repeated call pattern can still enumerate
+    far more than ``MAX_CALL_SITES`` call-sites (checked separately, see
+    ``d33d.module_registry.build_registry_glb``), so this is
+    defense-in-depth rather than the sole guard against that.
+    """
+
+    scad_source: str = Field(min_length=1, max_length=1024 * 1024)
+
+
+# ---------------------------------------------------------------------------
+# Region-scoped edit request (issue #7, workstream task-c)
+# ---------------------------------------------------------------------------
+#
+# ⚠️ HONEST STUB — this route accepts and validates a region-selection
+# payload (ranked module identifiers + marked PNG + lasso polygon + view
+# id) and returns 202 Accepted. It does NOT regenerate any OpenSCAD
+# source. Wiring "regenerate only these named modules" into the design
+# loop (``d33d/design_loop.py``, issue #5) is explicitly deferred to a
+# future ticket per issue #7's scope split — see the module docstring on
+# ``ApiClient.downloadModel3MF`` in ``web/src/lib/api.ts`` for the same
+# accept-and-defer convention used elsewhere in this codebase (a route/
+# client method that is real plumbing over a backend capability that does
+# not exist yet, not a fabricated response).
+
+#: The six orthographic render-worker views a lasso selection may be
+#: drawn on (matches ``ViewId`` in ``web/src/components/canvas/
+#: DimensionCanvas.tsx``).
+REGION_EDIT_VIEW_IDS: frozenset[str] = frozenset(
+    {"front", "back", "left", "right", "top", "iso"}
+)
+
+#: Hard cap on the marked-PNG body carried in a region-edit request. The
+#: composited marked image is a single 800x800 (or viewport-sized) PNG,
+#: base64-encoded — a few hundred KB in practice. This bounds the request
+#: the same way ``MAX_CATALOGUE_BODY_BYTES`` bounds the catalogue PUT.
+MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB (base64-decoded size)
+
+#: Set-of-Mark cap (spec: "small open models confuse more IDs than
+#: that"). A ranked module-identifier list longer than this is rejected
+#: rather than silently truncated, so an over-long selection is surfaced
+#: to the caller instead of quietly losing ranked entries.
+MAX_REGION_EDIT_MODULE_IDS = 10
+
+
+class LassoPolygonPoint(BaseModel):
+    """One vertex of the lasso polygon, in photo-pixel coordinates.
+
+    Mirrors ``PhotoPoint`` in ``DimensionCanvas.tsx`` — pixel coordinates
+    only; this route never receives or infers 3-D geometry.
+    """
+
+    x: float
+    y: float
+
+
+class RegionEditRequest(BaseModel):
+    """Body of ``POST /api/projects/{id}/region-edits``.
+
+    Carries everything the (future) scoped-edit regeneration will need:
+    the ranked module-identifier list the client-side lasso resolved via
+    ``ModelViewer.resolveLassoSelection`` (top-most/primary first, never
+    pixel coordinates — the whole point of issue #7), the composited
+    red-marked PNG the vision model would see, the raw lasso polygon (for
+    audit/debugging and for the containment gate's future volume lift),
+    the view id it was drawn on, and the user's free-text edit instruction.
+    """
+
+    module_ids: list[str] = Field(min_length=1, max_length=MAX_REGION_EDIT_MODULE_IDS)
+    view_id: str
+    marked_png_base64: str = Field(min_length=1)
+    polygon: list[LassoPolygonPoint] = Field(min_length=3)
+    instruction: str = Field(min_length=1)
+
+    @field_validator("view_id")
+    @classmethod
+    def _view_id_must_be_known(cls, v: str) -> str:
+        if v not in REGION_EDIT_VIEW_IDS:
+            raise ValueError(
+                f"view_id must be one of {sorted(REGION_EDIT_VIEW_IDS)}, got {v!r}"
+            )
+        return v
+
+    @field_validator("module_ids")
+    @classmethod
+    def _module_ids_non_empty_strings(cls, v: list[str]) -> list[str]:
+        if any(not isinstance(m, str) or not m for m in v):
+            raise ValueError("module_ids must be non-empty strings")
+        return v
+
+
 def create_app(
     db_path: str | Path = ":memory:",
     *,
@@ -331,6 +481,10 @@ def create_app(
     # maps ``project_id -> AsyncIterator[(event, data)]`` and starts empty
     # (no active streams until a future ticket wires the design loop).
     app.state.event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] = {}
+    # The named-module registry builder (issue #7) — injected so tests
+    # never spawn Docker; production wiring is the real
+    # ``d33d.module_registry.build_registry_glb`` (default below).
+    app.state.build_registry_glb = build_registry_glb
 
     spa_index = state_spa_dist_dir / "index.html"
     serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
@@ -484,6 +638,149 @@ def create_app(
             }
         )
 
+    @app.post("/api/projects/{project_id}/module-registry")
+    async def create_module_registry(
+        request: Request, project_id: int, body: ModuleRegistryRequest
+    ) -> Response:
+        """Build the named OpenSCAD module registry for ``scad_source``
+        and return it as a GLB — the wiring path ``ModelViewer.loadGLB``
+        and ``resolveLassoSelection`` (``web/src/components/viewer/
+        ModelViewer.tsx``) are built to consume, and the source of the
+        ``module_ids`` ``POST /api/projects/{id}/region-edits`` accepts.
+        No frontend code calls this route yet — the SPA shell has no
+        ``scad_source`` to send it until the design-loop-to-SSE pipeline
+        (issue #23's own tracked future ticket) lands; this route and its
+        orchestration are independently real and tested regardless.
+
+        Delegates to ``app.state.build_registry_glb`` (the real
+        ``d33d.module_registry.build_registry_glb`` in production;
+        injectable in tests so no Docker is spawned). Every call-site's
+        isolated render is a sequential ``subprocess.run`` round-trip
+        (create volume -> populate -> openscad -> harvest -> remove
+        volume), so ``build_fn`` itself runs on a worker thread via
+        ``asyncio.to_thread`` — called directly, it would block THIS
+        process's single event loop for the full multi-call-site Docker
+        round-trip, starving every other concurrent request (SSE
+        streams, unrelated projects' routes, health checks) for the
+        entire duration, not just serialising this one endpoint.
+
+        A ``.scad`` with no top-level module call-sites is a valid, empty
+        registry — 200 with ``status: "empty"``, never a fabricated GLB
+        or a 500. A PARTIAL registry (some call-sites failed their
+        isolated render) still returns the GLB body for every module
+        that DID succeed; the failed module names are surfaced in the
+        ``X-Module-Registry-Failed`` response header (comma-separated) so
+        the caller can show which regions are unavailable without
+        discarding the rest of the registry.
+        """
+        conn: db.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        build_fn = request.app.state.build_registry_glb
+        try:
+            result: RegistryBuildResult = await asyncio.to_thread(
+                build_fn, body.scad_source
+            )
+        except TooManyCallSitesError as e:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"{e.count} call-sites exceeds the {MAX_CALL_SITES} limit "
+                    "per registry build"
+                ),
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            # Bounded infra-error set around the threaded build: Docker
+            # daemon unreachable / docker binary missing (OSError, e.g.
+            # FileNotFoundError, and subprocess.SubprocessError), or the
+            # RuntimeError _export_scene_isolating_bad_meshes raises when
+            # even the per-mesh-isolated scene export fails. None of
+            # these are a diagnosable validation failure of the request
+            # itself, so they must not escape as a bare unclassified 500
+            # (bypassing the project's closed ErrorClass discipline) or
+            # leak raw exception text to the client.
+            logger.exception(
+                "module-registry build failed for project_id=%s "
+                "(scad_source length=%d)",
+                project_id,
+                len(body.scad_source),
+            )
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "module registry build failed",
+                    "error_class": "container_error",
+                },
+            )
+
+        if result.glb_bytes is None:
+            return JSONResponse(
+                content={
+                    "project_id": project_id,
+                    "status": "empty",
+                    "registry_names": list(result.registry_names),
+                }
+            )
+
+        headers: dict[str, str] = {}
+        if result.failures:
+            headers["X-Module-Registry-Failed"] = ",".join(
+                f.site.registry_name for f in result.failures
+            )
+        return Response(
+            content=result.glb_bytes,
+            media_type="model/gltf-binary",
+            headers=headers,
+        )
+
+    @app.post("/api/projects/{project_id}/region-edits", status_code=202)
+    async def create_region_edit(
+        request: Request, project_id: int, body: RegionEditRequest
+    ) -> JSONResponse:
+        """Accept a region-scoped edit request. HONEST STUB — see the
+        module-level comment above :class:`RegionEditRequest`.
+
+        Validates the payload (module identifiers, marked PNG, lasso
+        polygon, view id, instruction) against a real project and
+        returns 202 Accepted with a ``status: "deferred"`` body. No
+        OpenSCAD source is read or regenerated by this route — scoped-
+        edit regeneration is out of scope for issue #7 (see the design
+        loop, issue #5, for the eventual consumer of this payload).
+        """
+        conn: db.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        try:
+            image_bytes = base64.b64decode(body.marked_png_base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail=f"marked_png_base64 is not valid base64: {e}"
+            )
+        if len(image_bytes) > MAX_REGION_EDIT_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"marked PNG exceeds {MAX_REGION_EDIT_IMAGE_BYTES} byte limit",
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "project_id": project_id,
+                "status": "deferred",
+                "detail": (
+                    "region-scoped edit request accepted; scoped-edit "
+                    "regeneration is not yet implemented (deferred to a "
+                    "future ticket wiring this into d33d/design_loop.py)"
+                ),
+                "module_ids": body.module_ids,
+                "view_id": body.view_id,
+            },
+        )
+
     # Static SPA serving — mounted LAST, at the root path. All ``/api/*``
     # routers are registered above; Starlette's Router matches routes in
     # registration order and returns on the first full match, so this
@@ -504,6 +801,11 @@ def create_app(
 
 __all__ = [
     "MAX_CATALOGUE_BODY_BYTES",
+    "MAX_REGION_EDIT_IMAGE_BYTES",
+    "MAX_REGION_EDIT_MODULE_IDS",
+    "REGION_EDIT_VIEW_IDS",
     "STUB_HTML",
+    "ModuleRegistryRequest",
+    "RegionEditRequest",
     "create_app",
 ]

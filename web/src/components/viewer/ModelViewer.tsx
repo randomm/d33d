@@ -27,6 +27,41 @@
  *     the SAME rotation (rotation.set(-Math.PI/2, 0, 0) + camera.up) — the
  *     viewer's Y-up scene assumption is documented so the #7 work does not
  *     silently double-rotate.
+ *
+ * Lasso region → named module resolution (issue #6, workstream task-b)
+ * -----------------------------------------------------------------------
+ * `resolveLassoSelection` is the client-side picking half of #6's "how
+ * selection resolves to code" contract. Given a 2-D lasso polygon (in the
+ * viewport's on-screen pixel space) and the loaded per-module mesh group
+ * (`mesh.name === <module identifier>`, sourced from the render worker's
+ * `model.csg` registry per the spec), it:
+ *
+ *   1. Samples points inside the polygon on a regular grid (the ranking
+ *      metric's coordinate space: on-screen viewport pixels at the
+ *      current zoom, matching what `Raycaster.intersectObjects` actually
+ *      sees — not the 800x800 render-PNG space, since the picking ray
+ *      itself is cast through the live camera/viewport).
+ *   2. Casts one ray per sample via `Raycaster.intersectObjects`, which
+ *      returns hits nearest-first — correct z-buffer occlusion for free,
+ *      exactly per spec. Only the nearest hit per sample counts (that is
+ *      what is actually visible at that pixel).
+ *   3. Ranks all hit module names by hit ("visible pixel") count,
+ *      descending — the top-most/most-visible module is primary.
+ *   4. Never reads per-face/per-vertex colour. Resolution is solely via
+ *      `mesh.name` — the server-side OpenSCAD colour-ID pass is dead (see
+ *      spec: `color()` is discarded by `--render`/STL export, and
+ *      `difference()` cut faces take the *subtracted* object's colour),
+ *      so this function must not and does not consult material colour.
+ *
+ * A polygon that hits zero geometry returns an empty ranked list (never a
+ * crash, never a silent fallback to "the whole model") — the caller shows
+ * a "nothing selected" UI state.
+ *
+ * Server-side disocclusion is out of scope (spec: "a rabbit hole"). A
+ * module fully hidden behind another in the current view is not
+ * selectable; the escape hatch is `object.visible = false` on the
+ * occluding mesh (excluding it from `intersectObjects`) so the user can
+ * hide-and-reselect, per spec.
  */
 
 import { useEffect, useRef } from 'react';
@@ -279,6 +314,166 @@ export async function loadMesh(
   camera?: THREE.Camera,
 ): Promise<LoadResult> {
   return format === 'stl' ? loadSTL(buffer, camera) : loadGLB(buffer, camera);
+}
+
+// ---------------------------------------------------------------------------
+// Lasso region → named module resolution (#6)
+// ---------------------------------------------------------------------------
+
+/** A 2-D point in on-screen viewport pixel coordinates (not photo pixels
+ *  and not NDC — the same space the polygon was drawn in, so the raycast
+ *  matches what the user actually saw). */
+export interface ScreenPoint {
+  x: number;
+  y: number;
+}
+
+/** One named module ranked by how many sample points resolved to it. */
+export interface RankedModule {
+  /** The module identifier (`mesh.name`, sourced from the CSG registry). */
+  name: string;
+  /** Number of sample points inside the polygon whose nearest raycast hit
+   *  landed on this module — the "visible pixel count" proxy. */
+  hitCount: number;
+}
+
+/** Result of resolving a lasso polygon against the loaded per-module
+ *  meshes. `ranked` is empty (never a crash, never a fallback to "the
+ *  whole model") when the polygon hits no geometry. */
+export interface LassoResolution {
+  /** All intersected module names, ranked by hit count descending. */
+  ranked: RankedModule[];
+  /** `ranked[0].name`, or null if the polygon hit nothing — the
+   *  "top-most primary" module per spec. */
+  primary: string | null;
+}
+
+/** Default sampling density (points per axis) when the caller does not
+ *  override it. 12x12 = up to 144 rays per resolve call — dense enough to
+ *  rank overlapping filigree modules without being expensive per click. */
+const DEFAULT_SAMPLE_GRID = 12;
+
+/**
+ * Point-in-polygon test (ray casting / even-odd rule) in 2-D screen space.
+ * Standard implementation; used to build the sample-point set inside an
+ * arbitrary (possibly concave) lasso polygon.
+ */
+export function pointInPolygon(point: ScreenPoint, polygon: ScreenPoint[]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const pi = polygon[i];
+    const pj = polygon[j];
+    const intersects =
+      pi.y > point.y !== pj.y > point.y &&
+      point.x < ((pj.x - pi.x) * (point.y - pi.y)) / (pj.y - pi.y) + pi.x;
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * Generate sample points on a regular grid inside the polygon's bounding
+ * box, keeping only points that pass `pointInPolygon`. This is the
+ * "visible pixel count" ranking metric's coordinate space: on-screen
+ * viewport pixels, matching exactly what a `Raycaster` cast through the
+ * live camera/viewport would see — not the 800x800 render-PNG space,
+ * which may differ from the current zoom/viewport.
+ */
+export function samplePolygonInterior(
+  polygon: ScreenPoint[],
+  gridSize: number = DEFAULT_SAMPLE_GRID,
+): ScreenPoint[] {
+  if (polygon.length < 3) return [];
+  const xs = polygon.map((p) => p.x);
+  const ys = polygon.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+
+  const points: ScreenPoint[] = [];
+  for (let i = 0; i < gridSize; i++) {
+    for (let j = 0; j < gridSize; j++) {
+      // Sample at cell centres, not edges, so a thin polygon still gets
+      // at least the centre sample rather than landing exactly on a
+      // vertex/edge boundary.
+      const x = minX + ((i + 0.5) / gridSize) * (maxX - minX);
+      const y = minY + ((j + 0.5) / gridSize) * (maxY - minY);
+      const candidate = { x, y };
+      if (pointInPolygon(candidate, polygon)) points.push(candidate);
+    }
+  }
+  return points;
+}
+
+/**
+ * Resolve a closed lasso polygon (screen-space) to a ranked list of named
+ * OpenSCAD module identifiers, per the spec's client-side picking
+ * contract:
+ *
+ *   1. Sample points inside the polygon (screen space — matches the live
+ *      viewport, not the 800x800 render PNG).
+ *   2. Cast one ray per sample via `raycaster.intersectObjects`, which
+ *      three.js returns nearest-first (correct z-buffer occlusion with no
+ *      extra work).
+ *   3. Count only the NEAREST hit per sample — that is what is actually
+ *      visible at that screen pixel; occluded geometry behind it does not
+ *      count towards that module's hits (server-side disocclusion is out
+ *      of scope; a hidden-behind module is not selectable in this view).
+ *   4. Rank all hit module names by hit count, descending. `primary` is
+ *      the top-ranked name, or null if nothing was hit.
+ *
+ * `moduleGroup` is expected to contain named meshes
+ * (`mesh.name === <module identifier>`) sourced from the render worker's
+ * `model.csg` registry — this function reads ONLY `object.name` from the
+ * raycast hit, never per-face/per-vertex colour (the server-side
+ * OpenSCAD colour-ID pass is dead per spec).
+ *
+ * To let the user "hide the front module and re-select" (the spec's
+ * documented remedy for occlusion, since server-side disocclusion is a
+ * rabbit hole), set `object.visible = false` on the mesh to exclude
+ * before calling this — `intersectObjects` already skips invisible
+ * objects, so no extra parameter is needed here.
+ */
+export function resolveLassoSelection(
+  polygon: ScreenPoint[],
+  viewportWidth: number,
+  viewportHeight: number,
+  camera: THREE.Camera,
+  raycaster: THREE.Raycaster,
+  moduleGroup: THREE.Object3D,
+  gridSize: number = DEFAULT_SAMPLE_GRID,
+): LassoResolution {
+  const samples = samplePolygonInterior(polygon, gridSize);
+  const hitCounts = new Map<string, number>();
+
+  for (const sample of samples) {
+    // Convert screen-space pixel coords to NDC (-1..1, Y flipped) for
+    // Raycaster.setFromCamera.
+    const ndcX = (sample.x / viewportWidth) * 2 - 1;
+    const ndcY = -(sample.y / viewportHeight) * 2 + 1;
+    raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
+
+    const hits = raycaster.intersectObjects([moduleGroup], true);
+    if (hits.length === 0) continue;
+
+    // Nearest-first is three.js's contract for intersectObjects — only the
+    // first (nearest) hit is "visible" at this sample point.
+    const nearest = hits[0];
+    const name = nearest.object.name;
+    if (!name) continue; // unnamed geometry cannot resolve to a module id
+
+    hitCounts.set(name, (hitCounts.get(name) ?? 0) + 1);
+  }
+
+  const ranked: RankedModule[] = Array.from(hitCounts.entries())
+    .map(([name, hitCount]) => ({ name, hitCount }))
+    .sort((a, b) => b.hitCount - a.hitCount);
+
+  return {
+    ranked,
+    primary: ranked.length > 0 ? ranked[0].name : null,
+  };
 }
 
 // ---------------------------------------------------------------------------
