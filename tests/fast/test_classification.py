@@ -288,3 +288,67 @@ def test_precedence_oom_wins_over_syntax_error_when_not_timed_out() -> None:
         )
         == "oom"
     )
+
+
+def _derive_ok_args(
+    exit_code: int,
+    stl: object,
+    csg: object,
+    views: object,
+    vertex_count: int,
+    watertight: bool,
+    volume: float,
+) -> dict:
+    return {
+        "exit_code": exit_code,
+        "stl_path": stl,
+        "csg_path": csg,
+        "views": views,
+        "vertex_count": vertex_count,
+        "watertight": watertight,
+        "volume": volume,
+    }
+
+
+def test_derive_ok_matches_classify_ok_across_synthetic_tuples() -> None:
+    # derive_ok() must be structurally derived from classify() so the two
+    # can never silently diverge: ok iff classify(...) == "ok".
+    exit_codes = [0, 1, 137]
+    stl_opts = [None, "model.stl"]
+    csg_opts = [None, "model.csg"]
+    views_opts = [None, ["a.png"], SIX_VIEWS]
+    vertex_opts = [0, 100]
+    watertight_opts = [False, True]
+    volume_opts = [0.0, 1.0]
+
+    for ec, stl, csg, views, vc, wt, vol in itertools.product(
+        exit_codes,
+        stl_opts,
+        csg_opts,
+        views_opts,
+        vertex_opts,
+        watertight_opts,
+        volume_opts,
+    ):
+        args = _derive_ok_args(ec, stl, csg, views, vc, wt, vol)
+        classify_result = rw.classify(**args) == "ok"
+        derive_result = rw.derive_ok(**args)
+        assert derive_result == classify_result, (
+            f"derive_ok diverges from classify for {args!r}: "
+            f"derive_ok={derive_result!r} classify=={classify_result!r}"
+        )
+
+
+def test_derive_ok_true_for_fully_valid_run() -> None:
+    assert (
+        rw.derive_ok(
+            exit_code=0,
+            stl_path="model.stl",
+            csg_path="model.csg",
+            views=SIX_VIEWS,
+            vertex_count=100,
+            watertight=True,
+            volume=1.0,
+        )
+        is True
+    )
