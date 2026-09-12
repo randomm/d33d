@@ -27,7 +27,8 @@ Seven-gate order (deterministic, human-free):
     4. bbox matches stated dimensions
     5. volume > 0, face count sane
     6. slice dry run succeeds  (its own gate)
-    7. fits the build plate
+    7. fits the build plate (7a: per-axis extent ≤ envelope; 7b: clears
+       the bed keep-out zone)
 """
 
 from __future__ import annotations
@@ -533,36 +534,21 @@ def validate_stl(
             f"Slice dry run failed: {slice_result.error_string or slice_result.detail}",
         )
 
-    # Gate 7: fits the build plate
+    # Gate 7: fits the build plate (7a: per-axis extent, 7b: keep-out).
     env = QIDI_PLUS_5_ENVELOPE_MM
     for i in range(3):
         if bbox_mm[i] > env[i]:
             return _fail(
                 "envelope",
                 _part_from_mesh(mesh),
-                f"Dimension {i} ({bbox_mm[i]}mm) exceeds envelope {env[i]}mm",
+                f"gate7/envelope: dimension {i} ({bbox_mm[i]}mm) exceeds "
+                f"envelope {env[i]}mm",
             )
 
-    # Gate 7 (keep-out): reject a part whose post-centre position overlaps
-    # the bed's lower-left non-printable rectangle. The check is AND over
-    # the two axes — a part with X-min > keep-out X OR Y-min > keep-out Y
-    # clears the rectangle and passes. Z is unconstrained. This reads the
-    # post-centre lower bounds (mesh.bounds[0]), not extents, and does not
-    # subtract env/2 — the mesh is already translated by _centre_mesh.
-    keep_out = QIDI_PLUS_5_KEEP_OUT_MM
-    if (
-        mesh.bounds[0][0] <= keep_out[0]
-        and mesh.bounds[0][1] <= keep_out[1]
-    ):
-        return _fail(
-            "envelope",
-            _part_from_mesh(mesh),
-            (
-                f"Post-centre position ({mesh.bounds[0][0]:.2f}, "
-                f"{mesh.bounds[0][1]:.2f}) overlaps the bed keep-out zone "
-                f"({keep_out[0]}x{keep_out[1]}mm)"
-            ),
-        )
+    # Gate 7b: keep-out zone (see _check_bed_keep_out).
+    keep_out_error = _check_bed_keep_out(mesh)
+    if keep_out_error is not None:
+        return _fail("envelope", _part_from_mesh(mesh), keep_out_error)
 
     # Export 3MF
     try:
@@ -612,6 +598,32 @@ def _centre_mesh(mesh: trimesh.Trimesh) -> None:
         target_centre = np.array(env) / 2.0
         current_centre = mesh.centroid
         mesh.apply_translation(target_centre - current_centre)
+
+
+def _check_bed_keep_out(mesh: trimesh.Trimesh) -> str | None:
+    """Gate 7b: check the post-centre position against the bed keep-out.
+
+    Rejects a part whose post-centre position overlaps the bed's lower-left
+    non-printable rectangle. The check is AND over the two axes — a part
+    with X-min > keep-out X OR Y-min > keep-out Y clears the rectangle and
+    passes. Z is unconstrained. This reads the post-centre lower bounds
+    (mesh.bounds[0]), not extents, and does not subtract env/2 — the mesh
+    is already translated by _centre_mesh.
+
+    Returns an error message prefixed ``gate7/keep-out:`` for log triage,
+    or None if the part clears the zone.
+    """
+    keep_out = QIDI_PLUS_5_KEEP_OUT_MM
+    if (
+        mesh.bounds[0][0] <= keep_out[0]
+        and mesh.bounds[0][1] <= keep_out[1]
+    ):
+        return (
+            f"gate7/keep-out: post-centre position ({mesh.bounds[0][0]:.2f}, "
+            f"{mesh.bounds[0][1]:.2f}) overlaps the bed keep-out zone "
+            f"({keep_out[0]}x{keep_out[1]}mm)"
+        )
+    return None
 
 
 def _part_from_mesh(mesh: trimesh.Trimesh) -> Part:
