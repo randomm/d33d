@@ -17,7 +17,11 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Vector2, type Object3D } from "three";
-import { ChatPanel, type ChatMessage } from "./components/chat/ChatPanel";
+import {
+  ChatPanel,
+  type ChatMessage,
+  type ChatMessageSelection,
+} from "./components/chat/ChatPanel";
 import { PhotoUpload } from "./components/upload/PhotoUpload";
 import { PinnedParamStrip, type PinnedParam } from "./components/strip/PinnedParamStrip";
 import {
@@ -32,8 +36,13 @@ import {
 } from "./components/viewer/ViewportLassoOverlay";
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
-import { compositeMarkedPng } from "./lib/markedPng";
-import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "./lib/api";
+import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
+import {
+  ApiClient,
+  MAX_REGION_EDIT_MODULE_IDS,
+  type RegionEditPolygonPoint,
+  type RegionEditViewId,
+} from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 
 // ModelViewer and ViewportLassoOverlay each default independently to
@@ -49,6 +58,22 @@ export interface RenderImage {
   filename: string;
   /** data URL or relative URL */
   src: string;
+}
+
+/**
+ * A lasso selection that has been resolved to ranked module ids and a
+ * composited marked PNG, but has NOT yet been sent as a region edit — the
+ * user must still supply the free-text instruction via chat (see
+ * `handleLassoCompleted` / `handleSendMessage`). Carries everything
+ * `RegionEditRequest` needs except `instruction`.
+ */
+interface PendingRegionSelection {
+  /** The composited red-marked view PNG as a data URL (for the chat
+   *  thumbnail) — `stripDataUrlPrefix`'d again when building the request. */
+  thumbnail: string;
+  viewId: RegionEditViewId;
+  moduleIds: string[];
+  polygon: RegionEditPolygonPoint[];
 }
 
 interface AppProps {
@@ -75,6 +100,14 @@ export default function App({ renders = [], client }: AppProps) {
   const [moduleFixtureData, setModuleFixtureData] = useState<ArrayBuffer | null>(null);
   const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  // A lasso selection that has been resolved (module ids + marked PNG) but
+  // not yet sent — the instruction is the user's own free text, which the
+  // server requires non-empty (`RegionEditRequest.instruction`,
+  // `Field(min_length=1)`). The selection is attached to the NEXT chat
+  // message the user sends, not fired immediately from the lasso.
+  const [pendingSelection, setPendingSelection] = useState<PendingRegionSelection | null>(
+    null,
+  );
 
   // ModelViewer's onReady effect only fires once per mount — replace (never
   // merge) the captured handle on every call so a remount never leaves a
@@ -140,40 +173,27 @@ export default function App({ renders = [], client }: AppProps) {
       // scale into the canvas's drawing-buffer pixel space.
       const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
 
-      if (projectId === null) {
-        setStreamError("No project selected");
-        return;
-      }
-
-      void apiClient
-        .createRegionEdit(projectId, {
-          module_ids: moduleIds,
-          view_id: event.viewId,
-          marked_png_base64: markedPngBase64,
-          polygon: event.points,
-          instruction: "",
-        })
-        .then(() => {
-          setMessages((prev) => [
-            ...prev,
-            {
-              id: `msg-${Date.now()}-selection`,
-              role: "user",
-              content: "Selected a region for editing.",
-              selection: {
-                thumbnail: `data:image/png;base64,${markedPngBase64}`,
-                viewId: event.viewId,
-                moduleIds,
-              },
-            },
-          ]);
-        })
-        .catch((e) => {
-          setStreamError(e instanceof Error ? e.message : "Failed to submit region edit");
-        });
+      // The server requires a non-empty free-text `instruction`
+      // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
+      // the user can supply. Rather than call createRegionEdit here with
+      // no instruction (which would always 422), stash the resolved
+      // selection and the polygon/view needed to build the request, and
+      // surface an affordance telling the user to describe the change in
+      // chat. The pending selection is attached to whichever chat message
+      // the user sends next (see handleSendMessage).
+      setPendingSelection({
+        thumbnail: `data:image/png;base64,${markedPngBase64}`,
+        viewId: event.viewId,
+        moduleIds,
+        polygon: event.points,
+      });
     },
-    [apiClient, moduleGroup, projectId],
+    [moduleGroup],
   );
+
+  const handleCancelPendingSelection = useCallback(() => {
+    setPendingSelection(null);
+  }, []);
 
   // Create the (single, default) project on mount.
   useEffect(() => {
@@ -196,16 +216,51 @@ export default function App({ renders = [], client }: AppProps) {
 
   const handleSendMessage = useCallback(
     (text: string) => {
+      // Never call createRegionEdit with an empty or whitespace-only
+      // instruction — the server rejects it (`Field(min_length=1)`), and
+      // an all-whitespace string would pass a naive truthiness check but
+      // still be meaningless as an edit instruction.
+      const trimmed = text.trim();
+      const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
+
       const userMsg: ChatMessage = {
         id: `msg-${Date.now()}`,
         role: "user",
         content: text,
+        ...(selectionToAttach
+          ? {
+              selection: {
+                thumbnail: selectionToAttach.thumbnail,
+                viewId: selectionToAttach.viewId,
+                moduleIds: selectionToAttach.moduleIds,
+              } satisfies ChatMessageSelection,
+            }
+          : {}),
       };
       setMessages((prev) => [...prev, userMsg]);
 
       if (projectId === null) {
         setStreamError("No project selected");
         return;
+      }
+
+      if (selectionToAttach) {
+        // Clear immediately so a slow createRegionEdit response can't race a
+        // second send into re-attaching the same pending selection.
+        setPendingSelection(null);
+        void apiClient
+          .createRegionEdit(projectId, {
+            module_ids: selectionToAttach.moduleIds,
+            view_id: selectionToAttach.viewId,
+            marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
+            polygon: selectionToAttach.polygon,
+            instruction: trimmed,
+          })
+          .catch((e) => {
+            setStreamError(
+              e instanceof Error ? e.message : "Failed to submit region edit",
+            );
+          });
       }
 
       const assistantId = `msg-${Date.now()}-assistant`;
@@ -247,7 +302,7 @@ export default function App({ renders = [], client }: AppProps) {
         // it surfacing as an unhandled promise rejection in the browser.
         .catch(() => {});
     },
-    [projectId, apiClient],
+    [projectId, apiClient, pendingSelection],
   );
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
@@ -330,6 +385,24 @@ export default function App({ renders = [], client }: AppProps) {
           {selectionNotice && (
             <div className="selection-notice" data-testid="selection-notice" role="status">
               {selectionNotice}
+            </div>
+          )}
+          {pendingSelection && (
+            <div className="pending-selection-notice" data-testid="pending-selection-notice" role="status">
+              <span>Region selected — describe the change below.</span>
+              <img
+                src={pendingSelection.thumbnail}
+                alt={`pending selection on ${pendingSelection.viewId}`}
+                className="pending-selection-thumbnail"
+                data-testid="pending-selection-thumbnail"
+              />
+              <button
+                type="button"
+                data-testid="pending-selection-cancel-btn"
+                onClick={handleCancelPendingSelection}
+              >
+                Cancel selection
+              </button>
             </div>
           )}
         </div>
