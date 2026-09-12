@@ -758,3 +758,126 @@ def test_main_module_importable():
     import d33d.main as m
 
     assert callable(m.main)
+
+
+# ---------------------------------------------------------------------------
+# Named module registry (issue #7's core deliverable) — wiring test
+#
+# POST /api/projects/{id}/module-registry is the HTTP boundary the
+# frontend viewer (ModelViewer.loadGLB) actually calls to get the named
+# GLB it needs for resolveLassoSelection. The route delegates to
+# d33d.module_registry.build_registry_glb, injected via app.state so this
+# test never spawns Docker — the Docker-driven path itself is covered by
+# tests/slow/test_module_registry_docker.py.
+# ---------------------------------------------------------------------------
+
+
+def test_module_registry_returns_glb_bytes(app):
+    """A well-formed request with .scad source returns 200 with a GLB
+    body — the exact bytes d33d.module_registry.build_registry_glb
+    produced, served as model/gltf-binary so ModelViewer.loadGLB can
+    consume it directly."""
+    from d33d import module_registry as mr
+
+    stub_glb = b"glTF-stub-bytes"
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        assert "base" in source
+        return mr.RegistryBuildResult(
+            glb_bytes=stub_glb, registry_names=("base",), failures=()
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module base() { cube([1,1,1]); } base();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"] == "model/gltf-binary"
+    assert r.content == stub_glb
+
+
+def test_module_registry_unknown_project_returns_404(app):
+    async def _call(client):
+        return await client.post(
+            "/api/projects/999/module-registry",
+            json={"scad_source": "cube([1,1,1]);"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 404
+
+
+def test_module_registry_rejects_empty_scad_source(app):
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": ""},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_module_registry_no_call_sites_returns_empty_registry(app):
+    """A .scad with zero top-level module call-sites (bare primitives
+    only) resolves to a 200 with an explicit empty-registry body rather
+    than a fabricated GLB or a 500 — the honest-stub convention this
+    codebase already uses for region-edits."""
+    from d33d import module_registry as mr
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        return mr.RegistryBuildResult(glb_bytes=None, registry_names=(), failures=())
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "cube([1,1,1]);"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["registry_names"] == []
+    assert body["status"] == "empty"
+
+
+def test_module_registry_partial_failure_still_returns_glb_and_reports_failures(app):
+    """When SOME call-sites failed to isolate-render but at least one
+    succeeded, the route still returns the GLB (never discards a partial
+    registry) plus the failed module names in a response header/body
+    field so the caller can surface which regions are unavailable."""
+    from d33d import module_registry as mr
+
+    def _fake_build(source: str, **kwargs: Any) -> mr.RegistryBuildResult:
+        return mr.RegistryBuildResult(
+            glb_bytes=b"partial-glb",
+            registry_names=("base",),
+            failures=(
+                mr.ModuleRenderFailure(
+                    site=mr.CallSite(name="cap", registry_name="cap", line=3),
+                    error_class="empty_model",
+                    stderr="",
+                ),
+            ),
+        )
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        app.state.build_registry_glb = _fake_build
+        return await client.post(
+            f"/api/projects/{project_id}/module-registry",
+            json={"scad_source": "module base() {} module cap() {} base(); cap();"},
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    assert r.content == b"partial-glb"
+    assert r.headers["x-module-registry-failed"] == "cap"

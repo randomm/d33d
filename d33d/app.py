@@ -34,6 +34,18 @@ module identifiers, marked PNG, polygon, view id, instruction) and
 returns 202 Accepted with a ``status: "deferred"`` body. It does not
 regenerate any OpenSCAD source — that wiring into the design loop
 (``d33d/design_loop.py``, issue #5) is explicitly out of scope here.
+
+Also defined here: ``POST /api/projects/{id}/module-registry`` (issue #7,
+workstream task-a) — the named-module registry route that IS the wiring
+path ``region-edits``' ``module_ids`` and ``ModelViewer.tsx``'s
+``resolveLassoSelection`` both assume exists. Given ``.scad`` source, it
+calls ``d33d.module_registry.build_registry_glb`` (injected via
+``app.state.build_registry_glb`` so tests never spawn Docker) and returns
+the assembled named GLB as ``model/gltf-binary`` — exactly what
+``ModelViewer.loadGLB`` parses, with ``mesh.name`` on each node set to
+the registry's per-call-site name. This route is real plumbing over a
+real capability, not another honest stub: the registry module actually
+runs N isolated openscad renders and returns real named geometry.
 """
 
 from __future__ import annotations
@@ -51,7 +63,7 @@ from typing import Any
 
 import yaml
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
@@ -64,6 +76,7 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
+from d33d.module_registry import RegistryBuildResult, build_registry_glb
 from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
@@ -282,6 +295,24 @@ def _serialise_catalogue(cat: Catalogue) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Named module registry (issue #7, workstream task-a)
+# ---------------------------------------------------------------------------
+
+
+class ModuleRegistryRequest(BaseModel):
+    """Body of ``POST /api/projects/{id}/module-registry``.
+
+    ``scad_source`` is the parametric OpenSCAD the design loop produced
+    for the project (see ``d33d.design_loop``) — the SAME source the
+    single-render contract already renders. This route does not persist
+    ``scad_source``; it is a pure function of the given source in, named
+    GLB out.
+    """
+
+    scad_source: str = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
 # Region-scoped edit request (issue #7, workstream task-c)
 # ---------------------------------------------------------------------------
 #
@@ -423,6 +454,10 @@ def create_app(
     # maps ``project_id -> AsyncIterator[(event, data)]`` and starts empty
     # (no active streams until a future ticket wires the design loop).
     app.state.event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] = {}
+    # The named-module registry builder (issue #7) — injected so tests
+    # never spawn Docker; production wiring is the real
+    # ``d33d.module_registry.build_registry_glb`` (default below).
+    app.state.build_registry_glb = build_registry_glb
 
     spa_index = state_spa_dist_dir / "index.html"
     serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
@@ -576,6 +611,56 @@ def create_app(
             }
         )
 
+    @app.post("/api/projects/{project_id}/module-registry")
+    async def create_module_registry(
+        request: Request, project_id: int, body: ModuleRegistryRequest
+    ) -> Response:
+        """Build the named OpenSCAD module registry for ``scad_source``
+        and return it as a GLB — the wiring path ``ModelViewer.loadGLB``
+        and ``resolveLassoSelection`` (``web/src/components/viewer/
+        ModelViewer.tsx``) actually consume, and the source of the
+        ``module_ids`` ``POST /api/projects/{id}/region-edits`` accepts.
+
+        Delegates to ``app.state.build_registry_glb`` (the real
+        ``d33d.module_registry.build_registry_glb`` in production;
+        injectable in tests so no Docker is spawned). A ``.scad`` with no
+        top-level module call-sites is a valid, empty registry — 200 with
+        ``status: "empty"``, never a fabricated GLB or a 500. A PARTIAL
+        registry (some call-sites failed their isolated render) still
+        returns the GLB body for every module that DID succeed; the
+        failed module names are surfaced in the
+        ``X-Module-Registry-Failed`` response header (comma-separated) so
+        the caller can show which regions are unavailable without
+        discarding the rest of the registry.
+        """
+        conn: db.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        build_fn = request.app.state.build_registry_glb
+        result: RegistryBuildResult = build_fn(body.scad_source)
+
+        if result.glb_bytes is None:
+            return JSONResponse(
+                content={
+                    "project_id": project_id,
+                    "status": "empty",
+                    "registry_names": list(result.registry_names),
+                }
+            )
+
+        headers: dict[str, str] = {}
+        if result.failures:
+            headers["X-Module-Registry-Failed"] = ",".join(
+                f.site.registry_name for f in result.failures
+            )
+        return Response(
+            content=result.glb_bytes,
+            media_type="model/gltf-binary",
+            headers=headers,
+        )
+
     @app.post("/api/projects/{project_id}/region-edits", status_code=202)
     async def create_region_edit(
         request: Request, project_id: int, body: RegionEditRequest
@@ -646,6 +731,7 @@ __all__ = [
     "MAX_REGION_EDIT_MODULE_IDS",
     "REGION_EDIT_VIEW_IDS",
     "STUB_HTML",
+    "ModuleRegistryRequest",
     "RegionEditRequest",
     "create_app",
 ]
