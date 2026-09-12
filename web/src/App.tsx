@@ -108,6 +108,13 @@ export default function App({ renders = [], client }: AppProps) {
   const [pendingSelection, setPendingSelection] = useState<PendingRegionSelection | null>(
     null,
   );
+  // Bumped on every draw/cancel/send-clear of pendingSelection (see the
+  // three setPendingSelection call sites below). A createRegionEdit
+  // rejection captures the generation at send time and only restores the
+  // selection if nothing has touched pendingSelection since — otherwise a
+  // slow/failed request for an OLD selection could silently clobber a NEWER
+  // one the user drew afterward, or resurrect one they explicitly cancelled.
+  const pendingSelectionGenerationRef = useRef(0);
 
   // ModelViewer's onReady effect only fires once per mount — replace (never
   // merge) the captured handle on every call so a remount never leaves a
@@ -181,6 +188,7 @@ export default function App({ renders = [], client }: AppProps) {
       // surface an affordance telling the user to describe the change in
       // chat. The pending selection is attached to whichever chat message
       // the user sends next (see handleSendMessage).
+      pendingSelectionGenerationRef.current += 1;
       setPendingSelection({
         thumbnail: `data:image/png;base64,${markedPngBase64}`,
         viewId: event.viewId,
@@ -192,6 +200,7 @@ export default function App({ renders = [], client }: AppProps) {
   );
 
   const handleCancelPendingSelection = useCallback(() => {
+    pendingSelectionGenerationRef.current += 1;
     setPendingSelection(null);
   }, []);
 
@@ -253,7 +262,12 @@ export default function App({ renders = [], client }: AppProps) {
 
       if (selectionToAttach) {
         // Clear immediately so a slow createRegionEdit response can't race a
-        // second send into re-attaching the same pending selection.
+        // second send into re-attaching the same pending selection. Snapshot
+        // the generation counter first so the reject handler below can tell
+        // whether the user drew a new lasso or clicked cancel while this
+        // request was in flight.
+        const sentGeneration = pendingSelectionGenerationRef.current;
+        pendingSelectionGenerationRef.current += 1;
         setPendingSelection(null);
         void apiClient
           .createRegionEdit(projectId, {
@@ -270,11 +284,28 @@ export default function App({ renders = [], client }: AppProps) {
             // say plainly that THIS is what failed (the chat message
             // above already shows the selection thumbnail as sent, so a
             // generic error would leave that looking correct).
-            setPendingSelection(selectionToAttach);
+            //
+            // Only restore if the generation counter is UNCHANGED since this
+            // request started (i.e. the send's own +1 is still the latest
+            // bump) — this request's selectionToAttach is a value closed over
+            // at send time. If the user drew a new lasso or clicked cancel
+            // while this request was in flight, the counter has moved on and
+            // this stale value must NOT win: an unconditional (or a merely
+            // current-is-null) overwrite here would silently clobber a newer
+            // selection, or resurrect one the user explicitly cancelled, with
+            // no way for the user to tell the difference.
             const detail = e instanceof Error ? e.message : "unknown error";
-            setStreamError(
-              `Region edit failed — selection restored, please resend: ${detail}`,
-            );
+            if (pendingSelectionGenerationRef.current === sentGeneration + 1) {
+              setPendingSelection(selectionToAttach);
+              setStreamError(
+                `Region edit failed — selection restored, please resend: ${detail}`,
+              );
+            } else {
+              // The user already drew a new selection or cancelled while this
+              // request was in flight — nothing to restore, and claiming so
+              // would be dishonest about what state the UI is actually in.
+              setStreamError(`Region edit failed: ${detail}`);
+            }
           });
       }
 

@@ -812,6 +812,130 @@ describe("App region-selection (lasso) wiring", () => {
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
   });
 
+  it("does NOT let a stale rejected request clobber a newer selection drawn while it was in flight", async () => {
+    // Regression for the reject-handler race: request A (selection
+    // "wing_left") is sent and left pending on a never-resolving promise;
+    // while it's in flight the user draws a NEW lasso (selection
+    // "wing_right"), which must remain visible. Only THEN does A reject —
+    // its restore must never overwrite the newer "wing_right" pending state
+    // with the stale "wing_left" one.
+    const client = makeClient();
+    let rejectFirst: (e: Error) => void = () => {};
+    const firstCall = new Promise<never>((_, reject) => {
+      rejectFirst = reject;
+    });
+    vi.spyOn(client, "createRegionEdit").mockReturnValueOnce(firstCall);
+
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    // Draw and send selection A ("wing_left") — createRegionEdit(A) is now
+    // in flight on a promise that won't resolve until we reject it below.
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "thin the left wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(1));
+
+    // Pending selection was cleared synchronously on send.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+
+    // While A is still in flight, draw a NEW lasso — selection B
+    // ("wing_right").
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_right", hitCount: 5 }],
+      primary: "wing_right",
+    });
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    // NOW reject the stale request for A.
+    rejectFirst(new Error("stale 500"));
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+    });
+
+    // The still-visible pending selection must be B ("wing_right"), not a
+    // resurrected stale A ("wing_left").
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "widen the right wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(2));
+    const secondCall = (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(secondCall[1].module_ids).toEqual(["wing_right"]);
+  });
+
+  it("does NOT resurrect a cancelled selection when a stale request rejects afterward", async () => {
+    // Regression for the reject-handler race: request A ("wing_left") is in
+    // flight; the user explicitly cancels the pending-selection UI (clearing
+    // it to null) before A rejects. A's restore must not bring the
+    // cancelled selection back.
+    const client = makeClient();
+    let rejectFirst: (e: Error) => void = () => {};
+    const firstCall = new Promise<never>((_, reject) => {
+      rejectFirst = reject;
+    });
+    vi.spyOn(client, "createRegionEdit").mockReturnValueOnce(firstCall);
+
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "thin the left wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(1));
+
+    // A second, unrelated selection is drawn and then explicitly cancelled
+    // by the user while A is still in flight.
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("pending-selection-cancel-btn"));
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+
+    // NOW A rejects.
+    rejectFirst(new Error("stale 500"));
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+    });
+
+    // The cancellation must stick — no pending-selection notice reappears.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+  });
+
   it("does NOT attach a selection to the chat message when there is no project to send it to", async () => {
     // Simulate the createProject round-trip never resolving (or having
     // failed) so projectId stays null while the module fixture (loaded
