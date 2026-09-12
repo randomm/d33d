@@ -68,7 +68,6 @@ import os
 import re
 import subprocess
 import tempfile
-import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -98,6 +97,7 @@ from d33d.module_registry import (
     build_registry_glb,
 )
 from d33d.projects import create_projects_router
+from d33d.render_worker import render_for_design_loop
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
 from d33d.versions_routes import create_versions_router
@@ -896,184 +896,6 @@ def _http_request_factory(base_url: str, api_key: str):
     return _factory
 
 
-def _production_render_fn(scad_source: str, defines: dict[str, str]):
-    """One render-worker run for the design loop (issue #4's pipeline).
-
-    Ephemeral named Docker volume (no host bind mounts); the ``.scad``
-    source is copied into the volume, the pinned OpenSCAD image compiles
-    under the worker's container contract (``build_docker_argv``), and
-    :func:`d33d.render_worker.classify` maps the run onto the closed
-    7-class ``error_class`` enum. Any exception in the pipeline is a
-    ``container_error`` — a loop render failure is a classified render
-    outcome, never an unclassified raise.
-    """
-    import json as _json
-    import tempfile
-
-    from d33d.render_worker import (
-        RenderParams,
-        RenderResult,
-        build_docker_argv,
-        classify,
-        new_render_name,
-        run_container,
-        truncate_stderr,
-    )
-
-    name = new_render_name()
-    volume = f"d33d-render-{name}"
-    start = time.monotonic()
-    try:
-        subprocess.run(
-            ["docker", "volume", "create", volume],
-            capture_output=True,
-            check=False,
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            host_tmp = Path(tmp)
-            src = host_tmp / "src"
-            src.mkdir()
-            (src / "model.scad").write_text(scad_source, encoding="utf-8")
-            params = RenderParams(defines=dict(defines))
-            (src / "params.json").write_text(
-                _json.dumps({"defines": params.defines}), encoding="utf-8"
-            )
-            # Copy the source into the named volume via a helper container
-            # (named volumes are only writable from a container bound to
-            # them — no host bind mounts).
-            helper_argv = [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--volume",
-                f"{volume}:/work",
-                "--volume",
-                f"{tmp}:/host:ro",
-                "busybox:latest",
-                "cp",
-                "/host/src/model.scad",
-                "/work/model.scad",
-                "/host/src/params.json",
-                "/work/params.json",
-            ]
-            subprocess.run(helper_argv, capture_output=True, check=False)
-            argv = build_docker_argv(
-                image="docker.io/openscad/openscad:trixie",
-                name=name,
-                workdir_volume=volume,
-                params=params,
-            )
-            proc = run_container(argv, timeout_s=params.timeout_s)
-            duration_ms = int((time.monotonic() - start) * 1000)
-            stderr = truncate_stderr(proc.stderr)
-
-            def _harvest() -> tuple[Path, Path, list[Path]]:
-                out = host_tmp / "out"
-                out.mkdir()
-                harvest_argv = [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--network",
-                    "none",
-                    "--volume",
-                    f"{volume}:/work",
-                    "--volume",
-                    f"{out}:/host",
-                    "busybox:latest",
-                    "sh",
-                    "-c",
-                    (
-                        "cp /work/model.stl /host/ 2>/dev/null; "
-                        "cp /work/model.csg /host/ 2>/dev/null; "
-                        "for i in 0 1 2 3 4 5; do "
-                        "cp /work/view$i.png /host/ 2>/dev/null; done; true"
-                    ),
-                ]
-                subprocess.run(harvest_argv, capture_output=True, check=False)
-                stl = out / "model.stl"
-                csg = out / "model.csg"
-                views = [out / f"view{i}.png" for i in range(6)]
-                return stl, csg, views
-
-            if proc.returncode != 0:
-                error_class = classify(
-                    exit_code=proc.returncode,
-                    stl_path=None,
-                    stderr=stderr,
-                    timed_out=proc.returncode == 124,
-                )
-                return RenderResult(
-                    ok=False,
-                    exit_code=proc.returncode,
-                    duration_ms=duration_ms,
-                    error_class=error_class,
-                    stderr=stderr,
-                    stl=None,
-                    csg=None,
-                    views=(),
-                )
-
-            stl, csg, views = _harvest()
-            vertex_count = 0
-            watertight = False
-            volume_mm3 = 0.0
-            if stl.is_file():
-                try:
-                    import trimesh
-
-                    mesh = trimesh.load(str(stl), process=False)
-                    vertex_count = len(mesh.vertices)
-                    watertight = bool(mesh.is_watertight)
-                    volume_mm3 = float(mesh.volume)
-                except (OSError, ValueError):
-                    pass
-            views_ok = all(v.is_file() for v in views)
-            error_class = classify(
-                exit_code=proc.returncode,
-                stl_path=str(stl) if stl.is_file() else None,
-                csg_path=str(csg) if csg.is_file() else None,
-                views=[str(v) for v in views] if views_ok else None,
-                stderr=stderr,
-                timed_out=proc.returncode == 124,
-                vertex_count=vertex_count,
-                watertight=watertight,
-                volume=volume_mm3,
-            )
-            return RenderResult(
-                ok=error_class == "ok",
-                exit_code=proc.returncode,
-                duration_ms=duration_ms,
-                error_class=error_class,
-                stderr=stderr,
-                stl=str(stl) if stl.is_file() else None,
-                csg=str(csg) if csg.is_file() else None,
-                views=tuple(str(v) for v in views) if views_ok else (),
-            )
-    except (OSError, RuntimeError, ValueError) as e:
-        return RenderResult(
-            ok=False,
-            exit_code=1,
-            duration_ms=0,
-            error_class="container_error",
-            stderr=f"render pipeline error: {e}",
-            stl=None,
-            csg=None,
-            views=(),
-        )
-    finally:
-        try:
-            subprocess.run(
-                ["docker", "volume", "rm", "-f", volume],
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
-            pass
-
-
 def _build_production_design_loop():
     """The production ``run_design_loop`` closure (issue #9).
 
@@ -1133,7 +955,7 @@ def _build_production_design_loop():
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
             stated_dims=kwargs.get("stated_dims"),
-            render_fn=_production_render_fn,
+            render_fn=render_for_design_loop,
             llm_fn=llm_fn,
             request=request,
             model=res.entry.model,
