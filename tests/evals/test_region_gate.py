@@ -241,9 +241,18 @@ def test_result_type_is_frozen_dataclass(
     ``dataclasses.replace`` is the sanctioned way to get a modified copy
     (it never mutates the original); a direct assignment to a declared
     field on the original is the freeze contract and raises
-    ``AttributeError``.
+    ``AttributeError``. The assignment is exercised through a small typed
+    helper so the frozen dataclass's ``__setattr__`` is still triggered
+    without a type suppression (the helper keeps the assignment from
+    reading as a typo).
     """
     import dataclasses
+
+    def _assign_status(r, value: str) -> None:
+        # A string-keyed assignment through a helper (the frozen dataclass
+        # raises AttributeError on any declared-field assignment, and the
+        # helper keeps the assignment from reading as a typo).
+        r.status = value
 
     bbox_min, bbox_max = region_bbox
     result = run_region_gate(pre_mesh, post_mesh_pass, bbox_min, bbox_max)
@@ -252,7 +261,8 @@ def test_result_type_is_frozen_dataclass(
     assert replaced.status == "fail"
     assert result.status == original_status  # the original is untouched
     with pytest.raises(AttributeError):
-        result.status = "fail"  # type: ignore[misc]
+        _assign_status(result, "fail")
+    assert result.status == original_status  # still untouched after the raise
 
 
 def test_result_exposes_all_three_fields(

@@ -1090,9 +1090,12 @@ def _build_production_design_loop():
     popped before the real loop runs. A test that needs a stub loop (or no
     hook) overwrites ``app.state.run_design_loop`` after ``create_app``
     returns.
-    """
-    import asyncio
 
+    The closure is ``async`` (the finalize route awaits awaitable loop
+    results): the capability probe is awaited natively instead of being
+    ``asyncio.run``-nested inside the already-running event loop, which
+    ``asyncio.run`` forbids with ``RuntimeError``.
+    """
     from d33d.config.catalogue import load_catalogue
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
@@ -1100,20 +1103,18 @@ def _build_production_design_loop():
     from d33d.evals.failure_capture import default_run_design_loop_hook
     from d33d.prompt_hash import canonical_hash
 
-    def _loop(app_state: Any, **kwargs: Any) -> Any:
+    async def _loop(app_state: Any, **kwargs: Any) -> Any:
         catalogue_path: Path = app_state.catalogue_path
         cat = load_catalogue(catalogue_path)
         res = resolve_model(cat, "design")
         provider = cat.providers[next(iter(cat.providers))]
         api_key = provider.key
         factory = _http_request_factory(res.provider.base, api_key)
-        capability = asyncio.run(
-            probe_capabilities(
-                base_url=res.provider.base,
-                model_id=res.entry.model,
-                api_key=api_key,
-                request_factory=factory,
-            )
+        capability = await probe_capabilities(
+            base_url=res.provider.base,
+            model_id=res.entry.model,
+            api_key=api_key,
+            request_factory=factory,
         )
         # The canonical hash of the design-role prompt (role + messages,
         # as ``d33d.design_llm.send`` computes it for each call) — the

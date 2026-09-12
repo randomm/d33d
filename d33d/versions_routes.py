@@ -446,10 +446,13 @@ def create_versions_router() -> APIRouter:
         #
         # The route inspects the injected seam's signature before calling:
         # a production loop (``_build_production_design_loop``) takes
-        # (app, **kwargs) and is called that way; a test stub that takes
-        # no args is called with none (backward-compat with existing
-        # stubs). The inspection is a static contract check, not a
-        # per-call dynamic behavior change.
+        # (app, **kwargs) and is called with the FULL design-loop kwargs
+        # contract (``_finalize_loop_kwargs`` — photo, chat_history,
+        # stated_dims, render_fn, llm_fn, model, prompt_version, request
+        # built from the app state and the project row); a test stub that
+        # takes no args is called with none (backward-compat with
+        # existing stubs). The inspection is a static contract check, not
+        # a per-call dynamic behavior change.
         run_loop = request.app.state.run_design_loop
         if run_loop is None:
             raise HTTPException(status_code=503, detail="design loop not wired")
@@ -474,9 +477,7 @@ def create_versions_router() -> APIRouter:
             if _loop_takes_app(run_loop):
                 result = run_loop(
                     app=request.app,
-                    photo=body.photo,
-                    request=body.request or body.message,
-                    stated_dims=body.stated_dims,
+                    **_finalize_loop_kwargs(request, project_id, body),
                 )
             else:
                 result = run_loop()
@@ -541,6 +542,96 @@ def create_versions_router() -> APIRouter:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _finalize_loop_kwargs(
+    request: Request, project_id: int, body: FinalizeBody
+) -> dict[str, Any]:
+    """The full design-loop kwargs contract for the FINALIZE seam.
+
+    The production loop (``d33d.app._build_production_design_loop``) forwards
+    everything except its own hook kwargs (``model`` / ``prompt_version`` /
+    ``request``) to ``d33d.design_loop.run_design_loop``, which REQUIRES
+    ``photo``, ``stated_dims``, ``render_fn`` and ``llm_fn`` — a zero-kwarg
+    call would be a ``TypeError`` that escapes the route's bounded exception
+    set, and the hook's ``request`` (``FailureEvent.request`` is
+    ``min_length=1``) would be empty so an exhausted loop would never be
+    archived. This helper builds that contract from the app state and the
+    project row:
+
+    - ``photo`` — the body's photo, else the project's stored
+      ``source_photo_path`` (the uploaded reference photo); ``None`` when
+      neither exists (text-only finalize — the hook's photo is optional).
+    - ``stated_dims`` — the body's dims, else the named W/D/H parameters
+      from the latest version's snapshot (0.0 for any unset axis — the
+      dimension gate then measures, never fabricates).
+    - ``render_fn`` — the production render worker (``d33d.app.
+      _production_render_fn``). ``llm_fn`` — a no-op async edge: the
+      production closure builds its OWN ``llm_fn`` from the live catalogue
+      and does not consume this kwarg; the key is present so the seam's
+      full contract (``photo``, ``stated_dims``, ``render_fn``, ``llm_fn``)
+      is satisfied for any future seam variant that does pass it through.
+    - ``model`` / ``prompt_version`` / ``request`` — the hook's kwargs
+      (popped by the hook before the real loop runs): the resolved
+      design-role model id (empty when no catalogue is loaded — honest,
+      never a crash), the canonical hash of the design-role prompt (the
+      join key that makes "prompt v7 fails case 12 which v5 passed"
+      readable), and the user's request text (guaranteed non-empty — the
+      failures.jsonl line is un-archivable without it).
+    """
+    from d33d.app import _production_render_fn
+    from d33d.config.catalogue import CatalogueError, ResolutionError
+    from d33d.prompt_hash import canonical_hash
+
+    async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError(
+            "finalize route llm_fn must never be called "
+            "(the production closure builds its own llm_fn)"
+        )
+
+    app = request.app
+    row = app.state.versions.get_project(project_id)
+    assert row is not None  # already 404'd above
+
+    photo = body.photo or row.get("source_photo_path")
+    stated_dims = body.stated_dims
+    if stated_dims is None:
+        latest = app.state.versions.latest_version(project_id)
+        p = latest["params"] if latest is not None else {}
+        stated_dims = (
+            float(p.get("W", 0.0)),
+            float(p.get("D", 0.0)),
+            float(p.get("H", 0.0)),
+        )
+
+    # ``request`` must be non-empty: the hook builds a FailureEvent from
+    # it (``min_length=1``) and an empty string would silently drop the
+    # failures.jsonl line for an exhausted loop.
+    request_text = body.request or body.message
+    if not request_text:
+        request_text = f"finalize project {project_id}"
+
+    model = ""
+    cat = getattr(app.state, "catalogue", None)
+    if cat is not None:
+        try:
+            from d33d.config.resolve import resolve_model
+
+            model = resolve_model(cat, "design").entry.model
+        except (CatalogueError, ResolutionError, LookupError):
+            model = ""
+    prompt_version = canonical_hash(role="design", messages=[])
+
+    return {
+        "photo": photo,
+        "chat_history": (),
+        "stated_dims": stated_dims,
+        "render_fn": _production_render_fn,
+        "llm_fn": _noop_llm_fn,
+        "model": model,
+        "prompt_version": prompt_version,
+        "request": request_text,
+    }
 
 
 def _loop_takes_app(run_loop: Any) -> bool:

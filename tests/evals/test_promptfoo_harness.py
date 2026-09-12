@@ -198,6 +198,64 @@ def test_deterministic_gates_pass_passes_when_no_gates() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Local-run fixture bounds (evals/run.py --run path)
+# ---------------------------------------------------------------------------
+
+
+class _CaseRef:
+    """Duck of the case's reference fields for the local-render input path."""
+
+    def __init__(self, reference_photo: str | None = None,
+                 rendered_views: tuple[str, ...] = ()) -> None:
+        self.reference_photo = reference_photo
+        self.rendered_views = rendered_views
+
+
+def test_local_render_inputs_rejects_path_outside_evals(tmp_path) -> None:
+    """A case fixture that resolves OUTSIDE ``evals/`` (symlink-escape) is
+    skipped, not read — the resolved path must stay inside ``evals/``."""
+    run = _load_run_module()
+    repo_root = tmp_path / "repo"
+    (repo_root / "evals").mkdir(parents=True)
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"x")
+    case = _CaseRef(reference_photo=str(outside))
+    _render, stl, mesh = run._local_render_inputs(repo_root, case)
+    assert stl is None
+    assert mesh is None
+
+
+def test_local_render_inputs_rejects_overlarge_image_fixture(tmp_path) -> None:
+    """An image fixture over the 10 MB cap is skipped (never uploaded to
+    the LLM) — the size bound is a cost/volume guard, not a crash.
+    Only image fixtures (non-``.scad``) are subject to the image cap."""
+    run = _load_run_module()
+    repo_root = tmp_path / "repo"
+    evals_dir = repo_root / "evals"
+    evals_dir.mkdir(parents=True)
+    big = evals_dir / "big.png"
+    # Write just over the 10 MB cap in one block (the content is never
+    # read — the size check skips before any processing).
+    big.write_bytes(b"x" * (run.MAX_FIXTURE_IMAGE_BYTES + 1))
+    case = _CaseRef(reference_photo=str(big))
+    _render, stl, mesh = run._local_render_inputs(repo_root, case)
+    assert stl is None
+    assert mesh is None
+
+
+def test_scad_to_mesh_rejects_path_outside_repo(tmp_path) -> None:
+    """A ``.scad`` fixture that resolves OUTSIDE the repo (symlink-escape)
+    is never handed to openscad — ``None`` (no mesh) is returned."""
+    run = _load_run_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True)
+    outside = tmp_path / "outside.scad"
+    outside.write_text("cube([1, 1, 1]);\n", encoding="utf-8")
+    mesh = run._scad_to_mesh(repo_root, outside)
+    assert mesh is None
+
+
+# ---------------------------------------------------------------------------
 # N/A marker alignment (GATE_NA_MARKERS vs the gate modules' NA_REASON)
 # ---------------------------------------------------------------------------
 

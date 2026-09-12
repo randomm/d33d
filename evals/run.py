@@ -240,10 +240,24 @@ def _local_render_inputs(repo_root: Path, case: Any) -> tuple[Any, str | None, A
         fixture = Path(reference)
         if not fixture.is_absolute():
             fixture = repo_root / fixture
+        # Bound + confine the fixture: an unbounded fixture image sent to
+        # the LLM is a cost/volume DoS vector, and a case file that
+        # references a path outside the repo (symlink-escape) must not be
+        # read. The resolved path must stay inside ``evals/``.
+        resolved = fixture.resolve()
+        if not resolved.is_relative_to(repo_root.resolve() / "evals"):
+            print(f"# skip fixture outside evals/: {reference}", file=sys.stderr)
+            return render_result, stl_path, mesh
         if fixture.suffix == ".scad":
             mesh = _scad_to_mesh(repo_root, fixture)
             if mesh is not None:
                 stl_path = f"local:{fixture.name}"
+        elif resolved.is_file() and resolved.stat().st_size > MAX_FIXTURE_IMAGE_BYTES:
+            # An over-size image fixture is skipped, not uploaded to the LLM.
+            print(
+                f"# skip image fixture over {MAX_FIXTURE_IMAGE_BYTES} bytes: {reference}",
+                file=sys.stderr,
+            )
     return render_result, stl_path, mesh
 
 
@@ -265,6 +279,12 @@ def _null_render() -> Any:
     return _Render()
 
 
+#: Hard cap on a fixture image the local ``--run`` path sends to the LLM
+#: (10 MB — a reference photo / rendered view is a few hundred KB in
+#: practice; larger fixtures are rejected, not uploaded).
+MAX_FIXTURE_IMAGE_BYTES = 10 * 1024 * 1024
+
+
 def _scad_to_mesh(repo_root: Path, scad_path: Path) -> Any:
     """Best-effort mesh for a ``.scad`` fixture (``None`` when openscad
     is not invocable or the load fails).
@@ -278,6 +298,11 @@ def _scad_to_mesh(repo_root: Path, scad_path: Path) -> Any:
         scad_path = repo_root / scad_path
     if not scad_path.is_file():
         return None
+    # The .scad path is derived from case data — confine the resolved path
+    # to the repo before shelling out to openscad (symlink-escape).
+    resolved = scad_path.resolve()
+    if not resolved.is_relative_to(repo_root.resolve()):
+        return None
     try:
         import subprocess
         import tempfile
@@ -287,7 +312,7 @@ def _scad_to_mesh(repo_root: Path, scad_path: Path) -> Any:
         with tempfile.TemporaryDirectory() as tmp:
             stl = Path(tmp) / "model.stl"
             proc = subprocess.run(
-                ["openscad", "--stdout", str(stl), str(scad_path)],
+                ["openscad", "--stdout", str(stl), str(resolved)],
                 capture_output=True,
                 check=False,
                 timeout=60,

@@ -768,12 +768,18 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
     )
     app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
     loop = app.state.run_design_loop
-    result = loop(
-        app=app,
-        photo="/photos/ref.png",
-        request="make it a cube",
-        stated_dims=(10, 10, 10),
-    )
+
+    async def _drive():
+        return await loop(
+            app=app,
+            photo="/photos/ref.png",
+            request="make it a cube",
+            stated_dims=(10, 10, 10),
+        )
+
+    import asyncio as _asyncio
+
+    result = _asyncio.run(_drive())
     assert result.status == "exhausted"
     events = read_failure_events(app.state.failures_jsonl_path)
     assert len(events) == 1
@@ -866,12 +872,18 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
     )
     app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
     loop = app.state.run_design_loop
-    result = loop(
-        app=app,
-        photo="/photos/ref.png",
-        request="make it a cube",
-        stated_dims=(10, 10, 10),
-    )
+
+    async def _drive():
+        return await loop(
+            app=app,
+            photo="/photos/ref.png",
+            request="make it a cube",
+            stated_dims=(10, 10, 10),
+        )
+
+    import asyncio as _asyncio
+
+    result = _asyncio.run(_drive())
     assert result.status == "pass"
     events = read_failure_events(app.state.failures_jsonl_path)
     assert events == []
