@@ -37,6 +37,18 @@ export function stripDataUrlPrefix(dataUrl: string): string {
  * copy of the source canvas, returning the resulting PNG as base64 with
  * no `data:` URL prefix.
  *
+ * `polygon` is in CSS-pixel viewport space (the same space
+ * `ViewportLassoOverlay` draws in, via `getBoundingClientRect()`) — NOT
+ * the WebGL drawing-buffer's pixel space. `sourceCanvas.width/height` are
+ * the drawing-buffer dimensions, i.e. the CSS size scaled by
+ * `renderer.getPixelRatio()` (see `WebGLRenderer.setSize`). On any display
+ * with `devicePixelRatio !== 1` those two spaces differ, so the polygon
+ * must be scaled by `drawing-buffer / css` before being stroked onto the
+ * (drawing-buffer-sized) output canvas — otherwise the marker lands at a
+ * fraction of its intended offset from the origin. Callers must pass the
+ * CSS-pixel size of the source canvas (e.g. `renderer.getSize(new
+ * Vector2())`, as `App.tsx` already does for the raycast NDC conversion).
+ *
  * A polygon with fewer than 3 points is still composited (nothing extra
  * drawn) — callers are expected to have already validated the polygon via
  * `resolveLassoSelection`'s ranked-list gate before reaching this helper;
@@ -46,9 +58,13 @@ export function stripDataUrlPrefix(dataUrl: string): string {
 export function compositeMarkedPng(
   sourceCanvas: HTMLCanvasElement,
   polygon: MarkedPngPoint[],
+  cssWidth: number,
+  cssHeight: number,
 ): string {
   const width = sourceCanvas.width;
   const height = sourceCanvas.height;
+  const scaleX = cssWidth > 0 ? width / cssWidth : 1;
+  const scaleY = cssHeight > 0 ? height / cssHeight : 1;
 
   const out = document.createElement("canvas");
   out.width = width;
@@ -63,11 +79,13 @@ export function compositeMarkedPng(
 
   // Stroke the lasso polygon in the mandated red/high-contrast-warm
   // marker colour, closing the path so it reads as a region outline.
+  // Points are CSS pixels; scale into drawing-buffer pixels to match the
+  // canvas this is drawn onto (see the DPR note in the doc comment above).
   if (polygon.length >= 2) {
     ctx.beginPath();
-    ctx.moveTo(polygon[0].x, polygon[0].y);
+    ctx.moveTo(polygon[0].x * scaleX, polygon[0].y * scaleY);
     for (let i = 1; i < polygon.length; i++) {
-      ctx.lineTo(polygon[i].x, polygon[i].y);
+      ctx.lineTo(polygon[i].x * scaleX, polygon[i].y * scaleY);
     }
     ctx.closePath();
     ctx.strokeStyle = MARKER_COLOR;

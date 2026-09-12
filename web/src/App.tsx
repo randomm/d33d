@@ -126,7 +126,11 @@ export default function App({ renders = [], client }: AppProps) {
       setSelectionNotice(null);
 
       const moduleIds = ranked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name);
-      const markedPngBase64 = compositeMarkedPng(canvas, event.points);
+      // compositeMarkedPng's polygon argument is in the same CSS-pixel space
+      // as event.points (ViewportLassoOverlay draws via getBoundingClientRect()),
+      // so it needs the same CSS-pixel cssSize used for the raycast above to
+      // scale into the canvas's drawing-buffer pixel space.
+      const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
 
       if (projectId === null) {
         setStreamError("No project selected");

@@ -80,14 +80,14 @@ describe("compositeMarkedPng", () => {
       { x: 10, y: 10 },
     ];
 
-    const result = compositeMarkedPng(source, polygon);
+    const result = compositeMarkedPng(source, polygon, 100, 80);
 
     expect(result.length).toBeGreaterThan(0);
     expect(result.startsWith("data:")).toBe(false);
     expect(result).toBe("ZmFrZS1wbmc=");
   });
 
-  it("strokes the polygon in the mandated red marker colour", () => {
+  it("strokes the polygon in the mandated red marker colour, at DPR=1 (css size == drawing-buffer size)", () => {
     const source = makeSourceCanvas();
     const polygon = [
       { x: 1, y: 1 },
@@ -95,7 +95,7 @@ describe("compositeMarkedPng", () => {
       { x: 10, y: 10 },
     ];
 
-    compositeMarkedPng(source, polygon);
+    compositeMarkedPng(source, polygon, 100, 80);
 
     expect(fakeCtx.strokeStyle).toBe(MARKER_COLOR);
     expect(MARKER_COLOR).toBe("#FF3300");
@@ -106,21 +106,40 @@ describe("compositeMarkedPng", () => {
     expect(fakeCtx.closePath).toHaveBeenCalled();
   });
 
+  it("scales polygon points from CSS-pixel space into drawing-buffer-pixel space when devicePixelRatio > 1", () => {
+    // Drawing-buffer canvas is 2x the CSS size, matching
+    // renderer.setPixelRatio(2) + renderer.setSize(cssWidth, cssHeight).
+    const source = makeSourceCanvas(200, 160);
+    const polygon = [
+      { x: 1, y: 1 },
+      { x: 10, y: 1 },
+      { x: 10, y: 10 },
+    ];
+
+    compositeMarkedPng(source, polygon, 100, 80);
+
+    expect(fakeCtx.moveTo).toHaveBeenCalledWith(2, 2);
+    expect(fakeCtx.lineTo).toHaveBeenCalledWith(20, 2);
+    expect(fakeCtx.lineTo).toHaveBeenCalledWith(20, 20);
+  });
+
   it("copies the source canvas frame via drawImage", () => {
     const source = makeSourceCanvas(64, 48);
-    compositeMarkedPng(source, []);
+    compositeMarkedPng(source, [], 64, 48);
     expect(fakeCtx.drawImage).toHaveBeenCalledWith(source, 0, 0, 64, 48);
   });
 
   it("does not stroke a path for a polygon with fewer than 2 points", () => {
     const source = makeSourceCanvas();
-    compositeMarkedPng(source, [{ x: 5, y: 5 }]);
+    compositeMarkedPng(source, [{ x: 5, y: 5 }], 100, 80);
     expect(fakeCtx.stroke).not.toHaveBeenCalled();
   });
 
   it("throws if the 2-D canvas context is unavailable", () => {
     getContextSpy.mockReturnValue(null);
     const source = makeSourceCanvas();
-    expect(() => compositeMarkedPng(source, [])).toThrow(/2D canvas context unavailable/);
+    expect(() => compositeMarkedPng(source, [], 100, 80)).toThrow(
+      /2D canvas context unavailable/,
+    );
   });
 });
