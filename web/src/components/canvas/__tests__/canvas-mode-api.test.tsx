@@ -313,4 +313,66 @@ describe("canvas mode-agnostic API", () => {
     expect(event.scaleFactor).toBe(1.0);
     expect(event.axis).toBe("X");
   });
+
+  it("lasso mode shows the lasso hint instead of the dimension hint", () => {
+    render(
+      <DimensionCanvas
+        photoSrc={PHOTO_SRC}
+        photoWidth={PHOTO_W}
+        photoHeight={PHOTO_H}
+        mode="lasso"
+      />,
+    );
+    expect(screen.queryByTestId("drawing-hint")).not.toBeInTheDocument();
+    expect(screen.getByTestId("lasso-hint")).toBeInTheDocument();
+  });
+
+  it("onLassoCompleted is only meaningful in lasso mode (accepted in both without erroring)", () => {
+    const onLassoCompleted = vi.fn();
+    const { unmount } = render(
+      <DimensionCanvas
+        photoSrc={PHOTO_SRC}
+        photoWidth={PHOTO_W}
+        photoHeight={PHOTO_H}
+        mode="dimension"
+        onLassoCompleted={onLassoCompleted}
+      />,
+    );
+    expect(screen.getByTestId("dimension-canvas-container")).toBeInTheDocument();
+    unmount();
+
+    render(
+      <DimensionCanvas
+        photoSrc={PHOTO_SRC}
+        photoWidth={PHOTO_W}
+        photoHeight={PHOTO_H}
+        mode="lasso"
+        onLassoCompleted={onLassoCompleted}
+      />,
+    );
+    expect(screen.getByTestId("dimension-canvas-container")).toBeInTheDocument();
+  });
+
+  it("switching from lasso back to dimension mode resets in-progress lasso state", () => {
+    const { rerender } = render(
+      <DimensionCanvas
+        photoSrc={PHOTO_SRC}
+        photoWidth={PHOTO_W}
+        photoHeight={PHOTO_H}
+        mode="lasso"
+      />,
+    );
+    expect(screen.getByTestId("lasso-hint")).toBeInTheDocument();
+
+    rerender(
+      <DimensionCanvas
+        photoSrc={PHOTO_SRC}
+        photoWidth={PHOTO_W}
+        photoHeight={PHOTO_H}
+        mode="dimension"
+      />,
+    );
+    expect(screen.queryByTestId("lasso-hint")).not.toBeInTheDocument();
+    expect(screen.getByTestId("drawing-hint")).toBeInTheDocument();
+  });
 });

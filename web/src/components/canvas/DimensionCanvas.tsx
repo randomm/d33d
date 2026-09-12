@@ -1,21 +1,29 @@
 /**
- * DimensionCanvas — shared react-konva canvas for dimension capture.
+ * DimensionCanvas — shared react-konva canvas for dimension capture and
+ * lasso region selection (issue #6, workstream task-b).
  *
- * Implements the Fusion 360 attached-canvas pattern: the user draws a
- * 2-D segment between two features on the reference photo, types the
- * real mm value, and the whole frame is scaled from that single anchor.
+ * Implements the Fusion 360 attached-canvas pattern for dimension mode: the
+ * user draws a 2-D segment between two features on the reference photo,
+ * types the real mm value, and the whole frame is scaled from that single
+ * anchor.
+ *
+ * In lasso mode, the user clicks to place polygon vertices on one of the
+ * six orthographic views, closes the polygon (double-click, Enter, or
+ * clicking near the first point), and the closed polygon is emitted as a
+ * `LassoRegionEvent` in photo-pixel coordinates plus the view id — pixel
+ * coordinates only, never module identifiers (that resolution happens in
+ * ModelViewer.resolveLassoSelection against the loaded per-module meshes).
  *
  * Mode-agnostic API
  * -----------------
  * The component's public API is mode-agnostic: it accepts a `mode` prop
- * (`"dimension" | "lasso"`) so a future ticket (#6) can switch the same
- * component to lasso selection without a rewrite. Dimension lines and
- * lasso regions can coexist on one canvas — the mode determines what
- * the user is *drawing*; existing annotations from other modes remain
- * visible and interactive.
+ * (`"dimension" | "lasso"`) so ticket #6 switches the same component to
+ * lasso selection without a rewrite. Dimension lines and lasso regions can
+ * coexist on one canvas — the mode determines what the user is *drawing*;
+ * existing annotations from other modes remain visible and interactive.
  *
- * 2-D → 3-D axis mapping
- * -----------------------
+ * 2-D → 3-D axis mapping (dimension mode)
+ * -----------------------------------------
  * A drawn segment maps to a 3-D axis constraint by its dominant
  * direction in the photo's 2-D plane:
  *
@@ -32,6 +40,14 @@
  * The emitted event carries the 2-D endpoints (photo pixel coords), the
  * typed mm value, the derived scale factor, and the inferred 3-D axis —
  * giving the design loop an unambiguous ground-truth scale anchor.
+ *
+ * Lasso markers (red/warm requirement)
+ * -------------------------------------
+ * The lasso outline reuses the same red stroke (`#FF3300`) already used
+ * for dimension lines — VLM marker-fragility evidence (arXiv 2512.17875)
+ * requires selection markers to be red or high-contrast warm; a restyle to
+ * blue/green must not silently pass review, so `LASSO_STROKE_COLOR` is a
+ * named, tested constant rather than an inline literal.
  */
 
 import {
@@ -47,9 +63,20 @@ import type Konva from "konva";
 // Types
 // ---------------------------------------------------------------------------
 
-/** Canvas interaction mode. Dimension lines ship in this ticket;
- *  lasso mode is the API slot for ticket #6. */
+/** Canvas interaction mode. Dimension lines shipped in ticket #5;
+ *  lasso mode (region selection) ships in this ticket (#6). */
 export type CanvasMode = "dimension" | "lasso";
+
+/** Which of the six orthographic render-worker views a lasso was drawn
+ *  on. Selection is per-view: the same physical feature may be lassoed
+ *  from any view that shows it clearly. */
+export type ViewId =
+  | "front"
+  | "back"
+  | "left"
+  | "right"
+  | "top"
+  | "iso";
 
 /** A 2-D point in photo pixel coordinates. */
 export interface PhotoPoint {
@@ -68,6 +95,23 @@ export interface DimensionLine {
 
 /** The axis a dimension line maps to in the 3-D frame. */
 export type AxisMapping = "X" | "Y";
+
+/**
+ * A completed lasso region: a closed polygon in photo-pixel coordinates,
+ * on a specific view. This carries pixel coordinates ONLY — resolving the
+ * polygon to named OpenSCAD module identifiers is ModelViewer's job
+ * (`resolveLassoSelection`), never done here. Sending pixel coordinates
+ * to the backend instead of module identifiers would defeat the whole
+ * point of the ticket, so this event is explicitly not the edit request.
+ */
+export interface LassoRegionEvent {
+  /** Closed polygon vertices in photo pixel coordinates. At least 3
+   *  points (a degenerate 1- or 2-point "polygon" is rejected before
+   *  this event is built). */
+  points: PhotoPoint[];
+  /** Which of the six views this polygon was drawn on. */
+  viewId: ViewId;
+}
 
 /** The ground-truth scale event emitted to the design loop. */
 export interface DimensionGroundTruthEvent {
@@ -100,6 +144,13 @@ export interface DimensionCanvasProps {
   onDimensionCaptured?: (event: DimensionGroundTruthEvent) => void;
   /** Optional: existing dimension lines to display (read-only overlay). */
   existingDimensions?: DimensionLine[];
+  /** Which view this canvas instance is showing. Required in lasso mode
+   *  so the emitted `LassoRegionEvent` carries the correct view id;
+   *  ignored in dimension mode. Default "front". */
+  viewId?: ViewId;
+  /** Callback invoked when the user closes a lasso polygon (double-click,
+   *  Enter, or clicking near the first vertex). Only wired in lasso mode. */
+  onLassoCompleted?: (event: LassoRegionEvent) => void;
   /** Width of the canvas container in CSS pixels. Default 400. */
   width?: number;
   /** Height of the canvas container in CSS pixels. Default 300. */
@@ -118,6 +169,26 @@ type DrawState =
   | { phase: "drawing-end"; start: PhotoPoint; end: PhotoPoint }
   | { phase: "typing-mm"; start: PhotoPoint; end: PhotoPoint }
   | { phase: "done" };
+
+type LassoDrawState =
+  | { phase: "idle" }
+  | { phase: "drawing"; points: PhotoPoint[] }
+  | { phase: "closed"; points: PhotoPoint[] };
+
+/** Distance (in *photo pixel* space) within which a click near the first
+ *  vertex closes the polygon, mirroring common lasso-tool UX. */
+const CLOSE_POLYGON_THRESHOLD_PX = 12;
+
+/** Minimum vertex count for a valid (non-degenerate) polygon. */
+const MIN_POLYGON_POINTS = 3;
+
+/** Lasso outline colour. Reuses the dimension-line red so there is one
+ *  red/warm marker convention across the whole canvas — VLM
+ *  marker-fragility evidence (arXiv 2512.17875) requires markers to be
+ *  red or high-contrast warm; a restyle to blue/green must not silently
+ *  pass review, hence a named exported constant instead of an inline
+ *  literal. */
+export const LASSO_STROKE_COLOR = "#FF3300";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -169,6 +240,38 @@ export function buildGroundTruthEvent(
   };
 }
 
+/** A polygon with fewer than 3 vertices cannot enclose an area — reject it
+ *  rather than emitting a degenerate lasso selection. */
+export function isValidPolygon(points: PhotoPoint[]): boolean {
+  return points.length >= MIN_POLYGON_POINTS;
+}
+
+/** True if `point` is within `thresholdPx` of `target` — used to detect a
+ *  click near the first vertex that should close the polygon. */
+export function isNearPoint(
+  point: PhotoPoint,
+  target: PhotoPoint,
+  thresholdPx: number = CLOSE_POLYGON_THRESHOLD_PX,
+): boolean {
+  return pixelLength(point, target) <= thresholdPx;
+}
+
+/** Build the LassoRegionEvent from a closed polygon. Throws if the
+ *  polygon is degenerate (fewer than 3 points) — callers must validate
+ *  with `isValidPolygon` first; this function is the single source of
+ *  truth for what a valid emitted event looks like. */
+export function buildLassoRegionEvent(
+  points: PhotoPoint[],
+  viewId: ViewId,
+): LassoRegionEvent {
+  if (!isValidPolygon(points)) {
+    throw new Error(
+      `lasso polygon needs at least ${MIN_POLYGON_POINTS} points, got ${points.length}`,
+    );
+  }
+  return { points, viewId };
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -180,6 +283,8 @@ export function DimensionCanvas({
   mode = "dimension",
   onDimensionCaptured,
   existingDimensions = [],
+  viewId = "front",
+  onLassoCompleted,
   width = 400,
   height = 300,
   "aria-label": ariaLabel = "dimension canvas",
@@ -192,6 +297,9 @@ export function DimensionCanvas({
   const [draw, setDraw] = useState<DrawState>({ phase: "idle" });
   const [mmInput, setMmInput] = useState("");
   const [mmError, setMmError] = useState<string | null>(null);
+
+  // Lasso drawing state
+  const [lasso, setLasso] = useState<LassoDrawState>({ phase: "idle" });
 
   // Scale the photo to fit the canvas container while preserving aspect
   const scale = Math.min(width / photoWidth, height / photoHeight);
@@ -231,11 +339,9 @@ export function DimensionCanvas({
 
   const handleStageClick = useCallback(
     (e: Konva.KonvaEventObject<MouseEvent>) => {
-      if (mode !== "dimension") return; // lasso mode is ticket #6
-
       const target = e.target;
       // Only act on clicks on the background (the photo image or the stage)
-      // — not on already-drawn dimension lines or the mm input
+      // — not on already-drawn annotations or the mm input
       const stage = target.getStage();
       const isBackground =
         target === stage ||
@@ -246,6 +352,33 @@ export function DimensionCanvas({
 
       const point = stageToPhoto(target.x(), target.y());
 
+      if (mode === "lasso") {
+        setLasso((prev) => {
+          if (prev.phase === "idle" || prev.phase === "closed") {
+            return { phase: "drawing", points: [point] };
+          }
+          if (prev.phase === "drawing") {
+            // Clicking near the first vertex closes the polygon (common
+            // lasso-tool UX), mirroring the Enter-key close path below.
+            const first = prev.points[0];
+            if (
+              prev.points.length >= MIN_POLYGON_POINTS &&
+              first &&
+              isNearPoint(point, first)
+            ) {
+              const closedPoints = prev.points;
+              onLassoCompleted?.(buildLassoRegionEvent(closedPoints, viewId));
+              return { phase: "closed", points: closedPoints };
+            }
+            return { phase: "drawing", points: [...prev.points, point] };
+          }
+          return prev;
+        });
+        return;
+      }
+
+      if (mode !== "dimension") return;
+
       setMmError(null);
 
       if (draw.phase === "idle" || draw.phase === "done") {
@@ -254,7 +387,31 @@ export function DimensionCanvas({
         setDraw({ phase: "drawing-end", start: draw.start, end: point });
       }
     },
-    [mode, draw, stageToPhoto],
+    [mode, draw, stageToPhoto, viewId, onLassoCompleted],
+  );
+
+  /** Close the in-progress polygon explicitly (double-click or Enter). */
+  const handleLassoClose = useCallback(() => {
+    setLasso((prev) => {
+      if (prev.phase !== "drawing" || !isValidPolygon(prev.points)) {
+        return prev;
+      }
+      onLassoCompleted?.(buildLassoRegionEvent(prev.points, viewId));
+      return { phase: "closed", points: prev.points };
+    });
+  }, [viewId, onLassoCompleted]);
+
+  const handleLassoCancel = useCallback(() => {
+    setLasso({ phase: "idle" });
+  }, []);
+
+  const handleLassoKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (mode !== "lasso") return;
+      if (e.key === "Enter") handleLassoClose();
+      if (e.key === "Escape") handleLassoCancel();
+    },
+    [mode, handleLassoClose, handleLassoCancel],
   );
 
   // MM input handling
@@ -303,6 +460,7 @@ export function DimensionCanvas({
     setDraw({ phase: "idle" });
     setMmInput("");
     setMmError(null);
+    setLasso({ phase: "idle" });
   }, [mode]);
 
   // -----------------------------------------------------------------------
@@ -316,11 +474,24 @@ export function DimensionCanvas({
         ? { start: draw.start, end: draw.start }
         : null;
 
+  // Photo-pixel polygon points converted to display (stage) coordinates.
+  const toStagePoints = useCallback(
+    (points: PhotoPoint[]): number[] => {
+      const ox = (width - displayWidth) / 2;
+      const oy = (height - displayHeight) / 2;
+      return points.flatMap((p) => [ox + p.x * scale, oy + p.y * scale]);
+    },
+    [width, height, displayWidth, displayHeight, scale],
+  );
+
   return (
     <div
       data-testid="dimension-canvas-container"
       style={{ position: "relative", width, height }}
       aria-label={ariaLabel}
+      tabIndex={mode === "lasso" ? 0 : undefined}
+      onDoubleClick={mode === "lasso" ? handleLassoClose : undefined}
+      onKeyDown={mode === "lasso" ? handleLassoKeyDown : undefined}
     >
       {/* Canvas */}
       <Stage
@@ -387,6 +558,34 @@ export function DimensionCanvas({
                 strokeWidth={2}
                 dashed
                 lineCap="round"
+              />
+            </Group>
+          )}
+
+          {/* Lasso polygon: in-progress (open, dashed) or closed (filled outline) */}
+          {mode === "lasso" && lasso.phase === "drawing" && lasso.points.length > 0 && (
+            <Group data-testid="lasso-in-progress">
+              <Line
+                points={toStagePoints(lasso.points)}
+                stroke={LASSO_STROKE_COLOR}
+                strokeWidth={2}
+                dashed
+                lineCap="round"
+                lineJoin="round"
+                closed={false}
+              />
+            </Group>
+          )}
+          {mode === "lasso" && lasso.phase === "closed" && (
+            <Group data-testid="lasso-region">
+              <Line
+                points={toStagePoints(lasso.points)}
+                stroke={LASSO_STROKE_COLOR}
+                strokeWidth={2}
+                lineCap="round"
+                lineJoin="round"
+                closed
+                fill="rgba(255,51,0,0.15)"
               />
             </Group>
           )}
@@ -489,6 +688,32 @@ export function DimensionCanvas({
           Click two points to draw a dimension line
         </div>
       )}
+
+      {/* Lasso hint */}
+      {mode === "lasso" && lasso.phase !== "closed" && (
+        <div
+          data-testid="lasso-hint"
+          style={{
+            position: "absolute",
+            bottom: 8,
+            left: 8,
+            fontSize: 11,
+            color: "rgba(255,255,255,0.8)",
+            background: "rgba(0,0,0,0.5)",
+            padding: "2px 6px",
+            borderRadius: 3,
+          }}
+        >
+          {lasso.phase === "drawing"
+            ? "Click to add points; double-click or Enter to close, Esc to cancel"
+            : "Click to start a lasso region"}
+        </div>
+      )}
+
+      {/* Lasso empty-selection diagnostic slot: rendered by the parent once
+          ModelViewer.resolveLassoSelection returns zero matches for the
+          closed polygon (this component only emits the polygon; it does
+          not know about the 3-D scene). */}
     </div>
   );
 }

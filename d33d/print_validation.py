@@ -593,3 +593,184 @@ def _fail(
         assembly_layout=[],
         export_3mf=None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Region-selection containment gate (ticket #6)
+# ---------------------------------------------------------------------------
+#
+# Scope: the containment METRIC only — the fraction of changed triangle
+# area falling outside a selected region's 3D bounding volume. How that
+# volume is resolved (module registry lookup, lasso-to-3D lift) is owned
+# by other workstreams of ticket #6; this module treats the volume as an
+# opaque axis-aligned box (bbox_min, bbox_max) in mm, matching the mesh's
+# own coordinate space.
+
+#: Named env var carrying the containment threshold, as a percentage
+#: (e.g. "5.0" means 5%). Per spec this MUST be configurable (env/YAML)
+#: and never a hardcoded code constant — it is an initial guess to be
+#: tuned once the golden set produces real spillover data.
+CONTAINMENT_THRESHOLD_ENV_VAR: str = "D33D_CONTAINMENT_THRESHOLD_PCT"
+
+#: Fallback used when the env var is absent or unparseable. The spec's
+#: own initial guess, to be tuned once the golden set produces real data.
+DEFAULT_CONTAINMENT_THRESHOLD_PCT: float = 5.0
+
+BBoxCorner = tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class ContainmentResult:
+    """The containment gate's verdict for one region-scoped edit."""
+
+    ok: bool
+    spillover_pct: float
+    threshold_pct: float
+
+
+def containment_threshold_pct() -> float:
+    """Read the containment threshold (percent) from the named env var.
+
+    Falls back to :data:`DEFAULT_CONTAINMENT_THRESHOLD_PCT` when the env
+    var is unset or holds a value that cannot be parsed as a float, so a
+    malformed override fails closed to the documented default rather than
+    crashing the gate.
+    """
+    raw = os.environ.get(CONTAINMENT_THRESHOLD_ENV_VAR)
+    if raw is None:
+        return DEFAULT_CONTAINMENT_THRESHOLD_PCT
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid %s=%r, falling back to default %.2f%%",
+            CONTAINMENT_THRESHOLD_ENV_VAR,
+            raw,
+            DEFAULT_CONTAINMENT_THRESHOLD_PCT,
+        )
+        return DEFAULT_CONTAINMENT_THRESHOLD_PCT
+
+
+def changed_faces(pre_mesh: trimesh.Trimesh, post_mesh: trimesh.Trimesh) -> np.ndarray:
+    """Return the indices (into ``post_mesh.faces``) of triangles that are
+    new relative to ``pre_mesh``.
+
+    A post-edit triangle counts as "changed" when no triangle in the
+    pre-edit mesh occupies the same position — compared by each
+    triangle's vertex coordinates, rounded to survive floating-point
+    noise from mesh I/O, rather than by face-index identity (which is not
+    meaningful across two independently-generated meshes with different
+    topology/vertex ordering).
+    """
+    decimals = 6
+
+    def _face_signatures(
+        mesh: trimesh.Trimesh,
+    ) -> set[tuple[tuple[float, float, float], ...]]:
+        signatures = set()
+        for face in mesh.faces:
+            verts = tuple(
+                tuple(np.round(mesh.vertices[idx], decimals)) for idx in sorted(face)
+            )
+            signatures.add(verts)
+        return signatures
+
+    pre_signatures = _face_signatures(pre_mesh)
+
+    changed_idx = []
+    for i, face in enumerate(post_mesh.faces):
+        verts = tuple(
+            tuple(np.round(post_mesh.vertices[idx], decimals)) for idx in sorted(face)
+        )
+        if verts not in pre_signatures:
+            changed_idx.append(i)
+
+    return np.array(changed_idx, dtype=np.int64)
+
+
+def _triangle_area(vertices: np.ndarray) -> float:
+    """Area of one triangle given its 3 vertices (shape (3, 3))."""
+    a, b, c = vertices
+    return float(np.linalg.norm(np.cross(b - a, c - a)) / 2.0)
+
+
+def _fraction_outside_bbox(
+    triangle_vertices: np.ndarray,
+    bbox_min: BBoxCorner,
+    bbox_max: BBoxCorner,
+) -> float:
+    """Fraction of a single triangle's centroid-sampled area outside the
+    axis-aligned box [bbox_min, bbox_max].
+
+    A triangle is treated as either fully inside or fully outside the
+    region, decided by its centroid — sufficient precision for the
+    containment gate's own tolerance band (a handful of percent) without
+    requiring a full triangle/box clipping implementation.
+    """
+    centroid = triangle_vertices.mean(axis=0)
+    lo = np.asarray(bbox_min, dtype=np.float64)
+    hi = np.asarray(bbox_max, dtype=np.float64)
+    inside = bool(np.all(centroid >= lo) and np.all(centroid <= hi))
+    return 0.0 if inside else 1.0
+
+
+def spillover_fraction(
+    mesh: trimesh.Trimesh,
+    changed_face_indices: np.ndarray,
+    bbox_min: BBoxCorner,
+    bbox_max: BBoxCorner,
+) -> float:
+    """Fraction of changed triangle area falling outside the region bbox.
+
+    Returns 0.0 when there are no changed faces (nothing to be outside).
+    The denominator is the total area of the changed triangles only — the
+    metric measures spillover of the EDIT, not of the whole mesh.
+    """
+    if len(changed_face_indices) == 0:
+        return 0.0
+
+    total_area = 0.0
+    outside_area = 0.0
+    for idx in changed_face_indices:
+        face = mesh.faces[idx]
+        tri_vertices = mesh.vertices[face]
+        area = _triangle_area(tri_vertices)
+        total_area += area
+        outside_area += area * _fraction_outside_bbox(tri_vertices, bbox_min, bbox_max)
+
+    if total_area <= 0.0:
+        return 0.0
+    return outside_area / total_area
+
+
+def check_containment(
+    pre_mesh: trimesh.Trimesh,
+    post_mesh: trimesh.Trimesh,
+    bbox_min: BBoxCorner,
+    bbox_max: BBoxCorner,
+) -> ContainmentResult:
+    """Run the containment gate for one region-scoped edit.
+
+    Computes the fraction of changed triangle area (``post_mesh`` vs.
+    ``pre_mesh``) falling outside the selected region's 3D bounding
+    volume, compares it against the named configurable threshold (see
+    :func:`containment_threshold_pct`), and logs the measured fraction
+    for this run regardless of the pass/fail outcome.
+    """
+    changed = changed_faces(pre_mesh, post_mesh)
+    fraction = spillover_fraction(post_mesh, changed, bbox_min, bbox_max)
+    spillover_pct = fraction * 100.0
+    threshold_pct = containment_threshold_pct()
+    ok = spillover_pct <= threshold_pct
+
+    logger.info(
+        "containment gate: spillover=%.4f%% threshold=%.4f%% changed_faces=%d ok=%s",
+        spillover_pct,
+        threshold_pct,
+        len(changed),
+        ok,
+    )
+
+    return ContainmentResult(
+        ok=ok, spillover_pct=spillover_pct, threshold_pct=threshold_pct
+    )
