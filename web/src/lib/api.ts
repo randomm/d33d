@@ -56,6 +56,87 @@ function stringifyDetail(detail: unknown): string {
 // Types
 // ---------------------------------------------------------------------------
 
+/** One vertex of the lasso polygon. Coordinate space is caller-dependent:
+ *  `DimensionCanvas`'s photo-overlay lasso emits photo-pixel coordinates
+ *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`
+ *  (issue #29) emits viewport-pixel coordinates (`ScreenPoint`). This
+ *  type documents the shared shape. */
+
+/**
+ * The version-timeline entry (GET /api/projects/{id}/versions).
+ * `diff_count` is the diff badge — the number of params that changed vs
+ * the parent (0 for the first version).
+ */
+export interface VersionTimelineEntry {
+  id: number;
+  name: string;
+  params: Record<string, number | string | boolean>;
+  created_by_message: string;
+  parent: number | null;
+  restored_from: number | null;
+  forked_from: [number, number] | null;
+  pinned: boolean;
+  archived: boolean;
+  thumbnail: string | null;
+  created_at: string;
+  /** Diff badge: params changed vs the parent (0 for the first version).
+   *  Present on the timeline (GET /versions) but NOT on the single-version
+   *  GET /versions/{id} — the diff badge is computed in the timeline route
+   *  from the parent pointer. */
+  diff_count: number;
+}
+
+/**
+ * A gallery card (GET /api/projects/{id}/gallery) — a pinned variant.
+ * `actions` is the closed action set the gallery card renders.
+ */
+export interface GalleryCard extends VersionTimelineEntry {
+  actions: Array<"set-as-main" | "branch-from" | "archive">;
+}
+
+/**
+ * The compare response (GET .../versions/compare?a=&b=) — the prioritized
+ * surface. Both full param sets, the computed diff table (added/removed/
+ * changed), and the shared-rotation contract (identical units/axis
+ * convention → the two client viewports share one camera/rotation state).
+ */
+export interface VersionCompare {
+  project_id: number;
+  a: VersionTimelineEntry;
+  b: VersionTimelineEntry;
+  diff: {
+    added: string[];
+    removed: string[];
+    changed: string[];
+    count: number;
+  };
+  /** The shared-rotation contract for the two-viewport compare surface. */
+  shared_rotation: {
+    units: "mm";
+    axis_convention: "z-up";
+    identical_convention: boolean;
+  };
+}
+
+/**
+ * A project-library card (GET /api/library). Search over name/tags/notes
+ * is client-side over these rows.
+ */
+export interface LibraryCard {
+  id: number;
+  name: string;
+  tags: string[];
+  notes: string;
+  current_version: number | null;
+  last_activity: { ts: string | null; version_id: number | null; name: string | null } | null;
+  thumbnail: string | null;
+}
+
+/**
+ * The project (GET /api/projects/{id}) — with the version fields
+ * (issue #8): `current_version` (the resume pointer) and
+ * `last_activity` (the library-card activity).
+ */
 export interface Project {
   id: number;
   name: string;
@@ -65,6 +146,25 @@ export interface Project {
   source_photo_path: string | null;
   created_at: string;
   updated_at?: string;
+  /** The latest (main) version — the project resumes here. */
+  current_version?: number | null;
+  /** Last-activity record (the latest version's ts/name/id). */
+  last_activity?: { ts: string | null; version_id: number | null; name: string | null } | null;
+}
+
+/** A design-loop FINALIZE input (issue #8). */
+export interface FinalizeInput {
+  /** The complete parameter set (full snapshot). */
+  params?: Record<string, number | string | boolean>;
+  name?: string;
+  message?: string;
+}
+
+/** A manual version-create input (issue #8). */
+export interface CreateVersionInput {
+  params: Record<string, number | string | boolean>;
+  name?: string;
+  message?: string;
 }
 
 export interface CreateProjectInput {
@@ -205,6 +305,7 @@ export interface RegionEditResult {
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
@@ -215,6 +316,10 @@ export interface ApiClientOptions {
   fetch?: typeof fetch;
   /** Injectable AbortSignal source — callers can still pass per-call signals. */
 }
+
+// ---------------------------------------------------------------------------
+// Version-management client methods (issue #8)
+// ---------------------------------------------------------------------------
 
 export class ApiClient {
   private readonly baseUrl: string;
@@ -250,6 +355,194 @@ export class ApiClient {
       { method: "DELETE" },
     );
     if (!res.ok) await throwFor(res);
+  }
+
+  // -- version management (issue #8) ------------------------------------
+
+  /**
+   * Get the version timeline (oldest first, with diff badges).
+   */
+  async listVersions(id: number): Promise<VersionTimelineEntry[]> {
+    return this.request<VersionTimelineEntry[]>(
+      "GET",
+      `/api/projects/${id}/versions`,
+    );
+  }
+
+  /**
+   * Create a version (the manual create path; the design-loop FINALIZE
+   * boundary uses `finalize` instead — a version is created exactly when
+   * the loop passes validation).
+   */
+  async createVersion(
+    id: number,
+    input: CreateVersionInput,
+  ): Promise<VersionTimelineEntry> {
+    return this.request<VersionTimelineEntry>(
+      "POST",
+      `/api/projects/${id}/versions`,
+      input,
+      201,
+    );
+  }
+
+  /**
+   * Get a single version.
+   */
+  async getVersion(
+    id: number,
+    versionId: number,
+  ): Promise<VersionTimelineEntry> {
+    return this.request<VersionTimelineEntry>(
+      "GET",
+      `/api/projects/${id}/versions/${versionId}`,
+    );
+  }
+
+  /**
+   * Patch a version (rename / pin / archive / thumbnail — any subset).
+   */
+  async updateVersion(
+    id: number,
+    versionId: number,
+    input: {
+      name?: string;
+      pinned?: boolean;
+      archived?: boolean;
+      thumbnail?: string;
+    },
+  ): Promise<VersionTimelineEntry> {
+    return this.request<VersionTimelineEntry>(
+      "PATCH",
+      `/api/projects/${id}/versions/${versionId}`,
+      input,
+    );
+  }
+
+  /**
+   * Non-destructive restore: a NEW forward version with the target's full
+   * snapshot (parent = current latest). Restoring the current latest is a
+   * 409 (no-op — dedupe, no spurious entry).
+   */
+  async restoreVersion(
+    id: number,
+    versionId: number,
+  ): Promise<VersionTimelineEntry> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/versions/${versionId}/restore`,
+      { method: "POST" },
+    );
+    if (!res.ok) await throwFor(res);
+    return (await res.json()) as VersionTimelineEntry;
+  }
+
+  /**
+   * Set as main: re-point `current_version` in place AND write a no-change
+   * marker commit (the git history records the switch without rewriting).
+   */
+  async setVersionAsMain(
+    id: number,
+    versionId: number,
+  ): Promise<Project> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/versions/${versionId}/set-as-main`,
+      { method: "POST" },
+    );
+    if (!res.ok) await throwFor(res);
+    return (await res.json()) as Project;
+  }
+
+  /**
+   * Branch from: creates a NEW PROJECT (own git repo) whose first version
+   * is seeded from the source version's full snapshot. The new repo's
+   * history contains no source-project commit (forks are variant cards,
+   * not a git graph).
+   */
+  async branchFromVersion(
+    id: number,
+    versionId: number,
+  ): Promise<{ project: Project; version: VersionTimelineEntry }> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/versions/${versionId}/branch-from`,
+      { method: "POST" },
+    );
+    if (!res.ok) await throwFor(res);
+    return (await res.json()) as {
+      project: Project;
+      version: VersionTimelineEntry;
+    };
+  }
+
+  /**
+   * Compare two versions (the prioritized surface): both full param sets,
+   * the computed diff table, and the shared-rotation contract (the two
+   * client viewports share one camera/rotation state).
+   */
+  async compareVersions(
+    id: number,
+    a: number,
+    b: number,
+  ): Promise<VersionCompare> {
+    return this.request<VersionCompare>(
+      "GET",
+      `/api/projects/${id}/versions/compare?a=${a}&b=${b}`,
+    );
+  }
+
+  /**
+   * Get the pinned variant gallery (archived variants hidden by default;
+   * `archived` reveals them).
+   */
+  async getGallery(id: number, archived = false): Promise<GalleryCard[]> {
+    const q = archived ? "?archived=1" : "";
+    return this.request<GalleryCard[]>("GET", `/api/projects/${id}/gallery${q}`);
+  }
+
+  /**
+   * Get the project library grid (name, last activity, thumbnail per
+   * project; search is client-side).
+   */
+  async getLibrary(): Promise<LibraryCard[]> {
+    return this.request<LibraryCard[]>("GET", "/api/library");
+  }
+
+  /**
+   * Get the project's current OpenSCAD design source (the conversation's
+   * resumed design state). `source` is null when no design exists yet.
+   */
+  async getDesignSource(
+    id: number,
+  ): Promise<{ source: string | null }> {
+    return this.request<{ source: string | null }>(
+      "GET",
+      `/api/projects/${id}/design-source`,
+    );
+  }
+
+  /**
+   * Upload the project's OpenSCAD design source (persisted to the git
+   * repo — versioned content).
+   */
+  async putDesignSource(id: number, source: string): Promise<{ stored: string; length: number }> {
+    return this.request<{ stored: string; length: number }>(
+      "POST",
+      `/api/projects/${id}/design-source`,
+      { source },
+    );
+  }
+
+  /**
+   * FINALIZE: run the injected design loop; a `pass` result versions the
+   * best candidate's parameters; any other status is a 422 (never a
+   * spurious version).
+   */
+  async finalize(id: number, input?: FinalizeInput): Promise<VersionTimelineEntry> {
+    return this.request<VersionTimelineEntry>(
+      "POST",
+      `/api/projects/${id}/finalize`,
+      input ?? {},
+      201,
+    );
   }
 
   // -- photo upload -----------------------------------------------------------
@@ -507,7 +800,11 @@ export class ApiClient {
     }
     const res = await this.fetchImpl(`${this.baseUrl}${path}`, init);
     if (res.status === expectedStatus && res.status >= 200 && res.status < 300) {
-      if (res.status === 204) return undefined as T;
+      if (res.status === 204) {
+        // 204 No Content — the caller must use `Promise<void>` (not a typed
+        // body) so T is never cast to undefined for a body-shaped return.
+        return undefined as unknown as T;
+      }
       return (await res.json()) as T;
     }
     await throwFor(res);

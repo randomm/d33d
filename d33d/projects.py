@@ -127,6 +127,15 @@ class ProjectUpdate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
+    """A project row with the raw git-repo path removed (git invisibility
+    — the on-disk path names a git repo and is never exposed in an API
+    response)."""
+    out = dict(row)
+    out.pop("git_repo_path", None)
+    return out
+
+
 def create_projects_router() -> APIRouter:
     """Build and return the projects router.
 
@@ -138,7 +147,7 @@ def create_projects_router() -> APIRouter:
     @router.post("", status_code=201)
     async def create_project(request: Request, body: ProjectCreate) -> dict[str, Any]:
         conn: db_mod.Connection = request.app.state.conn
-        # Create the DB row (generates git_repo_path)
+        # Update the DB row (generates git_repo_path, sets activity)
         project_id = conn.create_project(
             name=body.name,
             tags=body.tags or [],
@@ -154,20 +163,8 @@ def create_projects_router() -> APIRouter:
             # Rollback: delete the DB row since git init failed
             conn.delete_project(project_id)
             raise HTTPException(status_code=500, detail=f"git init failed: {e}")
-        return {
-            "id": project_id,
-            "name": row["name"],
-            "git_repo_path": row["git_repo_path"],
-            "tags": row["tags"],
-            "notes": row["notes"],
-            "source_photo_path": row["source_photo_path"],
-            "created_at": row["created_at"],
-        }
-
-    @router.get("")
-    async def list_projects(request: Request) -> list[dict[str, Any]]:
-        conn: db_mod.Connection = request.app.state.conn
-        return conn.list_projects()
+        # Git invisibility: the raw on-disk repo path is never exposed.
+        return _public_project_row(row)
 
     @router.get("/{project_id}")
     async def get_project(request: Request, project_id: int) -> dict[str, Any]:
@@ -175,7 +172,15 @@ def create_projects_router() -> APIRouter:
         row = conn.get_project(project_id)
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
-        return row
+        return _public_project_row(row)
+
+    @router.get("")
+    async def list_projects(request: Request) -> list[dict[str, Any]]:
+        conn: db_mod.Connection = request.app.state.conn
+        out = []
+        for r in conn.list_projects():
+            out.append(_public_project_row(r))
+        return out
 
     @router.patch("/{project_id}")
     async def update_project(
@@ -193,7 +198,7 @@ def create_projects_router() -> APIRouter:
         )
         updated = conn.get_project(project_id)
         assert updated is not None
-        return updated
+        return _public_project_row(updated)
 
     @router.delete("/{project_id}", status_code=204)
     async def delete_project(request: Request, project_id: int) -> None:
@@ -293,9 +298,19 @@ def create_projects_router() -> APIRouter:
         dest.write_bytes(content)
         size = len(content)
 
-        # Commit the photo to the git repo
+        # Commit the photo to the git repo, under the shared version-write
+        # lock (d33d.versions.VersionService._with_project_lock) so EVERY
+        # git write to this repo — design-source PUT, version create,
+        # set-as-main, and this photo upload — is serialized; concurrent
+        # committers would otherwise collide on ``.git/index.lock``.
+        svc = getattr(request.app.state, "versions", None)
         try:
-            commit_all(repo_path, f"photo: {commit_subject}")
+            if svc is not None:
+                await svc._with_project_lock(project_id, lambda: commit_all(
+                    repo_path, f"photo: {commit_subject}"
+                ))
+            else:  # pragma: no cover - the app lifespan always wires it
+                commit_all(repo_path, f"photo: {commit_subject}")
         except RuntimeError as e:
             # Clean up the file but keep the repo consistent
             dest.unlink(missing_ok=True)

@@ -80,6 +80,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from d33d import db
+from d33d import versions as versions_mod
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
     Catalogue,
@@ -97,6 +98,7 @@ from d33d.module_registry import (
 from d33d.projects import create_projects_router
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
+from d33d.versions_routes import create_versions_router
 
 logger = logging.getLogger(__name__)
 
@@ -307,6 +309,8 @@ async def _lifespan(app: FastAPI):
     state = app.state
     if state.conn is None:
         state.conn = db.connect(state.db_path)
+        versions_mod.migrate(state.conn)
+        state.versions = versions_mod.VersionService(state.conn)
     if state.master_key is None:
         state.master_key = cred.get_or_create_master_key(state.master_key_path)
     if state.credential_store is None:
@@ -519,6 +523,10 @@ def create_app(
     app.state.conn: db.Connection | None = None
     app.state.master_key: bytes | None = None
     app.state.credential_store: cred.CredentialStore | None = None
+    # Version service (issue #8) — the single writer of the versions table
+    # + per-project version commits. Set by the lifespan; declared here so
+    # ``create_app()`` alone leaves the attribute present for routes/tests.
+    app.state.versions: versions_mod.VersionService | None = None
     # The SSE endpoint (streaming.py) reads this dict at request time; it
     # maps ``project_id -> AsyncIterator[(event, data)]`` and starts empty
     # (no active streams until a future ticket wires the design loop).
@@ -527,6 +535,11 @@ def create_app(
     # never spawn Docker; production wiring is the real
     # ``d33d.module_registry.build_registry_glb`` (default below).
     app.state.build_registry_glb = build_registry_glb
+    # The design-loop runner for FINALIZE (issue #8) — injected (same seam
+    # as build_registry_glb) so tests wire a stub loop; production wires
+    # the real d33d.design_loop.run_design_loop closure when the
+    # design-loop-to-SSE pipeline lands.
+    app.state.run_design_loop = None
 
     spa_index = state_spa_dist_dir / "index.html"
     serve_spa_build = state_spa_dist_dir.is_dir() and spa_index.is_file()
@@ -605,6 +618,7 @@ def create_app(
     # alone; no extra wiring at the entrypoint.
     app.include_router(create_projects_router())
     app.include_router(create_streaming_router())
+    app.include_router(create_versions_router())
 
     @app.get("/api/settings/credentials")
     async def list_credentials() -> list[dict[str, str]]:

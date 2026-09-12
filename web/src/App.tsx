@@ -37,11 +37,16 @@ import {
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
 import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
+import { VersionTimeline } from "./components/versions/VersionTimeline";
+import { VariantGallery } from "./components/versions/VariantGallery";
+import { CompareView } from "./components/versions/CompareView";
 import {
   ApiClient,
   MAX_REGION_EDIT_MODULE_IDS,
   type RegionEditPolygonPoint,
   type RegionEditViewId,
+  type VersionTimelineEntry,
+  type VersionCompare,
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 
@@ -94,6 +99,13 @@ export default function App({ renders = [], client }: AppProps) {
     null,
   );
   const [streamError, setStreamError] = useState<string | null>(null);
+
+  // Version timeline (issue #8) — the side rail. Loaded when the project
+  // resolves (opening a project RESUMES the chat at its latest version
+  // with the timeline as a side rail — the project home is the
+  // conversation and the design together).
+  const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
+  const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
 
   // Region-selection (lasso) wiring (issue #29).
   const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
@@ -233,7 +245,9 @@ export default function App({ renders = [], client }: AppProps) {
     setPendingSelection(null);
   }, []);
 
-  // Create the (single, default) project on mount.
+  // Create the (single, default) project on mount. Once it resolves,
+  // load the version timeline (the side rail) — the project resumes at
+  // its latest version.
   useEffect(() => {
     let cancelled = false;
     apiClient
@@ -251,6 +265,108 @@ export default function App({ renders = [], client }: AppProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Load the version timeline once the project exists (the resume state).
+  useEffect(() => {
+    let cancelled = false;
+    if (projectId === null) return;
+    apiClient
+      .listVersions(projectId)
+      .then((vs) => {
+        if (!cancelled) setVersions(vs);
+      })
+      .catch(() => {
+        // A fresh project has an empty timeline — no error to surface
+        // (the timeline component renders its own empty state).
+        if (!cancelled) setVersions([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, apiClient]);
+
+  // Timeline callbacks (issue #8): restore (non-destructive forward
+  // version), pin (the gallery), compare-select (the two-viewport compare).
+  const handleVersionRestore = useCallback(
+    async (versionId: number) => {
+      if (projectId === null) return;
+      try {
+        await apiClient.restoreVersion(projectId, versionId);
+        // Refresh the timeline (a new forward version was created).
+        const vs = await apiClient.listVersions(projectId);
+        setVersions(vs);
+      } catch (e) {
+        setStreamError(
+          `Restore failed: ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+      }
+    },
+    [projectId, apiClient],
+  );
+
+  const handleVersionPin = useCallback(
+    async (versionId: number, pinned: boolean) => {
+      if (projectId === null) return;
+      try {
+        await apiClient.updateVersion(projectId, versionId, { pinned });
+        setVersions((prev) =>
+          prev.map((v) => (v.id === versionId ? { ...v, pinned } : v)),
+        );
+      } catch (e) {
+        setStreamError(`Pin failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      }
+    },
+    [projectId, apiClient],
+  );
+
+  // Compare-select: pick two versions to compare (the prioritized surface).
+  // Each click drops the older of the two selections and keeps the newest,
+  // so a 3-click sequence rotates A→B→C→B→A→…
+  const handleCompareSelect = useCallback((versionId: number) => {
+    setCompareIds((prev) => {
+      if (!prev) return [versionId, versionId];
+      // Drop the older selection; keep the newest pair.
+      return [prev[1], versionId];
+    });
+  }, []);
+
+  // The compare view (two viewports + the param diff table) — fetched once
+  // two distinct versions have been selected (the prioritized surface).
+  const [compareResult, setCompareResult] = useState<VersionCompare | null>(null);
+  const [compareError, setCompareError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (projectId === null || compareIds === null) {
+      setCompareResult(null);
+      setCompareError(null);
+      return;
+    }
+    // Skip the fetch when both ids are the same (the first click sets
+    // [id, id] as a pending selection without a network call).
+    if (compareIds[0] === compareIds[1]) {
+      setCompareResult(null);
+      setCompareError(null);
+      return;
+    }
+    setCompareError(null);
+    apiClient
+      .compareVersions(projectId, compareIds[0], compareIds[1])
+      .then((res) => {
+        if (!cancelled) setCompareResult(res);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setCompareResult(null);
+          setCompareError(
+            `Compare failed: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, apiClient, compareIds]);
 
   const handleSendMessage = useCallback(
     (text: string) => {
@@ -453,8 +569,51 @@ export default function App({ renders = [], client }: AppProps) {
         )}
       </div>
 
-      {/* Right pane: viewer + validation status */}
+      {/* Right pane: version timeline (side rail) + viewer + validation */}
       <div className="app-right" data-testid="app-right-pane">
+        {/* The version timeline side rail (issue #8) — the project resumes
+            at its latest version; the timeline is the history surface. */}
+        {projectId !== null && (
+          <div className="version-tail-pane" data-testid="version-timeline-pane">
+            <VersionTimeline
+              versions={versions}
+              latestId={versions.length > 0 ? versions[versions.length - 1].id : 0}
+              onRestore={handleVersionRestore}
+              onPin={handleVersionPin}
+              onCompareSelect={handleCompareSelect}
+            />
+            {/* The two-viewport compare (surface 5) — rendered once two
+                versions have been selected from the timeline. */}
+            {compareIds !== null && compareResult !== null && (
+              <div data-testid="compare-pane">
+                {compareError && (
+                  <p data-testid="compare-error" role="alert">
+                    {compareError}
+                  </p>
+                )}
+                <CompareView
+                  compare={compareResult}
+                  aId={compareIds[0]}
+                  bId={compareIds[1]}
+                />
+              </div>
+            )}
+            {/* The pinned variant gallery (surface 2) — the browse-my-options
+                surface, distinct from the linear timeline. */}
+            {versions.filter((v) => v.pinned && !v.archived).length > 0 && (
+              <div data-testid="gallery-pane">
+                <VariantGallery
+                  cards={versions
+                    .filter((v) => v.pinned && !v.archived)
+                    .map((v) => ({
+                      ...v,
+                      actions: ["set-as-main", "branch-from", "archive"] as const,
+                    }))}
+                />
+              </div>
+            )}
+          </div>
+        )}
         <div className="viewer-pane" data-testid="viewer-pane" style={{ position: "relative" }}>
           {/* No live render/model artifact flows through the app yet — the
            * design-loop-to-SSE-to-model pipeline is a future ticket's
