@@ -304,7 +304,7 @@ class Connection:
         under MASTER_KEY). This table is the *storage home*; the encryption
         itself is task-b's job.
         """
-        self._conn.execute(
+        cur = self._conn.execute(
             "INSERT INTO provider_credentials (provider_id, model_alias, key_ciphertext)"
             " VALUES (?, ?, ?) ON CONFLICT(provider_id, model_alias)"
             " DO UPDATE SET key_ciphertext = excluded.key_ciphertext,"
@@ -312,11 +312,7 @@ class Connection:
             (provider_id, model_alias, key_ciphertext),
         )
         self._conn.commit()
-        row = self._conn.execute(
-            "SELECT id FROM provider_credentials WHERE provider_id = ? AND model_alias = ?",
-            (provider_id, model_alias),
-        ).fetchone()
-        return int(row["id"])
+        return int(cur.lastrowid or 0)
 
     def list_credentials(self) -> list[dict[str, Any]]:
         """Names-only view (what the HTTP list endpoint returns).

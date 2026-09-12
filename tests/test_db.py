@@ -176,6 +176,29 @@ def test_provider_credentials_round_trip_and_names_only(
     assert not hasattr(conn, "get_credential")
 
 
+def test_put_credential_returns_stable_id_across_insert_and_update(
+    conn: db.Connection,
+) -> None:
+    """put_credential must return the same row id on the INSERT path and
+    on a subsequent ON CONFLICT DO UPDATE of the same (provider_id,
+    model_alias) pair — pins the lastrowid shortcut for both upsert
+    branches now that the redundant SELECT has been dropped."""
+    inserted_id = conn.put_credential(
+        provider_id="trailopeners",
+        model_alias="design-primary",
+        key_ciphertext=b"fernet-ciphertext-bytes-v1",
+    )
+    updated_id = conn.put_credential(
+        provider_id="trailopeners",
+        model_alias="design-primary",
+        key_ciphertext=b"fernet-ciphertext-bytes-v2",
+    )
+    assert isinstance(inserted_id, int)
+    assert updated_id == inserted_id
+    names = conn.list_credentials()
+    assert len(names) == 1
+
+
 def test_request_logs_round_trip_with_prompt_hash(conn: db.Connection) -> None:
     pid = conn.create_project(name="P")
     rid = conn.log_request(
