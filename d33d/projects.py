@@ -298,9 +298,19 @@ def create_projects_router() -> APIRouter:
         dest.write_bytes(content)
         size = len(content)
 
-        # Commit the photo to the git repo
+        # Commit the photo to the git repo, under the shared version-write
+        # lock (d33d.versions.VersionService._with_project_lock) so EVERY
+        # git write to this repo — design-source PUT, version create,
+        # set-as-main, and this photo upload — is serialized; concurrent
+        # committers would otherwise collide on ``.git/index.lock``.
+        svc = getattr(request.app.state, "versions", None)
         try:
-            commit_all(repo_path, f"photo: {commit_subject}")
+            if svc is not None:
+                await svc._with_project_lock(project_id, lambda: commit_all(
+                    repo_path, f"photo: {commit_subject}"
+                ))
+            else:  # pragma: no cover - the app lifespan always wires it
+                commit_all(repo_path, f"photo: {commit_subject}")
         except RuntimeError as e:
             # Clean up the file but keep the repo consistent
             dest.unlink(missing_ok=True)

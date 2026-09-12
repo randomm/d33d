@@ -15,6 +15,11 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 
 from __future__ import annotations
 
+import json
+import subprocess
+
+import pytest
+
 from tests.versioning.helpers import (
     create_project,
     repo_path_for,
@@ -202,3 +207,124 @@ def test_design_source_rejects_non_json(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 400
+
+
+def test_design_source_commit_failure_leaves_no_uncommitted_source(
+    app_with_versions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(HIGH 1 regression) If the git commit of the design source fails, the
+    written ``design.scad`` must NOT be left on disk uncommitted — a prior
+    write-before-commit left a silent split state (``GET /design-source``
+    read the new source while git history recorded nothing)."""
+
+    def _fail_commit(repo_dir, message: str) -> None:
+        raise RuntimeError("git commit failed (simulated index.lock collision)")
+
+    import d33d.projects as projects_mod
+
+    monkeypatch.setattr(projects_mod, "commit_all", _fail_commit)
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        r = await client.post(
+            f"/api/projects/{pid}/design-source",
+            json={"source": "W = 20; cube([W, 1, 1]);\n"},
+        )
+        repo = repo_path_for(app_with_versions, pid)
+        get_r = await client.get(f"/api/projects/{pid}/design-source")
+        return r, repo, pid, get_r
+
+    r, repo, _pid, get_r = run_async(app_with_versions, _call)
+    assert r.status_code == 500, r.text
+    # The working tree is clean — design.scad is not left behind uncommitted.
+    design_scad = repo / "design.scad"
+    assert not design_scad.exists(), "design.scad left on disk uncommitted"
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    assert status.stdout.strip() == "", f"working tree not clean: {status.stdout!r}"
+    # GET agrees: no uncommitted source is readable.
+    assert get_r.status_code == 200
+    assert get_r.json() == {"source": None}
+
+
+def test_design_source_rejects_oversized_body(app_with_versions):
+    """A body over the 1 MB cap is rejected with 413."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        body = json.dumps({"source": "x" * (2 * 1024 * 1024)})
+        return await client.post(
+            f"/api/projects/{pid}/design-source",
+            content=body.encode("utf-8"),
+            headers={"content-type": "application/json"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 413
+
+
+def test_design_source_drain_times_out_on_stalled_stream(
+    app_with_versions, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(drain-timeout regression) An oversized body whose stream never ends
+    must not hold the connection (and the version-write lock) indefinitely:
+    the bounded drain is wrapped in ``asyncio.wait_for`` and a stalled
+    client times out into a 413 within the bound."""
+    import asyncio as _asyncio
+
+    from fastapi import HTTPException
+
+    import d33d.versions_routes as routes_mod
+
+    monkeypatch.setattr(routes_mod, "_DRAIN_TIMEOUT_SECONDS", 0.5)
+
+    class _StalledStream:
+        """A request stream that yields one chunk, then hangs forever."""
+
+        def __init__(self) -> None:
+            self._started = False
+
+        def __aiter__(self) -> _StalledStream:
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self._started:
+                self._started = True
+                return b"x" * 1024
+            await _asyncio.Event().wait()  # never fires
+            return b""
+
+        def close(self) -> None:
+            pass
+
+    class _StubRequest:
+        def __init__(self) -> None:
+            self.headers = {
+                "content-type": "application/json",
+                "content-length": str(2 * 1024 * 1024),
+            }
+
+        def stream(self) -> _StalledStream:
+            return _StalledStream()
+
+    async def _call(client):
+        # Oversized declared length → the header-reject path drains the
+        # stream (which stalls) under the timeout bound → 413.
+        stub = _StubRequest()
+        try:
+            await routes_mod._read_bounded_source(stub)
+        except HTTPException as e:
+            return e.status_code, e.detail
+        raise AssertionError("expected 413 HTTPException")
+
+    status_code, detail = run_async(app_with_versions, _call)
+    assert status_code == 413
+    assert "timed out" in detail

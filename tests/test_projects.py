@@ -396,6 +396,78 @@ def test_upload_photo_to_nonexistent_project(app_with_projects):
     assert r.status_code == 404
 
 
+def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, monkeypatch: pytest.MonkeyPatch):
+    """(HIGH 2 regression) The photo upload's git commit must run under the
+    shared version-write lock (``VersionService._with_project_lock``) so it
+    serializes with the design-source PUT / version-create git writes on the
+    same repo — concurrent unguarded committers collide on
+    ``.git/index.lock`` (500).
+
+    The test wraps the service's ``commit_all`` seam with a spy that spawns
+    a waiter task on the SAME per-project lock while the commit is in
+    flight; the waiter must time out (proof the lock is held across the
+    commit call, i.e. the route is not bypassing the lock)."""
+    import d33d.projects as projects_mod
+
+    png_bytes = (
+        b"\x89PNG\r\n\x1a\n"
+        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+        b"\x08\x02\x00\x00\x00\x90w\xfe\xed"
+        b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05"
+        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB\xbfK"
+    )
+    real_commit_all = projects_mod.commit_all
+
+    calls: list[int] = []
+    probe_results: list[str] = []
+
+    def _spy_commit(repo_dir, message: str) -> None:
+        # Get the service at call time (lifespan has run by now).
+        svc = app_with_projects.state.versions
+        if svc is None:
+            real_commit_all(repo_dir, message)
+            return
+        # The route must hold BOTH the write lock and the project lock while
+        # this commit runs. Probe directly: while the route holds the lock,
+        # ``locked()`` is True. We are on the same task/loop as the route
+        # (the sync commit runs inside the async request handler), so this
+        # is a synchronous, deterministic check — no waiter races.
+        pid_row = svc.conn.raw.execute(
+            "SELECT id FROM projects ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        pid = int(pid_row[0]) if pid_row else -1
+        proj_lock = svc._lock_for(pid)
+        write_lock = svc._write_lock
+        calls.append(pid)
+        probe_results.append("write_locked" if write_lock.locked() else "write_free")
+        probe_results.append("proj_locked" if proj_lock.locked() else "proj_free")
+        real_commit_all(repo_dir, message)
+
+    # The photo route calls commit_all defined in d33d.projects itself, so
+    # monkeypatch the module attribute (the route's local reference to the
+    # function is resolved at call time via the module's global scope).
+    monkeypatch.setattr(projects_mod, "commit_all", _spy_commit)
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Lock Test"})
+        pid = create_r.json()["id"]
+        files = {"file": ("lock.png", png_bytes, "image/png")}
+        r = await client.post(f"/api/projects/{pid}/photos", files=files)
+        repo_path = _repo_for(app_with_projects, pid)
+        return r, pid, repo_path
+
+    r, pid, repo_path = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    # The upload's commit ran through the spy for the right project.
+    assert calls and calls[-1] == pid
+    # The commit itself happened (real commit_all was called last).
+    log = _git(repo_path, "log", "--oneline").stdout
+    assert "photo:" in log
+    # Both locks must have been held while the commit ran.
+    assert "write_locked" in probe_results, f"write lock not held: {probe_results}"
+    assert "proj_locked" in probe_results, f"project lock not held: {probe_results}"
+
+
 def test_upload_photo_accepts_jpeg(app_with_projects):
     """image/jpeg is in the allowed set → accepted."""
     # Minimal JPEG magic bytes

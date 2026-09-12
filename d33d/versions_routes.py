@@ -54,8 +54,10 @@ live LLM, Docker render, or catalogue.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -64,11 +66,17 @@ from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
 
+logger = logging.getLogger(__name__)
+
 # ---------------------------------------------------------------------------
 # Design-source upload bound (same discipline as the photo-upload cap).
 # ---------------------------------------------------------------------------
 
 MAX_SCAD_SOURCE_BYTES = 1 * 1024 * 1024  # 1 MB — a parametric .scad is KBs.
+
+#: Bounded body drain timeout — a stalled client must not hold the
+#: version-write lock (held across write + commit) indefinitely.
+_DRAIN_TIMEOUT_SECONDS = 30
 
 
 def _design_source_path(project: dict[str, Any]) -> Path:
@@ -118,25 +126,6 @@ class FinalizeBody:
         self.params = params
         self.name = name
         self.message = message
-
-
-class DesignLoopHandle:
-    """Minimal duck-type for ``app.state.run_design_loop`` results.
-
-    The injected loop returns an object with ``.status`` (``"pass"`` |
-    ``"exhausted"``) and ``.best`` (the best candidate). Tests inject a
-    stub with the same shape (see the finalize contract tests).
-
-    In the production code path ``best`` is an ``IterationRecord`` from
-    ``d33d.design_loop`` (which has no ``params`` attribute); the
-    finalize route therefore falls back to the body's ``params`` or the
-    latest version's snapshot when ``getattr(best, 'params')`` is not a
-    non-empty dict. The ``Any`` annotation reflects this duck-typed seam.
-    """
-
-    def __init__(self, status: str, best: Any) -> None:
-        self.status = status
-        self.best = best
 
 
 # ---------------------------------------------------------------------------
@@ -385,7 +374,15 @@ def create_versions_router() -> APIRouter:
     @router.post("/api/projects/{project_id}/design-source", status_code=200)
     async def put_design_source(request: Request, project_id: int) -> dict[str, Any]:
         """Bounded OpenSCAD source upload (persisted to the git repo and
-        committed — the source is versioned content, not a cache)."""
+        committed — the source is versioned content, not a cache).
+
+        The source is installed atomically (temp file + ``os.replace``,
+        same discipline as the catalogue write) and — under the shared
+        version-write lock, which also serializes the photo upload's git
+        commit on the same repo — committed to the repo. On commit
+        failure the written file is unlinked, restoring the pre-write
+        state, so ``GET /design-source`` can never observe uncommitted
+        source."""
         svc = _service(request)
         row = _project_or_404(svc, project_id)
 
@@ -401,17 +398,24 @@ def create_versions_router() -> APIRouter:
             raise HTTPException(status_code=422, detail="'source' must be a string")
 
         path = _design_source_path(row)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(source, encoding="utf-8")
-        try:
-            from d33d.projects import commit_all
+        repo_dir = Path(row["git_repo_path"])
 
-            commit_all(Path(row["git_repo_path"]), "design source update")
-        except RuntimeError as e:
-            # The raw git output names the repo on disk — never leak it.
-            raise HTTPException(
-                status_code=500, detail="design source commit failed"
-            ) from e
+        async def _write_and_commit() -> None:
+            versions_mod.install_text_file_atomic(path, source)
+            try:
+                from d33d.projects import commit_all as _commit_all
+                _commit_all(repo_dir, "design source update")
+            except RuntimeError as e:
+                # Undo the atomic install so the working tree is clean —
+                # the pre-write state (prior committed source, or nothing)
+                # is restored. The raw git output names the repo on disk
+                # — never leak it.
+                path.unlink(missing_ok=True)
+                raise HTTPException(
+                    status_code=500, detail="design source commit failed"
+                ) from e
+
+        await svc._with_project_lock(project_id, _write_and_commit)
         # Git invisibility: the on-disk path is server-internal; the
         # response names only the repo-relative file, never the absolute
         # path (which names the repo's on-disk location).
@@ -426,6 +430,13 @@ def create_versions_router() -> APIRouter:
         version). ``params`` defaults to the current version's snapshot."""
         svc = _service(request)
         _project_or_404(svc, project_id)
+        # The design loop is an injected duck type (app.state.run_design_loop;
+        # the same DI seam as build_registry_glb — see the module docstring):
+        # an object with .status ("pass" | "exhausted") and .best (the best
+        # candidate). Tests inject a stub with the same shape; the real
+        # IterationRecord has no .params, so the route falls back to the
+        # body's params or the latest version's snapshot when
+        # getattr(best, 'params') is not a non-empty dict.
         run_loop = request.app.state.run_design_loop
         if run_loop is None:
             raise HTTPException(status_code=503, detail="design loop not wired")
@@ -446,9 +457,22 @@ def create_versions_router() -> APIRouter:
             latest = svc.latest_version(project_id)
             params = dict(latest["params"]) if latest is not None else {}
 
-        result = run_loop()
-        if inspect.isawaitable(result):
-            result = await result
+        try:
+            result = run_loop()
+            if inspect.isawaitable(result):
+                result = await result
+        except (OSError, RuntimeError, ValueError) as e:
+            # Bounded infra-error set around the injected loop: a raised
+            # loop must be a structured 502, not a bare unclassified 500
+            # (the same discipline as create_module_registry).
+            logger.exception(
+                "design loop failed for project_id=%s (type=%s)",
+                project_id,
+                type(e).__name__,
+            )
+            raise HTTPException(
+                status_code=502, detail="design loop failed: internal error"
+            ) from e
         if result.status != "pass":
             raise HTTPException(
                 status_code=422,
@@ -542,8 +566,13 @@ async def _read_bounded_source(request: Request) -> str:
         # chunk, never via ``await request.body()`` (which would buffer
         # the entire remainder in memory) — so the connection stays
         # usable without an unbounded buffer.
-        async for _ in request.stream():
-            pass
+        try:
+            await asyncio.wait_for(_drain_stream(request), timeout=_DRAIN_TIMEOUT_SECONDS)
+        except TimeoutError as e:
+            raise HTTPException(
+                status_code=413,
+                detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit (drain timed out)",
+            ) from e
         raise HTTPException(
             status_code=413,
             detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit",
@@ -555,14 +584,25 @@ async def _read_bounded_source(request: Request) -> str:
         if total > MAX_SCAD_SOURCE_BYTES:
             # Bounded drain of the remainder (see the header-reject path
             # above): read-and-discard, never full-body buffering.
-            async for _ in request.stream():
-                pass
+            try:
+                await asyncio.wait_for(_drain_stream(request), timeout=_DRAIN_TIMEOUT_SECONDS)
+            except TimeoutError as e:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit (drain timed out)",
+                ) from e
             raise HTTPException(
                 status_code=413,
                 detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit",
             )
         parts.append(chunk)
     return b"".join(parts).decode("utf-8")
+
+
+async def _drain_stream(request: Request) -> None:
+    """Read-and-discard the request stream (never buffer it)."""
+    async for _ in request.stream():
+        pass
 
 
 async def _parse_finalize_body(request: Request):

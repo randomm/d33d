@@ -43,9 +43,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import shutil
 import sqlite3
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -70,14 +73,6 @@ PARAMS_FILENAME = "params.json"
 
 #: ``versions/main_{seq}.json`` — set-as-main marker (no change).
 MAIN_MARKER_PREFIX = "main_"
-
-#: ``versions/fork.json`` — branch-from seed marker in the new project's
-#: own fresh repo (records where the variant card came from).
-FORK_MARKER_NAME = "fork.json"
-
-#: Bounded read for design-source uploads (same shape as photo uploads).
-MAX_SCAD_SOURCE_BYTES = 1 * 1024 * 1024  # 1 MB
-_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB
 
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
@@ -174,6 +169,29 @@ def _commit_versions_file(
     status = _git(repo_dir, "status", "--porcelain")
     if status.stdout.strip():
         _git(repo_dir, "commit", "-q", "-m", message)
+
+
+def install_text_file_atomic(path: Path, content: str) -> None:
+    """Atomically write ``content`` to ``path`` (temp file + ``os.replace``,
+    same discipline as the catalogue write in ``d33d.app``).
+
+    ``os.replace`` is atomic on POSIX, so a reader (``GET`` of the same
+    path) never observes a half-written file. Callers that commit the file
+    to git afterwards should ``unlink`` the path on commit failure —
+    undoing the replace restores the pre-write state (the prior committed
+    content, or nothing)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(path.parent), suffix=".tmp", prefix=path.name + "."
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -410,11 +428,10 @@ class VersionService:
         repo_dir = Path(project["git_repo_path"])
         versions_dir = repo_dir / "versions"
         vdir = versions_dir / str(version_id)
+        snapshot_path = vdir / PARAMS_FILENAME
         try:
-            vdir.mkdir(parents=True, exist_ok=True)
-            (vdir / PARAMS_FILENAME).write_text(
-                json.dumps(params, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
+            install_text_file_atomic(
+                snapshot_path, json.dumps(params, indent=2, sort_keys=True) + "\n"
             )
             commit_subject = (
                 f"version: {_sanitize_commit_message(version_name)}"
@@ -431,7 +448,7 @@ class VersionService:
         except (RuntimeError, OSError) as e:
             # Keep DB, git, and filesystem consistent: roll back the row
             # and clean up the snapshot file if the write succeeded.
-            (vdir / PARAMS_FILENAME).unlink(missing_ok=True)
+            snapshot_path.unlink(missing_ok=True)
             self.conn.raw.execute("DELETE FROM versions WHERE id = ?", (version_id,))
             self.conn.commit()
             raise RuntimeError(f"version commit failed: {e}") from e
@@ -443,7 +460,10 @@ class VersionService:
             current_version=version_id,
             last_activity=(version_id, version_name),
         )
-        return self.get_version(project_id, version_id)  # type: ignore[return-value]
+        row = self.get_version(project_id, version_id)
+        if row is None:
+            raise LookupError(f"version {version_id} not found")
+        return row
 
     async def restore_version(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Non-destructive restore: a NEW forward version with the target's
@@ -490,7 +510,8 @@ class VersionService:
             marker = marker_dir / marker_name
             # The marker file itself carries no new parameters — it records
             # the pointer move. Written as JSON so the diff is readable.
-            marker.write_text(
+            install_text_file_atomic(
+                marker,
                 json.dumps(
                     {
                         "event": "set_as_main",
@@ -500,7 +521,6 @@ class VersionService:
                     indent=2,
                 )
                 + "\n",
-                encoding="utf-8",
             )
             try:
                 _commit_versions_file(
@@ -521,7 +541,10 @@ class VersionService:
                 current_version=version_id,
                 last_activity=(target["id"], target["name"]),
             )
-            return self._public_project(self.conn.get_project(project_id))
+            row = self.conn.get_project(project_id)
+            if row is None:
+                raise LookupError(f"project {project_id} not found")
+            return self._public_project(row)
 
         return await self._with_project_lock(project_id, _set_main)
 
@@ -541,7 +564,10 @@ class VersionService:
             (clean, version_id),
         )
         self.conn.commit()
-        return self.get_version(project_id, version_id)  # type: ignore[return-value]
+        v = self.get_version(project_id, version_id)
+        if v is None:
+            raise LookupError(f"version {version_id} not found")
+        return v
 
     async def set_pinned(
         self, project_id: int, version_id: int, pinned: bool
@@ -555,7 +581,10 @@ class VersionService:
             (1 if pinned else 0, version_id),
         )
         self.conn.commit()
-        return self.get_version(project_id, version_id)  # type: ignore[return-value]
+        v = self.get_version(project_id, version_id)
+        if v is None:
+            raise LookupError(f"version {version_id} not found")
+        return v
 
     async def set_archived(
         self, project_id: int, version_id: int, archived: bool
@@ -570,7 +599,10 @@ class VersionService:
             (1 if archived else 0, version_id),
         )
         self.conn.commit()
-        return self.get_version(project_id, version_id)  # type: ignore[return-value]
+        v = self.get_version(project_id, version_id)
+        if v is None:
+            raise LookupError(f"version {version_id} not found")
+        return v
 
     async def branch_from(
         self,
@@ -583,9 +615,10 @@ class VersionService:
         version is seeded from the source version's full snapshot.
 
         The new repo's history contains NO source-project commit (forks are
-        variant cards, not a git graph) — the seed commit is a fresh
-        ``versions/{id}/params.json`` plus a ``versions/fork.json`` marker
-        recording the origin.
+        variant cards, not a git graph) — the seed is a fresh
+        ``versions/{id}/params.json`` commit. Provenance lives in the
+        version row's ``forked_from`` column and the commit message;
+        the repo carries no separate fork marker file.
         """
         target = self.get_version(project_id, version_id)
         if target is None:
@@ -614,8 +647,6 @@ class VersionService:
             except (LookupError, ValueError, VersionConflictError, RuntimeError, OSError):
                 # Roll back: remove the new project's repo + row so a
                 # failed branch never leaves an orphan variant card.
-                import shutil
-
                 shutil.rmtree(Path(new_repo), ignore_errors=True)
                 try:
                     self.conn.delete_project(new_project_id)
@@ -627,8 +658,11 @@ class VersionService:
                         new_project_id,
                     )
                 raise
+            row = self.conn.get_project(new_project_id)
+            if row is None:
+                raise LookupError(f"project {new_project_id} not found")
             return {
-                "project": self._public_project(self.conn.get_project(new_project_id)),
+                "project": self._public_project(row),
                 "version": seed,
             }
 
@@ -796,7 +830,6 @@ def migrate(conn: db_mod.Connection) -> None:
 
 
 __all__ = [
-    "FORK_MARKER_NAME",
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
     "ParamValue",
@@ -805,6 +838,7 @@ __all__ = [
     "derive_auto_name",
     "diff_params",
     "init_git_repo",
+    "install_text_file_atomic",
     "migrate",
     "validate_params",
 ]
