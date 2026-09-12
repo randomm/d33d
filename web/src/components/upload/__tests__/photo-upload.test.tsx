@@ -94,4 +94,40 @@ describe("PhotoUpload", () => {
       expect(onError).toHaveBeenCalledWith("file too large");
     });
   });
+
+  it("treats a 200 response with a missing source_photo_path as an error, not undefined propagation", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ unexpected: "shape" }),
+    });
+    const file = makeFile("image/png", 1024, "test.png");
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining("source_photo_path"),
+      );
+    });
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
+
+  it("treats a 200 response where source_photo_path is not a string as an error", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ source_photo_path: 12345 }),
+    });
+    const file = makeFile("image/png", 1024, "test.png");
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalled();
+    });
+    expect(onUploaded).not.toHaveBeenCalled();
+  });
 });

@@ -483,6 +483,45 @@ describe("SSE stream demux", () => {
     expect(fake.calls).toHaveLength(1); // the request WAS attempted with the signal
     expect((fake.calls[0]?.init.signal as AbortSignal | undefined)?.aborted).toBe(true);
   });
+
+  it("invokes onError and rethrows on a mid-stream reader.read() rejection", async () => {
+    // Simulate a network drop after the initial 200 response: the first
+    // read() yields a valid token frame, the second read() rejects (e.g.
+    // the connection dropped). The reader loop must not let this become an
+    // untyped/unhandled rejection — it must call handlers.onError first.
+    const encoder = new TextEncoder();
+    const firstChunk = encoder.encode(sseFrame("token", { text: "partial " }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(firstChunk);
+      },
+      pull() {
+        return Promise.reject(new Error("network drop"));
+      },
+    });
+    const res = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+    fake.enqueue(res);
+
+    let tokenText = "";
+    const onErrorSpy = vi.fn();
+    await expect(
+      client.streamEvents(1, {
+        onToken: (t) => {
+          tokenText += t;
+        },
+        onProgress: () => {},
+        onError: onErrorSpy,
+      }),
+    ).rejects.toThrow("network drop");
+
+    expect(tokenText).toBe("partial ");
+    expect(onErrorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("stream interrupted") }),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

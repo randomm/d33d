@@ -345,24 +345,34 @@ export class ApiClient {
       dataLines = [];
     };
 
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, idx).replace(/\r$/, "");
-        buf = buf.slice(idx + 1);
-        if (line === "") {
-          flush();
-        } else if (line.startsWith("event:")) {
-          if (eventKind !== null) dataLines = []; // frame corruption: drop
-          eventKind = line.slice("event:".length).trim();
-        } else if (line.startsWith("data:")) {
-          dataLines.push(line.slice("data:".length).trimStart());
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, idx).replace(/\r$/, "");
+          buf = buf.slice(idx + 1);
+          if (line === "") {
+            flush();
+          } else if (line.startsWith("event:")) {
+            if (eventKind !== null) dataLines = []; // frame corruption: drop
+            eventKind = line.slice("event:".length).trim();
+          } else if (line.startsWith("data:")) {
+            dataLines.push(line.slice("data:".length).trimStart());
+          }
+          // `id:` / `retry:` / comments: ignored per contract.
         }
-        // `id:` / `retry:` / comments: ignored per contract.
       }
+    } catch (e) {
+      // Mid-stream network failure (e.g. connection dropped after the
+      // initial 200 response): reader.read() rejects. Surface this to
+      // callers via the typed onError handler instead of letting an
+      // untyped rejection propagate.
+      const message = e instanceof Error ? e.message : String(e);
+      handlers.onError?.({ message: `stream interrupted: ${message}` });
+      throw e;
     }
     // Terminal flush: if the stream closed without a blank line, dispatch
     // whatever is pending — but only if it is a terminal event, otherwise

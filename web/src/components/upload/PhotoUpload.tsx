@@ -72,7 +72,15 @@ export function PhotoUpload({
         throw new Error(body.detail ?? `Upload failed (${resp.status})`);
       }
 
-      const data: { source_photo_path: string } = await resp.json();
+      const parsed: unknown = await resp.json();
+      if (
+        typeof parsed !== "object" ||
+        parsed === null ||
+        typeof (parsed as { source_photo_path?: unknown }).source_photo_path !== "string"
+      ) {
+        throw new Error("Upload response missing source_photo_path");
+      }
+      const data = parsed as { source_photo_path: string };
       setState("success");
       setPreviewUrl(URL.createObjectURL(file));
       onUploaded(data.source_photo_path);
