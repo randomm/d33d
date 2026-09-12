@@ -240,7 +240,9 @@ def _last_user_turn(chat_history: list[str]) -> str:
     return str(chat_history[-1])
 
 
-def _is_clean_affirmation(text: str, *, with_keyword: bool = False) -> bool:
+def _is_clean_affirmation(
+    text: str, *, fit_keyword_is_affirmative: bool = False
+) -> bool:
     """True if ``text`` is a SHORT, unambiguous affirmative response.
 
     This is a deliberately conservative heuristic soft-gate, NOT a
@@ -251,24 +253,43 @@ def _is_clean_affirmation(text: str, *, with_keyword: bool = False) -> bool:
     question is not a confirmation), negation words (no/not/...), or a
     hedging/confrontation marker (but/why/because/instead/although).
 
-    ``with_keyword=False`` (the default) additionally requires an explicit
-    affirmative token (yes/confirm/ok/correct/...); ``with_keyword=True``
-    admits a turn as affirmative when it names the fit-type keyword itself
-    (a clean "snap fit" or "it's a slip fit" IS the answer to the
-    fit-type question — no "yes" needed).
+    ``fit_keyword_is_affirmative=False`` (the default) additionally requires
+    an explicit affirmative token (yes/confirm/ok/correct/...); with it True,
+    a turn naming the fit-type keyword itself is admitted as affirmative
+    (a clean "snap fit" or "it's a slip fit" IS the answer to the fit-type
+    question — no "yes" needed). In that mode only, a turn that IS the tight
+    no-fit phrase ("no fit" / "no-fit" / "nofit" — no other tokens, and no
+    "don't"/"nope"/"nah"/"wrong"-style negation token anywhere in the turn)
+    is admitted BEFORE the generic negation check, so the valid ``no_fit``
+    value is selectable despite the "no" in that set; the base path and any
+    longer sentence stay closed for it.
 
     The known residual risk — a short turn that happens to be affirmative
     yet not responsive to the pending suggestion — is honestly documented
-    as residual: callers building a real UI confirmation flow should
-    prefer an explicit structured confirmation signal over this text
-    heuristic when one becomes available, rather than relying on this
-    layer alone.
+    as residual: callers building a real UI confirmation flow should prefer
+    the explicit structured confirmation signal the protocol already
+    exposes — the ``stated_dims`` parameter (including its ``fit_type``
+    key) — over this text heuristic, rather than relying on this layer
+    alone.
     """
     tokens = re.findall(r"[a-z']+", text.lower())
     if not tokens or len(tokens) > 19:
         return False
     if "?" in text:
         return False
+    if fit_keyword_is_affirmative:
+        # The ``no_fit`` enum value, spoken, is the phrase "no fit" itself —
+        # the valid answer to the fit-type question, not a negation. Admit
+        # the TIGHT phrase form only (exactly the two tokens no+fit, before
+        # the generic "no" disqualifier); any extra word or any other
+        # negation token ("don't", "nope", "wrong", ...) keeps the turn out.
+        phrase = re.sub(r"\s+", " ", text.strip().lower())
+        phrase = phrase.strip(".?! ")
+        phrase_nohyphen = phrase.replace("-", "")
+        if phrase_nohyphen in {"no fit", "nofit"} and not (
+            set(tokens) & {"don't", "dont", "nope", "nah", "wrong", "incorrect"}
+        ):
+            return True
     if set(tokens) & {
         "no",
         "not",
@@ -287,7 +308,7 @@ def _is_clean_affirmation(text: str, *, with_keyword: bool = False) -> bool:
         re.IGNORECASE,
     ):
         return True
-    if with_keyword:
+    if fit_keyword_is_affirmative:
         return bool(
             re.search(r"\b(slip|press|interference|snap)\b", text, re.IGNORECASE)
         )
@@ -305,14 +326,16 @@ def _confirmed_suggestion_tokens(chat_history: list[str]) -> set[str]:
     (but/why/...). A turn like "Yes, but why did you pick 40 and not 50?"
     is a QUESTION about the suggestion, not an acceptance of it, and must
     NOT promote the AI pre-fill into ground truth. A stray confirmatory
-    token in an earlier, unrelated turn has NO effect.
+    token in an earlier, unrelated turn has NO effect. In particular a
+    "no fit" turn — an affirmative for the fit-type question (base mode
+    never admits it) — is NOT a suggestion confirmation.
 
     This is a heuristic soft-gate, not a full confirmation-intent
     classifier: a short affirmative turn that is not actually responsive
     to the pending suggestion is a known residual risk. Callers building a
-    real UI confirmation flow should prefer an explicit structured
-    confirmation signal over this text heuristic when one becomes
-    available.
+    real UI confirmation flow should prefer the explicit structured
+    confirmation signal the protocol already exposes — the ``stated_dims``
+    parameter — over this text heuristic.
     """
     tokens: set[str] = set()
     text = _last_user_turn(chat_history)
@@ -342,21 +365,30 @@ def _extract_fit_type(
     turn (e.g. "that's a snap decision, why would you choose snap fit?")
     must NOT flip the fit type; the fit type is what the user says in a
     clean acceptance in response to the agent's proactive fit-type
-    question.
+    question. The tight "no fit" / "no-fit" / "nofit" phrase is the
+    ``no_fit`` answer itself — it takes precedence over the "no" negation
+    word (checked before it in :func:`_is_clean_affirmation`), which is
+    what makes the ``no_fit`` enum value reachable in natural language.
 
     As with dimension confirmation, this is a heuristic soft-gate, not a
-    full intent classifier: a real UI confirmation flow should prefer an
-    explicit structured confirmation signal over this text heuristic when
-    one becomes available.
+    full intent classifier: a real UI confirmation flow should prefer the
+    explicit structured confirmation signal the protocol already exposes —
+    the ``stated_dims`` parameter (including its ``fit_type`` key) — over
+    this text heuristic.
     """
     if stated_dims:
         raw = stated_dims.get("fit_type") or stated_dims.get("fit")
         if isinstance(raw, str) and raw.strip().lower() in _FIT_TYPE_SET:
             return raw.strip().lower()  # type: ignore[return-value]
     text = _last_user_turn(chat_history)
-    if not text or not _is_clean_affirmation(text, with_keyword=True):
+    if not text or not _is_clean_affirmation(text, fit_keyword_is_affirmative=True):
         return None
-    low = text.lower()
+    low = re.sub(r"\s+", " ", text.strip().lower()).strip(".?! ")
+    # The tight no-fit phrase is the ``no_fit`` answer; the loose
+    # "no...fit" match would also fire on "no, that fit is wrong" and is
+    # deliberately NOT admitted here.
+    if low.replace("-", "") in {"no fit", "nofit"}:
+        return "no_fit"
     for fit in ("slip", "press", "interference", "snap"):
         if re.search(rf"\b{fit}\b", low):
             return fit  # type: ignore[return-value]
@@ -402,17 +434,21 @@ def require_dimensions_confirmed(
     An ``ai_suggested`` pre-fill is surfaced (in ``suggested``) and only
     counts toward confirmation when the user confirms it in the chat — it
     is a confirmable suggestion, never the source of truth for a
-    fit-critical number.
+    fit-critical number. Surfaces are run through the same ``_coerce``
+    helper as the stated-dimension path, so a malformed LLM-derived
+    pre-fill (non-numeric / None) degrades to a missing suggested entry
+    rather than raising.
     """
     stated = _extract_stated(chat_history, stated_dims, ai_suggested)
     fit_type = _extract_fit_type(chat_history, stated_dims)
 
     missing = tuple(a for a in DIMENSION_AXES if a not in stated)
-    suggested = {
-        a: float(ai_suggested[a])
-        for a in DIMENSION_AXES
-        if ai_suggested and a in ai_suggested
-    }
+    suggested: dict[str, float] = {}
+    for a in DIMENSION_AXES:
+        if ai_suggested and a in ai_suggested:
+            cv = _coerce(ai_suggested[a])
+            if cv is not None:
+                suggested[a] = cv
 
     if missing or fit_type is None:
         return DimensionClarification(

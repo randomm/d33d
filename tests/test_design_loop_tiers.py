@@ -44,6 +44,7 @@ from d33d.design_llm import (
     to_ollama_messages,
 )
 from d33d.render_worker import VIEWS
+from d33d.response_shape import response_message_shape
 
 IMAGE_URL = "data:image/png;base64,REFPHOTO"
 VIEW_IMAGES = [f"data:image/png;base64,VIEW{i}" for i in range(len(VIEWS))]
@@ -691,6 +692,82 @@ def test_prompt_hash_wired_into_request_logs(tmp_path):
 def test_response_text_helper_handles_null_content():
     resp = _ok_response(None)
     assert response_text(resp) == ""
+
+
+# ---------------------------------------------------------------------------
+# Item 5: shared OpenAI response-shape validation helper
+# ---------------------------------------------------------------------------
+
+def test_response_message_shape_returns_message_for_valid_body():
+    assert response_message_shape(
+        {"choices": [{"message": {"content": "hi"}}]}
+    ) == {"content": "hi"}
+
+
+def test_response_message_shape_returns_none_on_shape_violations():
+    """Every rung of the validation ladder degrades to None (the shared
+    policy); callers apply their own failure policy on top."""
+    assert response_message_shape(["not a dict"]) is None  # non-dict body
+    assert response_message_shape({}) is None  # missing choices
+    assert response_message_shape({"choices": []}) is None  # empty choices
+    assert response_message_shape({"choices": "x"}) is None  # non-list choices
+    assert response_message_shape({"choices": ["x"]}) is None  # non-dict choices[0]
+    assert response_message_shape({"choices": [{"message": "x"}]}) is None  # non-dict message
+    assert response_message_shape({"choices": [{}]}) is None  # missing message
+
+
+def test_response_message_helper_keeps_typeerror_policy():
+    """response_message keeps its TypeError failure policy on top of the
+    shared None-returning shape helper (never a raw KeyError)."""
+    from d33d.design_llm import response_message
+
+    for body in (
+        ["not a dict"],
+        {},
+        {"choices": []},
+        {"choices": ["x"]},
+        {"choices": [{"message": "x"}]},
+        {"choices": [{}]},
+    ):
+
+        class _Resp:
+            def __init__(self, payload: Any) -> None:
+                self._payload = payload
+
+            def json(self) -> Any:
+                return self._payload
+
+        with pytest.raises(TypeError):
+            response_message(_Resp(body))
+
+    assert response_message(_ok_response("hi")) == {"content": "hi"}
+
+
+def test_t1_shape_violation_keeps_none_then_runtime_error_policy():
+    """A shape violation on the T1 path still raises the documented
+    RuntimeError (the None-returning helper feeds the or-'' fallback +
+    retry exhaustion), never a raw KeyError/TypeError."""
+    from d33d.config.t1_protocol import t1_invoke
+
+    class _Resp:
+        ok = True
+        status = 200
+
+        def json(self):
+            return {"choices": [{"message": "not a dict"}]}
+
+    async def factory(request: dict[str, Any]):
+        return _Resp()
+
+    with pytest.raises(RuntimeError):
+        _run(
+            t1_invoke(
+                request_factory=factory,
+                system_prompt="sys",
+                user_message="u",
+                tool_names=["answer"],
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
+from d33d.response_shape import response_message_shape
+
 __all__ = [
     "MAX_CORRECTIVE_RETRIES",
     "T1ToolCall",
@@ -211,14 +213,8 @@ def _response_content(resp: Any) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    choices = data.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None
-    first = choices[0]
-    if not isinstance(first, dict):
-        return None
-    message = first.get("message")
-    if not isinstance(message, dict):
+    message = response_message_shape(data)
+    if message is None:
         return None
     content = message.get("content")
     if isinstance(content, str):
