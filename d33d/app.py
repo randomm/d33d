@@ -375,10 +375,14 @@ MAX_REGION_EDIT_MODULE_IDS = 10
 
 
 class LassoPolygonPoint(BaseModel):
-    """One vertex of the lasso polygon, in photo-pixel coordinates.
+    """One vertex of the lasso polygon.
 
-    Mirrors ``PhotoPoint`` in ``DimensionCanvas.tsx`` — pixel coordinates
-    only; this route never receives or infers 3-D geometry.
+    Coordinate space is caller-dependent: ``DimensionCanvas``'s photo-overlay
+    lasso emits photo-pixel coordinates (``PhotoPoint``), while the
+    region-selection lasso wired in ``App.tsx`` (issue #29) emits
+    viewport-pixel coordinates (``ScreenPoint``). This route does not
+    interpret the coordinate space today — scoped-edit regeneration is
+    deferred — so both are accepted as plain pixel coordinates.
     """
 
     x: float

@@ -17,18 +17,100 @@
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { useEffect } from "react";
 import App from "../../App";
 import type { RenderImage } from "../../App";
-import { ApiClient } from "../../lib/api";
+import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project } from "../../lib/api";
+import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
+import type { ViewportLassoCompletedEvent } from "../viewer/ViewportLassoOverlay";
+import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditContract";
 
-vi.mock("../viewer/ModelViewer", () => ({
-  ModelViewer: (props: { data: ArrayBuffer | null; format: string }) => (
+/** A minimal fake THREE.Object3D — the mock only needs identity, never
+ *  real three.js behaviour (resolveLassoSelection itself is mocked below
+ *  in tests that need to control its output). */
+const FAKE_MODULE_GROUP = { name: "fake-module-group" };
+
+const { resolveLassoSelectionMock, mockLoadResultRef } = vi.hoisted(() => ({
+  resolveLassoSelectionMock: vi.fn(),
+  // Lets individual tests override the mock ModelViewer's onLoaded result
+  // (e.g. to simulate a `result.ok === false` decode/parse failure) without
+  // having to re-mock the whole module per test. Reset to null (meaning
+  // "use the default ok:true result") in beforeEach.
+  mockLoadResultRef: { current: null as LoadResult | null },
+}));
+
+vi.mock("../viewer/ModelViewer", async () => {
+  const actual = await vi.importActual<typeof import("../viewer/ModelViewer")>(
+    "../viewer/ModelViewer",
+  );
+  const MockModelViewer = (props: {
+    data: ArrayBuffer | null;
+    format: string;
+    onReady?: (handle: ModelViewerHandle) => void;
+    onLoaded?: (result: LoadResult) => void;
+  }) => {
+    useEffect(() => {
+      props.onReady?.({
+        scene: {} as never,
+        camera: {} as never,
+        renderer: {
+          domElement: document.createElement("canvas"),
+          getSize: (target: { x: number; y: number }) => {
+            target.x = 600;
+            target.y = 400;
+            return target;
+          },
+        } as never,
+        controls: {} as never,
+        raycaster: {} as never,
+      });
+      if (props.data !== null) {
+        props.onLoaded?.(
+          mockLoadResultRef.current ?? {
+            ok: true,
+            mesh: { object: FAKE_MODULE_GROUP as never, format: props.format as "glb" },
+          },
+        );
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.data]);
+
+    return (
+      <div
+        data-testid="model-viewer-mock"
+        data-format={props.format}
+        data-has-data={props.data !== null}
+      />
+    );
+  };
+
+  return {
+    ...actual,
+    resolveLassoSelection: resolveLassoSelectionMock,
+    ModelViewer: MockModelViewer,
+  };
+});
+
+vi.mock("../viewer/ViewportLassoOverlay", () => ({
+  ViewportLassoOverlay: (props: {
+    disabled?: boolean;
+    onLassoCompleted: (event: ViewportLassoCompletedEvent) => void;
+  }) => (
     <div
-      data-testid="model-viewer-mock"
-      data-format={props.format}
-      data-has-data={props.data !== null}
+      data-testid="viewport-lasso-overlay-mock"
+      data-disabled={props.disabled}
+      onClick={() =>
+        props.onLassoCompleted({
+          points: [
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 10, y: 10 },
+          ],
+          viewId: "front",
+        })
+      }
     />
   ),
 }));
@@ -98,6 +180,7 @@ describe("App layout", () => {
 
   beforeEach(() => {
     client = makeClient();
+    resolveLassoSelectionMock.mockReset();
   });
 
   it("renders the two-pane shell (left chat + right viewer)", async () => {
@@ -408,5 +491,653 @@ describe("App streamEvents rejection handling", () => {
     } finally {
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
     }
+  });
+});
+
+describe("App region-selection (lasso) wiring", () => {
+  // jsdom has no real 2-D canvas backend (no native `canvas` package
+  // installed) — HTMLCanvasElement.getContext("2d") returns null and
+  // toDataURL returns a degenerate value. Stub both so
+  // compositeMarkedPng's compositing path (exercised indirectly via
+  // App.tsx's lasso-completion handler) runs deterministically, matching
+  // markedPng.test.ts's own approach.
+  let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+  let originalToDataURL: typeof HTMLCanvasElement.prototype.toDataURL;
+
+  beforeEach(() => {
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "",
+      lineWidth: 0,
+    };
+    originalGetContext = HTMLCanvasElement.prototype.getContext;
+    originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.toDataURL = vi
+      .fn()
+      .mockReturnValue(
+        "data:image/png;base64,ZmFrZS1wbmc=",
+      ) as unknown as typeof HTMLCanvasElement.prototype.toDataURL;
+  });
+
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+  });
+
+  it("mounts ModelViewer with an onReady handler and a lasso surface over the viewport", async () => {
+    const client = makeClient();
+    render(<App client={client} />);
+
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    // The mock ModelViewer only renders data-has-data=true once its onReady
+    // (and onLoaded, for non-null data) fired — asserting this confirms
+    // App.tsx actually wires onReady/onLoaded rather than mounting a bare
+    // placeholder.
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+    expect(screen.getByTestId("viewport-lasso-overlay-mock")).toBeTruthy();
+  });
+
+  it("lasso completed -> pending selection shown, createRegionEdit NOT yet called", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [
+        { name: "wing_left", hitCount: 5 },
+        { name: "wing_right", hitCount: 2 },
+      ],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+
+  it("full corrected flow: lasso completed -> user sends chat text -> createRegionEdit called with that text as instruction and the resolved module ids -> resulting ChatMessage carries the matching .selection", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: ["wing_left", "wing_right"],
+      view_id: "front",
+    });
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [
+        { name: "wing_left", hitCount: 5 },
+        { name: "wing_right", hitCount: 2 },
+      ],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalledWith(
+        PROJECT.id,
+        expect.objectContaining({
+          module_ids: ["wing_left", "wing_right"],
+          view_id: "front",
+          instruction: "make the wing thinner",
+        }),
+      );
+    });
+    assertValidRegionEditRequest(
+      (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[0][1],
+    );
+
+    await waitFor(() => {
+      const selectionMsg = screen
+        .getAllByTestId(/^chat-msg-/)
+        .find((el) => el.textContent?.includes("make the wing thinner"));
+      expect(selectionMsg).toBeTruthy();
+      expect(selectionMsg?.querySelector(".chat-selection-thumbnail")).toBeTruthy();
+    });
+
+    // The pending-selection affordance clears once attached to the sent message.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+  });
+
+  it("NEVER calls createRegionEdit with an empty or whitespace-only instruction", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    // ChatPanel's own submit handler already blocks empty/whitespace input
+    // (trims before calling onSend and disables the button), so drive
+    // handleSendMessage the same way a user would: type whitespace, which
+    // ChatPanel refuses to submit.
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "   " } });
+    expect(screen.getByTestId("chat-send-btn")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+    // Selection is still pending — a blocked send must not have consumed it.
+    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+  });
+
+  it("cancelling a pending selection clears it without attaching to the next message", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByTestId("pending-selection-cancel-btn"));
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "unrelated message" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByTestId(/^chat-msg-/).find((el) =>
+          el.textContent?.includes("unrelated message"),
+        ),
+      ).toBeTruthy();
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call createRegionEdit when the ranked list is empty (nothing selected)", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({ ranked: [], primary: null });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+
+  it("caps module_ids at MAX_REGION_EDIT_MODULE_IDS when the ranked list is longer", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: [],
+      view_id: "front",
+    });
+    const longRanked = Array.from({ length: MAX_REGION_EDIT_MODULE_IDS + 5 }, (_, i) => ({
+      name: `module_${i}`,
+      hitCount: MAX_REGION_EDIT_MODULE_IDS + 5 - i,
+    }));
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: longRanked,
+      primary: longRanked[0].name,
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "tidy this area up" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalled();
+    });
+    const call = (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1].module_ids).toHaveLength(MAX_REGION_EDIT_MODULE_IDS);
+    expect(call[1].module_ids).toEqual(
+      longRanked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name),
+    );
+    assertValidRegionEditRequest(call[1]);
+  });
+
+  it("restores the pending selection and surfaces an honest error when createRegionEdit rejects", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockRejectedValue(new Error("422 Unprocessable"));
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalled());
+
+    // The failure must be surfaced honestly (never swallowed, never shown
+    // as success) AND the selection must be recoverable — not lost, forcing
+    // a redraw.
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("422 Unprocessable");
+    });
+    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+  });
+
+  it("does NOT let a stale rejected request clobber a newer selection drawn while it was in flight", async () => {
+    // Regression for the reject-handler race: request A (selection
+    // "wing_left") is sent and left pending on a never-resolving promise;
+    // while it's in flight the user draws a NEW lasso (selection
+    // "wing_right"), which must remain visible. Only THEN does A reject —
+    // its restore must never overwrite the newer "wing_right" pending state
+    // with the stale "wing_left" one.
+    const client = makeClient();
+    let rejectFirst: (e: Error) => void = () => {};
+    const firstCall = new Promise<never>((_, reject) => {
+      rejectFirst = reject;
+    });
+    vi.spyOn(client, "createRegionEdit").mockReturnValueOnce(firstCall);
+
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    // Draw and send selection A ("wing_left") — createRegionEdit(A) is now
+    // in flight on a promise that won't resolve until we reject it below.
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "thin the left wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(1));
+
+    // Pending selection was cleared synchronously on send.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+
+    // While A is still in flight, draw a NEW lasso — selection B
+    // ("wing_right").
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_right", hitCount: 5 }],
+      primary: "wing_right",
+    });
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    // NOW reject the stale request for A.
+    rejectFirst(new Error("stale 500"));
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+    });
+
+    // The still-visible pending selection must be B ("wing_right"), not a
+    // resurrected stale A ("wing_left").
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "widen the right wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(2));
+    const secondCall = (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[1];
+    expect(secondCall[1].module_ids).toEqual(["wing_right"]);
+  });
+
+  it("does NOT resurrect a cancelled selection when a stale request rejects afterward", async () => {
+    // Regression for the reject-handler race: request A ("wing_left") is in
+    // flight; the user explicitly cancels the pending-selection UI (clearing
+    // it to null) before A rejects. A's restore must not bring the
+    // cancelled selection back.
+    const client = makeClient();
+    let rejectFirst: (e: Error) => void = () => {};
+    const firstCall = new Promise<never>((_, reject) => {
+      rejectFirst = reject;
+    });
+    vi.spyOn(client, "createRegionEdit").mockReturnValueOnce(firstCall);
+
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "thin the left wing" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(1));
+
+    // A second, unrelated selection is drawn and then explicitly cancelled
+    // by the user while A is still in flight.
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByTestId("pending-selection-cancel-btn"));
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+
+    // NOW A rejects.
+    rejectFirst(new Error("stale 500"));
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+    });
+
+    // The cancellation must stick — no pending-selection notice reappears.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+  });
+
+  it("does NOT attach a selection to the chat message when there is no project to send it to", async () => {
+    // Simulate the createProject round-trip never resolving (or having
+    // failed) so projectId stays null while the module fixture (loaded
+    // independently of projectId) is already ready and a lasso can be drawn.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockReturnValue(new Promise(() => {}));
+    vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error").textContent).toContain("No project selected");
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+    // Bailing on "no project" must happen BEFORE the message (and any
+    // selection thumbnail) is ever appended to the transcript — a message
+    // that looks sent but never went anywhere would be misleading. And the
+    // selection stays pending so it's not lost.
+    expect(
+      screen.queryAllByTestId(/^chat-msg-/).some((el) =>
+        el.textContent?.includes("make the wing thinner"),
+      ),
+    ).toBe(false);
+    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+  });
+
+  it("a composite failure (getContext returning null) surfaces a notice and does not crash the app", async () => {
+    // Regression: compositeMarkedPng throws when canvas.getContext("2d")
+    // returns null (context loss, exhausted canvas contexts, headless
+    // quirks). Before the fix this propagated out of handleLassoCompleted
+    // uncaught, unmounting the whole React tree (no ErrorBoundary exists).
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    // The app tree must still be mounted and responsive — the shell is
+    // still there, a notice is shown instead of a crash, and no pending
+    // selection (which would require a successful composite) was created.
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(screen.getByTestId("app-shell")).toBeTruthy();
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+});
+
+describe("App model load-error handling", () => {
+  afterEach(() => {
+    mockLoadResultRef.current = null;
+  });
+
+  it("surfaces a distinct load-error state (not the generic 'not loaded yet' notice) when result.ok is false, and keeps the lasso disabled", async () => {
+    // Regression: before the fix, handleViewerLoaded collapsed "still
+    // loading" and "failed to load" into the same moduleGroup===null state
+    // with zero user-facing signal — a decode/parse failure left the lasso
+    // permanently and inexplicably disabled.
+    mockLoadResultRef.current = { ok: false, error: "unsupported GLB version" };
+
+    const client = makeClient();
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(screen.getByTestId("selection-notice").textContent).toContain(
+      "unsupported GLB version",
+    );
+    expect(screen.getByTestId("selection-notice").textContent).toContain("failed to load");
+    expect(
+      screen.getByTestId("viewport-lasso-overlay-mock").getAttribute("data-disabled"),
+    ).toBe("true");
+  });
+});
+
+describe("App region-edit success feedback", () => {
+  // Same jsdom canvas-backend limitation as the "lasso wiring" describe
+  // block above: getContext("2d") returns null in jsdom, so
+  // compositeMarkedPng needs a stub to composite deterministically here
+  // (this test needs a successful lasso completion to reach the send flow).
+  let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+  let originalToDataURL: typeof HTMLCanvasElement.prototype.toDataURL;
+
+  beforeEach(() => {
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "",
+      lineWidth: 0,
+    };
+    originalGetContext = HTMLCanvasElement.prototype.getContext;
+    originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.toDataURL = vi
+      .fn()
+      .mockReturnValue(
+        "data:image/png;base64,ZmFrZS1wbmc=",
+      ) as unknown as typeof HTMLCanvasElement.prototype.toDataURL;
+  });
+
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+  });
+
+  it("surfaces an accepted-but-deferred assistant message on a successful 202, never claiming the edit completed", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: ["wing_left"],
+      view_id: "front",
+    });
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalled());
+
+    await waitFor(() => {
+      const accepted = screen
+        .getAllByTestId("chat-msg-assistant")
+        .find((el) => el.textContent?.includes("accepted"));
+      expect(accepted).toBeTruthy();
+    });
+    const acceptedMsg = screen
+      .getAllByTestId("chat-msg-assistant")
+      .find((el) => el.textContent?.includes("accepted"));
+    // Must read as accepted-but-deferred, never as a completed edit.
+    expect(acceptedMsg?.textContent).toContain("not implemented yet");
+    expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("edit applied");
+    expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("done");
   });
 });

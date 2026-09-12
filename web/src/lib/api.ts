@@ -127,12 +127,42 @@ export interface Credential {
   model_alias: string;
 }
 
+/** Max number of ranked module identifiers `RegionEditRequest.module_ids`
+ *  accepts (matches `MAX_REGION_EDIT_MODULE_IDS` in `d33d/app.py`, enforced
+ *  server-side via `Field(max_length=...)`). Callers must slice the
+ *  ranked list to this length client-side or the request 422s. */
+export const MAX_REGION_EDIT_MODULE_IDS = 10;
+
 /** Which of the six render-worker views a lasso selection was drawn on
  *  (matches `ViewId` in `DimensionCanvas.tsx`). */
 export type RegionEditViewId = "front" | "back" | "left" | "right" | "top" | "iso";
 
-/** One vertex of the lasso polygon, in photo-pixel coordinates (matches
- *  `PhotoPoint` in `DimensionCanvas.tsx`). */
+/** Runtime-checkable form of `RegionEditViewId`, matching
+ *  `REGION_EDIT_VIEW_IDS` in `d33d/app.py` (the server 422s any `view_id`
+ *  outside this set via `RegionEditRequest`'s field validator). The type
+ *  alone only guards compile-time call sites — tests asserting the actual
+ *  request body a mock captured need a runtime set to check against. */
+export const REGION_EDIT_VIEW_IDS: readonly RegionEditViewId[] = [
+  "front",
+  "back",
+  "left",
+  "right",
+  "top",
+  "iso",
+];
+
+/** Hard cap on the base64-decoded `marked_png_base64` body, matching
+ *  `MAX_REGION_EDIT_IMAGE_BYTES` in `d33d/app.py` (the route 413s above
+ *  this). */
+export const MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/** One vertex of the lasso polygon. Coordinate space is caller-dependent:
+ *  `DimensionCanvas`'s photo-overlay lasso emits photo-pixel coordinates
+ *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`
+ *  (issue #29) emits viewport-pixel coordinates (`ScreenPoint`, the same
+ *  space `ModelViewer.resolveLassoSelection` raycasts through) — the
+ *  server does not interpret this field's coordinate space today, since
+ *  scoped-edit regeneration is deferred. */
 export interface RegionEditPolygonPoint {
   x: number;
   y: number;
@@ -154,7 +184,8 @@ export interface RegionEditRequest {
   view_id: RegionEditViewId;
   /** The composited red-marked PNG, base64-encoded (no `data:` prefix). */
   marked_png_base64: string;
-  /** Closed polygon vertices, photo-pixel coordinates. At least 3 points. */
+  /** Closed polygon vertices, in the coordinate space the caller drew in
+   *  (see `RegionEditPolygonPoint`). At least 3 points. */
   polygon: RegionEditPolygonPoint[];
   /** The user's free-text edit instruction for the selected region. */
   instruction: string;

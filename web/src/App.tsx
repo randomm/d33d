@@ -16,19 +16,64 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { ChatPanel, type ChatMessage } from "./components/chat/ChatPanel";
+import { Vector2, type Object3D } from "three";
+import {
+  ChatPanel,
+  type ChatMessage,
+  type ChatMessageSelection,
+} from "./components/chat/ChatPanel";
 import { PhotoUpload } from "./components/upload/PhotoUpload";
 import { PinnedParamStrip, type PinnedParam } from "./components/strip/PinnedParamStrip";
-import { ModelViewer } from "./components/viewer/ModelViewer";
+import {
+  ModelViewer,
+  resolveLassoSelection,
+  type ModelViewerHandle,
+  type LoadResult,
+} from "./components/viewer/ModelViewer";
+import {
+  ViewportLassoOverlay,
+  type ViewportLassoCompletedEvent,
+} from "./components/viewer/ViewportLassoOverlay";
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
-import { ApiClient } from "./lib/api";
+import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
+import {
+  ApiClient,
+  MAX_REGION_EDIT_MODULE_IDS,
+  type RegionEditPolygonPoint,
+  type RegionEditViewId,
+} from "./lib/api";
+import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
+
+// ModelViewer and ViewportLassoOverlay each default independently to
+// 600x400 when given no explicit size — that only lines up by
+// coincidence. Pass one shared size to both so the lasso's click
+// coordinate space can never drift from the canvas the raycast (and
+// compositeMarkedPng) actually read from.
+const VIEWER_WIDTH = 600;
+const VIEWER_HEIGHT = 400;
 
 export interface RenderImage {
   /** view filename, e.g. "view_00_front.png" */
   filename: string;
   /** data URL or relative URL */
   src: string;
+}
+
+/**
+ * A lasso selection that has been resolved to ranked module ids and a
+ * composited marked PNG, but has NOT yet been sent as a region edit — the
+ * user must still supply the free-text instruction via chat (see
+ * `handleLassoCompleted` / `handleSendMessage`). Carries everything
+ * `RegionEditRequest` needs except `instruction`.
+ */
+interface PendingRegionSelection {
+  /** The composited red-marked view PNG as a data URL (for the chat
+   *  thumbnail) — `stripDataUrlPrefix`'d again when building the request. */
+  thumbnail: string;
+  viewId: RegionEditViewId;
+  moduleIds: string[];
+  polygon: RegionEditPolygonPoint[];
 }
 
 interface AppProps {
@@ -49,6 +94,144 @@ export default function App({ renders = [], client }: AppProps) {
     null,
   );
   const [streamError, setStreamError] = useState<string | null>(null);
+
+  // Region-selection (lasso) wiring (issue #29).
+  const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
+  const [moduleFixtureData, setModuleFixtureData] = useState<ArrayBuffer | null>(null);
+  const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  // A lasso selection that has been resolved (module ids + marked PNG) but
+  // not yet sent — the instruction is the user's own free text, which the
+  // server requires non-empty (`RegionEditRequest.instruction`,
+  // `Field(min_length=1)`). The selection is attached to the NEXT chat
+  // message the user sends, not fired immediately from the lasso.
+  const [pendingSelection, setPendingSelection] = useState<PendingRegionSelection | null>(
+    null,
+  );
+  // Bumped on every draw/cancel/send-clear of pendingSelection (see the
+  // three setPendingSelection call sites below). A createRegionEdit
+  // rejection captures the generation at send time and only restores the
+  // selection if nothing has touched pendingSelection since — otherwise a
+  // slow/failed request for an OLD selection could silently clobber a NEWER
+  // one the user drew afterward, or resurrect one they explicitly cancelled.
+  const pendingSelectionGenerationRef = useRef(0);
+
+  // ModelViewer's onReady effect only fires once per mount — replace (never
+  // merge) the captured handle on every call so a remount never leaves a
+  // stale raycaster behind.
+  const handleViewerReady = useCallback((handle: ModelViewerHandle) => {
+    viewerHandleRef.current = handle;
+  }, []);
+
+  const handleViewerLoaded = useCallback((result: LoadResult) => {
+    if (result.ok && result.mesh) {
+      setModuleGroup(result.mesh.object);
+      setSelectionNotice(null);
+      return;
+    }
+    // A load failure (decode/parse error) is distinct from "still
+    // loading" — both leave moduleGroup null (disabling the lasso via
+    // `disabled={moduleGroup === null}`), but only a failure should tell
+    // the user *why* the lasso is unavailable instead of leaving them to
+    // wonder if it will ever appear.
+    setModuleGroup(null);
+    setSelectionNotice(
+      result.error
+        ? `Model failed to load — lasso unavailable: ${result.error}`
+        : "Model failed to load — lasso unavailable.",
+    );
+  }, []);
+
+  // Decode the named-module GLB fixture once on mount. Live module-registry
+  // wiring is deferred (issue #29 design decision) — this fixture is the
+  // sole moduleGroup source for resolveLassoSelection in this ticket.
+  // Inlined base64 (decoded synchronously, no network round-trip) so it
+  // never competes with `window.fetch` stubs other tests install for the
+  // backend API.
+  useEffect(() => {
+    setModuleFixtureData(loadModuleFixtureArrayBuffer());
+  }, []);
+
+  const handleLassoCompleted = useCallback(
+    (event: ViewportLassoCompletedEvent) => {
+      const handle = viewerHandleRef.current;
+      if (!handle || !moduleGroup) {
+        // "No model loaded yet" — distinct from "lasso hit nothing".
+        setSelectionNotice("Model not loaded yet — draw the lasso again once it appears.");
+        return;
+      }
+
+      const canvas = handle.renderer.domElement;
+      // CSS-pixel viewport size, NOT canvas.width/canvas.height (the
+      // WebGL drawing-buffer size, which renderer.setPixelRatio scales by
+      // devicePixelRatio). ViewportLassoOverlay's points come from
+      // getBoundingClientRect() — always CSS pixels — so the NDC
+      // conversion in resolveLassoSelection must divide by the same
+      // CSS-pixel dimensions or every raycast mis-registers on any
+      // DPR!==1 display.
+      const cssSize = handle.renderer.getSize(new Vector2());
+
+      // resolveLassoSelection and compositeMarkedPng both throw on
+      // unexpected failures (notably compositeMarkedPng's
+      // `canvas.getContext("2d")` returning null on context loss, exhausted
+      // canvas contexts, or headless quirks). There is no ErrorBoundary in
+      // this app, so an uncaught throw here would unmount the whole React
+      // tree — losing chat history and project state — instead of
+      // degrading like the existing "nothing selected" path. Catch and
+      // route through the same selection-notice channel.
+      try {
+        const { ranked, primary } = resolveLassoSelection(
+          event.points,
+          cssSize.x,
+          cssSize.y,
+          handle.camera,
+          handle.raycaster,
+          moduleGroup,
+        );
+
+        if (primary === null || ranked.length === 0) {
+          // Empty ranked list — distinct "nothing selected" state. Never
+          // falls back to selecting the whole model, never calls the API.
+          setSelectionNotice("Nothing selected — the lasso didn't hit any part of the model.");
+          return;
+        }
+
+        const moduleIds = ranked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name);
+        // compositeMarkedPng's polygon argument is in the same CSS-pixel space
+        // as event.points (ViewportLassoOverlay draws via getBoundingClientRect()),
+        // so it needs the same CSS-pixel cssSize used for the raycast above to
+        // scale into the canvas's drawing-buffer pixel space.
+        const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
+
+        setSelectionNotice(null);
+
+        // The server requires a non-empty free-text `instruction`
+        // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
+        // the user can supply. Rather than call createRegionEdit here with
+        // no instruction (which would always 422), stash the resolved
+        // selection and the polygon/view needed to build the request, and
+        // surface an affordance telling the user to describe the change in
+        // chat. The pending selection is attached to whichever chat message
+        // the user sends next (see handleSendMessage).
+        pendingSelectionGenerationRef.current += 1;
+        setPendingSelection({
+          thumbnail: `data:image/png;base64,${markedPngBase64}`,
+          viewId: event.viewId,
+          moduleIds,
+          polygon: event.points,
+        });
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : "unknown error";
+        setSelectionNotice(`Selection failed — could not process the lasso: ${detail}`);
+      }
+    },
+    [moduleGroup],
+  );
+
+  const handleCancelPendingSelection = useCallback(() => {
+    pendingSelectionGenerationRef.current += 1;
+    setPendingSelection(null);
+  }, []);
 
   // Create the (single, default) project on mount.
   useEffect(() => {
@@ -71,16 +254,107 @@ export default function App({ renders = [], client }: AppProps) {
 
   const handleSendMessage = useCallback(
     (text: string) => {
+      // Never call createRegionEdit with an empty or whitespace-only
+      // instruction — the server rejects it (`Field(min_length=1)`), and
+      // an all-whitespace string would pass a naive truthiness check but
+      // still be meaningless as an edit instruction.
+      const trimmed = text.trim();
+
+      // Bail before constructing/appending anything if there's no project to
+      // send to — a message (and any attached selection) must never render
+      // as sent when the region-edit request that would justify it can
+      // never fire. Checked ahead of selectionToAttach/userMsg construction
+      // so a pending selection is never displayed as "submitted" while
+      // still sitting untouched in state.
+      if (projectId === null) {
+        setStreamError("No project selected");
+        return;
+      }
+
+      const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
+
       const userMsg: ChatMessage = {
         id: `msg-${Date.now()}`,
         role: "user",
         content: text,
+        ...(selectionToAttach
+          ? {
+              selection: {
+                thumbnail: selectionToAttach.thumbnail,
+                viewId: selectionToAttach.viewId,
+                moduleIds: selectionToAttach.moduleIds,
+              } satisfies ChatMessageSelection,
+            }
+          : {}),
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      if (projectId === null) {
-        setStreamError("No project selected");
-        return;
+      if (selectionToAttach) {
+        // Clear immediately so a slow createRegionEdit response can't race a
+        // second send into re-attaching the same pending selection. Snapshot
+        // the generation counter first so the reject handler below can tell
+        // whether the user drew a new lasso or clicked cancel while this
+        // request was in flight.
+        const sentGeneration = pendingSelectionGenerationRef.current;
+        pendingSelectionGenerationRef.current += 1;
+        setPendingSelection(null);
+        void apiClient
+          .createRegionEdit(projectId, {
+            module_ids: selectionToAttach.moduleIds,
+            view_id: selectionToAttach.viewId,
+            marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
+            polygon: selectionToAttach.polygon,
+            instruction: trimmed,
+          })
+          .then(() => {
+            // 202 Accepted means the request was validated and queued —
+            // NOT that any regeneration happened (`RegionEditResult.status`
+            // is always "deferred"; scoped-edit regeneration is not yet
+            // implemented server-side, see api.ts's createRegionEdit doc
+            // comment). Without this, a successful request produced zero
+            // feedback, indistinguishable from a silent failure or a
+            // request still in flight. Word it so it can never read as a
+            // completed edit.
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `msg-${Date.now()}-region-edit-accepted`,
+                role: "assistant",
+                content:
+                  "Region edit request accepted — scoped regeneration is not implemented yet.",
+              },
+            ]);
+          })
+          .catch((e) => {
+            // The request failed (network error, or a 4xx/5xx from the
+            // server) after the pending selection was already cleared —
+            // restore it so the user doesn't have to redraw the lasso, and
+            // say plainly that THIS is what failed (the chat message
+            // above already shows the selection thumbnail as sent, so a
+            // generic error would leave that looking correct).
+            //
+            // Only restore if the generation counter is UNCHANGED since this
+            // request started (i.e. the send's own +1 is still the latest
+            // bump) — this request's selectionToAttach is a value closed over
+            // at send time. If the user drew a new lasso or clicked cancel
+            // while this request was in flight, the counter has moved on and
+            // this stale value must NOT win: an unconditional (or a merely
+            // current-is-null) overwrite here would silently clobber a newer
+            // selection, or resurrect one the user explicitly cancelled, with
+            // no way for the user to tell the difference.
+            const detail = e instanceof Error ? e.message : "unknown error";
+            if (pendingSelectionGenerationRef.current === sentGeneration + 1) {
+              setPendingSelection(selectionToAttach);
+              setStreamError(
+                `Region edit failed — selection restored, please resend: ${detail}`,
+              );
+            } else {
+              // The user already drew a new selection or cancelled while this
+              // request was in flight — nothing to restore, and claiming so
+              // would be dishonest about what state the UI is actually in.
+              setStreamError(`Region edit failed: ${detail}`);
+            }
+          });
       }
 
       const assistantId = `msg-${Date.now()}-assistant`;
@@ -122,7 +396,7 @@ export default function App({ renders = [], client }: AppProps) {
         // it surfacing as an unhandled promise rejection in the browser.
         .catch(() => {});
     },
-    [projectId, apiClient],
+    [projectId, apiClient, pendingSelection],
   );
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
@@ -181,14 +455,50 @@ export default function App({ renders = [], client }: AppProps) {
 
       {/* Right pane: viewer + validation status */}
       <div className="app-right" data-testid="app-right-pane">
-        <div className="viewer-pane" data-testid="viewer-pane">
-          {/* No render/model artifact flows through the app yet — the
+        <div className="viewer-pane" data-testid="viewer-pane" style={{ position: "relative" }}>
+          {/* No live render/model artifact flows through the app yet — the
            * design-loop-to-SSE-to-model pipeline is a future ticket's
-           * scope (see issue #23's documented deferral). Mounting the
-           * real ModelViewer now with an empty state means it's reachable
-           * and ready to receive `data`/`format` the moment that pipeline
-           * lands, without another integration pass here. */}
-          <ModelViewer data={null} format="stl" />
+           * scope (see issue #23's documented deferral). The named-module
+           * GLB fixture stands in as the moduleGroup source for lasso
+           * region selection (issue #29's settled design decision). */}
+          <ModelViewer
+            data={moduleFixtureData}
+            format="glb"
+            width={VIEWER_WIDTH}
+            height={VIEWER_HEIGHT}
+            onReady={handleViewerReady}
+            onLoaded={handleViewerLoaded}
+          />
+          <ViewportLassoOverlay
+            viewId="front"
+            width={VIEWER_WIDTH}
+            height={VIEWER_HEIGHT}
+            onLassoCompleted={handleLassoCompleted}
+            disabled={moduleGroup === null}
+          />
+          {selectionNotice && (
+            <div className="selection-notice" data-testid="selection-notice" role="status">
+              {selectionNotice}
+            </div>
+          )}
+          {pendingSelection && (
+            <div className="pending-selection-notice" data-testid="pending-selection-notice" role="status">
+              <span>Region selected — describe the change below.</span>
+              <img
+                src={pendingSelection.thumbnail}
+                alt={`pending selection on ${pendingSelection.viewId}`}
+                className="pending-selection-thumbnail"
+                data-testid="pending-selection-thumbnail"
+              />
+              <button
+                type="button"
+                data-testid="pending-selection-cancel-btn"
+                onClick={handleCancelPendingSelection}
+              >
+                Cancel selection
+              </button>
+            </div>
+          )}
         </div>
         <div className="validation-pane" data-testid="validation-pane">
           <span data-testid="validation-status">Waiting for render…</span>
