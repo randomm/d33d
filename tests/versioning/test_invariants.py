@@ -17,11 +17,9 @@ The four coverage gaps the ticket calls out:
 from __future__ import annotations
 
 import asyncio
-import subprocess
 from pathlib import Path
 
 from d33d import versions
-
 from tests.versioning.helpers import (
     create_project,
     create_version,
@@ -29,6 +27,7 @@ from tests.versioning.helpers import (
     git_rev_count,
     run_async,
 )
+
 # ---------------------------------------------------------------------------
 # Full-snapshot invariant
 # ---------------------------------------------------------------------------
@@ -105,7 +104,7 @@ def test_concurrent_creation_serializes_to_linear_chain(app_with_versions):
         row = (await client.get(f"/api/projects/{pid}")).json()
         return pid, results, timeline, row
 
-    pid, results, timeline, row = run_async(app_with_versions, _call)
+    _pid, results, timeline, row = run_async(app_with_versions, _call)
 
     # No exception escaped (the gather would have captured one). Both
     # creates resolved as version dicts (a plain create always 201s).
@@ -150,7 +149,7 @@ def test_concurrent_restores_dedupe_noop(app_with_versions):
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         return v1, v2, results, timeline
 
-    v1, v2, results, timeline = run_async(app_with_versions, _call)
+    _v1, _v2, results, timeline = run_async(app_with_versions, _call)
     for r in results:
         assert not isinstance(r, Exception)
     ok = [r for r in results if r.status_code == 201]
@@ -221,14 +220,6 @@ def test_renaming_changes_only_the_display_name(app_with_versions):
     # The git commit is UNTOUCHED (no new commit, no rewritten history).
     assert cb == ca
     assert log_b == log_a
-
-
-def git_rev_count(repo: Path) -> int:
-    cmd = ["git", "-C", str(repo), "rev-list", "--count", "HEAD"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=False)
-    if r.returncode != 0:
-        raise RuntimeError(f"git rev-list failed: {r.stderr}")
-    return int(r.stdout.strip())
 
 
 # ---------------------------------------------------------------------------

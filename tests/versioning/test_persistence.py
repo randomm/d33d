@@ -20,6 +20,7 @@ from tests.versioning.helpers import (
     create_version,
     run_async,
 )
+
 # ---------------------------------------------------------------------------
 # (a) reopening resumes at the latest version with the full timeline intact
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ def test_reopening_resumes_at_latest_version_full_timeline(app_with_versions):
             timeline = (await fresh.get(f"/api/projects/{pid}/versions")).json()
         return pid, v1["id"], v2["id"], v3["id"], row, timeline
 
-    pid, v1, v2, v3, row, timeline = run_async(app_with_versions, _call)
+    _pid, v1, v2, v3, row, timeline = run_async(app_with_versions, _call)
     # The timeline is fully intact, in order.
     assert [v["id"] for v in timeline] == [v1, v2, v3]
     # The project points at the latest version.

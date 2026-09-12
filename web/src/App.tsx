@@ -320,10 +320,12 @@ export default function App({ renders = [], client }: AppProps) {
   );
 
   // Compare-select: pick two versions to compare (the prioritized surface).
+  // Each click drops the older of the two selections and keeps the newest,
+  // so a 3-click sequence rotates A→B→C→B→A→…
   const handleCompareSelect = useCallback((versionId: number) => {
     setCompareIds((prev) => {
       if (!prev) return [versionId, versionId];
-      // Replace the older of the two selections (keep the newest pair).
+      // Drop the older selection; keep the newest pair.
       return [prev[1], versionId];
     });
   }, []);

@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
+import sqlite3
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -50,6 +52,8 @@ from typing import Any
 
 from d33d import db as db_mod
 from d33d.projects import _sanitize_commit_message
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -509,18 +513,14 @@ class VersionService:
                 marker.unlink(missing_ok=True)
                 raise RuntimeError(f"git commit failed: {e}") from e
             # Re-point the project pointer to the chosen version (the
-            # marker commit above records the switch in git history).
-            try:
-                self.conn.update_project(
-                    project_id,
-                    current_version=version_id,
-                    last_activity=(target["id"], target["name"]),
-                )
-            except Exception:
-                # The marker commit exists in git but the DB update failed.
-                # The divergence is observable via the marker file; re-raise
-                # so the caller knows the state is not fully consistent.
-                raise
+            # marker commit above records the switch in git history). If
+            # this fails the marker commit exists in git without a DB row
+            # — the divergence is observable via the marker file.
+            self.conn.update_project(
+                project_id,
+                current_version=version_id,
+                last_activity=(target["id"], target["name"]),
+            )
             return self._public_project(self.conn.get_project(project_id))
 
         return await self._with_project_lock(project_id, _set_main)
@@ -611,7 +611,7 @@ class VersionService:
                     forked_from=(project_id, version_id),
                 )
                 self.conn.update_project(new_project_id, current_version=seed["id"])
-            except (LookupError, ValueError, VersionConflictError, RuntimeError, OSError) as e:
+            except (LookupError, ValueError, VersionConflictError, RuntimeError, OSError):
                 # Roll back: remove the new project's repo + row so a
                 # failed branch never leaves an orphan variant card.
                 import shutil
@@ -619,10 +619,13 @@ class VersionService:
                 shutil.rmtree(Path(new_repo), ignore_errors=True)
                 try:
                     self.conn.delete_project(new_project_id)
-                except Exception:
+                except sqlite3.Error:
                     # The repo is already removed; if the DB row deletion
                     # also fails the orphan row is still observable in logs.
-                    pass
+                    logger.warning(
+                        "branch-from rollback: failed to delete project row %s (repo already removed)",
+                        new_project_id,
+                    )
                 raise
             return {
                 "project": self._public_project(self.conn.get_project(new_project_id)),

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 
+from d33d import versions
 from tests.versioning.helpers import (
     create_project,
     create_version,
@@ -24,8 +25,6 @@ from tests.versioning.helpers import (
     repo_path_for,
     run_async,
 )
-from d33d import versions
-
 
 # ---------------------------------------------------------------------------
 # (a) Each accepted change creates a version with parent link + message
@@ -52,7 +51,7 @@ def test_accepted_change_creates_version_with_parent_and_message(
         )
         return pid, v1, v2
 
-    pid, v1, v2 = run_async(app_with_versions, _call)
+    _pid, v1, v2 = run_async(app_with_versions, _call)
 
     assert v1["parent"] is None
     assert v1["created_by_message"] == "make a box"
@@ -84,7 +83,7 @@ def test_timeline_returns_versions_in_order_with_diff_badges(app_with_versions):
         r = await client.get(f"/api/projects/{pid}/versions")
         return pid, r
 
-    pid, r = run_async(app_with_versions, _call)
+    _pid, r = run_async(app_with_versions, _call)
     assert r.status_code == 200
     timeline = r.json()
     assert len(timeline) == 4
@@ -176,7 +175,7 @@ def test_timeline_exposes_no_raw_git_objects(app_with_versions):
         r = await client.get(f"/api/projects/{pid}/versions")
         return pid, r
 
-    pid, r = run_async(app_with_versions, _call)
+    _pid, r = run_async(app_with_versions, _call)
     body = r.text
     # 40-hex commit hashes: must be absent.
     assert not versions._HASH_RE.search(body), f"hash leaked: {body}"

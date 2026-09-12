@@ -535,7 +535,15 @@ async def _read_bounded_source(request: Request) -> str:
         declared_len = int(declared) if declared is not None else None
     except ValueError:
         declared_len = None
-    if declared_len is not None and declared_len > MAX_SCAD_SOURCE_BYTES:
+    if declared_len is None:
+        declared_len = MAX_SCAD_SOURCE_BYTES
+    if declared_len > MAX_SCAD_SOURCE_BYTES:
+        # Reject early; still drain what the client sends — chunk by
+        # chunk, never via ``await request.body()`` (which would buffer
+        # the entire remainder in memory) — so the connection stays
+        # usable without an unbounded buffer.
+        async for _ in request.stream():
+            pass
         raise HTTPException(
             status_code=413,
             detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit",
@@ -545,6 +553,10 @@ async def _read_bounded_source(request: Request) -> str:
     async for chunk in request.stream():
         total += len(chunk)
         if total > MAX_SCAD_SOURCE_BYTES:
+            # Bounded drain of the remainder (see the header-reject path
+            # above): read-and-discard, never full-body buffering.
+            async for _ in request.stream():
+                pass
             raise HTTPException(
                 status_code=413,
                 detail=f"body exceeds {MAX_SCAD_SOURCE_BYTES} byte limit",

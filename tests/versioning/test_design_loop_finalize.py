@@ -15,8 +15,6 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 
 from __future__ import annotations
 
-from httpx import ASGITransport, AsyncClient
-
 from tests.versioning.helpers import (
     create_project,
     repo_path_for,

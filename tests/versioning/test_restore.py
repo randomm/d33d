@@ -51,7 +51,7 @@ def test_restore_creates_forward_version_with_correct_parent(app_with_versions):
         r = await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
         return pid, v1, v2, v3, r
 
-    pid, v1, v2, v3, r = run_async(app_with_versions, _call)
+    _pid, v1, _v2, v3, r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     restored = r.json()
 
@@ -75,9 +75,7 @@ def test_restore_provenance_is_dedicated_field(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        v1 = await create_version(client, pid, {"W": 20, "H": 25, "D": 30}, name="v1")
-        v2 = await create_version(client, pid, {"W": 24, "H": 25, "D": 30}, name="v2")
-        v3 = await create_version(client, pid, {"W": 24, "H": 30, "D": 30}, name="v3")
+        v1, _v2, _v3 = await _three_versions(client, pid)
         r = await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
         restored = r.json()
         # Rename the restored version — provenance must survive.
@@ -103,9 +101,7 @@ def test_restore_to_latest_is_noop_409(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        v1 = await create_version(client, pid, {"W": 20, "H": 25, "D": 30}, name="v1")
-        v2 = await create_version(client, pid, {"W": 24, "H": 25, "D": 30}, name="v2")
-        v3 = await create_version(client, pid, {"W": 24, "H": 30, "D": 30}, name="v3")
+        _v1, _v2, v3 = await _three_versions(client, pid)
         before = (await client.get(f"/api/projects/{pid}/versions")).json()
         r = await client.post(f"/api/projects/{pid}/versions/{v3['id']}/restore")
         after = (await client.get(f"/api/projects/{pid}/versions")).json()
@@ -129,9 +125,7 @@ def test_original_version_unmodified_after_restore(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        v1 = await create_version(client, pid, {"W": 20, "H": 25, "D": 30}, name="v1")
-        v2 = await create_version(client, pid, {"W": 24, "H": 25, "D": 30}, name="v2")
-        v3 = await create_version(client, pid, {"W": 24, "H": 30, "D": 30}, name="v3")
+        v1, _v2, _v3 = await _three_versions(client, pid)
         await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         original = next(v for v in timeline if v["id"] == v1["id"])
@@ -161,16 +155,14 @@ def test_restore_is_forward_commit_not_reset(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        v1 = await create_version(client, pid, {"W": 20, "H": 25, "D": 30}, name="v1")
-        v2 = await create_version(client, pid, {"W": 24, "H": 25, "D": 30}, name="v2")
-        v3 = await create_version(client, pid, {"W": 24, "H": 30, "D": 30}, name="v3")
+        v1, _v2, _v3 = await _three_versions(client, pid)
         repo = repo_path_for(app_with_versions, pid)
         before = git_log(repo)
         r = await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
         after = git_log(repo)
         return v1, before, after, r.status_code
 
-    v1, before, after, status = run_async(app_with_versions, _call)
+    _v1, before, after, status = run_async(app_with_versions, _call)
     assert status == 201
     # The new commit is prepended (git log is newest-first); the prior
     # commits all survive in their relative order at the tail.

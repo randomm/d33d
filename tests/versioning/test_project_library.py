@@ -17,6 +17,7 @@ from tests.versioning.helpers import (
     create_version,
     run_async,
 )
+
 # ---------------------------------------------------------------------------
 # (a) library grid: name, last-activity, thumbnail
 # ---------------------------------------------------------------------------
@@ -125,7 +126,7 @@ def test_opening_project_resumes_at_latest_version_with_timeline(
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         return pid, v1["id"], v2["id"], v3["id"], opened, timeline
 
-    pid, v1, v2, v3, opened, timeline = run_async(app_with_versions, _call)
+    _pid, v1, v2, v3, opened, timeline = run_async(app_with_versions, _call)
 
     # The opened project points at the LATEST version (resume state).
     assert opened["current_version"] == v3
