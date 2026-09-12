@@ -104,7 +104,21 @@ export function PhotoUpload({
         throw new Error("Upload response missing source_photo_path");
       }
       const data = parsed as { source_photo_path: string };
-      const { width, height } = await readImageDimensions(file);
+
+      // The server upload has now succeeded — `source_photo_path` is
+      // durably stored. From here on, a failure is never reported as an
+      // upload failure: reading the image's natural pixel dimensions is a
+      // client-side nicety for DimensionCanvas, not part of the upload
+      // contract. If it fails (corrupt/unusual file, stalled decode), fall
+      // back to 0x0 and still report success — a retry here would just
+      // create an orphaned duplicate on the server for no benefit.
+      let width = 0;
+      let height = 0;
+      try {
+        ({ width, height } = await readImageDimensions(file));
+      } catch {
+        // Dimensions unknown; upload success is unaffected.
+      }
       setState("success");
       setPreviewUrl(URL.createObjectURL(file));
       onUploaded(data.source_photo_path, width, height);

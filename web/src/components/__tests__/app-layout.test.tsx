@@ -319,6 +319,53 @@ describe("App photo upload wiring", () => {
     expect(el.getAttribute("data-photo-width")).not.toBe("800");
     expect(el.getAttribute("data-photo-height")).not.toBe("600");
   });
+
+  it("does not mount DimensionCanvas (and shows a degraded notice instead) when the upload succeeds but client-side dimensions are unavailable", async () => {
+    const client = makeClient();
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
+    });
+
+    // Simulate a decode failure: Image fires onerror, so PhotoUpload falls
+    // back to (0, 0) but still calls onUploaded — the upload itself
+    // succeeded server-side.
+    class FailingImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 0;
+      naturalHeight = 0;
+      private _src = "";
+      set src(value: string) {
+        this._src = value;
+        queueMicrotask(() => this.onerror?.());
+      }
+      get src() {
+        return this._src;
+      }
+    }
+    vi.stubGlobal("Image", FailingImage);
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
+    fireEvent.change(screen.getByTestId("photo-file-input"), {
+      target: { files: [file] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("dimension-canvas-unavailable")).toBeTruthy();
+    });
+    // DimensionCanvas must never mount with degenerate 0x0 dimensions —
+    // that would divide by zero in its internal scale computation.
+    expect(screen.queryByTestId("dimension-canvas-container")).toBeNull();
+    // No app-level error surfaced — the upload succeeded.
+    expect(screen.queryByTestId("app-error")).toBeNull();
+
+    // Restore the shared FakeImage stub for subsequent tests in this file.
+    vi.stubGlobal("Image", FakeImage);
+  });
 });
 
 describe("App streamEvents rejection handling", () => {

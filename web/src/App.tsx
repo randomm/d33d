@@ -156,12 +156,17 @@ export default function App({ renders = [], client }: AppProps) {
           renders={renders}
         />
         <PhotoUpload projectId={projectId ?? undefined} onUploaded={handlePhotoUploaded} onError={setStreamError} />
-        {photoSrc && photoDimensions && (
+        {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
           <DimensionCanvas
             photoSrc={photoSrc}
             photoWidth={photoDimensions.width}
             photoHeight={photoDimensions.height}
           />
+        )}
+        {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
+          <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
+            Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
+          </div>
         )}
         <PinnedParamStrip
           params={pinnedParams}

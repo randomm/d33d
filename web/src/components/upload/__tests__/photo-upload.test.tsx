@@ -188,4 +188,47 @@ describe("PhotoUpload", () => {
     });
     expect(onUploaded).not.toHaveBeenCalled();
   });
+
+  it("reports upload success (onUploaded, not onError) when the server upload succeeds but client-side dimension-read fails", async () => {
+    // Simulate a FakeImage that fires onerror instead of onload for this
+    // one test — the decode failure must not be conflated with an upload
+    // failure: the server already has the photo stored.
+    class FailingImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 0;
+      naturalHeight = 0;
+      private _src = "";
+      set src(value: string) {
+        this._src = value;
+        queueMicrotask(() => this.onerror?.());
+      }
+      get src() {
+        return this._src;
+      }
+    }
+    vi.stubGlobal("Image", FailingImage);
+
+    const file = makeFile("image/png", 1024, "test.png");
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ source_photo_path: "/repo/photos/test.png" }),
+    });
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onUploaded).toHaveBeenCalledWith("/repo/photos/test.png", 0, 0);
+    });
+    // The upload itself succeeded — no error must be reported, and the
+    // component's visible state must reflect success, not failure.
+    expect(onError).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("upload-error")).toBeNull();
+
+    // Restore the shared FakeImage stub for subsequent tests in this file.
+    vi.stubGlobal("Image", FakeImage);
+  });
 });
