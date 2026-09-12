@@ -495,7 +495,12 @@ def create_versions_router() -> APIRouter:
 
 
 def _raise_mapped(e: Exception) -> None:
-    """Map the service's exception taxonomy to HTTP status codes."""
+    """Map the service's exception taxonomy to HTTP status codes.
+
+    Raises ``HTTPException`` for every known type (and re-raises unknown
+    types) — every path raises, so a caller never returns from here with a
+    mapped error left unhandled.
+    """
     if isinstance(e, LookupError):
         raise HTTPException(status_code=404, detail=str(e))
     if isinstance(e, ValueError):
@@ -518,8 +523,9 @@ async def _call(fn, *args: Any) -> Any:
             result = await result
         return result
     except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
+        # _raise_mapped raises on every path (a mapped HTTPException, or the
+        # original exception re-raised) — nothing falls through.
         _raise_mapped(e)
-        raise  # unreachable — _raise_mapped always raises
 
 
 async def _read_bounded_source(request: Request) -> str:

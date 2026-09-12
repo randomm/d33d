@@ -138,7 +138,7 @@ def test_unpinning_leaves_git_commit_untouched(app_with_versions):
 
     before, after, log = run_async(app_with_versions, _call)
     assert before == after
-    assert "version: keep me" in log
+    assert "version: keepme" in log
 
 
 # ---------------------------------------------------------------------------

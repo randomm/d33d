@@ -105,18 +105,6 @@ def remove_repo(repo_dir: Path) -> None:
         shutil.rmtree(repo_dir)
 
 
-def _mask_repo_path(p: str | None) -> str:
-    """Mask the on-disk git repo path so the raw path is never exposed in
-    an API response (git invisibility). The field is reduced to a stable
-    placeholder — the raw on-disk path (which names the repo and contains
-    the `.git` directory) is server-internal."""
-    if not p:
-        return ""
-    from pathlib import Path as _P
-
-    return f"project-{_P(p).name[:12]}" if _P(p).name else "project-<unnamed>"
-
-
 # ---------------------------------------------------------------------------
 # Pydantic models for request bodies
 # ---------------------------------------------------------------------------

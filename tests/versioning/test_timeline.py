@@ -208,4 +208,4 @@ def test_version_files_are_committed_to_git_on_disk(app_with_versions):
     )
     assert snapshot == {"W": 20, "H": 25}
     log = git_log(repo)
-    assert "version: first box" in log
+    assert "version: firstbox" in log

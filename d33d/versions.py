@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d import db as db_mod
+from d33d.projects import _sanitize_commit_message
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -412,9 +413,10 @@ class VersionService:
                 encoding="utf-8",
             )
             commit_subject = (
-                f"version: {version_name}"
+                f"version: {_sanitize_commit_message(version_name)}"
                 if restored_from is None
-                else f"restored from version {restored_from}: {version_name}"
+                else f"restored from version {restored_from}: "
+                f"{_sanitize_commit_message(version_name)}"
             )
             _commit_versions_file(
                 repo_dir,
@@ -501,7 +503,7 @@ class VersionService:
                     repo_dir,
                     versions_dir,
                     marker_name,
-                    f"set as main: {target['name']}",
+                    f"set as main: {_sanitize_commit_message(target['name'])}",
                 )
             except RuntimeError as e:
                 marker.unlink(missing_ok=True)
@@ -712,14 +714,33 @@ class VersionConflictError(Exception):
 
 
 def _ensure_column(
-    conn: db_mod.Connection, table: str, column: str, default_sql: str
+    conn: db_mod.Connection,
+    table: str,
+    column: str,
+    column_sql: str,
+    *,
+    backfill_value: str | None = None,
 ) -> None:
     """Idempotently add ``column`` to an existing table (ALTER TABLE ADD
-    COLUMN has no IF NOT EXISTS; check pragma first)."""
+    COLUMN has no IF NOT EXISTS; check pragma first).
+
+    SQLite's ``ALTER TABLE ADD COLUMN`` rejects a function-call (non-
+    constant) default — e.g. ``DEFAULT (json(...))`` is legal in the
+    CREATE TABLE DDL but not here — and a NOT NULL column must arrive WITH
+    a default. So when ``backfill_value`` is given (a JSON literal), the
+    column is added as plain ``NULL``-able TEXT and the pre-existing rows
+    are updated in the same step; the DDL in ``d33d.db`` (fresh DBs) keeps
+    the function-call default. ``column_sql`` is the ALTER's declaration
+    (e.g. ``INTEGER`` or ``TEXT``)."""
     info = conn.raw.execute(f"PRAGMA table_info({table})").fetchall()
     names = {r[1] for r in info}
     if column not in names:
-        conn.raw.execute(f"ALTER TABLE {table} ADD COLUMN {column} {default_sql}")
+        conn.raw.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_sql}")
+        if backfill_value is not None:
+            conn.raw.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {column} IS NULL",
+                (backfill_value,),
+            )
         conn.commit()
 
 
@@ -757,11 +778,17 @@ def migrate(conn: db_mod.Connection) -> None:
     conn.commit()
     # New columns on projects (existing DBs predate this ticket).
     _ensure_column(conn, "projects", "current_version", "INTEGER")
+    # ``last_activity``: the function-call default (json(...)) is legal in
+    # the CREATE TABLE DDL in d33d.db (fresh DBs) but NOT in an ALTER TABLE
+    # ADD COLUMN (pre-existing DBs — SQLite rejects non-constant defaults
+    # there), so the column is added without a default and the pre-existing
+    # rows are backfilled with the same null JSON literal.
     _ensure_column(
         conn,
         "projects",
         "last_activity",
-        'TEXT NOT NULL DEFAULT (json(\'{"ts": null, "version_id": null}\'))',
+        "TEXT",
+        backfill_value='{"ts": null, "version_id": null, "name": null}',
     )
 
 
