@@ -6,4 +6,9 @@ worker (ticket #1), FastAPI backend (ticket #2), 3MF validation
 the eval harness (ticket #8).
 """
 
-__version__ = "0.0.1"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    __version__ = version("d33d")
+except PackageNotFoundError:
+    __version__ = "0.0.0+unknown"
