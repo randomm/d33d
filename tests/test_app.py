@@ -27,6 +27,7 @@ consistent with the project's sync test style (no ``pytest-asyncio``).
 from __future__ import annotations
 
 import asyncio
+import base64
 import textwrap
 import uuid
 from pathlib import Path
@@ -545,6 +546,195 @@ def test_create_app_inits_event_sources(app):
     """``create_app()`` must initialise ``app.state.event_sources`` as an
     empty dict (the SSE endpoint reads it at request time)."""
     assert getattr(app.state, "event_sources", None) == {}
+
+
+# ---------------------------------------------------------------------------
+# Region-scoped edit request (issue #7, workstream task-c) — HONEST STUB
+#
+# This route accepts and validates a lasso-selection payload and returns
+# 202 Accepted with status "deferred". It never regenerates OpenSCAD
+# source — that wiring is out of scope for this ticket (see the module
+# docstring on d33d.app.RegionEditRequest).
+# ---------------------------------------------------------------------------
+
+#: A minimal valid 1x1 PNG, base64-encoded — small enough to exercise the
+#: base64-decode + size-bound path without a real render artifact.
+_TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _region_edit_body(**overrides: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "module_ids": ["curl_3", "curl_4"],
+        "view_id": "front",
+        "marked_png_base64": _TINY_PNG_BASE64,
+        "polygon": [
+            {"x": 10.0, "y": 10.0},
+            {"x": 50.0, "y": 10.0},
+            {"x": 30.0, "y": 40.0},
+        ],
+        "instruction": "open up this spiral, it's too tight to print",
+    }
+    body.update(overrides)
+    return body
+
+
+async def _create_project(client: AsyncClient) -> int:
+    r = await client.post("/api/projects", json={"name": "filigree earring"})
+    assert r.status_code == 201, r.text
+    return int(r.json()["id"])
+
+
+def test_region_edit_accepted_returns_202_deferred(app):
+    """A well-formed region-edit request against a real project returns
+    202 with an explicit ``status: "deferred"`` body — never a fabricated
+    success/edit result, since no regeneration happens."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(),
+        )
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    body = r.json()
+    assert body["project_id"] == project_id
+    assert body["status"] == "deferred"
+    assert body["module_ids"] == ["curl_3", "curl_4"]
+    assert body["view_id"] == "front"
+    # The honest-stub contract: no field claims an edit/regeneration result.
+    assert "scad" not in body
+    assert "result" not in body
+
+
+def test_region_edit_unknown_project_returns_404(app):
+    """A region-edit request against a project id that does not exist is
+    a 404, matching every other per-project route's not-found contract."""
+
+    async def _call(client):
+        return await client.post(
+            "/api/projects/999/region-edits",
+            json=_region_edit_body(),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 404
+    assert "not found" in r.json()["detail"].lower()
+
+
+def test_region_edit_rejects_empty_module_ids(app):
+    """``module_ids`` must carry at least one ranked identifier — the
+    whole point of #7 is resolving to named modules, never an empty or
+    pixel-coordinate-only selection."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(module_ids=[]),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_more_than_ten_module_ids(app):
+    """Set-of-Mark caps ranked regions at ~10 (spec: small open models
+    confuse more IDs than that) — an over-long list is rejected, not
+    silently truncated."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(module_ids=[f"m{i}" for i in range(11)]),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_unknown_view_id(app):
+    """``view_id`` must be one of the six render-worker views — an
+    unrecognised view id is a validation error, not silently accepted."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(view_id="bottom-left-diagonal"),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_degenerate_polygon(app):
+    """Fewer than 3 polygon vertices cannot enclose an area — rejected,
+    mirroring ``DimensionCanvas.tsx``'s ``isValidPolygon`` client-side
+    check (defence in depth: the server must not trust the client)."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(
+                polygon=[{"x": 1.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
+            ),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_invalid_base64_image(app):
+    """A ``marked_png_base64`` that is not valid base64 is a 400, not a
+    500 — the route must validate before attempting to use the bytes."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(marked_png_base64="not-valid-base64!!!"),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 400
+
+
+def test_region_edit_rejects_oversized_image(app):
+    """A base64 payload that decodes larger than
+    ``MAX_REGION_EDIT_IMAGE_BYTES`` is rejected with 413, mirroring the
+    photo-upload route's size cap."""
+    # ~6 MB of raw 'A' bytes, base64-encoded — decodes over the 5 MB cap.
+    oversized = base64.b64encode(b"A" * (6 * 1024 * 1024)).decode("ascii")
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(marked_png_base64=oversized),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 413
+
+
+def test_region_edit_rejects_empty_instruction(app):
+    """An empty edit instruction is rejected — the request must carry
+    what the user actually asked for, not just the selection geometry."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(instruction=""),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
 
 
 def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):

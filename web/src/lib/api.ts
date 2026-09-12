@@ -15,6 +15,7 @@
  *   PUT    /api/config/models                 — full-YAML catalogue replacement
  *   GET    /api/settings/credentials          — names-only credential list
  *   POST   /api/settings/credentials          — store a provider key (Fernet)
+ *   POST   /api/projects/{id}/region-edits    — region-scoped edit request (issue #7, task-c)
  *
  * Security invariants (inherited from the backend, asserted here):
  *   - API keys never surface in any value this module parses or returns.
@@ -126,6 +127,52 @@ export interface Credential {
   model_alias: string;
 }
 
+/** Which of the six render-worker views a lasso selection was drawn on
+ *  (matches `ViewId` in `DimensionCanvas.tsx`). */
+export type RegionEditViewId = "front" | "back" | "left" | "right" | "top" | "iso";
+
+/** One vertex of the lasso polygon, in photo-pixel coordinates (matches
+ *  `PhotoPoint` in `DimensionCanvas.tsx`). */
+export interface RegionEditPolygonPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Body of `POST /api/projects/{id}/region-edits` (issue #7, task-c).
+ *
+ * Carries the ranked module-identifier list `ModelViewer.resolveLassoSelection`
+ * resolved (top-most/primary first — never pixel coordinates), the
+ * composited red-marked PNG (base64, no data-URL prefix), the raw lasso
+ * polygon, the view id it was drawn on, and the user's free-text edit
+ * instruction.
+ */
+export interface RegionEditRequest {
+  /** Ranked module identifiers, top-most/primary first. 1–10 entries
+   *  (Set-of-Mark cap: small open models confuse longer ID lists). */
+  module_ids: string[];
+  view_id: RegionEditViewId;
+  /** The composited red-marked PNG, base64-encoded (no `data:` prefix). */
+  marked_png_base64: string;
+  /** Closed polygon vertices, photo-pixel coordinates. At least 3 points. */
+  polygon: RegionEditPolygonPoint[];
+  /** The user's free-text edit instruction for the selected region. */
+  instruction: string;
+}
+
+/**
+ * Response shape for the accept-and-defer stub. `status` is always
+ * `"deferred"` — this route never regenerates OpenSCAD source (see
+ * `createRegionEdit`'s doc comment).
+ */
+export interface RegionEditResult {
+  project_id: number;
+  status: "deferred";
+  detail: string;
+  module_ids: string[];
+  view_id: string;
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -201,6 +248,37 @@ export class ApiClient {
     );
     if (!res.ok) await throwFor(res);
     return (await res.json()) as PhotoUploadResult;
+  }
+
+  // -- region-scoped edit request (issue #7, task-c) -------------------------
+  //
+  // NOTE: This is an HONEST STUB client method, matching the backend's own
+  // accept-and-defer contract (see `d33d/app.py`'s `RegionEditRequest`
+  // docstring). The route validates the payload and returns 202 Accepted
+  // with `status: "deferred"` — it does NOT regenerate any OpenSCAD source.
+  // Wiring "regenerate only these named modules" into the design loop
+  // (`d33d/design_loop.py`, issue #5) is a future ticket's scope, same as
+  // `downloadModel3MF` below documents for the 3MF HTTP route.
+
+  /**
+   * Submit a region-scoped edit request: the ranked module-identifier list
+   * a lasso selection resolved to, the composited marked PNG, the lasso
+   * polygon, the view id, and the user's instruction.
+   *
+   * Returns 202 Accepted with `status: "deferred"` — the caller must not
+   * treat this as "the edit happened"; scoped-edit regeneration is not
+   * yet implemented on the backend.
+   */
+  async createRegionEdit(
+    projectId: number,
+    input: RegionEditRequest,
+  ): Promise<RegionEditResult> {
+    return this.request<RegionEditResult>(
+      "POST",
+      `/api/projects/${projectId}/region-edits`,
+      input,
+      202,
+    );
   }
 
   // -- model config -----------------------------------------------------------

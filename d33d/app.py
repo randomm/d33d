@@ -26,10 +26,20 @@ routers (``create_projects_router`` / ``create_streaming_router``) on the
 app it builds, and ``app.state.event_sources`` (the dict the SSE endpoint
 reads) is initialised empty at build time. The HTTP endpoints themselves
 are out of scope for this module.
+
+Also defined here: ``POST /api/projects/{id}/region-edits`` (issue #7,
+workstream task-c) — the region-scoped edit request route. It is an
+HONEST STUB: it validates and accepts a lasso-selection payload (ranked
+module identifiers, marked PNG, polygon, view id, instruction) and
+returns 202 Accepted with a ``status: "deferred"`` body. It does not
+regenerate any OpenSCAD source — that wiring into the design loop
+(``d33d/design_loop.py``, issue #5) is explicitly out of scope here.
 """
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import re
@@ -40,9 +50,10 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field, field_validator
 
 from d33d import db
 from d33d.config import ModelCatalogueLoader, hot_reload
@@ -270,6 +281,87 @@ def _serialise_catalogue(cat: Catalogue) -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Region-scoped edit request (issue #7, workstream task-c)
+# ---------------------------------------------------------------------------
+#
+# ⚠️ HONEST STUB — this route accepts and validates a region-selection
+# payload (ranked module identifiers + marked PNG + lasso polygon + view
+# id) and returns 202 Accepted. It does NOT regenerate any OpenSCAD
+# source. Wiring "regenerate only these named modules" into the design
+# loop (``d33d/design_loop.py``, issue #5) is explicitly deferred to a
+# future ticket per issue #7's scope split — see the module docstring on
+# ``ApiClient.downloadModel3MF`` in ``web/src/lib/api.ts`` for the same
+# accept-and-defer convention used elsewhere in this codebase (a route/
+# client method that is real plumbing over a backend capability that does
+# not exist yet, not a fabricated response).
+
+#: The six orthographic render-worker views a lasso selection may be
+#: drawn on (matches ``ViewId`` in ``web/src/components/canvas/
+#: DimensionCanvas.tsx``).
+REGION_EDIT_VIEW_IDS: frozenset[str] = frozenset(
+    {"front", "back", "left", "right", "top", "iso"}
+)
+
+#: Hard cap on the marked-PNG body carried in a region-edit request. The
+#: composited marked image is a single 800x800 (or viewport-sized) PNG,
+#: base64-encoded — a few hundred KB in practice. This bounds the request
+#: the same way ``MAX_CATALOGUE_BODY_BYTES`` bounds the catalogue PUT.
+MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB (base64-decoded size)
+
+#: Set-of-Mark cap (spec: "small open models confuse more IDs than
+#: that"). A ranked module-identifier list longer than this is rejected
+#: rather than silently truncated, so an over-long selection is surfaced
+#: to the caller instead of quietly losing ranked entries.
+MAX_REGION_EDIT_MODULE_IDS = 10
+
+
+class LassoPolygonPoint(BaseModel):
+    """One vertex of the lasso polygon, in photo-pixel coordinates.
+
+    Mirrors ``PhotoPoint`` in ``DimensionCanvas.tsx`` — pixel coordinates
+    only; this route never receives or infers 3-D geometry.
+    """
+
+    x: float
+    y: float
+
+
+class RegionEditRequest(BaseModel):
+    """Body of ``POST /api/projects/{id}/region-edits``.
+
+    Carries everything the (future) scoped-edit regeneration will need:
+    the ranked module-identifier list the client-side lasso resolved via
+    ``ModelViewer.resolveLassoSelection`` (top-most/primary first, never
+    pixel coordinates — the whole point of issue #7), the composited
+    red-marked PNG the vision model would see, the raw lasso polygon (for
+    audit/debugging and for the containment gate's future volume lift),
+    the view id it was drawn on, and the user's free-text edit instruction.
+    """
+
+    module_ids: list[str] = Field(min_length=1, max_length=MAX_REGION_EDIT_MODULE_IDS)
+    view_id: str
+    marked_png_base64: str = Field(min_length=1)
+    polygon: list[LassoPolygonPoint] = Field(min_length=3)
+    instruction: str = Field(min_length=1)
+
+    @field_validator("view_id")
+    @classmethod
+    def _view_id_must_be_known(cls, v: str) -> str:
+        if v not in REGION_EDIT_VIEW_IDS:
+            raise ValueError(
+                f"view_id must be one of {sorted(REGION_EDIT_VIEW_IDS)}, got {v!r}"
+            )
+        return v
+
+    @field_validator("module_ids")
+    @classmethod
+    def _module_ids_non_empty_strings(cls, v: list[str]) -> list[str]:
+        if any(not isinstance(m, str) or not m for m in v):
+            raise ValueError("module_ids must be non-empty strings")
+        return v
+
+
 def create_app(
     db_path: str | Path = ":memory:",
     *,
@@ -484,6 +576,52 @@ def create_app(
             }
         )
 
+    @app.post("/api/projects/{project_id}/region-edits", status_code=202)
+    async def create_region_edit(
+        request: Request, project_id: int, body: RegionEditRequest
+    ) -> JSONResponse:
+        """Accept a region-scoped edit request. HONEST STUB — see the
+        module-level comment above :class:`RegionEditRequest`.
+
+        Validates the payload (module identifiers, marked PNG, lasso
+        polygon, view id, instruction) against a real project and
+        returns 202 Accepted with a ``status: "deferred"`` body. No
+        OpenSCAD source is read or regenerated by this route — scoped-
+        edit regeneration is out of scope for issue #7 (see the design
+        loop, issue #5, for the eventual consumer of this payload).
+        """
+        conn: db.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        try:
+            image_bytes = base64.b64decode(body.marked_png_base64, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise HTTPException(
+                status_code=400, detail=f"marked_png_base64 is not valid base64: {e}"
+            )
+        if len(image_bytes) > MAX_REGION_EDIT_IMAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"marked PNG exceeds {MAX_REGION_EDIT_IMAGE_BYTES} byte limit",
+            )
+
+        return JSONResponse(
+            status_code=202,
+            content={
+                "project_id": project_id,
+                "status": "deferred",
+                "detail": (
+                    "region-scoped edit request accepted; scoped-edit "
+                    "regeneration is not yet implemented (deferred to a "
+                    "future ticket wiring this into d33d/design_loop.py)"
+                ),
+                "module_ids": body.module_ids,
+                "view_id": body.view_id,
+            },
+        )
+
     # Static SPA serving — mounted LAST, at the root path. All ``/api/*``
     # routers are registered above; Starlette's Router matches routes in
     # registration order and returns on the first full match, so this
@@ -504,6 +642,10 @@ def create_app(
 
 __all__ = [
     "MAX_CATALOGUE_BODY_BYTES",
+    "MAX_REGION_EDIT_IMAGE_BYTES",
+    "MAX_REGION_EDIT_MODULE_IDS",
+    "REGION_EDIT_VIEW_IDS",
     "STUB_HTML",
+    "RegionEditRequest",
     "create_app",
 ]

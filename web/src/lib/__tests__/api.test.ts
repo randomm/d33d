@@ -14,6 +14,8 @@ import {
   type ModelCatalogue,
   type PhotoUploadResult,
   type Project,
+  type RegionEditRequest,
+  type RegionEditResult,
   type StreamEvent,
 } from "../api.js";
 
@@ -228,6 +230,76 @@ describe("photo upload", () => {
     const f = new File([new Uint8Array(1)], "a.txt", { type: "text/plain" });
     await expect(client.uploadPhoto(1, f)).rejects.toBeInstanceOf(ApiError);
     expect(fake.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Region-scoped edit request (issue #7, task-c) — HONEST STUB
+// ---------------------------------------------------------------------------
+
+const REGION_EDIT_REQUEST: RegionEditRequest = {
+  module_ids: ["curl_3", "curl_4"],
+  view_id: "front",
+  marked_png_base64: "aGVsbG8=",
+  polygon: [
+    { x: 10, y: 10 },
+    { x: 50, y: 10 },
+    { x: 30, y: 40 },
+  ],
+  instruction: "open up this spiral, it's too tight to print",
+};
+
+const REGION_EDIT_RESULT: RegionEditResult = {
+  project_id: 1,
+  status: "deferred",
+  detail:
+    "region-scoped edit request accepted; scoped-edit regeneration is not yet implemented",
+  module_ids: ["curl_3", "curl_4"],
+  view_id: "front",
+};
+
+describe("region-scoped edit request", () => {
+  it("createRegionEdit POSTs JSON to /api/projects/{id}/region-edits", async () => {
+    fake.enqueue(json(202, REGION_EDIT_RESULT));
+    const r = await client.createRegionEdit(1, REGION_EDIT_REQUEST);
+    expect(r.status).toBe("deferred");
+    expect(r.module_ids).toEqual(["curl_3", "curl_4"]);
+
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/region-edits");
+    expect(init.method).toBe("POST");
+    expect(init.headers).toEqual({ "Content-Type": "application/json" });
+    expect(JSON.parse(init.body as string)).toEqual(REGION_EDIT_REQUEST);
+  });
+
+  it("resolves only on 202 (the accept-and-defer status)", async () => {
+    fake.enqueue(json(202, REGION_EDIT_RESULT));
+    await expect(
+      client.createRegionEdit(1, REGION_EDIT_REQUEST),
+    ).resolves.toMatchObject({ status: "deferred" });
+  });
+
+  it("surfaces a 404 for an unknown project", async () => {
+    fake.enqueue(json(404, { detail: "project not found" }));
+    await expect(
+      client.createRegionEdit(999, REGION_EDIT_REQUEST),
+    ).rejects.toMatchObject({ status: 404, detail: "project not found" });
+  });
+
+  it("surfaces a 422 validation error (e.g. empty module_ids)", async () => {
+    fake.enqueue(
+      json(422, { detail: [{ msg: "List should have at least 1 item" }] }),
+    );
+    await expect(
+      client.createRegionEdit(1, { ...REGION_EDIT_REQUEST, module_ids: [] }),
+    ).rejects.toBeInstanceOf(ApiError);
+  });
+
+  it("never fabricates an edit/regeneration result field", async () => {
+    fake.enqueue(json(202, REGION_EDIT_RESULT));
+    const r = await client.createRegionEdit(1, REGION_EDIT_REQUEST);
+    expect(r).not.toHaveProperty("scad");
+    expect(r).not.toHaveProperty("result");
   });
 });
 
