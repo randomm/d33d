@@ -32,8 +32,13 @@ import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditCont
  *  in tests that need to control its output). */
 const FAKE_MODULE_GROUP = { name: "fake-module-group" };
 
-const { resolveLassoSelectionMock } = vi.hoisted(() => ({
+const { resolveLassoSelectionMock, mockLoadResultRef } = vi.hoisted(() => ({
   resolveLassoSelectionMock: vi.fn(),
+  // Lets individual tests override the mock ModelViewer's onLoaded result
+  // (e.g. to simulate a `result.ok === false` decode/parse failure) without
+  // having to re-mock the whole module per test. Reset to null (meaning
+  // "use the default ok:true result") in beforeEach.
+  mockLoadResultRef: { current: null as LoadResult | null },
 }));
 
 vi.mock("../viewer/ModelViewer", async () => {
@@ -62,10 +67,12 @@ vi.mock("../viewer/ModelViewer", async () => {
         raycaster: {} as never,
       });
       if (props.data !== null) {
-        props.onLoaded?.({
-          ok: true,
-          mesh: { object: FAKE_MODULE_GROUP as never, format: props.format as "glb" },
-        });
+        props.onLoaded?.(
+          mockLoadResultRef.current ?? {
+            ok: true,
+            mesh: { object: FAKE_MODULE_GROUP as never, format: props.format as "glb" },
+          },
+        );
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [props.data]);
@@ -980,5 +987,157 @@ describe("App region-selection (lasso) wiring", () => {
       ),
     ).toBe(false);
     expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+  });
+
+  it("a composite failure (getContext returning null) surfaces a notice and does not crash the app", async () => {
+    // Regression: compositeMarkedPng throws when canvas.getContext("2d")
+    // returns null (context loss, exhausted canvas contexts, headless
+    // quirks). Before the fix this propagated out of handleLassoCompleted
+    // uncaught, unmounting the whole React tree (no ErrorBoundary exists).
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(null) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    // The app tree must still be mounted and responsive — the shell is
+    // still there, a notice is shown instead of a crash, and no pending
+    // selection (which would require a successful composite) was created.
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(screen.getByTestId("app-shell")).toBeTruthy();
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+});
+
+describe("App model load-error handling", () => {
+  afterEach(() => {
+    mockLoadResultRef.current = null;
+  });
+
+  it("surfaces a distinct load-error state (not the generic 'not loaded yet' notice) when result.ok is false, and keeps the lasso disabled", async () => {
+    // Regression: before the fix, handleViewerLoaded collapsed "still
+    // loading" and "failed to load" into the same moduleGroup===null state
+    // with zero user-facing signal — a decode/parse failure left the lasso
+    // permanently and inexplicably disabled.
+    mockLoadResultRef.current = { ok: false, error: "unsupported GLB version" };
+
+    const client = makeClient();
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(screen.getByTestId("selection-notice").textContent).toContain(
+      "unsupported GLB version",
+    );
+    expect(screen.getByTestId("selection-notice").textContent).toContain("failed to load");
+    expect(
+      screen.getByTestId("viewport-lasso-overlay-mock").getAttribute("data-disabled"),
+    ).toBe("true");
+  });
+});
+
+describe("App region-edit success feedback", () => {
+  // Same jsdom canvas-backend limitation as the "lasso wiring" describe
+  // block above: getContext("2d") returns null in jsdom, so
+  // compositeMarkedPng needs a stub to composite deterministically here
+  // (this test needs a successful lasso completion to reach the send flow).
+  let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+  let originalToDataURL: typeof HTMLCanvasElement.prototype.toDataURL;
+
+  beforeEach(() => {
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "",
+      lineWidth: 0,
+    };
+    originalGetContext = HTMLCanvasElement.prototype.getContext;
+    originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.toDataURL = vi
+      .fn()
+      .mockReturnValue(
+        "data:image/png;base64,ZmFrZS1wbmc=",
+      ) as unknown as typeof HTMLCanvasElement.prototype.toDataURL;
+  });
+
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+  });
+
+  it("surfaces an accepted-but-deferred assistant message on a successful 202, never claiming the edit completed", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: ["wing_left"],
+      view_id: "front",
+    });
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalled());
+
+    await waitFor(() => {
+      const accepted = screen
+        .getAllByTestId("chat-msg-assistant")
+        .find((el) => el.textContent?.includes("accepted"));
+      expect(accepted).toBeTruthy();
+    });
+    const acceptedMsg = screen
+      .getAllByTestId("chat-msg-assistant")
+      .find((el) => el.textContent?.includes("accepted"));
+    // Must read as accepted-but-deferred, never as a completed edit.
+    expect(acceptedMsg?.textContent).toContain("not implemented yet");
+    expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("edit applied");
+    expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("done");
   });
 });

@@ -124,7 +124,22 @@ export default function App({ renders = [], client }: AppProps) {
   }, []);
 
   const handleViewerLoaded = useCallback((result: LoadResult) => {
-    setModuleGroup(result.ok && result.mesh ? result.mesh.object : null);
+    if (result.ok && result.mesh) {
+      setModuleGroup(result.mesh.object);
+      setSelectionNotice(null);
+      return;
+    }
+    // A load failure (decode/parse error) is distinct from "still
+    // loading" — both leave moduleGroup null (disabling the lasso via
+    // `disabled={moduleGroup === null}`), but only a failure should tell
+    // the user *why* the lasso is unavailable instead of leaving them to
+    // wonder if it will ever appear.
+    setModuleGroup(null);
+    setSelectionNotice(
+      result.error
+        ? `Model failed to load — lasso unavailable: ${result.error}`
+        : "Model failed to load — lasso unavailable.",
+    );
   }, []);
 
   // Decode the named-module GLB fixture once on mount. Live module-registry
@@ -155,46 +170,60 @@ export default function App({ renders = [], client }: AppProps) {
       // CSS-pixel dimensions or every raycast mis-registers on any
       // DPR!==1 display.
       const cssSize = handle.renderer.getSize(new Vector2());
-      const { ranked, primary } = resolveLassoSelection(
-        event.points,
-        cssSize.x,
-        cssSize.y,
-        handle.camera,
-        handle.raycaster,
-        moduleGroup,
-      );
 
-      if (primary === null || ranked.length === 0) {
-        // Empty ranked list — distinct "nothing selected" state. Never
-        // falls back to selecting the whole model, never calls the API.
-        setSelectionNotice("Nothing selected — the lasso didn't hit any part of the model.");
-        return;
+      // resolveLassoSelection and compositeMarkedPng both throw on
+      // unexpected failures (notably compositeMarkedPng's
+      // `canvas.getContext("2d")` returning null on context loss, exhausted
+      // canvas contexts, or headless quirks). There is no ErrorBoundary in
+      // this app, so an uncaught throw here would unmount the whole React
+      // tree — losing chat history and project state — instead of
+      // degrading like the existing "nothing selected" path. Catch and
+      // route through the same selection-notice channel.
+      try {
+        const { ranked, primary } = resolveLassoSelection(
+          event.points,
+          cssSize.x,
+          cssSize.y,
+          handle.camera,
+          handle.raycaster,
+          moduleGroup,
+        );
+
+        if (primary === null || ranked.length === 0) {
+          // Empty ranked list — distinct "nothing selected" state. Never
+          // falls back to selecting the whole model, never calls the API.
+          setSelectionNotice("Nothing selected — the lasso didn't hit any part of the model.");
+          return;
+        }
+
+        const moduleIds = ranked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name);
+        // compositeMarkedPng's polygon argument is in the same CSS-pixel space
+        // as event.points (ViewportLassoOverlay draws via getBoundingClientRect()),
+        // so it needs the same CSS-pixel cssSize used for the raycast above to
+        // scale into the canvas's drawing-buffer pixel space.
+        const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
+
+        setSelectionNotice(null);
+
+        // The server requires a non-empty free-text `instruction`
+        // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
+        // the user can supply. Rather than call createRegionEdit here with
+        // no instruction (which would always 422), stash the resolved
+        // selection and the polygon/view needed to build the request, and
+        // surface an affordance telling the user to describe the change in
+        // chat. The pending selection is attached to whichever chat message
+        // the user sends next (see handleSendMessage).
+        pendingSelectionGenerationRef.current += 1;
+        setPendingSelection({
+          thumbnail: `data:image/png;base64,${markedPngBase64}`,
+          viewId: event.viewId,
+          moduleIds,
+          polygon: event.points,
+        });
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : "unknown error";
+        setSelectionNotice(`Selection failed — could not process the lasso: ${detail}`);
       }
-
-      setSelectionNotice(null);
-
-      const moduleIds = ranked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name);
-      // compositeMarkedPng's polygon argument is in the same CSS-pixel space
-      // as event.points (ViewportLassoOverlay draws via getBoundingClientRect()),
-      // so it needs the same CSS-pixel cssSize used for the raycast above to
-      // scale into the canvas's drawing-buffer pixel space.
-      const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
-
-      // The server requires a non-empty free-text `instruction`
-      // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
-      // the user can supply. Rather than call createRegionEdit here with
-      // no instruction (which would always 422), stash the resolved
-      // selection and the polygon/view needed to build the request, and
-      // surface an affordance telling the user to describe the change in
-      // chat. The pending selection is attached to whichever chat message
-      // the user sends next (see handleSendMessage).
-      pendingSelectionGenerationRef.current += 1;
-      setPendingSelection({
-        thumbnail: `data:image/png;base64,${markedPngBase64}`,
-        viewId: event.viewId,
-        moduleIds,
-        polygon: event.points,
-      });
     },
     [moduleGroup],
   );
@@ -276,6 +305,25 @@ export default function App({ renders = [], client }: AppProps) {
             marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
             polygon: selectionToAttach.polygon,
             instruction: trimmed,
+          })
+          .then(() => {
+            // 202 Accepted means the request was validated and queued —
+            // NOT that any regeneration happened (`RegionEditResult.status`
+            // is always "deferred"; scoped-edit regeneration is not yet
+            // implemented server-side, see api.ts's createRegionEdit doc
+            // comment). Without this, a successful request produced zero
+            // feedback, indistinguishable from a silent failure or a
+            // request still in flight. Word it so it can never read as a
+            // completed edit.
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `msg-${Date.now()}-region-edit-accepted`,
+                role: "assistant",
+                content:
+                  "Region edit request accepted — scoped regeneration is not implemented yet.",
+              },
+            ]);
           })
           .catch((e) => {
             // The request failed (network error, or a 4xx/5xx from the
