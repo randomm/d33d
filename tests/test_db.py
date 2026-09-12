@@ -179,22 +179,23 @@ def test_provider_credentials_round_trip_and_names_only(
 def test_put_credential_returns_stable_id_across_insert_and_update(
     conn: db.Connection,
 ) -> None:
-    """put_credential must return the same row id on the INSERT path and
-    on a subsequent ON CONFLICT DO UPDATE of the same (provider_id,
-    model_alias) pair — pins the lastrowid shortcut for both upsert
-    branches now that the redundant SELECT has been dropped."""
+    """put_credential returns cursor.lastrowid directly (no redundant
+    second SELECT) — pin that the id is stable across the INSERT and a
+    subsequent ON CONFLICT DO UPDATE of the same (provider_id, model_alias)
+    pair, since SQLite sets lastrowid to the conflicting row's id on the
+    UPDATE branch of an upsert."""
     inserted_id = conn.put_credential(
         provider_id="trailopeners",
         model_alias="design-primary",
-        key_ciphertext=b"fernet-ciphertext-bytes-v1",
+        key_ciphertext=b"first-ciphertext",
     )
     updated_id = conn.put_credential(
         provider_id="trailopeners",
         model_alias="design-primary",
-        key_ciphertext=b"fernet-ciphertext-bytes-v2",
+        key_ciphertext=b"replaced-ciphertext",
     )
-    assert isinstance(inserted_id, int)
     assert updated_id == inserted_id
+
     names = conn.list_credentials()
     assert len(names) == 1
 

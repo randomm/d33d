@@ -216,7 +216,7 @@ def test_master_key_no_leftover_tmp_file_after_success(tmp_path: Path) -> None:
 
 def test_master_key_survives_stale_tmp_file_from_crashed_run(tmp_path: Path) -> None:
     """A leftover .tmp file from a crashed prior run must not turn key
-    generation into a hard failure (the O_EXCL create must tolerate/replace
+    generation into a hard failure (the O_TRUNC create must tolerate/replace
     a stale tmp, not raise FileExistsError)."""
     if os.name != "posix":
         pytest.skip("chmod is POSIX-only")

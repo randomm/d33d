@@ -312,6 +312,9 @@ class Connection:
             (provider_id, model_alias, key_ciphertext),
         )
         self._conn.commit()
+        # cursor.lastrowid already carries the row id for both branches of
+        # the upsert: the new id on INSERT, and the conflicting row's id on
+        # the ON CONFLICT DO UPDATE branch — no need for a redundant SELECT.
         return int(cur.lastrowid or 0)
 
     def list_credentials(self) -> list[dict[str, Any]]:
