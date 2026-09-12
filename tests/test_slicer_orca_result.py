@@ -133,19 +133,40 @@ def test_wrong_shape_result_json_null_return_code(tmp_path):
     _wrong_shape_case(tmp_path, {"return_code": None})
 
 
-def test_wrong_shape_result_json_plates_not_list(tmp_path):
-    """(d) sliced_plates is a dict instead of a list → no crash."""
-    _wrong_shape_case(tmp_path, {"return_code": 0, "sliced_plates": {"objects": [1]}})
+def test_valid_rc_plates_not_list_surfaces_real_verdict(tmp_path):
+    """(6) valid int return_code + malformed sliced_plates → real rc and
+    error_string are preserved, objects degrades to None. The slicer's own
+    diagnostic is no longer discarded for a generic shape message."""
+    (tmp_path / "result.json").write_text(
+        json.dumps({"return_code": -50, "error_string": "over envelope"})
+    )
+    rc, err, objects = _parse_orca_result_json(tmp_path)
+    assert rc == -50
+    assert err == "over envelope"
+    assert objects is None
 
 
-def test_wrong_shape_result_json_plate_not_dict(tmp_path):
-    """(e) an entry in sliced_plates is not a dict → no crash."""
-    _wrong_shape_case(tmp_path, {"return_code": 0, "sliced_plates": ["not a plate"]})
+def test_valid_rc_plate_not_dict_surfaces_real_verdict(tmp_path):
+    """(6) valid return_code + a non-dict plate → real rc preserved."""
+    (tmp_path / "result.json").write_text(
+        json.dumps({"return_code": -50, "error_string": "boom", "sliced_plates": ["x"]})
+    )
+    rc, err, objects = _parse_orca_result_json(tmp_path)
+    assert rc == -50
+    assert err == "boom"
+    assert objects is None
 
 
-def test_wrong_shape_result_json_objects_not_list(tmp_path):
-    """sliced_plates[0].objects is not a list → full failure sentinel, no crash."""
-    _wrong_shape_case(tmp_path, {"return_code": 0, "sliced_plates": [{"objects": 5}]})
+def test_valid_rc_objects_not_list_surfaces_real_verdict(tmp_path):
+    """(6) valid return_code + objects is a scalar → real rc preserved,
+    objects is None (a scalar is not a JSON array)."""
+    (tmp_path / "result.json").write_text(
+        json.dumps({"return_code": -50, "error_string": "err", "sliced_plates": [{"objects": 5}]})
+    )
+    rc, err, objects = _parse_orca_result_json(tmp_path)
+    assert rc == -50
+    assert err == "err"
+    assert objects is None
 
 
 def test_orca_clean_result_json_is_success(tmp_path, monkeypatch):
