@@ -60,6 +60,14 @@ logger = logging.getLogger(__name__)
 #: for the QIDI Plus 5.
 QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 
+#: QIDI Plus 5 bed keep-out zone (X, Y) in millimetres, measured from the
+#: lower-left corner of the build plate. Vendor-verified from the QIDI Plus
+#: 5 tech-spec: "Lower-left 9x13 mm area is non-printable by default".
+#: A centred part overlapping this rectangle (post-centre X-min <= 9.0 AND
+#: Y-min <= 13.0) cannot be printed. Enforced in gate 7 only; centring and
+#: the Z envelope are unconstrained by this zone.
+QIDI_PLUS_5_KEEP_OUT_MM: tuple[float, float] = (9.0, 13.0)
+
 #: Minimum feature size for a 0.4 mm nozzle, in millimetres.
 #: Features below this threshold may not print reliably.
 MIN_FEATURE_MM: float = 1.0
@@ -534,6 +542,27 @@ def validate_stl(
                 _part_from_mesh(mesh),
                 f"Dimension {i} ({bbox_mm[i]}mm) exceeds envelope {env[i]}mm",
             )
+
+    # Gate 7 (keep-out): reject a part whose post-centre position overlaps
+    # the bed's lower-left non-printable rectangle. The check is AND over
+    # the two axes — a part with X-min > keep-out X OR Y-min > keep-out Y
+    # clears the rectangle and passes. Z is unconstrained. This reads the
+    # post-centre lower bounds (mesh.bounds[0]), not extents, and does not
+    # subtract env/2 — the mesh is already translated by _centre_mesh.
+    keep_out = QIDI_PLUS_5_KEEP_OUT_MM
+    if (
+        mesh.bounds[0][0] <= keep_out[0]
+        and mesh.bounds[0][1] <= keep_out[1]
+    ):
+        return _fail(
+            "envelope",
+            _part_from_mesh(mesh),
+            (
+                f"Post-centre position ({mesh.bounds[0][0]:.2f}, "
+                f"{mesh.bounds[0][1]:.2f}) overlaps the bed keep-out zone "
+                f"({keep_out[0]}x{keep_out[1]}mm)"
+            ),
+        )
 
     # Export 3MF
     try:
