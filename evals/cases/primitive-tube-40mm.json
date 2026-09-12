@@ -1,0 +1,23 @@
+{
+  "case_id": "primitive-tube-40mm",
+  "kind": "primitive",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/primitive_design_v1.md",
+    "sha256": "0832d2943248fe57128f92dd9bd06a9eead1bd8833c42d00702f2cc475bcca79"
+  },
+  "request": "A tube: 40 mm outer diameter, 24 mm inner diameter, 50 mm tall, coaxial hole through the full height.",
+  "expected_dims": {
+    "x": 40,
+    "y": 40,
+    "z": 50
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ]
+}

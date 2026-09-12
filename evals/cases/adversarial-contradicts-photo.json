@@ -1,0 +1,18 @@
+{
+  "case_id": "adversarial-contradicts-photo",
+  "kind": "adversarial",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/adversarial_v1.md",
+    "sha256": "60af96e776bfe91a3e3a36bc30ba833e93217f08773ced43f4b2c538aaa6366f"
+  },
+  "request": "Recreate the object in the photo, but make it exactly 2 mm wide in X \u2014 the photo clearly shows an object far wider than 2 mm.",
+  "reference_photo": "evals/cases/fixtures/qwen-baseline.scad",
+  "gate_expectations": [
+    "compile"
+  ],
+  "adversarial": {
+    "expected_outcome": "graceful_refusal",
+    "diagnostic": "stated 2 mm X width contradicts the reference photo's visible geometry \u2014 refuse with the conflicting constraint named"
+  }
+}

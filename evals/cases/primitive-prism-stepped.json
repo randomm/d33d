@@ -1,0 +1,23 @@
+{
+  "case_id": "primitive-prism-stepped",
+  "kind": "primitive",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/primitive_design_v1.md",
+    "sha256": "0832d2943248fe57128f92dd9bd06a9eead1bd8833c42d00702f2cc475bcca79"
+  },
+  "request": "A two-step prism: lower step 60\u00d740\u00d720 mm, upper step 40\u00d740\u00d720 mm centered on the lower step. Total height 40 mm.",
+  "expected_dims": {
+    "x": 60,
+    "y": 40,
+    "z": 40
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ]
+}

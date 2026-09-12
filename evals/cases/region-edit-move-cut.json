@@ -1,0 +1,52 @@
+{
+  "case_id": "region-edit-move-cut",
+  "kind": "red_region_edit",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/region_edit_v1.md",
+    "sha256": "e321e0bc2d0b9aeb1ac661738d961ea323808b2375a1dcdd83cfe380e5c2b432"
+  },
+  "request": "Move the existing 8\u00d78\u00d78 mm corner cut from the front-top to the back-top corner, in the red-marked zone. Same size, new position.",
+  "reference_photo": "evals/cases/fixtures/baseline-box20.scad",
+  "expected_dims": {
+    "x": 20,
+    "y": 20,
+    "z": 20
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run",
+    "region_containment"
+  ],
+  "red_region_edit": {
+    "edit_op": "move",
+    "baseline_scad": "evals/cases/fixtures/baseline-box20.scad",
+    "selection_polygons": [
+      {
+        "view": "view_01",
+        "points": [
+          [
+            120,
+            90
+          ],
+          [
+            220,
+            90
+          ],
+          [
+            220,
+            170
+          ],
+          [
+            120,
+            170
+          ]
+        ]
+      }
+    ]
+  }
+}

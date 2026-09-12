@@ -1,0 +1,52 @@
+{
+  "case_id": "region-edit-remove-window",
+  "kind": "red_region_edit",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/region_edit_v1.md",
+    "sha256": "e321e0bc2d0b9aeb1ac661738d961ea323808b2375a1dcdd83cfe380e5c2b432"
+  },
+  "request": "Remove a 10\u00d710\u00d75 mm window from the left face of the box, in the red-marked zone, centered on that face.",
+  "reference_photo": "evals/cases/fixtures/baseline-box20.scad",
+  "expected_dims": {
+    "x": 20,
+    "y": 20,
+    "z": 20
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run",
+    "region_containment"
+  ],
+  "red_region_edit": {
+    "edit_op": "remove",
+    "baseline_scad": "evals/cases/fixtures/baseline-box20.scad",
+    "selection_polygons": [
+      {
+        "view": "view_01",
+        "points": [
+          [
+            120,
+            90
+          ],
+          [
+            220,
+            90
+          ],
+          [
+            220,
+            170
+          ],
+          [
+            120,
+            170
+          ]
+        ]
+      }
+    ]
+  }
+}

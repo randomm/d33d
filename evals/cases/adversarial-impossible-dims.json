@@ -1,0 +1,17 @@
+{
+  "case_id": "adversarial-impossible-dims",
+  "kind": "adversarial",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/adversarial_v1.md",
+    "sha256": "60af96e776bfe91a3e3a36bc30ba833e93217f08773ced43f4b2c538aaa6366f"
+  },
+  "request": "A box 0 mm wide, -5 mm deep and 10 mm tall.",
+  "gate_expectations": [
+    "compile"
+  ],
+  "adversarial": {
+    "expected_outcome": "graceful_refusal",
+    "diagnostic": "zero and negative dimensions are physically impossible \u2014 refuse naming the invalid values"
+  }
+}
