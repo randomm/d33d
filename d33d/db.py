@@ -78,6 +78,8 @@ CREATE TABLE IF NOT EXISTS projects (
     tags            TEXT    NOT NULL DEFAULT '[]',
     notes           TEXT    NOT NULL DEFAULT '',
     source_photo_path TEXT,
+    current_version INTEGER,
+    last_activity   TEXT    NOT NULL DEFAULT (json('{"ts": null, "version_id": null, "name": null}')),
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
@@ -208,8 +210,28 @@ class Connection:
         ).fetchone()
         if row is None:
             return None
+        return self._project_row(row)
+
+    def list_projects(self) -> list[dict[str, Any]]:
+        rows = self._conn.execute("SELECT * FROM projects ORDER BY id ASC").fetchall()
+        return [self._project_row(r) for r in rows]
+
+    @staticmethod
+    def _project_row(row) -> dict[str, Any]:
+        """Decode the JSON columns (tags, last_activity) into Python.
+
+        ``last_activity`` is the library-card "last activity" field
+        (issue #8): ``{"ts": iso-ts | null, "version_id": int | null,
+        "name": str | null}`` — the ts/version of the latest version, the
+        product's "when did the design last change" semantics.
+        """
         out = dict(row)
         out["tags"] = json.loads(out.get("tags") or "[]")
+        raw_la = out.get("last_activity")
+        try:
+            out["last_activity"] = json.loads(raw_la) if raw_la else None
+        except (TypeError, ValueError):
+            out["last_activity"] = None
         return out
 
     def update_project(
@@ -220,6 +242,8 @@ class Connection:
         tags: list[str] | None = None,
         notes: str | None = None,
         source_photo_path: str | None = None,
+        current_version: int | None = None,
+        last_activity: tuple[int, str] | None = None,
     ) -> None:
         if name is not None:
             self._conn.execute(
@@ -241,20 +265,27 @@ class Connection:
                 "UPDATE projects SET source_photo_path = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
                 (source_photo_path, project_id),
             )
+        if current_version is not None:
+            self._conn.execute(
+                "UPDATE projects SET current_version = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+                (current_version, project_id),
+            )
+        if last_activity is not None:
+            version_id, name = last_activity
+            # Stamp the real wall-clock ts (json() has no now()).
+            ts = self._conn.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            ).fetchone()[0]
+            la = json.dumps({"ts": ts, "version_id": version_id, "name": name})
+            self._conn.execute(
+                "UPDATE projects SET last_activity = ? WHERE id = ?",
+                (la, project_id),
+            )
         self._conn.commit()
 
     def delete_project(self, project_id: int) -> None:
         self._conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         self._conn.commit()
-
-    def list_projects(self) -> list[dict[str, Any]]:
-        rows = self._conn.execute("SELECT * FROM projects ORDER BY id ASC").fetchall()
-        out = []
-        for r in rows:
-            d = dict(r)
-            d["tags"] = json.loads(d.get("tags") or "[]")
-            out.append(d)
-        return out
 
     # -- transcripts --------------------------------------------------------
 

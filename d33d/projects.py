@@ -105,6 +105,18 @@ def remove_repo(repo_dir: Path) -> None:
         shutil.rmtree(repo_dir)
 
 
+def _mask_repo_path(p: str | None) -> str:
+    """Mask the on-disk git repo path so the raw path is never exposed in
+    an API response (git invisibility). The field is reduced to a stable
+    placeholder — the raw on-disk path (which names the repo and contains
+    the `.git` directory) is server-internal."""
+    if not p:
+        return ""
+    from pathlib import Path as _P
+
+    return f"project-{_P(p).name[:12]}" if _P(p).name else "project-<unnamed>"
+
+
 # ---------------------------------------------------------------------------
 # Pydantic models for request bodies
 # ---------------------------------------------------------------------------
@@ -138,7 +150,7 @@ def create_projects_router() -> APIRouter:
     @router.post("", status_code=201)
     async def create_project(request: Request, body: ProjectCreate) -> dict[str, Any]:
         conn: db_mod.Connection = request.app.state.conn
-        # Create the DB row (generates git_repo_path)
+        # Update the DB row (generates git_repo_path, sets activity)
         project_id = conn.create_project(
             name=body.name,
             tags=body.tags or [],
@@ -154,20 +166,10 @@ def create_projects_router() -> APIRouter:
             # Rollback: delete the DB row since git init failed
             conn.delete_project(project_id)
             raise HTTPException(status_code=500, detail=f"git init failed: {e}")
-        return {
-            "id": project_id,
-            "name": row["name"],
-            "git_repo_path": row["git_repo_path"],
-            "tags": row["tags"],
-            "notes": row["notes"],
-            "source_photo_path": row["source_photo_path"],
-            "created_at": row["created_at"],
-        }
-
-    @router.get("")
-    async def list_projects(request: Request) -> list[dict[str, Any]]:
-        conn: db_mod.Connection = request.app.state.conn
-        return conn.list_projects()
+        # Git invisibility: the raw on-disk repo path is never exposed.
+        row = dict(row)
+        row.pop("git_repo_path", None)
+        return row
 
     @router.get("/{project_id}")
     async def get_project(request: Request, project_id: int) -> dict[str, Any]:
@@ -175,7 +177,21 @@ def create_projects_router() -> APIRouter:
         row = conn.get_project(project_id)
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
+        # Git invisibility: the raw on-disk repo path is never exposed
+        # (not even the field name — it names a git repo).
+        row = dict(row)
+        row.pop("git_repo_path", None)
         return row
+
+    @router.get("")
+    async def list_projects(request: Request) -> list[dict[str, Any]]:
+        conn: db_mod.Connection = request.app.state.conn
+        out = []
+        for r in conn.list_projects():
+            d = dict(r)
+            d.pop("git_repo_path", None)
+            out.append(d)
+        return out
 
     @router.patch("/{project_id}")
     async def update_project(
@@ -193,6 +209,8 @@ def create_projects_router() -> APIRouter:
         )
         updated = conn.get_project(project_id)
         assert updated is not None
+        updated = dict(updated)
+        updated.pop("git_repo_path", None)
         return updated
 
     @router.delete("/{project_id}", status_code=204)

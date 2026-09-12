@@ -54,6 +54,14 @@ def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
     return result
 
 
+def _repo_for(app, project_id: int) -> Path:
+    """The on-disk repo path (server-internal — the API masks it)."""
+    for p in app.state.conn.list_projects():
+        if p["id"] == project_id:
+            return Path(p["git_repo_path"])
+    raise AssertionError(f"project {project_id} not found")
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -113,16 +121,19 @@ def test_create_project_returns_201_and_git_repo(app_with_projects):
     """POST /api/projects creates a project row AND a git-initialized repo."""
 
     async def _call(client):
-        return await client.post("/api/projects", json={"name": "Test Project"})
+        r = await client.post("/api/projects", json={"name": "Test Project"})
+        pid = r.json()["id"]
+        repo_path = _repo_for(app_with_projects, pid)
+        return r, repo_path
 
-    r = _run_async(app_with_projects, _call)
+    r, repo_path = _run_async(app_with_projects, _call)
     assert r.status_code == 201
     body = r.json()
     assert body["name"] == "Test Project"
     assert body["id"] > 0
 
-    # Verify the git repo exists and is initialised
-    repo_path = Path(body["git_repo_path"])
+    # Verify the git repo exists and is initialised (the path is read from the
+    # DB within the lifespan — the API masks it in the response).
     assert (repo_path / ".git").exists(), "git repo should be initialised"
 
     # Verify git identity is set locally
@@ -223,7 +234,7 @@ def test_delete_project_removes_db_row_and_git_dir(app_with_projects):
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Doomed"})
         pid = create_r.json()["id"]
-        repo_path = create_r.json()["git_repo_path"]
+        repo_path = _repo_for(app_with_projects, pid)
         del_r = await client.delete(f"/api/projects/{pid}")
         return del_r, repo_path
 
@@ -283,7 +294,7 @@ def test_upload_photo_success(app_with_projects, tmp_path):
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Photo Project"})
         pid = create_r.json()["id"]
-        repo_path = Path(create_r.json()["git_repo_path"])
+        repo_path = _repo_for(app_with_projects, pid)
 
         files = {"file": ("test.png", png_bytes, "image/png")}
         return await client.post(f"/api/projects/{pid}/photos", files=files), repo_path
@@ -359,7 +370,7 @@ def test_upload_photo_rejects_oversized_file(app_with_projects):
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Big Test"})
         pid = create_r.json()["id"]
-        repo_path = Path(create_r.json()["git_repo_path"])
+        repo_path = _repo_for(app_with_projects, pid)
         files = {"file": ("big.png", oversized, "image/png")}
         r = await client.post(f"/api/projects/{pid}/photos", files=files)
         # Check no partial file left
@@ -419,7 +430,7 @@ def test_upload_photo_sanitizes_commit_message(app_with_projects):
             "/api/projects", json={"name": "Commit Sanitize Test"}
         )
         pid = create_r.json()["id"]
-        repo_path = Path(create_r.json()["git_repo_path"])
+        repo_path = _repo_for(app_with_projects, pid)
         files = {"file": (evil_name, png_bytes, "image/png")}
         r = await client.post(f"/api/projects/{pid}/photos", files=files)
         # Full commit message of the upload commit, raw body format.
