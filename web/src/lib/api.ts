@@ -127,6 +127,12 @@ export interface Credential {
   model_alias: string;
 }
 
+/** Max number of ranked module identifiers `RegionEditRequest.module_ids`
+ *  accepts (matches `MAX_REGION_EDIT_MODULE_IDS` in `d33d/app.py`, enforced
+ *  server-side via `Field(max_length=...)`). Callers must slice the
+ *  ranked list to this length client-side or the request 422s. */
+export const MAX_REGION_EDIT_MODULE_IDS = 10;
+
 /** Which of the six render-worker views a lasso selection was drawn on
  *  (matches `ViewId` in `DimensionCanvas.tsx`). */
 export type RegionEditViewId = "front" | "back" | "left" | "right" | "top" | "iso";

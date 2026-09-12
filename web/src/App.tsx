@@ -16,13 +16,25 @@
  */
 
 import { useState, useCallback, useEffect, useRef } from "react";
+import type { Object3D } from "three";
 import { ChatPanel, type ChatMessage } from "./components/chat/ChatPanel";
 import { PhotoUpload } from "./components/upload/PhotoUpload";
 import { PinnedParamStrip, type PinnedParam } from "./components/strip/PinnedParamStrip";
-import { ModelViewer } from "./components/viewer/ModelViewer";
+import {
+  ModelViewer,
+  resolveLassoSelection,
+  type ModelViewerHandle,
+  type LoadResult,
+} from "./components/viewer/ModelViewer";
+import {
+  ViewportLassoOverlay,
+  type ViewportLassoCompletedEvent,
+} from "./components/viewer/ViewportLassoOverlay";
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
-import { ApiClient } from "./lib/api";
+import { compositeMarkedPng } from "./lib/markedPng";
+import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "./lib/api";
+import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 
 export interface RenderImage {
   /** view filename, e.g. "view_00_front.png" */
@@ -49,6 +61,99 @@ export default function App({ renders = [], client }: AppProps) {
     null,
   );
   const [streamError, setStreamError] = useState<string | null>(null);
+
+  // Region-selection (lasso) wiring (issue #29).
+  const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
+  const [moduleFixtureData, setModuleFixtureData] = useState<ArrayBuffer | null>(null);
+  const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
+  const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+
+  // ModelViewer's onReady effect only fires once per mount — replace (never
+  // merge) the captured handle on every call so a remount never leaves a
+  // stale raycaster behind.
+  const handleViewerReady = useCallback((handle: ModelViewerHandle) => {
+    viewerHandleRef.current = handle;
+  }, []);
+
+  const handleViewerLoaded = useCallback((result: LoadResult) => {
+    setModuleGroup(result.ok && result.mesh ? result.mesh.object : null);
+  }, []);
+
+  // Decode the named-module GLB fixture once on mount. Live module-registry
+  // wiring is deferred (issue #29 design decision) — this fixture is the
+  // sole moduleGroup source for resolveLassoSelection in this ticket.
+  // Inlined base64 (decoded synchronously, no network round-trip) so it
+  // never competes with `window.fetch` stubs other tests install for the
+  // backend API.
+  useEffect(() => {
+    setModuleFixtureData(loadModuleFixtureArrayBuffer());
+  }, []);
+
+  const handleLassoCompleted = useCallback(
+    (event: ViewportLassoCompletedEvent) => {
+      const handle = viewerHandleRef.current;
+      if (!handle || !moduleGroup) {
+        // "No model loaded yet" — distinct from "lasso hit nothing".
+        setSelectionNotice("Model not loaded yet — draw the lasso again once it appears.");
+        return;
+      }
+
+      const canvas = handle.renderer.domElement;
+      const { ranked, primary } = resolveLassoSelection(
+        event.points,
+        canvas.width,
+        canvas.height,
+        handle.camera,
+        handle.raycaster,
+        moduleGroup,
+      );
+
+      if (primary === null || ranked.length === 0) {
+        // Empty ranked list — distinct "nothing selected" state. Never
+        // falls back to selecting the whole model, never calls the API.
+        setSelectionNotice("Nothing selected — the lasso didn't hit any part of the model.");
+        return;
+      }
+
+      setSelectionNotice(null);
+
+      const moduleIds = ranked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name);
+      const markedPngBase64 = compositeMarkedPng(canvas, event.points);
+
+      if (projectId === null) {
+        setStreamError("No project selected");
+        return;
+      }
+
+      void apiClient
+        .createRegionEdit(projectId, {
+          module_ids: moduleIds,
+          view_id: event.viewId,
+          marked_png_base64: markedPngBase64,
+          polygon: event.points,
+          instruction: "",
+        })
+        .then(() => {
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: `msg-${Date.now()}-selection`,
+              role: "user",
+              content: "Selected a region for editing.",
+              selection: {
+                thumbnail: `data:image/png;base64,${markedPngBase64}`,
+                viewId: event.viewId,
+                moduleIds,
+              },
+            },
+          ]);
+        })
+        .catch((e) => {
+          setStreamError(e instanceof Error ? e.message : "Failed to submit region edit");
+        });
+    },
+    [apiClient, moduleGroup, projectId],
+  );
 
   // Create the (single, default) project on mount.
   useEffect(() => {
@@ -181,14 +286,28 @@ export default function App({ renders = [], client }: AppProps) {
 
       {/* Right pane: viewer + validation status */}
       <div className="app-right" data-testid="app-right-pane">
-        <div className="viewer-pane" data-testid="viewer-pane">
-          {/* No render/model artifact flows through the app yet — the
+        <div className="viewer-pane" data-testid="viewer-pane" style={{ position: "relative" }}>
+          {/* No live render/model artifact flows through the app yet — the
            * design-loop-to-SSE-to-model pipeline is a future ticket's
-           * scope (see issue #23's documented deferral). Mounting the
-           * real ModelViewer now with an empty state means it's reachable
-           * and ready to receive `data`/`format` the moment that pipeline
-           * lands, without another integration pass here. */}
-          <ModelViewer data={null} format="stl" />
+           * scope (see issue #23's documented deferral). The named-module
+           * GLB fixture stands in as the moduleGroup source for lasso
+           * region selection (issue #29's settled design decision). */}
+          <ModelViewer
+            data={moduleFixtureData}
+            format="glb"
+            onReady={handleViewerReady}
+            onLoaded={handleViewerLoaded}
+          />
+          <ViewportLassoOverlay
+            viewId="front"
+            onLassoCompleted={handleLassoCompleted}
+            disabled={moduleGroup === null}
+          />
+          {selectionNotice && (
+            <div className="selection-notice" data-testid="selection-notice" role="status">
+              {selectionNotice}
+            </div>
+          )}
         </div>
         <div className="validation-pane" data-testid="validation-pane">
           <span data-testid="validation-status">Waiting for render…</span>

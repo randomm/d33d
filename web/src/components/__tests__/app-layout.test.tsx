@@ -17,18 +17,85 @@
  */
 
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { useEffect } from "react";
 import App from "../../App";
 import type { RenderImage } from "../../App";
-import { ApiClient } from "../../lib/api";
+import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project } from "../../lib/api";
+import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
+import type { ViewportLassoCompletedEvent } from "../viewer/ViewportLassoOverlay";
 
-vi.mock("../viewer/ModelViewer", () => ({
-  ModelViewer: (props: { data: ArrayBuffer | null; format: string }) => (
+/** A minimal fake THREE.Object3D — the mock only needs identity, never
+ *  real three.js behaviour (resolveLassoSelection itself is mocked below
+ *  in tests that need to control its output). */
+const FAKE_MODULE_GROUP = { name: "fake-module-group" };
+
+const { resolveLassoSelectionMock } = vi.hoisted(() => ({
+  resolveLassoSelectionMock: vi.fn(),
+}));
+
+vi.mock("../viewer/ModelViewer", async () => {
+  const actual = await vi.importActual<typeof import("../viewer/ModelViewer")>(
+    "../viewer/ModelViewer",
+  );
+  const MockModelViewer = (props: {
+    data: ArrayBuffer | null;
+    format: string;
+    onReady?: (handle: ModelViewerHandle) => void;
+    onLoaded?: (result: LoadResult) => void;
+  }) => {
+    useEffect(() => {
+      props.onReady?.({
+        scene: {} as never,
+        camera: {} as never,
+        renderer: { domElement: document.createElement("canvas") } as never,
+        controls: {} as never,
+        raycaster: {} as never,
+      });
+      if (props.data !== null) {
+        props.onLoaded?.({
+          ok: true,
+          mesh: { object: FAKE_MODULE_GROUP as never, format: props.format as "glb" },
+        });
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.data]);
+
+    return (
+      <div
+        data-testid="model-viewer-mock"
+        data-format={props.format}
+        data-has-data={props.data !== null}
+      />
+    );
+  };
+
+  return {
+    ...actual,
+    resolveLassoSelection: resolveLassoSelectionMock,
+    ModelViewer: MockModelViewer,
+  };
+});
+
+vi.mock("../viewer/ViewportLassoOverlay", () => ({
+  ViewportLassoOverlay: (props: {
+    disabled?: boolean;
+    onLassoCompleted: (event: ViewportLassoCompletedEvent) => void;
+  }) => (
     <div
-      data-testid="model-viewer-mock"
-      data-format={props.format}
-      data-has-data={props.data !== null}
+      data-testid="viewport-lasso-overlay-mock"
+      data-disabled={props.disabled}
+      onClick={() =>
+        props.onLassoCompleted({
+          points: [
+            { x: 0, y: 0 },
+            { x: 10, y: 0 },
+            { x: 10, y: 10 },
+          ],
+          viewId: "front",
+        })
+      }
     />
   ),
 }));
@@ -98,6 +165,7 @@ describe("App layout", () => {
 
   beforeEach(() => {
     client = makeClient();
+    resolveLassoSelectionMock.mockReset();
   });
 
   it("renders the two-pane shell (left chat + right viewer)", async () => {
@@ -408,5 +476,166 @@ describe("App streamEvents rejection handling", () => {
     } finally {
       window.removeEventListener("unhandledrejection", onUnhandledRejection);
     }
+  });
+});
+
+describe("App region-selection (lasso) wiring", () => {
+  // jsdom has no real 2-D canvas backend (no native `canvas` package
+  // installed) — HTMLCanvasElement.getContext("2d") returns null and
+  // toDataURL returns a degenerate value. Stub both so
+  // compositeMarkedPng's compositing path (exercised indirectly via
+  // App.tsx's lasso-completion handler) runs deterministically, matching
+  // markedPng.test.ts's own approach.
+  let originalGetContext: typeof HTMLCanvasElement.prototype.getContext;
+  let originalToDataURL: typeof HTMLCanvasElement.prototype.toDataURL;
+
+  beforeEach(() => {
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "",
+      lineWidth: 0,
+    };
+    originalGetContext = HTMLCanvasElement.prototype.getContext;
+    originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.toDataURL = vi
+      .fn()
+      .mockReturnValue(
+        "data:image/png;base64,ZmFrZS1wbmc=",
+      ) as unknown as typeof HTMLCanvasElement.prototype.toDataURL;
+  });
+
+  afterEach(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
+  });
+
+  it("mounts ModelViewer with an onReady handler and a lasso surface over the viewport", async () => {
+    const client = makeClient();
+    render(<App client={client} />);
+
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    // The mock ModelViewer only renders data-has-data=true once its onReady
+    // (and onLoaded, for non-null data) fired — asserting this confirms
+    // App.tsx actually wires onReady/onLoaded rather than mounting a bare
+    // placeholder.
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+    expect(screen.getByTestId("viewport-lasso-overlay-mock")).toBeTruthy();
+  });
+
+  it("lasso completed -> resolveLassoSelection invoked -> ranked module ids reach createRegionEdit -> resulting ChatMessage carries a matching .selection", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: ["wing_left", "wing_right"],
+      view_id: "front",
+    });
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [
+        { name: "wing_left", hitCount: 5 },
+        { name: "wing_right", hitCount: 2 },
+      ],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalledWith(
+        PROJECT.id,
+        expect.objectContaining({
+          module_ids: ["wing_left", "wing_right"],
+          view_id: "front",
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      const selectionMsg = screen
+        .getAllByTestId(/^chat-msg-/)
+        .find((el) => el.textContent?.includes("Selected a region"));
+      expect(selectionMsg).toBeTruthy();
+    });
+  });
+
+  it("does NOT call createRegionEdit when the ranked list is empty (nothing selected)", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({ ranked: [], primary: null });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice")).toBeTruthy();
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+  });
+
+  it("caps module_ids at MAX_REGION_EDIT_MODULE_IDS when the ranked list is longer", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "deferred",
+      detail: "accepted",
+      module_ids: [],
+      view_id: "front",
+    });
+    const longRanked = Array.from({ length: MAX_REGION_EDIT_MODULE_IDS + 5 }, (_, i) => ({
+      name: `module_${i}`,
+      hitCount: MAX_REGION_EDIT_MODULE_IDS + 5 - i,
+    }));
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: longRanked,
+      primary: longRanked[0].name,
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalled();
+    });
+    const call = (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1].module_ids).toHaveLength(MAX_REGION_EDIT_MODULE_IDS);
+    expect(call[1].module_ids).toEqual(
+      longRanked.slice(0, MAX_REGION_EDIT_MODULE_IDS).map((m) => m.name),
+    );
   });
 });
