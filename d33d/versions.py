@@ -27,8 +27,11 @@ defaults stored in project memory):
   no-change marker commit (``versions/main_{seq}.json``) so the git
   history records the switch without rewriting anything.
 * **Serialization.** One writer per project (``asyncio.Lock`` per project
-  id). N simultaneous creates: one wins, the rest get 409 — the chain
-  stays linear.
+  id) so the chain stays linear: parent pointers are read under the lock,
+  so a concurrent create always observes the true latest — plain creates
+  never collide (each wins in turn, appended to the chain head). 409s are
+  reserved for the stale-target races (a restore whose target became the
+  latest, or a fork seed into a non-empty project).
 * **Auto-name.** First 40 chars of the triggering message, sanitized to
   ``[a-z0-9 -]`` (spaces kept, all else dropped); on collision a numeric
   suffix is appended. User-editable, but renaming never touches params,
@@ -117,12 +120,6 @@ def diff_params(
     return added, removed, changed
 
 
-def _param_count(a: dict[str, ParamValue], b: dict[str, ParamValue]) -> int:
-    """Number of keys whose value differs (added + removed + changed)."""
-    added, removed, changed = diff_params(a, b)
-    return len(added) + len(removed) + len(changed)
-
-
 def _valid_param_value(value: Any) -> bool:
     """``params`` is a ``{name: scalar}`` map — number | string | bool."""
     if isinstance(value, bool):
@@ -164,13 +161,6 @@ def init_git_repo(repo_dir: Path) -> None:
         _git(repo_dir, "config", "user.name", _GIT_USER_NAME)
 
 
-def _commit_message(*parts: str) -> str:
-    """Single-line, alnum+``._-`` commit message (never raw user text)."""
-    text = " ".join(parts)
-    safe = "".join(c for c in text if c.isalnum() or c in "._-")
-    return safe[:200]
-
-
 def _commit_versions_file(
     repo_dir: Path, versions_subdir: Path, rel_name: str, message: str
 ) -> None:
@@ -191,9 +181,11 @@ class VersionService:
 
     Reads the shared ``db.Connection`` at construction. All mutations go
     through :meth:`_with_project_lock` so a per-project ``asyncio.Lock``
-    serializes creates (concurrent creators get 409, the chain stays
-    linear) and parent pointers can never branch or point at a stale
-    latest version.
+    serializes writes (concurrent creates queue and each observes the true
+    latest — the chain stays linear) and parent pointers can never branch
+    or point at a stale latest version. Stale-target mutations (restore
+    whose target became latest, fork seed into a non-empty project) 409
+    instead of corrupting the chain.
     """
 
     def __init__(self, conn: db_mod.Connection) -> None:
@@ -284,7 +276,8 @@ class VersionService:
         since git + a shared SQLite write path must be single-writer).
 
         Held across the sync fn so concurrent creates on the same project
-        queue: the loser re-reads the chain and 409s instead of forking.
+        queue: each reads the chain head under the lock, so parent
+        pointers always point at the true latest (the chain stays linear).
         """
         async with self._write_lock, self._lock_for(project_id):
             if hasattr(fn, "__await__"):
@@ -312,10 +305,12 @@ class VersionService:
         fork) can reuse it without re-entering the write lock.
 
         Serialized per project: concurrent calls to the same project run
-        one at a time; a concurrent caller that observes the chain move
-        underneath it (stale ``restored_from``/``forked_from`` target is
-        not the current parent, or the target vanished) gets a 409-style
-        ``VersionConflictError`` instead of forking the chain.
+        one at a time; a plain create always succeeds (parent is read
+        under the lock, so each create appends to the chain head). A
+        caller that pinned a stale ``restored_from`` target that vanished
+        underneath it, or a ``forked_from`` seed arriving at a project
+        that is no longer empty, gets a ``VersionConflictError`` instead
+        of forking the chain.
         """
         return await self._with_project_lock(
             project_id,
@@ -365,10 +360,11 @@ class VersionService:
         parent = latest["id"] if latest is not None else None
 
         # Provenance consistency (race window): if the caller pinned a
-        # restored_from / forked_from target, it must still exist AND be
-        # the current latest (create-then-restore and branch-from are
-        # single-user flows; a chain that moved means the request is
-        # stale).
+        # restored_from target it must still exist — restore_version's
+        # latest-check runs under the lock just above, and the row is not
+        # deleted in this flow, so existence is the only check here (the
+        # "target is already latest" no-op case is handled by
+        # restore_version, which 409s it).
         if restored_from is not None:
             target = self.get_version(project_id, restored_from)
             if target is None:

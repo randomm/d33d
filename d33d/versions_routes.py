@@ -166,23 +166,27 @@ def create_versions_router() -> APIRouter:
     async def list_versions(request: Request, project_id: int) -> list[dict[str, Any]]:
         """Version timeline: oldest first, each entry with name, triggering
         message excerpt, timestamp, thumbnail, parent link, and a diff badge
-        (``diff_count`` = params that changed vs the parent; 0 for the first
-        version)."""
+        (``diff_count`` = params that changed vs the version's OWN parent —
+        never the list-position predecessor, so a restored version's badge
+        is correct even though its parent is not the row before it; 0 for a
+        version without a parent)."""
         svc = _service(request)
         _project_or_404(svc, project_id)
+        by_id: dict[int, dict[str, Any]] = {
+            v["id"]: v for v in svc.list_versions(project_id)
+        }
         out: list[dict[str, Any]] = []
-        prev: dict[str, Any] | None = None
-        for v in svc.list_versions(project_id):
+        for v in by_id.values():
             entry = svc._version_public(v)
-            if prev is None:
+            parent = by_id.get(v["parent"]) if v["parent"] is not None else None
+            if parent is None:
                 entry["diff_count"] = 0
             else:
                 added, removed, changed = versions_mod.diff_params(
-                    prev["params"], v["params"]
+                    parent["params"], v["params"]
                 )
                 entry["diff_count"] = len(added) + len(removed) + len(changed)
             out.append(entry)
-            prev = v
         return out
 
     # -- compare (the prioritized surface) --------------------------------------
@@ -366,9 +370,6 @@ def create_versions_router() -> APIRouter:
                 "last_activity": row.get("last_activity"),
                 "thumbnail": (latest or {}).get("thumbnail"),
             }
-            # Git invisibility: mask the repo path like the projects
-            # router does (the library card shape doesn't need it, but if a
-            # future field adds it, it must be masked).
             out.append(card)
         return out
 
@@ -409,9 +410,13 @@ def create_versions_router() -> APIRouter:
             from d33d.projects import commit_all
 
             commit_all(Path(row["git_repo_path"]), "design source update")
-        except RuntimeError as e:
-            raise HTTPException(status_code=500, detail=f"git commit failed: {e}")
-        return {"stored": str(path), "length": len(source)}
+        except RuntimeError:
+            # The raw git output names the repo on disk — never leak it.
+            raise HTTPException(status_code=500, detail="design source commit failed")
+        # Git invisibility: the on-disk path is server-internal; the
+        # response names only the repo-relative file, never the absolute
+        # path (which names the repo's on-disk location).
+        return {"stored": "design.scad", "length": len(source)}
 
     # -- FINALIZE (the version-creation boundary) ------------------------------
 

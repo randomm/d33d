@@ -109,6 +109,30 @@ const COMPARE: VersionCompare = {
   shared_rotation: { units: "mm", axis_convention: "z-up", identical_convention: true },
 };
 
+/** A restored version at list position 3 (id 3) whose parent is v1 —
+ * its badge must diff against v1 (its parent), not v2 (the row before it).
+ * v3 = {W: 22, H: 25, D: 30} (restored from v1 {W: 20, H: 25, D: 30}, so
+ * 1 change vs the parent) vs v2 = {W: 24, H: 25, D: 30} (2 changes if the
+ * badge were wrongly position-based). */
+const TIMELINE_WITH_RESTORE: VersionTimelineEntry[] = [
+  TIMELINE[0],
+  TIMELINE[1],
+  {
+    id: 3,
+    name: "restored from version 1",
+    params: { W: 22, H: 25, D: 30 },
+    created_by_message: "restored from version 1",
+    parent: 1,
+    restored_from: 1,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-03T00:00:00Z",
+    diff_count: 1,
+  },
+];
+
 // ---------------------------------------------------------------------------
 // VersionTimeline
 // ---------------------------------------------------------------------------
@@ -158,6 +182,14 @@ describe("VersionTimeline (the side rail)", () => {
     render(<VersionTimeline versions={TIMELINE} latestId={2} onCompareSelect={onSelect} />);
     fireEvent.click(screen.getByTestId("timeline-compare-2"));
     expect(onSelect).toHaveBeenCalledWith(2);
+  });
+
+  it("the restored version's diff badge is parent-based, not position-based", () => {
+    // The restored v3 sits at list position 3 (its row's predecessor is v2),
+    // but its parent is v1 — the badge must reflect the diff against the
+    // parent (1 param changed), not the preceding row (2 params).
+    render(<VersionTimeline versions={TIMELINE_WITH_RESTORE} latestId={3} />);
+    expect(screen.getByTestId("timeline-diff-3").textContent).toBe("1 param changed");
   });
 });
 

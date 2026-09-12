@@ -188,6 +188,41 @@ def test_timeline_returns_versions_in_order_with_diff_badges(app_with_versions):
     assert [v["diff_count"] for v in timeline] == [0, 1, 1, 3]
 
 
+def test_restored_version_badge_is_parent_based_not_position_based(
+    app_with_versions,
+):
+    """A restored version's diff badge diffs against its OWN parent (the
+    current latest at restore time), not the immediately-preceding timeline
+    row — for a forward chain the parent IS the preceding row, but the
+    badge must be computed from the parent pointer, not the list position.
+    (The position-based variant was the original finding: it would mis-report
+    a restored version whose parent is not the row before it.)"""
+
+    async def _call(client):
+        pid = await _create_project(client)
+        v1 = await _create_version(client, pid, {"W": 20, "H": 25, "D": 30})
+        await _create_version(client, pid, {"W": 24, "H": 25, "D": 30})
+        await _create_version(client, pid, {"W": 24, "H": 30, "D": 30})
+        # Restore v1: a NEW forward version with v1's snapshot, parent = the
+        # current latest (v3). It sits at the tail of the list.
+        r = await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
+        assert r.status_code == 201, r.text
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return v1, timeline
+
+    v1, timeline = _run_async(app_with_versions, _call)
+    restored = timeline[-1]
+    # Restore's provenance: restored_from = the target, parent = latest.
+    assert restored["restored_from"] == v1["id"]
+    assert restored["parent"] == timeline[-2]["id"]
+    # The badge diffs restored-vs-its-parent (v3 = {W: 24, H: 30, D: 30};
+    # restored = {W: 20, H: 25, D: 30}) → W + H changed → 2 params. The
+    # position-based computation (diff against the row before it) yields the
+    # same value for a forward chain — the parent-pointer logic is what
+    # guarantees correctness for the general case.
+    assert restored["diff_count"] == 2
+
+
 # ---------------------------------------------------------------------------
 # (c) Thumbnails are attached to each version entry
 # ---------------------------------------------------------------------------

@@ -197,3 +197,51 @@ def test_fresh_project_has_empty_timeline_no_error(app_with_versions):
     # The library lists the fresh project with a null current version.
     fresh = [p for p in library if p["current_version"] is None]
     assert len(fresh) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Data-model round-trip: notes, last_activity, archived (the resolved
+# open-question fields — the surfaces the spec describes need them)
+# ---------------------------------------------------------------------------
+
+
+def test_notes_last_activity_and_archive_round_trip(app_with_versions):
+    """The resolved data model (issue #8 open question): Project.notes,
+    Project.last_activity, and Version.archived round-trip through the
+    API — the library card's last-activity field and the gallery archive
+    action depend on these fields existing and persisting."""
+
+    async def _call(client):
+        project = await _create_project(
+            client,
+            name="round trip project",
+            tags=["desk"],
+            notes="bracket for the studio shelf",
+        )
+        pid = project["id"]
+        v1 = await _create_version(client, pid, {"W": 20}, name="v1")
+        # Pin + archive v1 (the gallery archive action).
+        await client.patch(
+            f"/api/projects/{pid}/versions/{v1['id']}",
+            json={"pinned": True, "archived": True},
+        )
+        # A fresh client session reads everything back (the "close the
+        # browser, come back" simulation — the DB is shared).
+        fresh = AsyncClient(
+            transport=ASGITransport(app=app_with_versions), base_url="http://t2"
+        )
+        async with fresh:
+            row = (await fresh.get(f"/api/projects/{pid}")).json()
+            timeline = (await fresh.get(f"/api/projects/{pid}/versions")).json()
+            return row, timeline
+
+    row, timeline = _run_async(app_with_versions, _call)
+    # Project.notes round-trips (free-text outcome notes).
+    assert row["notes"] == "bracket for the studio shelf"
+    # Project.last_activity is stamped (the library card's activity field —
+    # the ts/version of the latest version).
+    assert row["last_activity"] is not None
+    assert row["last_activity"]["ts"]
+    assert row["last_activity"]["version_id"] == timeline[-1]["id"]
+    # Version.archived round-trips (the gallery archive action).
+    assert timeline[0]["archived"] is True

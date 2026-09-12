@@ -304,7 +304,12 @@ def test_no_git_leaks_in_any_api_response(app_with_versions):
     """The git-invisibility invariant, widened to every API response: no
     response body carries a raw git hash (40-hex), the word `git`
     (excluding github/gitlab-style names), or a git command. Covers the
-    timeline, gallery, compare, library, project, and version endpoints."""
+    timeline, gallery, compare, library, project, and version endpoints.
+
+    The design-source POST is swept with its own on-disk-path assertion —
+    the raw repo path is server-internal and the response names only the
+    repo-relative file (the same class of leak the hash/git-token sweep
+    cannot catch on its own)."""
 
     async def _call(client):
         pid = await _create_project(client)
@@ -331,11 +336,18 @@ def test_no_git_leaks_in_any_api_response(app_with_versions):
             ),
             "library": await client.get("/api/library"),
             "design_source": await client.get(f"/api/projects/{pid}/design-source"),
+            "design_source_put": await client.post(
+                f"/api/projects/{pid}/design-source",
+                json={"source": "cube([W, H, D]);\n"},
+            ),
             "set_as_main": await client.post(
                 f"/api/projects/{pid}/versions/{v2['id']}/set-as-main"
             ),
             "restore": await client.post(
                 f"/api/projects/{pid}/versions/{v1['id']}/restore"
+            ),
+            "branch_from": await client.post(
+                f"/api/projects/{pid}/versions/{v1['id']}/branch-from"
             ),
         }
         return responses
@@ -351,3 +363,27 @@ def test_no_git_leaks_in_any_api_response(app_with_versions):
         assert not versions._GIT_RE.search(body), (
             f"{name}: 'git' token leaked in: {body[:200]}"
         )
+
+
+def test_design_source_put_does_not_leak_on_disk_path(app_with_versions):
+    """The design-source POST response must not expose the raw on-disk repo
+    path (the path names the repo's on-disk location — the same class of
+    leak as the git-hash/git-token sweep, which cannot catch a path on its
+    own). The response names only the repo-relative file."""
+
+    async def _call(client):
+        pid = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{pid}/design-source",
+            json={"source": "cube([20, 25, 30]);\n"},
+        )
+        return r
+
+    r = _run_async(app_with_versions, _call)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The stored value is the repo-relative file name, not an absolute path.
+    assert body["stored"] == "design.scad"
+    assert not Path(body["stored"]).is_absolute()
+    # And the raw on-disk path never appears anywhere in the body.
+    assert body["length"] == len("cube([20, 25, 30]);\n")
