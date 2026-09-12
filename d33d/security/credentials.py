@@ -21,30 +21,39 @@ Security invariants:
 
 from __future__ import annotations
 
+import logging
 import os
 import stat
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol
+from typing import Protocol
 
 from cryptography.fernet import Fernet, InvalidToken
 
+logger = logging.getLogger(__name__)
 
-class _DBLike(Protocol):
-    """Duck type: ``db.Connection`` or a bare ``sqlite3.Connection``.
 
-    Both expose ``execute(sql, params)`` and ``commit()``, which is all
-    ``CredentialStore`` needs. ``CredentialStore`` takes this protocol so
-    tests can pass a raw ``sqlite3.Connection`` without a wrapper, and the
-    production path passes the real ``d33d.db.Connection``. No isinstance
-    check — the contract is the two methods.
+class _CursorLike(Protocol):
+    """Duck type for the object ``execute()`` returns: a cursor exposing
+    row access. Both ``sqlite3.Cursor`` and ``d33d.db.Connection``'s
+    ``execute()`` return value satisfy this structurally.
     """
 
-    def execute(self, sql: str, params: tuple) -> object: ...
+    def fetchone(self) -> tuple | None: ...
+    def fetchall(self) -> list[tuple]: ...
+
+
+class _DBLike(Protocol):
+    """Duck type: ``d33d.db.Connection`` or a bare ``sqlite3.Connection``.
+
+    Both expose ``execute(sql, params) -> _CursorLike`` and ``commit()``,
+    which is all ``CredentialStore`` needs. ``CredentialStore`` takes this
+    protocol so tests can pass a raw ``sqlite3.Connection`` without a
+    wrapper, and the production path passes the real ``d33d.db.Connection``.
+    No isinstance check — the contract is the two methods.
+    """
+
+    def execute(self, sql: str, params: tuple) -> _CursorLike: ...
     def commit(self) -> None: ...
-
-
-if TYPE_CHECKING:
-    from d33d import db as _db  # noqa: F401  (annotation-only, avoids circular import)
 
 
 def get_or_create_master_key(path: Path) -> bytes:
@@ -67,10 +76,21 @@ def get_or_create_master_key(path: Path) -> bytes:
         return raw
 
     key = Fernet.generate_key()
-    # Write atomically: write to temp then rename (avoids partial writes)
+    # Write atomically: write to temp then rename (avoids partial writes).
+    # The temp file is created with 0o600 from the very first byte on disk
+    # (O_CREAT|O_WRONLY, mode 0o600) rather than chmod-after-write, so the
+    # Fernet key is never briefly world-readable under a permissive umask.
+    # A stale tmp file from a crashed prior run is truncated and reused
+    # rather than causing key generation to fail.
     tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_bytes(key)
-    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    fd = os.open(
+        tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR
+    )
+    try:
+        os.write(fd, key)
+    finally:
+        os.close(fd)
+    os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)  # belt-and-suspenders vs. umask
     os.replace(tmp, path)
     return key
 
@@ -91,8 +111,13 @@ class CredentialStore:
     store = CredentialStore(conn, master_key)   # conn is db.Connection
     store.store_key("trailopeners", "design-primary", "sk-...")
     rows = store.list_credentials()  # [{"provider_id": "trailopeners", "model_alias": "..."}]
-    secret = store.get_key("trailopeners")  # "sk-..." (server-internal)
+    secret = store.get_key("trailopeners", "design-primary")  # "sk-..." (server-internal)
     ```
+
+    ``model_alias`` may be omitted for a single-alias provider. On a
+    multi-alias provider, omitting it falls back to the alphabetically
+    first alias and logs a warning — pass ``model_alias`` explicitly
+    whenever more than one alias may be stored for the same provider.
 
     The ``provider`` argument to ``store_key`` / ``get_key`` is the value stored
     in ``provider_id`` (the provider *name*, e.g. ``"trailopeners"``).
@@ -136,32 +161,65 @@ class CredentialStore:
         is looked up (0 or 1 row, guaranteed by the UNIQUE constraint).
         If ``model_alias`` is omitted, returns an arbitrary-but-deterministic
         (alphabetically first) alias's key, intended for the common
-        single-alias-per-provider case.
+        single-alias-per-provider case. If the provider has more than one
+        stored alias, a WARNING is logged naming the provider and the alias
+        selected — never the key material.
 
         Returns ``None`` if the provider has no row, or if the ciphertext
         cannot be decrypted (rotated/tampered MASTER_KEY). Never raises on
         decryption failure — the invariant is that a bad key reports
-        "unusable", not "crash".
+        "unusable", not "crash". A decrypt failure logs a WARNING (naming
+        provider/alias, never ciphertext or plaintext) so it's distinguishable
+        from a simple missing-row lookup (which stays silent) during on-call
+        triage.
         """
         if model_alias is None:
-            row = self._conn.execute(
-                "SELECT key_ciphertext FROM provider_credentials "
-                "WHERE provider_id = ? ORDER BY model_alias LIMIT 1",
+            rows = self._conn.execute(
+                "SELECT model_alias, key_ciphertext FROM provider_credentials "
+                "WHERE provider_id = ? ORDER BY model_alias LIMIT 2",
                 (provider,),
-            ).fetchone()
+            ).fetchall()
+            row: tuple | None = rows[0] if rows else None
+            if row is not None and len(rows) > 1:
+                # Multiple aliases exist for this provider; the caller omitted
+                # model_alias, so we deterministically picked the alphabetically
+                # first one. Log which alias was selected — never the ciphertext —
+                # so a cross-model key mix-up isn't silent.
+                logger.warning(
+                    "get_key(%r) called without model_alias on a provider with "
+                    "multiple aliases; falling back to alphabetically-first "
+                    "alias %r",
+                    provider,
+                    row[0],
+                )
+            resolved_alias = row[0] if row is not None else None
+            ciphertext = row[1] if row is not None else None
         else:
             row = self._conn.execute(
                 "SELECT key_ciphertext FROM provider_credentials "
                 "WHERE provider_id = ? AND model_alias = ?",
                 (provider, model_alias),
             ).fetchone()
-        if row is None:
+            resolved_alias = model_alias
+            ciphertext = row[0] if row is not None else None
+        if ciphertext is None:
             return None
         try:
-            return self._fernet.decrypt(row[0]).decode("utf-8")
+            return self._fernet.decrypt(ciphertext).decode("utf-8")
         except (InvalidToken, ValueError):
             # InvalidToken (ciphertext not decryptable with current key)
-            # or ValueError (malformed ciphertext) → unusable row, report as None
+            # or ValueError (malformed ciphertext) → unusable row, report as None.
+            # Log at WARNING (naming provider/alias, never ciphertext/plaintext)
+            # so a rotated/tampered MASTER_KEY incident is distinguishable from
+            # simple misconfiguration (missing row, which stays silent) during
+            # on-call triage.
+            logger.warning(
+                "get_key(%r, %r) found a stored credential that could not be "
+                "decrypted under the current MASTER_KEY (rotated or tampered "
+                "key); reporting as unusable",
+                provider,
+                resolved_alias,
+            )
             return None
 
     def list_credentials(self) -> list[dict[str, str]]:
