@@ -383,6 +383,11 @@ def test_put_models_hot_reload_non_catalogue_error_is_split_state_500(
     r, g = _run_async(app, _failing_put)
     monkeypatch.undo()
 
+    # monkeypatch.undo() also reverts the ``env_key`` fixture's
+    # ``TRAIL_OPENERS_LLM_KEY`` — re-set it so the retry PUT's catalogue
+    # validation can resolve the ``${ENV}`` reference.
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", env_key)
+
     assert r.status_code == 500
     err = r.json()["error"]
     # The message names the split state and the recovery path.
