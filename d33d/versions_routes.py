@@ -580,8 +580,8 @@ def _finalize_loop_kwargs(
       failures.jsonl line is un-archivable without it).
     """
     from d33d.config.catalogue import CatalogueError, ResolutionError
-    from d33d.render_worker import render_for_design_loop
     from d33d.prompt_hash import canonical_hash
+    from d33d.render_worker import render_for_design_loop
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:
         raise ValueError(
