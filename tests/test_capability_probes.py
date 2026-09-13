@@ -248,6 +248,82 @@ def test_probe_failure_degrades_to_t3_without_raising():
     assert select_tier(result) == Tier.T3
 
 
+def test_vision_probe_400_degrades_vision_only_not_tier():
+    """A gateway that rejects the probe image (400 "Non-base64 digit found")
+    must NOT degrade the model to T3: vision becomes False, the tool probe
+    still runs, and tools=True + json_schema=True resolves to T0."""
+    transport = ScriptedTransport(script={"tools_ok": {"text": "hi"}})
+
+    async def factory(request: dict[str, Any]) -> FakeResponse:
+        content = request["json"]["messages"][0]["content"]
+        if isinstance(content, list):
+            # The vision probe(s): the gateway rejects the inline PNG.
+            return FakeResponse(400, {"error": "Non-base64 digit found"})
+        return await transport(request)
+
+    result = _run(
+        probe_capabilities(
+            base_url="https://example.invalid/v1",
+            model_id="m",
+            request_factory=factory,
+        )
+    )
+    assert result.vision is False
+    assert result.max_images == 0
+    assert result.tools is True
+    assert result.json_schema is True
+    assert result.validated is True
+    # Vision failure degrades vision only; tools + json_schema -> T0.
+    assert select_tier(result) == Tier.T0
+
+
+def test_vision_probe_400_on_toolless_endpoint_lands_on_t1():
+    """Vision rejected + no native tools must land on T1 (fenced-JSON text
+    protocol), never T3 -- the T1 branch rides on json_schema, which the
+    tool probe validates independently of the image probe."""
+    transport = ScriptedTransport(script={"no_tools": {"tool": "answer"}})
+
+    async def factory(request: dict[str, Any]) -> FakeResponse:
+        content = request["json"]["messages"][0]["content"]
+        if isinstance(content, list):
+            return FakeResponse(400, {"error": "Non-base64 digit found"})
+        return await transport(request)
+
+    result = _run(
+        probe_capabilities(
+            base_url="https://example.invalid/v1",
+            model_id="m",
+            request_factory=factory,
+        )
+    )
+    assert result.vision is False
+    assert result.tools is False
+    assert result.validated is True
+    assert select_tier(result) == Tier.T1
+
+
+def test_vision_probe_exception_degrades_vision_only():
+    transport = ScriptedTransport(script={"tools_ok": {}})
+
+    async def factory(request: dict[str, Any]) -> FakeResponse:
+        content = request["json"]["messages"][0]["content"]
+        if isinstance(content, list):
+            raise ConnectionError("endpoint down")
+        return await transport(request)
+
+    result = _run(
+        probe_capabilities(
+            base_url="https://example.invalid/v1",
+            model_id="m",
+            request_factory=factory,
+        )
+    )
+    assert result.vision is False
+    assert result.tools is True
+    assert result.json_schema is True
+    assert select_tier(result) == Tier.T0
+
+
 def test_declared_caps_probed_capabilities():
     declared = CapabilityResult(
         tools=False, json_schema=False, vision=True, max_images=1

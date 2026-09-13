@@ -162,10 +162,10 @@ def _good_verdict_payload() -> dict[str, Any]:
 
 
 def _t2_capability() -> CapabilityResult:
-    """A tier that has no tool channel (T2: vision without tools) — the
+    """A tier that has no tool channel (T3: nothing validated) — the
     non-vision fallback trigger is ``status='no_tools_supported'``."""
     return CapabilityResult(
-        tools=False, json_schema=False, vision=False, max_images=0, validated=True
+        tools=False, json_schema=False, vision=False, max_images=0, validated=False
     )
 
 
