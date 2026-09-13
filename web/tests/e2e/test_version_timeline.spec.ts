@@ -31,14 +31,42 @@
  * spec's direct-API work targets the SAME project the SPA is displaying,
  * and no orphan project is ever created.
  *
- * Timeline visibility: the SPA fetches its version timeline exactly once
- * on mount (the `listVersions` effect keyed on projectId). The spec gates
- * the SPA's first `GET /api/projects/{pid}/versions` with a
- * `page.route` handler that waits on a gate promise, creates both
- * versions on the SPA's project in that window, then releases the gate —
- * so the SPA's only timeline fetch returns both versions and the pane
- * renders them without any reload (a reload would create a fresh project
- * and lose the versions).
+ * Timeline visibility (issue #52 fix): the SPA fetches its version
+ * timeline exactly once per page load (the `listVersions` effect keyed
+ * on projectId, which only runs after the mount-time `POST /api/projects`
+ * resolves and `setProjectId` re-renders the pane). The spec gates the
+ * SPA's first versions GET with a `page.route` handler that holds the
+ * request until both versions exist, then releases it — so the SPA's
+ * single timeline fetch of this page load returns both versions and the
+ * pane renders them without any reload (a reload would POST a FRESH
+ * project via App.tsx's unconditional mount-time `createProject` and
+ * orphan the versions).
+ *
+ * The old gate (pre-#52) held the versions GET only when `projectId`
+ * was already populated in the spec:
+ *
+ *   if (route.request().method() === "GET" && projectId !== null) {
+ *     await gate;
+ *   }
+ *   await route.continue();
+ *
+ * That raced with the SPA's fetch ordering under parallel load (5
+ * workers against one uvicorn server): the SPA's `setProjectId` and the
+ * spec's `projectId = created.id` are both async continuations on the
+ * same POST response, and the SPA's `listVersions` effect (and thus its
+ * versions GET) could reach the route handler before the spec's
+ * `projectId` assignment ran. With `projectId` still null the gate was
+ * skipped, the fetch went through un-gated, and the SPA rendered "No
+ * versions yet" for the rest of the test (60s timeout waiting for
+ * `timeline-entry-{id}`).
+ *
+ * The fix drops the `projectId !== null` condition: the versions GET is
+ * gated unconditionally (any matching project id). On a fresh page load
+ * the SPA's only versions GET is its own timeline fetch — no compare,
+ * restore, pin, or single-version GET is in flight at that point — so
+ * gating every matching GET is safe and eliminates the race entirely.
+ * The gate is released exactly once, after both versions are created via
+ * the direct API.
  *
  * No LLM calls, no render worker, no SSE interception: the version
  * endpoints are plain REST and fully deterministic.
@@ -92,14 +120,20 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:8080";
 
   // -- Gate the SPA's mount-time listVersions --------------------------------
-  // The SPA's timeline fetch (GET /api/projects/{pid}/versions) is the
-  // ONLY place it reads the timeline on this page load. We intercept it
-  // with page.route, hold it until both versions exist, then let it
-  // through. `projectId` is filled in as soon as the mount-time POST
-  // /api/projects resolves; the route handler reads it at request time
-  // (after the fill), so the gate works even though the route is
-  // registered before the project exists.
-  let projectId: number | null = null;
+  // The SPA's timeline fetch (GET /api/projects/{pid}/versions) is the ONLY
+  // versions GET in flight on a fresh page load (compare/restore/pin/single
+  // are longer paths and don't match the bare-versions regex below). Hold it
+  // until both versions exist, then let it through.
+  //
+  // The gate is UNCONDITIONAL on the GET — it does NOT check whether the
+  // spec's `projectId` is populated yet. That check (pre-#52) was the race:
+  // the SPA's listVersions effect runs as soon as setProjectId fires, which
+  // is an async continuation on the same POST response the spec reads for
+  // projectId. Under parallel load the SPA's GET could reach this handler
+  // before the spec's `projectId = created.id` ran; with the check, the
+  // fetch went through un-gated and the SPA rendered an empty timeline for
+  // the rest of the test. Gating every matching GET removes the race because
+  // there is no other bare versions GET to block on a fresh page load.
   let releaseGate: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => {
     releaseGate = resolve;
@@ -108,11 +142,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   await page.route(
     (url) => url.pathname.match(/^\/api\/projects\/\d+\/versions$/),
     async (route) => {
-      // Only gate the bare timeline GET for the SPA's project (not
-      // compare, create, restore, or single-version — those have longer
-      // paths and don't match the regex above). The SPA's listVersions is
-      // the only request that hits this route on a fresh page load.
-      if (route.request().method() === "GET" && projectId !== null) {
+      if (route.request().method() === "GET") {
         await gate;
       }
       await route.continue();
@@ -125,12 +155,15 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   );
   await page.goto("/");
   const created = (await (await projectResp).json()) as { id: number };
-  projectId = created.id;
+  const projectId = created.id;
 
   await page.getByTestId("app-shell").waitFor();
 
-  // The SPA's listVersions is now hanging on the gate. Create both
-  // versions on the SPA's own project in this window.
+  // The SPA's listVersions is now hanging on the gate (its GET matched the
+  // route and is awaiting `gate`). Create both versions on the SPA's own
+  // project in this window — the gate is unconditional, so this works
+  // regardless of whether the SPA's GET arrived before or after the spec's
+  // projectId assignment above.
   const v1 = await createVersion(
     baseURL,
     projectId,
@@ -194,6 +227,10 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   // The timeline re-fetches after the restore (handleVersionRestore calls
   // listVersions) → now 3 entries, including the new restored entry.
+  //
+  // NOTE: this re-fetch is a SECOND bare versions GET. The gate is already
+  // released (it fires once), so the re-fetch passes through un-gated — the
+  // gate is a one-shot latch, not a permanent hold.
   await page.getByTestId(`timeline-entry-${restoredBody.id}`).waitFor();
   await expect(page.getByTestId("version-timeline-count")).toHaveText("3");
 
@@ -221,7 +258,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   await page.getByTestId("compare-pane").waitFor();
   await page.getByTestId("compare-diff").waitFor();
 
-  // v1 = {W:60, H:40} vs v2 = {W:60, H:50, D:30}:
+  // v1 = {W:60, H:40} vs v2 = {W:60, H=50, D:30}:
   //   changed: H (40 → 50)   added: D (— → 30)   removed: (none)
   await expect(page.getByTestId("diff-changed-H")).toBeVisible();
   await expect(page.getByTestId("diff-added-D")).toBeVisible();
