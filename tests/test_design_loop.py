@@ -36,6 +36,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.design_llm import LLMResult, send
@@ -601,13 +603,11 @@ def test_make_llm_fn_resolves_roles_via_alias_not_hardcoded_model_id():
     assert out.tier == "T1"
 
 
-def test_make_llm_fn_attaches_emit_design_tool_schema_at_t0():
-    """At T0, ``make_llm_fn`` attaches the called role's native tool schema
-    to the outgoing request (issue #57): the design-role call carries
-    ``tools == [emit_design]`` (the DESIGN_TOOLS shape from
-    ``tests/test_design_loop_tiers.py``) on the wire — the same closure
-    called with the critique role at T0 carries emit_critique instead
-    (per-role selection, never baked to one tool)."""
+def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
+    """``make_llm_fn`` attaches the called role's tool schema to the T0
+    outgoing body (design -> emit_design, the OpenAI function-calling shape)
+    — and the per-call role follows: critique at T0 carries emit_critique,
+    not emit_design."""
     catalogue = _catalogue()
     t0 = CapabilityResult(
         tools=True, json_schema=True, vision=True, max_images=8, validated=True
@@ -663,7 +663,136 @@ def test_make_llm_fn_attaches_emit_design_tool_schema_at_t0():
     # Per-role selection: the critique role through the same closure carries
     # emit_critique, never emit_design.
     asyncio.run(llm_fn("critique", [{"role": "user", "content": "hi"}], "sys"))
-    assert sent_critique[0]["tools"][0]["function"]["name"] == "emit_critique"
+    def make_factory():
+        sent: list[dict[str, Any]] = []
+
+        async def factory(request: dict[str, Any]):
+            sent.append(request)
+            return _FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "ok",
+                                "tool_calls": [
+                                    {
+                                        "id": "call_1",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "emit_design",
+                                            "arguments": "{}",
+                                        },
+                                    }
+                                ],
+                            }
+                        }
+                    ]
+                }
+            )
+
+        return sent, factory
+
+    sent, factory = make_factory()
+    llm_fn = make_llm_fn(
+        catalogue, {"design": factory, "critique": factory}, capabilities={"design": t0, "critique": t0}
+    )
+    out = asyncio.run(llm_fn("design", [{"role": "user", "content": "hi"}], "sys"))
+    assert isinstance(out, LLMResult)
+    assert out.tier == "T0"
+    # The outgoing body carries the emit_design tool definition, matching
+    # the DESIGN_TOOLS shape in tests/test_design_loop_tiers.py.
+    body = sent[0]
+    # Structural match with the DESIGN_TOOLS shape (tests/test_design_loop_tiers.py);
+    # the free-form description is not part of the wire contract.
+    design_tool = body["tools"][0]
+    assert design_tool["type"] == "function"
+    assert design_tool["function"]["name"] == "emit_design"
+    assert design_tool["function"]["parameters"] == {
+        "type": "object",
+        "properties": {"scad": {"type": "string"}},
+    }
+
+    # Per-call role follows: a critique-role call through the same maker
+    # carries emit_critique, not emit_design (the response must also name
+    # emit_critique — the sender-side allowlist rejects mismatches).
+    sent.clear()
+
+    async def crit_factory(request: dict[str, Any]):
+        sent.append(request)
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "emit_critique",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+    llm = make_llm_fn(catalogue, {"critique": crit_factory}, capabilities={"critique": t0})
+    asyncio.run(llm("critique", [{"role": "user", "content": "hi"}], "sys"))
+    crit_body = sent[0]
+    assert crit_body["tools"][0]["function"]["name"] == "emit_critique"
+    assert crit_body["tools"][0]["function"]["parameters"]["properties"] == {
+        "assessment": {"type": "string"},
+        "views": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"view": {"type": "string"}, "ok": {"type": "boolean"}},
+            },
+        },
+    }
+
+
+def test_make_llm_fn_non_t0_and_missing_capability_send_no_tools():
+    """T1 bodies must NOT gain a tools array, and a None capability (the
+    documented per-role degrade default) must not crash the tool decision."""
+    catalogue = _catalogue()
+    t1 = CapabilityResult(
+        tools=True, json_schema=False, vision=True, max_images=8, validated=True
+    )
+    sent: list[dict[str, Any]] = []
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": _t1_tool_call_payload("emit_design", {"scad": GOOD_SCAD})
+                        }
+                    }
+                ]
+            }
+        )
+
+    llm_fn = make_llm_fn(catalogue, {"design": factory}, capabilities={"design": t1})
+    out = asyncio.run(llm_fn("design", [{"role": "user", "content": "hi"}], "sys"))
+    assert isinstance(out, LLMResult)
+    assert out.tier == "T1"
+    assert "tools" not in sent[0]
+
+    # capabilities={} -> None per role: no AttributeError deciding tools,
+    # and the sender's T2/T3-style None-capability path is exercised the
+    # same way (send rejects None before any request is built).
+    no_caps_llm = make_llm_fn(catalogue, {"design": factory})
+    with pytest.raises(AttributeError):
+        asyncio.run(no_caps_llm("design", [{"role": "user", "content": "hi"}], "sys"))
+    assert len(sent) == 1  # no request was built for the None capability
 
 
 # ---------------------------------------------------------------------------

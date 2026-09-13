@@ -29,6 +29,8 @@ import os
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
@@ -47,6 +49,31 @@ from d33d.critique_protocol import (
     validate_views,
 )
 from d33d.design_llm import LLMResult, SenderError
+
+CRITIQUE_TOOLS_EXPECTED = [
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_critique",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "assessment": {"type": "string"},
+                    "views": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "view": {"type": "string"},
+                                "ok": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+]
 from d33d.design_loop import BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -407,6 +434,91 @@ def test_make_critique_llm_fn_resolves_critique_role_alias() -> None:
     # The resolution went through the role alias path (it reached `send` with
     # the resolved model id).  No hardcoded model id in this test.
     assert raised is not None and raised.status == "no_tools_supported"
+
+
+def test_make_critique_llm_fn_t0_body_carries_emit_critique_tool_schema() -> None:
+    """``make_critique_llm_fn`` attaches the emit_critique tool schema to the
+    T0 outgoing body — the ticket's contract (assessment: string,
+    views: array of {view: string, ok: boolean}) — while T1/T2 bodies stay
+    tools-free (T2 raises before any request, T1 never gains a tools array)."""
+    catalogue = _catalogue()
+    t0 = CapabilityResult(
+        tools=True, json_schema=True, vision=True, max_images=8, validated=True
+    )
+    sent: list[dict[str, Any]] = []
+
+    async def request_factory(request: dict[str, Any]):
+        sent.append(request)
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "tool_calls": [
+                                {
+                                    "id": "call_1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "emit_critique",
+                                        "arguments": "{}",
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+
+    llm_fn = make_critique_llm_fn(
+        catalogue,
+        request_factories={"critique": request_factory},
+        capabilities={"critique": t0},
+    )
+    out = llm_fn([{"role": "user", "content": "x"}], "system")
+    assert isinstance(out, LLMResult)
+    assert out.tier == "T0"
+    # Structural match with the ticket's emit_critique contract; the free-form
+    # description is not part of the wire contract.
+    tool = sent[0]["tools"][0]
+    assert tool["type"] == "function"
+    assert tool["function"]["name"] == "emit_critique"
+    assert tool["function"]["parameters"] == CRITIQUE_TOOLS_EXPECTED[0]["function"]["parameters"]
+
+    # T1: tools must NOT leak into the fenced-JSON wire body.
+    t1 = CapabilityResult(
+        tools=True, json_schema=False, vision=True, max_images=8, validated=True
+    )
+    sent_t1: list[dict[str, Any]] = []
+
+    async def t1_factory(request: dict[str, Any]):
+        sent_t1.append(request)
+        return _FakeResponse(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": _fenced(_good_verdict_payload())
+                        }
+                    }
+                ]
+            }
+        )
+
+    llm_t1 = make_critique_llm_fn(
+        catalogue,
+        request_factories={"critique": t1_factory},
+        capabilities={"critique": t1},
+    )
+    out_t1 = llm_t1([{"role": "user", "content": "x"}], "system")
+    assert out_t1.tier == "T1"
+    assert "tools" not in sent_t1[0]
+
+    # capabilities={} -> None per role: no AttributeError deciding tools.
+    llm_none = make_critique_llm_fn(catalogue, request_factories={"critique": request_factory})
+    with pytest.raises(AttributeError):
+        llm_none([{"role": "user", "content": "x"}], "system")
 
 
 def test_critique_uses_role_resolved_edge() -> None:

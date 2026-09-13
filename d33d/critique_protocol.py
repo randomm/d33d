@@ -54,6 +54,7 @@ from d33d.design_loop import BboxInfo, score
 from d33d.render_worker import VIEWS, RenderResult
 
 __all__ = [
+    "CRITIQUE_TOOLS",
     "REQUIRED_VIEW_NAMES",
     "VERDICTS",
     "CritiqueFn",
@@ -511,6 +512,35 @@ def deterministic_verdict(
 # Role-alias LLM seam (dependency injection, never a hardcoded model id)
 # ---------------------------------------------------------------------------
 
+#: The T0 native tool schema for the critique role (OpenAI function-calling
+#: shape — the same wire shape ``send`` attaches when the caller passes
+#: ``tools``); attached to the outgoing body only at T0.
+CRITIQUE_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_critique",
+            "description": "Emit the pairwise critique verdict",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "assessment": {"type": "string"},
+                    "views": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "view": {"type": "string"},
+                                "ok": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    }
+]
+
 #: ``critique_llm_fn(messages, system) -> LLMResult`` (sync or async).  The
 #: caller-supplied edge; ``make_critique_llm_fn`` builds the role-resolving
 #: closure for the common case.
@@ -541,15 +571,19 @@ def make_critique_llm_fn(
 
     def critique_llm_fn(messages, system) -> LLMResult:
         resolution = resolve_model(catalogue, "critique")
+        capability = caps.get("critique")
+        # T0-only: the fenced-JSON tiers carry no tools array on the wire.
+        tools = CRITIQUE_TOOLS if capability is not None and capability.tier == "T0" else None
         return asyncio.run(
             send(
                 role="critique",
                 model_id=resolution.entry.model,
                 messages=messages,
                 request_factory=factory,
-                capability=caps.get("critique"),
+                capability=capability,
                 dialect=dialect,
                 system=system,
+                tools=tools,
             )
         )
 
