@@ -16,6 +16,14 @@
  *     project's id from the network stream (POST /api/projects → id)
  *     instead of creating a second project via the API, so the 3MF route
  *     interception matches the id the Export 3MF button actually requests.
+ *   - Both mount-time and upload waits use page.waitForResponse (not
+ *     page.waitForRequest): waitForRequest fires the moment the request is
+ *     SENT, and the subsequent resp.response() can resolve null if the
+ *     page has already navigated or the request was retried — the exact
+ *     flake class that made this spec's 15 s project-creation timeout fire
+ *     while the SPA was already fully rendered. Waiting for the 201
+ *     response instead removes that race class entirely (same pattern the
+ *     other three specs already use).
  *   - The fixture file is the sibling-workstream `scaffold`'s scope
  *     (web/tests/e2e/). Until those land, the spec generates its
  *     equivalents deterministically in a scratch dir: a tiny PNG reference
@@ -123,14 +131,14 @@ function buildDeterministic3MF(): Buffer {
  * for the 3MF route this spec intercepts.
  */
 async function waitForProjectId(page: Page): Promise<number> {
-  const resp = await page.waitForRequest(
-    (req) => req.method() === "POST" && req.url().includes("/api/projects"),
+  const projectResp = await page.waitForResponse(
+    (r) =>
+      r.request().method() === "POST" &&
+      r.url().includes("/api/projects"),
     { timeout: 15_000 },
   );
-  const projectResp = await resp.response();
-  expect(projectResp).not.toBeNull();
-  expect(projectResp!.status()).toBe(201);
-  const body = (await projectResp!.json()) as { id: number };
+  expect(projectResp.status()).toBe(201);
+  const body = (await projectResp.json()) as { id: number };
   expect(typeof body.id).toBe("number");
   return body.id;
 }
@@ -197,10 +205,10 @@ test("happy path: upload photo → SSE settle → 3MF download", async ({
     // The photo is POSTed to the REAL (unintercepted) backend upload
     // endpoint for this project — only the not-yet-existing 3MF route is
     // intercepted.
-    const uploadPromise = page.waitForRequest(
-      (req) =>
-        req.method() === "POST" &&
-        req.url().includes(`/api/projects/${projectId}/photos`),
+    const uploadPromise = page.waitForResponse(
+      (r) =>
+        r.request().method() === "POST" &&
+        r.url().includes(`/api/projects/${projectId}/photos`),
     );
     await photoInput.setInputFiles([
       {
@@ -209,9 +217,8 @@ test("happy path: upload photo → SSE settle → 3MF download", async ({
         buffer: photoBuffer,
       },
     ]);
-    const uploadResp = await (await uploadPromise).response();
-    expect(uploadResp).not.toBeNull();
-    expect(uploadResp!.status()).toBe(201);
+    const uploadResp = await uploadPromise;
+    expect(uploadResp.status()).toBe(201);
 
     // The upload settles to the success state: the label now shows the
     // preview image instead of the "Attach reference photo" prompt.
