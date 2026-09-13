@@ -18,6 +18,7 @@ version had.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -119,6 +120,48 @@ def test_render_for_design_loop_helper_chowns_work_volume(
     assert "chown 1000:1000 /work" in script
     assert "cp /host/src/model.scad /work/model.scad" in script
     assert "cp /host/src/params.json /work/params.json" in script
+
+
+def test_render_for_design_loop_harvests_view_glob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The harvest helper must copy ``view_*.png`` (the worker writes
+    ``view_00_front.png`` etc.), and the views list must come from a
+    glob of the harvested directory, not a hard-coded ``view0..5``."""
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-0000000a")
+
+    orig_glob = Path.glob
+
+    def _gl(self: Path, pattern: str, **kw: Any):
+        if str(self).endswith("out") and pattern == "view_*.png":
+            return [
+                self / "view_00_front.png",
+                self / "view_01_back.png",
+                self / "view_02_left.png",
+                self / "view_03_right.png",
+                self / "view_04_top.png",
+                self / "view_05_iso.png",
+            ]
+        return orig_glob(self, pattern, **kw)
+
+    monkeypatch.setattr(Path, "glob", _gl)
+
+    rw.render_for_design_loop("cube(10);", {})
+
+    helper_scripts = [
+        c[-1] for c in calls if "busybox:latest" in c and "sh" in c and "cp /work" in c[-1]
+    ]
+    harvest_scripts = [s for s in helper_scripts if "/work/model.stl" in s]
+    assert harvest_scripts, f"no harvest helper recorded: {calls}"
+    assert "cp /work/view_*.png /host/" in harvest_scripts[0]
+    assert "view$i.png" not in harvest_scripts[0]
 
 
 def test_render_for_design_loop_pipeline_exception_returns_container_error(

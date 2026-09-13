@@ -26,6 +26,7 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -223,6 +224,19 @@ NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
 #: The locally built render-worker image (Dockerfile + entrypoint.sh, run
 #: as uid 1000). Override in tests via monkeypatch on this module attribute.
 RENDER_WORKER_IMAGE = "d33d/render-worker:local"
+
+
+def _render_host_tmp_base() -> Path:
+    """Directory that host-side render temp dirs live under.
+
+    Must NOT be ``/tmp`` — in Docker Desktop the host ``/tmp`` is not
+    shared with the VM, so a helper container mounting ``/tmp/...``
+    sees an empty directory. Use ``~/d33d/render-tmp`` instead, which
+    the Docker daemon can bind-mount into the helper container.
+    """
+    path = Path(os.environ.get("D33D_RENDER_TMP", str(Path.home() / "d33d" / "render-tmp")))
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def parse_defines(params_json_text: str) -> dict[str, str]:
@@ -705,7 +719,7 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
             capture_output=True,
             check=False,
         )
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory(dir=_render_host_tmp_base()) as tmp:
             host_tmp = Path(tmp)
             src = host_tmp / "src"
             src.mkdir()
@@ -816,14 +830,13 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
                     (
                         "cp /work/model.stl /host/ 2>/dev/null; "
                         "cp /work/model.csg /host/ 2>/dev/null; "
-                        "for i in 0 1 2 3 4 5; do "
-                        "cp /work/view$i.png /host/ 2>/dev/null; done; true"
+                        "cp /work/view_*.png /host/ 2>/dev/null; true"
                     ),
                 ]
                 subprocess.run(harvest_argv, capture_output=True, check=False)
                 stl = out / "model.stl"
                 csg = out / "model.csg"
-                views = [out / f"view{i}.png" for i in range(6)]
+                views = sorted(out.glob("view_*.png"))
                 return stl, csg, views
 
             if proc.returncode != 0:
