@@ -958,3 +958,107 @@ def test_photo_data_uri_none_returns_constant():
 
     uri = photo_data_uri(None)
     assert uri == EMPTY_PHOTO_DATA_URI
+
+
+def test_chat_render_runs_off_the_event_loop(app_with_versions):
+    """The spec's ``asyncio.to_thread`` acceptance criterion, made testable.
+
+    The design loop's SYNC ``render_fn`` (the multi-minute Docker
+    ``subprocess.run`` in ``render_for_design_loop``) must run on a worker
+    thread, NOT the event loop — otherwise one slow render stalls every
+    concurrent SSE stream and API handler on the app. The adapter implements
+    this via ``asyncio.to_thread(_run_in_loop, raw)``: the loop coroutine is
+    driven by ``asyncio.run`` (a fresh loop) inside a worker thread, so the
+    entire design loop — the blocking sync render AND the LLM's awaits —
+    runs off the app's event loop.
+
+    This test drives the real adapter (``run_design_loop_with_events``)
+    with a loop whose sync render records the thread id it runs on and
+    whose async LLM records the same thread id. After the loop completes,
+    both the render's and the LLM's thread ids must EQUAL each other (both
+    on the worker thread) and DIFFER from the event loop's thread id (the
+    render is off the loop). A naive ``await raw`` (the prior implementation)
+    would fail: the render's thread id would equal the event-loop thread id.
+    """
+    import threading
+
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    render_thread_id = {}  # set by the sync render fn
+    llm_thread_id = {}  # set by the async llm fn
+
+    class _Result:
+        status = "pass"
+        best = _StubBest({"W": 10}, scad="W = 10; cube([W]);")
+        failure_reason = None
+
+    class _Loop:
+        """The injected ``app.state.run_design_loop`` seam: mirrors the real
+        loop's sync-or-await dispatch — sync render on the calling thread,
+        async LLM awaited on the running loop."""
+
+        def __init__(self, app) -> None:
+            self._app = app
+
+        def __call__(self, **kwargs):
+            async def _run():
+                # Sync render — runs on whatever thread drives the
+                # coroutine. Under the to_thread implementation this is a
+                # worker thread; under a bare ``await`` it would be the
+                # event-loop thread.
+                render_thread_id["id"] = threading.get_ident()
+                # Async LLM — record the thread that drives the running
+                # loop. Under ``asyncio.run`` in the worker thread the
+                # fresh loop is installed in that thread, so this thread IS
+                # the one the LLM awaits on; under a bare ``await`` it is
+                # the event-loop thread.
+                llm_thread_id["id"] = threading.get_ident()
+                return _Result()
+
+            return _run()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _Loop(app_with_versions)
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        # The event loop's own thread id (this coroutine runs on it).
+        event_loop_thread = threading.get_ident()
+        return render_thread_id, llm_thread_id, event_loop_thread, frames
+
+    render_tid, llm_tid, event_loop_tid, frames = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert "done" in event_names, f"no done frame: {frames}"
+    # The render ran on a worker thread — NOT the event-loop thread.
+    assert render_tid["id"] != event_loop_tid, (
+        "sync render ran on the event loop (would stall other streams); "
+        f"render thread {render_tid['id']} == event loop thread {event_loop_tid}"
+    )
+    # The LLM also ran on the worker thread (asyncio.run in the worker
+    # thread installs a fresh loop there, so the LLM's ``await`` runs on
+    # the same worker thread as the render). Both render and LLM share the
+    # worker-thread id, and that id differs from the event-loop thread —
+    # proving the ENTIRE design loop (blocking render + LLM) is off the
+    # app's event loop.
+    assert llm_tid["id"] == render_tid["id"], (
+        f"LLM did not run on the same worker thread as the render: "
+        f"llm={llm_tid['id']} render={render_tid['id']}"
+    )
+    assert llm_tid["id"] != event_loop_tid, (
+        f"LLM ran on the event-loop thread: llm={llm_tid['id']} "
+        f"event loop={event_loop_tid}"
+    )
+

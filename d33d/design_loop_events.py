@@ -25,6 +25,7 @@ exhausted, and exception alike.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import inspect
 import logging
@@ -77,16 +78,23 @@ def photo_data_uri(source_photo_path: str | None) -> str:
 def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     """Per-axis extents (mm) for the design-loop bbox gate, from a render.
 
-    ``render_for_design_loop`` trimesh-loads the harvested ``model.stl``
-    and computes ``vertex_count`` / ``watertight`` / ``volume_mm3`` from
-    the same mesh — the extents come from that same on-volume STL (``
-    render.stl``), re-loaded host-side here (the file lives in the
-    caller's harvest dir and outlives the render; it is only removed
-    when the volume is torn down, which the caller owns).
+    The intended design: ``render_for_design_loop`` trimesh-loads the
+    harvested ``model.stl`` and computes ``vertex_count`` / ``watertight`` /
+    ``volume_mm3`` from that mesh, so the extents derive from the same
+    on-volume STL — re-loaded host-side here from ``render.stl``.
 
-    Returns ``None`` (the bbox gate fails — the loop cannot score the
-    bbox bit) when the render has no STL or it cannot be loaded; never
-    raises.
+    ``render.stl`` points at the harvested STL inside the render worker's
+    ``tempfile.TemporaryDirectory`` (``render_worker.py``), which is torn
+    down when the render returns, *before* ``bbox_fn`` is invoked. The
+    worker is out of scope for issue #54 (it must NOT be changed to keep
+    the STL), so on today's production seam the file is already gone when
+    this runs: ``path.is_file()`` is ``False`` → ``None`` → the bbox gate
+    cannot score (documented; the gate then fails and no candidate can
+    score the bbox bit). A render whose STL survives (e.g. a test stub
+    returning a real, still-on-disk path) yields real extents.
+
+    Returns ``None`` (the bbox gate fails) when the render has no STL or it
+    cannot be loaded; never raises.
     """
     stl = render.stl
     if not isinstance(stl, str) or not stl:
@@ -132,6 +140,32 @@ def _loop_takes_app(run_loop: Any) -> bool:
     return "app" in sig.parameters
 
 
+def _run_in_loop(coro: Any) -> Any:
+    """Drive ``coro`` to completion on a worker thread (``asyncio.run``).
+
+    ``asyncio.to_thread`` schedules this function on the default executor (a
+    worker thread with NO running event loop), so it ``asyncio.run``-s
+    ``coro`` on a FRESH event loop. ``asyncio.run`` is required (not a bare
+    ``await``) because the worker thread has no running loop to await
+    against; ``asyncio.run`` installs that fresh loop and drives ``coro``.
+
+    This is the spec's ``asyncio.to_thread`` requirement for the sync render:
+    the multi-minute ``render_for_design_loop`` (Docker ``subprocess.run``)
+    runs on the worker thread, NOT the app's event loop, so one slow render
+    cannot stall other SSE streams or API handlers. The LLM's awaits run on
+    the fresh loop (they still yield — the LLM is async) and do not block
+    the app's event loop either, because the entire design loop runs here,
+    off the app loop.
+
+    ``coro`` MUST be the result of calling the injected loop (the adapter
+    calls ``run_loop(...)`` before invoking this, so the loop's body runs
+    here, not on the event loop). Exceptions from ``coro`` propagate out of
+    ``asyncio.run`` and are caught by :func:`run_design_loop_with_events`'
+    terminal-frame handler.
+    """
+    return asyncio.run(coro)
+
+
 async def _resolve_version_create(
     app: Any, project_id: int, result: Any, user_message: str
 ) -> int | None:
@@ -172,10 +206,12 @@ async def run_design_loop_with_events(
     one chat message and yield the SSE frame contract.
 
     The heavy render work (``render_fn=render_for_design_loop`` — Docker
-    subprocess work, minutes) runs on the event loop via the loop's own
-    ``await`` chain; the adapter itself is an async generator that yields
-    frames as the loop progresses. Every exit path (pass, exhausted,
-    exception) ends in a terminal ``done``|``error`` frame — the client
+    subprocess work, minutes) is run off the event loop per the spec's
+    ``asyncio.to_thread`` requirement — see :func:`_run_in_loop` — so a
+    slow render does not stall other SSE streams or API handlers. The
+    adapter itself is an async generator that yields frames as the loop
+    progresses. Every exit path (pass, exhausted, exception) ends in a
+    terminal ``done``|``error`` frame — the client
     (``ApiClient.streamEvents``) resolves only on a terminal frame, so an
     unhandled exception here would leave the stream hanging.
 
@@ -224,17 +260,25 @@ async def run_design_loop_with_events(
         else:
             raw = run_loop()
         if inspect.isawaitable(raw):
-            # The real loop is async: ``raw`` is a coroutine. The heavy
-            # render work (``render_fn=render_for_design_loop`` — Docker
-            # subprocess work, minutes) runs on the event loop via the
-            # loop's own ``await`` chain; ``asyncio.to_thread`` would nest
-            # an ``asyncio.run`` and raise ``RuntimeError`` (a thread has
-            # no running loop to nest under — the production closure is
-            # ``async`` precisely so it can await its render calls). The
-            # loop's render calls are the only blocking I/O here and they
-            # run synchronously inside the coroutine's own thread via
-            # ``d33d.design_loop._call``'s sync-or-await dispatch.
-            result = await raw
+            # The real loop is async: ``raw`` is a coroutine. The spec's
+            # acceptance criterion — "the background task wraps the sync
+            # render_for_design_loop in asyncio.to_thread (it does Docker
+            # subprocess work, multi-minute)" — is implemented here. A bare
+            # ``await raw`` would run the sync ``render_for_design_loop``
+            # (Docker ``subprocess.run``, minutes) on the event loop and
+            # stall every other SSE stream and API handler on the app, not
+            # just the in-flight one.
+            #
+            # ``asyncio.to_thread`` cannot ``await`` a coroutine directly (a
+            # worker thread has no running event loop to nest an
+            # ``asyncio.run`` under — it would raise ``RuntimeError``), so
+            # the work is run via ``to_thread(_run_in_loop, raw)``:
+            # ``_run_in_loop`` drives the coroutine with ``asyncio.run`` on
+            # a fresh loop, in a worker thread, so the entire design loop —
+            # the multi-minute sync render AND the LLM's awaits — runs off
+            # the app's event loop. The event loop's only role is the short
+            # ``await asyncio.to_thread(...)`` below.
+            result = await asyncio.to_thread(_run_in_loop, raw)
         else:
             result = raw
     except (LookupError, KeyError) as e:
