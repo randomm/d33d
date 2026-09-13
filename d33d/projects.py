@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 
@@ -122,6 +122,42 @@ class ProjectUpdate(BaseModel):
     notes: str | None = None
 
 
+class ChatRequest(BaseModel):
+    """Body of ``POST /api/projects/{id}/chat`` (issue #54).
+
+    ``message`` is the user's chat text (the design-loop request text).
+    ``stated_dims`` is the (W, D, H) triple in mm — the ground-truth
+    dimensions; absent → the server falls back to the latest version's
+    W/D/H (0.0 default), never a 422. ``chat_history`` is the list of
+    prior user messages (the SPA sends the last 10); absent → empty tuple.
+    """
+
+    message: str
+    stated_dims: list[float] | None = None
+    chat_history: list[str] | None = None
+
+    @field_validator("message")
+    @classmethod
+    def _message_must_be_nonempty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("message must be non-empty and not whitespace-only")
+        return v
+
+    @field_validator("stated_dims")
+    @classmethod
+    def _stated_dims_must_be_3_finite(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return None
+        if len(v) != 3:
+            raise ValueError("stated_dims must be a 3-element array [W, D, H]")
+        import math
+
+        for x in v:
+            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+                raise ValueError("stated_dims elements must be finite numbers")
+        return [float(x) for x in v]
+
+
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
@@ -211,6 +247,102 @@ def create_projects_router() -> APIRouter:
         remove_repo(repo_path)
         # Delete the DB row (cascades transcripts via FK)
         conn.delete_project(project_id)
+
+    @router.post("/{project_id}/chat", status_code=202)
+    async def post_chat(request: Request, project_id: int, body: ChatRequest) -> dict[str, Any]:
+        """Wire a chat message to the design loop (issue #54).
+
+        Validates the project exists (404), checks the per-project in-flight
+        flag (409), registers the event source synchronously (so the SSE
+        stream does not terminate on "no active stream"), and starts the
+        background design-loop task. Returns 202 immediately — the design
+        loop runs in a background asyncio task and streams progress/token
+        frames via ``GET /api/stream/{project_id}``.
+
+        The in-flight flag (``app.state.design_loop_inflight``) is set
+        synchronously before the 202 response and cleared in the
+        background task's ``finally`` on ALL exit paths (pass, exhausted,
+        exception) — a leaked flag would 409 every subsequent chat for
+        that project forever.
+        """
+        conn: db_mod.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        app = request.app
+        inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
+        if inflight is None:
+            inflight = set()
+            app.state.design_loop_inflight = inflight
+        if project_id in inflight:
+            raise HTTPException(status_code=409, detail="a design loop is already in flight")
+
+        # stated_dims: from the request body, or the latest version's W/D/H
+        # (0.0 default) — the same fallback the finalize seam uses. The
+        # adapter also guards ``None`` → (0.0, 0.0, 0.0) so the hook's
+        # ``FailureEvent.request`` is never empty.
+        stated_dims = (
+            tuple(float(d) for d in body.stated_dims)
+            if body.stated_dims is not None
+            else None
+        )
+        chat_history = tuple(body.chat_history or ())
+
+        # Photo: read the project's stored photo NOW (synchronously, before
+        # the 202 response) — the background task runs via asyncio and the
+        # DB may be closed by the time the loop starts (a deleted project
+        # or a closed connection). The photo is captured here as a data URI
+        # (MIME from the extension; missing file → the fixed 1x1
+        # transparent-PNG constant).
+        from d33d.design_loop_events import photo_data_uri
+
+        photo = photo_data_uri(row.get("source_photo_path"))
+
+        # Register the event source synchronously BEFORE starting the
+        # background task (else the client stream terminates on "no active
+        # stream" — see d33d/streaming.py's contract). The adapter is a
+        # plain async generator (not a coroutine): ``event_sources`` maps
+        # project_id -> AsyncIterator of (event, data) tuples.
+        from d33d.design_loop_events import run_design_loop_with_events
+
+        events = run_design_loop_with_events(
+            app,
+            project_id,
+            user_message=body.message,
+            stated_dims=stated_dims,
+            chat_history=chat_history,
+            photo=photo,
+            request_text=body.message,
+        )
+        app.state.event_sources[project_id] = events
+
+        # Set the in-flight flag (synchronously, before the 202 response).
+        # The background task's ``finally`` clears it on ALL exit paths.
+        inflight.add(project_id)
+
+        # The background task: drive the event-source generator to
+        # completion. The adapter catches broadly and always emits a
+        # terminal frame, so the task completes cleanly on every path. The
+        # streaming endpoint may still be iterating the SAME generator
+        # object concurrently (the SSE client is the other consumer); the
+        # flag lifecycle is owned here, not by the adapter.
+        async def _drive() -> None:
+            try:
+                async for _event, _data in events:
+                    pass
+            finally:
+                # Release the in-flight flag on ALL exit paths (pass,
+                # exhausted, exception). The adapter's terminal frame is
+                # already in the generator's buffer, so the SSE client
+                # still sees it even after the flag is released.
+                inflight.discard(project_id)
+
+        import asyncio
+
+        asyncio.create_task(_drive())
+
+        return {"status": "accepted"}
 
     @router.post("/{project_id}/photos", status_code=201)
     async def upload_photo(request: Request, project_id: int) -> dict[str, Any]:

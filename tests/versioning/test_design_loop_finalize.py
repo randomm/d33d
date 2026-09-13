@@ -421,3 +421,466 @@ def test_design_source_drain_times_out_on_stalled_stream(
     status_code, detail = run_async(app_with_versions, _call)
     assert status_code == 413
     assert "timed out" in detail
+
+
+# ---------------------------------------------------------------------------
+# (5) The chat route (issue #54) — POST /api/projects/{id}/chat
+# ---------------------------------------------------------------------------
+
+
+class _StubBest:
+    """Duck-type of the design loop's best candidate (carries the named
+    parameters + the generated SCAD source)."""
+
+    def __init__(self, params: dict, scad: str = "") -> None:
+        self.params = params
+        self.scad_source = scad
+
+
+class _StubResult:
+    def __init__(self, status: str, params: dict, scad: str = "") -> None:
+        self.status = status
+        self.best = _StubBest(params, scad)
+        self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
+
+
+def test_chat_empty_message_is_422(app_with_versions):
+    """A whitespace-only message is 422 (field_validator)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        return await client.post(
+            f"/api/projects/{proj['id']}/chat", json={"message": "   "}
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 422
+
+
+def test_chat_404_for_missing_project(app_with_versions):
+    """A chat to a non-existent project is 404."""
+
+    async def _call(client):
+        return await client.post(
+            "/api/projects/999999/chat", json={"message": "hi"}
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 404
+
+
+def test_chat_returns_202_accepted_and_registers_event_source(app_with_versions):
+    """A valid chat message returns 202 {status: accepted} and the event
+    source is registered synchronously BEFORE the 202 response (the SSE
+    stream must not terminate on 'no active stream')."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        # Simulate a slow loop — the 202 must return before this completes.
+        import asyncio as _a
+
+        await _a.sleep(0.05)
+        return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make a 10mm box"},
+        )
+        # The event source must be registered synchronously (before the
+        # 202 response is returned) — the SSE stream reads it at request
+        # time and would otherwise terminate on "no active stream".
+        source = app_with_versions.state.event_sources.get(pid)
+        return r, source
+
+    r, source = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"status": "accepted"}
+    assert source is not None, "event source not registered before 202 response"
+    # The loop was called with the full kwargs contract (photo, stated_dims,
+    # bbox_fn, request — the same shape the finalize seam supplies).
+    for key in ("photo", "stated_dims", "bbox_fn", "request"):
+        assert key in captured, f"missing design-loop kwarg {key!r}"
+    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    assert callable(captured["bbox_fn"])
+    assert captured["request"] == "make a 10mm box"
+
+
+def test_chat_409_while_in_flight(app_with_versions):
+    """A second chat while a design loop is in flight is 409."""
+    import asyncio as _a
+
+    release = _a.Event()
+
+    async def _loop(app, **kwargs):
+        await release.wait()
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r1 = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        # The first loop is in flight (awaiting release) — the flag is set.
+        inflight = app_with_versions.state.design_loop_inflight
+        assert pid in inflight, "in-flight flag not set"
+        r2 = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        release.set()
+        return r1, r2
+
+    r1, r2 = run_async(app_with_versions, _call)
+    assert r1.status_code == 202, r1.text
+    assert r2.status_code == 409, r2.text
+
+
+def test_chat_flag_released_after_loop_completes(app_with_versions):
+    """The in-flight flag is cleared after the loop completes (pass path)."""
+
+    async def _loop(app, **kwargs):
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        # Wait for the background task to complete (the flag is cleared in
+        # the _drive task's finally).
+        import asyncio as _a
+
+        for _ in range(50):
+            if pid not in app_with_versions.state.design_loop_inflight:
+                break
+            await _a.sleep(0.01)
+        return pid in app_with_versions.state.design_loop_inflight
+
+    still_inflight = run_async(app_with_versions, _call)
+    assert still_inflight is False, "in-flight flag leaked after loop completion"
+
+
+def test_chat_exhausted_emits_error_frame_and_no_version(app_with_versions):
+    """An exhausted loop emits a terminal error frame and does NOT create a
+    version."""
+    import asyncio as _a
+
+    async def _loop(app, **kwargs):
+        return _StubResult("exhausted", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        # Collect the frames from the event source.
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        # Wait for the flag to be released.
+        for _ in range(50):
+            if pid not in app_with_versions.state.design_loop_inflight:
+                break
+            await _a.sleep(0.01)
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert "error" in event_names, "no error frame emitted for exhausted loop"
+    # The terminal frame is an error (not a done).
+    assert event_names[-1] == "error"
+    # No version was created.
+    assert timeline == []
+
+
+def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
+    """A passing loop creates a version, emits a token frame (the SCAD
+    source) and a done frame."""
+    import asyncio as _a
+
+    async def _loop(app, **kwargs):
+        return _StubResult("pass", {"W": 10, "H": 20}, scad="W = 10; H = 20; cube([W, H, 1]);")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make a box 10 wide and 20 high"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        for _ in range(50):
+            if pid not in app_with_versions.state.design_loop_inflight:
+                break
+            await _a.sleep(0.01)
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    data_by_event = {}
+    for event, data in frames:
+        data_by_event.setdefault(event, []).append(data)
+    # A version was created.
+    assert len(timeline) == 1, "no version created on pass"
+    assert timeline[0]["name"] == "design"
+    assert timeline[0]["params"] == {"W": 10, "H": 20}
+    # The version-created progress frame carries the version id.
+    version_created = data_by_event.get("progress", [])
+    vc = [d for d in version_created if d.get("step") == "version-created"]
+    assert vc, "no version-created progress frame"
+    assert vc[0]["version_id"] == timeline[0]["id"]
+    # A token frame carries the SCAD source.
+    assert "token" in data_by_event, "no token frame"
+    assert data_by_event["token"][0]["text"] == "W = 10; H = 20; cube([W, H, 1]);"
+    # A done frame is emitted.
+    assert "done" in data_by_event, "no done frame"
+    # The terminal frame is a done (not an error).
+    assert event_names[-1] == "done"
+
+
+def test_chat_supplies_real_bbox_fn(app_with_versions):
+    """The chat wiring supplies a real bbox_fn (per-axis extents from the
+    render's artifacts) — the finalize seam's absence of one is the defect
+    this ticket fixes."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+
+    run_async(app_with_versions, _call)
+    assert "bbox_fn" in captured, "bbox_fn not supplied by chat wiring"
+    assert callable(captured["bbox_fn"]), "bbox_fn is not callable"
+    # The bbox_fn is the real implementation (not None, not a stub).
+    from d33d.design_loop_events import bbox_from_render
+
+    assert captured["bbox_fn"] is bbox_from_render
+
+
+def test_chat_stated_dims_from_body(app_with_versions):
+    """stated_dims from the request body is passed through to the loop."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "hi", "stated_dims": [20.0, 30.0, 40.0]},
+        )
+
+    run_async(app_with_versions, _call)
+    assert captured["stated_dims"] == (20.0, 30.0, 40.0)
+
+
+def test_chat_chat_history_from_body(app_with_versions):
+    """chat_history from the request body is passed through to the loop."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "hi", "chat_history": ["first", "second"]},
+        )
+
+    run_async(app_with_versions, _call)
+    assert captured["chat_history"] == ("first", "second")
+
+
+def test_chat_photo_data_uri_from_project(app_with_versions, tmp_path):
+    """The photo is read from the project's source_photo_path and emitted
+    as a data URI with MIME from the file extension."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        # Create a PNG file and set it as the project's photo.
+        png_path = tmp_path / "photo.png"
+        # 1x1 PNG
+        png_path.write_bytes(
+            bytes.fromhex(
+                "89504e470d0a1a0a0000000d49484452000000010000000108060000"
+                "001f15c4890000000d49444154789c626001000000050001"
+                "0d0a2fbc1e0000000049454e44ae426082"
+            )
+        )
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(png_path)
+        )
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+
+    run_async(app_with_versions, _call)
+    photo = captured.get("photo")
+    assert photo is not None, "photo not supplied"
+    assert photo.startswith("data:image/png;base64,"), f"wrong MIME: {photo[:50]}"
+
+
+def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
+    """A project with no photo gets the fixed 1x1 transparent-PNG data URI
+    constant (never None)."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+
+    run_async(app_with_versions, _call)
+    assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
+
+
+def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
+    """Project deleted mid-flight → terminal error frame + flag release,
+    not a 500."""
+    import asyncio as _a
+
+    class _DeleteMidLoop:
+        """A loop that deletes the project before completing."""
+
+        def __init__(self, app) -> None:
+            self._app = app
+
+        def __call__(self, **kwargs):
+            self._app.state.conn.delete_project(42)  # will fail (wrong id)
+            raise LookupError("project deleted")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # A loop that raises LookupError (simulating project deletion).
+        async def _loop(app, **kwargs):
+            raise LookupError(f"project {pid} not found")
+
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        for _ in range(50):
+            if pid not in app_with_versions.state.design_loop_inflight:
+                break
+            await _a.sleep(0.01)
+        return r, frames, pid in app_with_versions.state.design_loop_inflight
+
+    r, frames, still_inflight = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    event_names = [f[0] for f in frames]
+    assert "error" in event_names, "no error frame for deleted project"
+    assert event_names[-1] == "error"
+    assert still_inflight is False, "flag not released after error"
+
+
+def test_sse_wide_catch_emits_terminal_error():
+    """The SSE stream's broad catch emits a terminal error frame when the
+    event source raises an unhandled exception (e.g. KeyError)."""
+    import asyncio as _a
+
+    from httpx import ASGITransport, AsyncClient
+
+    from d33d.app import create_app
+
+    async def _call():
+        app = create_app(
+            ":memory:",
+            master_key_path="/tmp/pi-rukas-test-master.key",
+            catalogue_path="/tmp/pi-rukas-test-models.yaml",
+        )
+        async with app.router.lifespan_context(app):
+            client = AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            )
+            async with client:
+                create_r = await client.post(
+                    "/api/projects", json={"name": "WideCatch"}
+                )
+                pid = create_r.json()["id"]
+
+                async def _bad_source():
+                    raise KeyError("simulated adapter failure")
+
+                app.state.event_sources[pid] = _bad_source()
+                async with client.stream("GET", f"/api/stream/{pid}") as resp:
+                    chunks = []
+                    async for chunk in resp.aiter_text():
+                        chunks.append(chunk)
+                    raw = "".join(chunks)
+        return raw
+
+    raw = _a.run(_call())
+    # The stream must end with a terminal error frame (not hang, not die
+    # silently).
+    assert "event: error" in raw, f"no terminal error frame: {raw!r}"
+
+
+def test_photo_data_uri_jpeg(app_with_versions, tmp_path):
+    """A JPEG photo gets image/jpeg MIME (from the .jpg extension)."""
+    from d33d.design_loop_events import photo_data_uri
+
+    jpg_path = tmp_path / "photo.jpg"
+    jpg_path.write_bytes(b"\xff\xd8\xff\xdbfakejpegdata")
+    uri = photo_data_uri(str(jpg_path))
+    assert uri.startswith("data:image/jpeg;base64,"), f"wrong MIME: {uri[:50]}"
+
+
+def test_photo_data_uri_missing_file_returns_constant():
+    """A missing file (path exists in row but file deleted out-of-band)
+    falls back to the fixed 1x1 transparent-PNG constant, never None."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, photo_data_uri
+
+    uri = photo_data_uri("/nonexistent/path/photo.png")
+    assert uri == EMPTY_PHOTO_DATA_URI
+
+
+def test_photo_data_uri_none_returns_constant():
+    """None (no photo) returns the fixed constant, never None."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, photo_data_uri
+
+    uri = photo_data_uri(None)
+    assert uri == EMPTY_PHOTO_DATA_URI

@@ -99,6 +99,7 @@ export default function App({ renders = [], client }: AppProps) {
     null,
   );
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [designLoopInFlight, setDesignLoopInFlight] = useState(false);
 
   // Version timeline (issue #8) — the side rail. Loaded when the project
   // resolves (opening a project RESUMES the chat at its latest version
@@ -479,40 +480,71 @@ export default function App({ renders = [], client }: AppProps) {
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
 
+      // Set the in-flight flag (disables the send button) BEFORE the
+      // postChat call — the design loop runs in a background task and the
+      // flag must be set synchronously to prevent a second send from
+      // racing the first.
+      setDesignLoopInFlight(true);
+
+      // Collect the last 10 user messages for chat_history (the SPA
+      // in-memory state — the transcripts table is NOT populated by this
+      // ticket; that is a future seam).
+      const chatHistory = messages
+        .filter((m) => m.role === "user")
+        .slice(-10)
+        .map((m) => m.content);
+
       void apiClient
-        .streamEvents(projectId, {
-          onToken: (text) => {
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId ? { ...m, content: m.content + text } : m,
-              ),
-            );
-          },
-          // Progress events (render pipeline steps) will feed the viewer/
-          // validation pane once the design-loop-to-SSE wiring (a future
-          // ticket per issue #23) produces actual model artifacts. For now
-          // there is no render/model data flowing through the app to attach
-          // this to, so progress is a no-op placeholder.
-          onProgress: () => {},
-          onDone: () => {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
-            );
-          },
-          onError: (data) => {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
-            );
-            setStreamError(typeof data.message === "string" ? data.message : "Stream error");
-          },
+        .postChat(projectId, {
+          message: trimmed,
+          chat_history: chatHistory,
         })
-        // streamEvents rethrows after onError on a mid-stream failure so
-        // callers that care can observe it; here onError already updated
-        // the user-facing error state, so swallow the rejection to avoid
-        // it surfacing as an unhandled promise rejection in the browser.
-        .catch(() => {});
+        .then(() => {
+          // The event source is registered synchronously before the 202
+          // response — the SSE stream will find it. Open the stream now.
+          return apiClient.streamEvents(projectId, {
+            onToken: (text) => {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === assistantId ? { ...m, content: m.content + text } : m,
+                ),
+              );
+            },
+            onProgress: () => {},
+            onDone: () => {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+              );
+            },
+            onError: (data) => {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+              );
+              setStreamError(typeof data.message === "string" ? data.message : "Stream error");
+            },
+          });
+        })
+        .catch((e) => {
+          // postChat failed (404, 409, 422, network error) — the design
+          // loop did not start. Show the error and re-enable the send
+          // button.
+          const detail = e instanceof Error ? e.message : "unknown error";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, streaming: false, content: `Error: ${detail}` } : m,
+            ),
+          );
+          setStreamError(detail);
+        })
+        .finally(() => {
+          // Release the in-flight flag on ALL exit paths (pass, exhausted,
+          // exception, network error). The server also clears its flag in
+          // a finally, but the client-side flag is what disables the send
+          // button.
+          setDesignLoopInFlight(false);
+        });
     },
-    [projectId, apiClient, pendingSelection],
+    [projectId, apiClient, pendingSelection, messages],
   );
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
@@ -544,6 +576,7 @@ export default function App({ renders = [], client }: AppProps) {
           messages={messages}
           onSend={handleSendMessage}
           renders={renders}
+          inFlight={designLoopInFlight}
         />
         <PhotoUpload projectId={projectId ?? undefined} onUploaded={handlePhotoUploaded} onError={setStreamError} />
         {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (

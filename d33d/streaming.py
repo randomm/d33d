@@ -18,6 +18,7 @@ The stream terminates on the terminal event (``done`` or ``error``).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -25,6 +26,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 
 from d33d import db as db_mod
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # SSE formatting
@@ -73,8 +76,21 @@ async def _stream_events(
             yield format_sse(event, data)
             if event in ("done", "error"):
                 break  # terminal event
-    except (OSError, ValueError, StopAsyncIteration):
-        yield format_sse("error", {"message": "stream error"})
+    except Exception:  # broad by contract: the stream MUST end with a terminal frame (see below)
+        # Broad catch (not the historical OSError/ValueError/
+        # StopAsyncIteration trio): the committed contract is that the
+        # stream ALWAYS terminates with a terminal ``done`` or ``error``
+        # frame — the client (``ApiClient.streamEvents``) resolves only on
+        # a terminal frame, so an escaped exception (e.g. a KeyError from
+        # the event-source adapter) would close the stream with no frame
+        # and the client would hang. The event-source adapter
+        # (``d33d.design_loop_events``) is written to catch broadly and
+        # always yield a terminal frame itself; this clause is the
+        # backstop for an adapter that itself raised.
+        logger.exception("SSE event source for project %s raised", project_id)
+        yield format_sse(
+            "error", {"message": "stream error"}
+        )
 
 
 # ---------------------------------------------------------------------------
