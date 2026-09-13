@@ -50,6 +50,7 @@ async def _stream_events(
     project_id: int,
     event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] | None,
     conn: db_mod.Connection | None,
+    inflight: set[int] | None,
 ):
     """Yield SSE frames from the injectable event source for ``project_id``.
 
@@ -91,6 +92,15 @@ async def _stream_events(
         yield format_sse(
             "error", {"message": "stream error"}
         )
+    finally:
+        # Release the in-flight flag on ALL exit paths (generator
+        # exhausted, terminal frame, client disconnect, exception). The
+        # SSE endpoint is the sole driver of the generator — the
+        # background task no longer iterates it (a single async generator
+        # cannot be driven by two concurrent consumers).
+        if inflight is not None:
+            inflight.discard(project_id)
+        event_sources.pop(project_id, None)
 
 
 # ---------------------------------------------------------------------------
@@ -114,9 +124,12 @@ def create_streaming_router() -> APIRouter:
         event_sources: dict[int, AsyncIterator[tuple[str, dict[str, Any]]]] | None = (
             getattr(request.app.state, "event_sources", None)
         )
+        inflight: set[int] | None = getattr(
+            request.app.state, "design_loop_inflight", None
+        )
 
         return StreamingResponse(
-            _stream_events(project_id, event_sources, conn),
+            _stream_events(project_id, event_sources, conn, inflight),
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
