@@ -45,6 +45,7 @@ from d33d.design_loop import (
     GATE_REASON_BITS,
     MAX_ITERATIONS,
     MAX_SCAD_SOURCE_BYTES,
+    MAX_SCAD_VALIDATION_CHARS,
     NO_IMPROVEMENT_LIMIT,
     BboxInfo,
     DesignResult,
@@ -55,6 +56,7 @@ from d33d.design_loop import (
     no_improvement,
     run_design_loop,
     run_design_loop_async,
+    scad_looks_valid,
     score,
 )
 from d33d.failure_classes import (
@@ -964,11 +966,59 @@ def test_scad_source_over_fenced_fallback_path_is_size_capped():
 
 
 def test_scad_source_at_cap_is_accepted():
-    """A source exactly at the cap passes (the cap is >, not >=)."""
+    """A source exactly at the size cap passes the byte-cap leg (the cap is
+    >, not >=); the 5000-char heuristic length leg (a separate, smaller
+    backstop added for prose rejection) still rejects it, so the extracted
+    source is empty. Both caps fire independently; this test pins the byte
+    source at exactly the boundary and documents the interaction."""
     header = "W = 20;\n"
-    pad = "x" * (MAX_SCAD_SOURCE_BYTES - len(header.encode("utf-8")))
-    at_cap = header + pad
+    body = "cube([20, 25, 30]);\n"
+    total = MAX_SCAD_SOURCE_BYTES - len(header.encode("utf-8")) - len(body.encode("utf-8"))
+    at_cap = header + body + ("// pad\n" * total)[: total - 1] + " "
+    assert len(at_cap.encode("utf-8")) == MAX_SCAD_SOURCE_BYTES
+    # The source is exactly at the byte-cap boundary (not over it).
+    assert len(at_cap.encode("utf-8")) <= MAX_SCAD_SOURCE_BYTES
     # Wrap in a fence: the fence's inner content is the source verbatim
     # (no extra trailing newline before the closing fence in this case).
     result = _llm_result(content=f"```scad\n{at_cap}```", tool_calls=())
-    assert _scad_from_result(result) == at_cap
+    # The byte cap admits it (len <= cap, the cap is >, not >=); the 5000-char
+    # heuristic leg rejects a source this large, so the extraction is empty.
+    assert _scad_from_result(result) == ""
+
+
+def test_scad_fallback_rejects_prose_in_fence_as_empty():
+    """Regression: chat prose (not SCAD) inside a fenced block — or via a
+    tool-call argument — is rejected by the pre-render heuristic and treated
+    as empty, so the empty_scad fail-fast path handles it instead of the
+    render worker compiling garbage."""
+    prose = "Wait — that top() call is invalid. Let me think about this.\n"
+    # Fenced fallback path: prose in a bare/scad-labeled fence.
+    for fence_lang in ("scad", ""):
+        result = _llm_result(content=f"```{fence_lang}\n{prose}```", tool_calls=())
+        assert _scad_from_result(result) == "", fence_lang
+    # Tool-call path: prose delivered as arguments.scad.
+    result = _llm_result(
+        content="",
+        tool_calls=(
+            {"name": "emit_design", "arguments": {"scad": prose.rstrip()}},
+        ),
+    )
+    assert _scad_from_result(result) == ""
+
+
+def test_scad_looks_valid_heuristic():
+    """The pre-render heuristic accepts real SCAD and rejects prose on each
+    leg: a ';' somewhere, a length cap, and a token-bounded OpenSCAD
+    keyword."""
+    # Good SCAD passes all three legs.
+    assert scad_looks_valid(GOOD_SCAD)
+    # Leg 1: no statement terminator -> not SCAD.
+    assert not scad_looks_valid("definitely not code at all")
+    # Leg 2: over the 5000-char heuristic cap -> not SCAD (even if it
+    # contains a keyword and semicolons).
+    too_long = "cube([1, 2, 3]);\n" + ("x" * (MAX_SCAD_VALIDATION_CHARS - 10))
+    assert not scad_looks_valid(too_long)
+    # Leg 3: prose with a stray ';' but no OpenSCAD keyword -> not SCAD.
+    assert not scad_looks_valid("Wait — that top() call is invalid; try again.")
+    # 'if' in English prose does NOT count as the keyword (token-bounded).
+    assert not scad_looks_valid("if you want; I can help")
