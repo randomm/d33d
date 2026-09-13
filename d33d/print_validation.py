@@ -69,6 +69,11 @@ QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 #: the Z envelope are unconstrained by this zone.
 QIDI_PLUS_5_KEEP_OUT_MM: tuple[float, float] = (9.0, 13.0)
 
+# Single lower-left notch (0,0)-(9,13). Vendor-verified (QIDI Plus 5
+# tech-spec: 'Lower-left 9x13 mm area is non-printable by default'). No other
+# non-printable regions verified — if additional notches exist at other
+# corners, extend this constant to a list of rectangles.
+
 #: Minimum feature size for a 0.4 mm nozzle, in millimetres.
 #: Features below this threshold may not print reliably.
 MIN_FEATURE_MM: float = 1.0
@@ -98,6 +103,11 @@ ErrorClass = Literal[
     "envelope",
     "export_error",
 ]
+
+#: Message prefixes for gate 7 (envelope) sub-branches, shared by the gate
+#: body and the keep-out helper so the prefix string is defined once.
+_GATE7_KEEP_OUT_PREFIX = "gate7/keep-out"
+_GATE7_ENVELOPE_PREFIX = "gate7/envelope"
 
 #: Every possible error class. The table is TOTAL — every validation
 #: failure lands in exactly one class.
@@ -545,7 +555,7 @@ def validate_stl(
             return _fail(
                 "envelope",
                 _part_from_mesh(mesh),
-                f"gate7/envelope: dimension {i} ({bbox_mm[i]}mm) exceeds "
+                f"{_GATE7_ENVELOPE_PREFIX}: dimension {i} ({bbox_mm[i]}mm) exceeds "
                 f"envelope {env[i]}mm",
             )
     # 7b: keep-out zone within the same gate. The gate site references the
@@ -630,7 +640,7 @@ def _check_bed_keep_out(
         and mesh.bounds[0][1] <= keep_out[1]
     ):
         return (
-            f"gate7/keep-out: post-centre position ({mesh.bounds[0][0]:.2f}, "
+            f"{_GATE7_KEEP_OUT_PREFIX}: post-centre position ({mesh.bounds[0][0]:.2f}, "
             f"{mesh.bounds[0][1]:.2f}) overlaps the bed notch keep-out zone "
             f"({keep_out[0]}x{keep_out[1]}mm)"
         )

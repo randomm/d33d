@@ -142,7 +142,12 @@ def keep_out_x_boundary_pass_stl(tmp_path_factory) -> Path:
 def keep_out_x_boundary_fail_stl(tmp_path_factory) -> Path:
     """X-span 302.0 mm, centred → X-min == 9.0 (fails: <= rejects).
     Y-span 294.2 mm → Y-min ≈ 12.9 < 13 (also fails) so the AND rule
-    triggers and the keep-out gate rejects. Z 20 mm."""
+    triggers and the keep-out gate rejects. Z 20 mm.
+
+    Single shared fixture for both the X-min == 9.0 boundary case and the
+    AND-rule case — the geometry is identical to what the AND rule needs
+    (X-min 9.0 fails X AND Y-min 12.9 fails Y), so no second fixture is
+    required."""
     d = tmp_path_factory.mktemp("ko_x_bfail")
     return _export_box((302.0, 294.2, 20.0), d)
 
@@ -169,14 +174,6 @@ def keep_out_y_fail_stl(tmp_path_factory) -> Path:
     """
     d = tmp_path_factory.mktemp("ko_y_fail")
     return _export_box((301.9, 294.2, 20.0), d)
-
-
-@pytest.fixture(scope="module")
-def keep_out_and_fail_stl(tmp_path_factory) -> Path:
-    """X-span 302 (X-min 9.0, fails) + Y-span 294.2 (Y-min 12.9, fails) →
-    AND: both fail → keep-out rejects. Z 20 mm."""
-    d = tmp_path_factory.mktemp("ko_and_fail")
-    return _export_box((302.0, 294.2, 20.0), d)
 
 
 @pytest.fixture(scope="module")
@@ -377,6 +374,8 @@ def test_keep_out_constant_is_named():
     assert len(ko) == 2
     assert all(isinstance(v, (int, float)) for v in ko)
     assert ko[0] > 0 and ko[1] > 0
+    # Pin the vendor-verified values, not just the shape.
+    assert (ko[0], ko[1]) == (9.0, 13.0)
 
 
 def test_keep_out_gate_rejects_origin_notch(
@@ -436,7 +435,7 @@ def test_keep_out_gate_rejects_origin_notch(
 
 def test_keep_out_or_not_and(
     keep_out_or_pass_stl,
-    keep_out_and_fail_stl,
+    keep_out_x_boundary_fail_stl,
 ):
     """The keep-out rule is AND, not OR: a part passes if EITHER axis
     clears the keep-out rectangle, and fails only when BOTH axes overlap.
@@ -448,8 +447,11 @@ def test_keep_out_or_not_and(
     r = pv.validate_stl(str(keep_out_or_pass_stl), slice_dry_run_fn=_passing_slice_fn)
     assert r.ok, f"Expected OR pass, got {r.error_class}"
 
-    # AND: both axes fail → rejected
-    r = pv.validate_stl(str(keep_out_and_fail_stl), slice_dry_run_fn=_passing_slice_fn)
+    # AND: both axes fail → rejected (same geometry as the X-boundary
+    # failure fixture: X-min 9.0 and Y-min 12.9 both overlap the notch)
+    r = pv.validate_stl(
+        str(keep_out_x_boundary_fail_stl), slice_dry_run_fn=_passing_slice_fn
+    )
     assert not r.ok
     assert "envelope" in r.error_class
     assert r.export_3mf is None
@@ -485,24 +487,11 @@ def test_keep_out_source_invariant_reads_named_constant():
     site. The constant is the single source of truth for the keep-out
     boundary."""
     import inspect
-    import re
 
-    src = inspect.getsource(pv.validate_stl)
-    # The gate must reference the named constant
-    assert "QIDI_PLUS_5_KEEP_OUT_MM" in src or "keep_out" in src, (
-        "gate-7 keep-out check does not reference QIDI_PLUS_5_KEEP_OUT_MM "
-        "or the keep_out local variable"
-    )
-    # No bare 9.0 / 13.0 float literals in the keep-out check body.
-    # We look for a numeric literal that equals 9.0 or 13.0 (not as part
-    # of the envelope tuple or a different constant).
-    # Extract the keep-out block (from 'keep_out' assignment to the next
-    # 'Export 3MF' comment or end of function) and check for bare literals.
-    ko_match = re.search(
-        r"QIDI_PLUS_5_KEEP_OUT_MM",
-        src,
-    )
-    assert ko_match is not None, (
+    # The gate must reference the named constant (the single source of
+    # truth for the keep-out boundary; no bare 9.0/13.0 literals at the
+    # gate site).
+    assert "QIDI_PLUS_5_KEEP_OUT_MM" in inspect.getsource(pv.validate_stl), (
         "gate-7 must reference QIDI_PLUS_5_KEEP_OUT_MM "
         "(the named constant is the single source of truth); no bare "
         "9.0/13.0 literals allowed at the gate site"
@@ -536,9 +525,7 @@ def test_keep_out_positive_path_writes_3mf(valid_stl):
 
 
 def test_over_envelope_fails_loudly(
-    valid_stl,
     over_envelope_stl,
-    keep_out_and_fail_stl,
 ):
     """A mesh exceeding the QIDI Plus 5 build envelope on any axis must
     fail the envelope gate and NOT export a 3MF."""
@@ -550,7 +537,7 @@ def test_over_envelope_fails_loudly(
 
 
 def test_fits_envelope_but_overlaps_keep_out_fails_loudly(
-    keep_out_and_fail_stl,
+    keep_out_x_boundary_fail_stl,
 ):
     """A part that fits the 320x320x300 envelope on every axis but whose
     post-centre position overlaps the lower-left keep-out notch must fail
@@ -562,7 +549,7 @@ def test_fits_envelope_but_overlaps_keep_out_fails_loudly(
     keep-out AND rule (X-min <= 9.0 AND Y-min <= 13.0) rejects the part.
     """
     result = pv.validate_stl(
-        str(keep_out_and_fail_stl), slice_dry_run_fn=_passing_slice_fn
+        str(keep_out_x_boundary_fail_stl), slice_dry_run_fn=_passing_slice_fn
     )
     assert not result.ok
     assert "envelope" in result.error_class
