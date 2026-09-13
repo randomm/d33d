@@ -52,6 +52,7 @@ __all__ = [
     "llm_request_body",
     "response_message",
     "response_text",
+    "role_tools",
     "send",
     "to_ollama_messages",
 ]
@@ -76,6 +77,74 @@ ROLE_TOOL_NAMES: dict[str, str] = {
     "critique": "emit_critique",
     "classification": "emit_classification",
 }
+
+#: The OpenAI function-calling tool definition per role — the native ``tools``
+#: array the T0 request carries (the maker closures, 
+#: ``design_loop.make_llm_fn`` / ``critique_protocol.make_critique_llm_fn``,
+#: attach :func:`role_tools` at T0 so the wire schema matches the name the
+#: response-side allowlist (:func:`_validate_tool_name`) enforces).  The shape
+#: is structurally equal to the ``DESIGN_TOOLS`` test constant in
+#: ``tests/test_design_loop_tiers.py``; this is the production copy.
+ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
+    "emit_design": {
+        "type": "function",
+        "function": {
+            "name": "emit_design",
+            "description": "Emit the parametric OpenSCAD",
+            "parameters": {
+                "type": "object",
+                "properties": {"scad": {"type": "string"}},
+            },
+        },
+    },
+    "emit_critique": {
+        "type": "function",
+        "function": {
+            "name": "emit_critique",
+            "description": "Emit the structured six-view critique verdict",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "assessment": {"type": "string"},
+                    "views": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "view": {"type": "string"},
+                                "ok": {"type": "boolean"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+    "emit_classification": {
+        "type": "function",
+        "function": {
+            "name": "emit_classification",
+            "description": "Emit the structured failure classification",
+            "parameters": {
+                "type": "object",
+                "properties": {"classification": {"type": "string"}},
+            },
+        },
+    },
+}
+
+
+def role_tools(role: str) -> list[dict[str, Any]] | None:
+    """The role's native tool definition as a ``tools`` list (T0 wire shape).
+
+    ``None`` when the role has no tool contract (unknown role) — callers
+    attach the result at T0 only (the T1 branch of :func:`send` never
+    carries a ``tools`` array regardless).  The list is a fresh copy so a
+    caller mutating it cannot mutate the module-level schema.
+    """
+    tool_name = ROLE_TOOL_NAMES.get(role)
+    schema = ROLE_TOOL_SCHEMAS.get(tool_name) if tool_name else None
+    return [schema] if schema is not None else None
 
 
 class SenderError(RuntimeError):

@@ -61,7 +61,7 @@ from typing import Any, Literal
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
-from d33d.design_llm import LLMResult, send
+from d33d.design_llm import LLMResult, role_tools, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     classify_failure,
@@ -608,14 +608,20 @@ def make_llm_fn(
         role: str, messages: list[dict[str, Any]], system: str | None
     ) -> LLMResult:
         resolution = resolve_model(catalogue, role)
+        capability = caps.get(role)
         return await send(
             role=role,
             model_id=resolution.entry.model,
             messages=messages,
             request_factory=request_factories[role],
-            capability=caps.get(role),
+            capability=capability,
             dialect=dialect,  # type: ignore[arg-type]
             system=system,
+            # T0 native tool schema, attached per the role actually being
+            # called (design -> emit_design, critique -> emit_critique, ...);
+            # send() only puts it in the body on the T0 branch, and T1
+            # bodies never carry a tools array regardless.
+            tools=role_tools(role) if capability is not None and capability.tier == "T0" else None,
         )
 
     return llm_fn
