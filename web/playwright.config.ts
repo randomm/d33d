@@ -15,7 +15,7 @@ export default defineConfig({
   webServer: process.env.E2E_SKIP_SERVER
     ? undefined
     : {
-        command: "uvicorn d33d.app:create_app --factory --port 8080",
+        command: "uv run uvicorn d33d.app:create_app --factory --port 8080",
         url: "http://localhost:8080/api/projects",
         reuseExistingServer: true,
         cwd: "..",
