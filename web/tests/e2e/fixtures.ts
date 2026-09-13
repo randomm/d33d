@@ -13,7 +13,8 @@
  *   directly (version-timeline create/restore/compare, etc.) without
  *   duplicating HTTP boilerplate.
  *
- * - `e2eFixturesDir` — absolute path to `tests/fixtures/e2e/`, resolved
+ * - `e2eFixturesDir` — absolute path to `web/tests/e2e/` (where the
+ *   fixture files now live), resolved
  *   relative to this file so specs can locate `test-photo.png` and
  *   `sample-model.3mf` regardless of the process cwd (Playwright may be
  *   invoked from the repo root or from `web/`).
@@ -40,8 +41,8 @@ import { test as base } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
-/** Absolute path to the `tests/fixtures/e2e/` directory. */
-export const E2E_FIXTURES_DIR = path.resolve(__dirname, "..", "fixtures", "e2e");
+/** Absolute path to the `web/tests/e2e/` fixture directory. */
+export const E2E_FIXTURES_DIR = path.resolve(__dirname);
 
 /** Absolute path to the small reference-photo PNG fixture. */
 export const TEST_PHOTO_PATH = path.join(E2E_FIXTURES_DIR, "test-photo.png");
@@ -167,7 +168,7 @@ type E2EFixtures = {
 };
 
 /**
- * Extended Playwright test. Each spec file in `tests/e2e/` imports `test`
+ * Extended Playwright test. Each spec file in `web/tests/e2e/` imports `test`
  * from here (rather than directly from `@playwright/test`) to get the
  * shared fixtures. Specs that don't need a particular fixture simply don't
  * reference it — Playwright's dependency injection only sets up fixtures a

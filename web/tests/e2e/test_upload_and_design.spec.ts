@@ -17,7 +17,7 @@
  *     instead of creating a second project via the API, so the 3MF route
  *     interception matches the id the Export 3MF button actually requests.
  *   - The fixture file is the sibling-workstream `scaffold`'s scope
- *     (tests/fixtures/e2e/). Until those land, the spec generates its
+ *     (web/tests/e2e/). Until those land, the spec generates its
  *     equivalents deterministically in a scratch dir: a tiny PNG reference
  *     photo and a minimal valid 3MF (a zip with a single
  *     [Content_Types].xml member), so this spec is self-contained.
@@ -29,10 +29,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 const FIXTURE_PHOTO_PATH = path.resolve(
-  "..",
-  "tests",
-  "fixtures",
-  "e2e",
+  path.dirname(new URL(import.meta.url).pathname),
   "test-photo.png",
 );
 
