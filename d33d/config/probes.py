@@ -196,7 +196,7 @@ async def probe_capabilities(
                 },
             }
         )
-        if resp.ok:
+        if resp.is_success:
             any_ok = True
             data = resp.json()
             content = data["choices"][0]["message"]["content"]
@@ -230,7 +230,7 @@ async def probe_capabilities(
                     },
                 }
             )
-            if resp.ok:
+            if resp.is_success:
                 max_images = 2
             else:
                 max_images = 1
@@ -268,7 +268,7 @@ async def probe_capabilities(
                 },
             }
         )
-        if resp.ok:
+        if resp.is_success:
             any_ok = True
             data = resp.json()
             message = data["choices"][0]["message"]

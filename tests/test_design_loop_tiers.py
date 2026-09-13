@@ -72,7 +72,7 @@ def _run(coro):
 class FakeResponse:
     def __init__(self, status: int, payload: dict[str, Any]):
         self.status = status
-        self.ok = status < 400
+        self.is_success = status < 400
         self._payload = payload
 
     def json(self):

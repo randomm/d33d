@@ -373,7 +373,7 @@ async def send(
     prompt_hash = canonical_hash(role=role, messages=body["messages"], system=system)
 
     resp = await request_factory(body)
-    if not getattr(resp, "ok", False):
+    if not getattr(resp, "is_success", False):
         raise SenderError(
             f"LLM call for role {role!r} failed: HTTP {getattr(resp, 'status', '?')}",
             status="error",
