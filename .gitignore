@@ -21,6 +21,13 @@ venv/
 .coverage
 htmlcov/
 
+# Playwright (E2E) output artifacts (issue #49)
+playwright-report/
+test-results/
+
+# Auto-created by uvicorn runs
+master.key
+
 # OS / editor noise
 .DS_Store
 .idea/
