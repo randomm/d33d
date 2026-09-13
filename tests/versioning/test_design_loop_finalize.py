@@ -569,6 +569,12 @@ def test_chat_returns_202_accepted_and_registers_event_source(app_with_versions)
         # 202 response is returned) — the SSE stream reads it at request
         # time and would otherwise terminate on "no active stream".
         source = app_with_versions.state.event_sources.get(pid)
+        # Drive the generator to completion (the SSE endpoint is the sole
+        # driver in production; here we do it directly to trigger the
+        # design-loop call and capture kwargs).
+        async for _event, _data in source:
+            if _event in ("done", "error"):
+                break
         return r, source
 
     r, source = run_async(app_with_versions, _call)
@@ -622,14 +628,12 @@ def test_chat_flag_released_after_loop_completes(app_with_versions):
         pid = proj["id"]
         app_with_versions.state.run_design_loop = _loop
         await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
-        # Wait for the background task to complete (the flag is cleared in
-        # the _drive task's finally).
-        import asyncio as _a
-
-        for _ in range(50):
-            if pid not in app_with_versions.state.design_loop_inflight:
-                break
-            await _a.sleep(0.01)
+        # Consume the SSE stream (the SSE endpoint is the sole driver of
+        # the generator; the flag is cleared in its finally when the
+        # generator is exhausted).
+        async with client.stream("GET", f"/api/stream/{pid}") as resp:
+            async for _chunk in resp.aiter_text():
+                pass
         return pid in app_with_versions.state.design_loop_inflight
 
     still_inflight = run_async(app_with_versions, _call)
@@ -740,6 +744,12 @@ def test_chat_supplies_real_bbox_fn(app_with_versions):
         pid = proj["id"]
         app_with_versions.state.run_design_loop = _loop
         await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        # Drive the generator to trigger the design-loop call.
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
 
     run_async(app_with_versions, _call)
     assert "bbox_fn" in captured, "bbox_fn not supplied by chat wiring"
@@ -766,6 +776,11 @@ def test_chat_stated_dims_from_body(app_with_versions):
             f"/api/projects/{pid}/chat",
             json={"message": "hi", "stated_dims": [20.0, 30.0, 40.0]},
         )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
 
     run_async(app_with_versions, _call)
     assert captured["stated_dims"] == (20.0, 30.0, 40.0)
@@ -787,6 +802,11 @@ def test_chat_chat_history_from_body(app_with_versions):
             f"/api/projects/{pid}/chat",
             json={"message": "hi", "chat_history": ["first", "second"]},
         )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
 
     run_async(app_with_versions, _call)
     assert captured["chat_history"] == ("first", "second")
@@ -819,6 +839,11 @@ def test_chat_photo_data_uri_from_project(app_with_versions, tmp_path):
             pid, source_photo_path=str(png_path)
         )
         await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
 
     run_async(app_with_versions, _call)
     photo = captured.get("photo")
@@ -842,6 +867,11 @@ def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
         pid = proj["id"]
         app_with_versions.state.run_design_loop = _loop
         await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
 
     run_async(app_with_versions, _call)
     assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
@@ -871,16 +901,19 @@ def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
 
         app_with_versions.state.run_design_loop = _loop
         r = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
-        source = app_with_versions.state.event_sources[pid]
+        # Consume the SSE stream (the SSE endpoint is the sole driver;
+        # the flag is cleared in its finally when the generator is
+        # exhausted or a terminal frame is reached).
+        sse_chunks = []
+        async with client.stream("GET", f"/api/stream/{pid}") as resp:
+            async for _chunk in resp.aiter_text():
+                sse_chunks.append(_chunk)
+        # Parse SSE frames from the raw text.
         frames = []
-        async for event, data in source:
-            frames.append((event, data))
-            if event in ("done", "error"):
-                break
-        for _ in range(50):
-            if pid not in app_with_versions.state.design_loop_inflight:
-                break
-            await _a.sleep(0.01)
+        for chunk in sse_chunks:
+            for line in chunk.split("\n"):
+                if line.startswith("event: "):
+                    frames.append((line[len("event: "):], {}))
         return r, frames, pid in app_with_versions.state.design_loop_inflight
 
     r, frames, still_inflight = run_async(app_with_versions, _call)

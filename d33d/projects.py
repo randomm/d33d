@@ -299,11 +299,20 @@ def create_projects_router() -> APIRouter:
 
         photo = photo_data_uri(row.get("source_photo_path"))
 
-        # Register the event source synchronously BEFORE starting the
-        # background task (else the client stream terminates on "no active
-        # stream" — see d33d/streaming.py's contract). The adapter is a
-        # plain async generator (not a coroutine): ``event_sources`` maps
+        # Register the event source synchronously BEFORE the 202 response
+        # (else the client stream terminates on "no active stream" — see
+        # d33d/streaming.py's contract). The adapter is a plain async
+        # generator (not a coroutine): ``event_sources`` maps
         # project_id -> AsyncIterator of (event, data) tuples.
+        #
+        # The SSE endpoint (GET /api/stream/{project_id}) is the SOLE
+        # driver of this generator — a single async generator cannot be
+        # driven by two concurrent ``async for`` consumers (CPython raises
+        # ``RuntimeError: anext(): asynchronous generator is already
+        # running`` on the second consumer's first ``__anext__``). The
+        # inflight flag is set here (synchronously, before the 202
+        # response) and cleared in the SSE endpoint's ``finally`` when the
+        # generator is exhausted (or an SSE client disconnects).
         from d33d.design_loop_events import run_design_loop_with_events
 
         events = run_design_loop_with_events(
@@ -318,29 +327,9 @@ def create_projects_router() -> APIRouter:
         app.state.event_sources[project_id] = events
 
         # Set the in-flight flag (synchronously, before the 202 response).
-        # The background task's ``finally`` clears it on ALL exit paths.
+        # The SSE endpoint's ``finally`` clears it on ALL exit paths
+        # (generator exhausted, client disconnect, exception).
         inflight.add(project_id)
-
-        # The background task: drive the event-source generator to
-        # completion. The adapter catches broadly and always emits a
-        # terminal frame, so the task completes cleanly on every path. The
-        # streaming endpoint may still be iterating the SAME generator
-        # object concurrently (the SSE client is the other consumer); the
-        # flag lifecycle is owned here, not by the adapter.
-        async def _drive() -> None:
-            try:
-                async for _event, _data in events:
-                    pass
-            finally:
-                # Release the in-flight flag on ALL exit paths (pass,
-                # exhausted, exception). The adapter's terminal frame is
-                # already in the generator's buffer, so the SSE client
-                # still sees it even after the flag is released.
-                inflight.discard(project_id)
-
-        import asyncio
-
-        asyncio.create_task(_drive())
 
         return {"status": "accepted"}
 
