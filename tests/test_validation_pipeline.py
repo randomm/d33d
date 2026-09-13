@@ -107,6 +107,103 @@ def over_envelope_stl(tmp_path_factory) -> Path:
     return path
 
 
+def _export_box(size: tuple[float, float, float], parent: Path) -> Path:
+    """Export a solid box of the given mm size to a temp STL file.
+
+    The STL round-trip (float32 vertices) is essential: the sub-mm keep-out
+    boundary (X-min 9.05 vs 9.0, Y-min 12.9 vs 13.0) must survive the same
+    float32 storage + ``_centre_mesh`` translation math that the production
+    pipeline applies. In-memory boxes would give exact float64 values and
+    mask the real boundary behaviour.
+    """
+    box = trimesh.creation.box(size)
+    path = parent / "keep_out.stl"
+    box.export(path)
+    return path
+
+
+@pytest.fixture(scope="module")
+def keep_out_x_pass_stl(tmp_path_factory) -> Path:
+    """X-span 301.5 mm, centred → X-min ≈ 9.25 > 9.0 (passes keep-out).
+    Y-span 100 mm → Y-min 110 > 13 (clears Y). Z 20 mm."""
+    d = tmp_path_factory.mktemp("ko_x_pass")
+    return _export_box((301.5, 100.0, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_x_boundary_pass_stl(tmp_path_factory) -> Path:
+    """X-span 301.9 mm, centred → X-min ≈ 9.05 > 9.0 (passes, 0.05 mm margin).
+    Y-span 100 mm → Y-min 110 > 13 (clears Y). Z 20 mm."""
+    d = tmp_path_factory.mktemp("ko_x_bpass")
+    return _export_box((301.9, 100.0, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_x_boundary_fail_stl(tmp_path_factory) -> Path:
+    """X-span 302.0 mm, centred → X-min == 9.0 (fails: <= rejects).
+    Y-span 294.2 mm → Y-min ≈ 12.9 < 13 (also fails) so the AND rule
+    triggers and the keep-out gate rejects. Z 20 mm.
+
+    Single shared fixture for both the X-min == 9.0 boundary case and the
+    AND-rule case — the geometry is identical to what the AND rule needs
+    (X-min 9.0 fails X AND Y-min 12.9 fails Y), so no second fixture is
+    required."""
+    d = tmp_path_factory.mktemp("ko_x_bfail")
+    return _export_box((302.0, 294.2, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_y_pass_stl(tmp_path_factory) -> Path:
+    """Y-span 12.9 mm, centred → Y-min ≈ 153.55 > 13 (passes keep-out).
+    X-span 100 mm → X-min 110 > 9 (clears X). Z 20 mm."""
+    d = tmp_path_factory.mktemp("ko_y_pass")
+    return _export_box((100.0, 12.9, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_y_fail_stl(tmp_path_factory) -> Path:
+    """Y-span 294.2 mm, centred → Y-min ≈ 12.9 < 13 (fails: < 13).
+    X-span 301.9 mm → X-min ≈ 9.05 > 9.0 (passes X) so the AND rule is
+    False and the part PASSES despite Y failing. Z 20 mm.
+
+    The Y-span must be large enough that centring places the Y-min below
+    13 mm. The spec's original 26.2 mm Y-span numbers were arithmetically
+    invalid under the spec's own centring model (a 26.2 mm Y-span centred
+    at 160 gives Y-min ≈ 146.9, far above 13). The 294.2 mm span is the
+    re-derived value: 160 - 294.2/2 = 12.9 < 13.0.
+    """
+    d = tmp_path_factory.mktemp("ko_y_fail")
+    return _export_box((301.9, 294.2, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_or_pass_stl(tmp_path_factory) -> Path:
+    """X-span 301.9 (X-min 9.05, passes) + Y-span 294.2 (Y-min 12.9, fails) →
+    OR: X clears → keep-out passes. Z 20 mm."""
+    d = tmp_path_factory.mktemp("ko_or_pass")
+    return _export_box((301.9, 294.2, 20.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_z_unconstrained_pass_stl(tmp_path_factory) -> Path:
+    """X-span 301.9 (X-min 9.05, passes), Y-span 12.9 (Y-min 153.55, passes),
+    Z-span 290 (near the 300 mm Z envelope but below it) → passes keep-out
+    and envelope. Demonstrates Z is not constrained by the keep-out rule.
+    """
+    d = tmp_path_factory.mktemp("ko_z_pass")
+    return _export_box((301.9, 12.9, 290.0), d)
+
+
+@pytest.fixture(scope="module")
+def keep_out_z_unconstrained_fail_stl(tmp_path_factory) -> Path:
+    """X-span 302 (X-min 9.0, fails), Y-span 294.2 (Y-min 12.9, fails),
+    Z-span 290 (near the 300 mm Z envelope but below it) → keep-out AND-fails.
+    The failure is due to the keep-out rule, not the Z dimension: Z 290 < 300.
+    """
+    d = tmp_path_factory.mktemp("ko_z_fail")
+    return _export_box((302.0, 294.2, 290.0), d)
+
+
 def _load(path: Path) -> trimesh.Trimesh:
     loaded = trimesh.load(path, process=False)
     assert isinstance(loaded, trimesh.Trimesh)
@@ -249,7 +346,187 @@ def test_holey_mesh_preserves_dimensions(holey_stl):
 # ---------------------------------------------------------------------------
 
 
-def test_over_envelope_fails_loudly(valid_stl, over_envelope_stl):
+def test_within_envelope_passes(valid_stl):
+    """A mesh within the envelope passes the envelope gate."""
+    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert result.ok
+
+
+# ---------------------------------------------------------------------------
+# Bed keep-out zone (ticket #40): QIDI_PLUS_5_KEEP_OUT_MM
+# ---------------------------------------------------------------------------
+#
+# The keep-out is the lower-left non-printable rectangle (9.0 x 13.0 mm)
+# on the bed. Gate 7 rejects a part iff post-centre X-min <= 9.0 AND
+# post-centre Y-min <= 13.0. Centring is unchanged: _centre_mesh shifts
+# the centroid to env/2 = (160, 160, 150), so for a box of span S on axis
+# i, the post-centre min on that axis is 160 - S/2.
+#
+# All keep-out fixtures stay inside the 320x320x300 envelope so the
+# per-axis extent check passes and the keep-out branch is isolated.
+
+
+def test_keep_out_constant_is_named():
+    """QIDI_PLUS_5_KEEP_OUT_MM must exist as a named 2-tuple with two
+    positive values (the X and Y keep-out boundaries in mm)."""
+    ko = pv.QIDI_PLUS_5_KEEP_OUT_MM
+    assert isinstance(ko, tuple)
+    assert len(ko) == 2
+    assert all(isinstance(v, (int, float)) for v in ko)
+    assert ko[0] > 0 and ko[1] > 0
+    # Pin the vendor-verified values, not just the shape.
+    assert (ko[0], ko[1]) == (9.0, 13.0)
+
+
+def test_keep_out_gate_rejects_origin_notch(
+    keep_out_x_pass_stl,
+    keep_out_x_boundary_pass_stl,
+    keep_out_x_boundary_fail_stl,
+    keep_out_y_pass_stl,
+    keep_out_y_fail_stl,
+):
+    """The keep-out gate rejects a part whose post-centre position overlaps
+    the lower-left 9x13 mm notch, and passes a part that clears either axis.
+
+    X-axis boundary (post-centre X-min = 160 - X_span/2):
+      - X-span 301.5 → X-min 9.25 > 9.0 → PASSES
+      - X-span 301.9 → X-min 9.05 > 9.0 → PASSES (0.05 mm margin)
+      - X-span 302.0 → X-min 9.0  == 9.0 → FAILS (<= rejects)
+
+    Y-axis boundary (post-centre Y-min = 160 - Y_span/2):
+      The spec's original Y-span values (25.9/26.2 mm → Y-min 122.05/121.9)
+      are arithmetically invalid under the spec's own centring model:
+      a 26.2 mm Y-span centred at 160 gives Y-min = 160 - 13.1 = 146.9,
+      which is far above 13.0 and would pass. The re-derived Y-span for
+      Y-min just below 13 is 294.2 mm (160 - 147.1 = 12.9 < 13).
+
+      - Y-span 12.9 → Y-min 153.55 > 13.0 → PASSES
+      - Y-span 294.2 → Y-min 12.9  < 13.0 → FAILS
+    """
+    # X passes (X-min > 9.0), Y clears (Y-min 110 > 13)
+    r = pv.validate_stl(str(keep_out_x_pass_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert r.ok, f"Expected pass, got {r.error_class}"
+
+    # X boundary: 9.05 > 9.0 still passes
+    r = pv.validate_stl(
+        str(keep_out_x_boundary_pass_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert r.ok, f"Expected pass at X-min 9.05, got {r.error_class}"
+
+    # X boundary: 9.0 == 9.0 fails (<= rejects)
+    r = pv.validate_stl(
+        str(keep_out_x_boundary_fail_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert not r.ok
+    assert "envelope" in r.error_class
+    assert "keep-out" in r.message
+    assert r.export_3mf is None
+
+    # Y passes (Y-min > 13.0)
+    r = pv.validate_stl(str(keep_out_y_pass_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert r.ok, f"Expected pass, got {r.error_class}"
+
+    # Y fails (Y-min < 13.0), X passes (X-min 9.05 > 9.0)
+    # AND rule: X passes → AND is False → PASSES despite Y failing
+    # (this is the OR side of the AND rule, covered explicitly below)
+    r = pv.validate_stl(str(keep_out_y_fail_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert r.ok, f"Expected pass (X clears), got {r.error_class}"
+
+
+def test_keep_out_or_not_and(
+    keep_out_or_pass_stl,
+    keep_out_x_boundary_fail_stl,
+):
+    """The keep-out rule is AND, not OR: a part passes if EITHER axis
+    clears the keep-out rectangle, and fails only when BOTH axes overlap.
+
+      - X-min 9.05 (passes X) + Y-min 12.9 (fails Y) → PASSES (X clears)
+      - X-min 9.0  (fails X)  + Y-min 12.9 (fails Y) → FAILS (both fail)
+    """
+    # OR: one axis clears → passes
+    r = pv.validate_stl(str(keep_out_or_pass_stl), slice_dry_run_fn=_passing_slice_fn)
+    assert r.ok, f"Expected OR pass, got {r.error_class}"
+
+    # AND: both axes fail → rejected (same geometry as the X-boundary
+    # failure fixture: X-min 9.0 and Y-min 12.9 both overlap the notch)
+    r = pv.validate_stl(
+        str(keep_out_x_boundary_fail_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert not r.ok
+    assert "envelope" in r.error_class
+    assert r.export_3mf is None
+
+
+def test_keep_out_z_unconstrained(
+    keep_out_z_unconstrained_pass_stl,
+    keep_out_z_unconstrained_fail_stl,
+):
+    """Z is never constrained by the keep-out rule: a part with Z-span 290 mm
+    (well below the 300 mm Z envelope) passes or fails based solely on the
+    X/Y keep-out rule, never on Z.
+
+      - X-min 9.05 (passes) + Y-min 153.55 (passes) + Z 290 → PASSES
+      - X-min 9.0  (fails)  + Y-min 12.9   (fails)  + Z 290 → FAILS (keep-out,
+        not Z: 290 < 300)
+    """
+    r = pv.validate_stl(
+        str(keep_out_z_unconstrained_pass_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert r.ok, f"Expected Z-unconstrained pass, got {r.error_class}"
+
+    r = pv.validate_stl(
+        str(keep_out_z_unconstrained_fail_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert not r.ok
+    assert "envelope" in r.error_class
+
+
+def test_keep_out_source_invariant_reads_named_constant():
+    """The gate-7 keep-out check must read QIDI_PLUS_5_KEEP_OUT_MM (directly
+    or via a shared helper); no bare 9.0/13.0 literal may appear at the gate
+    site. The constant is the single source of truth for the keep-out
+    boundary."""
+    import inspect
+
+    # The gate must reference the named constant (the single source of
+    # truth for the keep-out boundary; no bare 9.0/13.0 literals at the
+    # gate site).
+    assert "QIDI_PLUS_5_KEEP_OUT_MM" in inspect.getsource(pv.validate_stl), (
+        "gate-7 must reference QIDI_PLUS_5_KEEP_OUT_MM "
+        "(the named constant is the single source of truth); no bare "
+        "9.0/13.0 literals allowed at the gate site"
+    )
+
+
+def test_keep_out_positive_path_writes_3mf(valid_stl):
+    """A part fully clear of the keep-out zone (X-min 110 > 9.0, Y-min 110 >
+    13.0) returns ok=True and writes model.3mf. This pins the positive path:
+    the keep-out gate must not block a part that is geometrically clear of
+    the notch."""
+    import os
+    import tempfile
+
+    out = tempfile.mkdtemp(prefix="d33d_keep_out_positive_")
+    try:
+        result = pv.validate_stl(
+            str(valid_stl),
+            slice_dry_run_fn=_passing_slice_fn,
+            output_dir=out,
+        )
+        assert result.ok, f"Expected ok=True, got error_class={result.error_class}"
+        assert result.export_3mf is not None
+        assert os.path.isfile(result.export_3mf), (
+            f"model.3mf was not written: {result.export_3mf}"
+        )
+        assert result.export_3mf.endswith(".3mf")
+    finally:
+        import shutil
+        shutil.rmtree(out, ignore_errors=True)
+
+
+def test_over_envelope_fails_loudly(
+    over_envelope_stl,
+):
     """A mesh exceeding the QIDI Plus 5 build envelope on any axis must
     fail the envelope gate and NOT export a 3MF."""
     result = pv.validate_stl(str(over_envelope_stl), slice_dry_run_fn=_passing_slice_fn)
@@ -259,10 +536,28 @@ def test_over_envelope_fails_loudly(valid_stl, over_envelope_stl):
     assert result.export_3mf is None
 
 
-def test_within_envelope_passes(valid_stl):
-    """A mesh within the envelope passes the envelope gate."""
-    result = pv.validate_stl(str(valid_stl), slice_dry_run_fn=_passing_slice_fn)
-    assert result.ok
+def test_fits_envelope_but_overlaps_keep_out_fails_loudly(
+    keep_out_x_boundary_fail_stl,
+):
+    """A part that fits the 320x320x300 envelope on every axis but whose
+    post-centre position overlaps the lower-left keep-out notch must fail
+    the keep-out branch of gate 7 (not the per-axis extent check) and NOT
+    export a 3MF.
+
+    This is the sibling case to test_over_envelope_fails_loudly: the
+    per-axis extent check passes (all spans < 320x320x300), but the
+    keep-out AND rule (X-min <= 9.0 AND Y-min <= 13.0) rejects the part.
+    """
+    result = pv.validate_stl(
+        str(keep_out_x_boundary_fail_stl), slice_dry_run_fn=_passing_slice_fn
+    )
+    assert not result.ok
+    assert "envelope" in result.error_class
+    # The keep-out branch must be distinguishable from a plain
+    # over-envelope failure by its detail message (same "envelope" class).
+    assert "keep-out" in result.message
+    assert "gate7/envelope" not in result.message
+    assert result.export_3mf is None
 
 
 # ---------------------------------------------------------------------------
