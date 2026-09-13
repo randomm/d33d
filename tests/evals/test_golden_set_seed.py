@@ -89,7 +89,9 @@ def test_baseline_is_the_only_marked_case() -> None:
     """Exactly one case is marked is_baseline (the Qwen smoke)."""
     cases = _load()
     baselines = [c for c in cases.values() if c.is_baseline]
-    assert len(baselines) == 1, f"expected exactly 1 baseline case, got {len(baselines)}"
+    assert len(baselines) == 1, (
+        f"expected exactly 1 baseline case, got {len(baselines)}"
+    )
     assert baselines[0].case_id == QWEN_SMOKE_CASE_ID
 
 
@@ -112,7 +114,9 @@ def test_bbox_gate_requires_expected_dims() -> None:
         if "bbox_dims" in c.gate_expectations:
             assert c.expected_dims is not None, f"{cid}: bbox gate but no expected_dims"
         if c.kind == "adversarial":
-            assert c.expected_dims is None, f"{cid}: adversarial must not have expected_dims"
+            assert c.expected_dims is None, (
+                f"{cid}: adversarial must not have expected_dims"
+            )
 
 
 def test_adversarial_cases_score_against_outcome_class() -> None:
@@ -120,7 +124,9 @@ def test_adversarial_cases_score_against_outcome_class() -> None:
         if c.kind != "adversarial":
             continue
         assert c.adversarial is not None, f"{cid}: adversarial spec missing"
-        assert c.adversarial.expected_outcome in ADVERSARIAL_OUTCOMES, f"{cid}: bad outcome"
+        assert c.adversarial.expected_outcome in ADVERSARIAL_OUTCOMES, (
+            f"{cid}: bad outcome"
+        )
         # never as compile failures: the subset check below is the real
         # invariant — an adversarial case declares fewer than all seven
         # deterministic gates.
@@ -143,8 +149,74 @@ def test_region_edit_cases_carry_baseline_and_selection() -> None:
 
 
 def test_red_region_edit_kinds_cover_add_remove_move() -> None:
-    ops = {c.red_region_edit.edit_op for c in _load().values() if c.kind == "red_region_edit"}
+    ops = {
+        c.red_region_edit.edit_op
+        for c in _load().values()
+        if c.kind == "red_region_edit"
+    }
     assert ops == {"add", "remove", "move"}, f"region edits cover only {ops}"
+
+
+def _canonical_polygon(points: list[list[float]]) -> tuple[tuple[float, float], ...]:
+    """Canonicalize a polygon's point set: rotate the list to start at the
+    lexicographically minimum point, preserving order. A cyclic re-ordering
+    (the same polygon listed from a different corner) then maps to the same
+    canonical form; a genuinely different point set does not."""
+    pts = [tuple(p) for p in points]
+    i = pts.index(min(pts))
+    rotated = pts[i:] + pts[:i]
+    return tuple(rotated)
+
+
+def _region_edit_polygons() -> dict[str, list[tuple[float, float]]]:
+    """Map region-edit case_id -> canonicalized selection-polygon point lists."""
+    out: dict[str, list[tuple[float, float]]] = {}
+    for cid, c in _load().items():
+        if c.kind != "red_region_edit":
+            continue
+        rre = c.red_region_edit
+        assert rre is not None
+        out[cid] = [_canonical_polygon(p.points) for p in rre.selection_polygons]
+    return out
+
+
+def test_region_edit_selection_polygons_are_all_distinct() -> None:
+    """The 5 region-edit cases carry 5 distinct selection polygons.
+
+    Distinct means a different point set — NOT merely the same square listed
+    from a different corner, which is why comparison happens on canonicalized
+    geometry (point list rotated to start at its minimum point)."""
+    polygons = _region_edit_polygons()
+    region_edit_ids = [c for c in _load() if _load()[c].kind == "red_region_edit"]
+    assert len(region_edit_ids) == 5, (
+        f"expected 5 region-edit cases, got {len(region_edit_ids)}"
+    )
+    canonicals = [tuple(canons) for canons in polygons.values()]
+    assert len(set(canonicals)) == 5, (
+        f"region-edit selection polygons are not all distinct; canonical forms: "
+        f"{dict(zip(polygons, canonicals))}"
+    )
+
+
+def test_move_cut_and_move_window_are_not_identical() -> None:
+    """region-edit-move-window is a genuinely distinct case from move-cut:
+    distinct request text AND distinct selection polygon, not just case_id."""
+    cases = _load()
+    cut = cases.get("region-edit-move-cut")
+    window = cases.get("region-edit-move-window")
+    assert cut is not None and window is not None
+    assert cut.request != window.request, (
+        "move-cut and move-window share identical request text"
+    )
+    cut_polys = [
+        _canonical_polygon(p.points) for p in cut.red_region_edit.selection_polygons
+    ]
+    window_polys = [
+        _canonical_polygon(p.points) for p in window.red_region_edit.selection_polygons
+    ]
+    assert cut_polys != window_polys, (
+        "move-cut and move-window share the same selection polygon"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +263,17 @@ def test_qwen_baseline_is_the_6th_primitive() -> None:
 
 
 def test_gate_expectations_reject_unknown_gates() -> None:
-    pin = PromptPin(prompt_version="v1", path="evals/prompts/primitive_design_v1.md", sha256="0" * 64)
+    pin = PromptPin(
+        prompt_version="v1",
+        path="evals/prompts/primitive_design_v1.md",
+        sha256="0" * 64,
+    )
     with pytest.raises(ValidationError):
         GoldenCase(
-            case_id="x", kind="primitive", prompt=pin, request="r",
+            case_id="x",
+            kind="primitive",
+            prompt=pin,
+            request="r",
             expected_dims={"x": 1, "y": 1, "z": 1},
             gate_expectations=["nonexistent_gate"],
         )
@@ -204,7 +283,10 @@ def test_gate_expectations_reject_duplicates() -> None:
     pin = PromptPin(prompt_version="v1", path="p", sha256="0" * 64)
     with pytest.raises(ValidationError):
         GoldenCase(
-            case_id="x", kind="primitive", prompt=pin, request="r",
+            case_id="x",
+            kind="primitive",
+            prompt=pin,
+            request="r",
             expected_dims={"x": 1, "y": 1, "z": 1},
             gate_expectations=["compile", "compile"],
         )
@@ -214,7 +296,10 @@ def test_bbox_gate_rejects_missing_dims() -> None:
     pin = PromptPin(prompt_version="v1", path="p", sha256="0" * 64)
     with pytest.raises(ValidationError):
         GoldenCase(
-            case_id="x", kind="primitive", prompt=pin, request="r",
+            case_id="x",
+            kind="primitive",
+            prompt=pin,
+            request="r",
             gate_expectations=["bbox_dims"],
         )
 
@@ -223,7 +308,10 @@ def test_adversarial_kind_rejects_expected_dims() -> None:
     pin = PromptPin(prompt_version="v1", path="p", sha256="0" * 64)
     with pytest.raises(ValidationError):
         GoldenCase(
-            case_id="x", kind="adversarial", prompt=pin, request="r",
+            case_id="x",
+            kind="adversarial",
+            prompt=pin,
+            request="r",
             expected_dims={"x": 1, "y": 1, "z": 1},
             gate_expectations=["compile"],
             adversarial={"expected_outcome": "graceful_refusal", "diagnostic": "d"},
