@@ -82,6 +82,7 @@ __all__ = [
     "no_improvement",
     "run_design_loop",
     "run_design_loop_async",
+    "scad_looks_valid",
     "score",
 ]
 
@@ -375,17 +376,51 @@ MAX_SCAD_SOURCE_BYTES = 256 * 1024
 #: The bare-fence fallback DELIBERATELY accepts ANY fenced code block, not
 #: just ```scad / ```openscad-labeled ones. That is intentional and pinned
 #: by existing tests (tests/test_design_loop.py); do NOT tighten the regex.
-#: A mis-extracted non-SCAD payload is safe in practice because the
-#: downstream backstops catch it: the render worker runs in a sandbox
-#: (--network none, no privileged mounts) and every candidate is size-capped
-#: at :data:`MAX_SCAD_SOURCE_BYTES` above; anything that is not valid OpenSCAD
-#: simply fails compilation and is routed through the render worker's failure
-#: classification as a scored failure, feeding the loop's normal repair /
-#: exhaustion logic.
+#: A mis-extracted non-SCAD payload is caught by the :func:`scad_looks_valid`
+#: pre-render validation (and, if it slips through, by the sandboxed render
+#: worker + the size cap at :data:`MAX_SCAD_SOURCE_BYTES` above).
 _SCAD_FENCE_RE = re.compile(
     r"```(?:scad|openscad)?[ \t]*\r?\n(.*?)```",
     re.DOTALL,
 )
+
+#: Heuristic length cap for extracted SCAD (chars). LLM chat prose can be
+#: long; a genuine parametric .scad response is not. Anything over this is
+#: treated as not-SCAD before it reaches the render worker.
+MAX_SCAD_VALIDATION_CHARS = 5000
+
+#: Token-bounded OpenSCAD keywords a plausible .scad contains at least one
+#: of (primitives, transforms, set ops, meta). ``for`` / ``each`` / ``if`` /
+#: ``else`` / ``else if`` appear token-bounded so ``if`` never matches
+#: inside English prose like "if you..."; bare ``each``/``else`` are
+#: excluded because they are common English words.
+_SCAD_KEYWORD_RE = re.compile(
+    r"\b(?:"
+    "cube|cylinder|sphere|hull|minkowski|linear_extrude|rotate|translate|"
+    "scale|union|difference|intersection|surface|import|module|polyhedron|"
+    "text|resize|mirror|projection|offset|echo|assert|children|"
+    r"for\s*\(|each\s*\(|else\s+if\b"
+    r")"
+)
+
+
+def scad_looks_valid(scad: str) -> bool:
+    """Cheap pre-render heuristic: does this look like OpenSCAD source?
+
+    A candidate must (1) contain at least one ``;`` (a statement
+    terminator), (2) be at most :data:`MAX_SCAD_VALIDATION_CHARS` chars,
+    and (3) contain at least one known OpenSCAD keyword
+    (token-bounded). Prose that slipped past the fenced-JSON protocol
+    (a chat response inside a fence, a refusal with a stray ``;``) fails
+    at least one leg; anything that fails is treated as empty SCAD so the
+    loop's empty_scad fail-fast path handles it — the render worker never
+    spends a run compiling garbage.
+    """
+    if ";" not in scad:
+        return False
+    if len(scad) > MAX_SCAD_VALIDATION_CHARS:
+        return False
+    return _SCAD_KEYWORD_RE.search(scad) is not None
 
 
 def _scad_from_result(result: LLMResult) -> str:
@@ -419,6 +454,8 @@ def _scad_from_result(result: LLMResult) -> str:
     if candidate is None:
         return ""
     if len(candidate.encode("utf-8", "replace")) > MAX_SCAD_SOURCE_BYTES:
+        return ""
+    if not scad_looks_valid(candidate):
         return ""
     return candidate
 
