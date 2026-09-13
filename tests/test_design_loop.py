@@ -601,6 +601,71 @@ def test_make_llm_fn_resolves_roles_via_alias_not_hardcoded_model_id():
     assert out.tier == "T1"
 
 
+def test_make_llm_fn_attaches_emit_design_tool_schema_at_t0():
+    """At T0, ``make_llm_fn`` attaches the called role's native tool schema
+    to the outgoing request (issue #57): the design-role call carries
+    ``tools == [emit_design]`` (the DESIGN_TOOLS shape from
+    ``tests/test_design_loop_tiers.py``) on the wire — the same closure
+    called with the critique role at T0 carries emit_critique instead
+    (per-role selection, never baked to one tool)."""
+    catalogue = _catalogue()
+    t0 = CapabilityResult(
+        tools=True, json_schema=True, vision=True, max_images=8, validated=True
+    )
+    assert t0.tier == "T0"
+    design_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "emit_design", "arguments": "{}"},
+    }
+    critique_call = {
+        "id": "call_2",
+        "type": "function",
+        "function": {"name": "emit_critique", "arguments": "{}"},
+    }
+
+    def _t0_factory(sent_list, tool_call):
+        async def factory(request):
+            sent_list.append(request)
+            return _FakeResponse({"choices": [{"message": {"tool_calls": [tool_call]}}]})
+
+        return factory
+
+    sent_design: list[dict[str, Any]] = []
+    sent_critique: list[dict[str, Any]] = []
+    factories: dict[str, Any] = {
+        "design": _t0_factory(sent_design, design_call),
+        "critique": _t0_factory(sent_critique, critique_call),
+        "classification": _t0_factory([], design_call),
+    }
+    llm_fn = make_llm_fn(
+        catalogue,
+        factories,
+        capabilities={"design": t0, "critique": t0, "classification": t0},
+    )
+    out = asyncio.run(llm_fn("design", [{"role": "user", "content": "hi"}], "sys"))
+    assert out.tier == "T0"
+    # The outgoing body carries the emit_design tool definition
+    # (structural equality with the DESIGN_TOOLS test constant).
+    assert sent_design[0]["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "emit_design",
+                "description": "Emit the parametric OpenSCAD",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"scad": {"type": "string"}},
+                },
+            },
+        }
+    ]
+    # Per-role selection: the critique role through the same closure carries
+    # emit_critique, never emit_design.
+    asyncio.run(llm_fn("critique", [{"role": "user", "content": "hi"}], "sys"))
+    assert sent_critique[0]["tools"][0]["function"]["name"] == "emit_critique"
+
+
 # ---------------------------------------------------------------------------
 # Dimension handling: stated dims travel as NAMED parameters
 # ---------------------------------------------------------------------------
