@@ -47,19 +47,25 @@ _TIER_ORDER = (Tier.T0, Tier.T1, Tier.T2, Tier.T3)
 
 
 def tier_from_declared(
-    *, tools: bool, json_schema: bool, vision: bool, fenced_json: bool = True
+    *,
+    tools: bool,
+    json_schema: bool,
+    vision: bool,
+    fenced_json: bool = True,
+    any_probe_ok: bool = False,
 ) -> str:
     """Map declared/validated capability axes to a tier.
 
     T0 needs native tool calling *and* json_schema.  T1 is the fenced-JSON
     text protocol, which must work even without native tools — but only when
-    there is *any* validated capability to ride on.  T2 is text-only
-    (vision without tools); T3 is the last-resort fixed format, selected when
-    nothing was validated or enabled.
+    there is *any* validated capability to ride on (the tool probe validates
+    independently of the image probe, so a vision failure must not exclude T1
+    when tools were validated).  T2 is text-only (vision without tools); T3 is
+    the last-resort fixed format, selected when nothing was validated or enabled.
     """
     if tools and json_schema:
         return Tier.T0
-    if fenced_json and (tools or vision):
+    if fenced_json and (tools or vision or any_probe_ok):
         return Tier.T1
     if vision:
         return Tier.T2
@@ -116,6 +122,7 @@ class CapabilityResult:
             json_schema=self.json_schema,
             vision=self.vision,
             fenced_json=self.fenced_json,
+            any_probe_ok=self.validated,
         )
 
 
