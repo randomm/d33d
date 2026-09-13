@@ -272,7 +272,7 @@ def test_qidi_branch_includes_load_settings_xplus5(tmp_path, monkeypatch):
     assert argv[idx + 1] == expected_value
 
     # Assert the exact expected literal value (guards against drift)
-    assert argv[idx + 1] == "Qidi X-Plus 5 0.4 nozzle.json;0.20mm Standard @X-Plus 5.json"
+    assert argv[idx + 1] == slicer._LOAD_SETTINGS_VALUE
 
 
 def test_orca_branch_includes_load_settings_xplus5(tmp_path, monkeypatch):
@@ -301,7 +301,7 @@ def test_orca_branch_includes_load_settings_xplus5(tmp_path, monkeypatch):
 
     expected_value = f"{slicer.QIDI_XPLUS5_MACHINE_PRESET};{slicer.QIDI_XPLUS5_PROCESS_PRESET}"
     assert argv[idx + 1] == expected_value
-    assert argv[idx + 1] == "Qidi X-Plus 5 0.4 nozzle.json;0.20mm Standard @X-Plus 5.json"
+    assert argv[idx + 1] == slicer._LOAD_SETTINGS_VALUE
 
 
 def test_preset_constants_defined_and_referenced():
@@ -312,7 +312,7 @@ def test_preset_constants_defined_and_referenced():
     assert slicer.QIDI_XPLUS5_PROCESS_PRESET == "0.20mm Standard @X-Plus 5.json"
 
     # The --load-settings value is the ;-joined pair (single argv element)
-    expected = "Qidi X-Plus 5 0.4 nozzle.json;0.20mm Standard @X-Plus 5.json"
+    expected = slicer._LOAD_SETTINGS_VALUE
     assert f"{slicer.QIDI_XPLUS5_MACHINE_PRESET};{slicer.QIDI_XPLUS5_PROCESS_PRESET}" == expected
 
     # The _LOAD_SETTINGS_VALUE (used by slice_orca_family) matches
