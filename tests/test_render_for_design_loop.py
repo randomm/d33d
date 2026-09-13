@@ -64,7 +64,16 @@ def test_render_for_design_loop_runs_local_render_worker_image(
         argv: list[str], *args: Any, **kwargs: Any
     ) -> subprocess.CompletedProcess[str]:
         calls.append(argv)
-        return subprocess.CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=b"")
+        # Seed helper and post-seed verification must succeed for the
+        # render worker to launch; the render itself is the one that
+        # fails (to exercise the full path through the function).
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b""
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
 
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000002")

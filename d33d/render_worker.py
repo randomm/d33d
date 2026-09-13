@@ -736,7 +736,57 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
                     "chown 1000:1000 /work"
                 ),
             ]
-            subprocess.run(helper_argv, capture_output=True, check=False)
+            helper_proc = subprocess.run(
+                helper_argv, capture_output=True, check=False
+            )
+            if helper_proc.returncode != 0:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                return RenderResult(
+                    ok=False,
+                    exit_code=helper_proc.returncode,
+                    duration_ms=duration_ms,
+                    error_class="container_error",
+                    stderr=(
+                        "seed helper failed: "
+                        + truncate_stderr(helper_proc.stderr)
+                    ),
+                    stl=None,
+                    csg=None,
+                    views=(),
+                )
+            # Post-seed verification: the source file must actually be in the
+            # volume before the (much more expensive) render worker launches.
+            verify_argv = [
+                "docker",
+                "run",
+                "--rm",
+                "--network",
+                "none",
+                "--volume",
+                f"{volume}:/work",
+                "busybox:latest",
+                "test",
+                "-f",
+                "/work/model.scad",
+            ]
+            verify_proc = subprocess.run(
+                verify_argv, capture_output=True, check=False
+            )
+            if verify_proc.returncode != 0:
+                duration_ms = int((time.monotonic() - start) * 1000)
+                return RenderResult(
+                    ok=False,
+                    exit_code=verify_proc.returncode,
+                    duration_ms=duration_ms,
+                    error_class="container_error",
+                    stderr=(
+                        "seed verification failed: /work/model.scad missing "
+                        "in volume " + volume
+                    ),
+                    stl=None,
+                    csg=None,
+                    views=(),
+                )
             argv = build_docker_argv(
                 image=RENDER_WORKER_IMAGE,
                 name=name,
