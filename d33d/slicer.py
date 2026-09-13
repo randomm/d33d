@@ -178,6 +178,21 @@ def _fail(kind: str, detail: str, error_string: str = "") -> SliceDryRunResult:
 _RESULT_JSON_NAME = "result.json"
 _GCODE_RE = re.compile(r"plate_\d+\.gcode$")
 
+# QIDI X-Plus 5 machine preset constants (ticket #43).
+# These are bare profile names that each Orca-family slicer (QIDI Studio,
+# OrcaSlicer) resolves from its own bundled profiles directory. The driver
+# does NOT resolve paths or fail-closed on absence — the slicer reports
+# its own error if the profile is missing.
+QIDI_XPLUS5_MACHINE_PRESET = "Qidi X-Plus 5 0.4 nozzle.json"
+QIDI_XPLUS5_PROCESS_PRESET = "0.20mm Standard @X-Plus 5.json"
+
+# The --load-settings flag value: both presets joined by ";" as a single
+# argv element. Each slicer parses the pair and applies the machine + process
+# profile to the dry-run slice.
+_LOAD_SETTINGS_VALUE = (
+    f"{QIDI_XPLUS5_MACHINE_PRESET};{QIDI_XPLUS5_PROCESS_PRESET}"
+)
+
 
 def _parse_orca_result_json(outdir: Path) -> tuple[int, str, int | None]:
     """Read the slicer's result.json → (return_code, error_string, objects).
@@ -244,6 +259,11 @@ def slice_orca_family(
 ) -> tuple[int, str, Path | None]:
     """Drive an Orca-family binary headlessly.
 
+    The QIDI X-Plus 5 machine profile is pinned via ``--load-settings`` so
+    the slice is validated against the correct machine preset (0.4mm
+    nozzle, 320×320×300mm envelope).  Both the QIDI Studio and OrcaSlicer
+    branches use this builder (ticket #43).
+
     Returns (process_exit_code, stderr_tail, gcode_path_or_None).  On
     success the gcode path is non-None.
     """
@@ -256,6 +276,8 @@ def slice_orca_family(
         "--no-check",
         "--outputdir",
         str(outdir),
+        "--load-settings",
+        _LOAD_SETTINGS_VALUE,
     ]
     try:
         proc = subprocess.run(
