@@ -26,5 +26,7 @@ jobs:
         working-directory: web
       - run: npm run type-check
         working-directory: web
+      - run: npm run build
+        working-directory: web
       - run: npm test
         working-directory: web
