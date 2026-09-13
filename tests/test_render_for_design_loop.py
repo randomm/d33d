@@ -51,6 +51,67 @@ def test_render_for_design_loop_returns_render_result_fields(
         rw.render_for_design_loop("cube(10);", {})
 
 
+def test_render_for_design_loop_runs_local_render_worker_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The render run must use the built ``d33d/render-worker:local`` image
+    (entrypoint.sh, uid 1000), not the raw ``openscad:trixie`` base."""
+    assert rw.RENDER_WORKER_IMAGE == "d33d/render-worker:local"
+
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=1, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000002")
+
+    rw.render_for_design_loop("cube(10);", {})
+
+    render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
+    assert render_runs, "no docker run argv recorded"
+    assert render_runs[0][-1] == rw.RENDER_WORKER_IMAGE
+
+
+def test_render_for_design_loop_helper_chowns_work_volume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The busybox seeding helper must chown /work to 1000:1000 after
+    copying, because a fresh named volume is root:root but the worker
+    runs as uid 1000."""
+    calls: list[list[str]] = []
+
+    def _record_and_stop(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:3] == ["docker", "volume", "create"]:
+            # Let the seed-helper call happen, then stop before `docker run`.
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=b"", stderr=b""
+            )
+        raise ValueError("stop after helper argv recorded")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record_and_stop)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000003")
+
+    with pytest.raises(ValueError, match="stop after helper argv recorded"):
+        rw.render_for_design_loop("cube(10);", {})
+
+    print("DEBUG calls:", calls)
+    helper_scripts = [
+        c[-1] for c in calls if "busybox:latest" in c and "sh" in c
+    ]
+    assert helper_scripts, f"no busybox sh helper recorded: {calls}"
+    script = helper_scripts[0]
+    assert "chown 1000:1000 /work" in script
+    assert "cp /host/src/model.scad /work/model.scad" in script
+    assert "cp /host/src/params.json /work/params.json" in script
+
+
 def test_render_for_design_loop_pipeline_exception_returns_container_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

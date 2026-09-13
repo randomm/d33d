@@ -220,6 +220,10 @@ _CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
 #: container and volume share the name.
 NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
 
+#: The locally built render-worker image (Dockerfile + entrypoint.sh, run
+#: as uid 1000). Override in tests via monkeypatch on this module attribute.
+RENDER_WORKER_IMAGE = "d33d/render-worker:local"
+
 
 def parse_defines(params_json_text: str) -> dict[str, str]:
     """Parse a ``params.json`` text payload and return the validated
@@ -724,15 +728,17 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
                 "--volume",
                 f"{tmp}:/host:ro",
                 "busybox:latest",
-                "cp",
-                "/host/src/model.scad",
-                "/work/model.scad",
-                "/host/src/params.json",
-                "/work/params.json",
+                "sh",
+                "-c",
+                (
+                    "cp /host/src/model.scad /work/model.scad && "
+                    "cp /host/src/params.json /work/params.json && "
+                    "chown 1000:1000 /work"
+                ),
             ]
             subprocess.run(helper_argv, capture_output=True, check=False)
             argv = build_docker_argv(
-                image="docker.io/openscad/openscad:trixie",
+                image=RENDER_WORKER_IMAGE,
                 name=name,
                 workdir_volume=volume,
                 params=params,
