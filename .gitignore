@@ -21,6 +21,10 @@ venv/
 .coverage
 htmlcov/
 
+# Playwright (E2E) output artifacts (issue #49)
+playwright-report/
+test-results/
+
 # OS / editor noise
 .DS_Store
 .idea/
