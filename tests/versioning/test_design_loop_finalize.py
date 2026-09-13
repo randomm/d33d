@@ -179,6 +179,80 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
     assert captured["request"] == "make a 20mm wide bracket"
 
 
+def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkeypatch):
+    """(CRITICAL #54 regression) The REAL production closure
+    (``d33d.app._build_production_design_loop`` — the hook-wrapped loop that
+    the chat route calls via ``app.state.run_design_loop``) must FORWARD
+    the ``bbox_fn`` it receives in ``**kwargs`` through to the real
+    ``run_design_loop_async``. Without the forward, the bbox gate can never
+    score (``bbox=None`` at ``design_loop.py:489``), no candidate can score
+    the bbox bit, and every production loop exhausts on
+    ``bbox_out_of_tolerance`` — the exact defect the chat wiring's
+    ``bbox_fn`` kwarg exists to fix.
+
+    The catalogue/probe/llm/render deps are stubbed so the closure runs
+    without a live LLM, Docker render, or model config; the real
+    ``run_design_loop_async`` is monkeypatched to capture the kwargs it is
+    actually handed (the ``bbox_fn`` included) and return a pass result.
+    """
+    import types
+
+    from d33d import design_loop as _design_loop_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.config import catalogue as _catalogue_mod
+    from d33d.config import probes as _probes_mod
+    from d33d.config import resolve as _resolve_mod
+    from d33d.design_loop_events import bbox_from_render
+
+    captured: dict = {}
+
+    async def _fake_real_run(**kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _fake_probe(base_url, model_id, api_key, request_factory):
+        return None
+
+    class _NoopLLM:
+        async def __call__(self, *a, **k):
+            return ""
+
+    monkeypatch.setattr(_catalogue_mod, "load_catalogue", lambda p: types.SimpleNamespace(providers={"p": types.SimpleNamespace(key="stub")}))
+    monkeypatch.setattr(
+        _resolve_mod,
+        "resolve_model",
+        lambda cat, role: types.SimpleNamespace(
+            entry=types.SimpleNamespace(model="stub"),
+            provider=types.SimpleNamespace(base="http://stub"),
+        ),
+    )
+    monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)
+    monkeypatch.setattr(_design_loop_mod, "make_llm_fn", lambda cat, f, c: _NoopLLM())
+    monkeypatch.setattr(_design_loop_mod, "run_design_loop_async", _fake_real_run)
+
+    async def _call(client):
+        app_with_versions.state.failures_jsonl_path = str(
+            app_with_versions.state.catalogue_path.parent / "failures.jsonl"
+        )
+        closure = _build_production_design_loop()
+        return await closure(
+            app=app_with_versions,
+            photo="data:image/png;base64,x",
+            chat_history=("hi",),
+            stated_dims=(1.0, 2.0, 3.0),
+            render_fn=None,
+            llm_fn=None,
+            bbox_fn=bbox_from_render,
+            request="make a box",
+        )
+
+    result = run_async(app_with_versions, _call)
+    assert result.status == "pass"
+    # The real loop received the chat wiring's bbox_fn — not None.
+    assert "bbox_fn" in captured, "bbox_fn not forwarded to run_design_loop_async"
+    assert captured["bbox_fn"] is bbox_from_render
+
+
 def test_finalize_production_seam_no_body_supplies_nonempty_request(app_with_versions):
     """(HIGH 3 regression) A FINALIZE with an empty body must still give
     the hook a non-empty ``request`` — the route falls back to a

@@ -139,7 +139,9 @@ async def _resolve_version_create(
     falling back to the latest version's snapshot or ``{}`` for a fresh
     project) and return its id. ``None`` when no version is created (no
     usable parameter set — an exhausted-with-no-pass or a contract
-    violation)."""
+    violation). The version ``message`` is the user's chat text truncated
+    to 200 characters (Python string slicing is code-point-safe — no
+    multi-byte split, unlike a raw byte slice)."""
     best = getattr(result, "best", None)
     named = getattr(best, "params", None)
     if not (isinstance(named, dict) and named):
@@ -193,7 +195,14 @@ async def run_design_loop_with_events(
     # seam's ``_finalize_loop_kwargs`` builds — photo as a data URI,
     # stated_dims from the request or the latest version's W/D/H, a real
     # bbox_fn, and the hook's ``request`` guaranteed non-empty so an
-    # exhausted loop still archives to failures.jsonl).
+    # exhausted loop still archives to failures.jsonl). ``render_fn`` and
+    # ``llm_fn`` are ``None`` by contract: the production closure
+    # (``_build_production_design_loop``) builds its OWN ``render_fn``
+    # (``render_for_design_loop``) and ``llm_fn`` (from the live catalogue)
+    # and does not consume these kwargs; a future seam variant that DOES
+    # consume them would need to supply real callables (the ``None``
+    # placeholders are not a fallback — see the production seam's
+    # ``render_fn=render_for_design_loop`` hardcode).
     kwargs: dict[str, Any] = {
         "photo": photo,
         "chat_history": chat_history,
