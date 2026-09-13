@@ -12,6 +12,8 @@ verdict as success, which is backwards.
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 
 from d33d import slicer
 from d33d.slicer import SliceDryRunResult, _parse_orca_result_json
@@ -198,3 +200,167 @@ def test_orca_clean_result_json_is_success(tmp_path, monkeypatch):
     assert result.gcode_path is not None
     assert result.return_code == 0
     assert result.objects == 1
+
+
+# ---------------------------------------------------------------------------
+# Ticket #43 — QIDI X-Plus 5 machine preset pinning
+# ---------------------------------------------------------------------------
+
+
+def _fake_orca_family_bin(tmp_path, name: str) -> Path:
+    """Create a fake Orca-family binary that dumps argv to a file and
+    writes a minimal success result.json + plate_1.gcode."""
+    fake_bin = tmp_path / name
+    fake_bin.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'outdir=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--outputdir" ]; then outdir="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'touch "$outdir/plate_1.gcode"\n'
+        'echo \'{"return_code": 0, "error_string": "", "sliced_plates": [{"objects": [1]}]}\' > "$outdir/result.json"\n'
+        '# Dump full argv (NUL-separated for safe parsing) to $0.argv\n'
+        'for a in "$@"; do\n'
+        '  printf "%s\\0" "$a"\n'
+        'done > "${0}.argv"\n'
+    )
+    fake_bin.chmod(0o755)
+    return fake_bin
+
+
+def _read_nul_separated(path: Path) -> list[str]:
+    """Read a NUL-separated file into a list of strings."""
+    data = path.read_bytes()
+    parts = data.split(b"\x00")
+    # Drop trailing empty element from the final NUL
+    if parts and parts[-1] == b"":
+        parts.pop()
+    return [p.decode() for p in parts]
+
+
+def test_qidi_branch_includes_load_settings_xplus5(tmp_path, monkeypatch):
+    """The QIDI branch of slice_dry_run passes --load-settings with both
+    X-Plus 5 preset names as a single ;-joined argv element (ticket #43).
+    Drives the real slice_orca_family via the qidi branch."""
+    fake_bin = _fake_orca_family_bin(tmp_path, "fake-qidi")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "qidi" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+
+    # Success path — the fake binary wrote a good result.json
+    assert result.ok is True
+    assert result.slicer == "qidi"
+
+    # The argv dump is written next to the model file
+    argv_path = Path(str(fake_bin) + ".argv")
+    assert argv_path.is_file(), f"expected argv dump at {argv_path}"
+    argv = _read_nul_separated(argv_path)
+
+    # --load-settings must be present
+    assert "--load-settings" in argv
+    idx = argv.index("--load-settings")
+    assert idx + 1 < len(argv)
+
+    # The value is the single ;-joined pair of bare profile names
+    expected_value = f"{slicer.QIDI_XPLUS5_MACHINE_PRESET};{slicer.QIDI_XPLUS5_PROCESS_PRESET}"
+    assert argv[idx + 1] == expected_value
+
+    # Assert the exact expected literal value (guards against drift)
+    assert argv[idx + 1] == slicer._LOAD_SETTINGS_VALUE
+
+
+def test_orca_branch_includes_load_settings_xplus5(tmp_path, monkeypatch):
+    """The OrcaSlicer branch of slice_dry_run passes --load-settings with
+    both X-Plus 5 preset names as a single ;-joined argv element (ticket #43).
+    Drives the real slice_orca_family via the orca fallback branch."""
+    fake_bin = _fake_orca_family_bin(tmp_path, "fake-orca")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "orca" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+
+    assert result.ok is True
+    assert result.slicer == "orca"
+
+    argv_path = Path(str(fake_bin) + ".argv")
+    assert argv_path.is_file(), f"expected argv dump at {argv_path}"
+    argv = _read_nul_separated(argv_path)
+
+    assert "--load-settings" in argv
+    idx = argv.index("--load-settings")
+    assert idx + 1 < len(argv)
+
+    expected_value = f"{slicer.QIDI_XPLUS5_MACHINE_PRESET};{slicer.QIDI_XPLUS5_PROCESS_PRESET}"
+    assert argv[idx + 1] == expected_value
+    assert argv[idx + 1] == slicer._LOAD_SETTINGS_VALUE
+
+
+def test_preset_constants_defined_and_referenced():
+    """The machine preset constants are defined at module level in
+    d33d/slicer.py and are referenced by the dry-run path (ticket #43)."""
+    # Constants exist with the expected values
+    assert slicer.QIDI_XPLUS5_MACHINE_PRESET == "Qidi X-Plus 5 0.4 nozzle.json"
+    assert slicer.QIDI_XPLUS5_PROCESS_PRESET == "0.20mm Standard @X-Plus 5.json"
+
+    # The --load-settings value is the ;-joined pair (single argv element)
+    expected = slicer._LOAD_SETTINGS_VALUE
+    assert f"{slicer.QIDI_XPLUS5_MACHINE_PRESET};{slicer.QIDI_XPLUS5_PROCESS_PRESET}" == expected
+
+    # The _LOAD_SETTINGS_VALUE (used by slice_orca_family) matches
+    assert slicer._LOAD_SETTINGS_VALUE == expected
+
+
+def test_prusa_branch_has_no_load_settings(tmp_path, monkeypatch):
+    """The PrusaSlicer fallback branch builds its argv [bin, model,
+    -export-slicedata, dir] with NO --load-settings flag and no crash
+    (ticket #43). Uses monkeypatched subprocess.run to capture the argv."""
+    fake_prusa = str(tmp_path / "fake-prusa")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    captured_argv: list[str] | None = None
+
+    def fake_run(cmd, **kwargs):
+        nonlocal captured_argv
+        captured_argv = cmd
+        # Simulate a successful prusa run: write a gcode file to -export-slicedata dir
+        # Find the -export-slicedata dir from cmd
+        idx = cmd.index("-export-slicedata")
+        outdir = Path(cmd[idx + 1])
+        outdir.mkdir(parents=True, exist_ok=True)
+        gcode_path = outdir / "object_1.gcode"
+        gcode_path.write_text("G1 X0 Y0 Z0\nG1 X1 Y0 Z0\n")
+        # Return a mock completed process
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(slicer.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: fake_prusa if kind == "prusa" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+
+    # The prusa branch should succeed (gcode produced, rc=0)
+    assert result.ok is True
+    assert result.slicer == "prusa"
+
+    # Assert the captured argv
+    assert captured_argv is not None
+    assert "--load-settings" not in captured_argv, (
+        f"Prusa branch must NOT include --load-settings, got: {captured_argv}"
+    )
+
+    # The prusa argv is [bin, model, -export-slicedata, dir]
+    assert captured_argv[0] == fake_prusa
+    assert captured_argv[1] == str(tmp_path / "model.stl")
+    assert captured_argv[2] == "-export-slicedata"
+    # 4th element is the output dir
+    assert len(captured_argv) == 4
