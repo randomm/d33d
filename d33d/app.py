@@ -883,15 +883,24 @@ def _http_request_factory(base_url: str, api_key: str):
     import httpx
 
     async def _factory(body: dict[str, Any]) -> httpx.Response:
+        # ``probe_capabilities`` hands over an envelope
+        # ``{"method", "url", "headers", "json"}``; the design-loop T0 path
+        # hands over the raw JSON payload.  Unwrap the envelope when present
+        # so both callers hit the same endpoint.
+        if "json" in body and "url" in body:
+            url = body["url"]
+            payload = body["json"]
+            headers = dict(body.get("headers") or {})
+            headers.setdefault("Content-Type", "application/json")
+        else:
+            url = f"{base_url.rstrip('/')}/chat/completions"
+            payload = body
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
         async with httpx.AsyncClient(timeout=120.0) as client:
-            return await client.post(
-                f"{base_url.rstrip('/')}/chat/completions",
-                json=body,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-            )
+            return await client.post(url, json=payload, headers=headers)
 
     return _factory
 

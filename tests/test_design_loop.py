@@ -494,7 +494,7 @@ def test_golden_scad_fixtures_carry_named_params_or_fail_gate():
 class _FakeResponse:
     def __init__(self, payload: dict[str, Any]):
         self._payload = payload
-        self.ok = True
+        self.is_success = True
 
     def json(self):
         return self._payload

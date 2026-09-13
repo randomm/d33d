@@ -27,7 +27,7 @@
  *   complete, well-formed SSE document — see `makeSseFrame` below.
  *
  * - `e2eModel3mfInterceptor` — a `page.route` helper that intercepts
- *   `GET /api/projects/*/model.3mf` (the SPA's 3MF download endpoint, not
+ *   `GET /api/projects/{id}/model.3mf` (the SPA's 3MF download endpoint, not
  *   yet implemented server-side) and fulfils it with the pre-rendered
  *   `sample-model.3mf` fixture, so the happy-path spec can assert the
  *   download path without the backend route existing.
@@ -40,9 +40,11 @@
 import { test as base } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** Absolute path to the `web/tests/e2e/` fixture directory. */
-export const E2E_FIXTURES_DIR = path.resolve(__dirname);
+const E2E_DIR = path.dirname(fileURLToPath(import.meta.url));
+export const E2E_FIXTURES_DIR = E2E_DIR;
 
 /** Absolute path to the small reference-photo PNG fixture. */
 export const TEST_PHOTO_PATH = path.join(E2E_FIXTURES_DIR, "test-photo.png");
@@ -176,10 +178,12 @@ type E2EFixtures = {
  * deletes a real project via the API) is only paid for by tests that ask
  * for it.
  */
-export const test = base.extend<E2EFixtures>({
+const e2eApiClient = new E2EApiClient(process.env.E2E_BASE_URL ?? "http://localhost:8080");
+
+const extendedTest = base.extend({
   e2eApi: [
-    async ({ baseURL }, use) => {
-      use(new E2EApiClient(baseURL ?? "http://localhost:8080"));
+    async ({ }, use) => {
+      use(e2eApiClient);
     },
     { scope: "worker" },
   ],
@@ -226,11 +230,7 @@ export const test = base.extend<E2EFixtures>({
    * spec waits for. Specs 2/3 (gate errors) pass their own `frames` to feed
    * a terminal `error` frame instead.
    */
-  e2eSseInterceptor: async
-    (
-      { page },
-      use,
-    ) => {
+  e2eSseInterceptor: async ({ page }, use) => {
       let active = false;
       const interceptor = async (
         projectId: number,
@@ -260,11 +260,7 @@ export const test = base.extend<E2EFixtures>({
    * `ApiClient.downloadModel3MF` would otherwise 404, so this is what lets
    * the happy-path spec assert the download path.
    */
-  e2eModel3mfInterceptor: async
-    (
-      { page, e2eSampleModel3mfBytes },
-      use,
-    ) => {
+  e2eModel3mfInterceptor: async ({ page, e2eSampleModel3mfBytes }, use) => {
       let active = false;
       const interceptor = async (projectId: number) => {
         if (active) await page.unroute("**/model.3mf");
@@ -281,5 +277,17 @@ export const test = base.extend<E2EFixtures>({
       if (active) await page.unroute("**/model.3mf");
     },
 });
+
+export const test = extendedTest as unknown as typeof base & {
+  e2eProject: E2EProject;
+  e2eApi: E2EApiClient;
+  e2eFixturesDir: string;
+  e2eSseInterceptor: (projectId: number) => Promise<void>;
+  e2eSseFrame: typeof makeSseFrame;
+  e2eSseDocument: typeof makeSseDocument;
+  e2eModel3mfInterceptor: (projectId: number) => Promise<void>;
+  e2eSampleModel3mfBytes: Uint8Array;
+  e2eTestPhotoBytes: Uint8Array;
+};
 
 export { expect } from "@playwright/test";

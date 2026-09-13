@@ -450,5 +450,5 @@ class _FakeResponse:
         return self._payload
 
     @property
-    def ok(self) -> bool:
+    def is_success(self) -> bool:
         return True

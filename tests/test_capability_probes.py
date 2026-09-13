@@ -51,7 +51,7 @@ class FakeResponse:
     body: dict[str, Any]
 
     @property
-    def ok(self) -> bool:
+    def is_success(self) -> bool:
         return 200 <= self.status_code < 300
 
     def json(self) -> dict[str, Any]:

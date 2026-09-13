@@ -205,7 +205,7 @@ def _response_content(resp: Any) -> str | None:
     documented ``RuntimeError``) — a raw ``KeyError``/``TypeError`` never
     escapes this function.
     """
-    if not getattr(resp, "ok", False):
+    if not getattr(resp, "is_success", False):
         return None
     try:
         data = resp.json()

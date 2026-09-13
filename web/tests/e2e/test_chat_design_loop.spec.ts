@@ -42,7 +42,7 @@
  *     (no real version was created by a real loop).
  */
 
-import { test, expect } from "./fixtures";
+import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -51,23 +51,38 @@ const FIXTURE_PHOTO_PATH = path.resolve(
   "test-photo.png",
 );
 
+/** Build one well-formed SSE frame, matching d33d/streaming.py's
+ *  format_sse: an `event:` line, a `data:` line, then the blank line that
+ *  terminates the frame. The SPA's streamEvents reader resolves on the
+ *  terminal frame, so a finite body is a complete stream. */
+function sseBody(frames: Array<{ event: string; data: Record<string, unknown> }>): string {
+  return frames
+    .map((f) => `event: ${f.event}\ndata: ${JSON.stringify(f.data)}\n\n`)
+    .join("");
+}
+
 test("chat design loop: send message → SSE completion → assistant bubble receives token", async ({
   page,
-  e2eSseInterceptor,
 }) => {
   // --- SPA boot: the app auto-creates a project on mount ------------------
+  // Arm the response listener BEFORE navigation — Playwright only records
+  // responses observed from the moment the promise is created, and the
+  // mount-time `POST /api/projects` fires during `goto` (the SPA's
+  // App.tsx `createProject` effect runs on the first render, before the
+  // app-shell is painted). Waiting for the shell first would miss it.
+  const spaProjectPromise = page.waitForResponse(
+    (r) =>
+      r.request().method() === "POST" &&
+      r.url().includes("/api/projects"),
+    { timeout: 30_000 },
+  );
   await page.goto("/");
   await expect(page.getByTestId("app-shell")).toBeVisible();
 
   // Observe the SPA's auto-created project from the network stream. The
   // SPA does not deep-link to an existing project (single default project
   // per mount), so this is the only project id available.
-  const spaProjectResp = await page.waitForResponse(
-    (r) =>
-      r.request().method() === "POST" &&
-      r.url().includes("/api/projects"),
-    { timeout: 15_000 },
-  );
+  const spaProjectResp = await spaProjectPromise;
   expect(spaProjectResp.status()).toBe(201);
   const spaProject = (await spaProjectResp.json()) as { id: number };
   const spaPid = spaProject.id;
@@ -95,31 +110,40 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
   // progress → progress → progress → token → done. The `version-created`
   // progress frame is part of this document — it is what the SPA
   // consumed (asserted below), NOT a real version row in the backend.
-  await e2eSseInterceptor(spaPid, [
+  const sseFrames = [
     { event: "progress", data: { step: "design-loop-start" } },
     { event: "progress", data: { step: "design-loop-pass" } },
     { event: "progress", data: { step: "version-created", version_id: 1 } },
     { event: "token", data: { text: "W = 20; H = 25; D = 30; cube([W, H, D]);" } },
     { event: "done", data: { message: "Design loop passed validation" } },
-  ]);
+  ];
+  await page.route(`**/api/stream/${spaPid}`, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/event-stream",
+      body: sseBody(sseFrames),
+    }),
+  );
 
   // --- Send a chat message -------------------------------------------------
   // The SPA's handleSendMessage calls POST /chat BEFORE opening the SSE
   // stream. The send button is disabled while in flight (client-side
-  // guard — `inFlight` prop on ChatPanel).
+  // guard — `inFlight` prop on ChatPanel). The button is ALSO disabled
+  // while the input is empty (disabled={!input.trim() || inFlight}), so
+  // it must be asserted enabled AFTER the fill, not before.
   const chatInput = page.getByTestId("chat-input");
   await expect(chatInput).toBeAttached();
 
-  // The send button should be enabled (not in flight).
+  // Type a message; the button becomes enabled once the input is non-empty.
+  await chatInput.fill("Make a 20mm wide, 25mm high, 30mm deep box");
   await expect(page.getByTestId("chat-send-btn")).toBeEnabled();
 
-  // Type a message and send it.
+  // Send it.
   const sendPromise = page.waitForResponse(
     (r) =>
       r.request().method() === "POST" &&
       r.url().includes(`/api/projects/${spaPid}/chat`),
   );
-  await chatInput.fill("Make a 20mm wide, 25mm high, 30mm deep box");
   await page.getByTestId("chat-send-btn").click();
 
   // The POST /chat returns 202 Accepted.
@@ -151,13 +175,24 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
     { timeout: 10_000 },
   );
 
-  // The send button is re-enabled after the stream completes (in-flight
-  // flag released — the SPA's `setDesignLoopInFlight(false)` in the
-  // `.finally` of the postChat chain).
+  // The send button stays DISABLED until the stream completes: the input
+  // was cleared on send (handleSubmit does setInput("")), and the button
+  // is disabled when the input is empty OR in-flight — both true here.
+  // Once the intercepted stream's `done` frame resolves, the SPA's
+  // `.finally` releases the in-flight flag; the button remains disabled
+  // only until the operator types again (empty input). We assert the
+  // in-flight flag was released by typing a probe character and
+  // re-asserting enabled.
+  await page.getByTestId("chat-send-btn").waitFor({ state: "attached" });
+  // Type a probe character to give the button a non-empty input; if the
+  // in-flight flag is still set, the button stays disabled.
+  await page.getByTestId("chat-input").fill("x");
   await expect
     .poll(async () => {
       const btn = page.getByTestId("chat-send-btn");
       return await btn.isEnabled();
     }, { timeout: 10_000 })
     .toBe(true);
+  // Clear the probe — don't leave the input dirty.
+  await page.getByTestId("chat-input").fill("");
 });
