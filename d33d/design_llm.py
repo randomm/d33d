@@ -36,6 +36,8 @@ The HTTP edge is injected: ``request_factory(request) -> response`` where
 
 from __future__ import annotations
 
+import json as _json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -421,6 +423,19 @@ async def send(
         tool_calls: tuple[dict[str, Any], ...] = (
             {"name": call.name, "arguments": call.arguments},
         )
+        # Raw-response observability (T1): log the fenced raw content and the
+        # synthesized tool call so server logs show what the model returned.
+        _logging = logging.getLogger(__name__)
+        try:
+            _logging.debug(
+                "raw LLM response (T1) for role=%r model=%r content=%r tool_calls=%s",
+                role,
+                model_id,
+                call.raw,
+                _json.dumps([dict(tc) for tc in tool_calls], default=str),
+            )
+        except (TypeError, ValueError) as exc:
+            _logging.warning("T1 raw-response log failed: %s", exc)
         return LLMResult(
             content=call.raw,
             tool_calls=tool_calls,
@@ -447,6 +462,7 @@ async def send(
             f"LLM call for role {role!r} failed: HTTP {getattr(resp, 'status', '?')}",
             status="error",
         )
+    _logging = logging.getLogger(__name__)
     try:
         msg = response_message(resp)
         raw_calls = msg.get("tool_calls") or []
@@ -471,6 +487,22 @@ async def send(
     for tc in tool_calls:
         _validate_tool_name(role, tc.get("name"))
     content = msg.get("content")
+
+    # Raw-response observability: log content + tool_calls after successful
+    # parse so server logs show exactly what the model returned for the
+    # design loop.  Best-effort — a logging failure must never break the
+    # normal return path.
+    try:
+        _logging.debug(
+            "raw LLM response for role=%r model=%r content=%r tool_calls=%s",
+            role,
+            model_id,
+            content,
+            _json.dumps([dict(tc) for tc in tool_calls], default=str),
+        )
+    except (TypeError, ValueError) as exc:
+        _logging.warning("T0 raw-response log failed: %s", exc)
+
     return LLMResult(
         content=content if isinstance(content, str) else "",
         tool_calls=tool_calls,

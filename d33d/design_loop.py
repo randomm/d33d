@@ -485,6 +485,46 @@ async def run_design_loop_async(
             log("design", design_hash, scad.status)
 
         scad_source = _scad_from_result(scad)
+        if not scad_source.strip():
+            # Fail fast: an empty/blank SCAD would burn a whole render run
+            # on nothing. A distinct structured error (not a render class)
+            # names the real cause for the next iteration's repair input.
+            empty_render = RenderResult(
+                ok=False,
+                exit_code=1,
+                duration_ms=0,
+                error_class="empty_model",
+                stderr="empty_scad: LLM response contained no SCAD source",
+                stl=None,
+                csg=None,
+                views=(),
+            )
+            candidate_score = score(
+                empty_render, stated_dims, scad_source=scad_source
+            )
+            record = IterationRecord(
+                iteration=iteration,
+                scad_source=scad_source,
+                render=empty_render,
+                score=candidate_score,
+                failure_class="empty_scad",
+                repair=None,
+                prompt_hashes={"design": design_hash},
+            )
+            iterations.append(record)
+            if best is None or is_best(candidate_score, best_score):
+                best = record
+                best_score = candidate_score
+            if prev_score is not None and no_improvement(
+                prev_score, candidate_score
+            ):
+                consecutive_no_improvement += 1
+            else:
+                consecutive_no_improvement = 0
+            prev_score = candidate_score
+            if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
+                return _exhausted(iterations, best, best_score)
+            continue
         render = await _call(render_fn, scad_source, defines_map)
         bbox = bbox_fn(render) if bbox_fn is not None else None
         candidate_score = score(render, stated_dims, bbox=bbox, scad_source=scad_source)
