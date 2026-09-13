@@ -81,6 +81,7 @@ __all__ = [
     "make_llm_fn",
     "no_improvement",
     "run_design_loop",
+    "run_design_loop_async",
     "score",
 ]
 

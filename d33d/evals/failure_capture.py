@@ -51,6 +51,7 @@ The app wires it into the design loop via ``create_app``'s production
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import json
 import logging
 import threading
@@ -489,10 +490,14 @@ def default_run_design_loop_hook(
 ):
     """Build the production ``run_design_loop`` closure with the hook.
 
-    The app wires ``app.state.run_design_loop`` to this closure; it
-    matches the DI seam's duck type — ``run_loop(**kwargs)`` — and the
-    real design loop is captured by default (``d33d.design_loop.
-    run_design_loop``). The hook fires ONLY on an exhausted result and
+    Returns an ``async def`` closure: it awaits ``d33d.design_loop.
+    run_design_loop_async`` (the async core, captured by default), so in
+    the FastAPI finalize path the loop runs inside the running event loop
+    with no nested ``asyncio.run``. Non-async callers (CLI, eval-harness
+    direct invocation, sync tests) use
+    :func:`default_run_design_loop_hook_sync`.
+
+    The hook fires ONLY on an exhausted result and
     ONLY here: the promptfoo assert path (task-harness) shells into the
     render worker directly and never calls this closure, so eval-run
     failures are structurally excluded (no ``is_eval`` flag).
@@ -507,9 +512,9 @@ def default_run_design_loop_hook(
     """
     from d33d import design_loop as _dl
 
-    real_run = _dl.run_design_loop
+    real_run = _dl.run_design_loop_async
 
-    def _hooked(**kwargs: Any) -> Any:
+    async def _hooked(**kwargs: Any) -> Any:
         hook_model = kwargs.pop("model", None)
         hook_prompt_version = kwargs.pop("prompt_version", None)
         hook_request = kwargs.pop("request", None)
@@ -518,7 +523,7 @@ def default_run_design_loop_hook(
         request = str(
             hook_request or kwargs.get("chat_history") or ""
         )
-        result = real_run(**kwargs)
+        result = await real_run(**kwargs)
         try:
             if result is not None:
                 record_production_failure(
@@ -545,6 +550,25 @@ def default_run_design_loop_hook(
     return _hooked
 
 
+def default_run_design_loop_hook_sync(
+    *,
+    path: str | Path | None = None,
+):
+    """Sync-callable entry to :func:`default_run_design_loop_hook`.
+
+    A thin ``asyncio.run`` over the async hook, for callers with NO
+    running event loop (CLI, eval-harness direct invocation, sync tests).
+    Calling it from inside a running event loop raises ``RuntimeError``
+    (``asyncio.run`` forbids that) — keep it out of the async path.
+    """
+    hook = default_run_design_loop_hook(path=path)
+
+    def _hooked_sync(**kwargs: Any) -> Any:
+        return _asyncio.run(hook(**kwargs))
+
+    return _hooked_sync
+
+
 __all__ = [
     "DEFAULT_FAILURES_FILENAME",
     "EVAL_FAILURE_CLASSES",
@@ -556,6 +580,7 @@ __all__ = [
     "append_failure_line",
     "default_failures_path",
     "default_run_design_loop_hook",
+    "default_run_design_loop_hook_sync",
     "make_failure_event",
     "read_failure_events",
     "record_production_failure",

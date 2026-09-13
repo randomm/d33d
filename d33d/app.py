@@ -951,7 +951,7 @@ def _build_production_design_loop():
             {"design": capability, "critique": capability},
         )
         request = str(kwargs.get("request") or kwargs.get("chat_history") or "")
-        return default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
+        return await default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
             stated_dims=kwargs.get("stated_dims"),
