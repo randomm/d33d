@@ -55,9 +55,11 @@ interface ChatPanelProps {
   onSend: (text: string) => void;
   /** Render images to display inline (arrived over SSE). */
   renders: RenderImage[];
+  /** True while a design loop is in flight — disables the send button. */
+  inFlight?: boolean;
 }
 
-export function ChatPanel({ messages, onSend, renders }: ChatPanelProps) {
+export function ChatPanel({ messages, onSend, renders, inFlight }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -132,7 +134,7 @@ export function ChatPanel({ messages, onSend, renders }: ChatPanelProps) {
           type="submit"
           className="chat-send-btn"
           data-testid="chat-send-btn"
-          disabled={!input.trim()}
+          disabled={!input.trim() || inFlight}
         >
           Send
         </button>

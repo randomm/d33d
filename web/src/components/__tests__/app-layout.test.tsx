@@ -171,6 +171,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   const client = new ApiClient();
   vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
+  vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
   Object.assign(client, overrides);
   return client;
 }
@@ -304,6 +305,7 @@ describe("App chat wiring", () => {
   it("appends streamed tokens to the assistant message via onToken", async () => {
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onToken("Hello", {});
       handlers.onToken(" world", {});
@@ -326,6 +328,7 @@ describe("App chat wiring", () => {
   it("surfaces a stream error via onError without crashing", async () => {
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onError?.({ message: "stream interrupted: boom" });
     });
@@ -455,6 +458,7 @@ describe("App streamEvents rejection handling", () => {
   it("does not surface an unhandled promise rejection when streamEvents rejects after onError", async () => {
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     // Mirrors the real ApiClient.streamEvents contract: on a mid-stream
     // failure it invokes onError with the user-facing message, then
     // rethrows so callers that care can still observe the rejection.

@@ -951,12 +951,23 @@ def _build_production_design_loop():
             {"design": capability, "critique": capability},
         )
         request = str(kwargs.get("request") or kwargs.get("chat_history") or "")
+        # ``bbox_fn`` — per-axis extents from the render's harvested STL
+        # (``d33d.design_loop_events.bbox_from_render``). The hook forwards
+        # it through ``**kwargs`` to ``run_design_loop_async`` (which pops
+        # only its own ``model`` / ``prompt_version`` / ``request`` kwargs
+        # before calling the real loop). ``None`` when the caller omits
+        # it — the bbox gate then fails and no candidate can score the
+        # bbox bit, so a chat loop without ``bbox_fn`` exhausts on
+        # ``bbox_out_of_tolerance`` (the finalize seam's historical
+        # omission; issue #54 wires the chat route to supply one).
+        bbox_fn = kwargs.get("bbox_fn")
         return await default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
             stated_dims=kwargs.get("stated_dims"),
             render_fn=render_for_design_loop,
             llm_fn=llm_fn,
+            bbox_fn=bbox_fn,
             request=request,
             model=res.entry.model,
             prompt_version=prompt_version,

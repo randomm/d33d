@@ -605,6 +605,40 @@ export class ApiClient {
     );
   }
 
+  // -- chat / design loop (issue #54) ---------------------------------------
+
+  /**
+   * Send a chat message to the design loop.
+   *
+   * Returns 202 Accepted immediately — the design loop runs in a
+   * background task and streams progress/token frames via the SSE endpoint
+   * (`GET /api/stream/{projectId}`). The caller must open the SSE stream
+   * AFTER this call resolves (the event source is registered synchronously
+   * before the 202 response, so the stream will find it).
+   *
+   * `statedDims` is the (W, D, H) triple in mm — the ground-truth
+   * dimensions. Absent → the server falls back to the latest version's
+   * W/D/H (0.0 default), never a 422.
+   *
+   * `chatHistory` is the list of prior user messages (the SPA sends the
+   * last 10). Absent → empty tuple.
+   */
+  async postChat(
+    projectId: number,
+    input: {
+      message: string;
+      stated_dims?: [number, number, number];
+      chat_history?: string[];
+    },
+  ): Promise<{ status: string }> {
+    return this.request<{ status: string }>(
+      "POST",
+      `/api/projects/${projectId}/chat`,
+      input,
+      202,
+    );
+  }
+
   // -- model config -----------------------------------------------------------
 
   async getModelConfig(): Promise<ModelCatalogue> {
