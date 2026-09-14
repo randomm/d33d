@@ -36,3 +36,7 @@ master.key
 
 # pi-rukas driver state (machine-local, never committed)
 .pi/work-state/
+
+# Runtime-generated config and logs
+models.yaml
+evals/failures.jsonl
