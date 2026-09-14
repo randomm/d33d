@@ -22,6 +22,7 @@ import pytest
 
 from tests.versioning.helpers import (
     create_project,
+    create_version,
     repo_path_for,
     run_async,
 )
@@ -495,6 +496,248 @@ def test_design_source_drain_times_out_on_stalled_stream(
     status_code, detail = run_async(app_with_versions, _call)
     assert status_code == 413
     assert "timed out" in detail
+
+
+# ---------------------------------------------------------------------------
+# (6) The region-edit route (issue #68) — POST /api/projects/{id}/region-edits
+#
+# The route drives the injected design loop with the composed region-edit
+# request text (instruction prefixed with the resolved module_ids + view_id),
+# the marked PNG as the photo, the latest version's W/D/H as stated_dims,
+# and an EMPTY chat_history (a scoped directive, not a chat turn). The 202
+# body mirrors /chat ({project_id, status: "accepted"}); the version arrives
+# only via the SSE stream's version-created frame.
+# ---------------------------------------------------------------------------
+
+#: A minimal valid 1x1 PNG, base64-encoded (same as tests/test_app.py's
+#: region-edit fixture — small enough for the 5 MB cap path without a real
+#: render artifact).
+_REGION_EDIT_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _region_edit_body() -> dict:
+    return {
+        "module_ids": ["curl_3", "curl_4"],
+        "view_id": "front",
+        "marked_png_base64": _REGION_EDIT_PNG_BASE64,
+        "polygon": [
+            {"x": 10.0, "y": 10.0},
+            {"x": 50.0, "y": 10.0},
+            {"x": 30.0, "y": 40.0},
+        ],
+        "instruction": "open up this spiral, it's too tight to print",
+    }
+
+
+def test_region_edit_returns_202_accepted_and_records_full_kwargs(
+    app_with_versions,
+):
+    """A valid region edit returns 202 {project_id, status: accepted}
+    (mirroring /chat — no deferred field, no module_ids/view_id echo) and
+    drives the injected design loop with the FULL kwargs contract:
+    the composed request text (instruction prefixed with module_ids +
+    view_id, non-empty), the marked PNG as a data URI (NOT the stored
+    photo), stated_dims from the latest version's W/D/H ((0,0,0) for a
+    fresh project), an EMPTY chat_history (a scoped directive, not a
+    chat turn — even when the project has prior transcripts), and a
+    callable bbox_fn."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        async for _event, _data in source:
+            if _event in ("done", "error"):
+                break
+        return pid, r, source
+
+    pid, r, source = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"project_id": pid, "status": "accepted"}
+    assert source is not None, "event source not registered before 202 response"
+    # Full kwargs contract — the same shape the /chat adapter asserts.
+    for key in ("photo", "stated_dims", "bbox_fn", "request", "chat_history"):
+        assert key in captured, f"missing design-loop kwarg {key!r}"
+    # request: non-empty instruction text prefixed with the resolved
+    # module_ids + view_id (the failures.jsonl hook's FailureEvent.request).
+    assert captured["request"], "request kwarg must be non-empty"
+    assert "curl_3" in captured["request"]
+    assert "curl_4" in captured["request"]
+    assert "front" in captured["request"]
+    assert "open up this spiral, it's too tight to print" in captured["request"]
+    # photo: the marked PNG from the body as a data URI (the vision model
+    # sees the marked-up render, not the stored reference photo).
+    assert captured["photo"] == f"data:image/png;base64,{_REGION_EDIT_PNG_BASE64}"
+    # stated_dims: fresh project (no versions) → (0, 0, 0) so the
+    # dimension gate measures rather than fabricates.
+    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # chat_history: the EMPTY tuple — a region edit is a scoped directive,
+    # not a chat turn (the project's transcript is never auto-included).
+    assert captured["chat_history"] == ()
+    assert callable(captured["bbox_fn"])
+
+
+def test_region_edit_stated_dims_from_latest_version(app_with_versions):
+    """stated_dims is ALWAYS derived from the latest version's W/D/H
+    (no client override for region edits) — a project with an existing
+    version passes that version's W/D/H, not (0,0,0)."""
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("exhausted", {})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        async for _event, _data in source:
+            if _event in ("done", "error"):
+                break
+        return r
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+
+
+def test_region_edit_pass_creates_version_visible_in_get_versions(
+    app_with_versions,
+):
+    """A passing loop creates a version visible via GET /versions (via
+    VersionService.create_version, the sole version-creation path) and
+    the SSE stream emits the version-created progress frame with the
+    version_id."""
+    async def _loop(app, **kwargs):
+        return _StubResult("pass", {"W": 11, "H": 22}, scad="W = 11; cube([W]);")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/region-edits", json=_region_edit_body())
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    # A version was created and is visible in GET /versions.
+    assert len(timeline) == 1, "no version created on pass"
+    assert timeline[0]["name"] == "design"
+    assert timeline[0]["params"] == {"W": 11, "H": 22}
+    # The version-created progress frame carries the version id.
+    vc = [d for e, d in frames if e == "progress" and d.get("step") == "version-created"]
+    assert vc, "no version-created progress frame"
+    assert vc[0]["version_id"] == timeline[0]["id"]
+    # Terminal frame is a done (not an error).
+    assert frames[-1][0] == "done"
+
+
+def test_region_edit_exhausted_emits_error_frame_and_no_version(app_with_versions):
+    """An exhausted loop produces NO version and the stream emits a
+    terminal error frame (mirroring the finalize/chat contract — no
+    spurious version)."""
+
+    async def _loop(app, **kwargs):
+        return _StubResult("exhausted", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/region-edits", json=_region_edit_body())
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert event_names[-1] == "error", f"no terminal error frame: {event_names}"
+    assert "error" in event_names, "no error frame emitted for exhausted loop"
+    assert timeline == [], "exhausted loop must not create a version"
+
+
+def test_region_edit_unwired_loop_returns_202_and_terminates_with_error(
+    app_with_versions,
+):
+    """The not-wired case mirrors /chat exactly: the route still returns
+    202 (no synchronous 503) and the stream emits the adapter's terminal
+    error frame ("design loop not wired")."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = None
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return r, frames
+
+    r, frames = run_async(app_with_versions, _call)
+    assert r.status_code == 202, f"expected 202, got {r.status_code}: {r.text}"
+    assert r.json()["status"] == "accepted"
+    assert frames[-1][0] == "error"
+    assert "not wired" in frames[-1][1]["message"]
+
+
+def test_region_edit_409_while_in_flight(app_with_versions):
+    """A second region edit while a design loop is in flight is 409
+    (the same per-project guard as /chat — the event source is a single
+    async generator, so a second concurrent drive would lose frames)."""
+    import asyncio as _a
+
+    release = _a.Event()
+
+    async def _loop(app, **kwargs):
+        await release.wait()
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r1 = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        release.set()
+        return r1, r2
+
+    r1, r2 = run_async(app_with_versions, _call)
+    assert r1.status_code == 202, r1.text
+    assert r2.status_code == 409, r2.text
 
 
 # ---------------------------------------------------------------------------

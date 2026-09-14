@@ -23,7 +23,7 @@ import App from "../../App";
 import type { RenderImage } from "../../App";
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
-import type { Project } from "../../lib/api";
+import type { Project, RegionEditResult } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { ViewportLassoCompletedEvent } from "../viewer/ViewportLassoOverlay";
 import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditContract";
@@ -728,11 +728,8 @@ describe("App region-selection (lasso) wiring", () => {
     const client = makeClient();
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
-      status: "deferred",
-      detail: "accepted",
-      module_ids: ["wing_left", "wing_right"],
-      view_id: "front",
-    });
+      status: "accepted",
+    } as RegionEditResult);
     resolveLassoSelectionMock.mockReturnValue({
       ranked: [
         { name: "wing_left", hitCount: 5 },
@@ -884,11 +881,8 @@ describe("App region-selection (lasso) wiring", () => {
     const client = makeClient();
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
-      status: "deferred",
-      detail: "accepted",
-      module_ids: [],
-      view_id: "front",
-    });
+      status: "accepted",
+    } as RegionEditResult);
     const longRanked = Array.from({ length: MAX_REGION_EDIT_MODULE_IDS + 5 }, (_, i) => ({
       name: `module_${i}`,
       hitCount: MAX_REGION_EDIT_MODULE_IDS + 5 - i,
@@ -1238,15 +1232,12 @@ describe("App region-edit success feedback", () => {
     HTMLCanvasElement.prototype.toDataURL = originalToDataURL;
   });
 
-  it("surfaces an accepted-but-deferred assistant message on a successful 202, never claiming the edit completed", async () => {
+  it("surfaces an accepted assistant message on a successful 202, never claiming the edit completed", async () => {
     const client = makeClient();
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
-      status: "deferred",
-      detail: "accepted",
-      module_ids: ["wing_left"],
-      view_id: "front",
-    });
+      status: "accepted",
+    } as RegionEditResult);
     resolveLassoSelectionMock.mockReturnValue({
       ranked: [{ name: "wing_left", hitCount: 5 }],
       primary: "wing_left",
@@ -1281,8 +1272,8 @@ describe("App region-edit success feedback", () => {
     const acceptedMsg = screen
       .getAllByTestId("chat-msg-assistant")
       .find((el) => el.textContent?.includes("accepted"));
-    // Must read as accepted-but-deferred, never as a completed edit.
-    expect(acceptedMsg?.textContent).toContain("not implemented yet");
+    // Must read as accepted-in-flight, never as a completed edit.
+    expect(acceptedMsg?.textContent).toContain("running in the background");
     expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("edit applied");
     expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("done");
   });

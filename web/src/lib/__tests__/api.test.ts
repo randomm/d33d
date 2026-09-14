@@ -234,7 +234,8 @@ describe("photo upload", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Region-scoped edit request (issue #7, task-c) — HONEST STUB
+// Region-scoped edit request (issue #7, task-c; design-loop wiring by
+// issue #68)
 // ---------------------------------------------------------------------------
 
 const REGION_EDIT_REQUEST: RegionEditRequest = {
@@ -251,19 +252,17 @@ const REGION_EDIT_REQUEST: RegionEditRequest = {
 
 const REGION_EDIT_RESULT: RegionEditResult = {
   project_id: 1,
-  status: "deferred",
-  detail:
-    "region-scoped edit request accepted; scoped-edit regeneration is not yet implemented",
-  module_ids: ["curl_3", "curl_4"],
-  view_id: "front",
+  status: "accepted",
 };
 
 describe("region-scoped edit request", () => {
   it("createRegionEdit POSTs JSON to /api/projects/{id}/region-edits", async () => {
     fake.enqueue(json(202, REGION_EDIT_RESULT));
     const r = await client.createRegionEdit(1, REGION_EDIT_REQUEST);
-    expect(r.status).toBe("deferred");
-    expect(r.module_ids).toEqual(["curl_3", "curl_4"]);
+    expect(r.status).toBe("accepted");
+    // The 202 body is exactly {project_id, status} — no detail/module_ids/
+    // view_id echo (the version arrives only via the SSE stream).
+    expect(r).toEqual({ project_id: 1, status: "accepted" });
 
     const { url, init } = lastCall();
     expect(url).toBe("http://api.test/api/projects/1/region-edits");
@@ -272,11 +271,11 @@ describe("region-scoped edit request", () => {
     expect(JSON.parse(init.body as string)).toEqual(REGION_EDIT_REQUEST);
   });
 
-  it("resolves only on 202 (the accept-and-defer status)", async () => {
+  it("resolves only on 202 (the accepted status, mirroring /chat)", async () => {
     fake.enqueue(json(202, REGION_EDIT_RESULT));
     await expect(
       client.createRegionEdit(1, REGION_EDIT_REQUEST),
-    ).resolves.toMatchObject({ status: "deferred" });
+    ).resolves.toMatchObject({ status: "accepted" });
   });
 
   it("surfaces a 404 for an unknown project", async () => {
@@ -295,11 +294,14 @@ describe("region-scoped edit request", () => {
     ).rejects.toBeInstanceOf(ApiError);
   });
 
-  it("never fabricates an edit/regeneration result field", async () => {
+  it("never fabricates a version/result in the 202 body", async () => {
     fake.enqueue(json(202, REGION_EDIT_RESULT));
     const r = await client.createRegionEdit(1, REGION_EDIT_REQUEST);
+    // The version arrives only via the SSE stream's version-created frame —
+    // the 202 body has no field for it.
     expect(r).not.toHaveProperty("scad");
     expect(r).not.toHaveProperty("result");
+    expect(r).not.toHaveProperty("version_id");
   });
 });
 

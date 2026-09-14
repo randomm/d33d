@@ -28,12 +28,14 @@ reads) is initialised empty at build time. The HTTP endpoints themselves
 are out of scope for this module.
 
 Also defined here: ``POST /api/projects/{id}/region-edits`` (issue #7,
-workstream task-c) — the region-scoped edit request route. It is an
-HONEST STUB: it validates and accepts a lasso-selection payload (ranked
-module identifiers, marked PNG, polygon, view id, instruction) and
-returns 202 Accepted with a ``status: "deferred"`` body. It does not
-regenerate any OpenSCAD source — that wiring into the design loop
-(``d33d/design_loop.py``, issue #5) is explicitly out of scope here.
+workstream task-c; wired to the design loop by issue #68) — the
+region-scoped edit request route. It validates and accepts a
+lasso-selection payload (ranked module identifiers, marked PNG, polygon,
+view id, instruction) and returns 202 Accepted with a
+``status: "accepted"`` body — mirroring ``/chat`` — driving the
+injected design loop (``d33d/design_loop.py``) in the background. The
+version, when the loop passes, arrives only via the SSE stream's
+``version-created`` progress frame (never in the 202 body).
 
 Also defined here: ``POST /api/projects/{id}/module-registry`` (issue #7,
 workstream task-a) — the named-module registry route that IS the wiring
@@ -89,6 +91,7 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
+from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
@@ -384,19 +387,17 @@ class ModuleRegistryRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Region-scoped edit request (issue #7, workstream task-c)
+# Region-scoped edit request (issue #7, workstream task-c; design-loop
+# wiring by issue #68)
 # ---------------------------------------------------------------------------
 #
-# ⚠️ HONEST STUB — this route accepts and validates a region-selection
-# payload (ranked module identifiers + marked PNG + lasso polygon + view
-# id) and returns 202 Accepted. It does NOT regenerate any OpenSCAD
-# source. Wiring "regenerate only these named modules" into the design
-# loop (``d33d/design_loop.py``, issue #5) is explicitly deferred to a
-# future ticket per issue #7's scope split — see the module docstring on
-# ``ApiClient.downloadModel3MF`` in ``web/src/lib/api.ts`` for the same
-# accept-and-defer convention used elsewhere in this codebase (a route/
-# client method that is real plumbing over a backend capability that does
-# not exist yet, not a fabricated response).
+# The route accepts and validates a region-selection payload (ranked
+# module identifiers + marked PNG + lasso polygon + view id) and drives
+# the injected design loop (``app.state.run_design_loop``) in the
+# background — the same adapter pattern as ``POST /{id}/chat``
+# (``d33d/projects.py`` / ``d33d/design_loop_events.py``). The 202 body
+# mirrors ``/chat`` (``{project_id, status: "accepted"}``); the version
+# arrives only via the SSE stream's ``version-created`` frame.
 
 #: The six orthographic render-worker views a lasso selection may be
 #: drawn on (matches ``ViewId`` in ``web/src/components/canvas/
@@ -436,13 +437,14 @@ class LassoPolygonPoint(BaseModel):
 class RegionEditRequest(BaseModel):
     """Body of ``POST /api/projects/{id}/region-edits``.
 
-    Carries everything the (future) scoped-edit regeneration will need:
-    the ranked module-identifier list the client-side lasso resolved via
+    Carries everything the scoped-edit regeneration needs: the ranked
+    module-identifier list the client-side lasso resolved via
     ``ModelViewer.resolveLassoSelection`` (top-most/primary first, never
     pixel coordinates — the whole point of issue #7), the composited
-    red-marked PNG the vision model would see, the raw lasso polygon (for
-    audit/debugging and for the containment gate's future volume lift),
-    the view id it was drawn on, and the user's free-text edit instruction.
+    red-marked PNG the vision model sees (the marked-up render of the
+    current model), the raw lasso polygon (for audit/debugging and for
+    the containment gate's volume lift), the view id it was drawn on, and
+    the user's free-text edit instruction.
     """
 
     module_ids: list[str] = Field(min_length=1, max_length=MAX_REGION_EDIT_MODULE_IDS)
@@ -814,15 +816,33 @@ def create_app(
     async def create_region_edit(
         request: Request, project_id: int, body: RegionEditRequest
     ) -> JSONResponse:
-        """Accept a region-scoped edit request. HONEST STUB — see the
-        module-level comment above :class:`RegionEditRequest`.
+        """Accept a region-scoped edit request and drive the design loop.
 
         Validates the payload (module identifiers, marked PNG, lasso
-        polygon, view id, instruction) against a real project and
-        returns 202 Accepted with a ``status: "deferred"`` body. No
-        OpenSCAD source is read or regenerated by this route — scoped-
-        edit regeneration is out of scope for issue #7 (see the design
-        loop, issue #5, for the eventual consumer of this payload).
+        polygon, view id, instruction) against a real project, checks the
+        per-project in-flight flag (409), registers the design-loop event
+        source SYNCHRONOUSLY (so the SSE stream does not terminate on
+        "no active stream"), and returns 202 Accepted with a
+        ``status: "accepted"`` body — mirroring ``POST /{id}/chat``. The
+        new version (if the loop passes) arrives only via the SSE stream's
+        ``version-created`` progress frame; an exhausted loop produces no
+        version and a terminal error frame.
+
+        The design loop is invoked with:
+
+        - ``photo`` = the marked PNG from the body as a data URI (the
+          vision model sees the marked-up render of the current model, not
+          the stored reference photo); the fixed transparent-PNG constant
+          is the fallback only if the (schema-required) field were ever
+          absent.
+        - ``stated_dims`` = the latest version's W/D/H (0.0 for a fresh
+          project — the dimension gate measures rather than fabricates);
+          there is no client override for region edits.
+        - ``chat_history`` = the empty tuple — a region edit is a scoped
+          directive, not a chat turn.
+        - ``request`` = the instruction prefixed with the resolved
+          ``module_ids`` + ``view_id`` (always non-empty — the
+          failures.jsonl hook's ``FailureEvent.request`` requires it).
         """
         conn: db.Connection = request.app.state.conn
         row = conn.get_project(project_id)
@@ -841,19 +861,67 @@ def create_app(
                 detail=f"marked PNG exceeds {MAX_REGION_EDIT_IMAGE_BYTES} byte limit",
             )
 
+        app = request.app
+        inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
+        if inflight is None:
+            inflight = set()
+            app.state.design_loop_inflight = inflight
+        if project_id in inflight:
+            raise HTTPException(
+                status_code=409, detail="a design loop is already in flight"
+            )
+
+        # Capture photo + stated_dims SYNCHRONOUSLY before the 202
+        # response — the loop runs in the background and the DB may be
+        # closed by the time it starts (same contract as post_chat).
+        # Photo: the marked PNG from the body (schema-required, so the
+        # fallback only fires on a future schema change).
+        photo = (
+            f"data:image/png;base64,{body.marked_png_base64}"
+            if image_bytes
+            else EMPTY_PHOTO_DATA_URI
+        )
+        # Stated dims: the latest version's W/D/H (no client override —
+        # a region edit is a scoped directive). Fresh project → (0,0,0)
+        # so the dimension gate measures rather than fabricates.
+        latest = app.state.versions.latest_version(project_id)
+        p = latest["params"] if latest is not None else {}
+        stated_dims = (
+            float(p.get("W", 0.0)),
+            float(p.get("D", 0.0)),
+            float(p.get("H", 0.0)),
+        )
+
+        # The composed request text: the instruction prefixed with the
+        # resolved module_ids + view_id (the failures.jsonl hook records
+        # this; the version message is its 200-char prefix).
+        request_text = (
+            f"Region edit on modules {', '.join(body.module_ids)} "
+            f"(view: {body.view_id}): {body.instruction}"
+        )
+
+        from d33d.design_loop_events import run_design_loop_with_events
+
+        events = run_design_loop_with_events(
+            app,
+            project_id,
+            user_message=request_text,
+            stated_dims=stated_dims,
+            chat_history=(),
+            photo=photo,
+            request_text=request_text,
+        )
+        # Register the event source SYNCHRONOUSLY before the 202 response
+        # (else the client's GET /api/stream/{id} sees no active source).
+        # The SSE endpoint is the sole driver of the generator; the
+        # in-flight flag (set here, cleared in the SSE endpoint's finally)
+        # prevents a second concurrent drive.
+        app.state.event_sources[project_id] = events
+        inflight.add(project_id)
+
         return JSONResponse(
             status_code=202,
-            content={
-                "project_id": project_id,
-                "status": "deferred",
-                "detail": (
-                    "region-scoped edit request accepted; scoped-edit "
-                    "regeneration is not yet implemented (deferred to a "
-                    "future ticket wiring this into d33d/design_loop.py)"
-                ),
-                "module_ids": body.module_ids,
-                "view_id": body.view_id,
-            },
+            content={"project_id": project_id, "status": "accepted"},
         )
 
     # Static SPA serving — mounted LAST, at the root path. All ``/api/*``
