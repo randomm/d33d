@@ -17,6 +17,7 @@
 
 import { useState, useCallback, useEffect, useRef } from "react";
 import { Vector2, type Object3D } from "three";
+import { dataUriToArrayBuffer } from "./lib/dataUri";
 import {
   ChatPanel,
   type ChatMessage,
@@ -111,8 +112,28 @@ export default function App({ renders = [], client }: AppProps) {
   // Region-selection (lasso) wiring (issue #29).
   const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
   const [moduleFixtureData, setModuleFixtureData] = useState<ArrayBuffer | null>(null);
+  // Stream-driven model (issue #69): once a design-loop pass streams its
+  // best render's STL through the version-created progress frame
+  // (`stl_data_uri`), the viewer swaps from the static GLB fixture to the
+  // decoded STL ArrayBuffer (format "stl"). Stays null until the first
+  // stream-driven pass — the fixture (and its named modules, the lasso's
+  // moduleGroup source) is the pre-pass state.
+  //
+  // ONE-WAY LATCH: once set, it is never reset to null. A later pass whose
+  // frame omits stl_data_uri does not restore the fixture — the streamed
+  // model stays mounted and the lasso stays degraded for the session.
+  // This is intentional (a streamed pass is a terminal state for the
+  // viewer's source); a future ticket that needs the fixture back must
+  // add an explicit reset path here, not an implicit one.
+  const [streamModelData, setStreamModelData] = useState<ArrayBuffer | null>(null);
   const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  // The viewer's mounted data + format, derived ONCE from the source-of-
+  // truth pair (streamModelData / moduleFixtureData) so the "which source
+  // is mounted" decision lives in one place, not in JSX.
+  const viewerSource = streamModelData
+    ? { data: streamModelData, format: "stl" as const }
+    : { data: moduleFixtureData, format: "glb" as const };
   // A lasso selection that has been resolved (module ids + marked PNG) but
   // not yet sent — the instruction is the user's own free text, which the
   // server requires non-empty (`RegionEditRequest.instruction`,
@@ -136,34 +157,83 @@ export default function App({ renders = [], client }: AppProps) {
     viewerHandleRef.current = handle;
   }, []);
 
-  const handleViewerLoaded = useCallback((result: LoadResult) => {
-    if (result.ok && result.mesh) {
-      setModuleGroup(result.mesh.object);
-      setSelectionNotice(null);
-      return;
-    }
+  const handleViewerLoaded = useCallback(
+    (result: LoadResult) => {
+      if (result.ok && result.mesh) {
+        // Format-based moduleGroup policy (issue #69): the GLB fixture's
+        // named meshes are the lasso's moduleGroup source; a streamed STL
+        // is a single unnamed mesh, so it does NOT re-enable the lasso —
+        // the viewer displays the streamed model but the lasso stays
+        // disabled with the degradation notice.
+        if (result.mesh.format === "glb") {
+          setModuleGroup(result.mesh.object);
+          setSelectionNotice(null);
+        } else {
+          setModuleGroup(null);
+        }
+        return;
+      }
     // A load failure (decode/parse error) is distinct from "still
     // loading" — both leave moduleGroup null (disabling the lasso via
     // `disabled={moduleGroup === null}`), but only a failure should tell
     // the user *why* the lasso is unavailable instead of leaving them to
     // wonder if it will ever appear.
-    setModuleGroup(null);
-    setSelectionNotice(
-      result.error
-        ? `Model failed to load — lasso unavailable: ${result.error}`
-        : "Model failed to load — lasso unavailable.",
-    );
-  }, []);
+      setModuleGroup(null);
+      setSelectionNotice(
+        result.error
+          ? `Model failed to load — lasso unavailable: ${result.error}`
+          : "Model failed to load — lasso unavailable.",
+      );
+    },
+    [],
+  );
 
   // Decode the named-module GLB fixture once on mount. Live module-registry
   // wiring is deferred (issue #29 design decision) — this fixture is the
-  // sole moduleGroup source for resolveLassoSelection in this ticket.
+  // sole moduleGroup source for resolveLassoSelection in this ticket. It is
+  // the viewer's pre-pass state (issue #69): a stream-driven pass replaces
+  // it with the design loop's rendered STL via streamModelData.
   // Inlined base64 (decoded synchronously, no network round-trip) so it
   // never competes with `window.fetch` stubs other tests install for the
   // backend API.
   useEffect(() => {
     setModuleFixtureData(loadModuleFixtureArrayBuffer());
   }, []);
+
+  // Consume the design-loop frame fields (issue #69): the version-created
+  // progress frame carries `stl_data_uri` (the best iteration's STL as a
+  // base64 data URI) plus a `views` map of data URIs. Swap the viewer to
+  // the stream-derived STL. Runs BEFORE the lasso-degradation notice: a
+  // pass always renders a single unnamed mesh, so the fixture's named
+  // modules are gone and the lasso can no longer resolve to module ids.
+  // (SCAD ownership is untouched — onToken stays the sole SCAD carrier.)
+  // The streamed source is a one-way latch (see streamModelData): a later
+  // frame that omits stl_data_uri does not restore the fixture.
+  const handleStreamViewerData = useCallback(
+    (data: Record<string, unknown>) => {
+      const stlDataUri = typeof data.stl_data_uri === "string" ? data.stl_data_uri : null;
+      if (stlDataUri === null) return;
+      try {
+        setStreamModelData(dataUriToArrayBuffer(stlDataUri));
+      } catch (e) {
+        // A corrupt data URI must not break the stream turn — keep the
+        // exception visible in the console and surface the same notice
+        // channel used for load failures (never a crash). The lasso is
+        // unchanged (no new model mounted), so the notice names the decode
+        // failure only.
+        console.error("failed to decode streamed STL data URI", e);
+        setSelectionNotice(
+          "Could not decode the streamed model — the displayed model is unchanged.",
+        );
+        return;
+      }
+      setModuleGroup(null);
+      setSelectionNotice(
+        "Lasso selection is unavailable for streamed models — the rendered STL has no named modules.",
+      );
+    },
+    [],
+  );
 
   const handleLassoCompleted = useCallback(
     (event: ViewportLassoCompletedEvent) => {
@@ -510,7 +580,9 @@ export default function App({ renders = [], client }: AppProps) {
                 ),
               );
             },
-            onProgress: () => {},
+            onProgress: (_step, data) => {
+              handleStreamViewerData(data);
+            },
             onDone: () => {
               setMessages((prev) =>
                 prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
@@ -544,7 +616,7 @@ export default function App({ renders = [], client }: AppProps) {
           setDesignLoopInFlight(false);
         });
     },
-    [projectId, apiClient, pendingSelection, messages],
+    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData],
   );
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
@@ -648,14 +720,16 @@ export default function App({ renders = [], client }: AppProps) {
           </div>
         )}
         <div className="viewer-pane" data-testid="viewer-pane" style={{ position: "relative" }}>
-          {/* No live render/model artifact flows through the app yet — the
-           * design-loop-to-SSE-to-model pipeline is a future ticket's
-           * scope (see issue #23's documented deferral). The named-module
-           * GLB fixture stands in as the moduleGroup source for lasso
-           * region selection (issue #29's settled design decision). */}
+          {/* The viewer's pre-pass state is the named-module GLB fixture —
+           * the moduleGroup source for lasso region selection (issue #29's
+           * settled design decision). After a stream-driven design-loop
+           * pass (issue #69) it is REPLACED by the design loop's rendered
+           * STL (streamModelData, from the version-created frame's
+           * stl_data_uri) so the browser displays the model the loop
+           * actually produced. */}
           <ModelViewer
-            data={moduleFixtureData}
-            format="glb"
+            data={viewerSource.data}
+            format={viewerSource.format}
             width={VIEWER_WIDTH}
             height={VIEWER_HEIGHT}
             onReady={handleViewerReady}

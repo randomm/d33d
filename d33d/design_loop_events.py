@@ -93,6 +93,9 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     score the bbox bit). A render whose STL survives (e.g. a test stub
     returning a real, still-on-disk path) yields real extents.
 
+    Side effect: also opportunistically caches artifact bytes — see
+    :func:`cache_render_artifact_bytes`.
+
     Returns ``None`` (the bbox gate fails) when the render has no STL or it
     cannot be loaded; never raises.
     """
@@ -116,6 +119,83 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
         return BboxInfo(x=x, y=y, z=z, volume=volume)
     except Exception:  # any load failure → gate fails (None), never a raise
         logger.exception("bbox_fn: failed to load STL %r", stl)
+        return None
+
+
+def _maybe_cache(render: Any, attr: str, value: Any) -> None:
+    """Cache ``value`` on ``render`` under ``attr`` (a no-op when the
+    object refuses the attribute — a frozen dataclass, e.g. the
+    production ``RenderResult`` — the frame then omits the field).
+    """
+    try:
+        setattr(render, attr, value)
+    except (AttributeError, TypeError) as e:
+        # Frozen dataclass — the frame omits the field. Log at debug so an
+        # unexpected __setattr__ rejection (not a frozen dataclass) is
+        # diagnosable instead of silently dropping the field.
+        logger.debug("_maybe_cache: setattr(%r, %r) failed: %s", render, attr, e)
+
+
+def _data_uri_from_bytes(raw: bytes, mime: str) -> str:
+    """A base64 data URI from raw bytes and a MIME type."""
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"data:{mime};base64,{b64}"
+
+
+def cache_render_artifact_bytes(render: Any) -> None:
+    """Cache the best render's STL + views bytes on the render object so
+    the SSE adapter (which runs AFTER the render worker's tempdir is torn
+    down) can still emit them.
+
+    The render worker's ``tempfile.TemporaryDirectory`` dies when the
+    render returns — *before* the design loop yields the result to the
+    chat adapter, so a read inside the adapter's generator (before the
+    ``yield``) sees dead paths in production. The ONE place the artifacts
+    are still reachable when the bytes are still on disk is the sync
+    render path, so the caller (the production loop seam) runs this as an
+    explicit post-render cache step on the result's render object (a
+    duck-typed attribute — never a change to the ``RenderResult``
+    contract) and the adapter reads them from memory.
+
+    A no-op when the bytes are already dead (the production seam today —
+    the frame omits the fields) and a pure win when they survive (tests,
+    or a future worker that keeps the artifacts). Never raises.
+    """
+    stl = getattr(render, "stl", None)
+    _maybe_cache(render, "stl_bytes", _read_artifact_bytes(stl))
+    views = getattr(render, "views", ())
+    if isinstance(views, (tuple, list)) and views:
+        view_bytes: dict[str, bytes] = {}
+        for v in views:
+            b = _read_artifact_bytes(v)
+            if b is not None:
+                # Bare filenames per the VIEWS contract; a Path object is a
+                # realistic input, so derive its name explicitly.
+                key = Path(v).name if isinstance(v, (str, Path)) else str(v)
+                view_bytes[key] = b
+        if len(view_bytes) != len(views):
+            # A partial views map (some artifact unreadable/dead) is
+            # treated as "no views" — the frame omits the field entirely
+            # rather than emitting fewer than the fixed 6, which a consumer
+            # cannot distinguish from a complete map.
+            view_bytes = {}
+        if view_bytes:
+            _maybe_cache(render, "view_bytes", view_bytes)
+
+
+def _read_artifact_bytes(path: Any) -> bytes | None:
+    """Raw bytes for a render artifact path, or ``None`` when unreadable
+    (missing file, non-string path, or an ``OSError`` mid-read).
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    p = Path(path)
+    if not p.is_file():
+        return None
+    try:
+        return p.read_bytes()
+    except OSError:
+        logger.exception("render artifact unreadable: %r", path)
         return None
 
 
@@ -300,13 +380,38 @@ async def run_design_loop_with_events(
 
     if getattr(result, "status", None) == "pass":
         yield ("progress", {"step": "design-loop-pass"})
-        version_id = await _resolve_version_create(app, project_id, result, user_message)
-        if version_id is not None:
-            yield (
-                "progress",
-                {"step": "version-created", "version_id": version_id},
-            )
         best = getattr(result, "best", None)
+        # The best candidate's OWN render artifacts (the best iteration's
+        # STL + 6 views — never a later iteration's) were cached into
+        # memory by the caller's explicit post-render step (cache_render_artifact_bytes,
+        # run on the sync render path — the only place the bytes are
+        # reachable after the render worker's tempdir is torn down).
+        # A missing/dead render → fields omitted entirely (never a
+        # bogus path, never a null), keeping the frame JSON-safe.
+        render = getattr(best, "render", None)
+        frame_fields: dict[str, Any] = {}
+        if render is not None:
+            stl_bytes = getattr(render, "stl_bytes", None)
+            if stl_bytes is not None:
+                frame_fields["stl_data_uri"] = _data_uri_from_bytes(
+                    stl_bytes, "application/octet-stream"
+                )
+            view_bytes = getattr(render, "view_bytes", None)
+            if view_bytes:
+                frame_fields["views"] = {
+                    name: _data_uri_from_bytes(raw, "image/png")
+                    for name, raw in view_bytes.items()
+                }
+        version_id = await _resolve_version_create(
+            app, project_id, result, user_message
+        )
+        if version_id is not None:
+            vc_frame: dict[str, Any] = {
+                "step": "version-created",
+                "version_id": version_id,
+            }
+            vc_frame.update(frame_fields)
+            yield ("progress", vc_frame)
         scad = getattr(best, "scad_source", None)
         yield ("token", {"text": scad if isinstance(scad, str) else ""})
         yield ("done", {"message": _result_message(result)})
@@ -317,6 +422,7 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
+    "cache_render_artifact_bytes",
     "photo_data_uri",
     "run_design_loop_with_events",
 ]

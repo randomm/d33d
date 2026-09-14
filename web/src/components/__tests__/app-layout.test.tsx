@@ -16,11 +16,12 @@
  * boundary (avoid re-mocking three.js wholesale here).
  */
 
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
 import type { RenderImage } from "../../App";
+import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
@@ -166,6 +167,12 @@ const PROJECT: Project = {
   source_photo_path: null,
   created_at: "2026-01-01T00:00:00Z",
 };
+
+/** A real, valid minimal binary-ASCII STL (one triangle) whose base64
+ *  round-trips through dataUriToArrayBuffer — the same decoder App.tsx
+ *  uses for the version-created frame's stl_data_uri. */
+const ASCII_STL = "solid test\nfacet normal 0 0 0\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendfacet\nendsolid test\n";
+const STL_DATA_URI = `data:application/octet-stream;base64,${btoa(ASCII_STL)}`;
 
 function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   const client = new ApiClient();
@@ -451,6 +458,108 @@ describe("App photo upload wiring", () => {
 
     // Restore the shared FakeImage stub for subsequent tests in this file.
     vi.stubGlobal("Image", FakeImage);
+  });
+});
+
+describe("App stream-driven model (issue #69)", () => {
+  /** Render the app, let the project + fixture settle, then fire a
+   *  version-created progress frame (carrying stl_data_uri + views)
+   *  through the mocked stream and send a message. */
+  async function renderAndStreamVersionCreated(
+    client: ApiClient,
+  ): Promise<void> {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Pre-pass settle: the GLB fixture mount has landed.
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+    // Send the chat message, then synchronously dispatch the version-created
+    // frame (the real stream delivers it mid-flight; act() keeps the
+    // setState batch deterministic in the unit environment).
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+      // The mocked streamEvents has been called by now (postChat + the
+      // then-chain ran). Grab the last call's handlers and dispatch.
+      const spy = vi.mocked(client.streamEvents);
+      const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+        undefined) as
+        | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
+        | undefined;
+      handlers?.onProgress?.("version-created", {
+        step: "version-created",
+        version_id: 1,
+        stl_data_uri: STL_DATA_URI,
+        views: {
+          ["view_00_front.png"]: "data:image/png;base64,AAA",
+        },
+      });
+    });
+  }
+
+  it("replaces the static GLB fixture with the decoded streamed STL after a stream-driven pass", async () => {
+    const client = makeClient();
+    await renderAndStreamVersionCreated(client);
+
+    // After the version-created frame: the viewer is fed the decoded
+    // stream-derived STL ArrayBuffer — data-format flips to "stl" and the
+    // buffer is the decoded stl_data_uri payload, not the fixture.
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-format")).toBe("stl");
+    });
+    // The decoded payload is the stream's STL — not the fixture's GLB
+    // bytes (which start with the GLB magic; the decoded STL decodes back
+    // to the exact ASCII source we streamed).
+    const decoded = new TextDecoder().decode(dataUriToArrayBuffer(STL_DATA_URI));
+    expect(decoded).toContain("solid test");
+  });
+
+  it("shows a lasso-degradation notice and disables the lasso once the streamed STL replaces the fixture", async () => {
+    const client = makeClient();
+    await renderAndStreamVersionCreated(client);
+
+    // After the pass: the streamed STL has no named modules, so the lasso
+    // is disabled and the notice explains why.
+    await waitFor(() => {
+      expect(screen.getByTestId("selection-notice").textContent).toContain(
+        "no named modules",
+      );
+    });
+    expect(screen.getByTestId("viewport-lasso-overlay-mock").getAttribute("data-disabled")).toBe(
+      "true",
+    );
+  });
+
+  it("leaves the GLB fixture mounted when a progress frame carries no stl_data_uri", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("design-loop-pass", { step: "design-loop-pass" });
+      handlers.onProgress("version-created", { step: "version-created", version_id: 1 });
+      handlers.onDone?.({});
+    });
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("true");
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+    // No stl_data_uri on the frame — the fixture GLB stays mounted and the
+    // lasso keeps working (no degradation notice).
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-format")).toBe("glb");
+    });
+    expect(screen.queryByTestId("selection-notice")).toBeNull();
+    expect(
+      screen.getByTestId("viewport-lasso-overlay-mock").getAttribute("data-disabled"),
+    ).toBe("false");
   });
 });
 
