@@ -691,7 +691,7 @@ def test_chat_exhausted_emits_error_frame_and_no_version(app_with_versions):
 
 
 def test_chat_pass_creates_version_and_emits_token_and_done(
-    app_with_versions, tmp_path
+    app_with_versions
 ):
     """A passing loop creates a version, emits a token frame (the SCAD
     source) and a done frame."""
@@ -1075,7 +1075,6 @@ def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
 def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
     """Project deleted mid-flight → terminal error frame + flag release,
     not a 500."""
-    import asyncio as _a
 
     class _DeleteMidLoop:
         """A loop that deletes the project before completing."""

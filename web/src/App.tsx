@@ -118,9 +118,22 @@ export default function App({ renders = [], client }: AppProps) {
   // decoded STL ArrayBuffer (format "stl"). Stays null until the first
   // stream-driven pass — the fixture (and its named modules, the lasso's
   // moduleGroup source) is the pre-pass state.
+  //
+  // ONE-WAY LATCH: once set, it is never reset to null. A later pass whose
+  // frame omits stl_data_uri does not restore the fixture — the streamed
+  // model stays mounted and the lasso stays degraded for the session.
+  // This is intentional (a streamed pass is a terminal state for the
+  // viewer's source); a future ticket that needs the fixture back must
+  // add an explicit reset path here, not an implicit one.
   const [streamModelData, setStreamModelData] = useState<ArrayBuffer | null>(null);
   const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  // The viewer's mounted data + format, derived ONCE from the source-of-
+  // truth pair (streamModelData / moduleFixtureData) so the "which source
+  // is mounted" decision lives in one place, not in JSX.
+  const viewerSource = streamModelData
+    ? { data: streamModelData, format: "stl" as const }
+    : { data: moduleFixtureData, format: "glb" as const };
   // A lasso selection that has been resolved (module ids + marked PNG) but
   // not yet sent — the instruction is the user's own free text, which the
   // server requires non-empty (`RegionEditRequest.instruction`,
@@ -152,8 +165,7 @@ export default function App({ renders = [], client }: AppProps) {
         // is a single unnamed mesh, so it does NOT re-enable the lasso —
         // the viewer displays the streamed model but the lasso stays
         // disabled with the degradation notice.
-        const loadedFormat = result.mesh.format;
-        if (loadedFormat === "glb") {
+        if (result.mesh.format === "glb") {
           setModuleGroup(result.mesh.object);
           setSelectionNotice(null);
         } else {
@@ -195,17 +207,23 @@ export default function App({ renders = [], client }: AppProps) {
   // pass always renders a single unnamed mesh, so the fixture's named
   // modules are gone and the lasso can no longer resolve to module ids.
   // (SCAD ownership is untouched — onToken stays the sole SCAD carrier.)
+  // The streamed source is a one-way latch (see streamModelData): a later
+  // frame that omits stl_data_uri does not restore the fixture.
   const handleStreamViewerData = useCallback(
     (data: Record<string, unknown>) => {
       const stlDataUri = typeof data.stl_data_uri === "string" ? data.stl_data_uri : null;
       if (stlDataUri === null) return;
       try {
         setStreamModelData(dataUriToArrayBuffer(stlDataUri));
-      } catch {
-        // A corrupt data URI must not break the stream turn — show the
-        // same notice channel used for load failures, never a crash.
+      } catch (e) {
+        // A corrupt data URI must not break the stream turn — keep the
+        // exception visible in the console and surface the same notice
+        // channel used for load failures (never a crash). The lasso is
+        // unchanged (no new model mounted), so the notice names the decode
+        // failure only.
+        console.error("failed to decode streamed STL data URI", e);
         setSelectionNotice(
-          "Model failed to load — lasso unavailable: could not decode the streamed model.",
+          "Could not decode the streamed model — the displayed model is unchanged.",
         );
         return;
       }
@@ -710,8 +728,8 @@ export default function App({ renders = [], client }: AppProps) {
            * stl_data_uri) so the browser displays the model the loop
            * actually produced. */}
           <ModelViewer
-            data={streamModelData ?? moduleFixtureData}
-            format={streamModelData !== null ? "stl" : "glb"}
+            data={viewerSource.data}
+            format={viewerSource.format}
             width={VIEWER_WIDTH}
             height={VIEWER_HEIGHT}
             onReady={handleViewerReady}

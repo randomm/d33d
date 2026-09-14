@@ -64,6 +64,13 @@ function sseBody(frames: Array<{ event: string; data: Record<string, unknown> }>
     .join("");
 }
 
+/** The viewer's uniform clear colour (0x1a1a2e). A pixel with all three
+ *  RGB channels equal to this is background — geometry is present iff at
+ *  least one probed pixel differs. */
+function isBackgroundPixel(r: number, g: number, b: number): boolean {
+  return r === 26 && g === 26 && b === 46;
+}
+
 test("chat design loop: send message → SSE completion → assistant bubble receives token", async ({
   page,
 }) => {
@@ -219,14 +226,12 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
   await expect
     .poll(async () => {
       const px = (await probePixels()).split(",").map(Number);
-      // Geometry is present iff at least one RGB channel across the probe
-      // differs from the uniform viewer clear colour (r=26, g=26, b=46).
-      return px.some((v, i) => {
-        if (i % 4 === 3) return false; // skip alpha
-        const channel = i % 4;
-        const expected = [26, 26, 46][channel];
-        return v !== expected;
-      });
+      // Geometry is present iff at least one probed pixel is not the
+      // uniform viewer clear colour.
+      for (let i = 0; i < px.length; i += 4) {
+        if (!isBackgroundPixel(px[i], px[i + 1], px[i + 2])) return true;
+      }
+      return false;
     }, { timeout: 10_000, message: "viewer canvas never rendered the streamed STL" })
     .toBe(true);
 
