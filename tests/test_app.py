@@ -664,12 +664,17 @@ def test_create_app_inits_event_sources(app):
 
 
 # ---------------------------------------------------------------------------
-# Region-scoped edit request (issue #7, workstream task-c) — HONEST STUB
+# Region-scoped edit request (issue #7, workstream task-c; design-loop
+# wiring by issue #68)
 #
-# This route accepts and validates a lasso-selection payload and returns
-# 202 Accepted with status "deferred". It never regenerates OpenSCAD
-# source — that wiring is out of scope for this ticket (see the module
-# docstring on d33d.app.RegionEditRequest).
+# The route validates the lasso-selection payload and drives the injected
+# design loop (``app.state.run_design_loop``) in the background — the
+# same adapter pattern as ``POST /{id}/chat``. The 202 body mirrors
+# ``/chat`` (``{project_id, status: "accepted"}``); the version arrives
+# only via the SSE stream. Full integration coverage (pass → version,
+# exhausted → no version + terminal error frame, kwargs contract) lives
+# in tests/versioning/test_design_loop_finalize.py; this file keeps the
+# payload-validation gates (404/400/413/422) plus the 202 contract.
 # ---------------------------------------------------------------------------
 
 #: A minimal valid 1x1 PNG, base64-encoded — small enough to exercise the
@@ -699,10 +704,12 @@ async def _create_project(client: AsyncClient) -> int:
     return int(r.json()["id"])
 
 
-def test_region_edit_accepted_returns_202_deferred(app):
+def test_region_edit_accepted_returns_202_accepted(app):
     """A well-formed region-edit request against a real project returns
-    202 with an explicit ``status: "deferred"`` body — never a fabricated
-    success/edit result, since no regeneration happens."""
+    202 with the concrete ``{project_id, status: "accepted"}`` body
+    (mirroring ``/chat``) — no ``status: "deferred"`` field, no
+    detail/module_ids/view_id echo; the version arrives only via the
+    SSE stream, never in the 202 body."""
 
     async def _call(client):
         project_id = await _create_project(client)
@@ -714,14 +721,7 @@ def test_region_edit_accepted_returns_202_deferred(app):
 
     project_id, r = _run_async(app, _call)
     assert r.status_code == 202, r.text
-    body = r.json()
-    assert body["project_id"] == project_id
-    assert body["status"] == "deferred"
-    assert body["module_ids"] == ["curl_3", "curl_4"]
-    assert body["view_id"] == "front"
-    # The honest-stub contract: no field claims an edit/regeneration result.
-    assert "scad" not in body
-    assert "result" not in body
+    assert r.json() == {"project_id": project_id, "status": "accepted"}
 
 
 def test_region_edit_unknown_project_returns_404(app):
