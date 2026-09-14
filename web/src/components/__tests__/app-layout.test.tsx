@@ -23,7 +23,7 @@ import App from "../../App";
 import type { RenderImage } from "../../App";
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
-import type { Project } from "../../lib/api";
+import type { Project, RegionEditResult } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { ViewportLassoCompletedEvent } from "../viewer/ViewportLassoOverlay";
 import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditContract";
@@ -729,7 +729,7 @@ describe("App region-selection (lasso) wiring", () => {
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
       status: "accepted",
-    });
+    } as RegionEditResult);
     resolveLassoSelectionMock.mockReturnValue({
       ranked: [
         { name: "wing_left", hitCount: 5 },
@@ -882,7 +882,7 @@ describe("App region-selection (lasso) wiring", () => {
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
       status: "accepted",
-    });
+    } as RegionEditResult);
     const longRanked = Array.from({ length: MAX_REGION_EDIT_MODULE_IDS + 5 }, (_, i) => ({
       name: `module_${i}`,
       hitCount: MAX_REGION_EDIT_MODULE_IDS + 5 - i,
@@ -1237,7 +1237,7 @@ describe("App region-edit success feedback", () => {
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({
       project_id: PROJECT.id,
       status: "accepted",
-    });
+    } as RegionEditResult);
     resolveLassoSelectionMock.mockReturnValue({
       ranked: [{ name: "wing_left", hitCount: 5 }],
       primary: "wing_left",
