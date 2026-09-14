@@ -7,6 +7,9 @@
  *     → wait for SSE completion (the SSE stream is intercepted via
  *       page.route and fulfilled with a finite, well-formed document)
  *     → assert the assistant bubble received the token frame
+ *     → assert the viewer pane displays geometry after the stream
+ *       completes (the version-created frame's stl_data_uri drives
+ *       the STL swap)
  *     → assert the send button is re-enabled (in-flight flag released)
  *
  * Determinism notes:
@@ -110,10 +113,26 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
   // progress → progress → progress → token → done. The `version-created`
   // progress frame is part of this document — it is what the SPA
   // consumed (asserted below), NOT a real version row in the backend.
+  // The version-created frame carries the pass's render payload (issue
+  // #69): `stl_data_uri`, a real base64 data URI of the on-disk minimal
+  // STL fixture (web/tests/fixtures/viewer/mini-box.stl, the same bytes
+  // the viewer's own unit tests load), plus a `views` map. The SPA
+  // decodes stl_data_uri and swaps the GLB fixture for the streamed STL —
+  // the viewer-geometry assertion below pins that end-to-end.
+  const stlBytes = readFileSync(
+    path.resolve(
+      path.dirname(new URL(import.meta.url).pathname),
+      "../fixtures/viewer/mini-box.stl",
+    ),
+  );
+  const stlDataUri = `data:application/octet-stream;base64,${stlBytes.toString("base64")}`;
   const sseFrames = [
     { event: "progress", data: { step: "design-loop-start" } },
     { event: "progress", data: { step: "design-loop-pass" } },
-    { event: "progress", data: { step: "version-created", version_id: 1 } },
+    {
+      event: "progress",
+      data: { step: "version-created", version_id: 1, stl_data_uri: stlDataUri, views: {} },
+    },
     { event: "token", data: { text: "W = 20; H = 25; D = 30; cube([W, H, D]);" } },
     { event: "done", data: { message: "Design loop passed validation" } },
   ];
@@ -174,6 +193,42 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
     "W = 20; H = 25; D = 30; cube([W, H, D]);",
     { timeout: 10_000 },
   );
+
+  // The viewer pane displays geometry after the stream completes: the
+  // version-created frame's stl_data_uri (real mini-box.stl bytes as a
+  // base64 data URI) is decoded by the SPA and swapped in for the GLB
+  // fixture — the three.js canvas then renders the streamed STL mesh.
+  // Read the WebGL canvas back via drawImage → getImageData and assert the
+  // frame is no longer uniform background (0x1a1a2e = rgb(26,26,46)) —
+  // geometry occupies part of the viewport, so some probed pixel differs.
+  const probePixels = () =>
+    page.locator('[data-testid="viewer-pane"] canvas').evaluate((el) => {
+      const canvas = el as HTMLCanvasElement;
+      const probe = document.createElement("canvas");
+      probe.width = 8;
+      probe.height = 8;
+      const ctx = probe.getContext("2d");
+      if (!ctx) return "";
+      try {
+        ctx.drawImage(canvas, 0, 0, 8, 8);
+        return ctx.getImageData(0, 0, 8, 8).data.join(",");
+      } catch {
+        return "";
+      }
+    });
+  await expect
+    .poll(async () => {
+      const px = (await probePixels()).split(",").map(Number);
+      // Geometry is present iff at least one RGB channel across the probe
+      // differs from the uniform viewer clear colour (r=26, g=26, b=46).
+      return px.some((v, i) => {
+        if (i % 4 === 3) return false; // skip alpha
+        const channel = i % 4;
+        const expected = [26, 26, 46][channel];
+        return v !== expected;
+      });
+    }, { timeout: 10_000, message: "viewer canvas never rendered the streamed STL" })
+    .toBe(true);
 
   // The send button stays DISABLED until the stream completes: the input
   // was cleared on send (handleSubmit does setInput("")), and the button

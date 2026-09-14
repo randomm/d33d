@@ -502,19 +502,32 @@ def test_design_source_drain_times_out_on_stalled_stream(
 # ---------------------------------------------------------------------------
 
 
+class _StubRender:
+    """Duck-type of ``RenderResult`` for chat-route tests: ``stl`` + the
+    6-element ``views`` tuple (``render_worker.py`` VIEWS contract). The
+    paths may be live on-disk files or dead (torn-down tempdir) — the
+    adapter must handle both (present / omitted fields, never a bogus path).
+    """
+
+    def __init__(self, stl: str | None = None, views: tuple[str, ...] = ()) -> None:
+        self.stl = stl
+        self.views = views
+
+
 class _StubBest:
     """Duck-type of the design loop's best candidate (carries the named
     parameters + the generated SCAD source)."""
 
-    def __init__(self, params: dict, scad: str = "") -> None:
+    def __init__(self, params: dict, scad: str = "", render=None) -> None:
         self.params = params
         self.scad_source = scad
+        self.render = render
 
 
 class _StubResult:
-    def __init__(self, status: str, params: dict, scad: str = "") -> None:
+    def __init__(self, status: str, params: dict, scad: str = "", render=None) -> None:
         self.status = status
-        self.best = _StubBest(params, scad)
+        self.best = _StubBest(params, scad, render)
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
 
 
@@ -677,7 +690,9 @@ def test_chat_exhausted_emits_error_frame_and_no_version(app_with_versions):
     assert timeline == []
 
 
-def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
+def test_chat_pass_creates_version_and_emits_token_and_done(
+    app_with_versions, tmp_path
+):
     """A passing loop creates a version, emits a token frame (the SCAD
     source) and a done frame."""
     import asyncio as _a
@@ -720,6 +735,10 @@ def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
     vc = [d for d in version_created if d.get("step") == "version-created"]
     assert vc, "no version-created progress frame"
     assert vc[0]["version_id"] == timeline[0]["id"]
+    # No render on the stub result → the frame carries no viewer fields
+    # (stl_data_uri / views omitted entirely, not null, no bogus paths).
+    assert "stl_data_uri" not in vc[0], "stl_data_uri must be omitted without a render"
+    assert "views" not in vc[0], "views must be omitted without a render"
     # A token frame carries the SCAD source.
     assert "token" in data_by_event, "no token frame"
     assert data_by_event["token"][0]["text"] == "W = 10; H = 20; cube([W, H, 1]);"
@@ -727,6 +746,182 @@ def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
     assert "done" in data_by_event, "no done frame"
     # The terminal frame is a done (not an error).
     assert event_names[-1] == "done"
+
+
+def test_chat_pass_version_created_frame_carries_stl_and_views(app_with_versions, tmp_path):
+    """A pass whose best candidate carries a live render (on-disk STL +
+    the 6 VIEWS filenames) emits, on the version-created progress frame,
+    ``stl_data_uri`` plus ``views`` mapping each of the 6 VIEWS filenames
+    to its base64 data URI — the adapter reads the bytes into memory
+    before yielding (render worker tempdir torn down) and no SCAD leaks
+    into any progress frame (the token frame stays the sole SCAD owner).
+    """
+    import base64 as _b64
+
+    from d33d.render_worker import VIEWS
+
+    async def _call(client):
+        # The render worker's artifacts (stl + views) live inside its
+        # tempdir, torn down when the render returns — i.e. BEFORE the
+        # loop returns to the adapter. Simulate that: the loop "worker"
+        # captures the bytes and deletes the files as part of the call, so
+        # the adapter can only recover them if it read them into memory
+        # before yielding the version-created frame (the "read bytes into
+        # memory before yielding" contract). A live on-disk STL fixture
+        # file also exists under tmp_path for the assertion baseline.
+        stl = tmp_path / "model.stl"
+        stl.write_bytes(b"\x84\xab\x50\x53fake-stl-bytes")
+        worker_tmp = tmp_path / "render-tmp"
+        worker_tmp.mkdir()
+        views = []
+        for name, _cam in VIEWS:
+            p = worker_tmp / name
+            p.write_bytes(b"\x89PNG-fake-view-bytes")
+            views.append(str(p))
+        worker_stl = worker_tmp / "model.stl"
+        worker_stl.write_bytes(stl.read_bytes())
+
+        async def _loop(app, **kwargs):
+            # Simulate the production render seam: (1) the worker's
+            # ``bbox_fn`` runs on the sync render path and caches the
+            # artifact bytes on the render object (the ONLY place the
+            # bytes are still reachable — the tempdir dies when the
+            # render returns, before the loop yields); (2) the tempdir is
+            # torn down, so the adapter's own read of the paths would
+            # see dead files (it must use the cache).
+            from pathlib import Path as _Path
+
+            from d33d.design_loop_events import cache_render_artifact_bytes
+
+            render = _StubRender(stl=str(worker_stl), views=tuple(views))
+            cache_render_artifact_bytes(render)
+            for v in views:
+                _Path(v).unlink()
+            worker_stl.unlink()
+            worker_tmp.rmdir()
+            return _StubResult("pass", {"W": 10, "H": 20}, scad="W = 10; cube([W]);",
+                                render=render)
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make a box"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    data_by_event = {}
+    for event, data in frames:
+        data_by_event.setdefault(event, []).append(data)
+    # The version-created frame carries stl_data_uri + all 6 views — the
+    # bytes were cached on the render during the sync render path (the
+    # files are dead by frame time; only the cache survives).
+    vc = [d for d in data_by_event.get("progress", []) if d.get("step") == "version-created"]
+    assert vc, "no version-created progress frame"
+    stl_uri = vc[0].get("stl_data_uri")
+    assert stl_uri is not None, "stl_data_uri missing on version-created frame"
+    assert stl_uri.startswith("data:") and ";base64," in stl_uri
+    payload = _b64.b64decode(stl_uri.split(";base64,", 1)[1])
+    assert payload == b"\x84\xab\x50\x53fake-stl-bytes", "STL bytes mismatch"
+    view_map = vc[0].get("views")
+    expected_view_names = {name for name, _cam in VIEWS}
+    assert set(view_map.keys()) == expected_view_names, (
+        f"views keys {sorted(view_map)} != expected {sorted(expected_view_names)}"
+    )
+    for name in view_map:
+        uri = view_map[name]
+        assert uri.startswith("data:image/png;base64,"), f"view URI: {uri[:40]}"
+        decoded = _b64.b64decode(uri.split(";base64,", 1)[1])
+        assert decoded == b"\x89PNG-fake-view-bytes", f"view bytes mismatch for {name}"
+    # No SCAD in any progress frame — the token frame is the sole owner.
+    for d in data_by_event.get("progress", []):
+        assert "W = 10; cube([W]);" not in str(d), "SCAD leaked into a progress frame"
+    # The token frame still carries the SCAD source.
+    assert data_by_event["token"][0]["text"] == "W = 10; cube([W]);"
+
+
+def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
+    """A pass whose best render points at torn-down tempdir paths (the
+    production seam — bytes dead by frame time) still passes: the frame
+    omits stl_data_uri/views (never bogus paths), and the stream still
+    terminates with the terminal done frame.
+    """
+    async def _call(client):
+        # Dead paths: a tempdir the render worker would have torn down.
+        import shutil
+
+        dead = tmp_path / "torn-down"
+        dead.mkdir()
+        stl = dead / "model.stl"
+        stl.write_bytes(b"gone")
+        views = []
+        for i in range(6):
+            p = dead / f"view_{i:02d}.png"
+            p.write_bytes(b"gone")
+            views.append(str(p))
+        render = _StubRender(stl=str(stl), views=tuple(views))
+        shutil.rmtree(dead)  # simulate the worker's torn-down tempdir
+
+        async def _loop(app, **kwargs):
+            return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);", render=render)
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert event_names[-1] == "done", f"no terminal done frame: {event_names}"
+    for _event, data in frames:
+        if data.get("step") == "version-created":
+            assert "stl_data_uri" not in data, "stl_data_uri must be omitted for dead paths"
+            assert "views" not in data, "views must be omitted for dead paths"
+
+
+def test_chat_exhausted_emits_no_stl_or_views_fields(app_with_versions):
+    """An exhausted run terminates with the terminal error frame and emits
+    NO stl_data_uri or views fields — the {progress,token,done,error}
+    schema is unchanged (no new event kind)."""
+    async def _call(client):
+        async def _loop(app, **kwargs):
+            return _StubResult("exhausted", {"W": 10})
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert event_names[-1] == "error", f"no terminal error frame: {event_names}"
+    for event, data in frames:
+        assert "stl_data_uri" not in data, f"stl_data_uri in {event} frame"
+        assert "views" not in data, f"views in {event} frame"
+    # Only the existing event kinds — no new event kind.
+    assert set(event_names) <= {"progress", "token", "done", "error"}
 
 
 def test_chat_supplies_real_bbox_fn(app_with_versions):
