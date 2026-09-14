@@ -494,21 +494,22 @@ export default function App({ renders = [], client }: AppProps) {
             instruction: trimmed,
           })
           .then(() => {
-            // 202 Accepted means the request was validated and queued —
-            // NOT that any regeneration happened (`RegionEditResult.status`
-            // is always "deferred"; scoped-edit regeneration is not yet
-            // implemented server-side, see api.ts's createRegionEdit doc
-            // comment). Without this, a successful request produced zero
-            // feedback, indistinguishable from a silent failure or a
-            // request still in flight. Word it so it can never read as a
-            // completed edit.
+            // 202 Accepted means the request was validated and the design
+            // loop was queued in the background — NOT that any
+            // regeneration happened (`RegionEditResult` is exactly
+            // `{project_id, status: "accepted"}`, mirroring /chat; the
+            // version arrives only via the SSE stream, see api.ts's
+            // createRegionEdit doc comment). Without this, a successful
+            // request produced zero feedback, indistinguishable from a
+            // silent failure or a request still in flight. Word it so it
+            // can never read as a completed edit.
             setMessages((prev) => [
               ...prev,
               {
                 id: `msg-${Date.now()}-region-edit-accepted`,
                 role: "assistant",
                 content:
-                  "Region edit request accepted — scoped regeneration is not implemented yet.",
+                  "Region edit request accepted — the design loop is running in the background; a new version will appear in the timeline when it passes.",
               },
             ]);
           })

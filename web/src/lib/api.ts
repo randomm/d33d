@@ -261,21 +261,23 @@ export const MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024;
  *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`
  *  (issue #29) emits viewport-pixel coordinates (`ScreenPoint`, the same
  *  space `ModelViewer.resolveLassoSelection` raycasts through) — the
- *  server does not interpret this field's coordinate space today, since
- *  scoped-edit regeneration is deferred. */
+ *  server does not interpret this field's coordinate space today (kept
+ *  for audit/debugging and the containment gate's volume lift). */
 export interface RegionEditPolygonPoint {
   x: number;
   y: number;
 }
 
 /**
- * Body of `POST /api/projects/{id}/region-edits` (issue #7, task-c).
+ * Body of `POST /api/projects/{id}/region-edits` (issue #7, task-c;
+ * wired to the design loop by issue #68).
  *
  * Carries the ranked module-identifier list `ModelViewer.resolveLassoSelection`
  * resolved (top-most/primary first — never pixel coordinates), the
- * composited red-marked PNG (base64, no data-URL prefix), the raw lasso
- * polygon, the view id it was drawn on, and the user's free-text edit
- * instruction.
+ * composited red-marked PNG (base64, no data-URL prefix) the vision model
+ * sees as the marked-up render of the current model, the raw lasso
+ * polygon (audit/debugging + the containment gate's volume lift), the view
+ * id it was drawn on, and the user's free-text edit instruction.
  */
 export interface RegionEditRequest {
   /** Ranked module identifiers, top-most/primary first. 1–10 entries
@@ -292,16 +294,16 @@ export interface RegionEditRequest {
 }
 
 /**
- * Response shape for the accept-and-defer stub. `status` is always
- * `"deferred"` — this route never regenerates OpenSCAD source (see
- * `createRegionEdit`'s doc comment).
+ * 202 response for `POST /api/projects/{id}/region-edits` (issue #68).
+ * Mirrors `POST /{id}/chat` exactly — `{project_id, status: "accepted"}`.
+ * The accepted status means the payload was validated and the design
+ * loop was queued in the background; it does NOT mean any regeneration
+ * happened. The new version (if the loop passes) arrives only via the
+ * SSE stream's `version-created` progress frame, never in this body.
  */
 export interface RegionEditResult {
   project_id: number;
-  status: "deferred";
-  detail: string;
-  module_ids: string[];
-  view_id: string;
+  status: "accepted";
 }
 
 // ---------------------------------------------------------------------------
@@ -574,24 +576,19 @@ export class ApiClient {
     return (await res.json()) as PhotoUploadResult;
   }
 
-  // -- region-scoped edit request (issue #7, task-c) -------------------------
-  //
-  // NOTE: This is an HONEST STUB client method, matching the backend's own
-  // accept-and-defer contract (see `d33d/app.py`'s `RegionEditRequest`
-  // docstring). The route validates the payload and returns 202 Accepted
-  // with `status: "deferred"` — it does NOT regenerate any OpenSCAD source.
-  // Wiring "regenerate only these named modules" into the design loop
-  // (`d33d/design_loop.py`, issue #5) is a future ticket's scope, same as
-  // `downloadModel3MF` below documents for the 3MF HTTP route.
+  // -- region-scoped edit request (issue #7, task-c; design-loop wiring
+  // by issue #68) — mirrors `postChat` (see below).
 
   /**
    * Submit a region-scoped edit request: the ranked module-identifier list
    * a lasso selection resolved to, the composited marked PNG, the lasso
    * polygon, the view id, and the user's instruction.
    *
-   * Returns 202 Accepted with `status: "deferred"` — the caller must not
-   * treat this as "the edit happened"; scoped-edit regeneration is not
-   * yet implemented on the backend.
+   * Returns 202 Accepted with `status: "accepted"` (mirroring `POST
+   * /{id}/chat`) — the design loop runs in the background and the new
+   * version (if the loop passes) arrives only via the SSE stream's
+   * `version-created` progress frame, never in this response. A 409 means
+   * a design loop is already in flight for this project.
    */
   async createRegionEdit(
     projectId: number,
