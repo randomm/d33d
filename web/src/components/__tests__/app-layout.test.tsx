@@ -582,6 +582,39 @@ describe("App region-selection (lasso) wiring", () => {
     expect(client.createRegionEdit).not.toHaveBeenCalled();
   });
 
+  it("pending selection notice is styled as a card (border + light bg) with a 200px-max thumbnail", async () => {
+    const client = makeClient();
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [
+        { name: "wing_left", hitCount: 5 },
+        { name: "wing_right", hitCount: 2 },
+      ],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    });
+
+    // jsdom applies no class-based CSS, so the card styling must be an
+    // inline style the test can see directly (not getComputedStyle).
+    const notice = screen.getByTestId("pending-selection-notice");
+    expect(notice.style.border).toBe("2px solid rgb(208, 215, 222)");
+    expect(notice.style.backgroundColor).toBe("rgb(246, 248, 250)");
+
+    const thumbnail = screen.getByTestId("pending-selection-thumbnail");
+    expect(thumbnail.style.maxWidth).toBe("200px");
+  });
+
   it("full corrected flow: lasso completed -> user sends chat text -> createRegionEdit called with that text as instruction and the resolved module ids -> resulting ChatMessage carries the matching .selection", async () => {
     const client = makeClient();
     vi.spyOn(client, "createRegionEdit").mockResolvedValue({

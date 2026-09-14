@@ -674,13 +674,23 @@ export default function App({ renders = [], client }: AppProps) {
             </div>
           )}
           {pendingSelection && (
-            <div className="pending-selection-notice" data-testid="pending-selection-notice" role="status">
+            <div
+              className="pending-selection-notice"
+              data-testid="pending-selection-notice"
+              role="status"
+              style={{
+                border: "2px solid #d0d7de",
+                backgroundColor: "#f6f8fa",
+                padding: "8px",
+              }}
+            >
               <span>Region selected — describe the change below.</span>
               <img
                 src={pendingSelection.thumbnail}
                 alt={`pending selection on ${pendingSelection.viewId}`}
                 className="pending-selection-thumbnail"
                 data-testid="pending-selection-thumbnail"
+                style={{ maxWidth: "200px" }}
               />
               <button
                 type="button"
