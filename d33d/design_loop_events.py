@@ -93,6 +93,11 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     score the bbox bit). A render whose STL survives (e.g. a test stub
     returning a real, still-on-disk path) yields real extents.
 
+    No ``merge_vertices()`` is needed here: bounds are derived from
+    vertex coordinates and are invariant under duplicate-vertex merging,
+    so (unlike the issue #84 watertight fix, which required merging before
+    ``is_watertight``) the unmerged load is correct for this read.
+
     Side effect: also opportunistically caches artifact bytes — see
     :func:`cache_render_artifact_bytes`.
 
