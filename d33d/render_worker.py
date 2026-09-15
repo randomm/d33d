@@ -956,10 +956,22 @@ def render_for_design_loop(
                     import trimesh
 
                     mesh = trimesh.load(str(stl), process=False)
+                    # OpenSCAD's STL export emits per-facet DUPLICATED
+                    # vertices, so with process=False the mesh must be
+                    # merged before a watertightness check is meaningful
+                    # (an unmerged valid cube reports watertight=False →
+                    # bogus empty_model). merge_vertices() is deliberately
+                    # narrower than process=True, which would also drop
+                    # degenerate/duplicate faces.
+                    mesh.merge_vertices()
                     vertex_count = len(mesh.vertices)
                     watertight = bool(mesh.is_watertight)
                     volume_mm3 = float(mesh.volume)
-                except (OSError, ValueError):
+                except (OSError, ValueError, IndexError):
+                    # IndexError: a malformed/degenerate STL can make
+                    # mesh.volume raise instead of returning a number;
+                    # it must classify (empty_model), never crash the
+                    # render pipeline.
                     pass
             views_ok = all(v.is_file() for v in views)
             error_class = classify(
