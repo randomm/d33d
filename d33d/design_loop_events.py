@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d.design_loop import BboxInfo
-from d33d.render_worker import RenderResult
+from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +96,6 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     so (unlike the issue #84 watertight fix, which required merging before
     ``is_watertight``) the unmerged load is correct for this read.
 
-    Side effect: also opportunistically caches artifact bytes — see
-    :func:`cache_render_artifact_bytes`.
-
     Returns ``None`` (the bbox gate fails) when the render has no STL or it
     cannot be loaded; never raises.
     """
@@ -125,47 +122,36 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
         return None
 
 
-def _maybe_cache(render: Any, attr: str, value: Any) -> None:
-    """Cache ``value`` on ``render`` under ``attr`` (a no-op when the
-    object refuses the attribute — a frozen dataclass, e.g. the
-    production ``RenderResult`` — the frame then omits the field).
-    """
-    try:
-        setattr(render, attr, value)
-    except (AttributeError, TypeError) as e:
-        # Frozen dataclass — the frame omits the field. Log at debug so an
-        # unexpected __setattr__ rejection (not a frozen dataclass) is
-        # diagnosable instead of silently dropping the field.
-        logger.debug("_maybe_cache: setattr(%r, %r) failed: %s", render, attr, e)
-
-
 def _data_uri_from_bytes(raw: bytes, mime: str) -> str:
     """A base64 data URI from raw bytes and a MIME type."""
     b64 = base64.b64encode(raw).decode("ascii")
     return f"data:{mime};base64,{b64}"
 
 
-def _artifact_bytes_from_path(render: Any) -> tuple[bytes | None, dict[str, bytes]]:
+def _artifact_bytes_from_path(render: RenderResult) -> tuple[bytes | None, dict[str, bytes]]:
     """Read the best render's STL + view bytes from its DURABLE artifact
-    directory (the per-render directory the worker persists to INSIDE its
-    ``tempfile.TemporaryDirectory`` with-block before the block exits —
-    issue #72; the directory survives past the tempdir teardown because the
-    copy happened inside it).
+    directory — ``render.render_artifact_dir`` (issue #72: the per-render
+    directory the worker persists to INSIDE its
+    ``tempfile.TemporaryDirectory`` with-block before the block exits;
+    the directory survives past the tempdir teardown because the copy
+    happened inside it).
 
-    The durable path rides on the render object as a duck-typed
-    ``render_artifact_path`` attribute — never a change to the frozen
-    ``RenderResult`` contract (the worker's workstream attaches it; a test
-    stub or a future worker may set it). ``None`` for either field means
-    "no usable durable source" — the caller then falls back to the
-    in-memory byte cache (``stl_bytes``/``view_bytes``).
+    The durable path rides on the render object as a real attribute: the
+    declared ``RenderResult`` field ``render_artifact_dir`` (the reader
+    used to ``getattr`` a non-existent attribute name, which
+    silently returned ``None`` on every real render — the bug this fix
+    resolved). ``None`` for the field means "no durable source" — the
+    frame omits the fields (never a bogus path, never a null, never a
+    raise).
 
-    Views follow the partial-omit rule: a directory that yields fewer than
-    the 6 fixed VIEWS filenames (a failed copy, a missing file) is treated
-    as "no views" (empty dict) — a consumer cannot distinguish a 5-of-6
-    map from a complete one, so the frame omits the field entirely rather
-    than emit fewer than 6.
+    The filenames are joined explicitly from the fixed VIEWS contract —
+    never globbed: a directory that yields fewer than the 6 fixed VIEWS
+    view PNGs (a failed copy, a missing file) is treated as "no views"
+    (empty dict) — a consumer cannot distinguish a 5-of-6 map from a
+    complete one, so the frame omits the field entirely rather than emit
+    fewer than 6.
     """
-    artifact_path = getattr(render, "render_artifact_path", None)
+    artifact_path = render.render_artifact_dir
     if not isinstance(artifact_path, str) or not artifact_path:
         return None, {}
     artifact_dir = Path(artifact_path)
@@ -173,56 +159,14 @@ def _artifact_bytes_from_path(render: Any) -> tuple[bytes | None, dict[str, byte
         return None, {}
     stl_bytes = _read_artifact_bytes(str(artifact_dir / "model.stl"))
     view_bytes: dict[str, bytes] = {}
-    for v in artifact_dir.iterdir():
-        if v.is_file() and v.suffix == ".png":
-            b = _read_artifact_bytes(str(v))
-            if b is not None:
-                view_bytes[v.name] = b
-    if len(view_bytes) != 6:
+    for name, _cam in VIEWS:
+        b = _read_artifact_bytes(str(artifact_dir / name))
+        if b is not None:
+            view_bytes[name] = b
+    if len(view_bytes) != len(VIEWS):
         # Partial views → "no views" (the frame omits the field entirely).
         view_bytes = {}
     return stl_bytes, view_bytes
-
-
-def cache_render_artifact_bytes(render: Any) -> None:
-    """Cache the best render's STL + views bytes on the render object so
-    the SSE adapter (which runs AFTER the render worker's tempdir is torn
-    down) can still emit them.
-
-    The render worker's ``tempfile.TemporaryDirectory`` dies when the
-    render returns — *before* the design loop yields the result to the
-    chat adapter, so a read inside the adapter's generator (before the
-    ``yield``) sees dead paths in production. The ONE place the artifacts
-    are still reachable when the bytes are still on disk is the sync
-    render path, so the caller (the production loop seam) runs this as an
-    explicit post-render cache step on the result's render object (a
-    duck-typed attribute — never a change to the ``RenderResult``
-    contract) and the adapter reads them from memory.
-
-    A no-op when the bytes are already dead (the production seam today —
-    the frame omits the fields) and a pure win when they survive (tests,
-    or a future worker that keeps the artifacts). Never raises.
-    """
-    stl = getattr(render, "stl", None)
-    _maybe_cache(render, "stl_bytes", _read_artifact_bytes(stl))
-    views = getattr(render, "views", ())
-    if isinstance(views, (tuple, list)) and views:
-        view_bytes: dict[str, bytes] = {}
-        for v in views:
-            b = _read_artifact_bytes(v)
-            if b is not None:
-                # Bare filenames per the VIEWS contract; a Path object is a
-                # realistic input, so derive its name explicitly.
-                key = Path(v).name if isinstance(v, (str, Path)) else str(v)
-                view_bytes[key] = b
-        if len(view_bytes) != len(views):
-            # A partial views map (some artifact unreadable/dead) is
-            # treated as "no views" — the frame omits the field entirely
-            # rather than emitting fewer than the fixed 6, which a consumer
-            # cannot distinguish from a complete map.
-            view_bytes = {}
-        if view_bytes:
-            _maybe_cache(render, "view_bytes", view_bytes)
 
 
 def _read_artifact_bytes(path: Any) -> bytes | None:
@@ -425,25 +369,16 @@ async def run_design_loop_with_events(
         best = getattr(result, "best", None)
         # The best candidate's OWN render artifacts (the best iteration's
         # STL + 6 views — never a later iteration's) are read from the
-        # Durable artifact directory the worker persisted to inside its
+        # durable artifact directory the worker persisted to inside its
         # ``tempfile.TemporaryDirectory`` with-block (issue #72 — the
         # bytes survive past the tempdir teardown, so the adapter reads
-        # them from the persistent path, not the dead tempdir paths) with
-        # the in-memory byte cache (``stl_bytes``/``view_bytes``, attached
-        # via ``cache_render_artifact_bytes`` on the sync render path) as
-        # the fallback for stubs/tests that carry no durable path.
+        # them from the persistent path, not the dead tempdir paths).
         # A missing/dead render → fields omitted entirely (never a
         # bogus path, never a null), keeping the frame JSON-safe.
         render = getattr(best, "render", None)
         frame_fields: dict[str, Any] = {}
         if render is not None:
-            # Durable source first (persisted files take precedence), then
-            # the setattr byte-cache fallback (tests without a durable dir).
             stl_bytes, view_bytes = _artifact_bytes_from_path(render)
-            if stl_bytes is None:
-                stl_bytes = getattr(render, "stl_bytes", None)
-            if not view_bytes:
-                view_bytes = getattr(render, "view_bytes", None) or {}
             if stl_bytes is not None:
                 frame_fields["stl_data_uri"] = _data_uri_from_bytes(
                     stl_bytes, "application/octet-stream"
@@ -473,7 +408,6 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
-    "cache_render_artifact_bytes",
     "photo_data_uri",
     "run_design_loop_with_events",
 ]

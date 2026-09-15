@@ -20,6 +20,7 @@ import subprocess
 
 import pytest
 
+from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
     create_version,
@@ -765,25 +766,26 @@ def test_region_edit_409_while_in_flight(app_with_versions):
 
 class _StubRender:
     """Duck-type of ``RenderResult`` for chat-route tests: ``stl`` + the
-    6-element ``views`` tuple (``render_worker.py`` VIEWS contract). The
-    paths may be live on-disk files or dead (torn-down tempdir) — the
-    adapter must handle both (present / omitted fields, never a bogus path).
-    ``render_artifact_path`` (issue #72) is the optional DURABLE per-render
-    artifact directory the worker persists to inside its tempdir with-block
-    — when set, the adapter reads the STL + 6 views from it (durable source
-    takes precedence) and ignores the dead tempdir paths entirely.
+    6-element ``views`` tuple (``render_worker.py`` VIEWS contract).
+    ``render_artifact_dir`` mirrors the REAL declared ``RenderResult``
+    field name (issue #72) — the adapter reads it as a real attribute; a
+    stub carrying any other name would exercise a dead read, which is
+    exactly the bug issue #89 fixes, so the stub's ctor takes the real
+    field name only.
     """
 
     def __init__(
         self,
         stl: str | None = None,
         views: tuple[str, ...] = (),
-        render_artifact_path: str | None = None,
+        render_artifact_dir: str | None = None,
     ) -> None:
         self.stl = stl
         self.views = views
-        if render_artifact_path is not None:
-            self.render_artifact_path = render_artifact_path
+        # Always defined (None when unset) so the reader's attribute read
+        # cannot raise AttributeError on a stub — mirroring the declared
+        # ``RenderResult`` field (always present, ``str | None``).
+        self.render_artifact_dir = render_artifact_dir
 
 
 def _write_durable_artifacts(root, *, partial_views: bool = False):
@@ -1044,59 +1046,49 @@ def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
     assert event_names[-1] == "done"
 
 
-def test_chat_pass_version_created_frame_carries_stl_and_views(
+def test_chat_pass_real_render_result_frame_carries_stl_and_views(
     app_with_versions, tmp_path
 ):
-    """A pass whose best candidate carries a live render (on-disk STL +
-    the 6 VIEWS filenames) emits, on the version-created progress frame,
-    ``stl_data_uri`` plus ``views`` mapping each of the 6 VIEWS filenames
-    to its base64 data URI — the adapter reads the bytes into memory
-    before yielding (render worker tempdir torn down) and no SCAD leaks
-    into any progress frame (the token frame stays the sole SCAD owner).
+    """(issue #89 decisive test) A REAL frozen ``RenderResult`` — the exact
+    production type, constructed with the declared ``render_artifact_dir``
+    field pointing at a durable directory holding the real fixture STL plus
+    the 6 VIEWS PNGs — fed through the real frame-assembly path yields a
+    version-created frame whose ``stl_data_uri`` base64-decodes to EXACTLY
+    the on-disk STL bytes and whose ``views`` maps all 6 VIEWS names to
+    ``data:image/png;base64,`` URIs with byte equality against the planted
+    bytes. No stub, no byte cache, no hand-constructed frames — a hand-
+    built reader input is exactly what let the dead-``getattr`` bug survive
+    #69 and #72. No SCAD leaks into any progress frame (the token frame
+    stays the sole SCAD owner).
     """
     import base64 as _b64
 
     from d33d.render_worker import VIEWS
 
     async def _call(client):
-        # The render worker's artifacts (stl + views) live inside its
-        # tempdir, torn down when the render returns — i.e. BEFORE the
-        # loop returns to the adapter. Simulate that: the loop "worker"
-        # captures the bytes and deletes the files as part of the call, so
-        # the adapter can only recover them if it read them into memory
-        # before yielding the version-created frame (the "read bytes into
-        # memory before yielding" contract). A live on-disk STL fixture
-        # file also exists under tmp_path for the assertion baseline.
-        stl = tmp_path / "model.stl"
-        stl.write_bytes(b"\x84\xab\x50\x53fake-stl-bytes")
-        worker_tmp = tmp_path / "render-tmp"
-        worker_tmp.mkdir()
-        views = []
-        for name, _cam in VIEWS:
-            p = worker_tmp / name
-            p.write_bytes(b"\x89PNG-fake-view-bytes")
-            views.append(str(p))
-        worker_stl = worker_tmp / "model.stl"
-        worker_stl.write_bytes(stl.read_bytes())
+        # Production-shaped durable dir: the real box_20mm.stl fixture bytes
+        # as model.stl + the 6 VIEWS PNGs (the _write_durable_artifacts
+        # layout, with the golden STL fixture in place of the placeholder).
+        from pathlib import Path
+
+        artifact_dir = _write_durable_artifacts(tmp_path)
+        fixture = Path("tests/fixtures/stl/box_20mm.stl")
+        (Path(artifact_dir) / "model.stl").write_bytes(fixture.read_bytes())
 
         async def _loop(app, **kwargs):
-            # Simulate the production render seam: (1) the worker's
-            # ``bbox_fn`` runs on the sync render path and caches the
-            # artifact bytes on the render object (the ONLY place the
-            # bytes are still reachable — the tempdir dies when the
-            # render returns, before the loop yields); (2) the tempdir is
-            # torn down, so the adapter's own read of the paths would
-            # see dead files (it must use the cache).
-            from pathlib import Path as _Path
-
-            from d33d.design_loop_events import cache_render_artifact_bytes
-
-            render = _StubRender(stl=str(worker_stl), views=tuple(views))
-            cache_render_artifact_bytes(render)
-            for v in views:
-                _Path(v).unlink()
-            worker_stl.unlink()
-            worker_tmp.rmdir()
+            render = RenderResult(
+                ok=True,
+                exit_code=0,
+                duration_ms=100,
+                error_class="ok",
+                stderr="",
+                stl=str(Path(artifact_dir) / "model.stl"),
+                csg=str(Path(artifact_dir) / "model.csg"),
+                views=tuple(
+                    str(Path(artifact_dir) / name) for name, _cam in VIEWS
+                ),
+                render_artifact_dir=artifact_dir,
+            )
             return _StubResult(
                 "pass", {"W": 10, "H": 20}, scad="W = 10; cube([W]);", render=render
             )
@@ -1120,20 +1112,22 @@ def test_chat_pass_version_created_frame_carries_stl_and_views(
     data_by_event = {}
     for event, data in frames:
         data_by_event.setdefault(event, []).append(data)
-    # The version-created frame carries stl_data_uri + all 6 views — the
-    # bytes were cached on the render during the sync render path (the
-    # files are dead by frame time; only the cache survives).
     vc = [
         d
         for d in data_by_event.get("progress", [])
         if d.get("step") == "version-created"
     ]
     assert vc, "no version-created progress frame"
+    # stl_data_uri decodes to EXACTLY the on-disk STL bytes (the fixture).
+    from pathlib import Path as _Path
+
+    fixture = _Path("tests/fixtures/stl/box_20mm.stl")
     stl_uri = vc[0].get("stl_data_uri")
     assert stl_uri is not None, "stl_data_uri missing on version-created frame"
     assert stl_uri.startswith("data:") and ";base64," in stl_uri
     payload = _b64.b64decode(stl_uri.split(";base64,", 1)[1])
-    assert payload == b"\x84\xab\x50\x53fake-stl-bytes", "STL bytes mismatch"
+    assert payload == fixture.read_bytes(), "STL bytes mismatch vs on-disk fixture"
+    # views: all 6 VIEWS names, each a PNG data URI with byte equality.
     view_map = vc[0].get("views")
     expected_view_names = {name for name, _cam in VIEWS}
     assert set(view_map.keys()) == expected_view_names, (
@@ -1149,6 +1143,42 @@ def test_chat_pass_version_created_frame_carries_stl_and_views(
         assert "W = 10; cube([W]);" not in str(d), "SCAD leaked into a progress frame"
     # The token frame still carries the SCAD source.
     assert data_by_event["token"][0]["text"] == "W = 10; cube([W]);"
+
+
+def test_render_result_reader_reads_declared_fields():
+    """(issue #89 rename guard) Every attribute the frame-assembly path
+    reads off the render object is a DECLARED ``RenderResult`` field —
+    asserted via ``dataclasses.fields`` and a source-level AST check of
+    the reader, so a future rename to a non-existent name fails LOUDLY
+    here instead of silently yielding ``None`` (the exact bug: the reader
+    once ``getattr``-ed a non-existent attribute name and every real
+    frame shipped without an STL).
+    """
+    import ast
+    import dataclasses
+    import inspect
+
+    from d33d.design_loop_events import _artifact_bytes_from_path
+
+    declared = {f.name for f in dataclasses.fields(RenderResult)}
+    for name in ("render_artifact_dir", "stl", "views"):
+        assert name in declared, f"{name!r} is not a declared RenderResult field"
+    # AST check: every ``render.<attr>`` read in the reader must target a
+    # declared field (a misspelled getattr cannot be caught by a frozen
+    # dataclass read at runtime — it returns None silently, which is how
+    # this bug shipped).
+    source = inspect.getsource(_artifact_bytes_from_path)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "render"
+        ):
+            assert node.attr in declared, (
+                f"reader references render.{node.attr!r}, which is not a "
+                f"declared RenderResult field"
+            )
 
 
 def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
@@ -1202,12 +1232,13 @@ def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
             assert "views" not in data, "views must be omitted for dead paths"
 
 
-def test_chat_pass_live_render_artifact_path_emits_stl_and_views(
+def test_chat_pass_live_render_artifact_dir_emits_stl_and_views(
     app_with_versions, tmp_path
 ):
     """(issue #72 emit path) A pass whose best render carries a DURABLE
-    artifact path (the per-render directory the worker persisted to inside
-    its tempdir with-block — live on disk when the frame is built) emits
+    artifact directory — ``render_artifact_dir`` (the per-render directory
+    the worker persisted to inside its tempdir with-block — live on disk
+    when the frame is built) emits
     ``stl_data_uri`` + all 6 ``views`` on the version-created frame — the
     adapter reads the persisted files, not the dead tempdir paths the
     render's ``stl``/``views`` point at.
@@ -1239,7 +1270,7 @@ def test_chat_pass_live_render_artifact_path_emits_stl_and_views(
             render = _StubRender(
                 stl=str(dead_stl),
                 views=tuple(dead_views),
-                render_artifact_path=artifact_dir,
+                render_artifact_dir=artifact_dir,
             )
             _shutil.rmtree(dead)  # simulate the worker's torn-down tempdir
             return _StubResult(
@@ -1293,8 +1324,8 @@ def test_chat_pass_partial_durable_views_omit_views_field(app_with_versions, tmp
     """(issue #72 partial edge) A durable artifact directory that persisted
     only 5 of the 6 view PNGs (a failed copy — the worker's partial-harvest
     case) emits ``stl_data_uri`` (the STL is fine) but omits ``views``
-    ENTIRELY — the same partial-omit rule as the byte-cache path: a consumer
-    cannot distinguish a 5-of-6 map from a complete one.
+    ENTIRELY: a consumer cannot distinguish a 5-of-6 map from a complete
+    one.
     """
     import base64 as _b64
 
@@ -1302,7 +1333,7 @@ def test_chat_pass_partial_durable_views_omit_views_field(app_with_versions, tmp
         artifact_dir = _write_durable_artifacts(tmp_path, partial_views=True)
 
         async def _loop(app, **kwargs):
-            render = _StubRender(render_artifact_path=artifact_dir)
+            render = _StubRender(render_artifact_dir=artifact_dir)
             return _StubResult(
                 "pass", {"W": 10}, scad="W = 10; cube([W]);", render=render
             )
@@ -1337,44 +1368,29 @@ def test_chat_pass_partial_durable_views_omit_views_field(app_with_versions, tmp
     assert "views" not in vc[0], "partial (5-of-6) views must omit the field entirely"
 
 
-def test_chat_pass_durable_path_missing_falls_back_to_byte_cache(
+def test_chat_pass_dead_render_artifact_dir_omits_fields(
     app_with_versions, tmp_path
 ):
-    """(issue #72 fallback edge) A render whose ``render_artifact_path`` is
-    set but UNREACHABLE (the directory was deleted out-of-band — a project
-    wiped mid-flight) still emits the frame when the in-memory byte cache
-    (``stl_bytes``/``view_bytes``) carries the bytes — the setattr fallback
-    remains the safety net for the durable-path miss."""
-    import base64 as _b64
-
-    from d33d.design_loop_events import cache_render_artifact_bytes
-    from d33d.render_worker import VIEWS
+    """(issue #89) A render whose ``render_artifact_dir`` is set but
+    UNREACHABLE (the directory was deleted out-of-band — a project wiped
+    mid-flight) degrades exactly as a missing source: the frame OMITS
+    ``stl_data_uri`` and ``views`` (never a bogus path, never an
+    empty-string data URI), and the stream still terminates with the
+    terminal done frame. The setattr byte-cache fallback that this test
+    used to exercise (``cache_render_artifact_bytes``) is deleted — it
+    raised ``FrozenInstanceError`` on the frozen ``RenderResult`` and never
+    worked in production.
+    """
 
     async def _call(client):
-        # Live files for the byte cache (the sync-render path caches them
-        # into memory), a durable dir that will be deleted before the frame.
-        worker_tmp = tmp_path / "render-tmp"
-        worker_tmp.mkdir()
-        views = []
-        for name, _cam in VIEWS:
-            p = worker_tmp / name
-            p.write_bytes(b"\x89PNG-fake-view-bytes")
-            views.append(str(p))
-        worker_stl = worker_tmp / "model.stl"
-        worker_stl.write_bytes(b"\x84\xab\x50\x53fake-stl-bytes")
+        # A durable dir that will be deleted before the frame is built.
         durable = tmp_path / "deleted-durable"
         durable.mkdir()
 
         async def _loop(app, **kwargs):
-            render = _StubRender(
-                stl=str(worker_stl),
-                views=tuple(views),
-                render_artifact_path=str(durable),
-            )
-            cache_render_artifact_bytes(render)  # byte-cache fallback populated
             import shutil as _shutil
 
-            _shutil.rmtree(worker_tmp)  # tempdir torn down
+            render = _StubRender(render_artifact_dir=str(durable))
             _shutil.rmtree(durable)  # durable dir deleted out-of-band
             return _StubResult(
                 "pass", {"W": 10}, scad="W = 10; cube([W]);", render=render
@@ -1393,19 +1409,16 @@ def test_chat_pass_durable_path_missing_falls_back_to_byte_cache(
         return frames
 
     frames = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert event_names[-1] == "done", f"no terminal done frame: {event_names}"
     vc = [
         d for e, d in frames if e == "progress" and d.get("step") == "version-created"
     ]
     assert vc, "no version-created progress frame"
-    stl_uri = vc[0].get("stl_data_uri")
-    assert stl_uri is not None, "stl_data_uri missing (byte-cache fallback not used)"
-    assert (
-        _b64.b64decode(stl_uri.split(";base64,", 1)[1])
-        == b"\x84\xab\x50\x53fake-stl-bytes"
-    )
-    view_map = vc[0].get("views")
-    expected_view_names = {name for name, _cam in VIEWS}
-    assert set(view_map.keys()) == expected_view_names, "views missing from fallback"
+    # Dead durable dir → both fields omitted (never null, never an
+    # empty-string data URI), nothing raised.
+    assert "stl_data_uri" not in vc[0], "stl_data_uri must be omitted for a dead dir"
+    assert "views" not in vc[0], "views must be omitted for a dead dir"
 
 
 def test_chat_exhausted_emits_no_stl_or_views_fields(app_with_versions):
