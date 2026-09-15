@@ -440,9 +440,11 @@ def create_versions_router() -> APIRouter:
         # the same DI seam as build_registry_glb — see the module docstring):
         # an object with .status ("pass" | "exhausted") and .best (the best
         # candidate). Tests inject a stub with the same shape; the real
-        # IterationRecord has no .params, so the route falls back to the
-        # body's params or the latest version's snapshot when
-        # getattr(best, 'params') is not a non-empty dict.
+        # IterationRecord carries a declared ``params`` field (issue #93),
+        # so the route reads it directly — the best candidate's params win,
+        # and the fallback to the body's params or the latest version's
+        # snapshot only fires for a candidate whose ``params`` is not a
+        # dict (a duck-typed stub without the field).
         #
         # The route inspects the injected seam's signature before calling:
         # a production loop (``_build_production_design_loop``) takes
@@ -505,25 +507,30 @@ def create_versions_router() -> APIRouter:
                 detail=f"design loop did not pass validation: {result.status}",
             )
 
-        # The loop's result is authoritative: on a pass the version's params
-        # are the best candidate's named parameters (the loop's named-param
-        # gate verified them). The body's params only seed up front; the
-        # loop's result overwrites them here. If the loop's result has no
-        # usable param set (e.g. the real IterationRecord has no .params),
-        # fall back to the seed (body params or latest-version snapshot).
-        named = getattr(result.best, "params", None)
-        if isinstance(named, dict) and named:
-            params = dict(named)
-        else:
-            # No named parameters on the candidate (or empty) — fall back
-            # to the seed (body params or latest-version snapshot); an
-            # empty fallback means the loop's pass produced no usable
-            # parameter set (a contract violation by the loop).
-            if not params:
-                raise HTTPException(
-                    status_code=502,
-                    detail="design loop passed but produced no parameter set",
-                )
+        # The loop's result is authoritative: on a pass the version's
+        # params are the best candidate's ``params`` — a DECLARED
+        # ``IterationRecord`` field (issue #93), populated from the
+        # defines map the render was made with. The body's params only
+        # seed up front; the loop's result overwrites them here.
+        #
+        # ISSUE #93 SEMANTIC FLIP (stated explicitly): this used to be a
+        # duck-typed read of an attribute the real ``IterationRecord``
+        # did not declare, so it was ``None`` for every real loop result
+        # and the code below ALWAYS fell through to the seed — a fresh-
+        # project pass (no body params, no prior version) therefore 502'd.
+        # The declared field makes the read succeed: the best candidate's
+        # params win, and a fresh-project pass that used to 502 may now
+        # return 201 with the candidate's own params.
+        named = result.best.params
+        if not isinstance(named, dict):
+            # Contract violation: the loop's pass produced no usable
+            # parameter set. There is no fallback for the finalize seam
+            # (the loop is authoritative here, unlike the chat adapter).
+            raise HTTPException(
+                status_code=502,
+                detail="design loop passed but produced no parameter set",
+            )
+        params = dict(named)
 
         try:
             v = await svc.create_version(
