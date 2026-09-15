@@ -41,6 +41,10 @@ class _FakeMesh:
         self.is_watertight = True
         self.volume = 1000.0
 
+    def merge_vertices(self, *args: Any, **kwargs: Any) -> None:
+        """No-op: the fake mesh already has unique vertices."""
+        return self
+
 
 def _harvest_side_effect(
     argv: list[str], out_dir: Path
