@@ -1,0 +1,288 @@
+/**
+ * d33d SPA stylesheet (issue #81).
+ *
+ * The SPA previously shipped with no CSS file at all — the className
+ * attributes the components already use (chat-panel, chat-msg--user,
+ * viewer-pane, ...) resolved to nothing and the app rendered in
+ * browser-default serif with no spacing, colour, or hierarchy. This
+ * stylesheet activates those existing class names (no parallel class
+ * vocabulary) using a small token set as CSS custom properties:
+ * a system font stack, a 4px spacing scale, and a neutral grey ramp.
+ *
+ * The colours are GitHub Primer's ramp; #1f2328 (fg) and #0969da
+ * (accent) already existed in the codebase as inline literals in
+ * App.tsx's region-edit bar, so the ramp unifies rather than
+ * introduces new values.
+ *
+ * The app-shell / pane / viewer-pane geometry stays in the components'
+ * inline styles — the lasso overlay's containing block depends on the
+ * viewer pane's exact box (issues #74/#76), and jsdom unit tests read
+ * those inline styles directly. This file must NOT set position,
+ * width, height, or overflow on .viewer-pane — colour and border only.
+ */
+
+:root {
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+
+  --color-bg: #ffffff;
+  --color-bg-subtle: #f6f8fa;
+  --color-border: #d0d7de;
+  --color-muted: #57606a;
+  --color-fg: #1f2328;
+  --color-accent: #0969da;
+
+  --font-size-xs: 12px;
+  --font-size-sm: 14px;
+  --font-size-base: 16px;
+  --font-size-lg: 20px;
+  --line-height: 1.5;
+  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Base — replaces the browser-default serif. The zero-margin / full
+   viewport-height rule for html, body and #root moves here from the
+   inline <style> block in index.html (issue #81 reconciliation: one
+   stylesheet, not two sources of truth). */
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-family);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height);
+  color: var(--color-fg);
+  background-color: var(--color-bg);
+}
+
+/* App panes — the two-pane shell from App.tsx. */
+.app-right {
+  border-left: 1px solid var(--color-border);
+}
+
+/* The viewer pane is a fixed 600x400 container whose inline geometry
+   (position/width/height/overflow) the lasso overlay depends on —
+   colour and border only here, never box properties. */
+.viewer-pane {
+  border: 1px solid var(--color-border);
+  border-bottom: 0;
+  background-color: var(--color-bg);
+}
+
+/* Version timeline side rail + validation pane. */
+.version-tail-pane {
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.validation-pane {
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+/* Chat panel (left pane) — flat full-width messages, no bubbles. */
+.chat-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  box-sizing: border-box;
+}
+
+.chat-msg {
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--space-1);
+  word-break: break-word;
+}
+
+/* 8px between same-role consecutive messages, 16px across a role
+   change: the first message carries the full gap, every following
+   message halves it, and a role change restores the full gap. */
+.chat-msg:first-child {
+  margin-top: 0;
+}
+.chat-msg + .chat-msg {
+  margin-top: var(--space-2);
+}
+.chat-msg--user + .chat-msg--user,
+.chat-msg--assistant + .chat-msg--assistant,
+.chat-msg--system + .chat-msg--system {
+  margin-top: var(--space-2);
+}
+.chat-msg--user + .chat-msg--assistant,
+.chat-msg--assistant + .chat-msg--user,
+.chat-msg--user + .chat-msg--system,
+.chat-msg--system + .chat-msg--user,
+.chat-msg--assistant + .chat-msg--system,
+.chat-msg--system + .chat-msg--assistant {
+  margin-top: var(--space-4);
+}
+
+/* Role differentiation by background tint: user is a light tint of
+   the accent, assistant is subtle neutral, system is bordered muted. */
+.chat-msg--user {
+  background-color: var(--color-bg-subtle);
+}
+
+.chat-msg--assistant {
+  background-color: transparent;
+}
+
+.chat-msg--system {
+  background-color: transparent;
+  border: 1px solid var(--color-border);
+  color: var(--color-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* Chat content — SCAD arrives as plain text (the design loop emits the
+   full source as one token frame), so the content span itself gets the
+   monospace-friendly wrapping: long SCAD lines wrap instead of
+   overflowing the flex column. */
+.chat-msg-content {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  word-break: break-word;
+}
+
+/* Selection thumbnails persist on the chat message (06-region-selection);
+   the border colour stays an inline literal (MARKER_COLOR) so the
+   VLM marker-fragility test can assert the inline value. */
+.chat-selection-thumbnail {
+  display: block;
+  margin-top: var(--space-2);
+  max-width: 96px;
+  height: auto;
+  border: 2px solid;
+}
+
+/* Inline render images — the 6 views in a 3-column grid; the img
+   overflow fix (max-width:100%, height:auto) is part of issue #81. */
+.chat-renders {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+}
+
+.chat-render-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--space-1);
+}
+
+/* Composer (bottom of the chat panel) — minimal consistent treatment
+   for inputs and buttons, with the :hover states that inline styles
+   cannot express. */
+.chat-input-form {
+  display: flex;
+  gap: var(--space-2);
+}
+
+input.chat-input,
+button.chat-send-btn {
+  font-family: inherit;
+  font-size: var(--font-size-sm);
+}
+
+input.chat-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--space-1);
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+}
+
+input.chat-input:hover {
+  border-color: var(--color-muted);
+}
+
+input.chat-input:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+button.chat-send-btn {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--space-1);
+  background-color: var(--color-accent);
+  color: var(--color-bg);
+  cursor: pointer;
+}
+
+button.chat-send-btn:hover:not(:disabled) {
+  background-color: var(--color-muted);
+}
+
+button.chat-send-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Streaming cursor blink (keyframes are impossible with inline styles —
+   another reason the file exists). */
+@keyframes streaming-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.streaming-cursor {
+  animation: streaming-blink 1s step-end infinite;
+}
+
+/* Inline region bar + selection notice (App.tsx). The bar's geometry
+   stays inline; these rules only add the border-radius/hover states
+   its buttons need (the inline styles already cover the rest, and the
+   bar only renders while a selection is pending). */
+.region-edit-bar .region-edit-apply-btn:hover:not(:disabled) {
+  background-color: var(--color-muted);
+}
+
+.region-edit-bar .region-edit-apply-btn:disabled {
+  cursor: not-allowed;
+}
+
+.region-edit-bar .region-edit-cancel-btn:hover {
+  background-color: var(--color-bg-subtle);
+  color: var(--color-fg);
+}
+
+.selection-notice {
+  margin: var(--space-2) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--space-1);
+  color: var(--color-muted);
+  font-size: var(--font-size-xs);
+}
+
+/* App-level error surface (stream errors, etc.). */
+.app-error {
+  margin: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--space-1);
+  color: var(--color-fg);
+  font-size: var(--font-size-xs);
+}
