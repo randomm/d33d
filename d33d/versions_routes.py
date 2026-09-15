@@ -581,7 +581,22 @@ def _finalize_loop_kwargs(
     """
     from d33d.config.catalogue import CatalogueError, ResolutionError
     from d33d.prompt_hash import canonical_hash
-    from d33d.render_worker import render_for_design_loop
+    from d33d.render_worker import project_renders_dir, render_for_design_loop
+
+    app = request.app
+    db_path = getattr(app.state, "db_path", None)
+    data_dir = Path(db_path).parent if db_path is not None else Path(".")
+
+    def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
+        # Project-scoped persistence (issue #72): bind the per-project
+        # renders_dir so the worker's post-harvest step actually fires in
+        # production (the bare ``render_for_design_loop`` reference would
+        # leave ``renders_dir`` unset and fall back to the global default).
+        return render_for_design_loop(
+            scad_source,
+            defines,
+            renders_dir=project_renders_dir(data_dir, project_id),
+        )
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:
         raise ValueError(
@@ -589,7 +604,6 @@ def _finalize_loop_kwargs(
             "(the production closure builds its own llm_fn)"
         )
 
-    app = request.app
     row = app.state.versions.get_project(project_id)
     assert row is not None  # already 404'd above
 
@@ -626,7 +640,7 @@ def _finalize_loop_kwargs(
         "photo": photo,
         "chat_history": (),
         "stated_dims": stated_dims,
-        "render_fn": render_for_design_loop,
+        "render_fn": _render_fn,
         "llm_fn": _noop_llm_fn,
         "model": model,
         "prompt_version": prompt_version,

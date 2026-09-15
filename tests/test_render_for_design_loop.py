@@ -26,6 +26,38 @@ import pytest
 import d33d.render_worker as rw
 
 
+class _FakeMesh:
+    """Stand-in for a ``trimesh``-loaded mesh on the ``ok`` test path.
+
+    ``render_for_design_loop`` trimesh-loads the harvested STL host-side
+    (vertex_count / watertight / volume feed ``classify``); the test
+    monkeypatches ``trimesh.load`` to return this instead of parsing
+    bytes, so the ``ok`` path exercises the real ``classify`` table
+    (exit 0 + STL/CSG/views present + non-degenerate mesh → ``ok``).
+    """
+
+    def __init__(self) -> None:
+        self.vertices = [0, 1, 2]
+        self.is_watertight = True
+        self.volume = 1000.0
+
+
+def _harvest_side_effect(
+    argv: list[str], out_dir: Path
+) -> subprocess.CompletedProcess[str]:
+    """Simulate the busybox harvest helper: when the argv is the harvest
+    script (copies ``/work/model.stl`` out of the volume), create real
+    ``model.stl`` / ``model.csg`` / 6 ``view_*.png`` files under
+    ``out_dir`` — the real glob of the harvest directory then finds
+    them, exactly as a successful production render would leave them."""
+    if "cp /work/model.stl /host/" in " ".join(argv):
+        (out_dir / "model.stl").write_bytes(b"fake-stl-bytes")
+        (out_dir / "model.csg").write_bytes(b"fake-csg-bytes")
+        for name, _cam in rw.VIEWS:
+            (out_dir / name).write_bytes(b"fake-png-bytes")
+    return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+
 def test_render_for_design_loop_lives_in_render_worker() -> None:
     """The symbol must exist on ``d33d.render_worker`` and be callable."""
     assert callable(rw.render_for_design_loop)
@@ -208,3 +240,131 @@ def test_render_for_design_loop_pipeline_exception_returns_container_error(
     assert result.stl is None
     assert result.csg is None
     assert result.views == ()
+
+
+def _run_ok_render(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, persist_dir: Path
+) -> rw.RenderResult:
+    """Drive ``render_for_design_loop`` to a fully ``ok`` outcome without
+    Docker: every ``subprocess.run`` returns success, the harvest helper
+    leaves real STL + CSG + 6 view PNGs on disk, and ``trimesh.load``
+    returns a non-degenerate fake mesh so ``classify`` lands in ``ok``.
+    ``renders_dir`` is pointed at ``persist_dir`` (isolated from the
+    ``D33D_RENDER_PERSIST_DIR`` env)."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if "cp /work/model.stl /host/" in " ".join(argv):
+            # ``--volume <out>:/host`` — the harvest directory is the
+            # host-side half of the volume mount whose container half is
+            # ``/host``.
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    _harvest_side_effect(argv, Path(tok.rsplit(":", 1)[0]))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000b1")
+    # The with-block's tempdir lives under ``_render_host_tmp_base()``
+    # (``D33D_RENDER_TMP``, default ``~/d33d/render-tmp``); point it at
+    # the test's own tmp dir so the run is hermetic regardless of the
+    # developer's env (a stale ``D33D_RENDER_TMP`` would otherwise make
+    # the tempdir creation ``OSError`` → ``container_error``).
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    class _FakeTrimesh:
+        load = staticmethod(lambda *a, **kw: _FakeMesh())
+
+    # ``render_for_design_loop`` runs ``import trimesh`` inside the
+    # function body (host-side mesh check); inject the fake into
+    # ``sys.modules`` so that import resolves to it.
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "trimesh", _FakeTrimesh)
+
+    return rw.render_for_design_loop("cube(10);", {}, renders_dir=persist_dir)
+
+
+def test_render_for_design_loop_persists_stl_and_views_to_renders_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fully ``ok`` render copies ``model.stl`` + all 6 ``view_*.png``
+    into ``<renders_dir>/<uuid8>/`` INSIDE the with-block; the durable
+    path is carried on ``RenderResult.render_artifact_dir`` and the
+    files survive after the render returns (the tempdir is torn down)."""
+    persist_dir = tmp_path / "renders"
+    result = _run_ok_render(monkeypatch, tmp_path, persist_dir)
+
+    assert result.ok is True
+    assert result.error_class == "ok"
+    assert result.render_artifact_dir is not None, "no durable dir on an ok render"
+    artifact_dir = Path(result.render_artifact_dir)
+    assert artifact_dir.parent == persist_dir, f"{artifact_dir} not under {persist_dir}"
+    assert artifact_dir.name != "renders", "key must be a per-render subdir"
+    files = sorted(p.name for p in artifact_dir.iterdir())
+    expected = sorted(["model.stl", *[name for name, _cam in rw.VIEWS]])
+    assert files == expected, f"persisted files {files} != expected {expected}"
+    for f in artifact_dir.iterdir():
+        assert f.stat().st_size > 0, f"persisted {f.name} is empty"
+    # Bytes survive the with-block teardown: still readable post-return.
+    stl = artifact_dir / "model.stl"
+    assert stl.read_bytes() == b"fake-stl-bytes"
+
+
+def test_render_for_design_loop_failed_render_persists_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-zero-exit render persists nothing: no directory is created
+    under ``renders_dir`` and ``render_artifact_dir`` is ``None``."""
+    persist_dir = tmp_path / "renders"
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        # The render worker run (the argv carrying the worker image)
+        # fails; the busybox helpers succeed.
+        if any(tok.endswith("render-worker:local") for tok in argv):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b"ERROR: syntax"
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000b2")
+
+    result = rw.render_for_design_loop("cube(10);", {}, renders_dir=persist_dir)
+
+    assert result.ok is False
+    assert result.render_artifact_dir is None
+    created = list(persist_dir.iterdir()) if persist_dir.is_dir() else []
+    assert created == [], f"failed render must persist nothing, found {created}"
+
+
+def test_render_for_design_loop_renders_dir_kwarg_overrides_base(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The ``renders_dir`` kwarg takes precedence over the env default
+    (``D33D_RENDER_PERSIST_DIR``): artifacts land under the kwarg's
+    directory, and nothing is created under the env base."""
+    env_base = tmp_path / "env-base"
+    kwarg_dir = tmp_path / "kwarg-dir"
+    monkeypatch.setenv("D33D_RENDER_PERSIST_DIR", str(env_base))
+
+    result = _run_ok_render(monkeypatch, tmp_path, kwarg_dir)
+
+    assert result.render_artifact_dir is not None
+    artifact_dir = Path(result.render_artifact_dir)
+    assert artifact_dir.parent == kwarg_dir
+    assert (kwarg_dir / artifact_dir.name / "model.stl").is_file()
+    # The env base holds no per-render artifact dir (the kwarg won).
+    if env_base.is_dir():
+        assert sorted(e.name for e in env_base.iterdir()) == [], (
+            f"env base {env_base} must not receive the artifacts"
+        )
