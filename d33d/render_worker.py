@@ -968,10 +968,11 @@ def render_for_design_loop(
                     watertight = bool(mesh.is_watertight)
                     volume_mm3 = float(mesh.volume)
                 except (OSError, ValueError, IndexError):
-                    # IndexError: a malformed/degenerate STL can make
-                    # mesh.volume raise instead of returning a number;
-                    # it must classify (empty_model), never crash the
-                    # render pipeline.
+                    # IndexError sources: mesh.merge_vertices() raises it
+                    # on a vertex-only (zero-face) mesh, and a malformed/
+                    # degenerate STL can make mesh.volume raise it instead
+                    # of returning a number. Both must classify
+                    # (empty_model), never crash the render pipeline.
                     pass
             views_ok = all(v.is_file() for v in views)
             error_class = classify(
