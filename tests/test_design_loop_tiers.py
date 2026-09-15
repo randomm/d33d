@@ -1153,8 +1153,113 @@ def test_t0_fenced_json_native_tool_calls_take_precedence():
         )
     )
     assert len(result.tool_calls) == 1
-    # The native call passed through; the fenced block was not parsed.
-    assert result.tool_calls[0]["arguments"] == '{"scad": "cube([20,25,30]);"}'
+    # The native call passed through (string arguments normalized to dict);
+    # the fenced block was not parsed.
+    assert result.tool_calls[0]["arguments"] == {"scad": "cube([20,25,30]);"}
+
+
+def test_t0_json_string_tool_call_arguments_normalized_to_dict():
+    """The production endpoint returns tool_call arguments as a JSON-ENCODED
+    string; the sender normalizes it to a dict so _scad_from_result's
+    isinstance(args, dict) check extracts the SCAD (issue #80)."""
+    from d33d.design_loop import _scad_from_result
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": '{"scad": "cube([20,20,20]);"}',
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert result.status == "ok"
+    assert result.tool_calls[0]["arguments"] == {"scad": "cube([20,20,20]);"}
+    # The normalized dict flows through the downstream extractor unchanged.
+    assert _scad_from_result(result) == "cube([20,20,20]);"
+
+
+def test_t0_dict_tool_call_arguments_unchanged():
+    """Already-dict arguments (the existing wire shape) pass through
+    verbatim — regression guard for the native-dict path (issue #80)."""
+    from d33d.design_loop import _scad_from_result
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": {"scad": "cube([30,30,30]);"},
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert result.status == "ok"
+    assert result.tool_calls[0]["arguments"] == {"scad": "cube([30,30,30]);"}
+    assert _scad_from_result(result) == "cube([30,30,30]);"
+
+
+@pytest.mark.parametrize(
+    "raw_args",
+    ["not json at all", "", None, "[1,2,3]"],
+    ids=["invalid-json", "empty-string", "none", "json-non-dict"],
+)
+def test_t0_malformed_tool_call_arguments_yield_empty_dict(raw_args):
+    """A string that is not valid JSON, an empty string, None, or JSON that
+    parses to a non-dict must yield {} (never raise) so the loop's
+    empty_scad path handles it (issue #80)."""
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "emit_design", "arguments": raw_args},
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert result.status == "ok"
+    assert result.tool_calls[0]["arguments"] == {}
 
 
 def test_t0_fenced_json_name_mismatch_for_role_raises_sender_error():

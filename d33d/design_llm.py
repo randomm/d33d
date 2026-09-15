@@ -176,6 +176,28 @@ class LLMResult:
     usage: dict[str, int] = field(default_factory=dict)
 
 
+def _normalize_tool_arguments(args: Any) -> dict[str, Any]:
+    """Coerce a T0 tool call's ``function.arguments`` wire value to a dict.
+
+    The OpenAI-compatible production endpoint returns ``arguments`` as a
+    JSON-ENCODED STRING (e.g. ``'{"scad": "cube(...);"}'``); other shapes
+    (dict, ``None``, an empty/invalid JSON string, JSON that parses to a
+    non-dict) are normalized to ``{}`` so the downstream extractor's
+    ``isinstance(args, dict)`` check is the only remaining gate.  Never
+    raises — a malformed wire shape degrades to empty arguments, and the
+    loop's existing empty_scad path handles it.
+    """
+    if isinstance(args, dict):
+        return args
+    if not isinstance(args, str):
+        return {}
+    try:
+        parsed = _json.loads(args)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _validate_tool_name(role: str, call_name: Any) -> None:
     """Raise :class:`SenderError` (``status='error'``) iff the parsed tool
     call's name is not the one the called role is allowed to emit.
@@ -475,7 +497,9 @@ async def send(
         tool_calls = tuple(
             {
                 "name": tc.get("function", {}).get("name"),
-                "arguments": tc.get("function", {}).get("arguments"),
+                "arguments": _normalize_tool_arguments(
+                    tc.get("function", {}).get("arguments")
+                ),
             }
             for tc in raw_calls
             if isinstance(tc, dict)
