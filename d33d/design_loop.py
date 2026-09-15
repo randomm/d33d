@@ -145,12 +145,11 @@ class Score:
     bits: tuple[bool, bool, bool, bool]
     rank: int
     tiebreak: tuple[bool, bool, bool, bool]
-    #: True iff the bbox bit is True only because no stated dimension was
-    #: known (a zero/absent axis) and the gate ABSTAINED (ticket #91).
-    #: Separate from the bitvector on purpose: the bit ordering, the
-    #: ``tiebreak`` tuple, and ``GATE_REASON_BITS`` are unchanged, yet a
-    #: downstream consumer can never claim dimensions were VERIFIED on an
-    #: abstained gate.
+    #: True iff the bbox bit is True and ANY stated axis is unknown
+    #: (``<= 0``) and the gate ABSTAINED on it (ticket #91) — including
+    #: partial triples where the known axes happen to match: an unknown
+    #: axis was never measured, so the pass must carry the flag even when
+    #: every measured axis passed. Never True on an all-known triple.
     bbox_abstained: bool = False
 
     @property
@@ -289,11 +288,15 @@ def score(
     (deterministic, earlier bits first).
 
     ``Score.bbox_abstained`` (ticket #91) marks a bbox bit that is True
-    merely because no stated dimension was known (a zero/absent axis —
-    :func:`_bbox_within_tolerance` abstains on an unknown target). It is a
-    SEPARATE field, not a fifth bit, so the bit ordering, the ``tiebreak``
-    tuple, and ``GATE_REASON_BITS`` names are all unchanged while the
-    abstention stays distinguishable from a measured pass.
+    while any stated dimension is unknown (a zero/absent axis —
+    :func:`_bbox_within_tolerance` abstains on an unknown target). The flag
+    is raised whenever ANY stated axis is unknown and the bit is True (not
+    only when the bit is true merely because of the abstention): a partial
+    triple whose known axes happen to match still leaves an unmeasured
+    axis, and that pass must be distinguishable from a fully measured one.
+    It is a SEPARATE field, not a fifth bit, so the bit ordering, the
+    ``tiebreak`` tuple, and ``GATE_REASON_BITS`` names are all unchanged
+    while the abstention stays distinguishable from a measured pass.
     """
     bits = (
         render.error_class == "ok",
@@ -301,6 +304,10 @@ def score(
         bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
         _named_params_present(scad_source),
     )
+    # An abstained axis is ANY unknown target, independent of whether the
+    # other (measured) axes happened to pass — a partial triple whose known
+    # axes match still carries an unmeasured axis (ticket #91 round-2: the
+    # flag must be True, never left to bit 2's happenstance).
     bbox_abstained = (
         bbox is not None and bits[2] and any(t <= 0 for t in stated_dims)
     )

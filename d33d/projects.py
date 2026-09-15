@@ -30,6 +30,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
+from d33d.design_loop_events import (
+    latest_version_stated_dims,
+    photo_data_uri,
+    run_design_loop_with_events,
+)
+from d33d.dimension_protocol import stated_dims_from_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -303,11 +309,6 @@ def create_projects_router() -> APIRouter:
         #      distinctly in ``Score.bbox_abstained``); it never receives
         #      (0.0, 0.0, 0.0) from this route.
         chat_history = tuple(body.chat_history or ())
-        from d33d.design_loop_events import (
-            latest_version_stated_dims,
-            photo_data_uri,
-        )
-        from d33d.dimension_protocol import stated_dims_from_message
 
         if body.stated_dims is not None:
             stated: tuple[float, float, float] | None = tuple(
@@ -342,8 +343,6 @@ def create_projects_router() -> APIRouter:
         # inflight flag is set here (synchronously, before the 202
         # response) and cleared in the SSE endpoint's ``finally`` when the
         # generator is exhausted (or an SSE client disconnects).
-        from d33d.design_loop_events import run_design_loop_with_events
-
         events = run_design_loop_with_events(
             app,
             project_id,

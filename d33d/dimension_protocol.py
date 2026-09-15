@@ -197,13 +197,29 @@ def _extract_stated(
                 out[axis] = v
 
     # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
-    # plus a size shorthand ("a 20 mm cube" / "a 10mm box") that states ONE
-    # dimension and is applied to all three axes (a stated cube/dim is the
-    # only defensible ground truth the loop can compare a rendered bbox
-    # against — ticket #91: the bbox gate must be satisfiable from a bare
-    # "Create a 20mm cube" first turn, which has no latest version yet).
-    # The axis-prefixed form ("W: 42") wins when both are present: the
-    # axis pass runs first and its value is never overwritten.
+    # plus an equal-axis size shorthand ("a 20 mm cube" / "a 10mm box"
+    # / "a 15mm sphere") — the ONLY chat text allowed to fill all three
+    # axes from ONE number, and ONLY when the text also names an
+    # equal-axis shape (cube/box/sphere/ball: all three edges equal),
+    # in explicit millimetres ("mm" required — a bare "m"/meters must
+    # never be read as mm). A single number with no equal-axis shape
+    # ("make a 20mm hole in the lid", "a 20mm tall vase", "add a 5mm
+    # fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE or a
+    # one-axis measurement — filling three axes from it would fabricate
+    # a part envelope the user never stated, the exact fabricate-don't-
+    # measure anti-pattern ticket #91 removes: the gate would then run
+    # against a wrong target (spurious FAIL, or worse, spurious PASS),
+    # instead of abstaining (None) and leaving the gate unmeasurable.
+    # A stated equal-axis shape is the only defensible ground truth the
+    # loop can compare a rendered bbox against on a bare "Create a 20mm
+    # cube" first turn (no latest version yet).
+    # Precedence inside this pass: the axis-prefixed form ("W: 42") wins
+    # over the shorthand — the shorthand only fills axes the axis pass
+    # left empty, and it does NOT run mid-turn once an axis-prefixed
+    # value was found (deliberate: a turn like "W is 30mm... make it a
+    # 20mm cube" keeps the axis-prefixed value and never completes the
+    # triple from the shorthand — the gate abstains rather than mixing
+    # sources within one turn).
     if not all(a in out for a in DIMENSION_AXES):
         for turn in chat_history or []:
             text = str(turn)
@@ -221,7 +237,8 @@ def _extract_stated(
                         out[axis] = v
             if not out:
                 m = re.search(
-                    r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm?\b",
+                    r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm\b"
+                    r"\s+(?:cube|box|sphere|ball)\b",
                     text,
                     re.IGNORECASE,
                 )

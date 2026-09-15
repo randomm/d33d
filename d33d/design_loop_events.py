@@ -447,6 +447,19 @@ async def run_design_loop_with_events(
                     name: _data_uri_from_bytes(raw, "image/png")
                     for name, raw in view_bytes.items()
                 }
+        # Ticket #91: propagate the bbox abstention to the wire so a
+        # consumer can never mistake an abstained pass for a verified
+        # one — ``Score.bbox_abstained`` exists on the score, but a
+        # flag that stops at the Score object is not a safeguard: every
+        # pass frame carries the flag (False for a fully measured pass,
+        # True when any stated axis was unknown), in both the
+        # version-created progress frame and the terminal done frame.
+        # (The failures.jsonl archive needs no field: it fires ONLY on
+        # ``exhausted`` results, and an abstained bbox bit is always
+        # True, so an abstained gate never lands there as a failure —
+        # it can only make a loop more pass-prone.)
+        score = getattr(best, "score", None)
+        abstained = bool(getattr(score, "bbox_abstained", False))
         version_id = await _resolve_version_create(
             app, project_id, result, user_message
         )
@@ -456,10 +469,11 @@ async def run_design_loop_with_events(
                 "version_id": version_id,
             }
             vc_frame.update(frame_fields)
+            vc_frame["bbox_abstained"] = abstained
             yield ("progress", vc_frame)
         scad = getattr(best, "scad_source", None)
         yield ("token", {"text": scad if isinstance(scad, str) else ""})
-        yield ("done", {"message": _result_message(result)})
+        yield ("done", {"message": _result_message(result), "bbox_abstained": abstained})
     else:
         yield ("error", {"message": _result_message(result)})
 

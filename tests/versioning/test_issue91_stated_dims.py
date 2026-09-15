@@ -31,6 +31,8 @@ stub loops, plus direct loop drives with stub render/llm; no Docker.
 
 from __future__ import annotations
 
+import pytest
+
 from d33d.design_loop import (
     BboxInfo,
     _design_system,
@@ -39,6 +41,7 @@ from d33d.design_loop import (
     score,
 )
 from d33d.design_loop_events import latest_version_stated_dims
+from d33d.dimension_protocol import stated_dims_from_message
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
@@ -377,6 +380,124 @@ def test_score_bbox_abstains_on_partial_zero_triple() -> None:
     assert s.bbox_abstained is True
 
 
+def test_score_partial_triple_measured_axes_pass_still_flagged() -> None:
+    """Round-2 regression guard: a partial triple whose KNOWN axes happen to
+    match the render (bit 2 True for the measured axes) still carries
+    ``bbox_abstained=True`` — the unknown axis was never measured, so the
+    pass must not be indistinguishable from a fully measured one (the
+    vacuous-pass reachability hole of round 1: the flag used to depend on
+    bit 2's happenstance rather than on any axis being unknown)."""
+    r = _ok_render("x = 20; cube([x]);")
+    # Known axes (x, z) match exactly; y unknown (target 0) and the render
+    # reports an arbitrary y extent.
+    s = score(r, (20.0, 0.0, 20.0), bbox=BboxInfo(20.0, 7.0, 20.0, 1.0),
+              scad_source="x = 20; cube([x]);")
+    assert s.bits == (True, True, True, True)
+    assert s.bbox_abstained is True
+    # All-known control: the same render against a complete triple is a
+    # MEASURED pass, never flagged.
+    m = score(r, (20.0, 20.0, 20.0), bbox=BboxInfo(20.0, 7.0, 20.0, 1.0),
+              scad_source="x = 20; cube([x]);")
+    assert m.bits[2] is False  # y out of tolerance
+
+
+# ---------------------------------------------------------------------------
+# The shorthand regression guards (ticket #91 round 2 — CRITICAL finding):
+# a single stated number must NEVER fabricate a 3-axis triple unless the
+# text also names an equal-axis shape (cube/box/sphere/ball) with an
+# explicit "mm" — otherwise the gate runs against a made-up envelope
+# (the exact fabricate-don't-measure anti-pattern this ticket removes).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "make a 20mm hole in the lid",
+        "a 20mm tall vase",
+        "add a 5mm fillet",
+        "mount a 6mm bolt",
+        "a 3 m beam",  # a bare "m" (meters) is never mm
+        "make me a 42 millimeter thing",  # spelled-out unit
+        "make it 15mm taller",
+    ],
+)
+def test_single_number_without_equal_axis_shape_abstains(message: str) -> None:
+    """A single number that is a feature size, a one-axis measurement, or a
+    non-mm unit yields ``None`` (abstain) — never a fabricated
+    (n, n, n) triple that would feed the bbox gate a wrong reference."""
+    assert stated_dims_from_message(message) is None
+
+
+@pytest.mark.parametrize(
+    "message,expected",
+    [
+        ("a 20mm cube", (20.0, 20.0, 20.0)),
+        ("a 10mm box", (10.0, 10.0, 10.0)),
+        ("a 15mm sphere", (15.0, 15.0, 15.0)),
+        ("an 8mm ball", (8.0, 8.0, 8.0)),
+        ("a 20 mm cube", (20.0, 20.0, 20.0)),
+    ],
+)
+def test_equal_axis_shape_shorthand_still_extracts(message, expected) -> None:
+    """The one defensible single-number source: an equal-axis shape with an
+    explicit mm — "Create a 20mm cube" stays satisfiable on a bare first
+    turn (no latest version yet)."""
+    assert stated_dims_from_message(message) == expected
+
+
+def test_shorthand_does_not_fire_from_prior_turn_history() -> None:
+    """The shorthand now only fires on a turn that itself has no
+    axis-prefixed extraction; a prior turn's "a 20mm cube" is still
+    history-scanned (the axis pass's pre-existing design), so it still
+    yields the triple — but a prior turn's "a 5mm fillet" must NOT leak a
+    fabricated (5, 5, 5) into a later turn's gate target."""
+    # Prior turn named an equal-axis shape: still extracted (pre-existing
+    # history-scanning semantics, unchanged).
+    assert stated_dims_from_message(
+        "make a 5mm fillet", ["a 20mm cube"]
+    ) == (20.0, 20.0, 20.0)
+    # Prior turn stated a feature size only: nothing leaks.
+    assert stated_dims_from_message(
+        "make it rounder", ["make a 5mm fillet"]
+    ) is None
+
+
+def test_axis_prefixed_turn_shorthand_does_not_complete_triple() -> None:
+    """Round-2 minor: a turn stating "W: 30" does NOT let the shorthand
+    from the same turn fill D/H (the shorthand only runs on a turn with
+    no axis-prefixed extraction) — the gate abstains rather than mixing
+    an axis-prefixed value with a shorthand value within one turn."""
+    assert (
+        stated_dims_from_message("W: 30, make it a 20mm cube") is None
+    )
+
+
+def test_explicit_body_partial_bypass_yields_flagged_abstained_pass() -> None:
+    """Round-2 Q1: a client CAN bypass the message protocol with an
+    explicit partial triple (``stated_dims: [30, 0, 50]``). The loop
+    reaches pass (the unknown axis abstains) and the pass is flagged —
+    the only vacuous-pass reachability found in the review, and it is
+    now reliably flagged (the flag no longer depends on bit 2 having
+    happened to be True)."""
+    scad = "x = 20; cube([x, x, x]);"
+    bbox = BboxInfo(x=30.0, y=99.0, z=50.0, volume=1.0)
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    result = run_design_loop(
+        photo="data:image/png;base64,x",
+        chat_history=(),
+        stated_dims=(30.0, 0.0, 50.0),
+        render_fn=_render,
+        llm_fn=_stub_llm(scad),
+        bbox_fn=lambda r: bbox,
+    )
+    assert result.status == "pass"
+    assert result.best.score.bbox_abstained is True
+
+
 # ---------------------------------------------------------------------------
 # The prompt: no zero ground-truth line (asserted on the function the /chat
 # loop actually calls — _design_system, not design_prompts.design_prompt)
@@ -611,3 +732,103 @@ def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
         "the bbox bit is True ONLY because the (0,0,0) target is unknown "
         "— the abstention must be recorded distinctly"
     )
+
+
+# ---------------------------------------------------------------------------
+# The wire: ``Score.bbox_abstained`` must reach the consumer (ticket #91
+# round 2 — a flag that stops at the Score object is not a safeguard).
+# ---------------------------------------------------------------------------
+
+
+def test_done_frame_carries_bbox_abstained_true(app_with_versions):
+    """An abstained pass (no dimensions known anywhere) surfaces
+    ``bbox_abstained: true`` on the terminal ``done`` frame — the client
+    can never mistake it for a verified pass."""
+
+    class _R:
+        status = "pass"
+        failure_reason = None
+
+        class _Best:
+            params = None
+            scad_source = "x = 20; cube([x]);"
+            render = None
+
+            class _Score:
+                bbox_abstained = True
+
+            score = _Score()
+
+        best = _Best()
+
+    async def _loop(app, **kwargs):
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make it rounder", "chat_history": []},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return r, frames
+
+    r, frames = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    done = [d for e, d in frames if e == "done"]
+    assert done, "no done frame"
+    assert done[0]["bbox_abstained"] is True
+
+
+def test_done_frame_carries_bbox_abstained_false(app_with_versions):
+    """A measured pass (dimensions known, bbox verified) carries
+    ``bbox_abstained: false`` — the two pass kinds are distinguishable on
+    the wire."""
+
+    class _R:
+        status = "pass"
+        failure_reason = None
+
+        class _Best:
+            params = None
+            scad_source = "x = 20; cube([x]);"
+            render = None
+
+            class _Score:
+                bbox_abstained = False
+
+            score = _Score()
+
+        best = _Best()
+
+    async def _loop(app, **kwargs):
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "Create a 20mm cube", "chat_history": []},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return r, frames
+
+    r, frames = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    done = [d for e, d in frames if e == "done"]
+    assert done, "no done frame"
+    assert done[0]["bbox_abstained"] is False
