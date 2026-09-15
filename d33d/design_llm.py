@@ -43,7 +43,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from d33d.config.probes import CapabilityResult
-from d33d.config.t1_protocol import t1_invoke
+from d33d.config.t1_protocol import parse_t1_tool_call, t1_invoke
 from d33d.prompt_hash import canonical_hash
 from d33d.response_shape import response_message_shape
 
@@ -353,7 +353,13 @@ async def send(
     ``request_logs``.
 
     * **T0** — one native request with ``tools`` attached when provided; the
-      model's ``tool_calls`` pass through (name + arguments).
+      model's ``tool_calls`` pass through (name + arguments).  Some T0-tiered
+      models still reply with a fenced-JSON block in ``content`` (tool_calls
+      empty) instead of native calls; the T0 branch parses that block with
+      the same :func:`parse_t1_tool_call` codec the T1 path uses and
+      synthesizes the call into ``tool_calls`` — malformed blocks (or prose
+      without a fenced call) fall through to the empty-tool-call result, the
+      caller's ``empty_scad`` path, never an exception.
     * **T1** — ``t1_invoke`` (fenced-JSON codec + corrective retry).  The
       parsed block is synthesized into a ``tool_calls`` tuple so callers
       treat T0 and T1 identically; the raw fenced response stays in
@@ -486,7 +492,29 @@ async def send(
     # never reaches the caller as a valid result.
     for tc in tool_calls:
         _validate_tool_name(role, tc.get("name"))
-    content = msg.get("content")
+    content = msg.get("content") if isinstance(msg.get("content"), str) else ""
+    if not tool_calls and content:
+        # Fenced-JSON-in-content fallback: a T0-tiered model (Qwen3.8 over
+        # the OpenAI-compatible endpoint) sometimes answers with a fenced
+        # JSON tool call in content and an empty tool_calls field.  Reuse
+        # the T1 codec's parser (handles ```json and untagged ``` fences,
+        # returns None — never raises — on malformed input).  Native
+        # tool_calls always win (the fallback only triggers when they are
+        # empty/absent); malformed blocks (parser returns None) fall
+        # through to the caller's empty_scad path, never a crash; a
+        # well-formed block with a name the role may not emit is rejected
+        # by the same allowlist as the native path.
+        fenced = parse_t1_tool_call(content)
+        if fenced is not None:
+            expected = ROLE_TOOL_NAMES.get(role)
+            if expected is None or fenced.name == expected:
+                tool_calls = ({"name": fenced.name, "arguments": fenced.arguments},)
+            else:
+                # Name-mismatched but well-formed fenced block: same
+                # rejection as the native path (the sender boundary is the
+                # primary tool-name defense, the downstream shape checks
+                # secondary).
+                _validate_tool_name(role, fenced.name)
 
     # Raw-response observability: log content + tool_calls after successful
     # parse so server logs show exactly what the model returned for the
@@ -504,7 +532,7 @@ async def send(
         _logging.warning("T0 raw-response log failed: %s", exc)
 
     return LLMResult(
-        content=content if isinstance(content, str) else "",
+        content=content,
         tool_calls=tool_calls,
         prompt_hash=prompt_hash,
         tier=tier,
