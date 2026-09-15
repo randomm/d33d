@@ -89,9 +89,16 @@ def latest_version_stated_dims(
     original #91 bug); the caller treats ``None`` as "no dimensions known"
     and the gate abstains (``Score.bbox_abstained``).
 
-    ``create_region_edit`` does NOT use this helper — its deliberate
-    fresh-project ``(0.0, 0.0, 0.0)`` behavior ("the dimension gate
-    measures rather than fabricates") is behaviorally unchanged.
+    ``create_region_edit`` does NOT use this helper — it builds its own
+    ``float(params.get(axis, 0.0))`` triple, which on a fresh project
+    (or a version whose W/D/H are missing/null/zero) is ``(0.0, 0.0, 0.0)``.
+    Note: the bbox gate NOW ABSTAINS on such a triple (``_bbox_within_tolerance``
+    returns True on a ``target <= 0`` axis, ticket #91) and records the
+    abstention in ``Score.bbox_abstained`` — where that route previously
+    hard-FAILED every candidate. The abstain is the correct semantics for
+    region edits: it is the behavior that route's own comment ("the
+    dimension gate measures rather than fabricates") was always intended
+    to describe.
     """
     latest = versions_service.latest_version(project_id)
     if latest is None:
@@ -322,13 +329,19 @@ async def run_design_loop_with_events(
 
     ``stated_dims`` may be ``None`` ("no dimensions known" — the /chat
     caller path, ticket #91). The adapter no longer substitutes
-    ``(0.0, 0.0, 0.0)`` here: a zero triple would feed the bbox gate an
-    unsatisfiable ``target <= 0`` target and hard-fail every candidate.
-    Callers that DO pass an explicit zero triple (``create_region_edit``'s
-    deliberate fresh-project behavior) keep it verbatim — that behavior is
-    behaviorally unchanged (the gate now abstains on an unknown target
-    instead of failing it; see ``d33d.design_loop.score``'s
-    ``bbox_abstained`` field).
+    ``(0.0, 0.0, 0.0)`` here: a fabricated zero triple is never a gate
+    target.
+
+    The bbox gate itself changed for ALL callers (ticket #91): it now
+    ABSTAINS on an unknown (``<= 0``) target instead of hard-failing it,
+    and records the abstention distinctly in ``d33d.design_loop.score``'s
+    ``bbox_abstained`` field. This includes ``create_region_edit``, which
+    still deliberately passes a ``(0.0, 0.0, 0.0)`` triple on a fresh
+    project — its bbox bit flipped from FAIL to ABSTAIN (recorded as
+    ``Score.bbox_abstained``). The abstain is the correct semantics for
+    that route: its own comment says "the dimension gate measures rather
+    than fabricates", which IS abstain semantics — the old hard-fail
+    contradicted it.
     """
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:

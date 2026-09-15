@@ -593,8 +593,9 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # photo: the marked PNG from the body as a data URI (the vision model
     # sees the marked-up render, not the stored reference photo).
     assert captured["photo"] == f"data:image/png;base64,{_REGION_EDIT_PNG_BASE64}"
-    # stated_dims: fresh project (no versions) → (0, 0, 0) so the
-    # dimension gate measures rather than fabricates.
+    # stated_dims: fresh project (no versions) → (0, 0, 0), passed verbatim;
+    # the bbox gate ABSTAINS on the unknown target (recorded as
+    # Score.bbox_abstained, ticket #91) instead of hard-failing it.
     assert captured["stated_dims"] == (0.0, 0.0, 0.0)
     # chat_history: the EMPTY tuple — a region edit is a scoped directive,
     # not a chat turn (the project's transcript is never auto-included).

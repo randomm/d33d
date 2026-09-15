@@ -18,9 +18,11 @@ The fix (per the PM's settled decisions):
   abstention is recorded DISTINCTLY in ``Score.bbox_abstained`` — an
   unmeasurable gate neither hard-fails every candidate nor masquerades as
   a measured pass.
-* Scope — the abstain path serves the /chat caller path only;
+* Scope — the abstain is NOT /chat-only: the bbox gate now abstains on an
+  unknown (``<= 0``) target for ALL callers, including
   ``create_region_edit``'s deliberate fresh-project ``(0.0, 0.0, 0.0)``
-  behaviour is unchanged (regression guards below).
+  (whose bbox bit flipped from FAIL to ABSTAIN, recorded as
+  ``Score.bbox_abstained`` — regression guards below).
 
 Fast layer: SPA-shaped request bodies through the REAL seam
 (``app.state.run_design_loop`` via ``POST /api/projects/{id}/chat``) with
@@ -436,7 +438,7 @@ def test_loop_pass_prompt_captured_never_carries_zero_dims() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Regression guards: the region-edits route is behaviourally unchanged
+# Regression guards: the region-edits route and the abstain change
 # ---------------------------------------------------------------------------
 
 _REGION_EDIT_PNG_BASE64 = (
@@ -461,9 +463,10 @@ def _region_edit_body() -> dict:
 
 def test_region_edit_fresh_project_still_passes_zero_triple(app_with_versions):
     """REGRESSION GUARD: ``create_region_edit``'s deliberate fresh-project
-    ``(0.0, 0.0, 0.0)`` behaviour is unchanged — a fresh project still
-    passes the zero triple verbatim (the dimension gate measures rather
-    than fabricates)."""
+    ``(0.0, 0.0, 0.0)`` triple is passed to the loop VERBATIM (ticket #91
+    did not change what that route hands the loop — it changed what the
+    gate does with a zero triple: it now ABSTAINS instead of hard-failing
+    it, recorded as ``Score.bbox_abstained``)."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict = {}
@@ -492,7 +495,8 @@ def test_region_edit_fresh_project_still_passes_zero_triple(app_with_versions):
 
 def test_region_edit_latest_version_still_uses_version_dims(app_with_versions):
     """REGRESSION GUARD: a region edit with an existing version still
-    passes that version's W/D/H (the region-edits fallback is untouched)."""
+    passes that version's W/D/H verbatim (the region-edits fallback is
+    untouched)."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict = {}
@@ -518,3 +522,92 @@ def test_region_edit_latest_version_still_uses_version_dims(app_with_versions):
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
     assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+
+
+def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
+    app_with_versions,
+) -> None:
+    """PINNED NEW BEHAVIOUR (ticket #91): a region edit on a FRESH project
+    (no versions, so ``create_region_edit`` deliberately passes
+    ``(0.0, 0.0, 0.0)``) drives the loop so that the bbox bit is True via
+    ABSTENTION — ``Score.bbox_abstained`` is True — not via a measurement.
+
+    Before ticket #91 this same candidate scored the bbox bit False
+    (``target <= 0`` hard-failed) and the loop could never pass on a fresh
+    project. This is a deliberate, named assertion of the new behaviour —
+    not an incidental side effect of another test: the loop here is the
+    REAL ``run_design_loop`` (injected into the route's seam), so the
+    asserted score is what production scoring computes."""
+    app = app_with_versions
+    bbox = BboxInfo(x=21.0, y=19.0, z=25.0, volume=1.0)  # arbitrary extents
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    results: list = []
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        from d33d.design_loop import run_design_loop_async
+
+        captured.update(kwargs)
+        # The seam passes hook-only extras (request/model/prompt_version) and
+        # render_fn=None by contract (the production closure supplies its
+        # own) — the adapter's adapter-passed values must never reach the
+        # loop core. Drive it with an explicit keyword list instead.
+        kwargs.pop("request", None)
+        kwargs.pop("model", None)
+        kwargs.pop("prompt_version", None)
+        kwargs.pop("render_fn", None)
+        kwargs.pop("llm_fn", None)
+        kwargs.pop("bbox_fn", None)
+        # Drive the REAL async core directly — the adapter runs the seam's
+        # coroutine via asyncio.run on a worker thread, so the sync
+        # run_design_loop wrapper (itself an asyncio.run) cannot nest.
+        result = await run_design_loop_async(
+            photo=kwargs["photo"],
+            chat_history=kwargs["chat_history"],
+            stated_dims=kwargs["stated_dims"],
+            render_fn=_render,
+            llm_fn=_stub_llm("x = 20; cube([x, x, x]);"),
+            bbox_fn=lambda r: bbox,
+        )
+        results.append(result)
+        return result
+
+    async def _call(client):
+        proj = await create_project(client)  # fresh project — no versions
+        pid = proj["id"]
+        app.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits", json=_region_edit_body()
+        )
+        source = app.state.event_sources.get(pid)
+        assert source is not None, "event source not registered before 202"
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return r, frames
+
+    r, frames = run_async(app, _call)
+    assert r.status_code == 202, r.text
+    assert frames[-1][0] == "done", f"expected done frame, got {frames[-1]}"
+    # The pass creates a version via the loop result's best iteration
+    # (the stubbed render has no durable artifacts — the frame omits them).
+    # The route still passes its deliberate fresh-project (0,0,0) triple
+    # verbatim — ticket #91 changed what the gate does with it, not what
+    # the route hands over.
+    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # The REAL loop's own score: the bbox bit is True AND the pass is
+    # recorded distinctly as an abstention (before #91 this same candidate
+    # scored the bbox bit False — target <= 0 hard-failed — and the loop
+    # could never pass on a fresh project).
+    assert len(results) == 1
+    assert results[0].status == "pass"
+    assert results[0].best.score.bits == (True, True, True, True)
+    assert results[0].best.score.bbox_abstained is True, (
+        "the bbox bit is True ONLY because the (0,0,0) target is unknown "
+        "— the abstention must be recorded distinctly"
+    )
