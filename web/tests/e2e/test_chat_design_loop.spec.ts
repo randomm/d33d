@@ -201,6 +201,13 @@ test("chat design loop: send message → SSE completion → assistant bubble rec
     { timeout: 10_000 },
   );
 
+  // Role differentiation (issue #81): the user message and the assistant
+  // message compute to different background colours — verifiable only in a
+  // real browser (jsdom applies no CSS). toHaveCSS pins the tint so a
+  // restyle that collapses the roles into one background cannot slip past.
+  await expect(page.getByTestId("chat-msg-user")).toHaveCSS("background-color", "rgb(246, 248, 250)");
+  await expect(page.locator('[data-testid="chat-msg-assistant"]').last()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+
   // The viewer pane displays geometry after the stream completes: the
   // version-created frame's stl_data_uri (real mini-box.stl bytes as a
   // base64 data URI) is decoded by the SPA and swapped in for the GLB
