@@ -83,15 +83,13 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     ``volume_mm3`` from that mesh, so the extents derive from the same
     on-volume STL — re-loaded host-side here from ``render.stl``.
 
-    ``render.stl`` points at the harvested STL inside the render worker's
-    ``tempfile.TemporaryDirectory`` (``render_worker.py``), which is torn
-    down when the render returns, *before* ``bbox_fn`` is invoked. The
-    worker is out of scope for issue #54 (it must NOT be changed to keep
-    the STL), so on today's production seam the file is already gone when
-    this runs: ``path.is_file()`` is ``False`` → ``None`` → the bbox gate
-    cannot score (documented; the gate then fails and no candidate can
-    score the bbox bit). A render whose STL survives (e.g. a test stub
-    returning a real, still-on-disk path) yields real extents.
+    ``render.stl`` is re-pointed at the durable artifact directory when
+    the render worker's issue #72 persistence succeeds, so a live path is
+    the normal production case: a successful load yields real extents. A
+    ``None`` return is the edge case — persistence disabled or failed, or
+    the file externally deleted — where ``path.is_file()`` is ``False`` →
+    the bbox gate cannot score (the gate then fails and no candidate can
+    score the bbox bit).
 
     No ``merge_vertices()`` is needed here: bounds are derived from
     vertex coordinates and are invariant under duplicate-vertex merging,
