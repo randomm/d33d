@@ -244,6 +244,39 @@ describe("App layout", () => {
     expect(screen.getAllByTestId(/^render-img-/)).toHaveLength(6);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
+
+  // Issue #74 — the two-pane layout must be inline-styled (jsdom applies no
+  // class-based CSS, so layout assertions read the inline style object the
+  // same way the pending-selection-card test does).
+  it("lays out app-shell as a flex row filling the viewport (issue #74)", async () => {
+    render(<App client={client} />);
+    const shell = screen.getByTestId("app-shell");
+    expect(shell.style.display).toBe("flex");
+    expect(shell.style.flexDirection).toBe("row");
+    expect(shell.style.height).toBe("100vh");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
+
+  it("gives the left pane a flexible width and the right pane a fixed 600px width (issue #74)", async () => {
+    render(<App client={client} />);
+    const left = screen.getByTestId("app-left-pane");
+    expect(left.style.flex).toBe("1 1 0px");
+    const right = screen.getByTestId("app-right-pane");
+    expect(right.style.flex).toBe("0 0 600px");
+    expect(right.style.width).toBe("600px");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
+
+  it("pins the viewer pane to the 600x400 viewer size so the lasso overlay stays co-located (issue #74)", async () => {
+    render(<App client={client} />);
+    const pane = screen.getByTestId("viewer-pane");
+    // position:relative is the lasso overlay's containing block — it must
+    // stay inline even though new layout styles were added to the div.
+    expect(pane.style.position).toBe("relative");
+    expect(pane.style.width).toBe("600px");
+    expect(pane.style.height).toBe("400px");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
 });
 
 describe("App project lifecycle", () => {

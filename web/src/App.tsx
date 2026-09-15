@@ -642,9 +642,29 @@ export default function App({ renders = [], client }: AppProps) {
   }, []);
 
   return (
-    <div className="app-shell" data-testid="app-shell">
+    <div
+      className="app-shell"
+      data-testid="app-shell"
+      style={{
+        display: "flex",
+        flexDirection: "row",
+        height: "100vh",
+        margin: 0,
+        boxSizing: "border-box",
+        overflow: "hidden",
+      }}
+    >
       {/* Left pane: chat + upload */}
-      <div className="app-left" data-testid="app-left-pane">
+      <div
+        className="app-left"
+        data-testid="app-left-pane"
+        style={{
+          flex: "1 1 0",
+          minWidth: 0,
+          overflowY: "auto",
+          boxSizing: "border-box",
+        }}
+      >
         <ChatPanel
           messages={messages}
           onSend={handleSendMessage}
@@ -676,7 +696,18 @@ export default function App({ renders = [], client }: AppProps) {
       </div>
 
       {/* Right pane: version timeline (side rail) + viewer + validation */}
-      <div className="app-right" data-testid="app-right-pane">
+      <div
+        className="app-right"
+        data-testid="app-right-pane"
+        style={{
+          flex: `0 0 ${VIEWER_WIDTH}px`,
+          width: VIEWER_WIDTH,
+          display: "flex",
+          flexDirection: "column",
+          overflowY: "auto",
+          boxSizing: "border-box",
+        }}
+      >
         {/* The version timeline side rail (issue #8) — the project resumes
             at its latest version; the timeline is the history surface. */}
         {projectId !== null && (
@@ -720,7 +751,18 @@ export default function App({ renders = [], client }: AppProps) {
             )}
           </div>
         )}
-        <div className="viewer-pane" data-testid="viewer-pane" style={{ position: "relative" }}>
+        <div
+          className="viewer-pane"
+          data-testid="viewer-pane"
+          style={{
+            position: "relative",
+            width: VIEWER_WIDTH,
+            height: VIEWER_HEIGHT,
+            flex: "0 0 auto",
+            overflow: "hidden",
+            boxSizing: "border-box",
+          }}
+        >
           {/* The viewer's pre-pass state is the named-module GLB fixture —
            * the moduleGroup source for lasso region selection (issue #29's
            * settled design decision). After a stream-driven design-loop
@@ -743,40 +785,40 @@ export default function App({ renders = [], client }: AppProps) {
             onLassoCompleted={handleLassoCompleted}
             disabled={moduleGroup === null}
           />
-          {selectionNotice && (
-            <div className="selection-notice" data-testid="selection-notice" role="status">
-              {selectionNotice}
-            </div>
-          )}
-          {pendingSelection && (
-            <div
-              className="pending-selection-notice"
-              data-testid="pending-selection-notice"
-              role="status"
-              style={{
-                border: "2px solid #d0d7de",
-                backgroundColor: "#f6f8fa",
-                padding: "8px",
-              }}
-            >
-              <span>Region selected — describe the change below.</span>
-              <img
-                src={pendingSelection.thumbnail}
-                alt={`pending selection on ${pendingSelection.viewId}`}
-                className="pending-selection-thumbnail"
-                data-testid="pending-selection-thumbnail"
-                style={{ maxWidth: "200px" }}
-              />
-              <button
-                type="button"
-                data-testid="pending-selection-cancel-btn"
-                onClick={handleCancelPendingSelection}
-              >
-                Cancel selection
-              </button>
-            </div>
-          )}
         </div>
+        {selectionNotice && (
+          <div className="selection-notice" data-testid="selection-notice" role="status">
+            {selectionNotice}
+          </div>
+        )}
+        {pendingSelection && (
+          <div
+            className="pending-selection-notice"
+            data-testid="pending-selection-notice"
+            role="status"
+            style={{
+              border: "2px solid #d0d7de",
+              backgroundColor: "#f6f8fa",
+              padding: "8px",
+            }}
+          >
+            <span>Region selected — describe the change below.</span>
+            <img
+              src={pendingSelection.thumbnail}
+              alt={`pending selection on ${pendingSelection.viewId}`}
+              className="pending-selection-thumbnail"
+              data-testid="pending-selection-thumbnail"
+              style={{ maxWidth: "200px" }}
+            />
+            <button
+              type="button"
+              data-testid="pending-selection-cancel-btn"
+              onClick={handleCancelPendingSelection}
+            >
+              Cancel selection
+            </button>
+          </div>
+        )}
         <div className="validation-pane" data-testid="validation-pane">
           <span data-testid="validation-status">Waiting for render…</span>
           {projectId !== null && <Export3MF projectId={projectId} client={apiClient} />}
