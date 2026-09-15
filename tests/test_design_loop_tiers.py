@@ -1010,6 +1010,177 @@ def test_t1_error_path_log_callback_still_fires():
     assert log_calls == [("design", "0" * 64, "error")]
 
 
+# ---------------------------------------------------------------------------
+# T0 fenced-JSON-in-content fallback (issue #78): tool_calls empty, a fenced
+# JSON block in content is parsed with the T1 codec and synthesized into
+# tool_calls at the sender boundary
+# ---------------------------------------------------------------------------
+
+
+def test_t0_fenced_json_in_content_synthesizes_tool_call():
+    """A T0 response with tool_calls=() and a ```json fenced tool call in
+    content yields a synthesized tool_call — _scad_from_result downstream
+    finds arguments.scad and the loop does not hit empty_scad."""
+    fenced = '```json\n{"tool": "emit_design", "arguments": {"scad": "cube([20,20,20]);"}}\n```'
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(fenced, tool_calls=[])
+
+    result = _run(
+        send(
+            role="design",
+            model_id="RedHatAI/Qwen3.8-27B-INT4",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+            system="You are a CAD engine.",
+            tools=DESIGN_TOOLS,
+        )
+    )
+    assert result.tier == "T0"
+    assert result.status == "ok"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "emit_design"
+    assert result.tool_calls[0]["arguments"] == {"scad": "cube([20,20,20]);"}
+    # The raw fenced content is preserved verbatim (T0 passthrough).
+    assert result.content == fenced
+
+
+def test_t0_fenced_json_untagged_fence_synthesizes_tool_call():
+    """The untagged ``` fence (no language tag) parses identically to the
+    ```json fence — the shared codec handles both, no duplicated regex."""
+    fenced = (
+        '```\n{"tool": "emit_design", "arguments": {"scad": "cube([20,20,20]);"}}\n```'
+    )
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(fenced)
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "emit_design"
+    assert result.tool_calls[0]["arguments"] == {"scad": "cube([20,20,20]);"}
+
+
+def test_t0_plain_prose_content_keeps_empty_tool_calls():
+    """A T0 response with tool_calls=() and no fenced JSON in content still
+    yields an empty tool_calls tuple — the caller's empty_scad path, no new
+    exception, no new error class."""
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response("some random text", tool_calls=[])
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert result.tier == "T0"
+    assert result.status == "ok"
+    assert result.tool_calls == ()
+    assert result.content == "some random text"
+
+
+def test_t0_malformed_fenced_json_falls_through_to_empty():
+    """A T0 response whose fenced block is not valid JSON (or lacks the tool
+    / arguments keys) falls through to the empty-tool-call result — never a
+    SenderError, never a crash."""
+
+    async def _call_with(bad: str) -> LLMResult:
+        async def factory(request: dict[str, Any]):
+            return _ok_response(bad, tool_calls=[])
+
+        return await send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+
+    for bad in (
+        "some prose ```json {not valid json``` more prose",
+        '```json\n{"arguments": {"scad": "cube(1);"}}\n```',  # missing tool
+        '```json\n{"tool": "emit_design", "arguments": "nope"}\n```',  # non-dict arguments
+        "no fenced block at all",
+    ):
+        result = _run(_call_with(bad))
+        assert result.status == "ok"
+        assert result.tool_calls == ()
+
+
+def test_t0_fenced_json_native_tool_calls_take_precedence():
+    """When BOTH a native tool_calls entry and a fenced JSON block are present
+    in content, the native tool_calls win verbatim — the fallback only
+    triggers when tool_calls is empty/absent (the working T0 path is
+    unchanged)."""
+    fenced = '```json\n{"tool": "emit_design", "arguments": {"scad": "cube(9);"}}\n```'
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            f"prose\n{fenced}",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": '{"scad": "cube([20,25,30]);"}',
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert len(result.tool_calls) == 1
+    # The native call passed through; the fenced block was not parsed.
+    assert result.tool_calls[0]["arguments"] == '{"scad": "cube([20,25,30]);"}'
+
+
+def test_t0_fenced_json_name_mismatch_for_role_raises_sender_error():
+    """A well-formed fenced block naming a tool the role may not emit is
+    rejected at the sender boundary — same SenderError(status='error')
+    contract as the native T0 path (the allowlist is the primary
+    tool-name defense on both paths)."""
+    fenced = '```json\n{"tool": "emit_critique", "arguments": {}}\n```'
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(fenced, tool_calls=[])
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t0(),
+            )
+        )
+    assert exc.value.status == "error"
+    assert "tool_name_mismatch" in str(exc.value)
+
+
 def test_t0_malformed_body_is_sender_error():
     """A T0 response that is not OpenAI-shaped (e.g. missing choices) must
     become SenderError(status='error'), never a raw KeyError."""
