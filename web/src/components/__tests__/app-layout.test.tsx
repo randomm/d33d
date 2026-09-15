@@ -718,13 +718,38 @@ describe("App region-selection (lasso) wiring", () => {
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
     expect(client.createRegionEdit).not.toHaveBeenCalled();
   });
 
-  it("pending selection notice is styled as a card (border + light bg) with a 200px-max thumbnail", async () => {
+  it("renders NO inline region bar before a lasso selection exists (and the lasso overlay is not blocked)", async () => {
+    const client = makeClient();
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    // No pending selection yet — the bar must be entirely absent from the DOM
+    // (pendingSelection null), so it can neither block the lasso overlay's
+    // clicks nor cover the canvas.
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
+    // The lasso overlay is present and not disabled — still the click surface.
+    const overlay = screen.getByTestId("viewport-lasso-overlay-mock");
+    expect(overlay).toBeTruthy();
+    expect(overlay.getAttribute("data-disabled")).toBe("false");
+  });
+
+  it("pending selection renders the inline bar at the bottom of the viewer pane with a placeholder input (and no old notice card)", async () => {
     const client = makeClient();
     resolveLassoSelectionMock.mockReturnValue({
       ranked: [
@@ -744,17 +769,34 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
-    // jsdom applies no class-based CSS, so the card styling must be an
-    // inline style the test can see directly (not getComputedStyle).
-    const notice = screen.getByTestId("pending-selection-notice");
-    expect(notice.style.border).toBe("2px solid rgb(208, 215, 222)");
-    expect(notice.style.backgroundColor).toBe("rgb(246, 248, 250)");
+    // The old sibling-below notice card is gone — replaced by the bar.
+    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
 
-    const thumbnail = screen.getByTestId("pending-selection-thumbnail");
-    expect(thumbnail.style.maxWidth).toBe("200px");
+    // jsdom applies no class-based CSS, so the bar's positioning must be an
+    // inline style the test can see directly (not getComputedStyle).
+    const bar = screen.getByTestId("region-edit-bar");
+    // The bar is absolutely positioned at the bottom, full width, inside the
+    // viewer pane (its containing block), semi-transparent so the model shows
+    // through.
+    expect(bar.style.position).toBe("absolute");
+    expect(bar.style.bottom).toBe("0px");
+    expect(bar.style.left).toBe("0px");
+    expect(bar.style.right).toBe("0px");
+    expect(bar.style.backgroundColor).toBe("rgba(0, 0, 0, 0.8)");
+    // The bar is a child of .viewer-pane (not a sibling below it).
+    expect(screen.getByTestId("viewer-pane").contains(bar)).toBe(true);
+
+    // The input carries the issue's exact placeholder, is present, and the
+    // thumbnail is retained inside the bar at a small size.
+    const input = screen.getByTestId("region-edit-input");
+    expect(input.getAttribute("placeholder")).toBe(
+      "Describe the change to this region…",
+    );
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-apply-btn")).toBeTruthy();
   });
 
   it("full corrected flow: lasso completed -> user sends chat text -> createRegionEdit called with that text as instruction and the resolved module ids -> resulting ChatMessage carries the matching .selection", async () => {
@@ -781,7 +823,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
     expect(client.createRegionEdit).not.toHaveBeenCalled();
 
@@ -813,7 +855,99 @@ describe("App region-selection (lasso) wiring", () => {
     });
 
     // The pending-selection affordance clears once attached to the sent message.
-    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
+  });
+
+  it("submitting the inline bar (Apply button) routes the instruction through handleSendMessage and fires createRegionEdit", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit").mockResolvedValue({
+      project_id: PROJECT.id,
+      status: "accepted",
+    } as RegionEditResult);
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [
+        { name: "wing_left", hitCount: 5 },
+        { name: "wing_right", hitCount: 2 },
+      ],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
+    });
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+
+    // Type into the BAR's own input (not the chat panel) and submit via the
+    // Apply button — must attach the pending selection and fire createRegionEdit
+    // exactly once through the shared handleSendMessage path.
+    fireEvent.change(screen.getByTestId("region-edit-input"), {
+      target: { value: "make the wing thinner" },
+    });
+    expect(screen.getByTestId("region-edit-apply-btn")).toBeEnabled();
+    fireEvent.click(screen.getByTestId("region-edit-apply-btn"));
+
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalledTimes(1);
+    });
+    await waitFor(() => {
+      expect(client.createRegionEdit).toHaveBeenCalledWith(
+        PROJECT.id,
+        expect.objectContaining({
+          module_ids: ["wing_left", "wing_right"],
+          view_id: "front",
+          instruction: "make the wing thinner",
+        }),
+      );
+    });
+    assertValidRegionEditRequest(
+      (client.createRegionEdit as ReturnType<typeof vi.fn>).mock.calls[0][1],
+    );
+    // The bar clears once the selection is attached and sent.
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
+  });
+
+  it("submitting the inline bar with whitespace-only input does NOT fire createRegionEdit and keeps the selection pending", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "createRegionEdit");
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+        "true",
+      );
+    });
+
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
+    });
+
+    // Whitespace-only draft: the Apply button is disabled (same guard as the
+    // chat send), so a submit cannot fire createRegionEdit, and the pending
+    // selection must not be consumed.
+    fireEvent.change(screen.getByTestId("region-edit-input"), {
+      target: { value: "   " },
+    });
+    expect(screen.getByTestId("region-edit-apply-btn")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("region-edit-apply-btn"));
+
+    expect(client.createRegionEdit).not.toHaveBeenCalled();
+    // The selection is still pending — a blocked submit must not consume it.
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
   });
 
   it("NEVER calls createRegionEdit with an empty or whitespace-only instruction", async () => {
@@ -834,7 +968,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     // ChatPanel's own submit handler already blocks empty/whitespace input
@@ -847,7 +981,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     expect(client.createRegionEdit).not.toHaveBeenCalled();
     // Selection is still pending — a blocked send must not have consumed it.
-    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
   });
 
   it("cancelling a pending selection clears it without attaching to the next message", async () => {
@@ -868,11 +1002,11 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     fireEvent.click(screen.getByTestId("pending-selection-cancel-btn"));
-    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
 
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "unrelated message" },
@@ -935,7 +1069,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByTestId("chat-input"), {
@@ -972,7 +1106,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByTestId("chat-input"), {
@@ -988,7 +1122,7 @@ describe("App region-selection (lasso) wiring", () => {
     await waitFor(() => {
       expect(screen.getByTestId("app-error").textContent).toContain("422 Unprocessable");
     });
-    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
   });
 
@@ -1023,7 +1157,7 @@ describe("App region-selection (lasso) wiring", () => {
     // in flight on a promise that won't resolve until we reject it below.
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "thin the left wing" },
@@ -1032,7 +1166,7 @@ describe("App region-selection (lasso) wiring", () => {
     await waitFor(() => expect(client.createRegionEdit).toHaveBeenCalledTimes(1));
 
     // Pending selection was cleared synchronously on send.
-    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
 
     // While A is still in flight, draw a NEW lasso — selection B
     // ("wing_right").
@@ -1042,7 +1176,7 @@ describe("App region-selection (lasso) wiring", () => {
     });
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     // NOW reject the stale request for A.
@@ -1089,7 +1223,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "thin the left wing" },
@@ -1101,10 +1235,10 @@ describe("App region-selection (lasso) wiring", () => {
     // by the user while A is still in flight.
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
     fireEvent.click(screen.getByTestId("pending-selection-cancel-btn"));
-    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
 
     // NOW A rejects.
     rejectFirst(new Error("stale 500"));
@@ -1112,8 +1246,8 @@ describe("App region-selection (lasso) wiring", () => {
       expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
     });
 
-    // The cancellation must stick — no pending-selection notice reappears.
-    expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
+    // The cancellation must stick — no pending-selection bar reappears.
+    expect(screen.queryByTestId("region-edit-bar")).toBeNull();
   });
 
   it("does NOT attach a selection to the chat message when there is no project to send it to", async () => {
@@ -1138,7 +1272,7 @@ describe("App region-selection (lasso) wiring", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByTestId("chat-input"), {
@@ -1159,7 +1293,7 @@ describe("App region-selection (lasso) wiring", () => {
         el.textContent?.includes("make the wing thinner"),
       ),
     ).toBe(false);
-    expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
   });
 
   it("a composite failure (getContext returning null) surfaces a notice and does not crash the app", async () => {
@@ -1286,7 +1420,7 @@ describe("App region-edit success feedback", () => {
 
     fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
     await waitFor(() => {
-      expect(screen.getByTestId("pending-selection-notice")).toBeTruthy();
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     });
 
     fireEvent.change(screen.getByTestId("chat-input"), {
