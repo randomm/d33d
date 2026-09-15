@@ -1058,7 +1058,9 @@ def _build_production_design_loop():
         return await default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
-            stated_dims=kwargs.get("stated_dims"),
+            stated_dims=kwargs.get("stated_dims")
+            if kwargs.get("stated_dims") is not None
+            else (0.0, 0.0, 0.0),
             render_fn=_render_fn,
             llm_fn=llm_fn,
             bbox_fn=bbox_fn,

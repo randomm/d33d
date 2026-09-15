@@ -896,7 +896,7 @@ def test_chat_returns_202_accepted_and_registers_event_source(app_with_versions)
     # bbox_fn, request — the same shape the finalize seam supplies).
     for key in ("photo", "stated_dims", "bbox_fn", "request"):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    assert captured["stated_dims"] == (10.0, 10.0, 10.0)
     assert callable(captured["bbox_fn"])
     assert captured["request"] == "make a 10mm box"
 

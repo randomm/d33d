@@ -52,6 +52,7 @@ __all__ = [
     "require_dimensions_confirmed",
     "resolution_questions",
     "resolve_tolerance_mm",
+    "stated_dims_from_message",
 ]
 
 #: The closed fit-type enum the protocol asks about. The spec pins slip
@@ -195,7 +196,14 @@ def _extract_stated(
             if v is not None:
                 out[axis] = v
 
-    # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm".
+    # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
+    # plus a size shorthand ("a 20 mm cube" / "a 10mm box") that states ONE
+    # dimension and is applied to all three axes (a stated cube/dim is the
+    # only defensible ground truth the loop can compare a rendered bbox
+    # against — ticket #91: the bbox gate must be satisfiable from a bare
+    # "Create a 20mm cube" first turn, which has no latest version yet).
+    # The axis-prefixed form ("W: 42") wins when both are present: the
+    # axis pass runs first and its value is never overwritten.
     if not all(a in out for a in DIMENSION_AXES):
         for turn in chat_history or []:
             text = str(turn)
@@ -211,6 +219,16 @@ def _extract_stated(
                     v = _coerce(m.group(1))
                     if v is not None:
                         out[axis] = v
+            if not out:
+                m = re.search(
+                    r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm?\b",
+                    text,
+                    re.IGNORECASE,
+                )
+                if m:
+                    v = _coerce(m.group(1))
+                    if v is not None:
+                        out = {axis: v for axis in DIMENSION_AXES}
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
@@ -224,6 +242,37 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
     return out
+
+
+def stated_dims_from_message(
+    message: str,
+    chat_history: list[str] | tuple[str, ...] | None = (),
+    explicit: dict[str, float] | None = None,
+) -> tuple[float, float, float] | None:
+    """The complete (W, D, H) triple stated in a chat turn, or ``None``.
+
+    Ticket #91's dimension source for the ``/chat`` caller path: the user's
+    own words, via the existing :func:`_extract_stated` pipeline (never a
+    new parser). ``message`` is the current turn (the newest text — the
+    extraction walks history oldest-first, so it must sit last); prior turns
+    are ``chat_history``; ``explicit`` is a caller-supplied dimension map
+    (the request's ``stated_dims`` field, keyed by axis) that the extraction
+    already ranks highest priority.
+
+    Returns ``None`` — NOT a zero triple — when fewer than all three axes
+    are stated. A caller that receives ``None`` must treat the bbox gate as
+    unmeasurable (abstain), never fabricate ``0.0`` targets (an unsatisfied
+    ``target <= 0`` hard-fail, ticket #91's original bug).
+    """
+    turns = [str(t) for t in (chat_history or ())] + [str(message)]
+    stated = _extract_stated(turns, explicit, None)
+    if all(axis in stated for axis in DIMENSION_AXES):
+        return (
+            float(stated["W"]),
+            float(stated["D"]),
+            float(stated["H"]),
+        )
+    return None
 
 
 def _last_user_turn(chat_history: list[str]) -> str:

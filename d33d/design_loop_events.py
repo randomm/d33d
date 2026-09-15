@@ -75,6 +75,40 @@ def photo_data_uri(source_photo_path: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def latest_version_stated_dims(
+    versions_service: Any, project_id: int
+) -> tuple[float, float, float] | None:
+    """The latest version's (W, D, H) as a fully-positive triple, or
+    ``None`` — ticket #91's fallback source (mirrors
+    ``create_region_edit``'s latest-version W/D/H read, but returns ``None``
+    instead of a zero triple when the dimensions are not KNOWN).
+
+    ``None`` is returned when there is no version, or when any of W/D/H is
+    missing/null or ``<= 0`` — an all-zero (or partial) triple must never
+    re-enter the bbox gate as a ``target <= 0`` hard-fail target (the
+    original #91 bug); the caller treats ``None`` as "no dimensions known"
+    and the gate abstains (``Score.bbox_abstained``).
+
+    ``create_region_edit`` does NOT use this helper — its deliberate
+    fresh-project ``(0.0, 0.0, 0.0)`` behavior ("the dimension gate
+    measures rather than fabricates") is behaviorally unchanged.
+    """
+    latest = versions_service.latest_version(project_id)
+    if latest is None:
+        return None
+    params = latest.get("params") or {}
+    triple: list[float] = []
+    for axis in ("W", "D", "H"):
+        try:
+            value = float(params.get(axis, 0.0))
+        except (TypeError, ValueError):
+            return None
+        triple.append(value)
+    if any(value <= 0 for value in triple):
+        return None
+    return (triple[0], triple[1], triple[2])
+
+
 def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     """Per-axis extents (mm) for the design-loop bbox gate, from a render.
 
@@ -285,6 +319,16 @@ async def run_design_loop_with_events(
     caller — the route — synchronously before the 202 response; the
     background task runs via asyncio and the DB may be closed by the time
     the loop starts).
+
+    ``stated_dims`` may be ``None`` ("no dimensions known" — the /chat
+    caller path, ticket #91). The adapter no longer substitutes
+    ``(0.0, 0.0, 0.0)`` here: a zero triple would feed the bbox gate an
+    unsatisfiable ``target <= 0`` target and hard-fail every candidate.
+    Callers that DO pass an explicit zero triple (``create_region_edit``'s
+    deliberate fresh-project behavior) keep it verbatim — that behavior is
+    behaviorally unchanged (the gate now abstains on an unknown target
+    instead of failing it; see ``d33d.design_loop.score``'s
+    ``bbox_abstained`` field).
     """
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -295,20 +339,22 @@ async def run_design_loop_with_events(
 
     # The full design-loop kwargs contract (the same shape the finalize
     # seam's ``_finalize_loop_kwargs`` builds — photo as a data URI,
-    # stated_dims from the request or the latest version's W/D/H, a real
-    # bbox_fn, and the hook's ``request`` guaranteed non-empty so an
-    # exhausted loop still archives to failures.jsonl). ``render_fn`` and
-    # ``llm_fn`` are ``None`` by contract: the production closure
-    # (``_build_production_design_loop``) builds its OWN ``render_fn``
-    # (``render_for_design_loop``) and ``llm_fn`` (from the live catalogue)
-    # and does not consume these kwargs; a future seam variant that DOES
-    # consume them would need to supply real callables (the ``None``
-    # placeholders are not a fallback — see the production seam's
-    # ``render_fn=render_for_design_loop`` hardcode).
+    # stated_dims from the caller — ``None`` when no dimensions are known,
+    # never a fabricated ``(0.0, 0.0, 0.0)``; the loop's bbox gate abstains
+    # on an unknown triple and records it in ``Score.bbox_abstained`` —
+    # ticket #91), a real bbox_fn, and the hook's ``request`` guaranteed
+    # non-empty so an exhausted loop still archives to failures.jsonl.
+    # ``render_fn`` and ``llm_fn`` are ``None`` by contract: the production
+    # closure (``_build_production_design_loop``) builds its OWN
+    # ``render_fn`` (``render_for_design_loop``) and ``llm_fn`` (from the
+    # live catalogue) and does not consume these kwargs; a future seam
+    # variant that DOES consume them would need to supply real callables
+    # (the ``None`` placeholders are not a fallback — see the production
+    # seam's ``render_fn=render_for_design_loop`` hardcode).
     kwargs: dict[str, Any] = {
         "photo": photo,
         "chat_history": chat_history,
-        "stated_dims": stated_dims or (0.0, 0.0, 0.0),
+        "stated_dims": stated_dims,
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
@@ -408,6 +454,7 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
+    "latest_version_stated_dims",
     "photo_data_uri",
     "run_design_loop_with_events",
 ]
