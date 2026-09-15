@@ -835,9 +835,11 @@ def create_app(
           the stored reference photo); the fixed transparent-PNG constant
           is the fallback only if the (schema-required) field were ever
           absent.
-        - ``stated_dims`` = the latest version's W/D/H (0.0 for a fresh
-          project — the dimension gate measures rather than fabricates);
-          there is no client override for region edits.
+        - ``stated_dims`` = the latest version's W/D/H (a fresh project
+          yields ``(0.0, 0.0, 0.0)`` — the gate then ABSTAINS on the
+          unknown target rather than measuring it, recorded distinctly as
+          ``Score.bbox_abstained``; ticket #91); there is no client
+          override for region edits.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
         - ``request`` = the instruction prefixed with the resolved
@@ -882,8 +884,12 @@ def create_app(
             else EMPTY_PHOTO_DATA_URI
         )
         # Stated dims: the latest version's W/D/H (no client override —
-        # a region edit is a scoped directive). Fresh project → (0,0,0)
-        # so the dimension gate measures rather than fabricates.
+        # a region edit is a scoped directive). Fresh project (or a version
+        # with missing/zero W/D/H) → (0,0,0): the bbox gate ABSTAINS on the
+        # unknown target (the design loop records it as
+        # Score.bbox_abstained, ticket #91) — the gate measures rather than
+        # fabricates, and an unmeasurable gate must not hard-fail every
+        # candidate.
         latest = app.state.versions.latest_version(project_id)
         p = latest["params"] if latest is not None else {}
         stated_dims = (
@@ -1058,7 +1064,9 @@ def _build_production_design_loop():
         return await default_run_design_loop_hook(path=app_state.failures_jsonl_path)(
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
-            stated_dims=kwargs.get("stated_dims"),
+            stated_dims=kwargs.get("stated_dims")
+            if kwargs.get("stated_dims") is not None
+            else (0.0, 0.0, 0.0),
             render_fn=_render_fn,
             llm_fn=llm_fn,
             bbox_fn=bbox_fn,

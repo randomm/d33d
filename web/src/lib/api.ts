@@ -613,9 +613,12 @@ export class ApiClient {
    * AFTER this call resolves (the event source is registered synchronously
    * before the 202 response, so the stream will find it).
    *
-   * `statedDims` is the (W, D, H) triple in mm — the ground-truth
-   * dimensions. Absent → the server falls back to the latest version's
-   * W/D/H (0.0 default), never a 422.
+   * `statedDims` is an optional (W, D, H) triple in mm. The SPA never
+   * sends it (see the call site in App.tsx); when absent the SERVER
+   * resolves dimensions itself — first the dimensions stated in the
+   * message text, then the latest version's W/D/H — and when neither
+   * yields a triple the design loop's bbox gate abstains rather than
+   * fabricating a (0, 0, 0) target (issue #91). Never a 422.
    *
    * `chatHistory` is the list of prior user messages (the SPA sends the
    * last 10). Absent → empty tuple.

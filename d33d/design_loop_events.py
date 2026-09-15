@@ -75,6 +75,47 @@ def photo_data_uri(source_photo_path: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def latest_version_stated_dims(
+    versions_service: Any, project_id: int
+) -> tuple[float, float, float] | None:
+    """The latest version's (W, D, H) as a fully-positive triple, or
+    ``None`` — ticket #91's fallback source (mirrors
+    ``create_region_edit``'s latest-version W/D/H read, but returns ``None``
+    instead of a zero triple when the dimensions are not KNOWN).
+
+    ``None`` is returned when there is no version, or when any of W/D/H is
+    missing/null or ``<= 0`` — an all-zero (or partial) triple must never
+    re-enter the bbox gate as a ``target <= 0`` hard-fail target (the
+    original #91 bug); the caller treats ``None`` as "no dimensions known"
+    and the gate abstains (``Score.bbox_abstained``).
+
+    ``create_region_edit`` does NOT use this helper — it builds its own
+    ``float(params.get(axis, 0.0))`` triple, which on a fresh project
+    (or a version whose W/D/H are missing/null/zero) is ``(0.0, 0.0, 0.0)``.
+    Note: the bbox gate NOW ABSTAINS on such a triple (``_bbox_within_tolerance``
+    returns True on a ``target <= 0`` axis, ticket #91) and records the
+    abstention in ``Score.bbox_abstained`` — where that route previously
+    hard-FAILED every candidate. The abstain is the correct semantics for
+    region edits: it is the behavior that route's own comment ("the
+    dimension gate measures rather than fabricates") was always intended
+    to describe.
+    """
+    latest = versions_service.latest_version(project_id)
+    if latest is None:
+        return None
+    params = latest.get("params") or {}
+    triple: list[float] = []
+    for axis in ("W", "D", "H"):
+        try:
+            value = float(params.get(axis, 0.0))
+        except (TypeError, ValueError):
+            return None
+        triple.append(value)
+    if any(value <= 0 for value in triple):
+        return None
+    return (triple[0], triple[1], triple[2])
+
+
 def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     """Per-axis extents (mm) for the design-loop bbox gate, from a render.
 
@@ -285,6 +326,22 @@ async def run_design_loop_with_events(
     caller — the route — synchronously before the 202 response; the
     background task runs via asyncio and the DB may be closed by the time
     the loop starts).
+
+    ``stated_dims`` may be ``None`` ("no dimensions known" — the /chat
+    caller path, ticket #91). The adapter no longer substitutes
+    ``(0.0, 0.0, 0.0)`` here: a fabricated zero triple is never a gate
+    target.
+
+    The bbox gate itself changed for ALL callers (ticket #91): it now
+    ABSTAINS on an unknown (``<= 0``) target instead of hard-failing it,
+    and records the abstention distinctly in ``d33d.design_loop.score``'s
+    ``bbox_abstained`` field. This includes ``create_region_edit``, which
+    still deliberately passes a ``(0.0, 0.0, 0.0)`` triple on a fresh
+    project — its bbox bit flipped from FAIL to ABSTAIN (recorded as
+    ``Score.bbox_abstained``). The abstain is the correct semantics for
+    that route: its own comment says "the dimension gate measures rather
+    than fabricates", which IS abstain semantics — the old hard-fail
+    contradicted it.
     """
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -295,20 +352,22 @@ async def run_design_loop_with_events(
 
     # The full design-loop kwargs contract (the same shape the finalize
     # seam's ``_finalize_loop_kwargs`` builds — photo as a data URI,
-    # stated_dims from the request or the latest version's W/D/H, a real
-    # bbox_fn, and the hook's ``request`` guaranteed non-empty so an
-    # exhausted loop still archives to failures.jsonl). ``render_fn`` and
-    # ``llm_fn`` are ``None`` by contract: the production closure
-    # (``_build_production_design_loop``) builds its OWN ``render_fn``
-    # (``render_for_design_loop``) and ``llm_fn`` (from the live catalogue)
-    # and does not consume these kwargs; a future seam variant that DOES
-    # consume them would need to supply real callables (the ``None``
-    # placeholders are not a fallback — see the production seam's
-    # ``render_fn=render_for_design_loop`` hardcode).
+    # stated_dims from the caller — ``None`` when no dimensions are known,
+    # never a fabricated ``(0.0, 0.0, 0.0)``; the loop's bbox gate abstains
+    # on an unknown triple and records it in ``Score.bbox_abstained`` —
+    # ticket #91), a real bbox_fn, and the hook's ``request`` guaranteed
+    # non-empty so an exhausted loop still archives to failures.jsonl.
+    # ``render_fn`` and ``llm_fn`` are ``None`` by contract: the production
+    # closure (``_build_production_design_loop``) builds its OWN
+    # ``render_fn`` (``render_for_design_loop``) and ``llm_fn`` (from the
+    # live catalogue) and does not consume these kwargs; a future seam
+    # variant that DOES consume them would need to supply real callables
+    # (the ``None`` placeholders are not a fallback — see the production
+    # seam's ``render_fn=render_for_design_loop`` hardcode).
     kwargs: dict[str, Any] = {
         "photo": photo,
         "chat_history": chat_history,
-        "stated_dims": stated_dims or (0.0, 0.0, 0.0),
+        "stated_dims": stated_dims,
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
@@ -388,6 +447,19 @@ async def run_design_loop_with_events(
                     name: _data_uri_from_bytes(raw, "image/png")
                     for name, raw in view_bytes.items()
                 }
+        # Ticket #91: propagate the bbox abstention to the wire so a
+        # consumer can never mistake an abstained pass for a verified
+        # one — ``Score.bbox_abstained`` exists on the score, but a
+        # flag that stops at the Score object is not a safeguard: every
+        # pass frame carries the flag (False for a fully measured pass,
+        # True when any stated axis was unknown), in both the
+        # version-created progress frame and the terminal done frame.
+        # (The failures.jsonl archive needs no field: it fires ONLY on
+        # ``exhausted`` results, and an abstained bbox bit is always
+        # True, so an abstained gate never lands there as a failure —
+        # it can only make a loop more pass-prone.)
+        score = getattr(best, "score", None)
+        abstained = bool(getattr(score, "bbox_abstained", False))
         version_id = await _resolve_version_create(
             app, project_id, result, user_message
         )
@@ -397,10 +469,11 @@ async def run_design_loop_with_events(
                 "version_id": version_id,
             }
             vc_frame.update(frame_fields)
+            vc_frame["bbox_abstained"] = abstained
             yield ("progress", vc_frame)
         scad = getattr(best, "scad_source", None)
         yield ("token", {"text": scad if isinstance(scad, str) else ""})
-        yield ("done", {"message": _result_message(result)})
+        yield ("done", {"message": _result_message(result), "bbox_abstained": abstained})
     else:
         yield ("error", {"message": _result_message(result)})
 
@@ -408,6 +481,7 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
+    "latest_version_stated_dims",
     "photo_data_uri",
     "run_design_loop_with_events",
 ]

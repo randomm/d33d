@@ -52,6 +52,7 @@ __all__ = [
     "require_dimensions_confirmed",
     "resolution_questions",
     "resolve_tolerance_mm",
+    "stated_dims_from_message",
 ]
 
 #: The closed fit-type enum the protocol asks about. The spec pins slip
@@ -195,7 +196,30 @@ def _extract_stated(
             if v is not None:
                 out[axis] = v
 
-    # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm".
+    # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
+    # plus an equal-axis size shorthand ("a 20 mm cube" / "a 10mm box"
+    # / "a 15mm sphere") — the ONLY chat text allowed to fill all three
+    # axes from ONE number, and ONLY when the text also names an
+    # equal-axis shape (cube/box/sphere/ball: all three edges equal),
+    # in explicit millimetres ("mm" required — a bare "m"/meters must
+    # never be read as mm). A single number with no equal-axis shape
+    # ("make a 20mm hole in the lid", "a 20mm tall vase", "add a 5mm
+    # fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE or a
+    # one-axis measurement — filling three axes from it would fabricate
+    # a part envelope the user never stated, the exact fabricate-don't-
+    # measure anti-pattern ticket #91 removes: the gate would then run
+    # against a wrong target (spurious FAIL, or worse, spurious PASS),
+    # instead of abstaining (None) and leaving the gate unmeasurable.
+    # A stated equal-axis shape is the only defensible ground truth the
+    # loop can compare a rendered bbox against on a bare "Create a 20mm
+    # cube" first turn (no latest version yet).
+    # Precedence inside this pass: the axis-prefixed form ("W: 42") wins
+    # over the shorthand — the shorthand only fills axes the axis pass
+    # left empty, and it does NOT run mid-turn once an axis-prefixed
+    # value was found (deliberate: a turn like "W is 30mm... make it a
+    # 20mm cube" keeps the axis-prefixed value and never completes the
+    # triple from the shorthand — the gate abstains rather than mixing
+    # sources within one turn).
     if not all(a in out for a in DIMENSION_AXES):
         for turn in chat_history or []:
             text = str(turn)
@@ -211,6 +235,17 @@ def _extract_stated(
                     v = _coerce(m.group(1))
                     if v is not None:
                         out[axis] = v
+            if not out:
+                m = re.search(
+                    r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm\b"
+                    r"\s+(?:cube|box|sphere|ball)\b",
+                    text,
+                    re.IGNORECASE,
+                )
+                if m:
+                    v = _coerce(m.group(1))
+                    if v is not None:
+                        out = {axis: v for axis in DIMENSION_AXES}
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
@@ -224,6 +259,37 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
     return out
+
+
+def stated_dims_from_message(
+    message: str,
+    chat_history: list[str] | tuple[str, ...] | None = (),
+    explicit: dict[str, float] | None = None,
+) -> tuple[float, float, float] | None:
+    """The complete (W, D, H) triple stated in a chat turn, or ``None``.
+
+    Ticket #91's dimension source for the ``/chat`` caller path: the user's
+    own words, via the existing :func:`_extract_stated` pipeline (never a
+    new parser). ``message`` is the current turn (the newest text — the
+    extraction walks history oldest-first, so it must sit last); prior turns
+    are ``chat_history``; ``explicit`` is a caller-supplied dimension map
+    (the request's ``stated_dims`` field, keyed by axis) that the extraction
+    already ranks highest priority.
+
+    Returns ``None`` — NOT a zero triple — when fewer than all three axes
+    are stated. A caller that receives ``None`` must treat the bbox gate as
+    unmeasurable (abstain), never fabricate ``0.0`` targets (an unsatisfied
+    ``target <= 0`` hard-fail, ticket #91's original bug).
+    """
+    turns = [str(t) for t in (chat_history or ())] + [str(message)]
+    stated = _extract_stated(turns, explicit, None)
+    if all(axis in stated for axis in DIMENSION_AXES):
+        return (
+            float(stated["W"]),
+            float(stated["D"]),
+            float(stated["H"]),
+        )
+    return None
 
 
 def _last_user_turn(chat_history: list[str]) -> str:

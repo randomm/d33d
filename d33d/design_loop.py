@@ -145,6 +145,12 @@ class Score:
     bits: tuple[bool, bool, bool, bool]
     rank: int
     tiebreak: tuple[bool, bool, bool, bool]
+    #: True iff the bbox bit is True and ANY stated axis is unknown
+    #: (``<= 0``) and the gate ABSTAINED on it (ticket #91) — including
+    #: partial triples where the known axes happen to match: an unknown
+    #: axis was never measured, so the pass must carry the flag even when
+    #: every measured axis passed. Never True on an all-known triple.
+    bbox_abstained: bool = False
 
     @property
     def ok(self) -> bool:
@@ -221,12 +227,21 @@ GATE_REASON_BITS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, float, float]) -> bool:
+def _bbox_within_tolerance(
+    bbox: BboxInfo, stated: tuple[float, float, float]
+) -> bool:
     """True iff every rendered axis is within max(1%, 0.5 mm) of the
-    corresponding stated dimension (order x, y, z)."""
+    corresponding stated dimension (order x, y, z).
+
+    A stated axis of ``<= 0`` means that dimension is UNKNOWN (the caller
+    normalizes absent/zero dimensions into the triple — ticket #91), so
+    the gate ABSTAINS (True): an unmeasurable gate must not hard-fail
+    every candidate. The abstention is recorded DISTINCTLY by
+    :func:`score`'s ``bbox_abstained`` field — it is never a vacuous,
+    unmarked pass."""
     for extent, target in zip((bbox.x, bbox.y, bbox.z), stated):
         if target <= 0:
-            return False
+            return True
         tol = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
         if abs(extent - target) > tol:
             return False
@@ -271,6 +286,17 @@ def score(
 
     Ranked by popcount; ties break on the raw bitvector tuple
     (deterministic, earlier bits first).
+
+    ``Score.bbox_abstained`` (ticket #91) marks a bbox bit that is True
+    while any stated dimension is unknown (a zero/absent axis —
+    :func:`_bbox_within_tolerance` abstains on an unknown target). The flag
+    is raised whenever ANY stated axis is unknown and the bit is True (not
+    only when the bit is true merely because of the abstention): a partial
+    triple whose known axes happen to match still leaves an unmeasured
+    axis, and that pass must be distinguishable from a fully measured one.
+    It is a SEPARATE field, not a fifth bit, so the bit ordering, the
+    ``tiebreak`` tuple, and ``GATE_REASON_BITS`` names are all unchanged
+    while the abstention stays distinguishable from a measured pass.
     """
     bits = (
         render.error_class == "ok",
@@ -278,7 +304,16 @@ def score(
         bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
         _named_params_present(scad_source),
     )
-    return Score(bits=bits, rank=sum(bits), tiebreak=bits)
+    # An abstained axis is ANY unknown target, independent of whether the
+    # other (measured) axes happened to pass — a partial triple whose known
+    # axes match still carries an unmeasured axis (ticket #91 round-2: the
+    # flag must be True, never left to bit 2's happenstance).
+    bbox_abstained = (
+        bbox is not None and bits[2] and any(t <= 0 for t in stated_dims)
+    )
+    return Score(
+        bits=bits, rank=sum(bits), tiebreak=bits, bbox_abstained=bbox_abstained
+    )
 
 
 def no_improvement(prev: Score, current: Score) -> bool:
@@ -317,11 +352,30 @@ def _dim_params(
     return out
 
 
+def _dim_axis(value: float) -> str:
+    """The ``:g`` rendering of one stated-dimension axis, or ``not
+    specified`` when the axis is unknown (``<= 0`` — ticket #91 normalizes
+    absent dimensions into the triple, so zero IS the "unknown" marker)."""
+    if value > 0:
+        return f"{value:g}"
+    return "not specified"
+
+
+def _dim_axis_list(stated: tuple[float, float, float]) -> str:
+    # Render W=/D=/H= with ``not specified`` on any unknown axis: a dimension
+    # the user never stated is never rendered as a number (it must not read
+    # as a measured zero, ticket #91).
+    return ", ".join(
+        f"{name}={_dim_axis(value)}"
+        for name, value in zip(("W", "D", "H"), stated)
+    )
+
+
 def _design_system(stated: tuple[float, float, float]) -> str:
     """Short imperative design-role system prompt (neutral delimiters)."""
     return (
         "You are a parametric CAD designer. "
-        f"Ground-truth dimensions in mm: W={stated[0]:g}, D={stated[1]:g}, H={stated[2]:g}. "
+        f"Ground-truth dimensions in mm: {_dim_axis_list(stated)}. "
         "Never invent a fit-critical number. Every dimension and any FDM "
         "clearance is a named parameter, never an inline literal. "
         "Reply with exactly one fenced JSON block and nothing else."
@@ -342,7 +396,7 @@ def _design_messages(
     for turn in chat_history:
         lines.append(f"chat: {turn}")
     lines.append(
-        f"Reference dimensions (mm, ground truth): W={stated[0]:g}, D={stated[1]:g}, H={stated[2]:g}"
+        f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}"
     )
     lines.append(
         "Emit parametric OpenSCAD. Every stated dimension and any FDM "
@@ -477,7 +531,7 @@ async def run_design_loop_async(
     *,
     photo: str,
     chat_history: Sequence[str] = (),
-    stated_dims: tuple[float, float, float],
+    stated_dims: tuple[float, float, float] | None,
     render_fn: RenderFn,
     llm_fn: LLMFn,
     defines: dict[str, str] | None = None,
@@ -488,14 +542,23 @@ async def run_design_loop_async(
     """Run the bounded iterate-and-score design loop (async core).
 
     ``photo`` is the reference image (data URI / URL). ``stated_dims`` is
-    the ground-truth (W, D, H) triple in mm — never estimated.
-    ``render_fn(scad, defines) -> RenderResult`` and ``llm_fn(role,
-    messages, system) -> LLMResult`` are injected (dependency injection, the
-    same testable pattern as ``d33d.render_worker``); ``defines`` carries
-    extra named parameters (e.g. FDM clearances) into both the render and
-    the design prompt. ``bbox_fn`` extracts per-axis extents from a render
-    (``None`` → the bbox gate fails, e.g. when the render isn't ``ok``).
+    the ground-truth (W, D, H) triple in mm — never estimated. ``None``
+    (or a zero/absent axis inside the triple) means "no dimensions known":
+    the bbox gate ABSTAINS (``Score.bbox_abstained``) instead of hard-
+    failing on a ``target <= 0`` target — an unmeasurable gate must not
+    fail every candidate (ticket #91). ``render_fn(scad, defines)
+    -> RenderResult`` and ``llm_fn(role, messages, system) -> LLMResult``
+    are injected (dependency injection, the same testable pattern as
+    ``d33d.render_worker``); ``defines`` carries extra named parameters
+    (e.g. FDM clearances) into both the render and the design prompt.
+    ``bbox_fn`` extracts per-axis extents from a render (``None`` → the
+    bbox gate fails, e.g. when the render isn't ``ok``).
     """
+    # Normalize "no dimensions known" (None or a zero/absent axis) into the
+    # triple itself: the prompt and the defines map must never carry a
+    # fabricated value, and the bbox gate reads abstention off the same
+    # triple (ticket #91).
+    stated_dims = stated_dims if stated_dims is not None else (0.0, 0.0, 0.0)
     defines_map = _dim_params(stated_dims, defines or {})
 
     repair: dict[str, Any] | None = None

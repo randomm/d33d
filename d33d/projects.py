@@ -30,6 +30,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
+from d33d.design_loop_events import (
+    latest_version_stated_dims,
+    photo_data_uri,
+    run_design_loop_with_events,
+)
+from d33d.dimension_protocol import stated_dims_from_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -126,10 +132,21 @@ class ChatRequest(BaseModel):
     """Body of ``POST /api/projects/{id}/chat`` (issue #54).
 
     ``message`` is the user's chat text (the design-loop request text).
-    ``stated_dims`` is the (W, D, H) triple in mm — the ground-truth
-    dimensions; absent → the server falls back to the latest version's
-    W/D/H (0.0 default), never a 422. ``chat_history`` is the list of
-    prior user messages (the SPA sends the last 10); absent → empty tuple.
+    ``stated_dims`` is an optional (W, D, H) triple in mm; when present it
+    is passed to the design loop verbatim. When absent (the SPA never
+    sends the field), the server resolves dimensions itself — it does NOT
+    depend on the client supplying it (ticket #91):
+
+    1. dimensions stated in the user's own message, via the existing
+       ``d33d.dimension_protocol`` extraction (``stated_dims_from_message``);
+    2. else the latest version's W/D/H (``latest_version_stated_dims`` —
+       the same fallback the finalize seam uses);
+    3. else ``None`` — "no dimensions known": the loop's bbox gate
+       ABSTAINS (``Score.bbox_abstained``) instead of hard-failing on a
+       fabricated ``(0.0, 0.0, 0.0)`` target (the bug this ticket fixes).
+
+    ``chat_history`` is the list of prior user messages (the SPA sends the
+    last 10); absent → empty tuple.
     """
 
     message: str
@@ -278,16 +295,31 @@ def create_projects_router() -> APIRouter:
         if project_id in inflight:
             raise HTTPException(status_code=409, detail="a design loop is already in flight")
 
-        # stated_dims: from the request body, or the latest version's W/D/H
-        # (0.0 default) — the same fallback the finalize seam uses. The
-        # adapter also guards ``None`` → (0.0, 0.0, 0.0) so the hook's
-        # ``FailureEvent.request`` is never empty.
-        stated_dims = (
-            tuple(float(d) for d in body.stated_dims)
-            if body.stated_dims is not None
-            else None
-        )
+        # Resolve the loop's stated dimensions (ticket #91), in strict
+        # precedence order — the SPA never sends ``stated_dims`` (it posts
+        # only ``message`` + ``chat_history``), so a client-absent value
+        # must not silently become an unsatisfiable (0,0,0) gate target:
+        #   1. the user's own message, via the existing dimension_protocol
+        #      extraction (``stated_dims_from_message`` reuses
+        #      ``_extract_stated`` — never a new parser);
+        #   2. else the latest version's W/D/H (``latest_version_stated_dims``
+        #      — the same fallback the finalize seam uses); a version with
+        #      null/zero/partial W/D/H yields None, not a zero triple;
+        #   3. else None — the loop's bbox gate ABSTAINS (recorded
+        #      distinctly in ``Score.bbox_abstained``); it never receives
+        #      (0.0, 0.0, 0.0) from this route.
         chat_history = tuple(body.chat_history or ())
+
+        if body.stated_dims is not None:
+            stated: tuple[float, float, float] | None = tuple(
+                float(d) for d in body.stated_dims
+            )
+        else:
+            stated = stated_dims_from_message(body.message, chat_history)
+            if stated is None:
+                stated = latest_version_stated_dims(
+                    app.state.versions, project_id
+                )
 
         # Photo: read the project's stored photo NOW (synchronously, before
         # the 202 response) — the background task runs via asyncio and the
@@ -295,8 +327,6 @@ def create_projects_router() -> APIRouter:
         # or a closed connection). The photo is captured here as a data URI
         # (MIME from the extension; missing file → the fixed 1x1
         # transparent-PNG constant).
-        from d33d.design_loop_events import photo_data_uri
-
         photo = photo_data_uri(row.get("source_photo_path"))
 
         # Register the event source synchronously BEFORE the 202 response
@@ -313,13 +343,11 @@ def create_projects_router() -> APIRouter:
         # inflight flag is set here (synchronously, before the 202
         # response) and cleared in the SSE endpoint's ``finally`` when the
         # generator is exhausted (or an SSE client disconnects).
-        from d33d.design_loop_events import run_design_loop_with_events
-
         events = run_design_loop_with_events(
             app,
             project_id,
             user_message=body.message,
-            stated_dims=stated_dims,
+            stated_dims=stated,
             chat_history=chat_history,
             photo=photo,
             request_text=body.message,
