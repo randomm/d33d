@@ -128,6 +128,12 @@ export default function App({ renders = [], client }: AppProps) {
   const [streamModelData, setStreamModelData] = useState<ArrayBuffer | null>(null);
   const [moduleGroup, setModuleGroup] = useState<Object3D | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  // Free-text instruction typed into the inline bar while a lasso selection
+  // is pending. Kept in local state (not the chat input) so the bar's own
+  // Enter/Apply can submit it through the same handleSendMessage path the
+  // chat panel uses. Reset on every lasso completion/cancel/submit so a
+  // stale draft never leaks into a later selection's instruction.
+  const [regionBarText, setRegionBarText] = useState("");
   // The viewer's mounted data + format, derived ONCE from the source-of-
   // truth pair (streamModelData / moduleFixtureData) so the "which source
   // is mounted" decision lives in one place, not in JSX.
@@ -287,6 +293,7 @@ export default function App({ renders = [], client }: AppProps) {
         const markedPngBase64 = compositeMarkedPng(canvas, event.points, cssSize.x, cssSize.y);
 
         setSelectionNotice(null);
+        setRegionBarText("");
 
         // The server requires a non-empty free-text `instruction`
         // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
@@ -314,6 +321,7 @@ export default function App({ renders = [], client }: AppProps) {
   const handleCancelPendingSelection = useCallback(() => {
     pendingSelectionGenerationRef.current += 1;
     setPendingSelection(null);
+    setRegionBarText("");
   }, []);
 
   // Create the (single, default) project on mount. Once it resolves,
@@ -620,6 +628,20 @@ export default function App({ renders = [], client }: AppProps) {
     [projectId, apiClient, pendingSelection, messages, handleStreamViewerData],
   );
 
+  // The inline bar's submit path — routes the typed instruction through the
+  // SAME handleSendMessage the chat panel uses, so the pending selection is
+  // attached and createRegionEdit fires exactly once, with the same
+  // empty/whitespace guard, generation race-guard, and error handling as a
+  // chat send (no duplicated request logic). handleSendMessage trims the
+  // text; a whitespace-only draft therefore also cannot fire a request, and
+  // an empty draft never even reaches it (guard below).
+  const handleRegionBarSubmit = useCallback(() => {
+    const text = regionBarText;
+    if (text.trim().length === 0) return;
+    setRegionBarText("");
+    handleSendMessage(text);
+  }, [regionBarText, handleSendMessage]);
+
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
     // Photo upload success — the photo path is now stored server-side.
     // The chat panel picks up the new photo context on next interaction.
@@ -758,7 +780,14 @@ export default function App({ renders = [], client }: AppProps) {
             position: "relative",
             width: VIEWER_WIDTH,
             height: VIEWER_HEIGHT,
+            // flexShrink 0 pins this pane's box: a tall version-tail-pane
+            // above can no longer compress the 600x400 containing block that
+            // the lasso overlay (absolute, inset 0) and the inline region
+            // bar (absolute, bottom 0) are positioned against — their
+            // coordinate space stays locked to the canvas regardless of how
+            // much history the side rail grows (issue #76).
             flex: "0 0 auto",
+            flexShrink: 0,
             overflow: "hidden",
             boxSizing: "border-box",
           }}
@@ -785,38 +814,118 @@ export default function App({ renders = [], client }: AppProps) {
             onLassoCompleted={handleLassoCompleted}
             disabled={moduleGroup === null}
           />
+          {/* Inline region bar (issue #76) — the pending-selection affordance
+              relocated from a sibling-below card into .viewer-pane itself:
+              absolute, bottom 0, full width, semi-transparent so the model
+              shows through. Renders ONLY while a selection is pending —
+              with pendingSelection null it is absent from the DOM, so it can
+              never block the lasso overlay's clicks or cover the canvas.
+              Enter or Apply submits through the SAME handleSendMessage path
+              as the chat panel (same guard, attach, and race-guard); the
+              draft lives in local state, and Escape or Cancel clears it and
+              the selection together. The thumbnail stays small inside the
+              bar — the lasso polygon on the canvas is the primary visual
+              reference, the crop is the secondary one. */}
+          {pendingSelection && (
+            <form
+              className="region-edit-bar"
+              data-testid="region-edit-bar"
+              role="group"
+              style={{
+                position: "absolute",
+                bottom: 0,
+                left: 0,
+                right: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+                padding: "8px 12px",
+                backgroundColor: "rgba(0, 0, 0, 0.8)",
+                boxSizing: "border-box",
+                zIndex: 10,
+              }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleRegionBarSubmit();
+              }}
+            >
+              <img
+                src={pendingSelection.thumbnail}
+                alt={`pending selection on ${pendingSelection.viewId}`}
+                className="pending-selection-thumbnail"
+                data-testid="pending-selection-thumbnail"
+                style={{
+                  width: 32,
+                  height: 32,
+                  maxWidth: 200,
+                  objectFit: "cover",
+                  flex: "0 0 auto",
+                }}
+              />
+              <input
+                type="text"
+                className="region-edit-input"
+                data-testid="region-edit-input"
+                placeholder="Describe the change to this region…"
+                value={regionBarText}
+                onChange={(e) => setRegionBarText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape") handleCancelPendingSelection();
+                }}
+                autoFocus
+                style={{
+                  flex: "1 1 auto",
+                  minWidth: 0,
+                  padding: "4px 8px",
+                  border: "none",
+                  borderRadius: 4,
+                  backgroundColor: "rgba(255, 255, 255, 0.95)",
+                  color: "#1f2328",
+                }}
+              />
+              <button
+                type="submit"
+                className="region-edit-apply-btn"
+                data-testid="region-edit-apply-btn"
+                aria-label="Apply"
+                disabled={regionBarText.trim().length === 0}
+                style={{
+                  flex: "0 0 auto",
+                  padding: "4px 12px",
+                  border: "none",
+                  borderRadius: 4,
+                  backgroundColor: "#0969da",
+                  color: "#ffffff",
+                  cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
+                  opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
+                }}
+              >
+                Apply
+              </button>
+              <button
+                type="button"
+                className="region-edit-cancel-btn"
+                data-testid="pending-selection-cancel-btn"
+                aria-label="Cancel selection"
+                onClick={handleCancelPendingSelection}
+                style={{
+                  flex: "0 0 auto",
+                  padding: "4px 12px",
+                  border: "none",
+                  borderRadius: 4,
+                  backgroundColor: "rgba(255, 255, 255, 0.2)",
+                  color: "#ffffff",
+                  cursor: "pointer",
+                }}
+              >
+                Cancel
+              </button>
+            </form>
+          )}
         </div>
         {selectionNotice && (
           <div className="selection-notice" data-testid="selection-notice" role="status">
             {selectionNotice}
-          </div>
-        )}
-        {pendingSelection && (
-          <div
-            className="pending-selection-notice"
-            data-testid="pending-selection-notice"
-            role="status"
-            style={{
-              border: "2px solid #d0d7de",
-              backgroundColor: "#f6f8fa",
-              padding: "8px",
-            }}
-          >
-            <span>Region selected — describe the change below.</span>
-            <img
-              src={pendingSelection.thumbnail}
-              alt={`pending selection on ${pendingSelection.viewId}`}
-              className="pending-selection-thumbnail"
-              data-testid="pending-selection-thumbnail"
-              style={{ maxWidth: "200px" }}
-            />
-            <button
-              type="button"
-              data-testid="pending-selection-cancel-btn"
-              onClick={handleCancelPendingSelection}
-            >
-              Cancel selection
-            </button>
           </div>
         )}
         <div className="validation-pane" data-testid="validation-pane">
