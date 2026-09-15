@@ -142,6 +142,45 @@ def _data_uri_from_bytes(raw: bytes, mime: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def _artifact_bytes_from_path(render: Any) -> tuple[bytes | None, dict[str, bytes]]:
+    """Read the best render's STL + view bytes from its DURABLE artifact
+    directory (the per-render directory the worker persists to INSIDE its
+    ``tempfile.TemporaryDirectory`` with-block before the block exits —
+    issue #72; the directory survives past the tempdir teardown because the
+    copy happened inside it).
+
+    The durable path rides on the render object as a duck-typed
+    ``render_artifact_path`` attribute — never a change to the frozen
+    ``RenderResult`` contract (the worker's workstream attaches it; a test
+    stub or a future worker may set it). ``None`` for either field means
+    "no usable durable source" — the caller then falls back to the
+    in-memory byte cache (``stl_bytes``/``view_bytes``).
+
+    Views follow the partial-omit rule: a directory that yields fewer than
+    the 6 fixed VIEWS filenames (a failed copy, a missing file) is treated
+    as "no views" (empty dict) — a consumer cannot distinguish a 5-of-6
+    map from a complete one, so the frame omits the field entirely rather
+    than emit fewer than 6.
+    """
+    artifact_path = getattr(render, "render_artifact_path", None)
+    if not isinstance(artifact_path, str) or not artifact_path:
+        return None, {}
+    artifact_dir = Path(artifact_path)
+    if not artifact_dir.is_dir():
+        return None, {}
+    stl_bytes = _read_artifact_bytes(str(artifact_dir / "model.stl"))
+    view_bytes: dict[str, bytes] = {}
+    for v in artifact_dir.iterdir():
+        if v.is_file() and v.suffix == ".png":
+            b = _read_artifact_bytes(str(v))
+            if b is not None:
+                view_bytes[v.name] = b
+    if len(view_bytes) != 6:
+        # Partial views → "no views" (the frame omits the field entirely).
+        view_bytes = {}
+    return stl_bytes, view_bytes
+
+
 def cache_render_artifact_bytes(render: Any) -> None:
     """Cache the best render's STL + views bytes on the render object so
     the SSE adapter (which runs AFTER the render worker's tempdir is torn
@@ -382,21 +421,30 @@ async def run_design_loop_with_events(
         yield ("progress", {"step": "design-loop-pass"})
         best = getattr(result, "best", None)
         # The best candidate's OWN render artifacts (the best iteration's
-        # STL + 6 views — never a later iteration's) were cached into
-        # memory by the caller's explicit post-render step (cache_render_artifact_bytes,
-        # run on the sync render path — the only place the bytes are
-        # reachable after the render worker's tempdir is torn down).
+        # STL + 6 views — never a later iteration's) are read from the
+        # Durable artifact directory the worker persisted to inside its
+        # ``tempfile.TemporaryDirectory`` with-block (issue #72 — the
+        # bytes survive past the tempdir teardown, so the adapter reads
+        # them from the persistent path, not the dead tempdir paths) with
+        # the in-memory byte cache (``stl_bytes``/``view_bytes``, attached
+        # via ``cache_render_artifact_bytes`` on the sync render path) as
+        # the fallback for stubs/tests that carry no durable path.
         # A missing/dead render → fields omitted entirely (never a
         # bogus path, never a null), keeping the frame JSON-safe.
         render = getattr(best, "render", None)
         frame_fields: dict[str, Any] = {}
         if render is not None:
-            stl_bytes = getattr(render, "stl_bytes", None)
+            # Durable source first (persisted files take precedence), then
+            # the setattr byte-cache fallback (tests without a durable dir).
+            stl_bytes, view_bytes = _artifact_bytes_from_path(render)
+            if stl_bytes is None:
+                stl_bytes = getattr(render, "stl_bytes", None)
+            if not view_bytes:
+                view_bytes = getattr(render, "view_bytes", None) or {}
             if stl_bytes is not None:
                 frame_fields["stl_data_uri"] = _data_uri_from_bytes(
                     stl_bytes, "application/octet-stream"
                 )
-            view_bytes = getattr(render, "view_bytes", None)
             if view_bytes:
                 frame_fields["views"] = {
                     name: _data_uri_from_bytes(raw, "image/png")

@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -236,6 +237,29 @@ def _render_host_tmp_base() -> Path:
     """
     path = Path(os.environ.get("D33D_RENDER_TMP", str(Path.home() / "d33d" / "render-tmp")))
     path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _render_persist_base() -> Path | None:
+    """Default base dir for persisted render artifacts (issue #72).
+
+    The design loop's best-iteration STL + 6 view PNGs are copied here
+    (``<base>/<render-key>/``) INSIDE the render worker's with-block,
+    before the ``TemporaryDirectory`` is torn down — the SSE adapter
+    reads them from disk into the frame's data URIs, so the bytes must
+    survive the tempdir.
+
+    ``D33D_RENDER_PERSIST_DIR`` (default ``~/.d33d/renders`` — mirrors
+    ``D33D_DATA_DIR``'s ``~/.d33d`` convention). Returns ``None`` when
+    the base cannot be created (read-only FS, permission) — persistence
+    is best-effort and must never change the render outcome."""
+    path = Path(
+        os.environ.get("D33D_RENDER_PERSIST_DIR", str(Path.home() / ".d33d" / "renders"))
+    )
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
     return path
 
 
@@ -659,6 +683,7 @@ class RenderResult:
     stl: str | None
     csg: str | None
     views: tuple[str, ...]
+    render_artifact_dir: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -699,7 +724,40 @@ def result_to_json(result: RenderResult) -> str:
     return json.dumps(result.to_dict(), indent=2, sort_keys=False)
 
 
-def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderResult:
+def _persist_render_artifacts(
+    stl: Path, views: list[Path], base: Path | None, key: str
+) -> str | None:
+    """Copy the harvested ``model.stl`` + the 6 ``view_*.png`` into
+    ``<base>/<key>/`` (issue #72's post-harvest persistence step).
+
+    Must be called INSIDE the ``TemporaryDirectory`` with-block — the
+    harvested paths die when the block exits. Copies are best-effort:
+    any ``OSError`` mid-copy cleans up the partial directory (no
+    orphaned half-written artifacts) and returns ``None``. Returns the
+    durable directory path on success, ``None`` when persistence is
+    skipped (no base) or failed."""
+    if base is None:
+        return None
+    target = base / key
+    try:
+        target.mkdir(parents=True)
+        (target / stl.name).write_bytes(stl.read_bytes())
+        for v in views:
+            (target / v.name).write_bytes(v.read_bytes())
+    except OSError:
+        try:
+            shutil.rmtree(target)
+        except OSError:
+            pass
+        return None
+    return str(target)
+
+
+def render_for_design_loop(
+    scad_source: str,
+    defines: dict[str, str],
+    renders_dir: str | Path | None = None,
+) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
     Ephemeral named Docker volume (no host bind mounts); the ``.scad``
@@ -709,10 +767,25 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
     7-class ``error_class`` enum. Any exception in the pipeline is a
     ``container_error`` — a loop render failure is a classified render
     outcome, never an unclassified raise.
+
+    Post-harvest persistence (issue #72): on a fully ``ok`` render, the
+    harvested ``model.stl`` + 6 ``view_*.png`` are copied into
+    ``<persist base>/<uuid8>/`` INSIDE the ``TemporaryDirectory``
+    with-block (the harvested paths die when the block exits) and
+    ``RenderResult.render_artifact_dir`` carries the durable path to
+    the SSE adapter. The base is ``renders_dir`` when given, else
+    :func:`_render_persist_base` (``D33D_RENDER_PERSIST_DIR``, default
+    ``~/.d33d/renders``). A non-``ok`` render persists nothing — no
+    orphaned partial directories.
     """
     name = new_render_name()
     volume = f"d33d-render-{name}"
     start = time.monotonic()
+    # Durable per-render key (issue #72): generated BEFORE the with-block
+    # so the persistence copy inside it lands at a path the caller (the
+    # SSE adapter) can learn from ``RenderResult.render_artifact_dir``.
+    persist_base = Path(renders_dir) if renders_dir is not None else _render_persist_base()
+    render_key = uuid.uuid4().hex[:8]
     try:
         subprocess.run(
             ["docker", "volume", "create", volume],
@@ -883,6 +956,15 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
                 watertight=watertight,
                 volume=volume_mm3,
             )
+            # Post-harvest persistence (issue #72): a fully ``ok`` render
+            # copies the STL + 6 view PNGs to the durable per-render
+            # directory INSIDE the with-block (the harvested paths die
+            # when the block exits). A non-ok render persists nothing.
+            render_artifact_dir: str | None = None
+            if error_class == "ok" and stl.is_file():
+                render_artifact_dir = _persist_render_artifacts(
+                    stl, views, persist_base, render_key
+                )
             return RenderResult(
                 ok=error_class == "ok",
                 exit_code=proc.returncode,
@@ -892,6 +974,7 @@ def render_for_design_loop(scad_source: str, defines: dict[str, str]) -> RenderR
                 stl=str(stl) if stl.is_file() else None,
                 csg=str(csg) if csg.is_file() else None,
                 views=tuple(str(v) for v in views) if views_ok else (),
+                render_artifact_dir=render_artifact_dir,
             )
     except (OSError, RuntimeError, ValueError) as e:
         return RenderResult(

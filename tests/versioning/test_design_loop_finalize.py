@@ -152,6 +152,7 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
+
         # The real production closure is async; a stub of the same
         # production shape ((app, **kwargs)) captures the kwargs and
         # returns a pass result — the route must await it and call it
@@ -168,7 +169,14 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
-    for key in ("photo", "stated_dims", "render_fn", "llm_fn", "model", "prompt_version"):
+    for key in (
+        "photo",
+        "stated_dims",
+        "render_fn",
+        "llm_fn",
+        "model",
+        "prompt_version",
+    ):
         assert key in captured, f"missing design-loop kwarg {key!r}"
     assert captured["stated_dims"] == (0.0, 0.0, 0.0)
     assert callable(captured["render_fn"])
@@ -218,7 +226,13 @@ def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkey
         async def __call__(self, *a, **k):
             return ""
 
-    monkeypatch.setattr(_catalogue_mod, "load_catalogue", lambda p: types.SimpleNamespace(providers={"p": types.SimpleNamespace(key="stub")}))
+    monkeypatch.setattr(
+        _catalogue_mod,
+        "load_catalogue",
+        lambda p: types.SimpleNamespace(
+            providers={"p": types.SimpleNamespace(key="stub")}
+        ),
+    )
     monkeypatch.setattr(
         _resolve_mod,
         "resolve_model",
@@ -302,6 +316,7 @@ def test_finalize_async_loop_result_is_awaited(app_with_versions):
             # FastAPI request cycle, not a nested ``asyncio.run`` (which
             # would raise RuntimeError the moment it executes).
             import asyncio as _a
+
             _a.get_running_loop()  # running loop present → awaited
             return _StubResult("pass", {"W": 10})
 
@@ -622,6 +637,7 @@ def test_region_edit_pass_creates_version_visible_in_get_versions(
     VersionService.create_version, the sole version-creation path) and
     the SSE stream emits the version-created progress frame with the
     version_id."""
+
     async def _loop(app, **kwargs):
         return _StubResult("pass", {"W": 11, "H": 22}, scad="W = 11; cube([W]);")
 
@@ -645,7 +661,9 @@ def test_region_edit_pass_creates_version_visible_in_get_versions(
     assert timeline[0]["name"] == "design"
     assert timeline[0]["params"] == {"W": 11, "H": 22}
     # The version-created progress frame carries the version id.
-    vc = [d for e, d in frames if e == "progress" and d.get("step") == "version-created"]
+    vc = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
     assert vc, "no version-created progress frame"
     assert vc[0]["version_id"] == timeline[0]["id"]
     # Terminal frame is a done (not an error).
@@ -750,11 +768,48 @@ class _StubRender:
     6-element ``views`` tuple (``render_worker.py`` VIEWS contract). The
     paths may be live on-disk files or dead (torn-down tempdir) — the
     adapter must handle both (present / omitted fields, never a bogus path).
+    ``render_artifact_path`` (issue #72) is the optional DURABLE per-render
+    artifact directory the worker persists to inside its tempdir with-block
+    — when set, the adapter reads the STL + 6 views from it (durable source
+    takes precedence) and ignores the dead tempdir paths entirely.
     """
 
-    def __init__(self, stl: str | None = None, views: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        stl: str | None = None,
+        views: tuple[str, ...] = (),
+        render_artifact_path: str | None = None,
+    ) -> None:
         self.stl = stl
         self.views = views
+        if render_artifact_path is not None:
+            self.render_artifact_path = render_artifact_path
+
+
+def _write_durable_artifacts(root, *, partial_views: bool = False):
+    """Write a live durable artifact directory (the issue #72 seam): a real
+    on-disk ``model.stl`` + the 6 fixed VIEWS view PNGs under ``root``
+    (the worker's per-render uuid directory), returning the directory path.
+    ``partial_views=True`` writes only 5 of the 6 PNGs (the partial-omit
+    edge case — the frame must then omit ``views`` entirely).
+
+    A UNIQUE subdirectory per call — each test's fixture is built ONCE
+    (module-level fixture collection happens before ``run_async``'s lifespan
+    enters ``tmp_path``/isolation), so a fixed ``artifacts/`` name would be
+    shared across tests in the same pytest session and clobbered.
+    """
+    import uuid
+
+    from d33d.render_worker import VIEWS
+
+    d = root / f"artifacts-{uuid.uuid4().hex[:8]}"
+    d.mkdir(parents=True)
+    (d / "model.stl").write_bytes(b"\x84\xab\x50\x53fake-stl-bytes")
+    for name, _cam in VIEWS:
+        if partial_views and name == "view_05_iso.png":
+            continue  # 5 of 6 — the partial-omit edge case
+        (d / name).write_bytes(b"\x89PNG-fake-view-bytes")
+    return str(d)
 
 
 class _StubBest:
@@ -791,9 +846,7 @@ def test_chat_404_for_missing_project(app_with_versions):
     """A chat to a non-existent project is 404."""
 
     async def _call(client):
-        return await client.post(
-            "/api/projects/999999/chat", json={"message": "hi"}
-        )
+        return await client.post("/api/projects/999999/chat", json={"message": "hi"})
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 404
@@ -933,15 +986,15 @@ def test_chat_exhausted_emits_error_frame_and_no_version(app_with_versions):
     assert timeline == []
 
 
-def test_chat_pass_creates_version_and_emits_token_and_done(
-    app_with_versions
-):
+def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
     """A passing loop creates a version, emits a token frame (the SCAD
     source) and a done frame."""
     import asyncio as _a
 
     async def _loop(app, **kwargs):
-        return _StubResult("pass", {"W": 10, "H": 20}, scad="W = 10; H = 20; cube([W, H, 1]);")
+        return _StubResult(
+            "pass", {"W": 10, "H": 20}, scad="W = 10; H = 20; cube([W, H, 1]);"
+        )
 
     async def _call(client):
         proj = await create_project(client)
@@ -991,7 +1044,9 @@ def test_chat_pass_creates_version_and_emits_token_and_done(
     assert event_names[-1] == "done"
 
 
-def test_chat_pass_version_created_frame_carries_stl_and_views(app_with_versions, tmp_path):
+def test_chat_pass_version_created_frame_carries_stl_and_views(
+    app_with_versions, tmp_path
+):
     """A pass whose best candidate carries a live render (on-disk STL +
     the 6 VIEWS filenames) emits, on the version-created progress frame,
     ``stl_data_uri`` plus ``views`` mapping each of the 6 VIEWS filenames
@@ -1042,8 +1097,9 @@ def test_chat_pass_version_created_frame_carries_stl_and_views(app_with_versions
                 _Path(v).unlink()
             worker_stl.unlink()
             worker_tmp.rmdir()
-            return _StubResult("pass", {"W": 10, "H": 20}, scad="W = 10; cube([W]);",
-                                render=render)
+            return _StubResult(
+                "pass", {"W": 10, "H": 20}, scad="W = 10; cube([W]);", render=render
+            )
 
         proj = await create_project(client)
         pid = proj["id"]
@@ -1067,7 +1123,11 @@ def test_chat_pass_version_created_frame_carries_stl_and_views(app_with_versions
     # The version-created frame carries stl_data_uri + all 6 views — the
     # bytes were cached on the render during the sync render path (the
     # files are dead by frame time; only the cache survives).
-    vc = [d for d in data_by_event.get("progress", []) if d.get("step") == "version-created"]
+    vc = [
+        d
+        for d in data_by_event.get("progress", [])
+        if d.get("step") == "version-created"
+    ]
     assert vc, "no version-created progress frame"
     stl_uri = vc[0].get("stl_data_uri")
     assert stl_uri is not None, "stl_data_uri missing on version-created frame"
@@ -1097,6 +1157,7 @@ def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
     omits stl_data_uri/views (never bogus paths), and the stream still
     terminates with the terminal done frame.
     """
+
     async def _call(client):
         # Dead paths: a tempdir the render worker would have torn down.
         import shutil
@@ -1114,7 +1175,9 @@ def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
         shutil.rmtree(dead)  # simulate the worker's torn-down tempdir
 
         async def _loop(app, **kwargs):
-            return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);", render=render)
+            return _StubResult(
+                "pass", {"W": 10}, scad="W = 10; cube([W]);", render=render
+            )
 
         proj = await create_project(client)
         pid = proj["id"]
@@ -1133,14 +1196,223 @@ def test_chat_pass_dead_render_paths_omit_fields(app_with_versions, tmp_path):
     assert event_names[-1] == "done", f"no terminal done frame: {event_names}"
     for _event, data in frames:
         if data.get("step") == "version-created":
-            assert "stl_data_uri" not in data, "stl_data_uri must be omitted for dead paths"
+            assert "stl_data_uri" not in data, (
+                "stl_data_uri must be omitted for dead paths"
+            )
             assert "views" not in data, "views must be omitted for dead paths"
+
+
+def test_chat_pass_live_render_artifact_path_emits_stl_and_views(
+    app_with_versions, tmp_path
+):
+    """(issue #72 emit path) A pass whose best render carries a DURABLE
+    artifact path (the per-render directory the worker persisted to inside
+    its tempdir with-block — live on disk when the frame is built) emits
+    ``stl_data_uri`` + all 6 ``views`` on the version-created frame — the
+    adapter reads the persisted files, not the dead tempdir paths the
+    render's ``stl``/``views`` point at.
+    """
+    import base64 as _b64
+
+    from d33d.render_worker import VIEWS
+
+    async def _call(client):
+        # The durable artifacts survive the worker's tempdir teardown — a
+        # real on-disk directory with a non-empty STL + the 6 view PNGs.
+        artifact_dir = _write_durable_artifacts(tmp_path)
+        # Dead tempdir paths: the worker's with-block has exited, so the
+        # render's own stl/views paths are gone (only the durable copy is
+        # reachable — the adapter must read the durable source).
+        dead = tmp_path / "torn-down"
+        dead.mkdir()
+        dead_stl = dead / "model.stl"
+        dead_stl.write_bytes(b"dead")
+        dead_views = []
+        for i in range(6):
+            p = dead / f"view_{i:02d}.png"
+            p.write_bytes(b"dead")
+            dead_views.append(str(p))
+
+        async def _loop(app, **kwargs):
+            import shutil as _shutil
+
+            render = _StubRender(
+                stl=str(dead_stl),
+                views=tuple(dead_views),
+                render_artifact_path=artifact_dir,
+            )
+            _shutil.rmtree(dead)  # simulate the worker's torn-down tempdir
+            return _StubResult(
+                "pass", {"W": 10, "H": 20}, scad="W = 10; cube([W]);", render=render
+            )
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    data_by_event = {}
+    for event, data in frames:
+        data_by_event.setdefault(event, []).append(data)
+    vc = [
+        d
+        for d in data_by_event.get("progress", [])
+        if d.get("step") == "version-created"
+    ]
+    assert vc, "no version-created progress frame"
+    # The frame's bytes come from the DURABLE artifacts, not the dead
+    # tempdir paths (the dead paths would have read b"dead" / b"gone").
+    stl_uri = vc[0].get("stl_data_uri")
+    assert stl_uri is not None, "stl_data_uri missing on version-created frame"
+    assert stl_uri.startswith("data:") and ";base64," in stl_uri
+    payload = _b64.b64decode(stl_uri.split(";base64,", 1)[1])
+    assert payload == b"\x84\xab\x50\x53fake-stl-bytes", (
+        "STL bytes must come from the durable artifact dir, not the dead tempdir"
+    )
+    view_map = vc[0].get("views")
+    expected_view_names = {name for name, _cam in VIEWS}
+    assert set(view_map.keys()) == expected_view_names, (
+        f"views keys {sorted(view_map)} != expected {sorted(expected_view_names)}"
+    )
+    for name in view_map:
+        uri = view_map[name]
+        assert uri.startswith("data:image/png;base64,"), f"view URI: {uri[:40]}"
+        decoded = _b64.b64decode(uri.split(";base64,", 1)[1])
+        assert decoded == b"\x89PNG-fake-view-bytes", f"view bytes mismatch for {name}"
+
+
+def test_chat_pass_partial_durable_views_omit_views_field(app_with_versions, tmp_path):
+    """(issue #72 partial edge) A durable artifact directory that persisted
+    only 5 of the 6 view PNGs (a failed copy — the worker's partial-harvest
+    case) emits ``stl_data_uri`` (the STL is fine) but omits ``views``
+    ENTIRELY — the same partial-omit rule as the byte-cache path: a consumer
+    cannot distinguish a 5-of-6 map from a complete one.
+    """
+    import base64 as _b64
+
+    async def _call(client):
+        artifact_dir = _write_durable_artifacts(tmp_path, partial_views=True)
+
+        async def _loop(app, **kwargs):
+            render = _StubRender(render_artifact_path=artifact_dir)
+            return _StubResult(
+                "pass", {"W": 10}, scad="W = 10; cube([W]);", render=render
+            )
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    vc = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert vc, "no version-created progress frame"
+    # The STL is complete → stl_data_uri is present (the 5-of-6 case only
+    # drops the views, never the STL).
+    stl_uri = vc[0].get("stl_data_uri")
+    assert stl_uri is not None, "stl_data_uri must be present for a complete STL"
+    assert (
+        _b64.b64decode(stl_uri.split(";base64,", 1)[1])
+        == b"\x84\xab\x50\x53fake-stl-bytes"
+    )
+    # 5 of 6 views → "no views" (the frame omits the field entirely rather
+    # than emit a map a consumer cannot distinguish from a complete one).
+    assert "views" not in vc[0], "partial (5-of-6) views must omit the field entirely"
+
+
+def test_chat_pass_durable_path_missing_falls_back_to_byte_cache(
+    app_with_versions, tmp_path
+):
+    """(issue #72 fallback edge) A render whose ``render_artifact_path`` is
+    set but UNREACHABLE (the directory was deleted out-of-band — a project
+    wiped mid-flight) still emits the frame when the in-memory byte cache
+    (``stl_bytes``/``view_bytes``) carries the bytes — the setattr fallback
+    remains the safety net for the durable-path miss."""
+    import base64 as _b64
+
+    from d33d.design_loop_events import cache_render_artifact_bytes
+    from d33d.render_worker import VIEWS
+
+    async def _call(client):
+        # Live files for the byte cache (the sync-render path caches them
+        # into memory), a durable dir that will be deleted before the frame.
+        worker_tmp = tmp_path / "render-tmp"
+        worker_tmp.mkdir()
+        views = []
+        for name, _cam in VIEWS:
+            p = worker_tmp / name
+            p.write_bytes(b"\x89PNG-fake-view-bytes")
+            views.append(str(p))
+        worker_stl = worker_tmp / "model.stl"
+        worker_stl.write_bytes(b"\x84\xab\x50\x53fake-stl-bytes")
+        durable = tmp_path / "deleted-durable"
+        durable.mkdir()
+
+        async def _loop(app, **kwargs):
+            render = _StubRender(
+                stl=str(worker_stl),
+                views=tuple(views),
+                render_artifact_path=str(durable),
+            )
+            cache_render_artifact_bytes(render)  # byte-cache fallback populated
+            import shutil as _shutil
+
+            _shutil.rmtree(worker_tmp)  # tempdir torn down
+            _shutil.rmtree(durable)  # durable dir deleted out-of-band
+            return _StubResult(
+                "pass", {"W": 10}, scad="W = 10; cube([W]);", render=render
+            )
+
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    vc = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert vc, "no version-created progress frame"
+    stl_uri = vc[0].get("stl_data_uri")
+    assert stl_uri is not None, "stl_data_uri missing (byte-cache fallback not used)"
+    assert (
+        _b64.b64decode(stl_uri.split(";base64,", 1)[1])
+        == b"\x84\xab\x50\x53fake-stl-bytes"
+    )
+    view_map = vc[0].get("views")
+    expected_view_names = {name for name, _cam in VIEWS}
+    assert set(view_map.keys()) == expected_view_names, "views missing from fallback"
 
 
 def test_chat_exhausted_emits_no_stl_or_views_fields(app_with_versions):
     """An exhausted run terminates with the terminal error frame and emits
     NO stl_data_uri or views fields — the {progress,token,done,error}
     schema is unchanged (no new event kind)."""
+
     async def _call(client):
         async def _loop(app, **kwargs):
             return _StubResult("exhausted", {"W": 10})
@@ -1332,6 +1604,7 @@ def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
+
         # A loop that raises LookupError (simulating project deletion).
         async def _loop(app, **kwargs):
             raise LookupError(f"project {pid} not found")
@@ -1350,7 +1623,7 @@ def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
         for chunk in sse_chunks:
             for line in chunk.split("\n"):
                 if line.startswith("event: "):
-                    frames.append((line[len("event: "):], {}))
+                    frames.append((line[len("event: ") :], {}))
         return r, frames, pid in app_with_versions.state.design_loop_inflight
 
     r, frames, still_inflight = run_async(app_with_versions, _call)
@@ -1531,4 +1804,3 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
         f"LLM ran on the event-loop thread: llm={llm_tid['id']} "
         f"event loop={event_loop_tid}"
     )
-
