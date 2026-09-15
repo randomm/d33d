@@ -12,10 +12,11 @@
  *      `onLassoCompleted`, which raycasts the polygon through the live
  *      viewport and either:
  *        - resolves to a module id -> stores the pending selection and
- *          surfaces `data-testid="pending-selection-notice"`, or
+ *          surfaces `data-testid="region-edit-bar"` (the inline region-edit
+ *          bar in the viewer pane), or
  *        - hits nothing / fails -> surfaces `data-testid="selection-notice"`
  *          with a "nothing selected" / "selection failed" message.
- *   3. The spec asserts the notice (pending OR selection) appears.
+ *   3. The spec asserts the bar OR notice appears.
  *
  * Determinism & WebGL policy (per issue #49):
  *   - No LLM calls, no render worker, no page.route interception — the
@@ -25,17 +26,18 @@
  *     `pointer-events: auto` style to flip, which happens exactly when
  *     the model finishes loading — this is a deterministic wait that does
  *     NOT depend on WebGL raycast results.
- *   - The spec deliberately does NOT assert WHICH notice appears (pending
- *     vs selection) — the outcome depends on whether the raycast hits the
- *     fixture geometry, which is WebGL-dependent (headless SwiftShader).
- *     Per the issue's out-of-scope note ("assert the notice, not the 3D
- *     pick"), we assert that one of the two notices appears.
+ *   - The spec deliberately does NOT assert WHICH surface appears (bar
+ *     vs selection notice) — the outcome depends on whether the raycast
+ *     hits the fixture geometry, which is WebGL-dependent (headless
+ *     SwiftShader). Per the issue's out-of-scope note ("assert the
+ *     notice, not the 3D pick"), we assert that one of the two surfaces
+ *     appears.
  *
  * Selectors used (all pre-existing in App.tsx / ViewportLassoOverlay.tsx):
  *   - data-testid="app-shell"                 (app mounted)
  *   - data-testid="viewer-pane"               (the right-pane 3D viewport)
  *   - data-testid="viewport-lasso-overlay"    (the lasso surface)
- *   - data-testid="pending-selection-notice"  (lasso resolved to a module)
+ *   - data-testid="region-edit-bar"           (lasso resolved to a module)
  *   - data-testid="selection-notice"          (lasso hit nothing / failed)
  */
 
@@ -72,10 +74,10 @@ async function waitForLassoActive(page: Page): Promise<void> {
  * The polygon is a small triangle well inside the viewport so that, IF the
  * raycast hits anything, it is the fixture model (which fills most of the
  * viewport). The exact coordinates do not matter for the assertion — the
- * spec asserts the notice, not the pick — but the points must be inside the
- * overlay's rect so the click handler records them (points outside the rect
- * still register as negative/huge coords, which is fine for closing but
- * would not hit geometry if we ever asserted the pick).
+ * spec asserts the response surface, not the pick — but the points must be
+ * inside the overlay's rect so the click handler records them (points
+ * outside the rect still register as negative/huge coords, which is fine
+ * for closing but would not hit geometry if we ever asserted the pick).
  *
  * Closing: a 4th click within CLOSE_THRESHOLD_PX (12px) of the first vertex
  * closes the polygon and fires onLassoCompleted.
@@ -121,17 +123,18 @@ test("lasso selection surfaces a notice after drawing a polygon", async ({ page 
   // Draw the lasso polygon (3 vertices + a closing click).
   await drawLasso(page);
 
-  // Assert that a notice appears. The spec asserts the NOTICE, not the 3D
-  // pick: either the pending-selection-notice (lasso resolved to a module
-  // id) or the selection-notice (lasso hit nothing / selection failed).
-  // Both are the app's user-visible response to a completed lasso.
-  const pendingNotice = page.locator('[data-testid="pending-selection-notice"]');
+  // Assert that the region-edit bar or the selection notice appears. The
+  // spec asserts the user-visible response, not the 3D pick: either the
+  // region-edit-bar (lasso resolved to a module id) or the selection-notice
+  // (lasso hit nothing / selection failed). Both are the app's response to
+  // a completed lasso.
+  const regionBar = page.locator('[data-testid="region-edit-bar"]');
   const selectionNotice = page.locator('[data-testid="selection-notice"]');
 
   await expect
     .poll(
-      async () => (await pendingNotice.count()) > 0 || (await selectionNotice.count()) > 0,
-      { timeout: 10_000, message: "no lasso notice appeared after drawing a polygon" },
+      async () => (await regionBar.count()) > 0 || (await selectionNotice.count()) > 0,
+      { timeout: 10_000, message: "no region-edit bar or selection notice appeared after drawing a polygon" },
     )
     .toBeTruthy();
 });
