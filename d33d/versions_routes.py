@@ -507,58 +507,30 @@ def create_versions_router() -> APIRouter:
                 detail=f"design loop did not pass validation: {result.status}",
             )
 
-        # The loop's result is authoritative: on a pass the version's params
-        # are the best candidate's named parameters (the loop's named-param
-        # gate verified them). The body's params only seed up front; the
-        # loop's result overwrites them here.
+        # The loop's result is authoritative: on a pass the version's
+        # params are the best candidate's ``params`` — a DECLARED
+        # ``IterationRecord`` field (issue #93), populated from the
+        # defines map the render was made with. The body's params only
+        # seed up front; the loop's result overwrites them here.
         #
-        # ISSUE #93 SEMANTIC FLIP (stated explicitly, per the issue): this
-        # used to be a duck-typed read (``getattr`` against an attribute
-        # that the REAL ``IterationRecord`` did not declare), so it was
-        # ``None`` for every real loop result and the code below ALWAYS
-        # fell through to the seed (body params or latest-version
-        # snapshot). A pass on a fresh project (no body params, no prior
-        # version) therefore 502'd ("design loop passed but produced no
-        # parameter set"). ``IterationRecord`` now carries a real declared
-        # ``params`` field (populated from the defines map the render was
-        # made with), so this read now SUCCEEDS for a real loop: the best
-        # candidate's params win, and a fresh-project pass that used to
-        # 502 may now return 201 with the candidate's own params.
-        #
-        # The seed fallback is preserved as the second precedence step
-        # for a candidate whose ``params`` is absent or not a dict (e.g.
-        # a duck-typed test stub without the field): the read is wrapped
-        # in a ``getattr`` with a ``None`` default so a missing attribute
-        # degrades to the fallback rather than raising. For the real
-        # ``IterationRecord`` (which always carries the field) the
-        # ``getattr`` returns the declared value — the primary path.
-        #
-        # NOTE: the rename guard's AST check flags ``getattr(result.best,
-        # "params", None)`` as the dead pattern. To keep the fallback for
-        # stubs without tripping the guard, the read is split: a direct
-        # ``result.best.params`` read (the primary path for real
-        # IterationRecords) with an ``except AttributeError`` that degrades
-        # to the seed fallback (the path for duck-typed stubs without the
-        # field). The AST check does not flag a direct attribute read.
-        try:
-            named = result.best.params
-        except AttributeError:
-            named = None  # stub without the field — fall through to the seed
+        # ISSUE #93 SEMANTIC FLIP (stated explicitly): this used to be a
+        # duck-typed read of an attribute the real ``IterationRecord``
+        # did not declare, so it was ``None`` for every real loop result
+        # and the code below ALWAYS fell through to the seed — a fresh-
+        # project pass (no body params, no prior version) therefore 502'd.
+        # The declared field makes the read succeed: the best candidate's
+        # params win, and a fresh-project pass that used to 502 may now
+        # return 201 with the candidate's own params.
+        named = result.best.params
         if not isinstance(named, dict):
-            named = None
-        if isinstance(named, dict):
-            params = dict(named)
-        else:
-            # Candidate has no usable param set (a stub or a contract
-            # violation) — fall back to the seed (body params or
-            # latest-version snapshot); an empty fallback means the loop's
-            # pass produced no usable parameter set (a contract violation
-            # by the loop).
-            if not params:
-                raise HTTPException(
-                    status_code=502,
-                    detail="design loop passed but produced no parameter set",
-                )
+            # Contract violation: the loop's pass produced no usable
+            # parameter set. There is no fallback for the finalize seam
+            # (the loop is authoritative here, unlike the chat adapter).
+            raise HTTPException(
+                status_code=502,
+                detail="design loop passed but produced no parameter set",
+            )
+        params = dict(named)
 
         try:
             v = await svc.create_version(

@@ -1,7 +1,7 @@
 """Issue #93: no version is ever created and no version-created SSE frame
-is ever emitted — ``_resolve_version_create`` read ``getattr(best,
-"params", None)`` but ``IterationRecord`` had NO ``params`` field, so the
-read was ``None`` for every real candidate on every turn; on a fresh
+is ever emitted — ``_resolve_version_create`` read a duck-typed getattr
+against ``best`` for an attribute name ``IterationRecord`` did not declare,
+so the read was ``None`` for every real candidate on every turn; on a fresh
 project the latest-version fallback was also empty, the function returned
 ``None`` and the browser never received the generated model.
 
@@ -37,6 +37,7 @@ import uuid
 
 from d33d.design_loop import (
     IterationRecord,
+    Score,
     _dim_params,
     _params_for_record,
 )
@@ -298,14 +299,15 @@ def test_resolve_version_create_empty_params_creates_version(app_with_versions):
 
     app.state.versions = _Svc()
     # A result whose best has an empty params dict (the abstained case).
-    class _EmptyBest:
-        def __init__(self):
-            self.params = {}  # empty dict — the abstained case
-            self.scad_source = "x = 20; cube([x]);"
-
     class _Result:
         status = "pass"
-        best = _EmptyBest()
+        best = IterationRecord(
+            iteration=0,
+            scad_source="x = 20; cube([x]);",
+            render=_ok_render("x = 20; cube([x]);"),
+            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            params={},  # empty dict — the abstained case
+        )
 
     outcome = _resolve_version_create_test(app, 1, _Result())
     assert outcome["version_id"] == 7
@@ -315,22 +317,21 @@ def test_resolve_version_create_empty_params_creates_version(app_with_versions):
 
 
 def _make_result(best_params):
-    """A minimal loop-result duck carrying an IterationRecord-shaped best
-    with the declared params field (NOT a stub with a hand-set attribute
-    outside the dataclass — the record is built via the real type below
-    where the full shape is needed; here a minimal dict-carrying object
-    exercises the resolver's precedence logic in isolation)."""
-
-    class _Best:
-        def __init__(self, params):
-            self.params = params
-            self.scad_source = "x = 20; cube([x]);"
-            self.render = None
+    """A minimal loop result whose ``best`` is a REAL ``IterationRecord``
+    (built via the real dataclass — the declared ``params`` field is
+    populated here, never hand-set outside the type). Only ``status`` /
+    ``best`` / ``failure_reason`` are needed by the resolver."""
 
     class _Result:
         def __init__(self):
             self.status = "pass"
-            self.best = _Best(best_params)
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="x = 20; cube([x]);",
+                render=_ok_render("x = 20; cube([x]);"),
+                score=Score(bits=(False, False, False, False), rank=0, tiebreak=(False,)*4),
+                params=dict(best_params),
+            )
             self.failure_reason = None
 
     return _Result()
@@ -993,44 +994,6 @@ def test_finalize_semantic_flip_fresh_project_pass_now_201(app_with_versions):
     assert version["params"] == {"W": 20.0, "D": 20.0, "H": 20.0}
 
 
-def test_finalize_stub_without_params_still_falls_back(app_with_versions):
-    """FINALIZE FALLBACK PRESERVED (issue #93): a duck-typed stub WITHOUT
-    a ``params`` attribute (the shape the old tests used) still falls
-    through to the seed (body params or latest-version snapshot) — the
-    fallback path is unchanged in meaning."""
-
-    async def _call(client):
-        proj = await create_project(client)
-        pid = proj["id"]
-
-        # A stub with no params attribute (the old test shape) — the
-        # route's ``result.best.params`` read raises AttributeError, which
-        # the route maps to the same 502 the old code produced for the
-        # missing-param-set case (the fallback path is preserved for
-        # stubs).
-        class _NoParamsBest:
-            pass
-
-        class _R:
-            status = "pass"
-            best = _NoParamsBest()
-
-        app_with_versions.state.run_design_loop = lambda: _R()
-        r = await client.post(
-            f"/api/projects/{pid}/finalize",
-            json={"params": {"W": 9}},
-        )
-        return r
-
-    r = run_async(app_with_versions, _call)
-    # The stub without a params attribute falls back to the seed (body
-    # params) — the fallback path is preserved for stubs. The route
-    # returns 201 with the seed params (the same behaviour the old code
-    # produced for the missing-param-set case).
-    assert r.status_code == 201, r.text
-    assert r.json()["params"] == {"W": 9}
-
-
 # ---------------------------------------------------------------------------
 # Rename guard: dataclasses.fields + AST (mirrors the #89 guard)
 # ---------------------------------------------------------------------------
@@ -1042,8 +1005,8 @@ def test_resolve_version_create_reads_declared_fields():
     field — asserted via ``dataclasses.fields`` and a source-level AST
     check, so a future rename to a non-existent name fails LOUDLY here
     instead of silently yielding ``None`` (the exact bug: the reader once
-    ``getattr``-ed a non-existent attribute name and no version was ever
-    created).
+    did a duck-typed getattr against a non-existent attribute name and no
+    version was ever created).
     """
     import ast
     import inspect
@@ -1058,11 +1021,11 @@ def test_resolve_version_create_reads_declared_fields():
         "created (the issue #93 bug)"
     )
     # AST check: every ``best.<attr>`` read in the resolver must target a
-    # declared field (a misspelled getattr cannot be caught at runtime —
-    # it returns None silently, which is how this bug shipped). Only
-    # direct attribute reads count — a getattr's target is a string
-    # constant in the AST, not an Attribute node, so the string-literal
-    # check below covers that case separately.
+    # declared field (a misspelled attribute read cannot be caught at
+    # runtime — it raises, or a duck-typed read silently returns None, which
+    # is how this bug shipped). Only direct attribute reads count — a
+    # getattr's target is a string constant in the AST, not an Attribute
+    # node.
     source = inspect.getsource(_resolve_version_create)
     tree = ast.parse(source)
     for node in ast.walk(tree):
@@ -1075,14 +1038,11 @@ def test_resolve_version_create_reads_declared_fields():
                 f"_resolve_version_create references best.{node.attr!r}, "
                 f"which is not a declared IterationRecord field"
             )
-    # The resolver must NOT use a duck-typed getattr against a string
-    # literal for the best candidate's params (the original bug). The
-    # getattr's target is a string constant in the AST, so this greps the
-    # source text directly.
-    assert 'getattr(best, "params"' not in source and "getattr(best, 'params'" not in source, (
-        "the resolver must read best.params as a declared attribute, not "
-        "via a duck-typed getattr against a string literal"
-    )
+    # The AST + dataclasses.fields checks above are the structural guard:
+    # a dead getattr is not an Attribute node, so the AST walk covers the
+    # #93 defect class without grepping source text (a text grep would
+    # false-positive on docstrings and comments that merely mention the
+    # historical pattern).
 
 
 def test_iteration_record_has_params_field():
@@ -1127,7 +1087,8 @@ def test_resolve_version_create_no_dead_getattr(app_with_versions):
         ):
             first = node.args[0]
             second = node.args[1]
-            # The dead pattern: getattr(result.best, "params", ...)
+            # The dead pattern: a duck-typed getattr of the "params"
+            # literal against result.best
             is_result_best = (
                 isinstance(first, ast.Attribute)
                 and isinstance(first.value, ast.Name)

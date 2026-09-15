@@ -20,6 +20,7 @@ import subprocess
 
 import pytest
 
+from d33d.design_loop import IterationRecord, Score
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
@@ -29,18 +30,36 @@ from tests.versioning.helpers import (
 )
 
 
-class _StubBest:
-    """Duck-type of the design loop's best candidate (carries the named
-    parameters that the loop's named-param gate verified)."""
-
-    def __init__(self, params: dict) -> None:
-        self.params = params
-
-
 class _StubResult:
-    def __init__(self, status: str, params: dict) -> None:
+    """Duck-type of the loop result whose ``best`` is a REAL
+    ``IterationRecord`` (the params the route/adapter read are a declared
+    field of that type — issue #93)."""
+
+    def __init__(self, status: str, params: dict, scad: str = "", render=None) -> None:
         self.status = status
-        self.best = _StubBest(params)
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source=scad,
+            render=render if render is not None else _default_render(),
+            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            params=dict(params),
+        )
+        self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
+
+
+def _default_render() -> RenderResult:
+    """A clean, no-op render for stub results (the route/adapter only read
+    the declared fields off it)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl=None,
+        csg=None,
+        views=("v",) * 6,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -815,20 +834,20 @@ def _write_durable_artifacts(root, *, partial_views: bool = False):
     return str(d)
 
 
-class _StubBest:
-    """Duck-type of the design loop's best candidate (carries the named
-    parameters + the generated SCAD source)."""
-
-    def __init__(self, params: dict, scad: str = "", render=None) -> None:
-        self.params = params
-        self.scad_source = scad
-        self.render = render
-
-
 class _StubResult:
+    """Duck-type of the loop result whose ``best`` is a REAL
+    ``IterationRecord`` (the params the route/adapter read are a declared
+    field of that type — issue #93)."""
+
     def __init__(self, status: str, params: dict, scad: str = "", render=None) -> None:
         self.status = status
-        self.best = _StubBest(params, scad, render)
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source=scad,
+            render=render if render is not None else _default_render(),
+            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            params=dict(params),
+        )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
 
 
@@ -1746,7 +1765,7 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
 
     class _Result:
         status = "pass"
-        best = _StubBest({"W": 10}, scad="W = 10; cube([W]);")
+        best = _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);").best
         failure_reason = None
 
     class _Loop:

@@ -282,16 +282,16 @@ async def _resolve_version_create(
 
     Params, in strict precedence:
 
-    1. the best candidate's OWN render parameters — ``best.params`` read
-       as a DECLARED ``IterationRecord`` field (issue #93: a duck-typed
-       read against an attribute name that was not a declared field used
-       to return ``None`` for every real candidate, so a fresh project
-       never got a version). A declared empty dict ({}) means
-       "a dimensionless pass with no known parameters" and IS used as-is
-       — it is the loop's authoritative answer, and an empty params set is
-       legal for ``create_version`` (``validate_params`` accepts it);
+    1. the best candidate's OWN render parameters — read as a DECLARED
+       ``IterationRecord`` field (issue #93: a duck-typed read of an
+       attribute that was not a declared field used to return ``None`` for
+       every real candidate, so a fresh project never got a version). A
+       declared empty dict ({}) means "a dimensionless pass with no known
+       parameters" and IS used as-is — it is the loop's authoritative
+       answer, and an empty params set is legal for ``create_version``
+       (``validate_params`` accepts it);
     2. else the latest version's params snapshot (a mid-project pass whose
-       candidate somehow carries no declared field — the fallback is
+       candidate somehow carries a non-dict param set — the fallback is
        unchanged in meaning from before the fix);
     3. else ``{}`` — the version is still created: a pass with unknown
        dimensions is a legitimate state and the user must still get their
@@ -309,6 +309,10 @@ async def _resolve_version_create(
         return None
     named = best.params  # a declared IterationRecord field (issue #93)
     if not isinstance(named, dict):
+        # The only reachable case for a real record: a defensive fallback
+        # that cannot actually fire — kept because the adapter is typed
+        # ``Any`` and a corrupt record (non-dict param set) must degrade
+        # to the latest-version snapshot rather than fabricate one.
         latest = app.state.versions.latest_version(project_id)
         named = dict(latest["params"]) if latest is not None else {}
     version = await app.state.versions.create_version(

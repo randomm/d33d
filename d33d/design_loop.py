@@ -57,7 +57,6 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
-from typing import Any as _Any
 
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
@@ -207,7 +206,7 @@ class IterationRecord:
     #: empty param set; the loop's ``_dim_params`` is the source of
     #: truth, and a caller that supplies extra defines plus no known
     #: dimensions still produces a non-empty map from them alone).
-    params: dict[str, _Any] = field(default_factory=dict)
+    params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
