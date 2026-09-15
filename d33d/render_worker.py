@@ -995,15 +995,34 @@ def render_for_design_loop(
                 render_artifact_dir = _persist_render_artifacts(
                     stl, views, persist_base, render_key
                 )
+            # Durable path for .stl/.views (issue #87): the harvested
+            # paths live in the TemporaryDirectory above, which is torn
+            # down when this function returns — so a consumer that reads
+            # RenderResult.stl afterwards (e.g. the bbox gate's
+            # bbox_from_render) would see a dead path. When persistence
+            # succeeded (render_artifact_dir is set), re-point .stl and
+            # .views at the durable copies: _persist_render_artifacts
+            # writes the STL under its fixed name "model.stl" (only the
+            # DIRECTORY is uuid8-keyed) plus the 6 view PNGs. .csg stays
+            # on the temp path because persistence does NOT copy it —
+            # the csg is only consumed in-process (ticket #6's CSG
+            # registry), never by a post-return reader.
+            if render_artifact_dir is not None:
+                artifact_dir = Path(render_artifact_dir)
+                stl_path = str(artifact_dir / stl.name)
+                views_paths = tuple(str(artifact_dir / v.name) for v in views)
+            else:
+                stl_path = str(stl) if stl.is_file() else None
+                views_paths = tuple(str(v) for v in views) if views_ok else ()
             return RenderResult(
                 ok=error_class == "ok",
                 exit_code=proc.returncode,
                 duration_ms=duration_ms,
                 error_class=error_class,
                 stderr=stderr,
-                stl=str(stl) if stl.is_file() else None,
+                stl=stl_path,
                 csg=str(csg) if csg.is_file() else None,
-                views=tuple(str(v) for v in views) if views_ok else (),
+                views=views_paths,
                 render_artifact_dir=render_artifact_dir,
             )
     except (OSError, RuntimeError, ValueError) as e:
