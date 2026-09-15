@@ -276,23 +276,44 @@ def _run_in_loop(coro: Any) -> Any:
 async def _resolve_version_create(
     app: Any, project_id: int, result: Any, user_message: str
 ) -> int | None:
-    """On a ``pass``: create the version (params from the best candidate,
-    falling back to the latest version's snapshot or ``{}`` for a fresh
-    project) and return its id. ``None`` when no version is created (no
-    usable parameter set — an exhausted-with-no-pass or a contract
-    violation). The version ``message`` is the user's chat text truncated
-    to 200 characters (Python string slicing is code-point-safe — no
-    multi-byte split, unlike a raw byte slice)."""
+    """On a ``pass``: create the version and return its id — a passing
+    loop ALWAYS materialises a version (issue #93), with whatever params
+    are known (possibly none).
+
+    Params, in strict precedence:
+
+    1. the best candidate's OWN render parameters — ``best.params`` read
+       as a DECLARED ``IterationRecord`` field (issue #93: a duck-typed
+       read against an attribute name that was not a declared field used
+       to return ``None`` for every real candidate, so a fresh project
+       never got a version). A declared empty dict ({}) means
+       "a dimensionless pass with no known parameters" and IS used as-is
+       — it is the loop's authoritative answer, and an empty params set is
+       legal for ``create_version`` (``validate_params`` accepts it);
+    2. else the latest version's params snapshot (a mid-project pass whose
+       candidate somehow carries no declared field — the fallback is
+       unchanged in meaning from before the fix);
+    3. else ``{}`` — the version is still created: a pass with unknown
+       dimensions is a legitimate state and the user must still get their
+       model (the old guard returned ``None`` here, suppressing the
+       version entirely).
+
+    ``None`` is returned only when ``best`` itself is missing (a loop
+    result that does not carry a candidate at all — a contract violation
+    that must not fabricate a version), never when the parameter set is
+    merely empty. The version ``message`` is the user's chat text
+    truncated to 200 characters (Python string slicing is code-point-safe
+    — no multi-byte split, unlike a raw byte slice)."""
     best = getattr(result, "best", None)
-    named = getattr(best, "params", None)
-    if not (isinstance(named, dict) and named):
+    if best is None:
+        return None
+    named = best.params  # a declared IterationRecord field (issue #93)
+    if not isinstance(named, dict):
         latest = app.state.versions.latest_version(project_id)
         named = dict(latest["params"]) if latest is not None else {}
-    if not named:
-        return None
     version = await app.state.versions.create_version(
         project_id,
-        named,
+        dict(named),
         name="design",
         message=user_message[:200],
     )

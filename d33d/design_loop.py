@@ -57,6 +57,7 @@ import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
+from typing import Any as _Any
 
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
@@ -190,6 +191,23 @@ class IterationRecord:
     repair: dict[str, Any] | None = None
     #: The ``role -> prompt_hash`` pairs this iteration produced.
     prompt_hashes: dict[str, str] = field(default_factory=dict)
+    #: The named parameters THIS candidate's render was made with — the
+    #: ``_dim_params`` defines map passed to ``render_fn``, converted for
+    #: the versions table's scalar-param representation (issue #93):
+    #: values that parse as numbers are stored as ``float`` (W/D/H must be
+    #: numeric — ``latest_version_stated_dims`` and the region-edit route
+    #: ``float()`` them on read), other values keep their string form.
+    #: An axis the user never stated is OMITTED entirely, never stored as
+    #: ``0`` (a stored zero is a false fact — "this part is 0 mm wide" —
+    #: whereas absent correctly means "unknown", and the downstream
+    #: readers already treat a missing/``<= 0`` axis as unknown). Caller-
+    #: supplied non-dimension defines (e.g. FDM clearances) are carried
+    #: through as-is — they are real parameters of the render. May be
+    #: empty (a dimensionless pass still materialises a version with an
+    #: empty param set; the loop's ``_dim_params`` is the source of
+    #: truth, and a caller that supplies extra defines plus no known
+    #: dimensions still produces a non-empty map from them alone).
+    params: dict[str, _Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -349,6 +367,35 @@ def _dim_params(
     out = {str(k): str(v) for k, v in dims.items()}
     for name, value in zip(("W", "D", "H"), stated):
         out.setdefault(name, str(value))
+    return out
+
+
+def _params_for_record(defines_map: dict[str, str]) -> dict[str, Any]:
+    """The ``IterationRecord.params`` conversion of the loop's defines map
+    (issue #93): numeric values are stored as ``float`` (the versions table
+    stores scalar JSON params and ``latest_version_stated_dims`` / the
+    region-edit route read W/D/H via ``float(params.get(axis, 0.0))``),
+    non-numeric values keep their string form, and axes the caller never
+    stated are OMITTED (the loop's ``_dim_params`` stringifies a zero
+    triple to ``"0"`` for unknown axes — a stored ``0`` would be a false
+    fact; absent means "unknown", which the readers already honour).
+    Non-dimension caller defines (e.g. FDM clearances) pass through as-is.
+    """
+    out: dict[str, Any] = {}
+    for key, raw in defines_map.items():
+        if key in ("W", "D", "H"):
+            try:
+                value: Any = float(raw)
+            except ValueError:
+                continue  # unparseable dimension — never a fabricated value
+            if value <= 0:
+                continue  # abstained axis: unknown, never a stored zero
+            out[key] = value
+        else:
+            try:
+                out[key] = float(raw)
+            except ValueError:
+                out[key] = raw
     return out
 
 
@@ -610,6 +657,7 @@ async def run_design_loop_async(
                 failure_class="empty_scad",
                 repair=None,
                 prompt_hashes={"design": design_hash},
+                params=_params_for_record(defines_map),
             )
             iterations.append(record)
             if best is None or is_best(candidate_score, best_score):
@@ -664,6 +712,7 @@ async def run_design_loop_async(
             failure_class=failure_class,
             repair=next_repair,
             prompt_hashes={"design": design_hash},
+            params=_params_for_record(defines_map),
         )
         iterations.append(record)
 
