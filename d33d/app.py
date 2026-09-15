@@ -1004,6 +1004,23 @@ def _build_production_design_loop():
 
     async def _loop(app_state: Any, **kwargs: Any) -> Any:
         catalogue_path: Path = app_state.catalogue_path
+        # Project-scoped persistence (issue #72): bind the data-dir
+        # renders path so the worker's post-harvest step actually fires in
+        # production (the bare ``render_for_design_loop`` reference would
+        # leave ``renders_dir`` unset and fall back to the global default).
+        # The production closure is app-scoped (the loop kwargs carry no
+        # project id), so the path is per-data-dir; the finalize route,
+        # which DOES have a project id, uses the project-scoped variant in
+        # :func:`d33d.versions_routes._finalize_loop_kwargs`.
+        data_dir = Path(app_state.db_path).parent
+
+        def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
+            return render_for_design_loop(
+                scad_source,
+                defines,
+                renders_dir=data_dir / "renders",
+            )
+
         cat = load_catalogue(catalogue_path)
         res = resolve_model(cat, "design")
         provider = cat.providers[next(iter(cat.providers))]
@@ -1042,7 +1059,7 @@ def _build_production_design_loop():
             photo=kwargs.get("photo"),
             chat_history=kwargs.get("chat_history") or (),
             stated_dims=kwargs.get("stated_dims"),
-            render_fn=render_for_design_loop,
+            render_fn=_render_fn,
             llm_fn=llm_fn,
             bbox_fn=bbox_fn,
             request=request,

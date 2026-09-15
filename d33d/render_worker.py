@@ -263,6 +263,23 @@ def _render_persist_base() -> Path | None:
     return path
 
 
+def project_renders_dir(data_dir: str | Path, project_id: int | str) -> Path:
+    """The project-scoped renders directory (issue #72).
+
+    ``<data_dir>/projects/{project_id}/renders`` — one durable subtree per
+    project so the worker's post-harvest persistence
+    (:func:`d33d.render_worker._persist_render_artifacts`) lands renders
+    next to the project data rather than under the global
+    ``D33D_RENDER_PERSIST_DIR`` default. The production design-loop call
+    sites (``d33d.app._build_production_design_loop`` and
+    ``d33d.versions_routes._finalize_loop_kwargs``) build a
+    ``render_fn`` closure that binds this path and passes it as the
+    ``renders_dir`` kwarg to :func:`d33d.render_worker.render_for_design_loop`
+    so the persistence step actually fires for chat and finalize runs.
+    """
+    return Path(data_dir) / "projects" / str(project_id) / "renders"
+
+
 def parse_defines(params_json_text: str) -> dict[str, str]:
     """Parse a ``params.json`` text payload and return the validated
     ``defines`` map.
