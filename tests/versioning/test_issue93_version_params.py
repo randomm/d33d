@@ -1000,20 +1000,22 @@ def test_finalize_semantic_flip_fresh_project_pass_now_201(app_with_versions):
 
 
 def test_resolve_version_create_reads_declared_fields():
-    """RENAME GUARD (issue #93): every attribute ``_resolve_version_create``
-    reads off the ``best`` candidate is a DECLARED ``IterationRecord``
-    field — asserted via ``dataclasses.fields`` and a source-level AST
-    check, so a future rename to a non-existent name fails LOUDLY here
-    instead of silently yielding ``None`` (the exact bug: the reader once
-    did a duck-typed getattr against a non-existent attribute name and no
-    version was ever created).
-    """
+    """RENAME GUARD (issue #93, unified via tests.seam_schemas — issue
+    #102): every attribute ``_resolve_version_create`` reads off the
+    ``best`` candidate is a DECLARED ``IterationRecord`` field — asserted
+    via ``dataclasses.fields`` and a source-level AST check (the
+    structural form of the #93 guard, now in the shared seam-schema
+    module rather than an inline copy). A future rename to a non-existent
+    name fails LOUDLY here instead of silently yielding ``None`` (the
+    exact bug: the reader once did a duck-typed getattr against a
+    non-existent attribute name and no version was ever created)."""
     import ast
     import inspect
 
     from d33d.design_loop_events import _resolve_version_create
+    from tests.seam_schemas import declared_field_names
 
-    declared = {f.name for f in dataclasses.fields(IterationRecord)}
+    declared = declared_field_names(IterationRecord)
     # The field the fix adds must be declared.
     assert "params" in declared, (
         "params is not a declared IterationRecord field — the resolver "

@@ -1,0 +1,115 @@
+{
+  "seam": "A",
+  "provenance": {
+    "commit": "d244fc42a4ace2fe2cd6054dbe9e01352993d016",
+    "date": "2026-09-16",
+    "model": "RedHatAI/Qwen3.8-27B-INT4",
+    "endpoint": "live https://llm.trailopeners.com/v1/chat/completions (httpx.AsyncClient, hard 120s timeout)",
+    "normalised": [
+      "request_body messages (replaced with role + '\u2026(normalised)' \u2014 no photo/SCAD content in the committed fixture)"
+    ],
+    "recorded": "live",
+    "recorded_at": "2026-09-16T22:16:09+00:00",
+    "shapes_note": "both shapes driven through the REAL send() against the live endpoint; the fixture records what the wire actually emitted (the raw arguments type per shape is in payload.*.raw_tool_call_args_types)"
+  },
+  "payload": {
+    "native": {
+      "content": "",
+      "tool_calls": [
+        {
+          "name": "emit_design",
+          "arguments": {
+            "scad": "// Simple 20mm cube\nsize = 20;\ncube(size, center=false);"
+          }
+        }
+      ],
+      "prompt_hash": "a27f07a8a1cc5c1bc00f56f2f8622c3b6e25eace69dbb335145b10d8558aea7d",
+      "tier": "T0",
+      "status": "ok",
+      "request_body": {
+        "model": "RedHatAI/Qwen3.8-27B-INT4",
+        "messages": [
+          {
+            "role": "user",
+            "content": "\u2026(normalised)"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "emit_design",
+              "description": "Emit the parametric OpenSCAD",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "scad": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 341,
+        "completion_tokens": 47
+      },
+      "raw_tool_call_args_types": [
+        "str"
+      ]
+    },
+    "fenced": {
+      "content": "",
+      "tool_calls": [
+        {
+          "name": "emit_design",
+          "arguments": {
+            "scad": "// 20mm cube (red)\ncolor(\"red\") cube(20, center = false);"
+          }
+        }
+      ],
+      "prompt_hash": "a27f07a8a1cc5c1bc00f56f2f8622c3b6e25eace69dbb335145b10d8558aea7d",
+      "tier": "T0",
+      "status": "ok",
+      "request_body": {
+        "model": "RedHatAI/Qwen3.8-27B-INT4",
+        "messages": [
+          {
+            "role": "user",
+            "content": "\u2026(normalised)"
+          }
+        ],
+        "tools": [
+          {
+            "type": "function",
+            "function": {
+              "name": "emit_design",
+              "description": "Emit the parametric OpenSCAD",
+              "parameters": {
+                "type": "object",
+                "properties": {
+                  "scad": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "usage": {
+        "prompt_tokens": 341,
+        "completion_tokens": 49
+      },
+      "raw_tool_call_args_types": [
+        "str"
+      ]
+    }
+  },
+  "expected": {
+    "scad": "// Simple 20mm cube\nsize = 20;\ncube(size, center=false);",
+    "scad_note": "expected.scad is the NATIVE shape's recorded SCAD only; the fenced shape is a separate live call whose SCAD legitimately differs (the live model varies per call), so the fenced shape is not pinned to this value."
+  }
+}
