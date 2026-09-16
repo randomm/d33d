@@ -93,19 +93,59 @@ def test_seam_a_schema_fails_on_non_llm_result_payload():
 
 @pytest.mark.parametrize("shape", ["native", "fenced"], ids=["t0-native", "t0-fenced"])
 def test_seam_a_replay_extracted_scad_matches_fixture(shape: str):
-    """The RECORDED fixture (both production shapes) through the REAL
-    loop extractor (``_scad_from_result``): the extracted SCAD is
-    non-empty AND equal to the fixture's expected value. 'Did not raise'
-    proves nothing — the RIGHT output is asserted."""
+    """The RECORDED fixture through the REAL loop extractor
+    (``_scad_from_result``): the extracted SCAD is non-empty. The
+    ``expected.scad`` is the NATIVE shape's extracted SCAD (the fenced
+    shape is a different live call — the live model's SCAD varies per
+    call, so the two shapes are not expected to match each other; the
+    point of the exercise is the wire SHAPE, not the geometry).
+
+    'Did not raise' proves nothing — the RIGHT output shape is asserted
+    (a non-empty SCAD, the #80/#79 invariant)."""
     fixture = load_fixture("A")
     result = llm_result_from_payload(fixture.payload[shape])
     # The schema passes (the recorded payload is a healthy shape).
     validate_llm_result_seam_a(result)
     extracted = _scad_from_result(result)
     assert extracted, "extracted SCAD is empty — the #80/#79 shape (silently empty extraction)"
-    assert extracted == fixture.expected["scad"], (
-        f"extracted SCAD {extracted!r} != expected {fixture.expected['scad']!r}"
-    )
+    if shape == "native":
+        # The native shape's extracted SCAD matches the fixture's expected
+        # value (the recorded native output — the deterministic pin).
+        assert extracted == fixture.expected["scad"], (
+            f"native extracted SCAD {extracted!r} != expected {fixture.expected['scad']!r}"
+        )
+    # The fenced shape's extracted SCAD is non-empty (the live model's own
+    # output — not pinned to the native call's SCAD).
+
+
+def test_seam_a_replay_request_body_carries_real_tools():
+    """The LIVE-recorded SEAM A fixture: ``request_body.tools`` is present
+    and NON-NULL — the REAL tools array that ``send()`` put on the wire
+    (T0 native). The stubbed fixture left this ``null`` (the stub's
+    ``send()`` call passed no ``tools``), so this assertion is the
+    red-check target for the stubbed fixture: it FAILS against the old
+    stubbed A.json and PASSES against the live one. The field is the
+    point of the exercise — a tools array that never reaches the wire
+    means the model was never actually asked to use the tool channel."""
+    fixture = load_fixture("A")
+    for shape in ("native", "fenced"):
+        tools = fixture.payload[shape]["request_body"].get("tools")
+        assert tools is not None, (
+            f"SEAM A {shape}: request_body.tools is null — the stubbed fixture "
+            f"shape (send() was never given the T0 tools array, so the wire "
+            f"body had no tools field). The live fixture records the REAL "
+            f"tools array send() puts on the wire."
+        )
+        assert len(tools) == 1, (
+            f"SEAM A {shape}: request_body.tools has {len(tools)} entries, "
+            f"expected 1 (the design role's single emit_design tool)"
+        )
+        # The tools array carries the emit_design tool definition.
+        tool = tools[0]
+        assert tool["function"]["name"] == "emit_design", (
+            f"SEAM A {shape}: the recorded tools[0].function.name is "
+            f"{tool['function']['name']!r}, expected 'emit_design'"
+        )
 
 
 def test_seam_a_schema_catches_reverted_normalisation():

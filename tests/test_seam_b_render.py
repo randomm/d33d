@@ -139,22 +139,57 @@ def test_seam_b_replay_reconstructed_result_field_for_field():
     validate_render_result_seam_b(result)
 
 
-def test_seam_b_replay_stl_bytes_are_committed_fixture():
-    """The recorded STL bytes (base64 in the fixture) are the committed
-    ``box_20mm.stl`` fixture — the worker's ``classify`` table classified
-    them ``ok`` (the real trimesh load, merge, watertight, volume)."""
+def test_seam_b_replay_stl_bytes_are_live_render():
+    """The recorded STL bytes (base64 in the fixture) are the LIVE render
+    output (the worker's ``classify`` table classified them ``ok`` — the
+    real trimesh load, merge, watertight, volume). The stubbed fixture
+    planted the committed ``box_20mm.stl`` bytes (a circularity — the
+    fixture's expected value came from the fixture itself); the live
+    fixture records the REAL Docker/OpenSCAD output, so the bytes are
+    NOT the committed fixture (they are the live render's own bytes).
+
+    The assertion is structural: the bytes must be a valid, non-degenerate
+    20x20x20 cube (the live geometry check) — NOT a byte match against
+    the committed fixture (the circularity this test replaces)."""
+    import tempfile as _tempfile
     from pathlib import Path
+
+    import trimesh as _trimesh
 
     fixture = load_fixture("B")
     stl_b64 = fixture.payload["artifacts_b64"]["model.stl"]
     stl_bytes = base64.b64decode(stl_b64.encode("ascii"))
+    # The live fixture's STL is NOT the committed box_20mm.stl (the
+    # circularity is gone — the live render produced its own bytes).
     committed = (Path(__file__).parent / "fixtures" / "stl" / "box_20mm.stl").read_bytes()
-    assert stl_bytes == committed, "the recorded STL bytes are not the committed fixture"
+    if fixture.provenance.get("recorded") == "live":
+        assert stl_bytes != committed, (
+            "the live-recorded STL bytes are byte-identical to the committed "
+            "fixture — the circularity the live mode removes (the fixture's "
+            "expected value must come from the live render, not the fixture)"
+        )
+    # Structural check: the bytes are a valid 20x20x20 cube (the live
+    # geometry — NOT a byte match).
+    with _tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
+        f.write(stl_bytes)
+        tmp_path = f.name
+    try:
+        mesh = _trimesh.load(tmp_path, process=False)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    mesh.merge_vertices()
+    b = mesh.bounds
+    for axis in range(3):
+        extent = float(b[1, axis] - b[0, axis])
+        assert 19.0 <= extent <= 21.0, (
+            f"recorded STL extent {extent} on axis {axis} is not ~20mm "
+            f"(the cube(20) request produced the wrong geometry)"
+        )
 
 
 def test_seam_b_replay_bbox_matches_stated_dims():
-    """The recorded render's bbox (from the committed box_20mm.stl) is
-    20x25x30 — the stated dimensions the loop scored against (the
+    """The recorded render's bbox (from the LIVE render's STL) is
+    20x20x20 — the stated dimensions the loop scored against (the
     fixture's expected bbox)."""
 
     import trimesh
@@ -186,3 +221,31 @@ def test_seam_b_replay_bbox_matches_stated_dims():
     assert bbox[0] == pytest.approx(expected["x"])
     assert bbox[1] == pytest.approx(expected["y"])
     assert bbox[2] == pytest.approx(expected["z"])
+
+
+def test_seam_b_replay_stderr_is_live_entrypoint():
+    """The LIVE-recorded SEAM B fixture: ``stderr`` is non-empty and
+    contains an ``[entrypoint]`` marker — the real render worker's
+    multi-line stderr (a Docker platform warning plus the ten
+    ``[entrypoint]`` step lines). The stubbed fixture recorded an empty
+    string (the stub's ``CompletedProcess`` had ``stderr=b''``), so this
+    assertion is the red-check target for the stubbed fixture: it FAILS
+    against the old stubbed B.json and PASSES against the live one.
+
+    The field is the point of the exercise — an empty stderr means the
+    fixture was recorded from a stub, not from a real Docker run (the
+    worker's entrypoint always emits ``[entrypoint]`` step lines on a
+    successful render)."""
+    fixture = load_fixture("B")
+    stderr = fixture.payload["stderr"]
+    assert stderr, (
+        "SEAM B: stderr is empty — the stubbed fixture shape (the stub's "
+        "CompletedProcess had stderr=b''). The live fixture records the "
+        "REAL Docker/OpenSCAD stderr (a platform warning + the [entrypoint] "
+        "step lines)."
+    )
+    assert "[entrypoint]" in stderr, (
+        "SEAM B: stderr does not contain an [entrypoint] marker — the live "
+        "render worker's entrypoint emits [entrypoint] step lines on every "
+        "successful render (the stub's empty stderr has no marker at all)."
+    )

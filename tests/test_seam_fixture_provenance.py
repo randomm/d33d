@@ -62,6 +62,27 @@ def test_each_fixture_carries_model_or_endpoint():
         )
 
 
+def test_each_fixture_carries_recorded_mode():
+    """Every fixture carries ``provenance.recorded`` — the live-vs-stubbed
+    discriminator (``'live'`` or ``'stubbed'``). A reader must never have
+    to guess whether the fixture was captured from a real service or from
+    a stub: the field names it explicitly. This test is the red-check
+    target for fixtures that pre-date the field (the old stubbed fixtures
+    have no ``recorded`` key at all)."""
+    for fixture in _all_fixtures():
+        prov = fixture.provenance
+        assert "recorded" in prov, (
+            f"SEAM {fixture.seam}: provenance missing 'recorded' field — "
+            f"a reader must never have to guess whether the fixture was "
+            f"captured live or stubbed"
+        )
+        recorded = prov["recorded"]
+        assert recorded in ("live", "stubbed"), (
+            f"SEAM {fixture.seam}: provenance.recorded {recorded!r} is not one "
+            f"of the two allowed values ('live' / 'stubbed')"
+        )
+
+
 def test_each_fixture_has_normalisation_note():
     """Every fixture carries a ``provenance.normalised`` list (what was
     normalised away for portability — absolute paths, uuids, temp dirs).

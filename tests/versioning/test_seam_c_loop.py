@@ -205,16 +205,16 @@ def test_seam_c_replay_version_frame_carries_version_id(seam_c_live, app_with_ve
     app = app_with_versions
     app.state.versions = _StubVersions()
 
-    version_id = asyncio.run(_resolve_version_create(app, 1, result, "make a 20x25x30 box"))
+    version_id = asyncio.run(_resolve_version_create(app, 1, result, "Create a 20mm cube"))
 
     # The version was created (a passing loop ALWAYS materialises a
     # version — issue #93's invariant).
     assert version_id is not None
     assert isinstance(version_id, int)
-    # The loop's stated_dims=(20,25,30) maps to W=20, D=25, H=30 (the
+    # The loop's stated_dims=(20,20,20) maps to W=20, D=20, H=20 (the
     # W/D/H axis order — W is the first axis, D the second, H the third).
     # The record's params are the loop's ``_params_for_record`` output.
-    assert record.params == {"W": 20.0, "D": 25.0, "H": 30.0}
+    assert record.params == {"W": 20.0, "D": 20.0, "H": 20.0}
 
 
 def test_seam_c_replay_version_frame_omit_policy_dead_path(tmp_path: Path, app_with_versions):
