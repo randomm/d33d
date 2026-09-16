@@ -215,7 +215,9 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
         # compare the stated triple against the whole-assembly bbox and
         # every multi-part request would fail). ``merge_vertices()`` is
         # destructive (mutates in place and returns self), so it is
-        # called on the loaded mesh, not assigned to a throwaway.
+        # called on the loaded mesh, not assigned to a throwaway. It is
+        # INSIDE the load try: a failure here is a load failure (the
+        # outer ``except`` → None), not a split failure.
         mesh.merge_vertices()
         # Initialize before the try so the except branch can reference it.
         components: tuple[tuple[float, float, float, float, float, float, float], ...] = ()
@@ -233,14 +235,55 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
                     # (non-watertight even after merge). Return None so
                     # the gate FAILS — a vacuous pass here would repeat
                     # the exact defect class issue #84 removed.
+                    #
+                    # This None is deliberately the SAME outcome as the
+                    # outer load-failure None (the gate bit is False either
+                    # way — a broken mesh never passes), but the two log
+                    # lines below are the ONLY place the conditions are
+                    # told apart: "mesh loaded OK but split found 0
+                    # watertight components" (healthy geometry, broken
+                    # topology — a split-level problem, greppable) vs the
+                    # "failed to load STL" line (the file/mesh itself
+                    # would not load). Do not merge the messages: this
+                    # codebase has been bitten by two distinct conditions
+                    # collapsing into one indistinguishable signal.
+                    logger.error(
+                        "bbox_fn: mesh loaded OK but split found 0 watertight "
+                        "components for %r — the bbox gate will fail "
+                        "(bbox_out_of_tolerance), not pass",
+                        stl,
+                    )
                     return None
                 components = tuple(
                     _component_extent(comp)
                     for comp in split_result
                 )
-        except Exception:
-            logger.exception("bbox_fn: component split failed for %r", stl)
-            components = ()
+        except (AttributeError, ValueError, TypeError, RuntimeError):
+            # A split failure on a mesh that LOADED and whose bounds were
+            # measured is a healthy-geometry anomaly, NOT a load failure —
+            # degrading to an empty breakdown (the legacy whole-part path)
+            # would silently re-create the exact issue #100 defect for
+            # every multi-part mesh (the stated triple compared against
+            # the whole-assembly bbox). Returning None fails the gate
+            # loudly, indistinguishable-from-a-broken-mesh at the wire
+            # level but greppable via this log line (which names the
+            # consequence and the trimesh version, so a trimesh upgrade
+            # that changes split() behaviour is diagnosable in one grep).
+            # The tuple is the known trimesh failure surface (attribute
+            # error on a changed API, value/type error from a non-list
+            # shape, runtime error from the geometry itself); MemoryError
+            # (BaseException subclass — a killed process is the right
+            # fate for OOM) and KeyboardInterrupt/SystemExit are not
+            # caught, deliberately.
+            logger.error(
+                "bbox_fn: component split failed for %r (trimesh %s) — "
+                "degrading to no breakdown means the bbox gate will fail; "
+                "refusing to fall back to the whole-part comparison that "
+                "issue #100 removed",
+                stl,
+                getattr(trimesh, "__version__", "unknown"),
+            )
+            return None
         return BboxInfo(x=x, y=y, z=z, volume=volume, components=components)
     except Exception:  # any load failure → gate fails (None), never a raise
         logger.exception("bbox_fn: failed to load STL %r", stl)

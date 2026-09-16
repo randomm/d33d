@@ -28,7 +28,9 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 import trimesh
 
@@ -43,6 +45,7 @@ from d33d.failure_classes import detect_magic_numbers
 from d33d.render_worker import RenderResult
 
 FIXTURES_STL = Path(__file__).parent / "fixtures" / "stl"
+FIXTURES_SCAD = Path(__file__).parent / "fixtures" / "scad"
 
 
 # ---------------------------------------------------------------------------
@@ -181,19 +184,46 @@ def test_zero_component_split_returns_none() -> None:
     bbox_from_render returns None (the gate fails) — never a vacuous
     pass.
 
-    Note: it is difficult to construct a mesh that stays non-watertight
-    through an STL round-trip AND merge_vertices (trimesh's STL export
-    often repairs topology). This test verifies the CONTRACT: when
-    split yields an empty list, bbox_from_render must return None.
-    The production path's zero-component handling is exercised by the
-    real box_20mm.stl fixture (which yields exactly 1 component after
-    merge — the non-zero case)."""
-    # Verify the contract by checking the code path directly:
-    # when split returns an empty list, the function returns None.
-    # We can't easily force this through the STL round-trip, but we can
-    # verify the gate's behaviour for the None case (the other half).
-    # The None → gate-bit-False test is test_none_bbox_gate_bit_false.
-    # Contract verified by code inspection + the None-bbox test.
+    A real mesh is hard to force through the STL round-trip AND
+    merge_vertices into the empty-split state (trimesh's STL export
+    often repairs topology), so ``trimesh.load`` is mocked to return a
+    mesh whose ``split(only_watertight=True)`` yields an EMPTY LIST —
+    exercising the exact production branch (``if not split_result:
+    return None``), not a hand-built BboxInfo."""
+
+    class _ZeroSplitMesh:
+        bounds = np.array([[0.0, 0.0, 0.0], [40.0, 20.0, 20.0]])
+        volume = 12000.0
+
+        def merge_vertices(self) -> _ZeroSplitMesh:
+            return self
+
+        def split(self, only_watertight: bool = True) -> list:
+            return []
+
+    with patch("trimesh.load", return_value=_ZeroSplitMesh()):
+        assert bbox_from_render(_make_render(str(FIXTURES_STL / "box_20mm.stl"))) is None
+
+
+def test_split_exception_returns_none_not_whole_part() -> None:
+    """A split that RAISES on a loaded mesh → bbox_from_render returns
+    None (the gate fails loudly) — never the legacy whole-part path,
+    which would silently re-create the issue #100 defect for every
+    multi-part mesh. (A zero-assertion test of the contract it names
+    was this branch's original home — this one asserts the branch.)"""
+
+    class _SplitRaisesMesh:
+        bounds = np.array([[0.0, 0.0, 0.0], [40.0, 20.0, 20.0]])
+        volume = 12000.0
+
+        def merge_vertices(self) -> _SplitRaisesMesh:
+            return self
+
+        def split(self, only_watertight: bool = True) -> list:
+            raise RuntimeError("synthetic split failure")
+
+    with patch("trimesh.load", return_value=_SplitRaisesMesh()):
+        assert bbox_from_render(_make_render(str(FIXTURES_STL / "box_20mm.stl"))) is None
 
 
 def test_none_bbox_gate_bit_false() -> None:
@@ -275,6 +305,75 @@ def test_magic_multi_part_scad_passes() -> None:
     ) is False
 
 
+def test_magic_multi_part_scad_fixture_passes() -> None:
+    """The reported multi-part SCAD (issue #100 live repro: "create a
+    20mm cube with a 10mm sphere next to it") pinned against the
+    archived fixture — the acceptance criterion, not a hand-written
+    stand-in. The fixture is the parametric W/D/H block + the placement
+    translate on its own line + the sphere's d=10 inlined.
+
+    The gate's regex matches only the FIRST literal immediately after a
+    call's opening paren (or its optional ``[``): for this fixture that
+    is the ``20`` in ``translate([20, 0, 0])``. The ``10`` in
+    ``sphere(d = 10)`` is invisible to the regex (the ``d = `` between
+    the paren and the literal breaks the match). So the gate's verdict
+    on this fixture is determined by the 20 alone: declared → exempt
+    (both the no-stated-dims call and the explicit stated-dims call
+    pass). The 10 being invisible is a pre-existing regex limitation,
+    not a regression — the fully-parametric variant below (where the 10
+    is declared as ``S = 10``) is the shape the gate was designed for.
+    """
+    scad = _load_fixture("issue-100-multipart.scad")
+    # The /chat path (stated dims supplied): the 20 is a stated value —
+    # exempt (the acceptance criterion).
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"W": 20.0, "D": 20.0, "H": 20.0, "S": 10.0}
+    ) is False
+    # The loop's gate-4 call (no stated dims): the 20 is declared —
+    # exempt (declared values are stated values, issue #100).
+    assert detect_magic_numbers(scad) is False
+
+
+def test_magic_named_param_scad_passes_without_dims() -> None:
+    """The fully parametric variant (W/D/H + declared sphere diameter,
+    placement literal) passes the gate even with NO stated dimensions
+    — the idealized acceptance shape, where every literal is either
+    declared or a placement element."""
+    scad = (
+        "W = 20;\nD = 20;\nH = 20;\nS = 10;\n"
+        "cube([W, D, H]);\n"
+        "translate([20, 0, 0]) sphere(d = S);\n"
+    )
+    assert detect_magic_numbers(scad) is False
+
+
+def test_magic_reported_scad_with_inlined_sphere_fails() -> None:
+    """A multi-part SCAD with an UNDECLARED, UNSTATED 2-digit literal in
+    the FIRST position after a call's paren (the sphere's inlined d=33
+    as the first arg — the shape the gate's regex actually sees)
+    flags the 33: the gate's documented purpose (catch an undeclared
+    fit-critical literal) survives the placement exemption. The
+    placement 20 in translate is exempt (a stated/declared value);
+    only the inlined 33 fails the gate.
+
+    The live measurement's failure reason was bbox_out_of_tolerance, not
+    stated_dims_not_named_parameters, so the named-params bit was passing
+    on the model's actual SCAD (fully parametric); this test pins the
+    boundary of the fix: an undeclared, unstated literal in a position
+    the gate's regex can see is still magic."""
+    scad = (
+        "W = 20;\nD = 20;\nH = 20;\n"
+        "cube([W, D, H]);\n"
+        "translate([20, 0, 0])\n"
+        "sphere(33);\n"
+    )
+    # The 33 is the first literal after sphere's paren — the gate sees it.
+    # Not declared, not stated → flagged.
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"W": 20.0, "D": 20.0, "H": 20.0}
+    ) is True
+
+
 def test_magic_genuinely_hardcoded_still_fails() -> None:
     """A hardcoded fit-critical literal (not stated, not placement)
     STILL fails."""
@@ -310,6 +409,46 @@ def test_magic_placement_in_rotate_passes() -> None:
     assert detect_magic_numbers(scad) is False
 
 
+def test_magic_rotate_named_axis_vector_passes_with_stated() -> None:
+    """rotate(angle, v=[x,y,z]) named-argument axis vector: the gate's
+    regex matches only the FIRST literal after the call paren (the
+    angle, not the axis vector elements). The angle passes when stated;
+    the axis vector elements are invisible to the gate (a pre-existing
+    regex limitation, not a regression)."""
+    scad = "rotate(45, v=[0, 0, 20]) cube(5);"
+    # 45 stated → exempt; the 20 in the vector is invisible to the regex
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"z": 20.0, "a": 45.0}
+    ) is False
+    # 45 NOT stated → flagged (the gate's only visible literal)
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"z": 20.0}
+    ) is True
+
+
+def test_magic_rotate_vector_first_element_passes_with_stated() -> None:
+    """rotate([20, 0, 0]) — the 20 is the first element of the axis
+    vector (immediately after ``[``): passes when 20 is stated."""
+    scad = "rotate([20, 0, 0]) cube(5);"
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"z": 20.0}
+    ) is False
+
+
+def test_magic_placement_chain_passes_with_stated_dims() -> None:
+    """A standard placement chain on one line (the adversarial review's
+    probe ``translate([10,0,0]) rotate(20) cube(5);``): the 20 is a
+    rotate ARGUMENT, not a vector element — with no stated dimensions
+    it stays flagged (the gate flags MORE on an imperfect line, never
+    less); with the stated dims the loop actually carries it passes —
+    the shape the live model's output needed."""
+    scad = "translate([10, 0, 0]) rotate(20) cube(5);"
+    assert detect_magic_numbers(scad) is True
+    assert detect_magic_numbers(
+        scad, stated_dimensions={"a": 20.0}
+    ) is False
+
+
 def test_magic_nested_size_in_vector_still_flagged() -> None:
     """A SIZE literal nested inside a translate vector is still flagged."""
     scad = "translate([cube(20), 0, 0]);"
@@ -323,3 +462,10 @@ def test_magic_stated_dimensions_now_honoured() -> None:
     stated = {"width": 20.0, "height": 25.0, "depth": 30.0}
     assert detect_magic_numbers(scad, stated_dimensions=stated) is False
     assert detect_magic_numbers(scad) is True
+
+
+def _load_fixture(name: str) -> str:
+    """Load a .scad fixture from tests/fixtures/scad/."""
+    path = FIXTURES_SCAD / name
+    assert path.exists(), f"Missing fixture: {name}"
+    return path.read_text()

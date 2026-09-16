@@ -493,15 +493,40 @@ def detect_magic_numbers(
     # matches a stated 20.0, "20.0" matches a stated 20.0, "20.5" does
     # not match 20.0). None when no stated dimensions were supplied (the
     # gate then degrades to the declared-values-only behaviour).
+    #
+    # DECLARED VALUES ARE STATED VALUES (issue #100 acceptance criterion):
+    # the loop's design prompt makes the stated dimensions into the
+    # model's W/D/H declarations, so a literal that equals a declared
+    # value is the stated value re-inlined — a genuine magic number is
+    # an UNDECLARED literal (the gate's documented purpose: "every
+    # dimension value that appears in the .scad should be declared as a
+    # named variable in the parameter block at the top of the file").
+    # Without this, a fully-parametric multi-part SCAD (W/D/H block +
+    # placement translate + `sphere(d = 10)` — the model's actual
+    # output in the live repro, which the gate must pass) would still
+    # flag the 10, because 10 was never a stated DIMENSION: the user
+    # asked for a "20mm cube with a 10mm sphere", the stated triple is
+    # (20, 20, 20), and the model's `S = 10; ... sphere(d = S);` (or
+    # the inlined `d = 10`) is the only way the 10 appears — the gate
+    # must not treat "the model's own declared value" as an invented
+    # magic number. The stated_dimensions argument is still honoured
+    # for callers that supply it explicitly (the /chat path, where the
+    # stated triple and the model's declarations can diverge).
     stated_values: set[float] = set()
-    if stated_dimensions:
-        for value in stated_dimensions.values():
-            try:
-                stated_values.add(float(value))
-            except (TypeError, ValueError):
-                continue  # a non-numeric stated value exempts nothing
+    for value in list((stated_dimensions or {}).values()):
+        try:
+            stated_values.add(float(value))
+        except (TypeError, ValueError):
+            continue  # a non-numeric stated value exempts nothing
+    for value in param_declarations:
+        try:
+            stated_values.add(float(value))
+        except (TypeError, ValueError):
+            continue  # an unparseable declared value exempts nothing
 
-    def _is_placement_element(stripped: str, literal_start: int) -> bool:
+    def _is_placement_element(
+        stripped: str, literal_start: int, values: set[float]
+    ) -> bool:
         """True iff the flagged literal (at ``literal_start`` in the
         stripped line) is a NUMERIC ELEMENT of a ``translate``/``rotate``
         argument vector (issue #100 exemption 2). The literal must begin
@@ -511,20 +536,32 @@ def detect_magic_numbers(
         element and stays flagged."""
         if literal_start == 0:
             return False
-        # The literal must sit directly inside a single [ ] pair — count
-        # the OPENING brackets minus the closing ones before it. The
-        # flagged literal is at depth 2 (inside the call's ``(`` and the
-        # vector's ``[``): an open-minus-close of 2 means it is a top-
-        # level element of exactly one vector; 3+ means it is inside a
-        # NESTED expression within the vector (or a nested call) and
-        # stays flagged; < 2 means it is outside the vector entirely.
+        # The literal must sit directly inside a single [ ] vector at
+        # depth 2: the call's ``(`` plus the vector's ``[`` — the ONLY
+        # bracket pair a placement vector contributes. Counting stops at
+        # the literal itself (a later closing bracket on the same line is
+        # irrelevant to the literal's own depth).
+        #
+        # DELIBERATE LIMITATION (known false-positive, bounded): ``{``/``}``
+        # are NOT counted. A placement literal on a line that also carries
+        # an OPEN module block (``difference() { translate([20,0,0])
+        # cube(5); }``) has a different raw brace count and stays flagged
+        # — the gate flags MORE, never less, which is the safe direction
+        # for this heuristic (a false positive costs the model one repair
+        # iteration; a false negative lets an undeclared fit-critical
+        # literal through). OpenSCAD has no real parser here, so the
+        # exemption is deliberately narrower than "every legitimate
+        # placement literal": it covers the canonical top-level shapes
+        # (``translate([20,0,0]) cube(5);`` and its rotate/multi-line
+        # variants) and the ``rotate(angle, [x,y,z])`` named-argument
+        # axis vector, and stops there.
         open_count = 0
         close_count = 0
         for i in range(literal_start):
             ch = stripped[i]
-            if ch in "([{":
+            if ch in "([":
                 open_count += 1
-            elif ch in ")]}":
+            elif ch in ")]":
                 close_count += 1
         if open_count - close_count != 2:
             return False  # not a top-level element of a single vector
@@ -548,7 +585,20 @@ def detect_magic_numbers(
             j -= 1
         name = stripped[: j + 1]
         m = re.search(r"(\w+)\s*$", name)
-        return m is not None and m.group(1) in ("translate", "rotate")
+        if m is None or m.group(1) not in ("translate", "rotate"):
+            return False
+        # ``rotate(a=20, v=[0,0,1])`` — the named-argument vector form
+        # (the axis lives in a NAMED keyword argument, not as the call's
+        # first argument) is a placement vector too. The value must still
+        # be a stated/declared dimension (exact float): an undeclared
+        # fit-critical literal in a placement vector is not auto-exempt,
+        # it just escapes the generic literal rule — so the vector element
+        # passes only when its value equals a stated or declared dimension
+        # (a stated/declared value is never magic; an unstated literal
+        # stays flagged).
+        if m.group(1) == "rotate":
+            return before[-1] == "," and float(match.group(2)) in values
+        return True
 
     for line in lines:
         stripped = line.strip()
@@ -573,7 +623,7 @@ def detect_magic_numbers(
             # rotate placement vector (offsets are not fit-critical).
             # Exemption 1 runs first, so a placement literal that equals
             # a stated dimension never reaches this check.
-            if _is_placement_element(stripped, match.start(2)):
+            if _is_placement_element(stripped, match.start(2), stated_values):
                 continue
             return True
     return False

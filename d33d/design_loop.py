@@ -299,13 +299,13 @@ def best_match_component(
         bbox.components,
         key=lambda c: (
             _component_per_axis_difference(c[:3], stated),
-            -c[3],
-            c[4],
-            c[5],
-            c[6],
+            -(c[3] if len(c) > 3 else 0.0),
+            c[4] if len(c) > 4 else 0.0,
+            c[5] if len(c) > 5 else 0.0,
+            c[6] if len(c) > 6 else 0.0,
         ),
     )
-    return ranked[0][:3]
+    return tuple(ranked[0][:3])
 
 
 def _bbox_within_tolerance(
@@ -365,11 +365,26 @@ def _views_non_blank(render: RenderResult) -> bool:
     )
 
 
-def _named_params_present(scad_source: str) -> bool:
+def _named_params_present(
+    scad_source: str, stated_dims: tuple[float, float, float]
+) -> bool:
     """True iff the .scad declares a named-parameter block AND has no
     un-declared multi-digit geometry literals (the "magic numbers" check
-    from ``d33d.failure_classes``)."""
-    if detect_magic_numbers(scad_source):
+    from ``d33d.failure_classes``).
+
+    The stated dimensions are passed through to the gate (issue #100):
+    a literal equal to a stated value (exact float) is not a magic number
+    — it is the stated value inlined. Stated axes that are unknown
+    (``<= 0``) are omitted: ``0``/absent is "dimension unknown" (the gate
+    abstains on it elsewhere), never a stated value — a ``cube([0, 25,
+    30])`` must not be exempted by an unknown axis.
+    """
+    stated_dimensions: dict[str, float] | None = {
+        axis: value for axis, value in zip(("W", "D", "H"), stated_dims) if value > 0
+    } or None
+    if detect_magic_numbers(
+        scad_source, stated_dimensions=stated_dimensions
+    ):
         return False
     declared = re.search(r"^\s*\w+\s*=\s*[\d.]+\s*;", scad_source, re.MULTILINE)
     return declared is not None
@@ -392,7 +407,14 @@ def score(
     3. bbox within max(1%, 0.5 mm) per axis of ``stated_dims`` — gate 4
        has a record to compare against
     4. stated dimensions appear as named parameters in the .scad, never
-       as magic-number literals (spec acceptance #4)
+       as magic-number literals (spec acceptance #4). The gate is called
+       WITH the known stated dimensions (issue #100): a literal equal to
+       a stated value (exact float) is the stated value inlined, not an
+       invented magic number — without it a multi-part request like "a
+       20mm cube with a 10mm sphere beside it" (stated W/D/H = 20) fails
+       the gate on its own ``translate([20, 0, 0])`` placement literal
+       when the model inlines a non-stated dimension (the adversarial
+       review's acceptance-criterion finding).
 
     Ranked by popcount; ties break on the raw bitvector tuple
     (deterministic, earlier bits first).
@@ -412,7 +434,7 @@ def score(
         render.error_class == "ok",
         _views_non_blank(render),
         bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
-        _named_params_present(scad_source),
+        _named_params_present(scad_source, stated_dims),
     )
     # An abstained axis is ANY unknown target, independent of whether the
     # other (measured) axes happened to pass — a partial triple whose known
