@@ -1,0 +1,62 @@
+{
+  "seam": "D",
+  "provenance": {
+    "commit": "92544d3f4831a6634dcd8f9b99a255a872603cda",
+    "date": "2026-09-17",
+    "model": "adapter (run_design_loop_with_events, real frame construction)",
+    "endpoint": "stubbed loop closure + create_version (no live LLM/Docker)",
+    "normalised": [
+      "the durable artifact dir was recorded under $HOME/d33d/record-seam-d/<key> (a live, under-$HOME path the adapter read via _artifact_bytes_from_path); the on-disk bytes are the committed box_20mm.stl + the 6 fake view PNGs (NOT normalised \u2014 they ARE the wire payload, carried as data URIs); version_id is the stub-assigned 1; the live dir is removed after recording"
+    ]
+  },
+  "payload": {
+    "frames": [
+      {
+        "kind": "progress",
+        "data": {
+          "step": "design-loop-start"
+        }
+      },
+      {
+        "kind": "progress",
+        "data": {
+          "step": "design-loop-pass"
+        }
+      },
+      {
+        "kind": "progress",
+        "data": {
+          "step": "version-created",
+          "version_id": 1,
+          "stl_data_uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAACAvwAAAAAAAAAAAAAgwQAAIMEAACBBAAAgwQAAIEEAACBBAAAgwQAAIMEAACDBAAAAAAAAAACAvwAAAAAAACBBAAAgwQAAIMEAACDBAAAgwQAAIEEAACDBAAAgwQAAIMEAAAAAgL8AAAAAAAAAAAAAIMEAACDBAAAgwQAAIMEAACBBAAAgQQAAIMEAACBBAAAgwQAAAAAAAAAAAAAAAIC/AAAgwQAAIEEAACDBAAAgQQAAIMEAACDBAAAgwQAAIMEAACDBAAAAAAAAAAAAAAAAgD8AACDBAAAgwQAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIEEAAAAAAAAAAIC/AAAAAAAAIEEAACDBAAAgQQAAIMEAACDBAAAgQQAAIEEAACDBAAAgwQAAAAAAAAAAAAAAAIA/AAAgQQAAIMEAACBBAAAgQQAAIEEAACBBAAAgwQAAIMEAACBBAAAAAAAAAACAPwAAAAAAACDBAAAgQQAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIMEAAAAAAAAAAAAAAACAvwAAIEEAACBBAAAgwQAAIEEAACDBAAAgwQAAIMEAACBBAAAgwQAAAAAAAAAAgD8AAAAAAAAgwQAAIEEAACDBAAAgQQAAIEEAACBBAAAgQQAAIEEAACDBAAAAAIA/AAAAAAAAAAAAACBBAAAgQQAAIMEAACBBAAAgwQAAIEEAACBBAAAgwQAAIMEAAAAAgD8AAAAAAAAAAAAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIEEAACBBAAAgwQAA",
+          "views": {
+            "view_00_front.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+            "view_01_back.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+            "view_02_left.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+            "view_03_right.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+            "view_04_top.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+            "view_05_iso.png": "data:image/png;base64,iVBORy1mYWtlLXZpZXctYnl0ZXM="
+          },
+          "bbox_abstained": false
+        }
+      },
+      {
+        "kind": "token",
+        "data": {
+          "text": "W = 20;\nH = 25;\nD = 30;\ncube([W, H, D]);\n"
+        }
+      },
+      {
+        "kind": "done",
+        "data": {
+          "message": "Design loop passed validation",
+          "bbox_abstained": false
+        }
+      }
+    ]
+  },
+  "expected": {
+    "terminal": "done",
+    "version_created": true
+  }
+}

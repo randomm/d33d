@@ -1,0 +1,73 @@
+{
+  "seam": "A",
+  "provenance": {
+    "commit": "92544d3f4831a6634dcd8f9b99a255a872603cda",
+    "date": "2026-09-17",
+    "model": "stub (T0 native + T0 fenced-JSON shapes, recorded via live send())",
+    "endpoint": "stubbed request_factory (no live endpoint)",
+    "normalised": [
+      "request_body messages (replaced with role + '\u2026(normalised)' \u2014 no photo/SCAD content in the committed fixture)"
+    ]
+  },
+  "payload": {
+    "native": {
+      "content": "",
+      "tool_calls": [
+        {
+          "name": "emit_design",
+          "arguments": {
+            "scad": "W = 20;\nH = 25;\nD = 30;\ncube([W, H, D]);\n"
+          }
+        }
+      ],
+      "prompt_hash": "bd37c3161e54eb2c53053fd2308b54bc356aeb22888d128bf3f742d8cf7bcee6",
+      "tier": "T0",
+      "status": "ok",
+      "request_body": {
+        "model": "stub/t0-native",
+        "messages": [
+          {
+            "role": "user",
+            "content": "\u2026(normalised)"
+          }
+        ],
+        "tools": null
+      },
+      "usage": {
+        "prompt_tokens": 11,
+        "completion_tokens": 7
+      }
+    },
+    "fenced": {
+      "content": "```json\n{\"tool\": \"emit_design\", \"arguments\": {\"scad\": \"W = 20;\\nH = 25;\\nD = 30;\\ncube([W, H, D]);\\n\"}}\n```",
+      "tool_calls": [
+        {
+          "name": "emit_design",
+          "arguments": {
+            "scad": "W = 20;\nH = 25;\nD = 30;\ncube([W, H, D]);\n"
+          }
+        }
+      ],
+      "prompt_hash": "bd37c3161e54eb2c53053fd2308b54bc356aeb22888d128bf3f742d8cf7bcee6",
+      "tier": "T0",
+      "status": "ok",
+      "request_body": {
+        "model": "stub/t0-fenced",
+        "messages": [
+          {
+            "role": "user",
+            "content": "\u2026(normalised)"
+          }
+        ],
+        "tools": null
+      },
+      "usage": {
+        "prompt_tokens": 12,
+        "completion_tokens": 8
+      }
+    }
+  },
+  "expected": {
+    "scad": "W = 20;\nH = 25;\nD = 30;\ncube([W, H, D]);\n"
+  }
+}

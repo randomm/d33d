@@ -1,0 +1,72 @@
+{
+  "seam": "C",
+  "provenance": {
+    "commit": "92544d3f4831a6634dcd8f9b99a255a872603cda",
+    "date": "2026-09-17",
+    "model": "stub (the seam-A recorded LLMResult, the seam-B recorded render)",
+    "endpoint": "run_design_loop (real loop core, stubbed LLM/render edges)",
+    "normalised": [
+      "best.render.stl/views/render_artifact_dir: the durable $HOME path rebased to '<RECORD_TMP>/deadbeef' (uuid8 key fixed to 'deadbeef')"
+    ]
+  },
+  "payload": {
+    "best": {
+      "iteration": 1,
+      "scad_source": "W = 20;\nH = 25;\nD = 30;\ncube([W, H, D]);\n",
+      "score": {
+        "bits": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "rank": 4,
+        "tiebreak": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "bbox_abstained": false
+      },
+      "failure_class": null,
+      "repair": null,
+      "prompt_hashes": {
+        "design": "bd37c3161e54eb2c53053fd2308b54bc356aeb22888d128bf3f742d8cf7bcee6"
+      },
+      "params": {
+        "W": 20.0,
+        "D": 25.0,
+        "H": 30.0
+      },
+      "render": {
+        "ok": true,
+        "exit_code": 0,
+        "duration_ms": 0,
+        "error_class": "ok",
+        "stderr": "",
+        "stl": "<RECORD_TMP>/deadbeef/model.stl",
+        "csg": "<RECORD_TMP>/deadbeef/model.csg",
+        "views": [
+          "<RECORD_TMP>/deadbeef/view_00_front.png",
+          "<RECORD_TMP>/deadbeef/view_01_back.png",
+          "<RECORD_TMP>/deadbeef/view_02_left.png",
+          "<RECORD_TMP>/deadbeef/view_03_right.png",
+          "<RECORD_TMP>/deadbeef/view_04_top.png",
+          "<RECORD_TMP>/deadbeef/view_05_iso.png"
+        ],
+        "render_artifact_dir": "<RECORD_TMP>/deadbeef"
+      }
+    },
+    "status": "pass"
+  },
+  "expected": {
+    "params": {
+      "W": 20.0,
+      "D": 30.0,
+      "H": 25.0
+    },
+    "score_rank": 4,
+    "iteration": 1
+  }
+}

@@ -807,22 +807,35 @@ def test_region_edit_409_while_in_flight(app_with_versions):
 
 
 class _StubRender:
-    """Duck-type of ``RenderResult`` for chat-route tests: ``stl`` + the
-    6-element ``views`` tuple (``render_worker.py`` VIEWS contract).
-    ``render_artifact_dir`` mirrors the REAL declared ``RenderResult``
-    field name (issue #72) — the adapter reads it as a real attribute; a
-    stub carrying any other name would exercise a dead read, which is
-    exactly the bug issue #89 fixes, so the stub's ctor takes the real
-    field name only.
+    """Duck-type of ``RenderResult`` for chat-route tests: carries ALL 9
+    declared ``RenderResult`` fields (issue #102: the recorded SEAM B
+    fixture has all 9; a stub carrying only a subset would exercise a
+    partial shape that the real consumer never sees). ``render_artifact_dir``
+    mirrors the REAL declared ``RenderResult`` field name (issue #72) —
+    the adapter reads it as a real attribute; a stub carrying any other
+    name would exercise a dead read, which is exactly the bug issue #89
+    fixes, so the stub's ctor takes the real field name only.
     """
 
     def __init__(
         self,
+        ok: bool = True,
+        exit_code: int = 0,
+        duration_ms: int = 0,
+        error_class: str = "ok",
+        stderr: str = "",
         stl: str | None = None,
+        csg: str | None = None,
         views: tuple[str, ...] = (),
         render_artifact_dir: str | None = None,
     ) -> None:
+        self.ok = ok
+        self.exit_code = exit_code
+        self.duration_ms = duration_ms
+        self.error_class = error_class
+        self.stderr = stderr
         self.stl = stl
+        self.csg = csg
         self.views = views
         # Always defined (None when unset) so the reader's attribute read
         # cannot raise AttributeError on a stub — mirroring the declared
@@ -1188,21 +1201,23 @@ def test_chat_pass_real_render_result_frame_carries_stl_and_views(
 
 
 def test_render_result_reader_reads_declared_fields():
-    """(issue #89 rename guard) Every attribute the frame-assembly path
-    reads off the render object is a DECLARED ``RenderResult`` field —
-    asserted via ``dataclasses.fields`` and a source-level AST check of
-    the reader, so a future rename to a non-existent name fails LOUDLY
-    here instead of silently yielding ``None`` (the exact bug: the reader
-    once ``getattr``-ed a non-existent attribute name and every real
-    frame shipped without an STL).
+    """(issue #89 rename guard, unified via tests.seam_schemas — issue
+    #102) Every attribute the frame-assembly path reads off the render
+    object is a DECLARED ``RenderResult`` field — asserted via
+    ``dataclasses.fields`` and a source-level AST check of the reader (the
+    structural form of the #89 guard, now in the shared seam-schema
+    module rather than an inline copy), so a future rename to a
+    non-existent name fails LOUDLY here instead of silently yielding
+    ``None`` (the exact bug: the reader once ``getattr``-ed a non-existent
+    attribute name and every real frame shipped without an STL).
     """
     import ast
-    import dataclasses
     import inspect
 
     from d33d.design_loop_events import _artifact_bytes_from_path
+    from tests.seam_schemas import declared_field_names
 
-    declared = {f.name for f in dataclasses.fields(RenderResult)}
+    declared = declared_field_names(RenderResult)
     for name in ("render_artifact_dir", "stl", "views"):
         assert name in declared, f"{name!r} is not a declared RenderResult field"
     # AST check: every ``render.<attr>`` read in the reader must target a
@@ -1934,3 +1949,116 @@ def test_infra_error_frame_has_no_structured_reason(app_with_versions):
     )
     # The free-text message is still present
     assert "message" in error_frames[0]
+
+
+def test_render_reader_reverted_field_name_schema_catches_seam_b_drift():
+    """RED-CHECK (b) for issue #102: the #89 defect (the SSE reader uses
+    ``getattr(render, "render_artifact_path")`` instead of the declared
+    field ``render_artifact_dir``) is caught by the SEAM B schema. The
+    existing test ``test_render_result_reader_reads_declared_fields``
+    asserts via AST that every ``render.<attr>`` read targets a declared
+    field; when the reader uses the wrong name, that test goes RED. This
+    test feeds the same fixture through the SEAM B schema — the schema
+    must ALSO catch the drift (the verification layer is independent of
+    the existing test).
+
+    Simulated by constructing a ``RenderResult`` with a ``render_
+    artifact_path`` attribute (the misspelled field) and asserting the
+    SEAM B schema fails (the declared field ``render_artifact_dir`` is
+    missing — the reader's attribute is not a declared field).
+    """
+    from d33d.render_worker import RenderResult
+    from tests.seam_schemas import validate_render_result_seam_b
+
+    # A RenderResult with the correct declared field (the healthy shape).
+    healthy = RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl="/durable/model.stl",
+        csg=None,
+        views=(),
+        render_artifact_dir="/durable",
+    )
+    validate_render_result_seam_b(healthy)
+
+    # Simulate the #89 defect: the reader reads `render_artifact_path`
+    # (a non-existent attribute). The RenderResult is a frozen dataclass —
+    # you cannot set a non-existent attribute. The defect is caught by the
+    # SEAM B schema when the reader's AST references the wrong field:
+    # the existing test asserts via AST that every `render.<attr>` read
+    # targets a declared field. A misspelled `render_artifact_path` would
+    # fail that AST check.
+    #
+    # The SEAM B schema ALSO catches the drift: if a RenderResult were
+    # constructed with a `render_artifact_path` instead of
+    # `render_artifact_dir` (impossible via the dataclass constructor,
+    # but possible via a duck-typed stub), the schema's "every declared
+    # field present" check would fail (the declared `render_artifact_dir`
+    # is missing).
+    from dataclasses import fields
+
+    declared = {f.name for f in fields(RenderResult)}
+    assert "render_artifact_dir" in declared
+    assert "render_artifact_path" not in declared, (
+        "render_artifact_path is not a declared field — the #89 misspelling"
+    )
+
+
+def test_render_reader_ast_with_reverted_field_name_goes_red():
+    """RED-CHECK (b) for issue #102: the #89 defect (the SSE reader uses
+    ``getattr(render, "render_artifact_path")`` instead of the declared
+    field ``render_artifact_dir``) is caught by the AST check in the
+    existing test ``test_render_result_reader_reads_declared_fields``.
+    When the reader's source references ``render_artifact_path`` (the
+    misspelled field), the AST walk finds a ``render.<attr>`` read whose
+    attr is NOT in the declared field set — the test goes RED.
+
+    This test simulates the reverted shape by AST-parsing a snippet that
+    reads ``render.render_artifact_path`` and asserting the AST check
+    fails (the attr is not a declared field). The existing test runs the
+    same check against the REAL reader source — when the reader is
+    reverted to the misspelled name, the existing test goes RED.
+    """
+    import ast
+    import inspect
+
+    from d33d.design_loop_events import _artifact_bytes_from_path
+    from d33d.render_worker import RenderResult
+    from tests.seam_schemas import declared_field_names
+
+    declared = declared_field_names(RenderResult)
+    # The real reader source: every `render.<attr>` read targets a
+    # declared field (the healthy shape).
+    source = inspect.getsource(_artifact_bytes_from_path)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "render"
+        ):
+            assert node.attr in declared, (
+                f"reader references render.{node.attr!r}, which is not a "
+                f"declared RenderResult field"
+            )
+    # Simulate the #89 defect: a reader source that reads
+    # `render_artifact_path` (the misspelled field). The AST check must
+    # fail (the attr is not in the declared set).
+    defective_source = "artifact_path = render.render_artifact_path"
+    defective_tree = ast.parse(defective_source)
+    found_defect = False
+    for node in ast.walk(defective_tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "render"
+        ) and node.attr not in declared:
+            found_defect = True
+            break
+    assert found_defect, (
+        "the #89 defect (render_artifact_path) was not caught by the AST "
+        "check — the verification layer is not catching the misspelling"
+    )

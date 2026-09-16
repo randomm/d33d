@@ -1304,3 +1304,57 @@ def test_t0_malformed_body_is_sender_error():
             )
         )
     assert exc.value.status == "error"
+
+
+def test_t0_reverted_normalisation_schema_catches_seam_a_drift():
+    """RED-CHECK (a) for issue #102: the #80 defect (tool-args
+    normalisation reverted — ``_normalize_tool_arguments`` returns the raw
+    JSON string) is caught by the SEAM A schema. The existing test
+    ``test_t0_json_string_tool_call_arguments_normalized_to_dict`` asserts
+    the normalised dict; when the normalisation is reverted, that test
+    goes RED (the arguments is a string, not a dict). This test drives
+    the same ``send()`` call and feeds the result through the SEAM A
+    schema — the schema must ALSO go RED (the schema is the verification
+    layer that catches the drift, independent of the existing test).
+    """
+
+    from tests.seam_schemas import SeamError, validate_llm_result_seam_a
+
+    async def factory(request):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": '{"scad": "cube([20,20,20]);"}',
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="design",
+            model_id="m",
+            messages=_design_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    # The existing test asserts this (and goes RED when the normalisation
+    # is reverted). The SEAM A schema ALSO catches it (the verification
+    # layer is independent of the existing test).
+    args = result.tool_calls[0]["arguments"]
+    if isinstance(args, dict):
+        # The normalised shape (the normalisation ran) — the schema passes.
+        validate_llm_result_seam_a(result)
+    else:
+        # The reverted shape (the normalisation was reverted — the #80
+        # defect) — the schema goes RED.
+        with pytest.raises(SeamError) as exc:
+            validate_llm_result_seam_a(result)
+        assert "SEAM A" in str(exc.value)
+        assert "arguments" in str(exc.value)

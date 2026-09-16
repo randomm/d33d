@@ -1,0 +1,62 @@
+{
+  "seam": "B",
+  "provenance": {
+    "commit": "92544d3f4831a6634dcd8f9b99a255a872603cda",
+    "date": "2026-09-17",
+    "model": "openscad (render-worker:local)",
+    "endpoint": "docker (stubbed subprocess.run; no live Docker)",
+    "normalised": [
+      "render_artifact_dir/stl/views: the durable $HOME path is rebased to <RECORD_TMP>/<render_key>/\u2026 (the per-render uuid8 key is fixed to 'deadbeef' for reproducibility); the csg tempdir path is rebased to <RECORD_TMP>/<key>-tmp/\u2026 (the csg is never persisted \u2014 a dead tempdir path is the documented worker contract, not a secret)"
+    ]
+  },
+  "payload": {
+    "ok": true,
+    "exit_code": 0,
+    "duration_ms": 0,
+    "error_class": "ok",
+    "stderr": "",
+    "artifacts": {
+      "stl": "<RECORD_TMP>/deadbeef/model.stl",
+      "csg": "<RECORD_TMP>/deadbeef-tmp/tmp4d8ozk3x/out/model.csg",
+      "views": [
+        "<RECORD_TMP>/deadbeef/view_00_front.png",
+        "<RECORD_TMP>/deadbeef/view_01_back.png",
+        "<RECORD_TMP>/deadbeef/view_02_left.png",
+        "<RECORD_TMP>/deadbeef/view_03_right.png",
+        "<RECORD_TMP>/deadbeef/view_04_top.png",
+        "<RECORD_TMP>/deadbeef/view_05_iso.png"
+      ]
+    },
+    "render_artifact_dir": "<RECORD_TMP>/deadbeef",
+    "stl": "<RECORD_TMP>/deadbeef/model.stl",
+    "views": [
+      "<RECORD_TMP>/deadbeef/view_00_front.png",
+      "<RECORD_TMP>/deadbeef/view_01_back.png",
+      "<RECORD_TMP>/deadbeef/view_02_left.png",
+      "<RECORD_TMP>/deadbeef/view_03_right.png",
+      "<RECORD_TMP>/deadbeef/view_04_top.png",
+      "<RECORD_TMP>/deadbeef/view_05_iso.png"
+    ],
+    "csg": "<RECORD_TMP>/deadbeef-tmp/tmp4d8ozk3x/out/model.csg",
+    "artifacts_b64": {
+      "model.stl": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAAAAAACAvwAAAAAAAAAAAAAgwQAAIMEAACBBAAAgwQAAIEEAACBBAAAgwQAAIMEAACDBAAAAAAAAAACAvwAAAAAAACBBAAAgwQAAIMEAACDBAAAgwQAAIEEAACDBAAAgwQAAIMEAAAAAgL8AAAAAAAAAAAAAIMEAACDBAAAgwQAAIMEAACBBAAAgQQAAIMEAACBBAAAgwQAAAAAAAAAAAAAAAIC/AAAgwQAAIEEAACDBAAAgQQAAIMEAACDBAAAgwQAAIMEAACDBAAAAAAAAAAAAAAAAgD8AACDBAAAgwQAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIEEAAAAAAAAAAIC/AAAAAAAAIEEAACDBAAAgQQAAIMEAACDBAAAgQQAAIEEAACDBAAAgwQAAAAAAAAAAAAAAAIA/AAAgQQAAIMEAACBBAAAgQQAAIEEAACBBAAAgwQAAIMEAACBBAAAAAAAAAACAPwAAAAAAACDBAAAgQQAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIMEAAAAAAAAAAAAAAACAvwAAIEEAACBBAAAgwQAAIEEAACDBAAAgwQAAIMEAACBBAAAgwQAAAAAAAAAAgD8AAAAAAAAgwQAAIEEAACDBAAAgQQAAIEEAACBBAAAgQQAAIEEAACDBAAAAAIA/AAAAAAAAAAAAACBBAAAgQQAAIMEAACBBAAAgwQAAIEEAACBBAAAgwQAAIMEAAAAAgD8AAAAAAAAAAAAAIEEAACBBAAAgQQAAIEEAACDBAAAgQQAAIEEAACBBAAAgwQAA",
+      "views": {
+        "view_00_front.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+        "view_01_back.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+        "view_02_left.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+        "view_03_right.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+        "view_04_top.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM=",
+        "view_05_iso.png": "iVBORy1mYWtlLXZpZXctYnl0ZXM="
+      }
+    }
+  },
+  "expected": {
+    "error_class": "ok",
+    "bbox": {
+      "x": 20.0,
+      "y": 20.0,
+      "z": 20.0
+    },
+    "stl_is_committed_fixture": true
+  }
+}
