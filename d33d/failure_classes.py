@@ -418,6 +418,27 @@ def classify_failure(
     )
 
 
+#: The two NAMED EXEMPTIONS for the magic-number gate (issue #100). Both
+#: are deliberate and bounded — the gate's purpose (catch hardcoded
+#: fit-critical literals that should be named parameters) must survive:
+#
+#: 1. Stated-dimension exemption: a literal whose value EQUALS (exact
+#:    float equality) one of the caller's stated dimensions is not a
+#:    magic number — it IS the stated value, inlined. A literal ``20``
+#:    is exempt when any stated dimension is ``20.0`` (float comparison
+#:    avoids the "20" vs "20.0" string trap).
+#: 2. Placement-vector exemption: a literal appearing as a NUMERIC ELEMENT
+#:    of the argument vector of ``translate``/``rotate`` is not fit-
+#:    critical — it is a placement offset. The exemption is scoped to the
+#:    vector's numeric elements only: a SIZE literal nested inside the
+#:    expression is still flagged.
+#:
+#: ``mirror`` is DELIBERATELY NOT in the regex alternation — it is not
+#: flagged today, so an exemption for it would be a no-op; extending the
+#: alternation would make the gate flag MORE and is out of scope
+#: (issue #100, PM decision 3).
+
+
 def detect_magic_numbers(
     scad_source: str,
     stated_dimensions: dict[str, float] | None = None,
@@ -430,13 +451,28 @@ def detect_magic_numbers(
     Single-digit numbers are not considered magic numbers — they are
     commonly used for small offsets, angles, and other non-dimension values.
 
+    Two narrow exemptions (issue #100, bounded — see the note above this
+    function):
+
+    * **Stated dimensions** (``stated_dimensions``): a literal whose value
+      equals one of the stated dimension values (exact float equality,
+      both sides parsed as ``float``) is exempt — it is the stated value
+      inlined, not an invented number. ``stated_dimensions`` used to be
+      accepted and ignored; the gate now honours it.
+    * **Placement vectors**: a literal that is a numeric element of the
+      argument vector of ``translate``/``rotate`` (``translate([20, 0, 0])``)
+      is exempt — placement offsets are not fit-critical. Scoped to the
+      vector's numeric elements; a size literal nested in the expression
+      is still flagged.
+
     Parameters
     ----------
     scad_source:
         The .scad source code.
     stated_dimensions:
-        Optional dict of stated dimensions. Not used for detection;
-        the heuristic is based on inline literals.
+        Optional dict of stated dimensions (name -> value in mm). A
+        flagged literal whose value equals any stated value (exact float
+        equality) is exempt.
 
     Returns
     -------
@@ -453,6 +489,67 @@ def detect_magic_numbers(
         if match:
             param_declarations.add(match.group(2))
 
+    # Exemption 1: stated-dimension values (exact float equality — "20"
+    # matches a stated 20.0, "20.0" matches a stated 20.0, "20.5" does
+    # not match 20.0). None when no stated dimensions were supplied (the
+    # gate then degrades to the declared-values-only behaviour).
+    stated_values: set[float] = set()
+    if stated_dimensions:
+        for value in stated_dimensions.values():
+            try:
+                stated_values.add(float(value))
+            except (TypeError, ValueError):
+                continue  # a non-numeric stated value exempts nothing
+
+    def _is_placement_element(stripped: str, literal_start: int) -> bool:
+        """True iff the flagged literal (at ``literal_start`` in the
+        stripped line) is a NUMERIC ELEMENT of a ``translate``/``rotate``
+        argument vector (issue #100 exemption 2). The literal must begin
+        immediately after a ``[`` or a top-level ``,`` inside the vector —
+        a literal inside a NESTED expression within the vector's own text
+        (``translate([cube(20)...])``-style nesting) is NOT a vector
+        element and stays flagged."""
+        if literal_start == 0:
+            return False
+        # The literal must sit directly inside a single [ ] pair — count
+        # the OPENING brackets minus the closing ones before it. The
+        # flagged literal is at depth 2 (inside the call's ``(`` and the
+        # vector's ``[``): an open-minus-close of 2 means it is a top-
+        # level element of exactly one vector; 3+ means it is inside a
+        # NESTED expression within the vector (or a nested call) and
+        # stays flagged; < 2 means it is outside the vector entirely.
+        open_count = 0
+        close_count = 0
+        for i in range(literal_start):
+            ch = stripped[i]
+            if ch in "([{":
+                open_count += 1
+            elif ch in ")]}":
+                close_count += 1
+        if open_count - close_count != 2:
+            return False  # not a top-level element of a single vector
+        prefix = stripped[:literal_start]
+        # The character right before the literal (ignoring whitespace)
+        # must be ``[`` (first element) or ``,`` (a later element) — a
+        # literal preceded by any other character (an identifier, a
+        # ``(``, ``*`` ...) belongs to a nested expression and stays
+        # flagged.
+        before = prefix.rstrip()
+        if not before.endswith(("[", ",")):
+            return False
+        # Walk back over the vector's opening ``[`` and the call's ``(``
+        # (and any whitespace between them) to the function identifier;
+        # the call must be ``translate`` or ``rotate`` — ``cube`` and the
+        # other geometric functions are NOT placement contexts (``cube``
+        # is a shape, not a transform).
+        open_pos = prefix.rfind("[")
+        j = open_pos - 1
+        while j >= 0 and (stripped[j] in " \t" or stripped[j] == "("):
+            j -= 1
+        name = stripped[: j + 1]
+        m = re.search(r"(\w+)\s*$", name)
+        return m is not None and m.group(1) in ("translate", "rotate")
+
     for line in lines:
         stripped = line.strip()
         if stripped.startswith(("//", "/*")):
@@ -463,8 +560,22 @@ def detect_magic_numbers(
             stripped,
         ):
             value_str = match.group(2)
-            if value_str not in param_declarations:
-                return True
+            if value_str in param_declarations:
+                continue
+            # Exemption 1: literal equals a stated dimension (exact float).
+            try:
+                literal_value = float(value_str)
+            except ValueError:
+                literal_value = None
+            if literal_value is not None and literal_value in stated_values:
+                continue
+            # Exemption 2: literal is a numeric element of a translate/
+            # rotate placement vector (offsets are not fit-critical).
+            # Exemption 1 runs first, so a placement literal that equals
+            # a stated dimension never reaches this check.
+            if _is_placement_element(stripped, match.start(2)):
+                continue
+            return True
     return False
 
 

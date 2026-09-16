@@ -399,13 +399,17 @@ cube([1, 2, 3]);
 
 
 def test_detect_magic_numbers_with_stated_dimensions() -> None:
-    """With stated_dimensions, the check still detects inline literals."""
+    """With stated_dimensions, a literal equal to a stated value is exempt
+    (issue #100 — the parameter was previously ignored; this test now
+    asserts it is HONORED)."""
     scad = """
 cube([20, 25, 30]);
 """
     stated = {"width": 20.0, "height": 25.0, "depth": 30.0}
-    # The heuristic detects inline literals regardless of stated_dimensions
-    assert fc.detect_magic_numbers(scad, stated_dimensions=stated) is True
+    # 20 (first arg) equals stated width → exempt → no magic numbers.
+    assert fc.detect_magic_numbers(scad, stated_dimensions=stated) is False
+    # Without stated dimensions, 20 is still flagged.
+    assert fc.detect_magic_numbers(scad) is True
 
 
 # ---------------------------------------------------------------------------
