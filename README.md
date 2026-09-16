@@ -16,7 +16,7 @@ below is one deliverable; the dependency order is the build order:
 | [#4](https://github.com/randomm/d33d/issues/4) | 3MF export and printability gating for QIDI |
 | [#5](https://github.com/randomm/d33d/issues/5) | Design agent: photo + chat to OpenSCAD with vision critique |
 | [#6](https://github.com/randomm/d33d/issues/6) | React single-page app |
-| [#7](https://github.com/randomm/d33d/issues/7) | Lasso region selection |
+| [#7](https://github.com/randomm/d33d/issues/7) | Region selection (single-point pick) |
 | [#8](https://github.com/randomm/d33d/issues/8) | Version timeline, restore, variant gallery, compare |
 | [#9](https://github.com/randomm/d33d/issues/9) | Eval harness and golden set |
 

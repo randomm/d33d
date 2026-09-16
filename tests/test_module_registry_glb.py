@@ -3,7 +3,7 @@
 No Docker required — builds tiny trimesh primitives directly (standing in
 for the STL an isolated openscad render would produce) and asserts the
 GLB round-trip preserves ``registry_name`` keys as glTF node/mesh names,
-exactly the shape ``ModelViewer.tsx``'s ``resolveLassoSelection`` reads
+exactly the shape ``ModelViewer.tsx``'s ``resolvePointPick`` reads
 via ``mesh.name`` in three.js's ``GLTFLoader``.
 
 The full Docker-driven orchestration (:func:`build_registry_glb` end to

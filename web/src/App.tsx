@@ -1022,7 +1022,7 @@ export default function App({ renders = [], client }: AppProps) {
             onLoaded={handleViewerLoaded}
           />
           {/* Single-click pick layer (issue #98) — the replacement for the
-              polygon-lasso overlay. `ready` flips once a model is loaded
+              pick layer (issue #98). `ready` flips once a model is loaded
               (e2e waits on `data-ready`); `marker` is the visible red dot
               while a selection is pending. The layer never swallows
               drag/wheel events, so OrbitControls always gets the camera's

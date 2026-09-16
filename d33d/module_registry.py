@@ -1,6 +1,6 @@
 """Named OpenSCAD module registry (issue #7's core deliverable).
 
-Resolves a lasso selection in the three.js viewer to a named OpenSCAD
+Resolves a region pick in the three.js viewer to a named OpenSCAD
 module identifier. This is greenfield orchestration built ON TOP of the
 render worker's existing per-render primitives (``d33d.render_worker`` —
 ``build_docker_argv`` / ``run_container``); it never re-implements
@@ -28,7 +28,7 @@ parts-so-a.md`` for the full evidence trail — do not re-litigate):
 4. Assemble the N per-module STLs into one ``trimesh.Scene({name: mesh})``
    and export GLB. Names survive the round-trip into ``nodes[].name`` /
    ``meshes[].name``, which is exactly what three.js's ``GLTFLoader``
-   reads (``ModelViewer.tsx``'s ``resolveLassoSelection`` keys off
+   reads (``ModelViewer.tsx``'s ``resolvePointPick`` keys off
    ``mesh.name``). Scene-graph node ORDER is not preserved across the
    round-trip; names are — irrelevant for a name-keyed registry.
 
@@ -135,7 +135,7 @@ class CallSite:
     ``registry_name`` is the DISTINCT key used in the assembled registry
     (GLB node name / ``trimesh.Scene`` dict key) — ``name`` for the first
     call to a given module, ``name_2``/``name_3``/... for subsequent
-    calls to the SAME module name, so a lasso pick is never ambiguous
+    calls to the SAME module name, so a region pick is never ambiguous
     even when a design calls the same module more than once (e.g. four
     identical ``leg()`` calls). Ordinal suffixes are chosen disjoint from
     every LITERAL module name found anywhere else in the source (not just
@@ -205,7 +205,7 @@ def parse_call_sites(source: str) -> list[CallSite]:
 
     Duplicate calls to the same module name are all enumerated, each with
     a distinct ``registry_name`` (``name``, ``name_2``, ``name_3``, ...)
-    so a lasso pick is never ambiguous. The ordinal suffix is chosen
+    so a region pick is never ambiguous. The ordinal suffix is chosen
     disjoint from every LITERAL module identifier that appears anywhere
     else in the source (both other call-sites' bare ``name`` and
     ``module name(...)`` definition headers) — never just the set of

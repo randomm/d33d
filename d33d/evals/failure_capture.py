@@ -152,7 +152,7 @@ class FailureEvent(BaseModel):
       data URI); ``None`` when the request carried no photo (text-only
       requests — the field is optional so text-only production runs
       still archive).
-    - ``region_mark`` — the lasso / region-selection mark (view id +
+    - ``region_mark`` — the region-selection mark (view id +
       module ids) for a region-scoped edit; ``None`` for a full-model
       design.
     - ``request`` — the user's request (instruction / chat context).

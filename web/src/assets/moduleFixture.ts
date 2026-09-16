@@ -6,7 +6,7 @@
  * checked-in fixture (identical bytes to
  * `web/tests/fixtures/viewer/mini-model.glb`, already used by
  * model-viewer.test.ts) stands in as the sole moduleGroup source for
- * `resolveLassoSelection` in this ticket. Inlined (not fetched at
+ * `resolvePointPick` in this ticket. Inlined (not fetched at
  * runtime) so it never competes with `window.fetch` stubs other tests
  * install for the backend API, and never trips `tsconfig.json`'s
  * `rootDir: "src"` constraint that a static import reaching outside

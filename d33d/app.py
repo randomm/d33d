@@ -30,8 +30,8 @@ are out of scope for this module.
 Also defined here: ``POST /api/projects/{id}/region-edits`` (issue #7,
 workstream task-c; wired to the design loop by issue #68) — the
 region-scoped edit request route. It validates and accepts a
-lasso-selection payload (ranked module identifiers, marked PNG, polygon,
-view id, instruction) and returns 202 Accepted with a
+point-pick payload (optional module identifiers, marked PNG, single
+picked point, view id, instruction) and returns 202 Accepted with a
 ``status: "accepted"`` body — mirroring ``/chat`` — driving the
 injected design loop (``d33d/design_loop.py``) in the background. The
 version, when the loop passes, arrives only via the SSE stream's
@@ -40,7 +40,7 @@ version, when the loop passes, arrives only via the SSE stream's
 Also defined here: ``POST /api/projects/{id}/module-registry`` (issue #7,
 workstream task-a) — the named-module registry route that IS the wiring
 path ``region-edits``' ``module_ids`` and ``ModelViewer.tsx``'s
-``resolveLassoSelection`` are BUILT to consume. Given ``.scad`` source, it
+``resolvePointPick`` are BUILT to consume. Given ``.scad`` source, it
 calls ``d33d.module_registry.build_registry_glb`` (injected via
 ``app.state.build_registry_glb`` so tests never spawn Docker) and returns
 the assembled named GLB as ``model/gltf-binary`` — exactly the shape
@@ -66,6 +66,7 @@ import base64
 import binascii
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -391,16 +392,16 @@ class ModuleRegistryRequest(BaseModel):
 # wiring by issue #68)
 # ---------------------------------------------------------------------------
 #
-# The route accepts and validates a region-selection payload (ranked
-# module identifiers + marked PNG + lasso polygon + view id) and drives
+# The route accepts and validates a region-pick payload (optional
+# module identifiers + marked PNG + single picked point + view id) and drives
 # the injected design loop (``app.state.run_design_loop``) in the
 # background — the same adapter pattern as ``POST /{id}/chat``
 # (``d33d/projects.py`` / ``d33d/design_loop_events.py``). The 202 body
 # mirrors ``/chat`` (``{project_id, status: "accepted"}``); the version
 # arrives only via the SSE stream's ``version-created`` frame.
 
-#: The six orthographic render-worker views a lasso selection may be
-#: drawn on (matches ``ViewId`` in ``web/src/components/canvas/
+#: The six orthographic render-worker views a point pick may be made on
+#: (matches ``ViewId`` in ``web/src/components/canvas/
 #: DimensionCanvas.tsx``).
 REGION_EDIT_VIEW_IDS: frozenset[str] = frozenset(
     {"front", "back", "left", "right", "top", "iso"}
@@ -426,10 +427,26 @@ class PointLocation(BaseModel):
     authoritative grounding is the marked PNG (the red dot composited at
     exactly this location), so the server does not interpret the
     coordinate space beyond accepting finite pixel values.
+
+    Finiteness is a wire-format requirement: ``x``/``y`` must be finite
+    floats (NaN/±inf are rejected — NaN is not even valid JSON), because
+    a non-finite coordinate reaching the containment gate would be a
+    defect the server cannot diagnose downstream. BOUNDS are deliberately
+    NOT validated: the server does not know the client's view dimensions,
+    and negative coordinates are legal (a client may use a different
+    origin) — validating a range would fabricate a constraint the client
+    alone can justify.
     """
 
     x: float
     y: float
+
+    @field_validator("x", "y")
+    @classmethod
+    def _coords_must_be_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("point coordinates must be finite numbers")
+        return v
 
 
 class RegionEditRequest(BaseModel):
@@ -720,8 +737,7 @@ def create_app(
     ) -> Response:
         """Build the named OpenSCAD module registry for ``scad_source``
         and return it as a GLB — the wiring path ``ModelViewer.loadGLB``
-        and ``resolveLassoSelection`` (``web/src/components/viewer/
-        ModelViewer.tsx``) are built to consume, and the source of the
+        and ``resolvePointPick`` (``web/src/components/viewer/ModelViewer.tsx``) are built to consume, and the source of the
         ``module_ids`` ``POST /api/projects/{id}/region-edits`` accepts.
         No frontend code calls this route yet — the SPA shell has no
         ``scad_source`` to send it until the design-loop-to-SSE pipeline

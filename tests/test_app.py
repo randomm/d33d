@@ -667,7 +667,7 @@ def test_create_app_inits_event_sources(app):
 # Region-scoped edit request (issue #7, workstream task-c; design-loop
 # wiring by issue #68)
 #
-# The route validates the lasso-selection payload and drives the injected
+# The route validates the point-pick payload and drives the injected
 # design loop (``app.state.run_design_loop``) in the background — the
 # same adapter pattern as ``POST /{id}/chat``. The 202 body mirrors
 # ``/chat`` (``{project_id, status: "accepted"}``); the version arrives
@@ -754,6 +754,75 @@ def test_region_edit_accepts_empty_module_ids(app):
     assert r.json() == {"project_id": project_id, "status": "accepted"}
 
 
+def test_region_edit_accepts_negative_point(app):
+    """A NEGATIVE but finite point coordinate is ACCEPTED: the server does
+    not know the client's view dimensions, so bounds are the client's
+    business (a client may use a different origin). Finiteness — not
+    range — is the only constraint the server may enforce."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(point={"x": -10.5, "y": -20.25}),
+        )
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"project_id": project_id, "status": "accepted"}
+
+
+def test_region_edit_empty_module_ids_composes_no_modules_request_text(app):
+    """With an EMPTY ``module_ids`` list the composed request text is
+    EXACTLY the no-modules form — no "on modules" prefix — because the
+    with-modules branch and this one produce different strings and an
+    unasserted branch can silently change. The stub design loop captures
+    the ``request`` kwarg it was called with, which is the composed text.
+    The registered event source is pumped synchronously (to its terminal
+    frame) after the 202 — the loop runs then, not inside the request."""
+    captured: dict[str, Any] = {}
+
+    class _PassResult:
+        """A minimal pass result the adapter can handle (no render
+        artifacts, no best/scad — the adapter omits those fields)."""
+
+        status = "pass"
+        best = None
+
+    async def _stub_loop(app, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _PassResult()
+
+    app.state.run_design_loop = _stub_loop
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(module_ids=[]),
+        )
+        # The route registers the event source synchronously and the loop
+        # is driven by whoever consumes the generator — pump it to its
+        # terminal frame so the stub runs and captures its kwargs.
+        source = app.state.event_sources.get(project_id)
+        if source is not None:
+            async for _event, _data in source:
+                pass
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"project_id": project_id, "status": "accepted"}
+    assert "request" in captured, "stub design loop was not invoked with the request kwarg"
+    expected = (
+        "Region edit at the marked point (view: front): "
+        "open up this spiral, it's too tight to print"
+    )
+    assert captured["request"] == expected
+    assert "on modules" not in captured["request"]
+
+
 def test_region_edit_rejects_more_than_ten_module_ids(app):
     """Set-of-Mark caps ranked regions at ~10 (spec: small open models
     confuse more IDs than that) — an over-long list is rejected, not
@@ -803,6 +872,39 @@ def test_region_edit_rejects_missing_point(app):
 
     r = _run_async(app, _call)
     assert r.status_code == 422
+
+
+def test_point_location_rejects_inf_coordinates(app):
+    """±inf are NOT finite floats and NOT valid JSON — the wire path
+    rejects them (``json.dumps`` raises on inf, which is a rejection at
+    serialization), and the MODEL's finiteness validator rejects them
+    for the in-process path. This test pins the model-level rule (the
+    authoritative guard for the in-process boundary) so the finiteness
+    requirement is pinned regardless of the serialization layer."""
+    from pydantic import ValidationError
+
+    from d33d.app import PointLocation
+
+    with pytest.raises(ValidationError):
+        PointLocation(x=float("nan"), y=200.0)
+    with pytest.raises(ValidationError):
+        PointLocation(x=300.0, y=float("-inf"))
+    # A normal value is accepted (the validator is not over-restrictive).
+    p = PointLocation(x=300.0, y=200.0)
+    assert p.x == 300.0 and p.y == 200.0
+
+
+def test_point_location_accepts_negative_finite_coordinates(app):
+    """A negative finite coordinate is ACCEPTED — the server does not know
+    the client's view dimensions, so bounds are the client's business (a
+    client may use a different origin); finiteness is the only constraint.
+    This is the model-level companion to the route-level
+    ``test_region_edit_accepts_negative_point`` (which exercises the full
+    202 path)."""
+    from d33d.app import PointLocation
+
+    p = PointLocation(x=-10.5, y=-20.25)
+    assert p.x == -10.5 and p.y == -20.25
 
 
 def test_region_edit_rejects_invalid_base64_image(app):
@@ -881,7 +983,7 @@ def test_main_module_importable():
 #
 # POST /api/projects/{id}/module-registry is the HTTP boundary the
 # frontend viewer (ModelViewer.loadGLB) actually calls to get the named
-# GLB it needs for resolveLassoSelection. The route delegates to
+# GLB it needs for resolvePointPick. The route delegates to
 # d33d.module_registry.build_registry_glb, injected via app.state so this
 # test never spawns Docker — the Docker-driven path itself is covered by
 # tests/slow/test_module_registry_docker.py.

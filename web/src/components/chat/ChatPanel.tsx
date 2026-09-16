@@ -17,7 +17,7 @@ import type { RenderImage } from "../../App";
 import type { RegionEditViewId } from "../../lib/api";
 
 /**
- * Marker colour for region-selection marks (lasso, thumbnails).
+ * Marker colour for region-selection marks (thumbnails).
  *
  * Must stay red / high-contrast warm — arXiv 2512.17875 (Berkeley) found
  * VLMs are fragile to marker details and a red-to-blue swap can flip

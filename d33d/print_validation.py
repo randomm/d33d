@@ -686,7 +686,7 @@ def _fail(
 #
 # Scope: the containment METRIC only — the fraction of changed triangle
 # area falling outside a selected region's 3D bounding volume. How that
-# volume is resolved (module registry lookup, lasso-to-3D lift) is owned
+# volume is resolved (module registry lookup, pick-to-3D lift) is owned
 # by other workstreams of ticket #6; this module treats the volume as an
 # opaque axis-aligned box (bbox_min, bbox_max) in mm, matching the mesh's
 # own coordinate space.
