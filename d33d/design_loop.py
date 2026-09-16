@@ -123,12 +123,32 @@ BboxFn = Callable[[RenderResult], "BboxInfo | None"]
 
 @dataclass(frozen=True)
 class BboxInfo:
-    """Per-axis rendered extents (mm) plus volume — the gate inputs."""
+    """Per-axis rendered extents (mm) plus volume — the gate inputs.
+
+    ``x``/``y``/``z``/``volume`` are the WHOLE-ASSEMBLY extents (the union
+    bounding box of everything the render produced). ``components`` is an
+    optional per-component breakdown — extents + volume of each watertight
+    connected component of the mesh after ``merge_vertices`` +
+    ``split(only_watertight=True)`` (issue #100: a multi-part request like
+    "a 20mm cube with a 10mm sphere beside it" renders one STL holding
+    several disjoint bodies, and comparing the whole-assembly bbox against
+    the single stated triple made the gate unsatisfiable by construction).
+    The bbox gate compares the stated triple against the BEST-MATCHING
+    component when ``components`` is non-empty; when it is empty the gate
+    takes the whole-part path exactly as before, so every existing caller
+    that builds ``BboxInfo(x, y, z, volume)`` sees byte-for-byte the old
+    behaviour (an empty breakdown means "no component data", never "one
+    component").
+    """
 
     x: float
     y: float
     z: float
     volume: float = 0.0
+    #: Per-component ``(x_extent, y_extent, z_extent, volume, min_x, min_y,
+    #: min_z)`` tuples from the mesh's watertight connected components
+    #: (issue #100). Empty = whole-part comparison (the legacy path).
+    components: tuple[tuple[float, float, float, float, float, float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -244,6 +264,50 @@ GATE_REASON_BITS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
+def _component_per_axis_difference(
+    extents: tuple[float, float, float], stated: tuple[float, float, float]
+) -> float:
+    """Sum of the absolute per-axis differences between a component's
+    extents and the stated triple — the best-match metric (issue #100).
+    Every stated axis is known here (the caller abstains first), so no
+    axis is skipped."""
+    return sum(abs(extent - target) for extent, target in zip(extents, stated))
+
+
+def best_match_component(
+    bbox: BboxInfo, stated: tuple[float, float, float]
+) -> tuple[float, float, float] | None:
+    """The stated triple's BEST-MATCHING component extents, or ``None``.
+
+    Returns ``None`` when the ``BboxInfo`` carries no component breakdown
+    (the legacy whole-part case). Otherwise sorts the components by the
+    TOTAL ordering ``(per-axis-difference ASC, volume DESC, min_x ASC,
+    min_y ASC, min_z ASC)`` and returns the first's extents (issue #100,
+    PM decision 5). The ordering is a total order defined purely on each
+    component's own measurements — it is independent of the order
+    ``trimesh.split()`` happens to return components in (that order varies
+    between merged/unmerged loads of the same bodies), so the selection is
+    deterministic across repeated runs and across component orderings.
+
+    Volume here is only a TIE-BREAKER, never a conformance signal: for
+    intersecting/contained shells ``split()`` double-counts the overlap in
+    component volumes, so a volume comparison is not a size comparison.
+    """
+    if not bbox.components:
+        return None
+    ranked = sorted(
+        bbox.components,
+        key=lambda c: (
+            _component_per_axis_difference(c[:3], stated),
+            -(c[3] if len(c) > 3 else 0.0),
+            c[4] if len(c) > 4 else 0.0,
+            c[5] if len(c) > 5 else 0.0,
+            c[6] if len(c) > 6 else 0.0,
+        ),
+    )
+    return tuple(ranked[0][:3])
+
+
 def _bbox_within_tolerance(
     bbox: BboxInfo, stated: tuple[float, float, float]
 ) -> bool:
@@ -255,10 +319,39 @@ def _bbox_within_tolerance(
     the gate ABSTAINS (True): an unmeasurable gate must not hard-fail
     every candidate. The abstention is recorded DISTINCTLY by
     :func:`score`'s ``bbox_abstained`` field — it is never a vacuous,
-    unmarked pass."""
-    for extent, target in zip((bbox.x, bbox.y, bbox.z), stated):
+    unmarked pass.
+
+    Issue #100 — multi-part meshes: when ``bbox.components`` is non-empty
+    the stated triple is compared against the BEST-MATCHING component
+    (the component whose extents are closest to the triple — see
+    :func:`best_match_component`) instead of the whole-assembly extents:
+    a stated single-body triple can never match a whole-assembly bbox that
+    contains additional bodies, so the whole-assembly comparison made any
+    multi-part request unsatisfiable by construction. The abstain check
+    runs BEFORE any component work (ticket #91 semantics preserved exactly).
+
+    Degradation is explicit (issue #100): when the mesh splits to exactly
+    one watertight component the gate compares that component against the
+    triple — which is byte-for-byte what the whole-part comparison is for
+    a single body (the single component IS the assembly). Fused/
+    intersecting geometry that OpenSCAD's CSG merged into one shell also
+    yields one component and therefore behaves as today: the gate measures
+    the union extents, not a per-feature decomposition. A mesh that splits
+    to ZERO components (a genuinely broken/non-watertight mesh) fails the
+    gate — a vacuous pass here would repeat the exact defect class issue
+    #84 removed, so a zero-component split is never treated as "no bodies,
+    nothing to measure". That case is reachable only through the
+    production ``bbox_from_render`` seam (which sets ``components``);
+    test-built ``BboxInfo``s without a breakdown keep the legacy
+    whole-part comparison.
+    """
+    for target in stated:
         if target <= 0:
             return True
+    extents = best_match_component(bbox, stated)
+    if extents is None:
+        extents = (bbox.x, bbox.y, bbox.z)
+    for extent, target in zip(extents, stated):
         tol = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
         if abs(extent - target) > tol:
             return False
@@ -272,11 +365,26 @@ def _views_non_blank(render: RenderResult) -> bool:
     )
 
 
-def _named_params_present(scad_source: str) -> bool:
+def _named_params_present(
+    scad_source: str, stated_dims: tuple[float, float, float]
+) -> bool:
     """True iff the .scad declares a named-parameter block AND has no
     un-declared multi-digit geometry literals (the "magic numbers" check
-    from ``d33d.failure_classes``)."""
-    if detect_magic_numbers(scad_source):
+    from ``d33d.failure_classes``).
+
+    The stated dimensions are passed through to the gate (issue #100):
+    a literal equal to a stated value (exact float) is not a magic number
+    — it is the stated value inlined. Stated axes that are unknown
+    (``<= 0``) are omitted: ``0``/absent is "dimension unknown" (the gate
+    abstains on it elsewhere), never a stated value — a ``cube([0, 25,
+    30])`` must not be exempted by an unknown axis.
+    """
+    stated_dimensions: dict[str, float] | None = {
+        axis: value for axis, value in zip(("W", "D", "H"), stated_dims) if value > 0
+    } or None
+    if detect_magic_numbers(
+        scad_source, stated_dimensions=stated_dimensions
+    ):
         return False
     declared = re.search(r"^\s*\w+\s*=\s*[\d.]+\s*;", scad_source, re.MULTILINE)
     return declared is not None
@@ -299,7 +407,14 @@ def score(
     3. bbox within max(1%, 0.5 mm) per axis of ``stated_dims`` — gate 4
        has a record to compare against
     4. stated dimensions appear as named parameters in the .scad, never
-       as magic-number literals (spec acceptance #4)
+       as magic-number literals (spec acceptance #4). The gate is called
+       WITH the known stated dimensions (issue #100): a literal equal to
+       a stated value (exact float) is the stated value inlined, not an
+       invented magic number — without it a multi-part request like "a
+       20mm cube with a 10mm sphere beside it" (stated W/D/H = 20) fails
+       the gate on its own ``translate([20, 0, 0])`` placement literal
+       when the model inlines a non-stated dimension (the adversarial
+       review's acceptance-criterion finding).
 
     Ranked by popcount; ties break on the raw bitvector tuple
     (deterministic, earlier bits first).
@@ -319,7 +434,7 @@ def score(
         render.error_class == "ok",
         _views_non_blank(render),
         bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
-        _named_params_present(scad_source),
+        _named_params_present(scad_source, stated_dims),
     )
     # An abstained axis is ANY unknown target, independent of whether the
     # other (measured) axes happened to pass — a partial triple whose known

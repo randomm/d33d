@@ -118,6 +118,32 @@ def latest_version_stated_dims(
     return (triple[0], triple[1], triple[2])
 
 
+def _component_extent(component: Any) -> tuple[float, float, float, float, float, float, float]:
+    """``(x_extent, y_extent, z_extent, volume, min_x, min_y, min_z)`` from
+    one trimesh component (issue #100). All values are plain ``float``
+    (numpy scalars are converted). Volume defaults to 0.0 for a
+    non-watertight component (trimesh raises on ``.volume`` for
+    non-watertight meshes — the gate only consumes volume as a best-match
+    tie-breaker, never as a conformance signal, so a missing volume is
+    harmless)."""
+    b = component.bounds
+    extents = (
+        float(b[1, 0] - b[0, 0]),
+        float(b[1, 1] - b[0, 1]),
+        float(b[1, 2] - b[0, 2]),
+    )
+    try:
+        volume = float(getattr(component, "volume", 0.0) or 0.0)
+    except (ValueError, TypeError, RuntimeError):  # non-watertight component
+        volume = 0.0
+    mins = (
+        float(b[0, 0]),
+        float(b[0, 1]),
+        float(b[0, 2]),
+    )
+    return (*extents, volume, *mins)
+
+
 def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     """Per-axis extents (mm) for the design-loop bbox gate, from a render.
 
@@ -134,10 +160,32 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
     the bbox gate cannot score (the gate then fails and no candidate can
     score the bbox bit).
 
-    No ``merge_vertices()`` is needed here: bounds are derived from
-    vertex coordinates and are invariant under duplicate-vertex merging,
-    so (unlike the issue #84 watertight fix, which required merging before
-    ``is_watertight``) the unmerged load is correct for this read.
+    Issue #100 — multi-part meshes: the bbox gate needs the mesh's
+    per-component extents (a stated single-body triple must match the
+    best-matching component, not the whole-assembly bbox), so this seam
+    runs the merge+split internally and carries the breakdown on
+    ``BboxInfo.components`` (``x``/``y``/``z``/``volume`` keep their
+    whole-assembly meaning):
+
+    **CRITICAL: ``merge_vertices()`` MUST run before
+    ``split(only_watertight=True)`` — do NOT "optimise" it away.**
+    The production STLs OpenSCAD emits are FACE-DISCONNECTED (triangles
+    share no vertices), so on an unmerged load ``split()`` finds ZERO
+    watertight connected components (measured on
+    ``tests/fixtures/stl/box_20mm.stl``: unmerged → 0 components; merged
+    → exactly 1 for the single 20mm body). Without the merge, every
+    multi-part render would split to zero and fail the gate on a broken
+    mesh that renders fine — the exact silent-corruption class issue #84
+    already cost days to remove. Merging is NOT a no-op for bounds (the
+    old "bounds are merge-invariant" note below is true for BOUNDS and
+    false for SPLIT, which is why it is now corrected) — it is what makes
+    ``split`` see a shell as one connected component.
+
+    A component breakdown the split cannot produce (empty) still returns
+    the whole-assembly ``BboxInfo`` (empty ``components`` → the gate's
+    legacy whole-part path). A zero-component split on a non-empty mesh is
+    a genuinely broken mesh: the gate fails it (``bbox_out_of_tolerance``)
+    — it is never a vacuous pass (issue #100, PM decision 2).
 
     Returns ``None`` (the bbox gate fails) when the render has no STL or it
     cannot be loaded; never raises.
@@ -159,7 +207,84 @@ def bbox_from_render(render: RenderResult) -> BboxInfo | None:
         y = float(b[1, 1] - b[0, 1])
         z = float(b[1, 2] - b[0, 2])
         volume = float(getattr(mesh, "volume", 0.0) or 0.0)
-        return BboxInfo(x=x, y=y, z=z, volume=volume)
+
+        # Issue #100: per-component breakdown for the multi-part gate.
+        # merge_vertices() BEFORE split() — see the CRITICAL note above;
+        # without it the production face-disconnected STL splits to ZERO
+        # components (the whole-part ``components=()`` path would then
+        # compare the stated triple against the whole-assembly bbox and
+        # every multi-part request would fail). ``merge_vertices()`` is
+        # destructive (mutates in place and returns self), so it is
+        # called on the loaded mesh, not assigned to a throwaway. It is
+        # INSIDE the load try: a failure here is a load failure (the
+        # outer ``except`` → None), not a split failure.
+        mesh.merge_vertices()
+        # Initialize before the try so the except branch can reference it.
+        components: tuple[tuple[float, float, float, float, float, float, float], ...] = ()
+        try:
+            split_result = mesh.split(only_watertight=True)
+            # ``split()`` returns a LIST of submeshes (one per watertight
+            # connected component); on trimesh 5.1.0 a mesh with zero
+            # watertight components yields an empty list (the zero-component
+            # case the gate must fail, not pass). Defensive: an unexpected
+            # non-list shape degrades to an empty breakdown (the legacy
+            # whole-part path), never a raise.
+            if isinstance(split_result, list):
+                if not split_result:
+                    # Zero components: the mesh is genuinely broken
+                    # (non-watertight even after merge). Return None so
+                    # the gate FAILS — a vacuous pass here would repeat
+                    # the exact defect class issue #84 removed.
+                    #
+                    # This None is deliberately the SAME outcome as the
+                    # outer load-failure None (the gate bit is False either
+                    # way — a broken mesh never passes), but the two log
+                    # lines below are the ONLY place the conditions are
+                    # told apart: "mesh loaded OK but split found 0
+                    # watertight components" (healthy geometry, broken
+                    # topology — a split-level problem, greppable) vs the
+                    # "failed to load STL" line (the file/mesh itself
+                    # would not load). Do not merge the messages: this
+                    # codebase has been bitten by two distinct conditions
+                    # collapsing into one indistinguishable signal.
+                    logger.error(
+                        "bbox_fn: mesh loaded OK but split found 0 watertight "
+                        "components for %r — the bbox gate will fail "
+                        "(bbox_out_of_tolerance), not pass",
+                        stl,
+                    )
+                    return None
+                components = tuple(
+                    _component_extent(comp)
+                    for comp in split_result
+                )
+        except (AttributeError, ValueError, TypeError, RuntimeError):
+            # A split failure on a mesh that LOADED and whose bounds were
+            # measured is a healthy-geometry anomaly, NOT a load failure —
+            # degrading to an empty breakdown (the legacy whole-part path)
+            # would silently re-create the exact issue #100 defect for
+            # every multi-part mesh (the stated triple compared against
+            # the whole-assembly bbox). Returning None fails the gate
+            # loudly, indistinguishable-from-a-broken-mesh at the wire
+            # level but greppable via this log line (which names the
+            # consequence and the trimesh version, so a trimesh upgrade
+            # that changes split() behaviour is diagnosable in one grep).
+            # The tuple is the known trimesh failure surface (attribute
+            # error on a changed API, value/type error from a non-list
+            # shape, runtime error from the geometry itself); MemoryError
+            # (BaseException subclass — a killed process is the right
+            # fate for OOM) and KeyboardInterrupt/SystemExit are not
+            # caught, deliberately.
+            logger.error(
+                "bbox_fn: component split failed for %r (trimesh %s) — "
+                "degrading to no breakdown means the bbox gate will fail; "
+                "refusing to fall back to the whole-part comparison that "
+                "issue #100 removed",
+                stl,
+                getattr(trimesh, "__version__", "unknown"),
+            )
+            return None
+        return BboxInfo(x=x, y=y, z=z, volume=volume, components=components)
     except Exception:  # any load failure → gate fails (None), never a raise
         logger.exception("bbox_fn: failed to load STL %r", stl)
         return None
