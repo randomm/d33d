@@ -593,11 +593,17 @@ def test_app_hook_closure_appends_on_exhausted(tmp_path: Path, monkeypatch):
     assert events[0].failure_class == "empty_model"
     assert events[0].model == "model-x"
     assert events[0].prompt_version == "deadbeef"
-    # The hook kwargs (model/prompt_version/request) are NOT forwarded to
-    # the real loop — the loop doesn't accept them.
+    # The hook's model/prompt_version kwargs are NOT forwarded to the real
+    # loop — the loop doesn't accept them.
     assert "model" not in calls[0]
     assert "prompt_version" not in calls[0]
-    assert "request" not in calls[0]
+    # ``request`` IS forwarded (issue #97: the hook used to pop it and the
+    # value never reached the loop — the user's request was never rendered
+    # in the design prompt). The forwarded value must equal the hook's
+    # archive value: the loop's prompt and the failures.jsonl line carry
+    # the same request, never a prior-turn chat_history fallback.
+    assert calls[0].get("request") == "make it a cube"
+    assert events[0].request == calls[0]["request"]
 
 
 def test_app_hook_closure_no_append_on_pass(tmp_path: Path, monkeypatch):

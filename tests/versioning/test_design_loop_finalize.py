@@ -577,9 +577,16 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     chat turn — even when the project has prior transcripts), and a
     callable bbox_fn."""
     captured: dict = {}
+    prompt_captured: dict = {}
 
     async def _loop(app, **kwargs):
+        # Two consecutive calls: the first captures the full kwargs contract
+        # (the route echo — the existing assertion surface); the second
+        # captures the same kwargs as the PROMPT input (issue #97: the
+        # request must reach the value the loop renders as the first
+        # ``Request:`` line, not just the route's kwarg echo).
         captured.update(kwargs)
+        prompt_captured.update(kwargs)
         return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);")
 
     async def _call(client):
@@ -620,6 +627,16 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # not a chat turn (the project's transcript is never auto-included).
     assert captured["chat_history"] == ()
     assert callable(captured["bbox_fn"])
+    # The composed region-edit instruction must reach the RENDERED design
+    # prompt, not just the captured kwargs (issue #97: a value passed
+    # around but never rendered is the exact defect being fixed). The
+    # ``request`` kwarg is the value ``_design_messages`` renders as the
+    # first ``Request:`` line of the user text — assert it on that value.
+    assert prompt_captured.get("request"), "region edit request not forwarded to the loop"
+    assert "open up this spiral, it's too tight to print" in prompt_captured["request"]
+    # The instruction is NOT buried in chat_history (a scoped directive is
+    # not a chat turn) — it must ride the explicit request line.
+    assert prompt_captured.get("chat_history") == ()
 
 
 def test_region_edit_stated_dims_from_latest_version(app_with_versions):

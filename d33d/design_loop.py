@@ -434,11 +434,26 @@ def _design_messages(
     chat_history: Sequence[str],
     stated: tuple[float, float, float],
     repair: dict[str, Any] | None,
+    request: str = "",
 ) -> list[dict[str, Any]]:
-    """The design-role message list: photo + chat + dimensions as named
-    parameters + (on repair iterations) the structured failure directive —
-    the tagged class and instruction, never a raw stderr dump."""
+    """The design-role message list: the current user's REQUEST as the
+    first line of the user text (issue #97: the current message used to be
+    lost — the user text was built from ``chat_history`` alone, and the
+    SPA's history excludes the current turn, so the model never saw what
+    was asked and invented unrelated geometry) + prior chat turns as
+    context + dimensions as named parameters + (on repair iterations) the
+    structured failure directive — the tagged class and instruction, never
+    a raw stderr dump.
+
+    The request line is rendered VERBATIM (no summarising, rewriting, or
+    truncation) and labelled ``Request:`` so the model can distinguish
+    the current instruction from the prior-context ``chat:`` lines and
+    from the dimensions. Empty/blank requests render no line at all (the
+    legacy shape — a caller that supplies no request, e.g. an old stub,
+    builds the exact prompt it always built)."""
     lines: list[str] = []
+    if request and request.strip():
+        lines.append(f"Request: {request}")
     for turn in chat_history:
         lines.append(f"chat: {turn}")
     lines.append(
@@ -584,6 +599,7 @@ async def run_design_loop_async(
     bbox_fn: BboxFn | None = None,
     log: LogFn | None = None,
     max_iterations: int = MAX_ITERATIONS,
+    request: str = "",
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -623,6 +639,7 @@ async def run_design_loop_async(
                 chat_history=chat_history,
                 stated=stated_dims,
                 repair=repair,
+                request=request,
             ),
             _design_system(stated_dims),
         )
@@ -752,6 +769,7 @@ def run_design_loop(
     bbox_fn: BboxFn | None = None,
     log: LogFn | None = None,
     max_iterations: int = MAX_ITERATIONS,
+    request: str = "",
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -770,6 +788,7 @@ def run_design_loop(
             bbox_fn=bbox_fn,
             log=log,
             max_iterations=max_iterations,
+            request=request,
         )
     )
 

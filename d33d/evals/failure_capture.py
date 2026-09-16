@@ -503,12 +503,16 @@ def default_run_design_loop_hook(
     failures are structurally excluded (no ``is_eval`` flag).
 
     The caller's ``kwargs`` carry the design-loop arguments PLUS the
-    hook's ``model``, ``prompt_version`` and ``request`` (the app adds
-    those from the resolved role, the canonical prompt hash, and the
-    user's request text); the closure strips them before forwarding to
-    the real loop (which doesn't accept them). A test that needs a
-    stub loop (or no hook) overwrites ``app.state.run_design_loop``
-    after ``create_app`` returns.
+    hook's ``model`` and ``prompt_version`` (the app adds those from the
+    resolved role and the canonical prompt hash) and the ``request`` —
+    the user's CURRENT request text. The closure pops ``model`` /
+    ``prompt_version`` (the loop doesn't accept them) but FORWARDS
+    ``request``: since issue #97 the loop renders it as the first
+    ``Request:`` line of the design prompt, so the hook archives the same
+    value it hands the loop — never a prior-turn ``chat_history``
+    fallback (the archive line must equal the current user's request, not
+    history). A test that needs a stub loop (or no hook) overwrites
+    ``app.state.run_design_loop`` after ``create_app`` returns.
     """
     from d33d import design_loop as _dl
 
@@ -520,10 +524,11 @@ def default_run_design_loop_hook(
         hook_request = kwargs.pop("request", None)
         hook_photo = kwargs.get("photo")
         hook_region_mark = kwargs.get("region_mark")
-        request = str(
-            hook_request or kwargs.get("chat_history") or ""
-        )
-        result = await real_run(**kwargs)
+        # The archive ``request`` is the popped value — identical to what
+        # the loop receives below (a missing ``request`` degrades to an
+        # empty archive field; the loop then renders no request line).
+        request = str(hook_request or "")
+        result = await real_run(request=request, **kwargs)
         try:
             if result is not None:
                 record_production_failure(
