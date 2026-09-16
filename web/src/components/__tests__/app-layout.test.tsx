@@ -1445,3 +1445,254 @@ describe("App region-edit success feedback", () => {
     expect(acceptedMsg?.textContent?.toLowerCase()).not.toContain("done");
   });
 });
+
+describe("App design-loop progress indicator (issue #82)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("is absent when designLoopInFlight is false (before send)", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(screen.queryByTestId("design-loop-progress")).toBeNull();
+  });
+
+  it("is present when designLoopInFlight is true (after send)", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(() => new Promise(() => {}));
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    // The send button is disabled while in flight
+    await waitFor(() => {
+      expect((screen.getByTestId("chat-send-btn") as HTMLInputElement).disabled).toBe(true);
+    });
+    // The progress indicator is visible
+    await waitFor(() => {
+      expect(screen.getByTestId("design-loop-progress")).toBeTruthy();
+    });
+    expect(screen.getByTestId("design-loop-elapsed")).toBeTruthy();
+    expect(screen.getByTestId("design-loop-progress-bar")).toBeTruthy();
+  });
+
+  it("renders 'Generating design…' on design-loop-start and generic fallback for unknown step", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    let capturedHandlers: any = null;
+    vi.spyOn(client, "streamEvents").mockImplementation((_id: number, handlers: any) => {
+      capturedHandlers = handlers;
+      return new Promise(() => {});
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    // Wait for streamEvents to be called
+    await waitFor(() => {
+      expect(capturedHandlers).not.toBeNull();
+    });
+
+    // Fire design-loop-start
+    act(() => {
+      capturedHandlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("design-loop-stage").textContent).toBe("Generating design…");
+    });
+
+    // Fire an unknown step — should show generic fallback, not the raw token
+    act(() => {
+      capturedHandlers.onProgress("some-unknown-step", { step: "some-unknown-step" });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("design-loop-stage").textContent).toBe("Working on your design…");
+    });
+    // The raw step name must NOT appear
+    expect(screen.getByTestId("design-loop-progress").textContent).not.toContain("some-unknown-step");
+  });
+});
+
+describe("App design-loop error display (issue #82)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it("maps error_class_not_ok to a plain-language sentence with the raw code in details", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onError?.({
+        message: "Design loop exhausted: error_class_not_ok",
+        reason: "error_class_not_ok",
+      });
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // Mapped sentence (not the raw message)
+    expect(screen.getByTestId("app-error").textContent).toContain(
+      "The model could not be generated",
+    );
+    // The raw code is in the detail element
+    const detail = screen.getByTestId("app-error-detail");
+    expect(detail.textContent).toContain("error_class_not_ok");
+    // Retry button is present (design-loop failure, retryable)
+    expect(screen.getByTestId("app-error-retry")).toBeTruthy();
+  });
+
+  it("maps an unknown reason code to the generic sentence plus the raw code", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onError?.({
+        message: "Design loop exhausted: totally_unknown_code",
+        reason: "totally_unknown_code",
+      });
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // Generic sentence for unknown codes
+    expect(screen.getByTestId("app-error").textContent).toContain(
+      "The design could not be generated",
+    );
+    // Raw code in detail
+    const detail = screen.getByTestId("app-error-detail");
+    expect(detail.textContent).toContain("totally_unknown_code");
+  });
+
+  it("shows no Retry button for a region-edit failure", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    // Simulate a region-edit failure: createRegionEdit rejects
+    vi.spyOn(client, "createRegionEdit").mockRejectedValue(new Error("500 Internal Server Error"));
+
+    // Stub the canvas context (compositeMarkedPng needs it)
+    const fakeCtx = {
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      closePath: vi.fn(),
+      stroke: vi.fn(),
+      strokeStyle: "",
+      lineWidth: 0,
+    };
+    const origGetContext = HTMLCanvasElement.prototype.getContext;
+    const origToDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.getContext = vi
+      .fn()
+      .mockReturnValue(fakeCtx) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+    HTMLCanvasElement.prototype.toDataURL = vi
+      .fn()
+      .mockReturnValue("data:image/png;base64,ZmFrZS1wbmc=") as unknown as typeof HTMLCanvasElement.prototype.toDataURL;
+
+    // Mock the lasso resolution to return a valid selection
+    resolveLassoSelectionMock.mockReturnValue({
+      ranked: [{ name: "wing_left", hitCount: 5 }],
+      primary: "wing_left",
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Wait for the GLB fixture to load (needed for moduleGroup)
+    await waitFor(() => {
+      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("true");
+    });
+
+    // Draw a lasso selection (this sets pendingSelection)
+    fireEvent.click(screen.getByTestId("viewport-lasso-overlay-mock"));
+    await waitFor(() => {
+      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
+    });
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "edit this region" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    // The region-edit failure appears
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // No Retry button for region-edit failures
+    expect(screen.queryByTestId("app-error-retry")).toBeNull();
+    // The error message mentions the region selection
+    expect(screen.getByTestId("app-error").textContent).toContain("Region edit failed");
+
+    // Restore the canvas stubs
+    HTMLCanvasElement.prototype.getContext = origGetContext;
+    HTMLCanvasElement.prototype.toDataURL = origToDataURL;
+  });
+
+  it("retry re-invokes the send path with the last user message", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    // First call: error; second call (retry): done
+    let callCount = 0;
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      callCount += 1;
+      if (callCount === 1) {
+        handlers.onError?.({
+          message: "Design loop exhausted: error_class_not_ok",
+          reason: "error_class_not_ok",
+        });
+      } else {
+        handlers.onDone?.({});
+      }
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    // First error appears
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // Retry button is present
+    const retryBtn = screen.getByTestId("app-error-retry");
+    expect(retryBtn).toBeTruthy();
+    expect((retryBtn as HTMLButtonElement).disabled).toBe(false);
+
+    // Click retry
+    fireEvent.click(retryBtn);
+
+    // The second streamEvents call should have happened (retry re-sent)
+    await waitFor(() => {
+      expect(client.streamEvents).toHaveBeenCalledTimes(2);
+    });
+    // The second call should be with the same message (verified via postChat call count)
+    // postChat is called again with the same message
+    expect(client.postChat).toHaveBeenCalledTimes(2);
+  });
+});

@@ -38,6 +38,7 @@ import {
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
 import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
+import { displayDesignLoopError, type DisplayError } from "./lib/errorMapping";
 import { VersionTimeline } from "./components/versions/VersionTimeline";
 import { VariantGallery } from "./components/versions/VariantGallery";
 import { CompareView } from "./components/versions/CompareView";
@@ -99,8 +100,29 @@ export default function App({ renders = [], client }: AppProps) {
   const [photoDimensions, setPhotoDimensions] = useState<{ width: number; height: number } | null>(
     null,
   );
-  const [streamError, setStreamError] = useState<string | null>(null);
+  const [streamError, setStreamError] = useState<DisplayError | null>(null);
+  // The kind of error ("stream" = design-loop/chat stream, "other" = e.g.
+  // a region edit that failed before the stream opened, or a photo upload
+  // failure) — the Retry control only renders for "stream" errors (issue
+  // #82): a region-edit failure carries a consumed selection and must not
+  // be silently resent without it.
+  const [streamErrorKind, setStreamErrorKind] = useState<"stream" | "other">("other");
+  // The last user message text, for the Retry control (issue #82).
+  const lastUserMessageRef = useRef<string>("");
   const [designLoopInFlight, setDesignLoopInFlight] = useState(false);
+  // The current design-loop progress step (issue #82): updated by the
+  // onProgress handler so the stage indicator can show a human label.
+  // Reset to null on completion/error. Unknown/empty values render the
+  // generic label, never the raw token.
+  const [designLoopStep, setDesignLoopStep] = useState<string | null>(null);
+  // Elapsed seconds since the design loop started (issue #82). Updated by
+  // a 1s interval while in flight; reset on completion/error. Cleaned up
+  // on unmount AND completion to avoid leaked intervals.
+  const [designLoopElapsed, setDesignLoopElapsed] = useState(0);
+  // The start timestamp (ms) of the current design loop, used to compute
+  // elapsed seconds. Held in a ref (not state) so the interval can read
+  // the current value without re-running the effect.
+  const designLoopStartRef = useRef<number | null>(null);
 
   // Version timeline (issue #8) — the side rail. Loaded when the project
   // resolves (opening a project RESUMES the chat at its latest version
@@ -336,7 +358,13 @@ export default function App({ renders = [], client }: AppProps) {
       })
       .catch((e) => {
         if (!cancelled) {
-          setStreamError(e instanceof Error ? e.message : "Failed to create project");
+          setStreamError({
+            message: `Failed to create project: ${
+              e instanceof Error ? e.message : "unknown error"
+            }`,
+            detail: e instanceof Error ? e.message : undefined,
+            retryable: false,
+          });
         }
       });
     return () => {
@@ -375,9 +403,13 @@ export default function App({ renders = [], client }: AppProps) {
         const vs = await apiClient.listVersions(projectId);
         setVersions(vs);
       } catch (e) {
-        setStreamError(
-          `Restore failed: ${e instanceof Error ? e.message : "unknown error"}`,
-        );
+        setStreamError({
+          message: `Restore failed: ${
+            e instanceof Error ? e.message : "unknown error"
+          }`,
+          detail: e instanceof Error ? e.message : undefined,
+          retryable: false,
+        });
       }
     },
     [projectId, apiClient],
@@ -389,10 +421,14 @@ export default function App({ renders = [], client }: AppProps) {
       try {
         await apiClient.updateVersion(projectId, versionId, { pinned });
         setVersions((prev) =>
-          prev.map((v) => (v.id === versionId ? { ...v, pinned } : v)),
+          prev.map((v) => (v.id === versionId ? { ...v, pinned: pinned } : v)),
         );
       } catch (e) {
-        setStreamError(`Pin failed: ${e instanceof Error ? e.message : "unknown error"}`);
+        setStreamError({
+          message: `Pin failed: ${e instanceof Error ? e.message : "unknown error"}`,
+          detail: e instanceof Error ? e.message : undefined,
+          retryable: false,
+        });
       }
     },
     [projectId, apiClient],
@@ -455,6 +491,9 @@ export default function App({ renders = [], client }: AppProps) {
       // still be meaningless as an edit instruction.
       const trimmed = text.trim();
 
+      // Remember the last plain chat message for the Retry control (issue #82).
+      lastUserMessageRef.current = text;
+
       // Bail before constructing/appending anything if there's no project to
       // send to — a message (and any attached selection) must never render
       // as sent when the region-edit request that would justify it can
@@ -462,7 +501,11 @@ export default function App({ renders = [], client }: AppProps) {
       // so a pending selection is never displayed as "submitted" while
       // still sitting untouched in state.
       if (projectId === null) {
-        setStreamError("No project selected");
+        setStreamError({
+          message: "No project selected",
+          detail: undefined,
+          retryable: false,
+        });
         return;
       }
 
@@ -483,6 +526,13 @@ export default function App({ renders = [], client }: AppProps) {
           : {}),
       };
       setMessages((prev) => [...prev, userMsg]);
+
+      // Start the design-loop timer (issue #82): the elapsed-seconds counter
+      // starts when the request is sent. The 1s interval runs while
+      // designLoopInFlight is true (the flag is set just below), so the
+      // timer starts on send and is torn down on completion/error.
+      designLoopStartRef.current = Date.now();
+      setDesignLoopElapsed(0);
 
       if (selectionToAttach) {
         // Clear immediately so a slow createRegionEdit response can't race a
@@ -541,14 +591,20 @@ export default function App({ renders = [], client }: AppProps) {
             const detail = e instanceof Error ? e.message : "unknown error";
             if (pendingSelectionGenerationRef.current === sentGeneration + 1) {
               setPendingSelection(selectionToAttach);
-              setStreamError(
-                `Region edit failed — selection restored, please resend: ${detail}`,
-              );
+              setStreamError({
+                message: `Region edit failed — selection restored, please resend: ${detail}`,
+                detail,
+                retryable: false,
+              });
             } else {
               // The user already drew a new selection or cancelled while this
               // request was in flight — nothing to restore, and claiming so
               // would be dishonest about what state the UI is actually in.
-              setStreamError(`Region edit failed: ${detail}`);
+              setStreamError({
+                message: `Region edit failed: ${detail}`,
+                detail,
+                retryable: false,
+              });
             }
           });
       }
@@ -589,8 +645,14 @@ export default function App({ renders = [], client }: AppProps) {
                 ),
               );
             },
-            onProgress: (_step, data) => {
+            onProgress: (step, data) => {
               handleStreamViewerData(data);
+              // Issue #82: the step name was previously discarded ("_step").
+              // The stage indicator uses it to show a human-readable label.
+              // design-loop-pass fires once per iteration (up to 3×); setting
+              // an identical value is a no-op state update (React bails out),
+              // so repeated steps do not reset the elapsed timer or flicker.
+              if (typeof step === "string") setDesignLoopStep(step);
             },
             onDone: () => {
               setMessages((prev) =>
@@ -601,7 +663,11 @@ export default function App({ renders = [], client }: AppProps) {
               setMessages((prev) =>
                 prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
               );
-              setStreamError(typeof data.message === "string" ? data.message : "Stream error");
+              setStreamErrorKind("stream");
+              // The structured `reason` (when present) is mapped to plain
+              // language; a missing reason is an infra failure (or a legacy
+              // frame) — generic copy, never a gate mapping (issue #82).
+              setStreamError(displayDesignLoopError(data));
             },
           });
         })
@@ -615,14 +681,22 @@ export default function App({ renders = [], client }: AppProps) {
               m.id === assistantId ? { ...m, streaming: false, content: `Error: ${detail}` } : m,
             ),
           );
-          setStreamError(detail);
+          setStreamErrorKind("stream");
+          setStreamError({
+            message: "The request could not be sent. The design did not start — you can retry.",
+            detail,
+            retryable: true,
+          });
         })
         .finally(() => {
           // Release the in-flight flag on ALL exit paths (pass, exhausted,
           // exception, network error). The server also clears its flag in
           // a finally, but the client-side flag is what disables the send
-          // button.
+          // button (issue #82: also tear down the elapsed-seconds timer —
+          // no leaked interval, no stage indicator after the run).
           setDesignLoopInFlight(false);
+          designLoopStartRef.current = null;
+          setDesignLoopStep(null);
         });
     },
     [projectId, apiClient, pendingSelection, messages, handleStreamViewerData],
@@ -635,6 +709,38 @@ export default function App({ renders = [], client }: AppProps) {
   // chat send (no duplicated request logic). handleSendMessage trims the
   // text; a whitespace-only draft therefore also cannot fire a request, and
   // an empty draft never even reaches it (guard below).
+  // Retry (issue #82): re-sends the LAST PLAIN CHAT message through the
+  // SAME handleSendMessage path the chat panel uses — no duplicated request
+  // logic, so the same empty/whitespace guard and (now-empty) pending-
+  // selection handling apply. A region edit failure is never retryable
+  // (streamErrorKind !== "stream" hides the control); a plain chat failure
+  // whose request carried no region selection is. Guarded by
+  // `!designLoopInFlight` so a retry cannot double-send.
+  const handleRetry = useCallback(() => {
+    if (designLoopInFlight) return;
+    const text = lastUserMessageRef.current;
+    if (text.trim().length === 0) return;
+    handleSendMessage(text);
+  }, [designLoopInFlight, handleSendMessage]);
+
+  // Elapsed-seconds timer for the design-loop stage indicator (issue
+  // #82): runs only while a plain chat design loop is in flight, so the
+  // indicator's counter is accurate and no interval leaks on completion
+  // or unmount. `designLoopInFlight` is false for region-edit sends, so
+  // the indicator (and this interval) never run for those.
+  useEffect(() => {
+    if (!designLoopInFlight) return;
+    const tick = () => {
+      const start = designLoopStartRef.current;
+      if (start !== null) {
+        setDesignLoopElapsed(Math.max(0, Math.floor((Date.now() - start) / 1000)));
+      }
+    };
+    tick(); // seed immediately — no 1s dead time before the first display
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [designLoopInFlight]);
+
   const handleRegionBarSubmit = useCallback(() => {
     const text = regionBarText;
     if (text.trim().length === 0) return;
@@ -693,7 +799,17 @@ export default function App({ renders = [], client }: AppProps) {
           renders={renders}
           inFlight={designLoopInFlight}
         />
-        <PhotoUpload projectId={projectId ?? undefined} onUploaded={handlePhotoUploaded} onError={setStreamError} />
+        <PhotoUpload
+          projectId={projectId ?? undefined}
+          onUploaded={handlePhotoUploaded}
+          onError={(msg) =>
+            setStreamError({
+              message: msg,
+              detail: undefined,
+              retryable: false,
+            })
+          }
+        />
         {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
           <DimensionCanvas
             photoSrc={photoSrc}
@@ -712,7 +828,45 @@ export default function App({ renders = [], client }: AppProps) {
         />
         {streamError && (
           <div className="app-error" data-testid="app-error" role="alert">
-            {streamError}
+            {streamError.message}
+            {streamError.detail && (
+              <details data-testid="app-error-detail" className="app-error-detail">
+                <summary>Details</summary>
+                {streamError.detail}
+              </details>
+            )}
+            {streamError.retryable && streamErrorKind === "stream" && (
+              <button
+                type="button"
+                className="app-error-retry-btn"
+                data-testid="app-error-retry"
+                onClick={handleRetry}
+                disabled={designLoopInFlight}
+              >
+                Retry
+              </button>
+            )}
+          </div>
+        )}
+        {designLoopInFlight && (
+          <div className="design-loop-progress" data-testid="design-loop-progress" role="status">
+            <span data-testid="design-loop-stage">
+              {designLoopStep === "design-loop-start"
+                ? "Generating design…"
+                : designLoopStep === "design-loop-pass"
+                  ? "Rendering and checking…"
+                  : designLoopStep === "version-created"
+                    ? "Saving version…"
+                    : "Working on your design…"}
+            </span>
+            <div
+              className="design-loop-progress-bar"
+              data-testid="design-loop-progress-bar"
+              aria-hidden="true"
+            >
+              <span className="design-loop-progress-indicator" />
+            </div>
+            <span data-testid="design-loop-elapsed">{designLoopElapsed}s</span>
           </div>
         )}
       </div>

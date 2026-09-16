@@ -286,3 +286,73 @@ button.chat-send-btn:disabled {
   color: var(--color-fg);
   font-size: var(--font-size-xs);
 }
+
+/* Design-loop progress indicator (issue #82): the indeterminate bar +
+   stage label shown while a design loop is in flight. The bar's geometry
+   (position, height) stays inline in App.tsx; these rules add the
+   animation the inline styles cannot express. The indicator is an
+   indeterminate progress bar — a moving gradient that does not imply a
+   specific percentage, matching the "unknown duration" pattern NN/g
+   prescribes for multi-stage operations of unknown length. */
+.design-loop-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-top: 1px solid var(--color-border);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+}
+
+.design-loop-progress-bar {
+  flex: 1 1 auto;
+  min-width: 40px;
+  height: 4px;
+  background-color: var(--color-bg-subtle);
+  border-radius: var(--space-1);
+  overflow: hidden;
+}
+
+@keyframes design-loop-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.design-loop-progress-indicator {
+  display: block;
+  width: 40%;
+  height: 100%;
+  background-color: var(--color-accent);
+  border-radius: var(--space-1);
+  animation: design-loop-progress-slide 1.5s ease-in-out infinite;
+}
+
+/* Error detail — the collapsed <details> that holds the raw code. */
+.app-error-detail {
+  margin-top: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+}
+
+/* Retry button inside the error surface. */
+.app-error-retry-btn {
+  margin-top: var(--space-2);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--space-1);
+  background-color: var(--color-bg);
+  color: var(--color-fg);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.app-error-retry-btn:hover:not(:disabled) {
+  background-color: var(--color-bg-subtle);
+}
+
+.app-error-retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
