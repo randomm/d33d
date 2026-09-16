@@ -245,29 +245,56 @@ def test_none_bbox_gate_bit_false() -> None:
 
 def test_best_match_deterministic_across_orderings() -> None:
     """Best-match selection is identical across repeated runs and
-    independent of component ordering."""
-    comp_a = (20.0, 20.0, 20.0, 8000.0, 0.0, 0.0, 0.0)
+    independent of component ordering.
+
+    The two components have DIFFERENT extents (10 vs 20 on axis 0) and the
+    stated triple is (10, 10, 10), so the 10-box (component A, per-axis
+    diff 0) wins regardless of ordering — the returned value identifies
+    WHICH component was selected (a broken ordering that picked the
+    20-box would fail this assertion)."""
+    comp_a = (10.0, 10.0, 10.0, 8000.0, 0.0, 0.0, 0.0)
     comp_b = (20.0, 20.0, 20.0, 5000.0, 25.0, 0.0, 0.0)
-    bbox_1 = BboxInfo(45.0, 20.0, 20.0, 13000.0, components=(comp_a, comp_b))
-    bbox_2 = BboxInfo(45.0, 20.0, 20.0, 13000.0, components=(comp_b, comp_a))
-    stated = (20.0, 20.0, 20.0)
+    bbox_1 = BboxInfo(30.0, 20.0, 20.0, 13000.0, components=(comp_a, comp_b))
+    bbox_2 = BboxInfo(30.0, 20.0, 20.0, 13000.0, components=(comp_b, comp_a))
+    stated = (10.0, 10.0, 10.0)
     best_1 = best_match_component(bbox_1, stated)
     best_2 = best_match_component(bbox_2, stated)
-    assert best_1 == best_2 == pytest.approx((20.0, 20.0, 20.0))
+    assert best_1 == best_2 == pytest.approx((10.0, 10.0, 10.0))
     for _ in range(5):
         assert best_match_component(bbox_1, stated) == best_1
 
 
 def test_best_match_tie_broken_by_volume() -> None:
-    """Two components tie on per-axis diff → larger volume wins."""
-    comp_a = (10.0, 10.0, 10.0, 5000.0, 0.0, 0.0, 0.0)
-    comp_b = (10.0, 10.0, 10.0, 3000.0, 15.0, 0.0, 0.0)
+    """Two components TIE on per-axis diff (both sum to 20 against the
+    stated 10mm triple) with DIFFERENT extents and DIFFERENT volumes, so
+    which one is selected is observable in the returned value: the
+    volume-desc tie-break picks the larger-volume (20, 20, 10) box. An
+    ordering that broke the tie by volume ASC (or min_x ASC, or
+    arbitrarily) would return the other box's (30, 10, 10) extents and
+    fail this assertion.
+
+    comp_a: extents (30, 10, 10), volume 3000, min_x 15 — per-axis diff
+            |30-10| + 0 + 0 = 20
+    comp_b: extents (20, 20, 10), volume 4000, min_x 0  — per-axis diff
+            10 + 10 + 0 = 20
+
+    Equal diff sums, different volumes (3000 vs 4000): only the volume
+    tie-break can distinguish them. (If the volumes were equal too, the
+    break would fall through to min_x, so the distinct volumes are what
+    make this a volume-break test rather than a min_x-break test.)"""
+    comp_a = (30.0, 10.0, 10.0, 3000.0, 15.0, 0.0, 0.0)  # diff 20, vol 3000
+    comp_b = (20.0, 20.0, 10.0, 4000.0, 0.0, 0.0, 0.0)  # diff 20, vol 4000
     stated = (10.0, 10.0, 10.0)
-    bbox = BboxInfo(25.0, 10.0, 10.0, 8000.0, components=(comp_a, comp_b))
+    bbox = BboxInfo(50.0, 20.0, 10.0, 7000.0, components=(comp_a, comp_b))
     best = best_match_component(bbox, stated)
-    bbox_rev = BboxInfo(25.0, 10.0, 10.0, 8000.0, components=(comp_b, comp_a))
+    # Volume-desc tie-break: comp_b (larger volume) wins; comp_a has the
+    # smaller min_x, so min_x-asc would pick comp_a — the returned extents
+    # are the observable selection.
+    assert best == pytest.approx((20.0, 20.0, 10.0))
+    # Same selection regardless of component order.
+    bbox_rev = BboxInfo(50.0, 20.0, 10.0, 7000.0, components=(comp_b, comp_a))
     best_rev = best_match_component(bbox_rev, stated)
-    assert best == best_rev == pytest.approx((10.0, 10.0, 10.0))
+    assert best_rev == best == pytest.approx((20.0, 20.0, 10.0))
 
 
 # ---------------------------------------------------------------------------

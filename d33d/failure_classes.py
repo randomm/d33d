@@ -429,9 +429,16 @@ def classify_failure(
 #:    avoids the "20" vs "20.0" string trap).
 #: 2. Placement-vector exemption: a literal appearing as a NUMERIC ELEMENT
 #:    of the argument vector of ``translate``/``rotate`` is not fit-
-#:    critical — it is a placement offset. The exemption is scoped to the
-#:    vector's numeric elements only: a SIZE literal nested inside the
-#:    expression is still flagged.
+#:    critical — it is a placement offset. TWO bounds apply:
+#:    (a) it covers the vector's numeric elements only — a SIZE literal
+#:        nested inside the expression is still flagged;
+#:    (b) it is LINE-SCOPED — the check counts brackets on the literal's
+#:        own line only, so it fires when the literal sits on the SAME
+#:        line as the ``translate``/``rotate`` call. A multi-line
+#:        ``translate([\n  20, 0, 0])`` puts the 20 on a line with no
+#:        brackets, where the exemption does NOT fire; that literal is
+#:        caught (or exempted) by the DECLARED/STATED-VALUE exemption
+#:        instead, which is a different mechanism.
 #:
 #: ``mirror`` is DELIBERATELY NOT in the regex alternation — it is not
 #: flagged today, so an exemption for it would be a no-op; extending the
@@ -460,10 +467,14 @@ def detect_magic_numbers(
       inlined, not an invented number. ``stated_dimensions`` used to be
       accepted and ignored; the gate now honours it.
     * **Placement vectors**: a literal that is a numeric element of the
-      argument vector of ``translate``/``rotate`` (``translate([20, 0, 0])``)
-      is exempt — placement offsets are not fit-critical. Scoped to the
-      vector's numeric elements; a size literal nested in the expression
-      is still flagged.
+      argument vector of ``translate``/``rotate`` on the SAME LINE
+      (``translate([20, 0, 0])``) is exempt — placement offsets are not
+      fit-critical. Two bounds: it covers the vector's numeric elements
+      only (a size literal nested in the expression is still flagged),
+      and it is LINE-SCOPED — a literal on a different line from its
+      ``translate``/``rotate`` call (a multi-line vector) does not get
+      this exemption; the declared/stated-value exemption is the
+      mechanism that can cover it.
 
     Parameters
     ----------
@@ -529,11 +540,19 @@ def detect_magic_numbers(
     ) -> bool:
         """True iff the flagged literal (at ``literal_start`` in the
         stripped line) is a NUMERIC ELEMENT of a ``translate``/``rotate``
-        argument vector (issue #100 exemption 2). The literal must begin
-        immediately after a ``[`` or a top-level ``,`` inside the vector —
-        a literal inside a NESTED expression within the vector's own text
-        (``translate([cube(20)...])``-style nesting) is NOT a vector
-        element and stays flagged."""
+        argument vector ON THE SAME LINE (issue #100 exemption 2). The
+        literal must begin immediately after a ``[`` or a top-level ``,``
+        inside the vector — a literal inside a NESTED expression within the
+        vector's own text (``translate([cube(20)...])``-style nesting) is
+        NOT a vector element and stays flagged.
+
+        LINE-SCOPED (a limit of the mechanism, not a choice): the depth
+        count below walks ``stripped[:literal_start]`` of the CURRENT line
+        only. A multi-line vector (``translate([\n  20, 0, 0])``) puts the
+        literal on a line with no ``[``/``(`` prefix, so its depth is 0
+        and this returns False — the multi-line case is NOT exempted here;
+        it is covered (or flagged) by the declared/stated-value exemption,
+        which is a different mechanism."""
         if literal_start == 0:
             return False
         # The literal must sit directly inside a single [ ] vector at
