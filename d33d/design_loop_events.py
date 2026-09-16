@@ -395,7 +395,7 @@ async def run_design_loop_with_events(
     # stated_dims from the caller — ``None`` when no dimensions are known,
     # never a fabricated ``(0.0, 0.0, 0.0)``; the loop's bbox gate abstains
     # on an unknown triple and records it in ``Score.bbox_abstained`` —
-    # ticket #91), a real bbox_fn, and the hook's ``request`` guaranteed
+    # ticket #91), a real bbox_fn, and the ``request`` guaranteed
     # non-empty so an exhausted loop still archives to failures.jsonl.
     # ``render_fn`` and ``llm_fn`` are ``None`` by contract: the production
     # closure (``_build_production_design_loop``) builds its OWN
@@ -404,6 +404,18 @@ async def run_design_loop_with_events(
     # variant that DOES consume them would need to supply real callables
     # (the ``None`` placeholders are not a fallback — see the production
     # seam's ``render_fn=render_for_design_loop`` hardcode).
+    #
+    # ``request`` carries the CURRENT user's message (``user_message`` —
+    # issue #97: the message used to be forwarded only as the
+    # failures.jsonl hook's archive field and was never rendered in the
+    # design prompt, so the model never saw what was asked). It rides
+    # the single ``request`` kwarg end to end: the hook pops a copy for
+    # archiving AND forwards the value to the loop, where
+    # ``_design_messages`` renders it as the first ``Request:`` line.
+    # ``request_text`` is the caller's alias for the same value (the
+    # ``user_message`` parameter is authoritative — the version row's
+    # message field reads it directly); a blank ``user_message`` degrades
+    # to ``request_text`` rather than rendering an empty request line.
     kwargs: dict[str, Any] = {
         "photo": photo,
         "chat_history": chat_history,
@@ -411,7 +423,7 @@ async def run_design_loop_with_events(
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
-        "request": request_text,
+        "request": (user_message or request_text or "").strip() or request_text,
     }
 
     # The production closure (``_build_production_design_loop``) builds its

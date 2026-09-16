@@ -620,6 +620,28 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # not a chat turn (the project's transcript is never auto-included).
     assert captured["chat_history"] == ()
     assert callable(captured["bbox_fn"])
+    # The instruction is NOT buried in chat_history (a scoped directive is
+    # not a chat turn) — it must ride the explicit request line.
+    assert captured.get("chat_history") == ()
+
+    # Rendered-prompt check (issue #97): feed the route's composed request
+    # through the REAL _design_messages and assert the instruction token
+    # appears in the returned user text.  This test FAILS if the
+    # ``Request:`` line is removed from _design_messages.
+    from d33d.design_loop import _design_messages
+
+    rendered = _design_messages(
+        photo=captured["photo"],
+        chat_history=captured["chat_history"],
+        stated=captured["stated_dims"],
+        repair=None,
+        request=captured["request"],
+    )
+    user_text = rendered[0]["content"][0]["text"]
+    assert "open up this spiral, it's too tight to print" in user_text, (
+        "region-edit instruction token missing from rendered prompt:"
+        f"\n{user_text}"
+    )
 
 
 def test_region_edit_stated_dims_from_latest_version(app_with_versions):

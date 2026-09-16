@@ -1050,7 +1050,15 @@ def _build_production_design_loop():
             {"design": factory, "critique": factory},
             {"design": capability, "critique": capability},
         )
-        request = str(kwargs.get("request") or kwargs.get("chat_history") or "")
+        # The user's CURRENT request text (issue #97: forwarded verbatim to
+        # the loop via the hook — the loop renders it as the first line of
+        # the design prompt). The historical ``chat_history`` fallback is
+        # gone: prior-turn history is NOT the current request, and two
+        # competing sources of "the user's message" would let the
+        # failures.jsonl archive line log history instead of the request
+        # (PM decision #97: the archive ``request`` equals the current
+        # user's request, not a prior-turn fallback).
+        request = str(kwargs.get("request") or "")
         # ``bbox_fn`` — per-axis extents from the render's harvested STL
         # (``d33d.design_loop_events.bbox_from_render``). The hook forwards
         # it through ``**kwargs`` to ``run_design_loop_async`` (which pops
