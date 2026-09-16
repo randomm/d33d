@@ -13,13 +13,14 @@ Spec (docs/backlog/06-region-selection.md, ticket #7):
 
 N/A fallback (ticket #8, open-question resolution):
 
-    The 2D-polygon → 3D bounding-volume convention is "the
+    The 2D-selection → 3D bounding-volume convention is "the
     least-specified part of the design" (ticket #7). Until it is
-    implemented and the caller can resolve the lasso to a concrete
+    implemented and the caller can resolve the selected region (the
+    marked point + its modules) to a concrete
     ``bbox_min`` / ``bbox_max`` pair, the harness must report
     ``"N/A, containment convention not available"`` — neither a pass
     nor a hard fail.  The gate reports N/A when the caller cannot
-    supply a resolved bounding volume (i.e. the lasso-to-3D-lift
+    supply a resolved bounding volume (i.e. the region-to-3D-lift
     function is absent or the caller passed ``None`` for either bound).
 
 Threshold sourcing:
@@ -85,7 +86,7 @@ class RegionGateResult:
 
 
 #: The exact N/A reason string the harness must emit when the
-#: lasso-to-3D-volume convention is not yet available.
+#: region-to-3D-volume convention is not yet available.
 NA_REASON: str = "N/A, containment convention not available"
 
 
@@ -111,12 +112,12 @@ def run_region_gate(
     bbox_min:
         The minimum corner of the selected region's 3D bounding volume,
         in the mesh's own coordinate space (mm).  Pass ``None`` when
-        the lasso-to-3D-lift convention is not yet available — the gate
+        the region-to-3D-lift convention is not yet available — the gate
         will report ``"na"``.
     bbox_max:
         The maximum corner of the selected region's 3D bounding volume,
         in the mesh's own coordinate space (mm).  Pass ``None`` when
-        the lasso-to-3D-lift convention is not yet available.
+        the region-to-3D-lift convention is not yet available.
 
     Returns
     -------
@@ -127,7 +128,7 @@ def run_region_gate(
     """
     # N/A path: the 2D→3D volume convention is not available.
     # Either bound being None means the caller could not resolve the
-    # lasso polygon to a concrete 3D bounding volume — report N/A, not
+    # region to a concrete 3D bounding volume — report N/A, not
     # a pass or a fail.
     if bbox_min is None or bbox_max is None:
         return RegionGateResult(

@@ -56,12 +56,6 @@ function stringifyDetail(detail: unknown): string {
 // Types
 // ---------------------------------------------------------------------------
 
-/** One vertex of the lasso polygon. Coordinate space is caller-dependent:
- *  `DimensionCanvas`'s photo-overlay lasso emits photo-pixel coordinates
- *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`
- *  (issue #29) emits viewport-pixel coordinates (`ScreenPoint`). This
- *  type documents the shared shape. */
-
 /**
  * The version-timeline entry (GET /api/projects/{id}/versions).
  * `diff_count` is the diff badge — the number of params that changed vs
@@ -241,7 +235,7 @@ export interface Credential {
  *  ranked list to this length client-side or the request 422s. */
 export const MAX_REGION_EDIT_MODULE_IDS = 10;
 
-/** Which of the six render-worker views a lasso selection was drawn on
+/** Which of the six render-worker views a region pick was drawn on
  *  (matches `ViewId` in `DimensionCanvas.tsx`). */
 export type RegionEditViewId = "front" | "back" | "left" | "right" | "top" | "iso";
 
@@ -264,39 +258,41 @@ export const REGION_EDIT_VIEW_IDS: readonly RegionEditViewId[] = [
  *  this). */
 export const MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024;
 
-/** One vertex of the lasso polygon. Coordinate space is caller-dependent:
- *  `DimensionCanvas`'s photo-overlay lasso emits photo-pixel coordinates
- *  (`PhotoPoint`), while the region-selection lasso wired in `App.tsx`
- *  (issue #29) emits viewport-pixel coordinates (`ScreenPoint`, the same
- *  space `ModelViewer.resolveLassoSelection` raycasts through) — the
- *  server does not interpret this field's coordinate space today (kept
- *  for audit/debugging and the containment gate's volume lift). */
-export interface RegionEditPolygonPoint {
+/** The single picked point, in the view's CSS-pixel coordinate space
+ *  (the same space the pick layer records via `getBoundingClientRect()`
+ *  and `ModelViewer.resolvePointPick` raycasts through). The server does
+ *  not interpret the coordinate space — the marked PNG (the red dot
+ *  composited at exactly this location) is the authoritative grounding;
+ *  this field is kept for audit/debugging and the containment gate. */
+export interface RegionEditPoint {
   x: number;
   y: number;
 }
 
 /**
  * Body of `POST /api/projects/{id}/region-edits` (issue #7, task-c;
- * wired to the design loop by issue #68).
+ * wired to the design loop by issue #68; re-based for #98's point pick).
  *
- * Carries the ranked module-identifier list `ModelViewer.resolveLassoSelection`
- * resolved (top-most/primary first — never pixel coordinates), the
- * composited red-marked PNG (base64, no data-URL prefix) the vision model
- * sees as the marked-up render of the current model, the raw lasso
- * polygon (audit/debugging + the containment gate's volume lift), the view
- * id it was drawn on, and the user's free-text edit instruction.
+ * Carries the OPTIONAL module-identifier list the point pick resolved
+ * via `ModelViewer.resolvePointPick` (supplementary context — a streamed
+ * unnamed STL legitimately yields an EMPTY list; the marked PNG is the
+ * grounding, never the ids), the composited red-marked PNG (base64, no
+ * data-URL prefix) the vision model sees as the marked-up render of the
+ * current model, the single picked point (audit/debugging + the
+ * containment gate), the view id it was drawn on, and the user's
+ * free-text edit instruction.
  */
 export interface RegionEditRequest {
-  /** Ranked module identifiers, top-most/primary first. 1–10 entries
-   *  (Set-of-Mark cap: small open models confuse longer ID lists). */
+  /** Optional module identifiers the pick resolved (0–10 entries; Set-of
+   *  of-Mark cap: small open models confuse longer ID lists). Empty when
+   *  the pick landed on unnamed geometry (a streamed STL). */
   module_ids: string[];
   view_id: RegionEditViewId;
   /** The composited red-marked PNG, base64-encoded (no `data:` prefix). */
   marked_png_base64: string;
-  /** Closed polygon vertices, in the coordinate space the caller drew in
-   *  (see `RegionEditPolygonPoint`). At least 3 points. */
-  polygon: RegionEditPolygonPoint[];
+  /** The single picked point in the view's CSS-pixel space (see
+   *  `RegionEditPoint`). */
+  point: RegionEditPoint;
   /** The user's free-text edit instruction for the selected region. */
   instruction: string;
 }
@@ -589,8 +585,8 @@ export class ApiClient {
 
   /**
    * Submit a region-scoped edit request: the ranked module-identifier list
-   * a lasso selection resolved to, the composited marked PNG, the lasso
-   * polygon, the view id, and the user's instruction.
+   * a point pick resolved to, the composited marked PNG, the picked
+   * point, the view id, and the user's instruction.
    *
    * Returns 202 Accepted with `status: "accepted"` (mirroring `POST
    * /{id}/chat`) — the design loop runs in the background and the new

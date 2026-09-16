@@ -573,11 +573,7 @@ def _region_edit_body() -> dict:
         "module_ids": ["curl_3", "curl_4"],
         "view_id": "front",
         "marked_png_base64": _REGION_EDIT_PNG_BASE64,
-        "polygon": [
-            {"x": 10.0, "y": 10.0},
-            {"x": 50.0, "y": 10.0},
-            {"x": 30.0, "y": 40.0},
-        ],
+        "point": {"x": 300.0, "y": 200.0},
         "instruction": "open up this spiral, it's too tight to print",
     }
 

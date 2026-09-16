@@ -15,7 +15,7 @@
  * introduces new values.
  *
  * The app-shell / pane / viewer-pane geometry stays in the components'
- * inline styles — the lasso overlay's containing block depends on the
+ * inline styles — the pick layer's containing block depends on the
  * viewer pane's exact box (issues #74/#76), and jsdom unit tests read
  * those inline styles directly. This file must NOT set position,
  * width, height, or overflow on .viewer-pane — colour and border only.
@@ -69,7 +69,7 @@ body {
 }
 
 /* The viewer pane is a fixed 600x400 container whose inline geometry
-   (position/width/height/overflow) the lasso overlay depends on —
+   (position/width/height/overflow) the pick layer depends on —
    colour and border only here, never box properties. */
 .viewer-pane {
   border: 1px solid var(--color-border);

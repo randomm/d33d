@@ -6,7 +6,7 @@ Scope (per the workstream brief):
 - Gate 7 consumes ``d33d.print_validation.check_containment`` (owned by
   ticket #7) and the threshold ``d33d.print_validation.
   containment_threshold_pct`` — this module does NOT re-implement them.
-- The N/A fallback: when the 2D→3D lasso-to-volume convention is not yet
+- The N/A fallback: when the 2D→3D region-to-volume convention is not yet
   available, the harness must report ``"N/A, containment convention not
   available"`` — not a pass, not a hard fail.
 

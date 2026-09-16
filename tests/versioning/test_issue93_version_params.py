@@ -829,11 +829,7 @@ def test_region_edit_pass_creates_version_unchanged(app_with_versions, tmp_path)
         "module_ids": ["curl_3"],
         "view_id": "front",
         "marked_png_base64": _REGION_EDIT_PNG_BASE64,
-        "polygon": [
-            {"x": 10.0, "y": 10.0},
-            {"x": 50.0, "y": 10.0},
-            {"x": 30.0, "y": 40.0},
-        ],
+        "point": {"x": 300.0, "y": 200.0},
         "instruction": "open up this spiral",
     }
 

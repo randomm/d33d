@@ -2,7 +2,7 @@
 
 Parses .scad SOURCE (never CSG/STL output — that path is a confirmed dead
 end, see the module docstring on ``d33d.module_registry``) to enumerate
-the top-level module CALL-SITES that a lasso selection resolves to. Module
+the top-level module CALL-SITES that a region pick resolves to. Module
 *definitions* (``module foo() {...}``) are never call-sites; only bare
 invocations (``foo();``) at the top level of the file count.
 
