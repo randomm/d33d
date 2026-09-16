@@ -242,11 +242,7 @@ const REGION_EDIT_REQUEST: RegionEditRequest = {
   module_ids: ["curl_3", "curl_4"],
   view_id: "front",
   marked_png_base64: "aGVsbG8=",
-  polygon: [
-    { x: 10, y: 10 },
-    { x: 50, y: 10 },
-    { x: 30, y: 40 },
-  ],
+  point: { x: 300, y: 200 },
   instruction: "open up this spiral, it's too tight to print",
 };
 
@@ -285,12 +281,12 @@ describe("region-scoped edit request", () => {
     ).rejects.toMatchObject({ status: 404, detail: "project not found" });
   });
 
-  it("surfaces a 422 validation error (e.g. empty module_ids)", async () => {
+  it("surfaces a 422 validation error (e.g. an unknown view_id)", async () => {
     fake.enqueue(
-      json(422, { detail: [{ msg: "List should have at least 1 item" }] }),
+      json(422, { detail: [{ msg: "view_id must be one of the render-worker views" }] }),
     );
     await expect(
-      client.createRegionEdit(1, { ...REGION_EDIT_REQUEST, module_ids: [] }),
+      client.createRegionEdit(1, { ...REGION_EDIT_REQUEST, view_id: "bottom-left" as never }),
     ).rejects.toBeInstanceOf(ApiError);
   });
 

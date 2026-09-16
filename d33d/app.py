@@ -419,15 +419,13 @@ MAX_REGION_EDIT_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB (base64-decoded size)
 MAX_REGION_EDIT_MODULE_IDS = 10
 
 
-class LassoPolygonPoint(BaseModel):
-    """One vertex of the lasso polygon.
+class PointLocation(BaseModel):
+    """The single picked point, in the view's CSS-pixel coordinate space.
 
-    Coordinate space is caller-dependent: ``DimensionCanvas``'s photo-overlay
-    lasso emits photo-pixel coordinates (``PhotoPoint``), while the
-    region-selection lasso wired in ``App.tsx`` (issue #29) emits
-    viewport-pixel coordinates (``ScreenPoint``). This route does not
-    interpret the coordinate space today — scoped-edit regeneration is
-    deferred — so both are accepted as plain pixel coordinates.
+    Carried for audit/debugging and for the containment gate: the
+    authoritative grounding is the marked PNG (the red dot composited at
+    exactly this location), so the server does not interpret the
+    coordinate space beyond accepting finite pixel values.
     """
 
     x: float
@@ -437,20 +435,21 @@ class LassoPolygonPoint(BaseModel):
 class RegionEditRequest(BaseModel):
     """Body of ``POST /api/projects/{id}/region-edits``.
 
-    Carries everything the scoped-edit regeneration needs: the ranked
-    module-identifier list the client-side lasso resolved via
-    ``ModelViewer.resolveLassoSelection`` (top-most/primary first, never
-    pixel coordinates — the whole point of issue #7), the composited
-    red-marked PNG the vision model sees (the marked-up render of the
-    current model), the raw lasso polygon (for audit/debugging and for
-    the containment gate's volume lift), the view id it was drawn on, and
-    the user's free-text edit instruction.
+    Carries everything the scoped-edit regeneration needs: the optional
+    module-identifier list the client-side point pick resolved via
+    ``ModelViewer.resolvePointPick`` (supplementary context — the pick
+    resolves by raycast against the live scene, so an unnamed streamed STL
+    legitimately yields an EMPTY list), the composited red-marked PNG the
+    vision model sees (the marked-up render of the current model — the
+    authoritative grounding), the single picked point (audit/debugging and
+    the containment gate), the view id it was drawn on, and the user's
+    free-text edit instruction.
     """
 
-    module_ids: list[str] = Field(min_length=1, max_length=MAX_REGION_EDIT_MODULE_IDS)
+    module_ids: list[str] = Field(default_factory=list, max_length=MAX_REGION_EDIT_MODULE_IDS)
     view_id: str
     marked_png_base64: str = Field(min_length=1)
-    polygon: list[LassoPolygonPoint] = Field(min_length=3)
+    point: PointLocation
     instruction: str = Field(min_length=1)
 
     @field_validator("view_id")
@@ -818,8 +817,8 @@ def create_app(
     ) -> JSONResponse:
         """Accept a region-scoped edit request and drive the design loop.
 
-        Validates the payload (module identifiers, marked PNG, lasso
-        polygon, view id, instruction) against a real project, checks the
+        Validates the payload (marked PNG, picked point, view id,
+        instruction) against a real project, checks the
         per-project in-flight flag (409), registers the design-loop event
         source SYNCHRONOUSLY (so the SSE stream does not terminate on
         "no active stream"), and returns 202 Accepted with a
@@ -842,9 +841,12 @@ def create_app(
           override for region edits.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
-        - ``request`` = the instruction prefixed with the resolved
-          ``module_ids`` + ``view_id`` (always non-empty — the
-          failures.jsonl hook's ``FailureEvent.request`` requires it).
+        - ``request`` = the instruction prefixed with the ``view_id`` and,
+          when the pick resolved named modules, with those ``module_ids``
+          (``module_ids`` may be EMPTY — a streamed unnamed STL still
+          selects fine, grounded by the marked PNG alone). The composed
+          string is always non-empty — the failures.jsonl hook's
+          ``FailureEvent.request`` requires it.
         """
         conn: db.Connection = request.app.state.conn
         row = conn.get_project(project_id)
@@ -898,13 +900,21 @@ def create_app(
             float(p.get("H", 0.0)),
         )
 
-        # The composed request text: the instruction prefixed with the
-        # resolved module_ids + view_id (the failures.jsonl hook records
-        # this; the version message is its 200-char prefix).
-        request_text = (
-            f"Region edit on modules {', '.join(body.module_ids)} "
-            f"(view: {body.view_id}): {body.instruction}"
-        )
+        # The composed request text: the instruction prefixed with the view
+        # id, and with the resolved module_ids only when the pick resolved
+        # named modules (a streamed unnamed STL sends an empty list — the
+        # marked point alone is the grounding). The failures.jsonl hook
+        # records this; the version message is its 200-char prefix.
+        if body.module_ids:
+            request_text = (
+                f"Region edit on modules {', '.join(body.module_ids)} "
+                f"at the marked point (view: {body.view_id}): {body.instruction}"
+            )
+        else:
+            request_text = (
+                f"Region edit at the marked point (view: {body.view_id}): "
+                f"{body.instruction}"
+            )
 
         from d33d.design_loop_events import run_design_loop_with_events
 

@@ -10,13 +10,16 @@
  * future contract violation fails here even if the mock itself doesn't care.
  *
  * Constraints mirrored from `RegionEditRequest` (`d33d/app.py`):
- *   - module_ids: 1..MAX_REGION_EDIT_MODULE_IDS non-empty strings
+ *   - module_ids: 0..MAX_REGION_EDIT_MODULE_IDS non-empty strings (EMPTY is
+ *     valid since issue #98 — a streamed unnamed STL still selects,
+ *     grounded by the marked PNG alone)
  *   - view_id: one of REGION_EDIT_VIEW_IDS (server field-validator, not just
  *     the TS union type — a runtime mock can still produce a bad string)
  *   - marked_png_base64: non-empty, valid base64, no `data:` prefix, decoded
  *     size within MAX_REGION_EDIT_IMAGE_BYTES (route-level check, not on
  *     the Pydantic model, but still a real 413 the client must avoid)
- *   - polygon: at least 3 points
+ *   - point: present (the single picked point in the view's CSS-pixel
+ *     space — the lasso polygon was replaced by this in issue #98)
  *   - instruction: non-empty (not whitespace-only)
  */
 import { expect } from "vitest";
@@ -34,7 +37,8 @@ const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
  *  violation, so failures point at the specific broken field. */
 export function assertValidRegionEditRequest(body: RegionEditRequest): void {
   expect(Array.isArray(body.module_ids)).toBe(true);
-  expect(body.module_ids.length).toBeGreaterThanOrEqual(1);
+  // 0 is VALID (issue #98): the marked point is the grounding, the module
+  // ids are supplementary context.
   expect(body.module_ids.length).toBeLessThanOrEqual(MAX_REGION_EDIT_MODULE_IDS);
   for (const id of body.module_ids) {
     expect(typeof id).toBe("string");
@@ -54,8 +58,10 @@ export function assertValidRegionEditRequest(body: RegionEditRequest): void {
   const decodedBytes = Math.floor((body.marked_png_base64.length * 3) / 4);
   expect(decodedBytes).toBeLessThanOrEqual(MAX_REGION_EDIT_IMAGE_BYTES);
 
-  expect(Array.isArray(body.polygon)).toBe(true);
-  expect(body.polygon.length).toBeGreaterThanOrEqual(3);
+  expect(typeof body.point).toBe("object");
+  expect(body.point).not.toBeNull();
+  expect(typeof body.point.x).toBe("number");
+  expect(typeof body.point.y).toBe("number");
 
   expect(typeof body.instruction).toBe("string");
   expect(body.instruction.trim().length).toBeGreaterThan(0);

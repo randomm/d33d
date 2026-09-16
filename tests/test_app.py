@@ -687,11 +687,7 @@ def _region_edit_body(**overrides: Any) -> dict[str, Any]:
         "module_ids": ["curl_3", "curl_4"],
         "view_id": "front",
         "marked_png_base64": _TINY_PNG_BASE64,
-        "polygon": [
-            {"x": 10.0, "y": 10.0},
-            {"x": 50.0, "y": 10.0},
-            {"x": 30.0, "y": 40.0},
-        ],
+        "point": {"x": 300.0, "y": 200.0},
         "instruction": "open up this spiral, it's too tight to print",
     }
     body.update(overrides)
@@ -739,20 +735,23 @@ def test_region_edit_unknown_project_returns_404(app):
     assert "not found" in r.json()["detail"].lower()
 
 
-def test_region_edit_rejects_empty_module_ids(app):
-    """``module_ids`` must carry at least one ranked identifier — the
-    whole point of #7 is resolving to named modules, never an empty or
-    pixel-coordinate-only selection."""
+def test_region_edit_accepts_empty_module_ids(app):
+    """``module_ids`` may be EMPTY (issue #98): a streamed unnamed STL
+    still selects fine, grounded by the marked PNG + picked point alone.
+    The module ids are supplementary context, never the grounding — an
+    empty list is valid and must not 422."""
 
     async def _call(client):
         project_id = await _create_project(client)
-        return await client.post(
+        r = await client.post(
             f"/api/projects/{project_id}/region-edits",
             json=_region_edit_body(module_ids=[]),
         )
+        return project_id, r
 
-    r = _run_async(app, _call)
-    assert r.status_code == 422
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    assert r.json() == {"project_id": project_id, "status": "accepted"}
 
 
 def test_region_edit_rejects_more_than_ten_module_ids(app):
@@ -786,18 +785,20 @@ def test_region_edit_rejects_unknown_view_id(app):
     assert r.status_code == 422
 
 
-def test_region_edit_rejects_degenerate_polygon(app):
-    """Fewer than 3 polygon vertices cannot enclose an area — rejected,
-    mirroring ``DimensionCanvas.tsx``'s ``isValidPolygon`` client-side
-    check (defence in depth: the server must not trust the client)."""
+def test_region_edit_rejects_missing_point(app):
+    """The single ``point`` field (the click location in the view's
+    CSS-pixel space) is REQUIRED — the marked PNG is grounded at exactly
+    this location, so a request without it cannot be audited or gated.
+    This replaces the old degenerate-polygon gate (issue #98 re-based the
+    ``polygon`` field into a single ``point``)."""
 
     async def _call(client):
         project_id = await _create_project(client)
+        body = _region_edit_body()
+        del body["point"]
         return await client.post(
             f"/api/projects/{project_id}/region-edits",
-            json=_region_edit_body(
-                polygon=[{"x": 1.0, "y": 1.0}, {"x": 2.0, "y": 2.0}]
-            ),
+            json=body,
         )
 
     r = _run_async(app, _call)

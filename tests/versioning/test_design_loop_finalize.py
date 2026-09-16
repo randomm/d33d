@@ -555,11 +555,7 @@ def _region_edit_body() -> dict:
         "module_ids": ["curl_3", "curl_4"],
         "view_id": "front",
         "marked_png_base64": _REGION_EDIT_PNG_BASE64,
-        "polygon": [
-            {"x": 10.0, "y": 10.0},
-            {"x": 50.0, "y": 10.0},
-            {"x": 30.0, "y": 40.0},
-        ],
+        "point": {"x": 300.0, "y": 200.0},
         "instruction": "open up this spiral, it's too tight to print",
     }
 
@@ -570,12 +566,12 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     """A valid region edit returns 202 {project_id, status: accepted}
     (mirroring /chat — no deferred field, no module_ids/view_id echo) and
     drives the injected design loop with the FULL kwargs contract:
-    the composed request text (instruction prefixed with module_ids +
-    view_id, non-empty), the marked PNG as a data URI (NOT the stored
-    photo), stated_dims from the latest version's W/D/H ((0,0,0) for a
-    fresh project), an EMPTY chat_history (a scoped directive, not a
-    chat turn — even when the project has prior transcripts), and a
-    callable bbox_fn."""
+    the composed request text (instruction prefixed with the view_id and,
+    when named modules resolve, with module_ids + "at the marked point",
+    non-empty), the marked PNG as a data URI (NOT the stored photo),
+    stated_dims from the latest version's W/D/H ((0,0,0) for a fresh
+    project), an EMPTY chat_history (a scoped directive, not a chat turn —
+    even when the project has prior transcripts), and a callable bbox_fn."""
     captured: dict = {}
 
     async def _loop(app, **kwargs):
@@ -602,12 +598,17 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # Full kwargs contract — the same shape the /chat adapter asserts.
     for key in ("photo", "stated_dims", "bbox_fn", "request", "chat_history"):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    # request: non-empty instruction text prefixed with the resolved
-    # module_ids + view_id (the failures.jsonl hook's FailureEvent.request).
+    # request: non-empty instruction text prefixed with the view_id and
+    # the resolved module_ids (the failures.jsonl hook's FailureEvent.request).
+    # Issue #98 re-based the composition: with named modules the text is
+    # "Region edit on modules {ids} at the marked point (view: {view_id}): {instruction}"
+    # — "at the marked point" is the new token; module_ids + view_id +
+    # instruction all still appear.
     assert captured["request"], "request kwarg must be non-empty"
     assert "curl_3" in captured["request"]
     assert "curl_4" in captured["request"]
     assert "front" in captured["request"]
+    assert "at the marked point" in captured["request"]
     assert "open up this spiral, it's too tight to print" in captured["request"]
     # photo: the marked PNG from the body as a data URI (the vision model
     # sees the marked-up render, not the stored reference photo).

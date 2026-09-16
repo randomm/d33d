@@ -52,6 +52,7 @@ vi.mock("../../viewer/ModelViewer", async () => {
         } as never,
         controls: {} as never,
         raycaster: {} as never,
+        modelRoot: null,
       });
     }, []);
     return <div data-testid={`model-viewer-slot-${props.format}`} />;
