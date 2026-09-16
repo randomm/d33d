@@ -9,7 +9,9 @@ the SPA's ``ApiClient.streamEvents`` expect:
 - ``("token", {text})`` — exactly ONE token frame per completed loop
 - ``("progress", {step: "version-created", version_id})`` on a pass
 - ``("done", {message})`` on completion
-- ``("error", {message})`` on exhaustion or infra failure
+- ``("error", {message, reason?})`` on exhaustion (``reason`` = the
+  structured ``failure_reason``, omitted when absent) or infra failure
+  (no ``reason`` — there is no ``DesignResult`` to read one from)
 
 The adapter is a plain async generator (never a coroutine):
 ``event_sources[project_id]`` stores the generator object, so the SSE
@@ -234,6 +236,19 @@ def _result_message(result: Any) -> str:
     if isinstance(reason, str) and reason:
         return f"Design loop exhausted: {reason}"
     return "Design loop exhausted"
+
+
+def _structured_reason(result: Any) -> str | None:
+    """The loop's ``DesignResult.failure_reason`` as a plain string, or
+    ``None`` — the SPA maps it to plain-language copy WITHOUT string-matching
+    the free-text message (issue #82). The value is one of the four
+    ``GATE_REASON_BITS`` or a render-worker ``ErrorClass``; ``None`` (absent
+    from the frame) is the "no reason" case.
+    """
+    reason = getattr(result, "failure_reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
+    return None
 
 
 def _loop_takes_app(run_loop: Any) -> bool:
@@ -500,7 +515,17 @@ async def run_design_loop_with_events(
         yield ("token", {"text": scad if isinstance(scad, str) else ""})
         yield ("done", {"message": _result_message(result), "bbox_abstained": abstained})
     else:
-        yield ("error", {"message": _result_message(result)})
+        # Exhausted (or otherwise non-pass): the terminal error frame gains
+        # the STRUCTURED failure reason (issue #82) so the SPA can map it
+        # to plain-language copy without string-matching the free-text
+        # ``message`` (which is preserved verbatim for backward
+        # compatibility). A ``None`` reason → the field is OMITTED (never a
+        # null), matching the adapter's omit-not-null frame policy.
+        error_data: dict[str, Any] = {"message": _result_message(result)}
+        reason = _structured_reason(result)
+        if reason is not None:
+            error_data["reason"] = reason
+        yield ("error", error_data)
 
 
 __all__ = [

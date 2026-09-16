@@ -1837,3 +1837,78 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
         f"LLM ran on the event-loop thread: llm={llm_tid['id']} "
         f"event loop={event_loop_tid}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (issue #82) Structured failure-reason field on the exhausted error frame
+# ---------------------------------------------------------------------------
+
+
+def test_exhausted_error_frame_carries_structured_reason(app_with_versions):
+    """An exhausted loop's error frame carries the structured ``reason``
+    field in addition to the free-text ``message`` (issue #82). The SPA
+    maps ``reason`` to plain-language copy without string-matching.
+    """
+
+    async def _loop(app, **kwargs):
+        return _StubResult("exhausted", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    # The structured reason field is present and carries the failure reason
+    assert "reason" in error_frames[0], (
+        "exhausted error frame must carry the structured 'reason' field"
+    )
+    assert error_frames[0]["reason"] == "bbox_out_of_tolerance", (
+        f"wrong reason value: {error_frames[0]['reason']}"
+    )
+    # The free-text message is preserved for backward compatibility
+    assert "message" in error_frames[0], "free-text 'message' field must be preserved"
+    assert "Design loop exhausted" in error_frames[0]["message"]
+
+
+def test_infra_error_frame_has_no_structured_reason(app_with_versions):
+    """An infra-failure error frame (no DesignResult) carries NO ``reason``
+    field — the SPA treats a missing ``reason`` as an infra failure and
+    uses generic copy, not a gate mapping (issue #82).
+    """
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # Not-wired case: run_design_loop is None → the adapter emits the
+        # infra error frame "design loop not wired" (no DesignResult).
+        app_with_versions.state.run_design_loop = None
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    # No structured reason — infra failure has no DesignResult
+    assert "reason" not in error_frames[0], (
+        "infra-failure error frame must NOT carry a 'reason' field "
+        "(no DesignResult to read it from)"
+    )
+    # The free-text message is still present
+    assert "message" in error_frames[0]

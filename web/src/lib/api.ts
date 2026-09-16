@@ -195,7 +195,15 @@ export interface StreamEvent<T extends StreamEventKind = StreamEventKind> {
     ? { text?: string }
     : T extends "progress"
       ? { step?: string; message?: string }
-      : { message?: string });
+      : T extends "error"
+        // Issue #82: the terminal error frame carries a STRUCTURED failure
+        // reason on the design-loop exhausted path (one of the four
+        // GATE_REASON_BITS or a render ErrorClass value). Absent on
+        // infra-failure frames (no DesignResult to read it from) and on
+        // legacy frames — a missing `reason` means "not a mapped design-loop
+        // gate failure", never a gate reason.
+        ? { message?: string; reason?: string }
+        : { message?: string });
 }
 
 export interface ModelCatalogue {
