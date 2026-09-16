@@ -109,6 +109,7 @@
     }
   },
   "expected": {
-    "scad": "// Simple 20mm cube\nsize = 20;\ncube(size, center=false);"
+    "scad": "// Simple 20mm cube\nsize = 20;\ncube(size, center=false);",
+    "scad_note": "expected.scad is the NATIVE shape's recorded SCAD only; the fenced shape is a separate live call whose SCAD legitimately differs (the live model varies per call), so the fenced shape is not pinned to this value."
   }
 }

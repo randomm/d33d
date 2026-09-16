@@ -51,10 +51,9 @@ must never have to guess.
 Usage:  uv run python scripts/record_seam_fixtures.py --seam A|B|C|D|all
         [--out tests/fixtures/e2e/] [--live]
 
-``--live`` re-records SEAM A from the real LLM edge (it is OPT-IN —
-without it SEAM A keeps working exactly as today, stubbed, so the fast
-layer is unaffected). SEAM B is live by default; pass ``--seam B``
-without ``--live`` to record it stubbed instead.
+``--live`` governs SEAM A ONLY (opt-in: without it, SEAM A is recorded
+stubbed, no network). SEAM B is LIVE BY DEFAULT (real Docker); pass
+``--stub-b`` to record it stubbed instead.
 """
 
 from __future__ import annotations

@@ -213,7 +213,10 @@ def test_seam_c_replay_version_frame_carries_version_id(seam_c_live, app_with_ve
     assert isinstance(version_id, int)
     # The loop's stated_dims=(20,20,20) maps to W=20, D=20, H=20 (the
     # W/D/H axis order — W is the first axis, D the second, H the third).
-    # The record's params are the loop's ``_params_for_record`` output.
+    # The record's params are the loop's ``_params_for_record`` output
+    # (replayed from ``payload.best`` — the fixture's ``expected`` block
+    # carries no ``params`` key; that was removed in this pass because it
+    # was dead data that had drifted from its own payload).
     assert record.params == {"W": 20.0, "D": 20.0, "H": 20.0}
 
 

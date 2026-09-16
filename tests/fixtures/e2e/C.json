@@ -64,11 +64,6 @@
     "status": "pass"
   },
   "expected": {
-    "params": {
-      "W": 20.0,
-      "D": 30.0,
-      "H": 25.0
-    },
     "score_rank": 4,
     "iteration": 1
   }
