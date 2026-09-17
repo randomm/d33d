@@ -81,16 +81,17 @@ def test_missing_catalogue_raises_named_error(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_missing_key_exit_code_is_nonzero() -> None:
-    """The LIVE suite's collection-time check must produce a NON-ZERO
-    pytest exit code when a prerequisite is missing — a refusal that
-    exits 0 is indistinguishable from a pass (the very thing being
-    guarded against).
+    """The LIVE suite's check must produce a NON-ZERO pytest exit code
+    when a prerequisite is missing — a refusal that exits 0 is
+    indistinguishable from a pass (the very thing being guarded
+    against).
 
     Runs ``pytest -m live`` in a subprocess with
     ``TRAIL_OPENERS_LLM_KEY`` removed from the environment. The
-    conftest's ``pytest_collection_modifyitems`` check (which fires
-    because ``-m live`` selects the live tests) raises the named error
-    at collection time -> a non-zero exit. This test is marked ``slow``
+    conftest's ``pytest_runtest_setup`` check (which fires because
+    ``-m live`` selects the live tests, which then run setup) raises
+    the named error at setup -> a non-zero exit. This test is marked
+    ``slow``
     (it spawns a full pytest; a few seconds) so the fast
     ``-m "not slow"`` CI job does not pay for it, and it is NOT
     marked ``live`` (it must run without the key).
@@ -99,7 +100,7 @@ def test_missing_key_exit_code_is_nonzero() -> None:
 
     env = {k: v for k, v in os.environ.items() if k != "TRAIL_OPENERS_LLM_KEY"}
     env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
-    # The key is absent -> the conftest check raises at collection. The
+    # The key is absent -> the conftest setup check raises. The
     # subprocess still needs the catalogue to exist so the failure is
     # the KEY (not the catalogue): _catalogue_path resolves it at the
     # subprocess's own repo root, so seed a MINIMAL catalogue — it must

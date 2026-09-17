@@ -4,10 +4,11 @@ FAILS, never skips: a silently-skipped live suite is indistinguishable
 from a passing one — the exact defect class this ticket exists to remove
 (seven integration defects shipped this week were all invisible to the
 ~1130 passing fast tests). Prerequisites are checked in
-``pytest_collection_modifyitems`` — AFTER marker deselection, so a fast
-run (``-m "not slow and not live"``) that deselects every ``live`` test
+``pytest_runtest_setup`` — a public hook that fires per-test, AFTER
+marker deselection and immediately before a test runs, so a fast run
+(``-m "not slow and not live"``) that deselects every ``live`` test
 never checks — and a missing prerequisite raises
-:class:`LivePrerequisiteError`, a collection error, so ``pytest -m live``
+:class:`LivePrerequisiteError`, an error at setup, so ``pytest -m live``
 exits NON-ZERO (never 0, never a green skip). The fast suite carries a
 hermetic meta-test that monkeypatches this check and asserts the named
 error is raised (see ``tests/test_live_fail_not_skip.py``), plus a
@@ -32,8 +33,6 @@ from pathlib import Path
 from typing import Self
 
 import pytest
-from _pytest.mark import MarkMatcher
-from _pytest.mark import expression as _mark_expression
 
 # tests/live_e2e/ is its own directory (no __init__.py), so the repo
 # root is parents[2].
@@ -59,9 +58,9 @@ CASE_TIMEOUT_S = 600.0
 
 
 class LivePrerequisiteError(RuntimeError):
-    """A live-suite prerequisite is missing. Raised at collection time
-    so the run FAILS with a message naming what is missing — never a
-    skip, never a silent pass."""
+    """A live-suite prerequisite is missing. Raised in
+    ``pytest_runtest_setup`` so the run FAILS with a message naming what
+    is missing — never a skip, never a silent pass."""
 
 
 def check_live_prerequisites(
@@ -130,49 +129,29 @@ def check_live_prerequisites(
         ) from e
 
 
-def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Pre-run prerequisite check — FAIL, not skip, but ONLY when a
-    ``live`` test is actually selected.
+def pytest_runtest_setup(item: pytest.Item) -> None:
+    """Per-test prerequisite check — FAIL, not skip, but ONLY for
+    ``live`` tests that actually run.
 
-    Gated on selection, NOT on mere collection: a fast run (``pytest -m
-    "not slow and not live"`` — CI, which has no Docker and no
-    ``TRAIL_OPENERS_LLM_KEY`` secret) deselects every ``live`` test, the
-    hook sees zero live items, and never checks. When any ``live`` item
-    survives selection (``pytest -m live``), the prerequisite check runs
-    and a missing prerequisite raises :class:`LivePrerequisiteError`, a
-    collection error: a non-zero exit naming what is missing — never a
-    skip, never a silent pass. The fast suite's hermetic meta-test
-    (``tests/test_live_fail_not_skip.py``) and its subprocess exit-code
-    test pin both halves of that contract.
+    ``pytest_runtest_setup`` is a public hook that fires per-test, AFTER
+    marker deselection and immediately before a test executes. A fast
+    run (``pytest -m "not slow and not live"`` — CI, which has no Docker
+    and no ``TRAIL_OPENERS_LLM_KEY`` secret) deselects every ``live``
+    test, so no live item ever reaches setup and the check never runs.
+    When a ``live`` test is selected (``pytest -m live``), the check runs
+    in setup and a missing prerequisite raises
+    :class:`LivePrerequisiteError`, an error: a non-zero exit naming
+    what is missing — never a skip, never a silent pass. The fast
+    suite's hermetic meta-test (``tests/test_live_fail_not_skip.py``)
+    and its subprocess exit-code test pin both halves of that contract.
 
-    The hook does its own marker deselection (and then calls pytest's
-    ``pytest_deselected`` so the ``N deselected`` count is accurate):
-    pytest 9.x invokes ``pytest_collection_modifyitems`` BEFORE its own
-    ``deselect_by_mark`` step, so gating on ``"live" in item.keywords``
-    alone would see the live tests during a fast run too — they are
-    merely *pending* deselection — and a catalogue-less, keyless CI run
-    would die with an INTERNALERROR (exit 3) instead of running the fast
-    suite normally.
+    Gating on ``"live" in item.keywords`` here is safe — unlike
+    ``pytest_collection_modifyitems`` (which pytest 9.x invokes BEFORE
+    its own ``deselect_by_mark`` step, so it would see the live tests of
+    a fast run still *pending* deselection), setup only fires for items
+    that survived selection.
     """
-    matchexpr = getattr(config.option, "markexpr", None) or ""
-    expr = None
-    if matchexpr:
-        expr = _mark_expression.Expression.compile(matchexpr)
-
-    def _selected(item: pytest.Item) -> bool:
-        if expr is None:
-            return True
-        return expr.evaluate(MarkMatcher.from_markers(item.iter_markers()))
-
-    selected: list[pytest.Item] = []
-    deselected: list[pytest.Item] = []
-    for item in items:
-        (selected if _selected(item) else deselected).append(item)
-    if deselected:
-        config.hook.pytest_deselected(items=deselected)
-        items[:] = selected
-
-    if any("live" in item.keywords for item in selected):
+    if "live" in item.keywords:
         check_live_prerequisites()
 
 
