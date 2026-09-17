@@ -4,11 +4,18 @@
 # This is the ONLY command the project's quality gates name. Running it:
 #
 #   1. Refuses to use a system / PATH pytest that lacks the project deps.
-#      `uv run` builds the project into a project-local venv and `--with
-#      pytest` guarantees the pytest binary is the one that has the
-#      project's deps — not whichever `pytest` happens to be first on
-#      $PATH. The wrapper cannot fall through to $PATH, so the
-#      wrong-pytest failure mode cannot happen.
+#      When `uv` is available (local runs) the gate uses `uv run --with
+#      pytest`, which builds the project into a project-local venv and
+#      guarantees the pytest binary is the one that has the project's deps
+#      — not whichever `pytest` happens to be first on $PATH. The wrapper
+#      cannot fall through to $PATH, so the wrong-pytest failure mode
+#      cannot happen. When `uv` is absent (CI installs the project
+#      editable with the `[test]` extra, so a plain `pytest` on $PATH is
+#      the correctly-installed binary), the gate falls back to plain
+#      `pytest` and says so. In BOTH cases the guards in
+#      tests/__init__.py fire at import time, regardless of how pytest
+#      was invoked — the invocation path is provenance, the guards are
+#      the protection.
 #
 #   2. Refuses to report a result if `d33d` resolves to a source tree
 #      other than the one this script was invoked in (the provenance
@@ -41,12 +48,23 @@ fi
 # AGENTS.md again.
 MARKER_EXPR="${D33D_MARKER_EXPR:-not slow}"
 
+if command -v uv >/dev/null 2>&1; then
+    echo "gate: invoking via uv (uv run --with pytest pytest)"
+    UV="uv run --with pytest pytest"
+else
+    echo "gate: uv not found, invoking pytest directly (installed via pip)"
+    UV="pytest"
+fi
+
+# UV is intentionally unquoted so it word-splits into its components
+# (`uv run --with pytest pytest` or `pytest`).
 if [[ "${1:-}" == "--full" ]]; then
     MARKER_EXPR=""
+    exec $UV -m "$MARKER_EXPR" "$@"
 elif [[ "${1:-}" == "--" ]]; then
     # Everything after `--` is passed to pytest verbatim.
     shift
-    exec uv run --with pytest pytest "$@"
+    exec $UV "$@"
 else
-    exec uv run --with pytest pytest -m "$MARKER_EXPR" "$@"
+    exec $UV -m "$MARKER_EXPR" "$@"
 fi
