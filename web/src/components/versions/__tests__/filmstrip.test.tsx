@@ -265,5 +265,57 @@ describe("Filmstrip", () => {
     render(<Filmstrip {...baseProps({ versions })} />);
     expect(screen.queryByTestId("filmstrip-earlier-exported")).toBeNull();
   });
+
+  it("the filmstrip slot is a real button: focusable, keyboard-activatable, expand is a sibling (issue #127)", () => {
+    const onCompareSelect = vi.fn();
+    const onOpenSheet = vi.fn();
+    const versions = [entry(1), entry(2)];
+    render(
+      <Filmstrip
+        {...baseProps({ versions, onCompareSelect, onOpenSheet })}
+      />,
+    );
+
+    // Structural guarantee (the fix): the slot is a real <button>, not a
+    // <span role="presentation">. A real button is natively focusable and
+    // natively activatable by Enter/Space via the browser's keyboard bridge
+    // — no explicit key handler required. Reverting to the span makes this
+    // assertion fail (the red check).
+    const slot = screen.getByTestId("filmstrip-slot-2");
+    expect(slot.tagName).toBe("BUTTON");
+    expect(slot).toHaveAttribute("type", "button");
+
+    // The slot can receive focus (it is in the tab order).
+    slot.focus();
+    expect(slot).toHaveFocus();
+
+    // Keyboard activation: Enter on the slot. A real browser fires click
+    // from Enter via its native button bridge; jsdom does not implement
+    // that bridge, so the test drives the key and then the click the
+    // browser would synthesize. Both the keydown and the click must reach
+    // onCompareSelect — a span (the pre-fix shape) cannot receive focus
+    // at all, so this test is red on the old code.
+    fireEvent.keyDown(slot, { key: "Enter" });
+    fireEvent.click(slot);
+    expect(onCompareSelect).toHaveBeenCalledWith(2);
+
+    // The expand control is a SIBLING of the slot button, not a child —
+    // no nested interactive elements (the original defect).
+    const expand = screen.getByTestId("filmstrip-expand-2");
+    expect(expand.tagName).toBe("BUTTON");
+    expect(slot.contains(expand)).toBe(false);
+
+    // The expand is focusable in its own right.
+    expand.focus();
+    expect(expand).toHaveFocus();
+
+    // Activating the expand opens the sheet and does NOT also fire
+    // compare-select (the two gestures stay separate).
+    const compareSelectCalls = onCompareSelect.mock.calls.length;
+    fireEvent.keyDown(expand, { key: "Enter" });
+    fireEvent.click(expand);
+    expect(onOpenSheet).toHaveBeenCalledWith(2);
+    expect(onCompareSelect.mock.calls.length).toBe(compareSelectCalls);
+  });
 });
 
