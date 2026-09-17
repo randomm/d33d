@@ -22,8 +22,9 @@
  * brief/header/filmstrip/controls 10; conversation 20; pin+bar 30.
  * A failure is CONTENT INSIDE THE CONVERSATION, not a layer.
  *
- * No auto-generated slider panel. The pinned-parameter strip is opt-in
- * and holds at most 3 user-chosen entries.
+ * No auto-generated slider panel. (The opt-in pinned-parameter strip was
+ * superseded by the Brief — issue #123 deleted it; the Brief is the
+ * always-visible answer to what we are building.)
  *
  * Project lifecycle (task-e wiring): this is a single-operator tool, not
  * a multi-project dashboard yet, so the shell creates one project on
@@ -42,7 +43,6 @@ import {
   type ChatMessageSelection,
 } from "./components/chat/ChatPanel";
 import { PhotoUpload } from "./components/upload/PhotoUpload";
-import { PinnedParamStrip, type PinnedParam } from "./components/strip/PinnedParamStrip";
 import { ModelViewer, type ModelViewerHandle, type LoadResult } from "./components/viewer/ModelViewer";
 import { PickLayer } from "./components/viewer/PickLayer";
 import { resolvePointPick } from "./components/viewer/ModelViewer";
@@ -55,6 +55,7 @@ import {
   type RegionEditViewId,
   type VersionTimelineEntry,
   type VersionCompare,
+  type DesignStateEntry,
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 import copy from "./copy";
@@ -125,7 +126,6 @@ export default function App({ client }: AppProps) {
   const apiClient = useRef(client ?? new ApiClient()).current;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [pinnedParams, setPinnedParams] = useState<PinnedParam[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
   const [photoDimensions, setPhotoDimensions] = useState<{ width: number; height: number } | null>(
@@ -161,6 +161,28 @@ export default function App({ client }: AppProps) {
   // conversation and the design together).
   const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
   const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
+
+  // The design-state block (issue #120 / #123) — the Brief's data. Fetched
+  // once the project exists and re-fetched on every version-created frame
+  // (the single trigger — a new version means the block may have changed).
+  // A failure leaves the last good block in place (never a crash, never a
+  // fake value).
+  const [designState, setDesignState] = useState<DesignStateEntry[]>([]);
+
+  const refetchDesignState = useCallback(() => {
+    if (projectId === null) return;
+    apiClient
+      .getDesignState(projectId)
+      .then(setDesignState)
+      .catch(() => {
+        // A failed fetch leaves the last good block in place — the Brief
+        // describes what it last knew, never a made-up value.
+      });
+  }, [projectId, apiClient]);
+
+  useEffect(() => {
+    refetchDesignState();
+  }, [refetchDesignState]);
 
   // Responsive shell state (issue #119). The floor and the Brief chip
   // threshold are measured against the WINDOW (window.innerWidth/Height —
@@ -850,8 +872,13 @@ export default function App({ client }: AppProps) {
               // Issue #114: the version-created frame is the single trigger
               // for refetching the timeline — not every progress frame
               // (that would hammer the endpoint).
-              if (step === "version-created")
+              if (step === "version-created") {
                 void apiClient.listVersions(projectId).then(setVersions);
+                // Issue #123: a new version means the design-state block the
+                // Brief renders may have changed — refetch it on the same
+                // single trigger.
+                refetchDesignState();
+              }
             },
             onDone: (data) => {
               setMessages((prev) =>
@@ -917,7 +944,7 @@ export default function App({ client }: AppProps) {
           setDesignLoopStep(null);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData],
+    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData, refetchDesignState],
   );
 
   // The inline bar's submit path — routes the typed instruction through the
@@ -976,16 +1003,6 @@ export default function App({ client }: AppProps) {
     setPhotoDimensions({ width, height });
   }, []);
 
-  const togglePinParam = useCallback((name: string, value: number) => {
-    setPinnedParams((prev) => {
-      const existing = prev.find((p) => p.name === name);
-      if (existing) {
-        return prev.filter((p) => p.name !== name);
-      }
-      if (prev.length >= 3) return prev; // cap at 3
-      return [...prev, { name, value }];
-    });
-  }, []);
 
   // Below the floor the app says so plainly rather than degrading (issue
   // #119): copy.shell.viewportTooSmall replaces the stage's content.
@@ -1176,14 +1193,21 @@ export default function App({ client }: AppProps) {
               Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
             </div>
           )}
-          <PinnedParamStrip params={pinnedParams} onToggle={togglePinParam} />
         </div>
       )}
 
       {/* Layer 10 — the Brief chip / full panel. The Brief renders as a
           CHIP below 1200px wide OR 820px tall; a full panel above. */}
       {!panelsHidden && (
-        <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} conversationCollapsed={conversationCollapsed} />
+        <Brief
+          isChip={briefIsChip}
+          inset={OVERLAY_INSET_PX}
+          conversationCollapsed={conversationCollapsed}
+          entries={designState}
+          hasLivePin={pendingSelection !== null}
+          onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
+          onChange={(label) => handleSendMessage(`${copy.brief.rowActions.change}: ${label}`)}
+        />
       )}
 
       {/* Layer 10 — the version filmstrip (bottom-left, horizontal four-slot

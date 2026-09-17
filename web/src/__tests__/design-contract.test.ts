@@ -48,6 +48,7 @@ import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
 import { Filmstrip } from "../components/versions/Filmstrip";
 import { CompareView } from "../components/versions/CompareView";
 import { VariantGallery } from "../components/versions/VariantGallery";
+import { Brief } from "../components/brief/Brief";
 import type { VersionCompare, VersionTimelineEntry } from "../lib/api";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -376,6 +377,35 @@ describe("design contract", () => {
       contentSpan.includes("msg.source"),
       "the transcript content span must render only content, never the source",
     ).toBe(false);
+  });
+
+  /* --------------------------------------------------------------- W9 */
+
+  it("the Brief never renders a numeric value for provenance 'unknown'", () => {
+    // W9 / issue #123: "unknown" arrives as value:null, and a number rendered
+    // for an unknown parameter is the house anti-pattern in its purest form.
+    // This is the tripwire for the thing a future change is most likely to
+    // quietly undo: a `?? 0`, a `String(value)` default, or a branch that
+    // falls through the unknown case into the number cell. The unknown cell
+    // must be the not-established control — no digit anywhere in the row.
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+          { name: "H", label: "Height", value: null, unit: null, provenance: "unknown" },
+        ],
+      }),
+    );
+    const row = container.querySelector("[data-testid='brief-row-H']");
+    expect(row, "the unknown row must be present").not.toBeNull();
+    const text = row?.textContent ?? "";
+    expect(text, "the unknown row must render the not-established control").toContain(
+      copy.brief.unknownValue,
+    );
+    expect(text, "the unknown row must carry NO digit").not.toMatch(/\d/);
   });
 
   /* --------------------------------------------------------------- W13 */

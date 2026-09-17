@@ -89,6 +89,36 @@ export interface GalleryCard extends VersionTimelineEntry {
 }
 
 /**
+ * The closed provenance set (issue #120) — a literal, never a bare `string`
+ * (the backend's `error_class` enum is the precedent): the user said this
+ * value (`stated`), a render produced it (`measured`), there is no value
+ * (`unknown` — `value` is `null`), or a measured value differs from the
+ * stated one (`disagrees` — both numbers are carried; the displayed one is
+ * the MEASURED, because that is what will print).
+ */
+export type DesignStateProvenance =
+  | "stated"
+  | "measured"
+  | "unknown"
+  | "disagrees";
+
+/**
+ * One design-state entry (GET /api/projects/{id}/design-state) — the row
+ * the Brief renders. `value` is nullable: `provenance: "unknown"` carries
+ * `null` (never `0`). `unit` is `"mm"` for numeric params, `null` for
+ * non-numeric ones. `stated_value` is present ONLY when `provenance` is
+ * `"disagrees"`.
+ */
+export interface DesignStateEntry {
+  name: string;
+  label: string;
+  value: number | string | boolean | null;
+  unit: string | null;
+  provenance: DesignStateProvenance;
+  stated_value?: number | string | boolean | null;
+}
+
+/**
  * The compare response (GET .../versions/compare?a=&b=) — the prioritized
  * surface. Both full param sets, the computed diff table (added/removed/
  * changed), and the shared-rotation contract (identical units/axis
@@ -510,6 +540,21 @@ export class ApiClient {
    */
   async getLibrary(): Promise<LibraryCard[]> {
     return this.request<LibraryCard[]>("GET", "/api/library");
+  }
+
+  /**
+   * Get the design-state block (issue #120, consumer 2): the entries the
+   * Brief renders, with provenance per value. `value` is nullable —
+   * `provenance: "unknown"` serialises as `null` and MUST survive JSON.parse
+   * as `null` (never defaulted to 0 — issue #91 shipped exactly that
+   * defect on the backend). `stated_value` rides alongside ONLY on
+   * `disagrees` entries.
+   */
+  async getDesignState(id: number): Promise<DesignStateEntry[]> {
+    return this.request<DesignStateEntry[]>(
+      "GET",
+      `/api/projects/${id}/design-state`,
+    );
   }
 
   /**
