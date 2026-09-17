@@ -23,7 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from d33d.design_loop import BboxInfo, run_design_loop
-from d33d.design_state import state_block_from_params
+from d33d.design_state import state_block_for_version
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import create_project, create_version, run_async
 
@@ -212,7 +212,7 @@ def test_route_latest_version_params_feed_the_block(app_with_versions):
     has W=30 → the params the route reads (``latest_version['params']``)
     feed the shared block, which contains 30 (the 30/60 bug pinned at the
     route's data source)."""
-    from d33d.design_state import build_design_state_block, format_design_state_block
+    from d33d.design_state import build_design_state_block, format_design_state_block, state_block_for_version
 
     async def _call(client):
         proj = await create_project(client)
@@ -222,7 +222,7 @@ def test_route_latest_version_params_feed_the_block(app_with_versions):
         latest = app_with_versions.state.versions.latest_version(pid)
         assert latest is not None
         block = build_design_state_block(
-            state_block_from_params(latest["params"])
+            state_block_for_version(latest["params"], latest["bbox"])
         )
         return format_design_state_block(block)
 
@@ -241,7 +241,7 @@ def test_finalize_seam_state_params_match_route_callable(app_with_versions):
     from d33d.design_state import (
         build_design_state_block,
         format_design_state_block,
-        state_block_from_params as _shared,
+        state_block_for_version as _shared,
     )
     from tests.versioning.test_design_loop_finalize import _StubResult
 

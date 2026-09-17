@@ -65,7 +65,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
-from d33d.design_state import state_block_from_params
+from d33d.design_state import state_block_for_version
 
 logger = logging.getLogger(__name__)
 
@@ -376,23 +376,27 @@ def create_versions_router() -> APIRouter:
         Returns a JSON array of entries: ``name``, ``label``, ``value``
         (nullable — ``unknown`` serialises as ``null``), ``unit`` (``mm``
         for numeric params, ``null`` for non-numeric), and ``provenance``
-        (``stated``/``unknown`` at this commit; ``stated_value`` rides
-        alongside ONLY for ``disagrees`` entries, which no production data
-        source can produce yet — see ``d33d.design_state``). A project
-        with no version yet returns an EMPTY array with 200 (never a 404,
-        never null — turn one is the commonest case).
+        (``stated``/``unknown``/``measured``/``disagrees`` — ``stated_value``
+        rides alongside ONLY for ``disagrees`` entries; ``measured``/
+        ``disagrees`` require the version's persisted measurement, issue
+        #137 — ``None`` when the version has no persisted bbox, see
+        ``d33d.design_state``). A project with no version yet returns an
+        EMPTY array with 200 (never a 404, never null — turn one is the
+        commonest case).
 
-        This calls the SAME ``state_block_from_params`` the live prompt
+        This calls the SAME ``state_block_for_version`` the live prompt
         builder (``d33d.design_loop``) calls — the shared callable, not a
         parallel implementation — so the prompt and the Brief cannot
-        drift apart. The route reads the persisted params snapshot only:
-        it does NOT re-render to obtain a measurement.
+        drift apart. The route reads the persisted params snapshot and the
+        persisted measurement only: it does NOT re-render to obtain a
+        measurement.
         """
         svc = _service(request)
         _project_or_404(svc, project_id)
         latest = svc.latest_version(project_id)
         params = dict(latest["params"]) if latest is not None else None
-        return state_block_from_params(params)
+        measurement = latest["bbox"] if latest is not None else None
+        return state_block_for_version(params, measurement)
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
@@ -664,6 +668,13 @@ def _finalize_loop_kwargs(
     state_params: dict[str, Any] | None = (
         dict(latest["params"]) if latest is not None else None
     )
+    # The design-state block's measurement (issue #137): the latest
+    # version's persisted measured bbox (the best candidate's render,
+    # the matched component for a multi-part model), forwarded to the
+    # loop's prompt builder so the block the prompt carries is the SAME
+    # block the GET the SPA reads serves. ``None`` when no version exists
+    # yet or the version has no persisted measurement.
+    state_bbox = latest["bbox"] if latest is not None else None
 
     # The current design source (issue #105): the project's current
     # version's per-version source, captured BEFORE the loop runs (the
@@ -702,6 +713,7 @@ def _finalize_loop_kwargs(
         "prompt_version": prompt_version,
         "request": request_text,
         "state_params": state_params,
+        "state_bbox": state_bbox,
         "design_source": design_source,
     }
 

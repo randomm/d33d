@@ -33,25 +33,33 @@ JSON objects preserve insertion order) render, and a final
 ``… N more parameter(s)`` count line names the drop honestly (never
 silently).
 
-``measured`` / ``disagrees`` provenance requires a measurement to compare
-against, and at this commit ``measured`` and ``disagrees`` are FORWARD-
-COMPATIBLE CONTRACT VALUES with NO PRODUCTION DATA SOURCE: the versions
-table has no bbox column and no write path persists a measurement at
-version creation, so neither the live prompt builder nor the GET the SPA
-reads (``d33d.versions_routes``) can ever emit them from real data —
-they emit only ``stated`` and ``unknown``. Making them reachable would
-require persisting a rendered bbox at version creation (tracked
-separately — a follow-up issue for bbox persistence); the enum keeps the
-values so that change is additive, not a contract rewrite. The builder
-therefore supports ``measured``/``disagrees`` synthetically (the unit
-tests that exercise those branches say so in a comment); the live
-consumers read only the params snapshot and do NOT re-render to obtain a
-measurement.
+``measured`` / ``disagrees`` provenance is reachable from real data:
+the versions table persists the measured bounding box of the render that
+produced each version (issue #137 — the best candidate's bbox, the
+matched component for multi-part models, NULL when no measurement was
+obtainable). The shared callable :func:`state_block_for_version`
+compares the latest version's params snapshot against that persisted
+measurement: a stated value that matches the measurement within the
+tolerance renders as ``measured`` (the displayed value is the MEASURED
+one — what will actually print), a stated value outside the tolerance
+renders as ``disagrees`` carrying BOTH numbers (``stated_value`` rides
+alongside), and a stated value with no persisted measurement keeps
+``stated``. Only parameters mapped to the bbox's axes (``W``/``D``/``H``)
+are compared — a non-axis parameter such as ``rod_bore`` has no axis and
+MUST stay ``stated``; it never silently becomes ``measured``. The live
+consumers read the persisted measurement only; they do NOT re-render to
+obtain one.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
+
+from d33d.design_loop import (
+    BBOX_TOLERANCE_MIN_MM,
+    BBOX_TOLERANCE_REL,
+    best_match_component,
+)
 
 __all__ = [
     "MAX_STATE_BLOCK_ENTRIES",
@@ -59,6 +67,8 @@ __all__ = [
     "StateEntry",
     "build_design_state_block",
     "format_design_state_block",
+    "persisted_bbox_extents",
+    "state_block_for_version",
     "state_block_from_params",
 ]
 
@@ -153,6 +163,116 @@ def state_block_from_params(
         else:
             # string/bool — a real parameter, stated, no mm unit.
             out.append(_entry(name, value, "stated"))
+    return out
+
+
+#: The parameter names that map onto the bbox's axes (``W`` → x,
+#: ``D`` → y, ``H`` → z — the ``_dim_params`` convention ``d33d.design_loop``
+#: threads to the render as ``defines``). A bbox gives W/D/H and ONLY
+#: those parameters may be compared against it: a parameter with no axis
+#: (``rod_bore``, ``wall_thickness``) is never a measurement target —
+#: it stays ``stated``, never silently becomes ``measured``.
+AXIS_PARAM_NAMES: tuple[str, str, str] = ("W", "D", "H")
+
+
+def persisted_bbox_extents(measurement: Any) -> tuple[float, float, float] | None:
+    """The per-axis extents to compare stated values against, or ``None``
+    (issue #137).
+
+    ``measurement`` is the version row's persisted ``bbox`` (``None`` —
+    no measurement was obtainable at version creation — or the JSON
+    ``{"x": ..., "y": ..., "z": ...}`` the write path stored). ``None``
+    → ``None`` (ABSTAIN: a persisted NULL means "no measurement", never
+    a fabricated ``(0.0, 0.0, 0.0)`` — issue #91's precedent). A stored
+    zero axis also abstains: a zero extent is not a measurement, it is
+    the encoded absence, and comparing a stated value against ``0`` would
+    mark every axis ``disagrees`` for a version that never measured.
+    """
+    if measurement is None:
+        return None
+    if not isinstance(measurement, dict):
+        return None
+    axes = [measurement.get(name) for name in ("x", "y", "z")]
+    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in axes):
+        return None
+    extents = tuple(float(v) for v in axes)  # type: ignore[arg-type]
+    if any(e <= 0 for e in extents):
+        return None
+    return extents
+
+
+def state_block_for_version(
+    params: dict[str, Any] | None,
+    measurement: Any = None,
+) -> list[dict[str, Any]]:
+    """The design-state block for ONE version: the version's params
+    snapshot (``state_block_from_params``) upgraded with the version's
+    PERSISTED measurement (issue #137).
+
+    This is THE shared callable — the live prompt builder
+    (``d33d.design_loop``) and the GET route the SPA reads
+    (``d33d.versions_routes``) both call it (identity pinned by the
+    tests, not output equality). ``measurement`` is the version row's
+    ``bbox`` field as the write path stored it (issue #137: the best
+    candidate's render bbox — the MATCHED COMPONENT for a multi-part
+    model, ``None`` when the component was not identifiable or no
+    measurement was obtained). ``None`` measurement → the pure
+    params-only substrate's output, verbatim (``stated``/``unknown``).
+
+    Comparison rule (stated explicitly): a parameter is compared against
+    the measurement ONLY when its name maps onto a bbox axis —
+    :data:`AXIS_PARAM_NAMES` (``W`` → x, ``D`` → y, ``H`` → z). A
+    parameter with no axis (``rod_bore``) is never compared: it keeps
+    ``stated`` (or ``unknown``) and never silently becomes ``measured``.
+
+    For a comparable parameter whose stated value is known (a positive
+    number):
+
+    - the measured axis is within the named tolerance (``max(
+      BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)`` — the same
+      rule the bbox gate applies, ``d33d.design_loop``'s constants) →
+      provenance ``"measured"``, and the DISPLAYED value is the measured
+      one (what will actually print), not the stated one;
+    - the measured axis is outside the tolerance → provenance
+      ``"disagrees"`` carrying BOTH numbers: ``value`` is the measured
+      one (the display), ``stated_value`` the stated one (the ride-
+      along).
+
+    A stated value that is unknown/absent/zero, and every non-axis
+    parameter, is untouched by the measurement. ``None`` params (no
+    version yet) → an empty block.
+    """
+    entries = state_block_from_params(params)
+    if measurement is None:
+        return entries
+    extents = persisted_bbox_extents(measurement)
+    if extents is None:
+        return entries
+    out: list[dict[str, Any]] = []
+    for entry in entries:
+        axis = entry["name"] if entry["name"] in AXIS_PARAM_NAMES else None
+        if axis is None:
+            out.append(entry)
+            continue
+        stated = entry["value"]
+        if not _is_number(stated) or stated <= 0:
+            # unknown/zero stated value: no comparison possible (the
+            # gate's ticket #91 abstain semantics, mirrored here).
+            out.append(entry)
+            continue
+        extent = extents[AXIS_PARAM_NAMES.index(axis)]
+        tol = max(BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)
+        if abs(extent - stated) <= tol:
+            e = dict(entry)
+            e["value"] = extent
+            e["provenance"] = "measured"
+            out.append(e)
+        else:
+            e = dict(entry)
+            e["value"] = extent
+            e["provenance"] = "disagrees"
+            e["stated_value"] = stated
+            out.append(e)
     return out
 
 

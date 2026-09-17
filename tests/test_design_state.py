@@ -29,6 +29,8 @@ from d33d.design_state import (
     StateEntry,
     build_design_state_block,
     format_design_state_block,
+    persisted_bbox_extents,
+    state_block_for_version,
     state_block_from_params,
 )
 
@@ -128,11 +130,12 @@ def test_design_state_block_disagrees_carries_both_values() -> None:
     """``disagrees`` carries BOTH the measured value (the displayed one —
     what will print) AND ``stated_value``. They are never collapsed.
 
-    NOTE: ``measured``/``disagrees`` are forward-compatible contract
-    values with NO production data source at this commit (no bbox is
-    persisted at version creation — see ``d33d.design_state``'s
-    docstring). This branch is exercised SYNTHETICALLY via a hand-built
-    entry; it is not coverage of a live path."""
+    NOTE: ``measured``/``disagrees`` are reachable from real data (issue
+    #137 — the version's persisted bbox); this test exercises the
+    serialised entry shape directly (a hand-built entry), while the
+    tolerance rules that PRODUCE those entries are pinned in the
+    ``state_block_for_version`` tests below and end-to-end in
+    ``tests/versioning/test_issue137_persist_bbox.py``."""
     import json
 
     entry: StateEntry = {
@@ -155,14 +158,109 @@ def test_design_state_block_disagrees_carries_both_values() -> None:
     assert got["value"] != got["stated_value"]
 
 
+# ---------------------------------------------------------------------------
+# Provenance: measured / disagrees from a REAL persisted measurement
+# (issue #137 — the tolerance rules, exercised through the new shared
+# function, not the synthetic hand-built entries above)
+# ---------------------------------------------------------------------------
+
+
+def test_stated_within_tolerance_yields_measured_not_disagrees() -> None:
+    """A stated value WITHIN the named tolerance (``max(1%, 0.5mm)`` —
+    ``BBOX_TOLERANCE_REL`` / ``BBOX_TOLERANCE_MIN_MM``) does NOT yield
+    ``disagrees``: the provenance is ``measured`` and the displayed value
+    is the measured one."""
+    # Stated W=30, measured 30.4: |30.4-30| = 0.4 <= tol = max(0.3, 0.5) = 0.5.
+    entries = state_block_for_version(
+        {"W": 30.0, "D": 30.0, "H": 30.0}, {"x": 30.4, "y": 30.0, "z": 30.0}
+    )
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["W"]["provenance"] == "measured"
+    assert by_name["W"]["value"] == 30.4  # the measured value is displayed
+    assert "stated_value" not in by_name["W"]
+    # D and H are exact matches → measured too.
+    assert by_name["D"]["provenance"] == "measured"
+    assert by_name["H"]["provenance"] == "measured"
+
+
+def test_stated_outside_tolerance_yields_disagrees_with_both_values() -> None:
+    """A stated value OUTSIDE the tolerance yields ``disagrees`` carrying
+    BOTH numbers — the measured one as the displayed value (what will
+    print) and ``stated_value`` as the ride-along."""
+    # Stated W=30, measured 29.2: |29.2-30| = 0.8 > tol = max(0.3, 0.5) = 0.5.
+    entries = state_block_for_version(
+        {"W": 30.0, "D": 30.0, "H": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}
+    )
+    by_name = {e["name"]: e for e in entries}
+    w = by_name["W"]
+    assert w["provenance"] == "disagrees"
+    # The MEASURED value is displayed (what will actually print).
+    assert w["value"] == 29.2
+    # The stated value rides alongside (never collapsed).
+    assert w["stated_value"] == 30.0
+    assert w["value"] != w["stated_value"]
+    # The other axes are within tolerance → measured, not disagrees.
+    assert by_name["D"]["provenance"] == "measured"
+    assert by_name["H"]["provenance"] == "measured"
+
+
+def test_non_axis_parameter_stays_stated_never_becomes_measured() -> None:
+    """A parameter with no bbox axis (``rod_bore``) is NEVER compared
+    against the measurement: it stays ``stated`` and never silently
+    becomes ``measured`` (the axis-mapping rule: only W/D/H are
+    comparable)."""
+    entries = state_block_for_version(
+        {"W": 30.0, "rod_bore": 6.0}, {"x": 29.2, "y": 30.0, "z": 30.0}
+    )
+    by_name = {e["name"]: e for e in entries}
+    # The non-axis param keeps its stated value and provenance.
+    assert by_name["rod_bore"]["provenance"] == "stated"
+    assert by_name["rod_bore"]["value"] == 6.0
+    assert "stated_value" not in by_name["rod_bore"]
+    # The axis param is still compared (disagrees here — 29.2 vs 30).
+    assert by_name["W"]["provenance"] == "disagrees"
+
+
+def test_no_measurement_persists_stated_and_unknown_only() -> None:
+    """No persisted measurement (``None``) → the pure params-only
+    substrate's output: ``stated``/``unknown`` only, never measured."""
+    entries = state_block_for_version({"W": 30.0, "H": None, "rod_bore": 6.0}, None)
+    provs = {e["provenance"] for e in entries}
+    assert provs == {"stated", "unknown"}
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["W"]["provenance"] == "stated"
+    assert by_name["H"]["provenance"] == "unknown"
+    assert by_name["H"]["value"] is None
+
+
+def test_stated_zero_axis_abstains_never_disagrees() -> None:
+    """A stated value that is zero (unknown — ticket #91) is never
+    compared: it stays ``unknown`` even when a measurement exists
+    (comparing against 0 would mark it disagrees for no reason)."""
+    entries = state_block_for_version({"W": 0, "D": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0})
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["W"]["provenance"] == "unknown"
+    assert by_name["W"]["value"] is None
+    assert by_name["D"]["provenance"] == "measured"
+
+
+def test_persisted_bbox_extents_null_abstains_never_zero_triple() -> None:
+    """An absent measurement (``None``) abstains — it is never encoded as
+    a zero triple (issue #91's precedent). A stored zero axis also
+    abstains: a zero is the encoded absence."""
+    assert persisted_bbox_extents(None) is None
+    assert persisted_bbox_extents({"x": 0.0, "y": 30.0, "z": 30.0}) is None
+    assert persisted_bbox_extents({"x": 30.0, "y": 30.0, "z": 30.0}) == (30.0, 30.0, 30.0)
+
+
 def test_disagrees_entry_renders_measured_value_with_stated_ridealong() -> None:
     """The formatted block renders the MEASURED value as the displayed
     value and carries the stated value alongside (never collapsed).
 
-    NOTE: synthetic branch — ``disagrees`` has no production data source
-    at this commit (see the ``test_design_state_block_disagrees_carries_
-    both_values`` note); this pins the formatter's handling of the
-    forward-compatible contract value."""
+    NOTE: the formatter's handling of the ``disagrees`` entry shape
+    (``measured``/``disagrees`` are reachable from real data via the
+    version's persisted bbox — issue #137; the producer's tolerance
+    rules are pinned in the ``state_block_for_version`` tests)."""
     entry: StateEntry = {
         "name": "W",
         "label": "W",
@@ -321,10 +419,10 @@ def test_design_state_block_builder_is_the_single_shared_function() -> None:
     builder calls the same function on the same params snapshot."""
     # The route's data source: latest_version's params.
     latest = {"params": {"W": 30.0, "bore_diameter": 8.0}}
-    route_block = state_block_from_params(latest["params"])
+    route_block = state_block_for_version(latest["params"])
 
     # The prompt builder's data source: the same params snapshot.
-    prompt_block = state_block_from_params(latest["params"])
+    prompt_block = state_block_for_version(latest["params"])
 
     # Same callable, same output (the shared function, not two that
     # happen to agree).
@@ -337,11 +435,18 @@ def test_design_state_block_builder_is_the_single_shared_function() -> None:
 
 def test_design_state_block_function_identity() -> None:
     """The function the two consumers use is literally the same object
-    (``d33d.design_state.state_block_from_params``) — identity, not
-    equality."""
+    (``d33d.design_state.state_block_for_version``) — identity, not
+    equality (issue #137: the measurement-aware shared callable, not a
+    parallel implementation). The pure params-only substrate
+    (``state_block_from_params``) survives unchanged as the substrate the
+    new function wraps."""
     import d33d.design_state as ds
 
-    assert ds.state_block_from_params is state_block_from_params
+    assert ds.state_block_for_version is state_block_for_version
+    # The substrate survives unchanged and is what the new function wraps.
+    substrate = state_block_from_params({"W": 30.0})
+    wrapped = state_block_for_version({"W": 30.0}, None)
+    assert substrate == wrapped
 
 
 # The 30/60 bug's named test lives in

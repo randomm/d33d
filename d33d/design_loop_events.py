@@ -36,7 +36,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from d33d.design_loop import BboxInfo
+from d33d.design_loop import BboxInfo, best_match_component
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -414,6 +414,63 @@ def _run_in_loop(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
+def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
+    """The best candidate's per-axis measured extents for persistence
+    (issue #137), or ``None``.
+
+    The version OWNS its measurement: the render that becomes the version
+    is the BEST candidate (``result.best`` — the loop's best-scoring
+    candidate, whose STL is the version's geometry), and the measurement
+    comes from the ``BboxInfo`` that ``bbox_fn`` produced for THAT render
+    (read from the best candidate's DECLARED ``IterationRecord.bbox``
+    field — issue #93's precedent, the value ``bbox_fn`` returned for
+    that render — never re-derived from the STL file, which may be gone
+    by the time the version row is written).
+
+    Multi-part (issue #100, same rule the bbox gate applies): when
+    ``BboxInfo.components`` is non-empty, the gate matched the stated
+    triple against the BEST-MATCHING COMPONENT, so the version persists
+    THAT component's extents — the assembly extents would describe a
+    body the user did not ask for. When the component is not identifiable
+    (no breakdown, an empty split, or no stated triple to match against —
+    the stated dims are read from the version's own params snapshot, and
+    a zero/absent axis means "unknown", never a target), the measurement
+    is NOT persisted (``None`` → the row stores NULL): abstaining is
+    correct, guessing is not. A zero extent inside the extents abstains
+    the same way (a zero is the encoded absence, issue #91).
+    """
+    best = getattr(result, "best", None)
+    if best is None:
+        return None
+    bbox = getattr(best, "bbox", None)
+    if not isinstance(bbox, BboxInfo):
+        return None
+    if bbox.components:
+        params = best.params if isinstance(best.params, dict) else {}
+        try:
+            stated = (
+                float(params.get("W", 0.0)),
+                float(params.get("D", 0.0)),
+                float(params.get("H", 0.0)),
+            )
+        except (TypeError, ValueError):
+            return None
+        if any(t <= 0 for t in stated):
+            # An unknown stated axis: best_match_component has no defined
+            # selection without a full triple (the gate abstains) — the
+            # component is not identifiable, persist nothing.
+            return None
+        matched = best_match_component(bbox, stated)
+        if matched is None:
+            return None
+        if any(e <= 0 for e in matched):
+            return None
+        return matched
+    if any(e <= 0 for e in (bbox.x, bbox.y, bbox.z)):
+        return None
+    return (bbox.x, bbox.y, bbox.z)
+
+
 async def _resolve_version_create(
     app: Any, project_id: int, result: Any, user_message: str
 ) -> int | None:
@@ -477,6 +534,7 @@ async def _resolve_version_create(
         name="design",
         message=user_message[:200],
         scad_source=candidate_source,
+        bbox=_version_bbox_extents(result),
     )
     return int(version["id"])
 
