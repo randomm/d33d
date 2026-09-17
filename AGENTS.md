@@ -114,7 +114,7 @@ standard-library features, or meta-questions about the project.
 
 | kind | command |
 | --- | --- |
-| test | `pytest -m "not slow"` |
+| test | `pytest -m "not slow and not live"` |
 | test | `pytest` |
 
 
