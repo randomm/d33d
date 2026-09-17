@@ -103,10 +103,19 @@ CAM_DIST_FACTOR: float = 3.0
 #: single axis (a cube of side *S* projects to *S*·√2), so the iso
 #: distance is ``CAM_DIST_FACTOR * sqrt(2) * max_extent`` to keep the
 #: same relative margin.
+#:
+#: This factor is calibrated for cube-shaped models: a cube's 45°-rotated
+#: silhouette is 2D-diagonal-limited (projected width *S*·√2, zero
+#: projected z-extent). A genuine iso corner view of a full-extent box of
+#: side *S* projects *S*·√3 instead. At ``CAM_DIST_FACTOR`` = 3.0 the
+#: exact-fit distance for a cube is 2.52·S·√2 ≈ 3.56·S (fitted: 3.0·√2·S
+#: ≈ 4.24·S → ~19% margin, same as the axis-aligned views) while a
+#: worst-case box needs 2.52·S·√3 ≈ 4.36·S (fitted: 4.24·S → ~3% margin).
+#: The iso case is therefore the tightest in the design: it holds with a
+#: positive margin for cube-shaped models and for a full-extent box — the
+#: only documented tight case is a box whose three extents are all
+#: simultaneously near the max.
 CAM_DIST_ISO_FACTOR: float = CAM_DIST_FACTOR * 2.0**0.5
-
-#: Index of the ``dist`` element inside a 7-element camera tuple.
-CAM_DIST_INDEX: int = 6
 
 #: Views whose camera tuple carries the isometric rotation (the last
 #: element of ``VIEWS``). Used by :func:`cam_dist` to pick the iso

@@ -21,7 +21,10 @@ isn't mirrored on the other now fails CI too.
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
+
+import pytest
 
 import d33d.render_worker as rw
 
@@ -181,3 +184,46 @@ def test_entrypoint_cam_dist_factor_matches_python() -> None:
         f"entrypoint.sh CAM_DIST_FACTOR {bash_factor} != "
         f"rw.CAM_DIST_FACTOR {rw.CAM_DIST_FACTOR}"
     )
+
+
+def test_entrypoint_iso_factor_is_sqrt2_times_factor() -> None:
+    """The bash ``CAM_DIST_ISO_FACTOR`` in ``entrypoint.sh`` must equal
+    ``CAM_DIST_FACTOR × √2`` (the ISO view's 45° rotation projects a
+    cube's silhouette at S·√2, so the same relative margin needs a ×√2
+    distance; issue #111). Parses the ``-v f="${VAR}"`` source of the
+    awk expression and evaluates the same formula the entrypoint runs,
+    so the two files cannot silently diverge on the √2 factor."""
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^CAM_DIST_ISO_FACTOR=\$\(awk[^\n]*?\)", src)
+    assert m is not None, "CAM_DIST_ISO_FACTOR assignment not found in entrypoint.sh"
+    line = m.group(0)
+    var_m = re.search(r'-v f="\$\{([A-Z_]+)\}"', line)
+    assert var_m is not None, (
+        f"CAM_DIST_ISO_FACTOR awk does not reference a factor variable: {line!r}"
+    )
+    factor_var = var_m.group(1)
+    expected = {
+        "CAM_DIST_FACTOR": rw.CAM_DIST_ISO_FACTOR,
+        "CAM_DIST_ISO_FACTOR": rw.CAM_DIST_ISO_FACTOR * rw.CAM_DIST_ISO_FACTOR,
+    }
+    assert factor_var in expected, (
+        f"CAM_DIST_ISO_FACTOR derived from unexpected variable {factor_var!r}"
+    )
+    # Evaluate the awk expression from the line with the resolved factor.
+    awk_args_m = re.search(r"BEGIN \{[^}]*\}", line)
+    assert awk_args_m is not None
+    expr = awk_args_m.group(0)
+    factor = rw.CAM_DIST_FACTOR if factor_var == "CAM_DIST_FACTOR" else rw.CAM_DIST_ISO_FACTOR
+    proc = subprocess.run(
+        ["awk", "-v", f"f={factor}", expr],
+        capture_output=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"awk evaluation failed: {proc.stderr.decode()}"
+    bash_iso_factor = float(proc.stdout.decode())
+    assert bash_iso_factor == pytest.approx(expected[factor_var], rel=1e-9), (
+        f"entrypoint.sh CAM_DIST_ISO_FACTOR {bash_iso_factor} != "
+        f"expected {expected[factor_var]} (factor {factor_var} × √2)"
+    )
+
+

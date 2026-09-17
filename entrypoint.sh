@@ -43,9 +43,25 @@
 #     dist_iso   = CAM_DIST_FACTOR × √2 × max_extent     (isometric view)
 #
 #   CAM_DIST_FACTOR is 3.0 (mirrored from d33d.render_worker.CAM_DIST_FACTOR).
+#   The √2 iso multiplier is calibrated for cube-shaped models (a cube's
+#   45°-rotated silhouette is 2D-diagonal-limited: S·√2, zero z-extent).
+#   For a genuine iso corner view of a full-extent box the projected
+#   width is S·√3, which at CAM_DIST_FACTOR=3.0 still fits the 800×800
+#   frame with ~5% margin (3.0/√3 ≈ 1.732 > 2.52 exact-fit ratio) —
+#   the iso factor is the tightest case in the design.
+#
 #   The fit is a pure function of the bounding box — no timestamps, no
 #   randomised seeds, no wall-clock — so two renders of the same source
 #   produce byte-identical view PNGs (issue #111 acceptance gate).
+#
+#   The STL is first verified to be ASCII (its first line must start
+#   with ``solid``) — a binary or partial STL is detected up front and
+#   the render ABORTS (a partial STL can carry bogus coordinates that
+#   would silently under-size the fit; the legacy 40.0/55.0 fallback
+#   would re-overflow the very bug issue #111 fixes, and a fallback that
+#   only warns on stderr would leave the host unaware the fit was
+#   skipped). The caller classifies a non-zero exit with a present STL
+#   as artifact_error.
 #
 #   The 7-element tuple order is (tx, ty, tz, rx, ry, rz, dist).
 #   The spec's VIEWS constant in d33d/render_worker.py pins the rotation
@@ -203,7 +219,8 @@ fi
 
 # ── Bounding-box extraction (zero extra openscad invocations) ──────────────
 # Parse the ASCII STL written by step 1 to get the model's bounding box.
-# OpenSCAD's STL export produces ASCII STL ("solid ... vertex x y z ... endsolid").
+# OpenSCAD's STL export produces ASCII STL ("solid ... vertex x y z ... endsolid");
+# the first line is verified below to be ``solid`` before any parse.
 # The awk parser reads only the "vertex" lines (not the "facet normal" lines,
 # which carry unit vectors, not model coordinates).
 #
@@ -211,14 +228,30 @@ fi
 # python3 and jq are NOT.
 #
 # The result is a single number: max_extent = max(x_max−x_min, y_max−y_min,
-# z_max−z_min) in mm. If the parse fails (corrupt or empty STL), the
-# fallback is the legacy fixed distance 40.0 — the render still runs, the
-# caller classifies the artifact_error from the PNG content.
+# z_max−z_min) in mm. A binary, truncated, or otherwise malformed STL cannot
+# yield a trusted bounding box — a partial file can carry valid "vertex" lines
+# that under-state the true extent, and the legacy 40.0/55.0 fallback would
+# re-overflow the 800×800 frame (the exact bug issue #111 fixes). Such an
+# STL therefore ABORTS the render: the STL artifact is still present on the
+# volume, so the caller's classification table lands this in artifact_error
+# ("STL present but a later step failed"), and the non-zero exit code carries
+# the failure signal to the host — no silent stderr-only WARNING.
+# A legitimately empty model (zero vertices) is detected the same way — it
+# aborts as artifact_error rather than shipping an unframeable render; the
+# caller's empty_model row still covers the normal "all eight artifacts
+# present, STL degenerate" shape.
 CAM_DIST_FACTOR=3.0
 CAM_DIST_ISO_FACTOR=$(awk -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", f * 2.0^0.5 }')
 
-max_extent=$(awk '
-# OpenSCAD STL export produces ASCII STL ("solid ... vertex x y z ... endsolid").
+stl_first_line=$(awk 'NR == 1 { print; exit }' "${STL_FILE}")
+
+bbox_status=0
+bbox_detail=""
+if [ "${stl_first_line}" != "" ] && ! printf '%s' "${stl_first_line}" | grep -q '^solid[[:space:]]'; then
+    bbox_status=1
+    bbox_detail="STL is not ASCII (first line is not 'solid')"
+else
+    max_extent=$(awk '
 # Each "vertex" line carries one model coordinate. The "facet normal" lines
 # carry unit vectors (not model coords) and must be excluded.
 /^ *vertex[[:space:]]/ {
@@ -246,20 +279,22 @@ END {
     m = ex; if (ey > m) m = ey; if (ez > m) m = ez
     if (m < 0) m = 0
     printf "%.10f", m
-}' "${STL_FILE}" 2>/dev/null)
-
-if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ]; then
-    # Fallback: the STL was corrupt or empty. Use the legacy distance so
-    # the render still produces artifacts the caller can classify.
-    CAM_DIST_AA=40.0
-    CAM_DIST_ISO=55.0
-    echo "[entrypoint] WARNING: bbox parse failed — falling back to dist 40.0/55.0" >&2
-    echo "[entrypoint] WARNING: bbox parse failed — falling back to dist 40.0/55.0" >>"${LOG_FILE}"
-else
-    CAM_DIST_AA=$(awk -v m="${max_extent}" -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
-    CAM_DIST_ISO=$(awk -v m="${max_extent}" -v f="${CAM_DIST_ISO_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
-    echo "[entrypoint] max_extent=${max_extent}mm  dist_aa=${CAM_DIST_AA}  dist_iso=${CAM_DIST_ISO}" >&2
+}' "${STL_FILE}")
+    if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ] || [ "${max_extent}" = "0.0000000000" ]; then
+        bbox_status=1
+        bbox_detail="no vertex lines parsed (empty or truncated STL)"
+    fi
 fi
+
+if [ "${bbox_status}" -ne 0 ]; then
+    echo "[entrypoint] ERROR: bounding-box fit aborted — ${bbox_detail}" >&2
+    echo "[entrypoint] ERROR: bounding-box fit aborted — ${bbox_detail}" >>"${LOG_FILE}"
+    exit 1
+fi
+
+CAM_DIST_AA=$(awk -v m="${max_extent}" -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
+CAM_DIST_ISO=$(awk -v m="${max_extent}" -v f="${CAM_DIST_ISO_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
+echo "[entrypoint] max_extent=${max_extent}mm  dist_aa=${CAM_DIST_AA}  dist_iso=${CAM_DIST_ISO}" >&2
 
 # ── Step 2: CSG export (non-aborting) ───────────────────────────────────────
 echo "[entrypoint] Step 2/8: CSG export" >&2

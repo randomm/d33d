@@ -232,14 +232,13 @@ def _check_corners_are_background(
     pos = 8
     idat = b""
     w = h = 0
-    bitdepth = 0
     color = 0
     while pos < len(data):
         ln = struct.unpack(">I", data[pos : pos + 4])[0]
         ctype = data[pos + 4 : pos + 8]
         chunk = data[pos + 8 : pos + 8 + ln]
         if ctype == b"IHDR":
-            w, h, bitdepth, color = struct.unpack(">IIBB", chunk[:10])
+            w, h, _bitdepth, color = struct.unpack(">IIBB", chunk[:10])
         elif ctype == b"IDAT":
             idat += chunk
         pos += 12 + ln
