@@ -26,6 +26,11 @@ interface VersionTimelineProps {
   onCompareSelect?: (versionId: number) => void;
 }
 
+// The "No versions yet" empty-state branch that lived here is gone (issue #117,
+// W13): the filmstrip is ABSENT, not empty, when a project has no versions, so
+// the expanded-sheet timeline no longer needs an empty branch of its own. An
+// empty list renders an empty (but present) timeline — the W16 sheet owns when
+// it shows.
 export function VersionTimeline({
   versions,
   latestId,
@@ -33,13 +38,6 @@ export function VersionTimeline({
   onPin,
   onCompareSelect,
 }: VersionTimelineProps) {
-  if (versions.length === 0) {
-    return (
-      <section className="version-timeline" data-testid="version-timeline-empty">
-        <p>No versions yet — accepted changes appear here.</p>
-      </section>
-    );
-  }
   return (
     <section className="version-timeline" data-testid="version-timeline" aria-label="Version timeline">
       <h2>
