@@ -1,12 +1,15 @@
-"""The harness enforces gates-before-judge ordering and the report
-aggregates correctly (issue #9, workstream task-harness).
+"""The harness enforces the design-call -> real render -> gates -> judge
+ordering and the report aggregates correctly (issue #9, workstream
+task-harness; re-ordered for issue #108).
 
 Covers (all mocked — no real LLM call, no real Docker):
-- a gate failure short-circuits the design call AND the judge (the
-  spec's "7 deterministic gates before any vision judge" — a case that
-  fails gate 1 never reaches the judge)
+- the design call runs FIRST (the model's output is what is measured)
+- a render failure (gate 1) short-circuits the gates and the judge
+  (the design call HAS already run — it produced the output the render
+  rejected)
+- a gate failure (e.g. watertight) short-circuits the judge
 - a gate-passing case reaches the judge (the judge runs only when the
-  gates let it through)
+  gates let the model's rendered output through)
 - the judge verdict maps onto the outcome's ``ok`` / ``failure_class``
 - ``build_report`` aggregates the per-case outcomes (counts,
   failure-class histogram mapped onto the design-loop taxonomy, the
@@ -56,10 +59,25 @@ def _case(case_id: str = "box-20", kind: str = "primitive") -> GoldenCase:
 
 
 class _Render:
-    def __init__(self, error_class: str = "ok", stderr: str = "") -> None:
+    """RenderResult-shaped stand-in (``render_fn``'s return)."""
+
+    def __init__(
+        self, error_class: str = "ok", stderr: str = "", stl: str | None = None
+    ) -> None:
         self.error_class = error_class
         self.stderr = stderr
         self.scad_source = ""
+        self.stl = stl
+
+
+def _mesh_stl(tmp: Path) -> str:
+    """A real 20mm-box STL on disk (the injected render_fn points its
+    ``stl`` here so the harness loads a real mesh)."""
+    import trimesh
+
+    path = tmp / "box20.stl"
+    trimesh.creation.box(extents=(20.0, 20.0, 20.0)).export(str(path))
+    return str(path)
 
 
 def _mesh() -> Any:
@@ -118,34 +136,71 @@ def _design_factory(content: str = "cube([20,20,20]);") -> Any:
     return factory  # type: ignore[attr-defined]
 
 
+def _render_fn(tmp: Path, error_class: str = "ok", stl: str | None = None) -> Any:
+    """A render_fn that records the scad source it was handed and
+    returns a fixed RenderResult-shaped object (the seam stand-in for
+    the Docker worker)."""
+    handed: list[str] = []
+
+    def fn(scad_source: str) -> _Render:
+        handed.append(scad_source)
+        return _Render(error_class=error_class, stl=stl)
+
+    fn.handed = handed  # type: ignore[attr-defined]
+    return fn  # type: ignore[attr-defined]
+
+
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
 
 
 # ---------------------------------------------------------------------------
-# Gate failure short-circuits the design call AND the judge
+# The re-ordered pipeline (issue #108): design call first, then the
+# render, then the gates on the model's output, then the judge
 # ---------------------------------------------------------------------------
 
 
-def test_gate1_failure_short_circuits_design_and_judge() -> None:
-    """A render that fails (``timeout``) short-circuits: the design call
-    is never made and the judge never runs (the spec's ordering)."""
+def test_design_call_runs_before_render_and_gates(tmp_path: Path) -> None:
+    """The design call's OUTPUT is what the render_fn receives — the
+    gates measure the model's output, never a reference fixture."""
+    design = _design_factory(content="cube([20,20,20]);")
+    render = _render_fn(tmp_path)
+
+    outcome = _run(
+        run_case(
+            case=_case(),
+            repo_root=REPO_ROOT,
+            model_id="m",
+            request_factory=design,
+            render_fn=render,
+            judge_fn=_passing_judge,
+        )
+    )
+    # The design call happened exactly once...
+    assert len(design.calls) == 1
+    # ...and the render received the design call's output.
+    assert render.handed == ["cube([20,20,20]);"]
+
+
+def test_render_failure_short_circuits_gates_and_judge(tmp_path: Path) -> None:
+    """A render that fails (``timeout``) short-circuits: the gates report
+    the failure, the judge never runs. The design call HAS already run —
+    it produced the output the render rejected (issue #108 ordering)."""
     design = _design_factory()
-    judge = _judge_factory(True)
+    render = _render_fn(tmp_path, error_class="timeout")
+    judge_calls: list[int] = []
 
     async def judge_fn(ji: Any) -> JudgeVerdict:
-        judge.calls.append("judge")
+        judge_calls.append(1)
         return JudgeVerdict(passed=True, reason="should not run")
 
     outcome = _run(
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,
-            render_result=_Render(error_class="timeout", stderr="timed out"),
-            mesh=_mesh(),
-            stl_path="/tmp/model.stl",
             model_id="m",
             request_factory=design,
+            render_fn=render,
             judge_fn=judge_fn,
         )
     )
@@ -153,15 +208,17 @@ def test_gate1_failure_short_circuits_design_and_judge() -> None:
     assert outcome.gates["compile"].status == "fail"
     assert outcome.judge is None
     assert outcome.failure_class == "timeout"
-    # Neither the design call nor the judge ran.
-    assert len(design.calls) == 0
-    assert "judge" not in judge.calls
+    # The design call ran (it produced the rejected output); the judge did not.
+    assert len(design.calls) == 1
+    assert len(judge_calls) == 0
 
 
-def test_gate3_failure_short_circuits_judge() -> None:
-    """A mesh that fails watertight short-circuits: the judge never runs
-    (the design call may run, but the verdict is the gate's)."""
+def test_gate2_failure_short_circuits_later_gates_and_judge(tmp_path: Path) -> None:
+    """A render that yields no STL fails gate 2 (``stl_export``):
+    the watertight gate and the judge never run (the design call and the
+    render already ran — the ordering is design -> render -> gates)."""
     design = _design_factory()
+    render = _render_fn(tmp_path, stl=None)  # no STL -> no mesh -> gate 3 fails
     calls: list[int] = []
 
     async def judge_fn(ji: Any) -> JudgeVerdict:
@@ -172,23 +229,23 @@ def test_gate3_failure_short_circuits_judge() -> None:
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,
-            render_result=_Render("ok"),
-            mesh=None,  # no mesh -> gate 3 fails
-            stl_path="/tmp/model.stl",
             model_id="m",
             request_factory=design,
+            render_fn=render,
             judge_fn=judge_fn,
         )
     )
-    assert outcome.gates["watertight_winding"].status == "fail"
+    assert outcome.gates["stl_export"].status == "fail"
+    assert "watertight_winding" not in outcome.gates  # short-circuited
     assert outcome.judge is None
     assert len(calls) == 0
 
 
-def test_gate_passing_reaches_the_judge() -> None:
-    """A case that passes every declared gate reaches the judge (the
-    judge runs only after the gate phase passes)."""
+def test_gate_passing_reaches_the_judge(tmp_path: Path) -> None:
+    """A case whose rendered output passes every declared gate reaches
+    the judge (the judge runs only after the gate phase passes)."""
     design = _design_factory()
+    render = _render_fn(tmp_path, stl=_mesh_stl(tmp_path))
     called: list[int] = []
 
     async def judge_fn(ji: Any) -> JudgeVerdict:
@@ -199,11 +256,9 @@ def test_gate_passing_reaches_the_judge() -> None:
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,
-            render_result=_Render("ok"),
-            mesh=_mesh(),
-            stl_path="/tmp/model.stl",
             model_id="m",
             request_factory=design,
+            render_fn=render,
             judge_fn=judge_fn,
         )
     )
@@ -216,26 +271,31 @@ def test_gate_passing_reaches_the_judge() -> None:
     assert len(design.calls) == 1
 
 
-def test_judge_fail_fails_the_case_with_judges_class() -> None:
+async def _passing_judge(ji: Any) -> JudgeVerdict:
+    return JudgeVerdict(passed=True, reason="matches")
+
+
+def test_judge_fail_fails_the_case_with_judges_class(tmp_path: Path) -> None:
     """A gate-passing candidate the judge fails gets the judge's
     ``failure_class`` (``geometrically_wrong`` for a non-adversarial
     case)."""
     design = _design_factory()
+    render = _render_fn(tmp_path, stl=_mesh_stl(tmp_path))
     called: list[int] = []
 
     async def judge_fn(ji: Any) -> JudgeVerdict:
         called.append(1)
-        return JudgeVerdict(passed=False, reason="hole too small", failure_class="geometrically_wrong")
+        return JudgeVerdict(
+            passed=False, reason="hole too small", failure_class="geometrically_wrong"
+        )
 
     outcome = _run(
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,
-            render_result=_Render("ok"),
-            mesh=_mesh(),
-            stl_path="/tmp/model.stl",
             model_id="m",
             request_factory=design,
+            render_fn=render,
             judge_fn=judge_fn,
         )
     )
@@ -244,39 +304,34 @@ def test_judge_fail_fails_the_case_with_judges_class() -> None:
     assert outcome.failure_class == "geometrically_wrong"
 
 
-def test_design_call_failure_maps_to_container_error() -> None:
+def test_design_call_failure_maps_to_container_error(tmp_path: Path) -> None:
     """A design call whose response has no ``.json()`` maps to
-    ``container_error`` (the gate phase passed; the failure is the
-    call). The case's overall verdict is a fail (the candidate never
-    produced a valid design), even though every *declared* gate passed
-    — the design-call failure is not a gate, it is the candidate.
-    """
+    ``container_error`` (the failure is the call itself). The render and
+    the gates never run — there is no model output to measure."""
     called: list[int] = []
 
     async def no_json_factory(request: dict[str, Any]) -> Any:
         called.append(1)
         return _NoJsonResponse()
 
-    async def judge_fn(ji: Any) -> JudgeVerdict:
-        return JudgeVerdict(passed=True, reason="no")
+    render = _render_fn(tmp_path)
 
     outcome = _run(
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,
-            render_result=_Render("ok"),
-            mesh=_mesh(),
-            stl_path="/tmp/model.stl",
             model_id="m",
             request_factory=no_json_factory,
-            judge_fn=judge_fn,
+            render_fn=render,
+            judge_fn=_passing_judge,
         )
     )
     assert outcome.failure_class == "container_error"
-    assert outcome.gates_ok is True  # every declared gate passed
     assert outcome.judge is None  # the judge never ran
     assert outcome.detail.startswith("design call failed")
     assert len(called) == 1
+    # The render never ran — the design call failed first.
+    assert render.handed == []
 
 
 # ---------------------------------------------------------------------------

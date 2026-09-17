@@ -3,25 +3,37 @@
 The deterministic part of the promptfoo harness. It is the single place
 the ``promptfoo.config.yaml`` custom asserts shell into (and the unit
 tests call directly), and it owns the one ordering invariant the ticket
-pins: **the seven deterministic gates run BEFORE any vision judge.**
+pins: **the seven deterministic gates run BEFORE any vision judge —
+and they run on the MODEL'S OUTPUT, never on a reference fixture.**
 
-Pipeline, per case:
+Pipeline, per case (issue #108 re-ordered this to close the vacuous-
+measurement defect):
 
-1. **Gates 1-7** via :func:`run_case_gates` — delegates to
-   ``d33d.evals.gates`` (gates 1-5), ``slice_gate`` (gate 6) and
-   ``region_gate`` (gate 7). Gates short-circuit on the first failure,
-   so a case that fails gate 1 never reaches gate 2 (or the judge).
-2. **The design call** — the case's hash-pinned prompt file content is
+1. **The design call** — the case's hash-pinned prompt file content is
    the system prompt; the case's request (+ reference photo / rendered
    views as ``image_url`` parts, base64 ``data:`` URIs when present on
    disk, a text reference when the fixture is a ``.scad`` stand-in) is
    the user turn. The LLM call is injected — the harness never opens its
-   own connection and never reads an API key itself.
-3. **The judge** — :func:`d33d.evals.judge.judge_render` — runs ONLY on
+   own connection and never reads an API key itself. This runs FIRST so
+   there is a model candidate to measure.
+2. **The real render** — the injected ``render_fn``
+   (``scad_source -> RenderResult``-shaped) renders the DESIGN CALL'S
+   OUTPUT through the real Docker render worker. The harness no longer
+   opens its own render; the caller injects the worker seam so the
+   fast suite can pass a stub and the live paths pass the real
+   ``render_for_design_loop``.
+3. **Gates 1-7** via :func:`run_case_gates` — on the RENDERED MODEL
+   OUTPUT (the worker's ``RenderResult`` + a trimesh load of its STL).
+   Delegates to ``d33d.evals.gates`` (gates 1-5), ``slice_gate``
+   (gate 6) and ``region_gate`` (gate 7). Gates short-circuit on the
+   first failure, so a case that fails gate 1 never reaches gate 2
+   (or the judge).
+4. **The judge** — :func:`d33d.evals.judge.judge_render` — runs ONLY on
    a candidate that passed every applicable gate (a gate failure
    short-circuits the judge; that is the spec's ordering, enforced
-   structurally, not by a flag).
-4. **The report** — :func:`d33d.evals.report.build_report` aggregates
+   structurally, not by a flag). Reported, never blocking: the
+   deterministic gates are the pass/fail authority.
+5. **The report** — :func:`d33d.evals.report.build_report` aggregates
    the per-case results into the run report (including
    :func:`d33d.evals.report.select_best_candidate`, the
    "best-candidate + reason" shape the design loop uses).
@@ -82,6 +94,13 @@ DEFAULT_CONFIG_PATH = Path("evals") / "promptfoo.config.yaml"
 #: response. The API key stays inside the factory (its
 #: ``Authorization`` header) — never in a message or a report.
 RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
+
+#: The render seam (issue #108): one OpenSCAD source string in, one
+#: ``RenderResult``-shaped render-worker result out (``error_class``,
+#: ``stderr``, ``stl``). The caller injects the real Docker worker
+#: (``d33d.render_worker.render_for_design_loop``) for live runs and a
+#: stub for hermetic tests. The harness never shells into Docker itself.
+RenderFn = Callable[[str], Any]
 
 
 @dataclass(frozen=True)
@@ -469,7 +488,7 @@ def run_case_gates(
 
 
 # ---------------------------------------------------------------------------
-# Per-case run — gates first, judge only when the gates let it through
+# Per-case run — design call, real render, gates on the output, judge last
 # ---------------------------------------------------------------------------
 
 
@@ -477,54 +496,38 @@ async def run_case(
     *,
     case: GoldenCase,
     repo_root: Path,
-    render_result: Any,
-    mesh: Any = None,
-    stl_path: str | None = None,
     model_id: str,
     request_factory: RequestFactory,
+    render_fn: RenderFn,
     judge_fn: Callable[..., Awaitable[JudgeVerdict]] | None = None,
     pre_mesh: Any = None,
 ) -> CaseOutcome:
-    """Run one golden-set case end to end (gates -> design call -> judge).
+    """Run one golden-set case end to end (design call -> render -> gates -> judge).
 
-    ``render_result`` is the render-worker result for the case's output
-    (``RenderResult``-shaped: ``error_class``, ``stderr``, ``stl``).
-    ``mesh`` is the trimesh load of that STL (``None`` when absent).
+    The ordering is the ticket's invariant (issue #108): the design call
+    runs FIRST, then the injected ``render_fn`` renders the MODEL'S
+    OUTPUT through the real render worker, then the gates run on that
+    rendered output, and the judge only when the gates let the
+    candidate through.
+
+    ``render_fn`` is injected (``scad_source -> RenderResult``-shaped:
+    ``error_class``, ``stderr``, ``stl``). It is a seam, not a stub —
+    live callers pass the real Docker worker; hermetic tests pass a
+    stub. The harness never opens Docker or an LLM connection itself.
+
     ``model_id`` is the resolved design-role model (configured via the
     catalogue — never hardcoded here). ``request_factory`` is the
     injected LLM request path (the key stays inside it).
-
-    The gate phase runs first and short-circuits on the first failure —
-    a case that fails a gate never reaches the design call or the judge
-    (the spec's ordering, enforced structurally). A gate-passing
-    candidate then gets a design call and a judge verdict.
     """
-    if case.gate_expectations:
-        gate_map = run_case_gates(
-            case=case,
-            repo_root=repo_root,
-            render_result=render_result,
-            mesh=mesh,
-            stl_path=stl_path,
-            pre_mesh=pre_mesh,
-        )
-    else:
-        gate_map = {}
+    base = dict(
+        case_id=case.case_id,
+        kind=case.kind,
+        prompt_version=case.prompt.prompt_version,
+        prompt_sha256=case.prompt.sha256,
+        request=case.request,
+    )
 
-    failed = [g for g in gate_map.values() if g.status == "fail"]
-    if failed:
-        first = failed[0]
-        return CaseOutcome(
-            case_id=case.case_id,
-            kind=case.kind,
-            prompt_version=case.prompt.prompt_version,
-            prompt_sha256=case.prompt.sha256,
-            request=case.request,
-            gates=gate_map,
-            failure_class=first.failure_class,
-            detail=f"{first.gate}: {first.detail}",
-        )
-
+    # 1. The design call — the model's output is what the gates measure.
     system, messages = case_messages(case, repo_root)
     try:
         scad_source = await _call_design(
@@ -532,16 +535,40 @@ async def run_case(
         )
     except ValueError as e:
         return CaseOutcome(
-            case_id=case.case_id,
-            kind=case.kind,
-            prompt_version=case.prompt.prompt_version,
-            prompt_sha256=case.prompt.sha256,
-            request=case.request,
-            gates=gate_map,
+            **base,
             failure_class="container_error",
             detail=f"design call failed: {e}",
         )
 
+    # 2. The real render of the model's output (injected seam).
+    render_result = render_fn(scad_source)
+    stl_path = getattr(render_result, "stl", None)
+    mesh = _load_mesh(stl_path)
+
+    # 3. The gates, on the rendered model output.
+    gate_map = run_case_gates(
+        case=case,
+        repo_root=repo_root,
+        render_result=render_result,
+        mesh=mesh,
+        stl_path=stl_path,
+        pre_mesh=pre_mesh,
+    )
+
+    failed = [g for g in gate_map.values() if g.status == "fail"]
+    if failed:
+        first = failed[0]
+        return CaseOutcome(
+            **base,
+            scad_source=scad_source,
+            gates=gate_map,
+            failure_class=first.failure_class,
+            detail=f"{first.gate}: {first.detail}",
+        )
+
+    # 4. The judge — only on a gate-passing candidate. The verdict is
+    # reported, never blocking: the deterministic gates are the
+    # pass/fail authority.
     fn = judge_fn if judge_fn is not None else judge_render
     verdict = await fn(
         JudgeInput(
@@ -562,14 +589,35 @@ async def run_case(
             failure_class = "unclassified_syntax_error"
 
     return CaseOutcome(
-        case_id=case.case_id,
-        kind=case.kind,
-        prompt_version=case.prompt.prompt_version,
-        prompt_sha256=case.prompt.sha256,
-        request=case.request,
+        **base,
         scad_source=scad_source,
         gates=gate_map,
         judge=verdict,
         failure_class=failure_class,
         detail=verdict.reason,
     )
+
+
+def _load_mesh(stl_path: Any) -> Any:
+    """Load the render worker's STL into a trimesh mesh (``None`` on
+    absence or load failure — the gate phase maps a missing mesh onto
+    its own outcome).
+
+    The load is ``process=False`` + ``merge_vertices()`` — the same
+    pair the render worker itself uses: OpenSCAD's STL export emits
+    per-facet DUPLICATED vertices, so a raw ``process=False`` load of a
+    valid cube reports ``is_watertight == False`` (duplicate vertices
+    along shared edges) and gate 3 would fail every good render.
+    ``merge_vertices()`` is deliberately narrower than ``process=True``
+    (which would also drop degenerate faces).
+    """
+    if not stl_path:
+        return None
+    try:
+        import trimesh
+
+        mesh = trimesh.load(str(stl_path), process=False)
+        mesh.merge_vertices()
+        return mesh
+    except (OSError, ValueError, KeyError, IndexError):
+        return None
