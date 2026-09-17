@@ -5,12 +5,15 @@
 import { render, screen } from "@testing-library/react";
 import { describe, it, expect } from "vitest";
 import { Brief } from "../Brief";
+import copy from "../../../copy";
 
 describe("Brief", () => {
-  it("renders the eyebrow line", () => {
+  it("renders the eyebrow line and the empty body when no entries are given", () => {
     render(<Brief isChip={false} inset={24} conversationCollapsed={false} />);
     expect(screen.getByTestId("brief-panel")).toBeTruthy();
-    expect(screen.getByTestId("brief-panel").textContent).toBe("What we're building");
+    // The eyebrow is always present; with no entries the empty body follows.
+    expect(screen.getByTestId("brief-panel").textContent).toContain("What we're building");
+    expect(screen.getByTestId("brief-empty").textContent).toBe(copy.brief.emptyBody);
   });
 
   it("renders as a chip when isChip is true", () => {

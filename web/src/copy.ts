@@ -32,6 +32,8 @@ export const brief = {
 
   /** The value cell for provenance "unknown". Never replace with a number. */
   unknownValue: "not established",
+  /** The one-question the unknown-value control sends the assistant. */
+  askEstablish: (label: string): string => `What is the ${label}?`,
   /** The value cell for a parameter being re-derived by the pass in flight. */
   remeasuring: "re-measuring…",
   /** The value cell on a FIRST pass: nothing has been measured yet, and saying
@@ -59,6 +61,11 @@ export const brief = {
     const direction = measuredMm < statedMm ? "short" : "over";
     return `You asked for ${mm(statedMm)}. What came out measures ${mm(measuredMm)} — ${mm(delta)} ${direction}, which is outside tolerance. The measured number is the one shown, because it is the one that will print.`;
   },
+
+  /** One row expanded, provenance in a sentence — the user asked for a
+   *  value with no measurement to compare it against. */
+  provenanceNoMeasurement: (quoted: string): string =>
+    `You asked for ${quoted}. Nothing has measured it yet, so this is held as stated until a render comes back.`,
 
   rowActions: { change: "Change it", locate: "Show it on the model" },
 

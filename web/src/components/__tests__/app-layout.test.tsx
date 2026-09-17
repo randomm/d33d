@@ -269,7 +269,9 @@ describe("App layout", () => {
   it("does NOT render an auto-generated slider/parameter panel", async () => {
     const { container } = render(<App client={client} />);
     expect(container.querySelectorAll("input[type='range']")).toHaveLength(0);
-    expect(screen.getByTestId("pinned-empty")).toBeTruthy();
+    // The opt-in pinned-parameter strip was deleted (issue #123) — the
+    // Brief is the always-visible parameter surface instead.
+    expect(screen.queryByTestId("pinned-strip")).toBeNull();
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
@@ -342,6 +344,92 @@ describe("App layout", () => {
     expect(left.style.top).toBe("24px");
     expect(left.style.left).toBe("24px");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
+});
+
+describe("App Brief wiring (issue #123)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it("mounts the Brief and fetches the design-state block the Brief renders", async () => {
+    // The adversarial review of #116 grepped this file for `brief-panel` and
+    // found NOTHING — if App stopped rendering <Brief/> entirely, every test
+    // would still pass. These assertions close that gap: the Brief is in the
+    // tree, App reads the design-state block, and the block's rows reach the
+    // DOM (so a broken wiring is not silent).
+    vi.spyOn(client, "getDesignState").mockResolvedValue([
+      {
+        name: "W",
+        label: "Width",
+        value: 60,
+        unit: "mm",
+        provenance: "stated",
+      },
+      {
+        name: "D",
+        label: "Depth",
+        value: 45,
+        unit: "mm",
+        provenance: "stated",
+      },
+      {
+        name: "H",
+        label: "Height",
+        value: 80,
+        unit: "mm",
+        provenance: "stated",
+      },
+    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+
+    render(<App client={client} />);
+    const panel = await screen.findByTestId("brief-panel");
+    expect(panel).toBeTruthy();
+    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledWith(7));
+    // The block's rows reach the DOM — the wiring is real, not just an import.
+    // jsdom's window is 1024x768 (below the 820px chip threshold), so the
+    // Brief is a chip there; rows live in the chip's resolved line.
+    const chip = await screen.findByTestId("brief-chip");
+    expect(chip.textContent).toContain("Width · 60.0\u202Fmm");
+    expect(chip.textContent).toContain("Depth · 45.0\u202Fmm");
+    expect(chip.textContent).toContain("Height · 80.0\u202Fmm");
+  });
+
+  it("renders the design-state rows in the full panel when the window is large (issue #123)", async () => {
+    vi.spyOn(client, "getDesignState").mockResolvedValue([
+      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
+      { name: "H", label: "Height", value: 80, unit: "mm", provenance: "stated" },
+    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+
+    render(<App client={client} />);
+    const panel = await screen.findByTestId("brief-panel");
+    expect(panel.getAttribute("data-mode")).toBe("full");
+    // The rows render as individual rows in the full panel — this is the
+    // assertion that FAILS if App stops wiring the block to the Brief.
+    expect(await screen.findByTestId("brief-row-W")).toBeTruthy();
+    expect(await screen.findByTestId("brief-row-D")).toBeTruthy();
+    expect(await screen.findByTestId("brief-row-H")).toBeTruthy();
+  });
+
+  it("refetches the design-state block on the version-created frame (issue #123)", async () => {
+    vi.spyOn(client, "getDesignState").mockResolvedValue([] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
+      handlers.onDone?.({});
+    });
+    render(<App client={client} />);
+    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(1));
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(2));
   });
 });
 
