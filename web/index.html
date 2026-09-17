@@ -4,6 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>d33d</title>
+    <!-- issue #112: the two webfonts the --font-ui / --font-mono tokens name.
+         Loaded from Google Fonts with display=swap (text renders immediately
+         in the token's system-stack fallback, then swaps when the webfonts
+         arrive). This IS a new runtime network dependency — the app had none
+         before #112; when the fetch fails or is blocked, the fallback stacks
+         in the tokens cover it. Weights 400 and 500 only. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400,500&family=JetBrains+Mono:wght@400,500&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>
