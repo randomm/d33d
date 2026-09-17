@@ -37,6 +37,7 @@ import pytest
 import yaml
 from httpx import ASGITransport, AsyncClient
 
+from d33d import print_validation as pv
 from d33d.app import STUB_HTML, create_app
 
 # ---------------------------------------------------------------------------
@@ -1246,3 +1247,71 @@ def test_module_registry_does_not_block_the_event_loop(app):
     # Running the blocking call in a worker thread lets the fast request
     # finish first.
     assert order == ["fast", "slow"], order
+
+
+# ---------------------------------------------------------------------------
+# GET /api/config/envelope
+# ---------------------------------------------------------------------------
+
+
+def test_envelope_route_returns_values_matching_named_constant(app):
+    """Wire x/y/z equal ``QIDI_PLUS_5_ENVELOPE_MM`` element-for-element —
+    the primary drift guard between the route and the named constant."""
+
+    async def _call(client):
+        return await client.get("/api/config/envelope")
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["x"], body["y"], body["z"]) == pv.QIDI_PLUS_5_ENVELOPE_MM
+
+
+def test_envelope_route_wire_shape_is_five_flat_keys(app):
+    """Response has exactly ``{x, y, z, unit, verified}`` — no nesting,
+    no extra keys — with ``unit == "mm"`` and ``verified`` False."""
+
+    async def _call(client):
+        return await client.get("/api/config/envelope")
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {"x", "y", "z", "unit", "verified"}
+    assert body["unit"] == "mm"
+    assert body["verified"] is False
+
+
+def test_envelope_route_verified_reads_module_flag(app):
+    """The wire's ``verified`` equals the module flag, so the operator's
+    future one-line flip propagates automatically."""
+
+    async def _call(client):
+        return await client.get("/api/config/envelope")
+
+    r = _run_async(app, _call)
+    body = r.json()
+    assert body["verified"] == pv.QIDI_PLUS_5_ENVELOPE_VERIFIED
+
+
+def test_envelope_route_source_reads_named_constant(app):
+    """Source invariant (mirrors
+    ``test_keep_out_source_invariant_reads_named_constant``):
+    the handler bound to ``/api/config/envelope`` references the constant
+    NAME, so nobody can swap in literals at the route site."""
+    import inspect
+
+    handler = next(
+        route.endpoint for route in app.routes if route.path == "/api/config/envelope"
+    )
+    src = inspect.getsource(handler)
+    assert "QIDI_PLUS_5_ENVELOPE_MM" in src
+    assert "QIDI_PLUS_5_ENVELOPE_VERIFIED" in src
+
+
+def test_envelope_unverified_warning_still_in_module_source():
+    """The ``⚠️ UNVERIFIED`` warning lives in the module docstring, so read
+    it via the module file path — a later change cannot strip it while
+    the flag stays False."""
+    src = Path(pv.__file__).read_text(encoding="utf-8")
+    assert "⚠️ UNVERIFIED" in src

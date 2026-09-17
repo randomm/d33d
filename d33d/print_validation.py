@@ -61,6 +61,14 @@ logger = logging.getLogger(__name__)
 #: for the QIDI Plus 5.
 QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 
+#: Whether the build envelope values in ``QIDI_PLUS_5_ENVELOPE_MM`` have been
+#: confirmed against the physical machine. Currently ``False`` — the values
+#: (320×320×300 mm) are the most commonly cited for the QIDI Plus 5 but
+#: sources disagree and the machine identity (Plus 5 vs X-Plus 5) is
+#: unconfirmed. Flip to ``True`` and delete the ``⚠️ UNVERIFIED`` docstring
+#: above once the operator has confirmed both.
+QIDI_PLUS_5_ENVELOPE_VERIFIED: bool = False
+
 #: QIDI Plus 5 bed keep-out zone (X, Y) in millimetres, measured from the
 #: lower-left corner of the build plate. Vendor-verified from the QIDI Plus
 #: 5 tech-spec: "Lower-left 9x13 mm area is non-printable by default".
