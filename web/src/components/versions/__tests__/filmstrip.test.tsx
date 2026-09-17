@@ -237,5 +237,31 @@ describe("Filmstrip", () => {
     const slot = screen.getByTestId("filmstrip-slot-1");
     expect(slot.getAttribute("title")).toBe("exported 2026-01-03T10:00:00.000Z");
   });
+
+  it("an exported version outside the four slots is discoverable via the earlier-count (issue #126)", () => {
+    // 5 versions; the four visible are 2,3,4,5. v1 (hidden) was exported.
+    // The collapsed count must carry the mark so the exported version is
+    // not lost in the collapse.
+    const versions = [
+      entry(1, { exported_at: "2026-01-03T10:00:00.000Z" }),
+      entry(2),
+      entry(3),
+      entry(4),
+      entry(5),
+    ];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    expect(
+      screen.getByTestId("filmstrip-earlier-exported").textContent?.trim(),
+    ).toBe("exported");
+    // The visible slot for v1 does not exist (it is collapsed) — the mark
+    // is on the count, not on a slot.
+    expect(screen.queryByTestId("filmstrip-exported-1")).toBeNull();
+  });
+
+  it("the earlier-count carries no mark when no hidden version was exported", () => {
+    const versions = [entry(1), entry(2), entry(3), entry(4), entry(5)];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    expect(screen.queryByTestId("filmstrip-earlier-exported")).toBeNull();
+  });
 });
 

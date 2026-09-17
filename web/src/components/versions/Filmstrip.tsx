@@ -131,6 +131,15 @@ export function Filmstrip({
             data-testid="filmstrip-earlier"
             aria-label={`${copy.history.earlierCount(earlierCount)} ${copy.history.earlierLabel}`}
           >
+            {/* The collapsed count carries the mark if ANY of the hidden
+                versions was exported — the mark stays discoverable when its
+                version sits outside the four slots (issue #126 edge case).
+                A hidden version's mark is real server state, so the count
+                is never invented; it is augmented only when the data says
+                so. */}
+            {versions.some((v) => !visible.includes(v) && v.exported_at !== null) ? (
+              <span data-testid="filmstrip-earlier-exported">{copy.history.exported} </span>
+            ) : null}
             {copy.history.earlierCount(earlierCount)} {copy.history.earlierLabel}
           </span>
         )}
