@@ -138,6 +138,11 @@ Run these before pushing. All must pass locally:
 - Model config: YAML is source of truth, hot-reloaded on save, UI is a thin editor (never a DB); alias/provider-id split; override cascade runtime flags > model params > provider defaults.
 - Mid-conversation model switch: never rewrite the stored transcript — sanitise the outgoing request per target (drop tool messages / strip image_url / truncate oldest with marker).
 - Region-selection markers must be RED / high-contrast warm (VLMs are marker-colour-fragile); resolve client-side via CSG module registry + three.js Raycaster, never server-side OpenSCAD colour ID pass.
+- No component displays a confident value it has not established. A blank, a dash, or an explicit "not established" control is correct; an invented number, a placeholder model, or a stale value shown as fresh is not.
+- #FF3300 is the region marker and nothing else — not errors, not destructive actions, not badges. Blocked / failed / disagreeing states use #D2A63C.
+- d33d owns geometry (correct mm, watertight, fits the volume, exports 3MF). Orca owns printing. No slicing setting appears in the UI and none is implied. The only printer fact the UI holds is the build volume it must fit inside.
+- All user-facing strings live in web/src/copy.ts. Components never inline prose.
+- Measurements, version ids and raw detail render in the mono face; prose in the UI face — so a number can never hide inside a sentence.
 
 ## Architecture Notes
 
