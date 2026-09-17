@@ -54,7 +54,6 @@ import {
   ApiClient,
   type RegionEditViewId,
   type VersionTimelineEntry,
-  type VersionCompare,
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 import copy from "./copy";
@@ -92,6 +91,19 @@ const BRIEF_CHIP_MAX_HEIGHT_PX = 820;
 // shape App and the pass-card surface both need); re-exported here for
 // existing consumers (ChatPanel, app-layout.test.tsx import from App).
 export type { RenderImage };
+
+// Compare-select wiring seam (issue #117): the filmstrip "selects only" —
+// W13 builds the gesture (a slot click) and the compare VIEW / restore / pin
+// are W16's (the expanded sheet). App records each compare-select the filmstrip
+// reports into this module-level array so the wiring is TESTABLE end-to-end:
+// a per-component test proves the slot calls its onCompareSelect prop, but
+// only this seam proves APP still passes a live callback down (a dropped
+// prop in App.tsx would leave the array empty and the test red). W16 replaces
+// the no-op body with the two-version rotation; the seam (and its test) stay.
+export const __compareSelectLog: number[] = [];
+export function __resetCompareSelectLog(): void {
+  __compareSelectLog.length = 0;
+}
 
 /**
  * A point selection that has been picked (raycast hit + optional resolved
@@ -152,7 +164,6 @@ export default function App({ client }: AppProps) {
   // with the timeline as a side rail — the project home is the
   // conversation and the design together).
   const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
-  const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
 
   // Responsive shell state (issue #119). The floor and the Brief chip
   // threshold are measured against the WINDOW (window.innerWidth/Height —
@@ -547,96 +558,15 @@ export default function App({ client }: AppProps) {
     };
   }, [projectId, apiClient]);
 
-  // Timeline callbacks (issue #8): restore (non-destructive forward
-  // version), pin (the gallery), compare-select (the two-viewport compare).
-  const handleVersionRestore = useCallback(
-    async (versionId: number) => {
-      if (projectId === null) return;
-      try {
-        await apiClient.restoreVersion(projectId, versionId);
-        // Refresh the timeline (a new forward version was created).
-        const vs = await apiClient.listVersions(projectId);
-        setVersions(vs);
-      } catch (e) {
-        setStreamError({
-          message: `Restore failed: ${
-            e instanceof Error ? e.message : "unknown error"
-          }`,
-          detail: e instanceof Error ? e.message : undefined,
-          retryable: false,
-        });
-      }
-    },
-    [projectId, apiClient],
-  );
-
-  const handleVersionPin = useCallback(
-    async (versionId: number, pinned: boolean) => {
-      if (projectId === null) return;
-      try {
-        await apiClient.updateVersion(projectId, versionId, { pinned });
-        setVersions((prev) =>
-          prev.map((v) => (v.id === versionId ? { ...v, pinned: pinned } : v)),
-        );
-      } catch (e) {
-        setStreamError({
-          message: `Pin failed: ${e instanceof Error ? e.message : "unknown error"}`,
-          detail: e instanceof Error ? e.message : undefined,
-          retryable: false,
-        });
-      }
-    },
-    [projectId, apiClient],
-  );
-
-  // Compare-select: pick two versions to compare (the prioritized surface).
-  // Each click drops the older of the two selections and keeps the newest,
-  // so a 3-click sequence rotates A→B→C→B→A→…
+  // Compare-select (W13): the filmstrip selects only. The slot is a button
+  // that reports the clicked version id; the compare VIEW, restore, and pin
+  // are W16's (the expanded sheet). App records the gesture in the
+  // __compareSelectLog seam so the wiring is testable end-to-end (see the
+  // seam's doc comment); W16 replaces the body with the two-version compare
+  // rotation.
   const handleCompareSelect = useCallback((versionId: number) => {
-    setCompareIds((prev) => {
-      if (!prev) return [versionId, versionId];
-      // Drop the older selection; keep the newest pair.
-      return [prev[1], versionId];
-    });
+    __compareSelectLog.push(versionId);
   }, []);
-
-  // The compare view (two viewports + the param diff table) — fetched once
-  // two distinct versions have been selected (the prioritized surface).
-  const [compareResult, setCompareResult] = useState<VersionCompare | null>(null);
-  const [compareError, setCompareError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (projectId === null || compareIds === null) {
-      setCompareResult(null);
-      setCompareError(null);
-      return;
-    }
-    // Skip the fetch when both ids are the same (the first click sets
-    // [id, id] as a pending selection without a network call).
-    if (compareIds[0] === compareIds[1]) {
-      setCompareResult(null);
-      setCompareError(null);
-      return;
-    }
-    setCompareError(null);
-    apiClient
-      .compareVersions(projectId, compareIds[0], compareIds[1])
-      .then((res) => {
-        if (!cancelled) setCompareResult(res);
-      })
-      .catch((e: unknown) => {
-        if (!cancelled) {
-          setCompareResult(null);
-          setCompareError(
-            `Compare failed: ${e instanceof Error ? e.message : "unknown error"}`,
-          );
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, apiClient, compareIds]);
 
   const handleSendMessage = useCallback(
     (text: string) => {
@@ -1178,17 +1108,17 @@ export default function App({ client }: AppProps) {
         <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} conversationCollapsed={conversationCollapsed} />
       )}
 
-      {/* Layer 10 — the version timeline (side rail), right edge. A failure
-          is CONTENT INSIDE THE CONVERSATION, never a layer of its own. */}
+      {/* Layer 10 — the version filmstrip (bottom-left, horizontal four-slot
+          strip, W13). A failure is CONTENT INSIDE THE CONVERSATION, never a
+          layer of its own. The strip is absent (not empty) until a version
+          exists or a pass is in flight. The pass-in-flight flag drives the
+          dashed pending slot so the strip is never behind the conversation. */}
       {!panelsHidden && projectId !== null && (
         <Filmstrip
           versions={versions}
-          compareIds={compareIds}
-          compareResult={compareResult}
-          compareError={compareError}
+          passInFlight={designLoopInFlight}
+          pendingName={lastUserMessageRef.current || null}
           inset={OVERLAY_INSET_PX}
-          onRestore={handleVersionRestore}
-          onPin={handleVersionPin}
           onCompareSelect={handleCompareSelect}
         />
       )}
