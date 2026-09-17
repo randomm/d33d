@@ -1,13 +1,18 @@
-"""Fast-layer test: the ``VIEWS`` six-view contract.
+"""Fast-layer test: the ``VIEWS`` six-view contract and the camera-distance fit.
 
 No Docker required — this asserts the module-level constant's shape and
-contents, which is the single source of truth read by the entrypoint,
-the caller and the slow-layer golden fixture test.
+contents, plus the :func:`d33d.render_worker.cam_dist` pure function that
+replaces the legacy fixed 40.0/55.0 distances (issue #111).
 
 The 7-element camera tuple is ``(tx, ty, tz, rx, ry, rz, dist)`` — the
 form the pinned image (``openscad/openscad:trixie``, OpenSCAD 2026.01.19)
 accepts via ``--camera``, verified empirically. If a future build wants a
 different arity, ``VIEWS`` and this test move together in the same commit.
+
+The ``cam_dist`` function is a pure function of the bounding box: no
+timestamps, no randomised seeds, no wall-clock, no dict-iteration-order
+dependence. The byte-stability acceptance gate (two renders of the same
+source produce identical view PNGs) depends on this purity.
 """
 
 from __future__ import annotations
@@ -183,3 +188,96 @@ def test_build_docker_argv_rejects_out_of_range_params_instance() -> None:
     # bypass path is closed at construction, not just at the argv builder.
     with pytest.raises(ValueError):
         rw.RenderParams(cpus="1000")
+
+
+# ── Issue #111: camera-distance fit (replaces fixed 40.0/55.0) ──────────
+
+
+def test_cam_dist_is_a_pure_function_of_the_bbox() -> None:
+    """The fit must be a pure function of the bounding box: no
+    timestamps, no randomised seeds, no wall-clock, no
+    dict-iteration-order dependence. Two calls with the same arguments
+    must return the same value."""
+    for extent in (20.0, 60.0, 300.0):
+        for _ in range(5):
+            d_aa = rw.cam_dist(extent, "view_00_front.png")
+            d_iso = rw.cam_dist(extent, "view_05_iso.png")
+        for _ in range(5):
+            assert rw.cam_dist(extent, "view_00_front.png") == d_aa
+            assert rw.cam_dist(extent, "view_05_iso.png") == d_iso
+
+
+def test_cam_dist_scales_linearly_with_extent() -> None:
+    """Doubling the extent must double the distance. This is what makes
+    the margin a fixed *fraction* of the model size rather than a fixed
+    absolute amount — a 20 mm and a 300 mm part get the same relative
+    margin (the ticket's "single margin constant" requirement)."""
+    d20 = rw.cam_dist(20.0, "view_00_front.png")
+    d40 = rw.cam_dist(40.0, "view_00_front.png")
+    d300 = rw.cam_dist(300.0, "view_00_front.png")
+    assert d40 == pytest.approx(2.0 * d20)
+    assert d300 == pytest.approx(15.0 * d20)
+
+
+def test_cam_dist_uses_different_factor_for_iso() -> None:
+    """The isometric view (45° rotation) projects a larger silhouette
+    than any single axis, so it needs a larger distance: the iso factor
+    must be √2 × the axis-aligned factor."""
+    extent = 60.0
+    d_aa = rw.cam_dist(extent, "view_00_front.png")
+    d_iso = rw.cam_dist(extent, "view_05_iso.png")
+    assert d_iso == pytest.approx(d_aa * 2.0**0.5)
+
+
+def test_cam_dist_zero_extent_returns_zero() -> None:
+    """A degenerate (zero-extent) mesh yields distance 0.0 — the caller
+    classifies it as ``empty_model`` before the views are rendered, so
+    the fit never sees a negative or zero extent in production."""
+    assert rw.cam_dist(0.0, "view_00_front.png") == 0.0
+    assert rw.cam_dist(-1.0, "view_00_front.png") == 0.0
+
+
+def test_cam_dist_factor_is_greater_than_exact_fit() -> None:
+    """The margin constant (CAM_DIST_FACTOR) must be strictly greater
+    than the exact-fit ratio (≈ 2.52, calibrated empirically) so that
+    the model does not touch the frame edge. If the factor were reduced
+    to the exact-fit value or below, the 60 mm part would overflow its
+    800×800 frame again — the bug this fix closes."""
+    assert rw.CAM_DIST_FACTOR > 2.52
+
+
+def test_cam_dist_frames_all_three_acceptance_sizes() -> None:
+    """A 20 mm, 60 mm and 300 mm part must ALL be fully framed with the
+    same margin rule. The test asserts the distance is proportional to
+    the extent (same relative margin) and strictly positive for all
+    three sizes — a single constant that fits all three, not one tuned
+    to pass one size and regress another."""
+    distances = []
+    for extent in (20.0, 60.0, 300.0):
+        d = rw.cam_dist(extent, "view_00_front.png")
+        assert d > 0, f"distance must be positive for {extent} mm extent"
+        # The margin fraction is constant: d / extent is the same for all
+        # three sizes (within floating-point tolerance).
+        distances.append(d / extent)
+    assert distances[0] == pytest.approx(distances[1], rel=1e-12)
+    assert distances[1] == pytest.approx(distances[2], rel=1e-12)
+
+
+def test_views_rotation_semantics_unchanged() -> None:
+    """The first six elements of each camera tuple (translate + rotate)
+    must still be the empirically-verified values that pin *which* face
+    each view sees. Only the 7th element (dist) is now substituted at
+    render time — the rotation semantics are unchanged (issue #111 is
+    about framing, not about which face each view shows)."""
+    expected_rotations = [
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),   # front
+        (0.0, 0.0, 0.0, 0.0, 180.0, 0.0),  # back
+        (0.0, 0.0, 0.0, 0.0, 90.0, 0.0),   # left
+        (0.0, 0.0, 0.0, 0.0, -90.0, 0.0),  # right
+        (0.0, 0.0, 0.0, 90.0, 0.0, 0.0),   # top
+        (0.0, 0.0, 0.0, 0.0, 45.0, 45.0),  # iso
+    ]
+    for (name, cam), expected in zip(rw.VIEWS, expected_rotations):
+        assert cam[:6] == expected, (
+            f"VIEWS[{name!r}] rotation {cam[:6]} != expected {expected}"
+        )

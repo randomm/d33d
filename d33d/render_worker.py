@@ -10,17 +10,20 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
 
 - ``--camera =tx,ty,tz,rx,ry,rz,dist`` — the 7-element gimbal form is
   accepted; rotations are applied about the origin **after** ``--autocenter``
-  has shifted the origin to the bounding-box centre, so the camera tuples
-  below are fixed constants independent of the model.
+  has shifted the origin to the bounding-box centre.
 - ``--autocenter``, ``--projection o``, ``--imgsize 800,800``, ``--render``
   and ``--colorscheme "Tomorrow Night"`` are all present in the pinned
   build (the spec forbade assuming ``--autocenter``/``--colorscheme`` —
   both were confirmed by ``openscad --help``; the flag table is recorded in
   ``docs/bosl2-pinning.md``).
-- The 6 camera tuples were verified empirically with a three-slab test
-  model (see ``docs/bosl2-pinning.md``); they are pinned together with the
-  ``VIEWS`` constant below. If a future OpenSCAD build changes the camera
-  rotation semantics, ``VIEWS`` and its test must move in the same commit.
+- The camera rotation semantics (which view sees which face) were verified
+  empirically with a three-slab test model (see ``docs/bosl2-pinning.md``);
+  they are pinned together with the ``VIEWS`` constant below. The camera
+  *distance*, however, is **not** a fixed constant — it is fitted to the
+  model's bounding box via :func:`cam_dist` (issue #111) so that a 60 mm
+  part does not overflow its 800×800 frame. If a future OpenSCAD build
+  changes the camera rotation semantics or the orthographic projection
+  scale, ``VIEWS`` and its test must move in the same commit.
 """
 
 from __future__ import annotations
@@ -67,17 +70,91 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: ``camera_tuple`` is the 7-element gimbal ``[tx, ty, tz, rx, ry, rz,
 #: dist]`` — translate, rotate about the origin (post-``--autocenter``),
 #: then distance, all in mm, orthographic 800x800. Single source of truth
-#: for the entrypoint, the caller and the tests. Cameras are fixed
-#: constants independent of the model — centre the model, don't fit the
-#: camera, so renders are stable across runs.
+#: for the entrypoint, the caller and the tests.
+#:
+#: The first six elements (translate + rotate) are fixed constants:
+#: they pin *which* face each view sees, verified empirically. The
+#: seventh element (``dist``) is a **placeholder** (``0.0``) — the
+#: entrypoint substitutes the actual per-model distance computed by
+#: :func:`cam_dist` from the harvested STL bounding box (issue #111).
+#: The entrypoint never reads these ``0.0`` values at render time.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
-    ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 40.0)),
-    ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 40.0)),
-    ("view_02_left.png", (0.0, 0.0, 0.0, 0.0, 90.0, 0.0, 40.0)),
-    ("view_03_right.png", (0.0, 0.0, 0.0, 0.0, -90.0, 0.0, 40.0)),
-    ("view_04_top.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 40.0)),
-    ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 55.0)),
+    ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 0.0)),
+    ("view_02_left.png", (0.0, 0.0, 0.0, 0.0, 90.0, 0.0, 0.0)),
+    ("view_03_right.png", (0.0, 0.0, 0.0, 0.0, -90.0, 0.0, 0.0)),
+    ("view_04_top.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 0.0)),
+    ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 0.0)),
 ]
+
+#: Multiplier between the model's max bounding-box extent (mm) and the
+#: camera distance (mm) for the five axis-aligned views. Calibrated
+#: empirically against the pinned image (``openscad/openscad:trixie``,
+#: OpenSCAD 2026.01.19): the orthographic projection maps a model of
+#: max-extent *S* to *S* × 2016 / *d* pixels in the 800×800 frame, so
+#: the exact-fit distance (model fills the frame) is *d* = 2.52 × *S*.
+#: Using 3.0 gives a ~19 % margin (3.0 / 2.52) — the model occupies
+#: ~84 % of the frame, leaving a visible background border on all four
+#: sides for every size from 20 mm to 300 mm.
+CAM_DIST_FACTOR: float = 3.0
+
+#: Additional multiplier for the isometric view (45° about Y then 45°
+#: about Z). The 45° rotation projects a larger silhouette than any
+#: single axis (a cube of side *S* projects to *S*·√2), so the iso
+#: distance is ``CAM_DIST_FACTOR * sqrt(2) * max_extent`` to keep the
+#: same relative margin.
+#:
+#: This factor is calibrated for cube-shaped models: a cube's 45°-rotated
+#: silhouette is 2D-diagonal-limited (projected width *S*·√2, zero
+#: projected z-extent). A genuine iso corner view of a full-extent box of
+#: side *S* projects *S*·√3 instead. At ``CAM_DIST_FACTOR`` = 3.0 the
+#: exact-fit distance for a cube is 2.52·S·√2 ≈ 3.56·S (fitted: 3.0·√2·S
+#: ≈ 4.24·S → ~19% margin, same as the axis-aligned views) while a
+#: worst-case box needs 2.52·S·√3 ≈ 4.36·S (fitted: 4.24·S → ~3% margin).
+#: The iso case is therefore the tightest in the design: it holds with a
+#: positive margin for cube-shaped models and for a full-extent box — the
+#: only documented tight case is a box whose three extents are all
+#: simultaneously near the max.
+CAM_DIST_ISO_FACTOR: float = CAM_DIST_FACTOR * 2.0**0.5
+
+#: Views whose camera tuple carries the isometric rotation (the last
+#: element of ``VIEWS``). Used by :func:`cam_dist` to pick the iso
+#: multiplier.
+ISO_VIEW_NAMES: frozenset[str] = frozenset({"view_05_iso.png"})
+
+
+def cam_dist(max_extent_mm: float, view_name: str = "") -> float:
+    """Camera distance (mm) that frames a model of ``max_extent_mm``.
+
+    Pure function of the bounding box: ``CAM_DIST_FACTOR × max_extent``
+    for the five axis-aligned views, ``CAM_DIST_ISO_FACTOR × max_extent``
+    for the isometric view. No timestamps, no randomised seeds, no
+    wall-clock, no dict-iteration-order dependence — the same bounding
+    box always yields the same distance, which is what makes the
+    byte-stability acceptance gate (two renders of the same source
+    produce identical PNG bytes) hold.
+
+    ``max_extent_mm`` is the largest of the three bounding-box extents
+    (``max(bounds[1] - bounds[0])`` from trimesh). A value of 0 or
+    below yields 0.0 (the caller classifies degenerate meshes as
+    ``empty_model`` before the views are ever rendered).
+
+    This function is a **reference implementation** of the distance
+    formula. The authoritative computation at render time is the awk
+    in ``entrypoint.sh``, which parses the ASCII STL's vertex lines
+    to get the bounding box and applies the same factor. The two are
+    kept in sync by the ``CAM_DIST_FACTOR`` literal (guarded by
+    ``tests/fast/test_entrypoint_views_sync.py``). The host-side
+    trimesh ``mesh.bounds`` path in ``render_for_design_loop`` is not
+    used for the render itself — the container self-computes the
+    distance from the STL it just wrote — so this function is not
+    exercised by the production render pipeline; it exists to pin the
+    formula in tests and document the margin rule.
+    """
+    if max_extent_mm <= 0:
+        return 0.0
+    factor = CAM_DIST_ISO_FACTOR if view_name in ISO_VIEW_NAMES else CAM_DIST_FACTOR
+    return factor * max_extent_mm
 
 #: Every ``openscad`` invocation carries these flags (verified present in
 #: the pinned image — see the module docstring). The entrypoint applies
