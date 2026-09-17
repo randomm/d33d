@@ -17,6 +17,12 @@
  *     dot is what the user pointed at). Exactly one marker exists; a new
  *     click replaces it. The parent clears it on cancel/dismiss/submit and
  *     when the camera pose changes (the marker is view-dependent).
+ *
+ * Sizing (issue #119): the layer has NO width/height props — it fills its
+ *     containing stage (position:absolute; inset:0), the SAME element box the
+ *     ModelViewer sizes itself from. That shared element is the single source
+ *     of the pick's coordinate space: this layer's getBoundingClientRect() and
+ *     the handle's renderer.getSize() describe one and the same box.
  */
 
 import { useCallback, useRef, type PointerEvent } from "react";
@@ -48,17 +54,9 @@ export interface PickLayerProps {
   /** The currently placed marker, or null when none is selected. */
   marker: { x: number; y: number } | null;
   onPointSelected: (event: PointSelectedEvent) => void;
-  width?: number;
-  height?: number;
 }
 
-export function PickLayer({
-  ready,
-  marker,
-  onPointSelected,
-  width = 600,
-  height = 400,
-}: PickLayerProps) {
+export function PickLayer({ ready, marker, onPointSelected }: PickLayerProps) {
   // pointerdown position (CSS px, client coords). A ref, not state — it
   // exists only for the pointerup decision and must not re-render.
   const downRef = useRef<{ x: number; y: number } | null>(null);
@@ -99,11 +97,11 @@ export function PickLayer({
       onPointerDown={handlePointerDown}
       onPointerUp={handlePointerUp}
       style={{
+        // Fills the stage — the same element box the viewer's ResizeObserver
+        // reads (issue #119). No pixel literal: a fixed size here would be a
+        // second size constant the pick path could drift against.
         position: "absolute",
-        top: 0,
-        left: 0,
-        width,
-        height,
+        inset: 0,
         cursor: ready ? "crosshair" : "default",
         // The layer must NOT swallow the camera's gestures: pointermove /
         // wheel events are left alone (they reach OrbitControls), and

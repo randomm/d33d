@@ -1,8 +1,16 @@
 /**
- * App shell — the two-pane layout from 05-spa-core.md.
+ * App shell — the full-viewport stage (issue #119).
  *
- * Left: chat panel (with inline render images) + photo upload.
- * Right: three.js viewer + validation status + Export 3MF.
+ * The 3D canvas fills the window; every panel floats above it and costs
+ * no layout height. The stage is a single positioned container
+ * (`.app-stage`, position:relative, 100vw × 100vh, overflow:hidden) with
+ * the ModelViewer absolute inset:0, sized from its ResizeObserver — the
+ * handle's `renderer.getSize()` is THE single source of the viewport's
+ * CSS-pixel size (the pick layer derives its box from the same element).
+ *
+ * Four layers, one ever modal (design contract, issue #119): canvas 0;
+ * brief/header/filmstrip/controls 10; conversation 20; pin+bar 30.
+ * A failure is CONTENT INSIDE THE CONVERSATION, not a layer.
  *
  * No auto-generated slider panel. The pinned-parameter strip is opt-in
  * and holds at most 3 user-chosen entries.
@@ -42,14 +50,24 @@ import {
   type VersionCompare,
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
+import copy from "./copy";
 
-// ModelViewer and PickLayer each default independently to 600x400 when
-// given no explicit size — that only lines up by coincidence. Pass one
-// shared size to both so the pick's click coordinate space can never
-// drift from the canvas the raycast (and compositeMarkedPng) actually
-// read from.
-const VIEWER_WIDTH = 600;
-const VIEWER_HEIGHT = 400;
+// Overlay geometry (issue #119). The overlays are siblings above the
+// canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
+// CLOSED set of four values (the design contract): canvas 0, panels 10,
+// conversation 20, pin+bar 30 — no other z-index may exist.
+const OVERLAY_INSET_PX = 24;
+const Z_INDEX = { canvas: 0, panels: 10, conversation: 20, pinAndBar: 30 } as const;
+
+// Responsive rules (issue #119). The floor is measured against the
+// WINDOW (window.innerWidth/innerHeight — NOT the stage's own box): below
+// it the app says so plainly instead of degrading. The Brief renders as a
+// chip below 1200px wide OR 820px tall (height is the real constraint on
+// a laptop).
+const FLOOR_WIDTH_PX = 1024;
+const FLOOR_HEIGHT_PX = 640;
+const BRIEF_CHIP_MAX_WIDTH_PX = 1200;
+const BRIEF_CHIP_MAX_HEIGHT_PX = 820;
 
 export interface RenderImage {
   /** view filename, e.g. "view_00_front.png" */
@@ -121,6 +139,59 @@ export default function App({ renders = [], client }: AppProps) {
   // conversation and the design together).
   const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
   const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
+
+  // Responsive shell state (issue #119). The floor and the Brief chip
+  // threshold are measured against the WINDOW (window.innerWidth/Height —
+  // NOT the stage's own box): below the floor the app says so plainly
+  // (copy.shell.viewportTooSmall) instead of degrading; the Brief renders
+  // as a chip below 1200px wide OR 820px tall.
+  const [windowSize, setWindowSize] = useState(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  // The conversation collapses to a RAIL by choice at any size, keeping
+  // the last summary legible (copy.shell.conversationCollapsed).
+  const [conversationCollapsed, setConversationCollapsed] = useState(false);
+  // Backslash hides EVERY panel (copy.shell.hideAllPanels) — bound at the
+  // window level so it fires regardless of focus, but IGNORED while an
+  // input/textarea/contenteditable has focus (typing a backslash into the
+  // composer would blank the interface).
+  const [panelsHidden, setPanelsHidden] = useState(false);
+
+  useEffect(() => {
+    const onResize = () =>
+      setWindowSize({ width: window.innerWidth, height: window.innerHeight });
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  // The backslash key: hide every panel (issue #119). window-level so
+  // focus does not matter — but IGNORED while an input, textarea or
+  // contenteditable has focus, and while a panel is hidden, backslash
+  // RESTORES them (one key, two states, no modal stack).
+  useEffect(() => {
+    const isTypingTarget = (t: EventTarget | null): boolean => {
+      if (!(t instanceof HTMLElement)) return false;
+      const tag = t.tagName;
+      return tag === "INPUT" || tag === "TEXTAREA" || t.isContentEditable;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "\\") return;
+      if (isTypingTarget(e.target)) return; // typing wins over the shortcut
+      setPanelsHidden((prev) => !prev);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const viewportTooSmall =
+    windowSize.width < FLOOR_WIDTH_PX || windowSize.height < FLOOR_HEIGHT_PX;
+  // The Brief is a CHIP below 1200px wide OR 820px tall (height is the
+  // real constraint on a laptop) — a chip, not a full panel.
+  const briefIsChip =
+    windowSize.width < BRIEF_CHIP_MAX_WIDTH_PX ||
+    windowSize.height < BRIEF_CHIP_MAX_HEIGHT_PX;
 
   // Region-selection (point pick) wiring (issue #98).
   const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
@@ -836,329 +907,439 @@ export default function App({ renders = [], client }: AppProps) {
     });
   }, []);
 
+  // Below the floor the app says so plainly rather than degrading (issue
+  // #119): copy.shell.viewportTooSmall replaces the stage's content.
+  if (viewportTooSmall) {
+    return (
+      <div
+        className="app-stage"
+        data-testid="app-stage"
+        style={{
+          position: "relative",
+          width: "100vw",
+          height: "100vh",
+          overflow: "hidden",
+        }}
+      >
+        <div
+          data-testid="viewport-too-small"
+          role="alert"
+          style={{
+            position: "absolute",
+            top: "50%",
+            left: "50%",
+            transform: "translate(-50%, -50%)",
+            maxWidth: "80%",
+            textAlign: "center",
+            color: "var(--color-fg)",
+            fontFamily: "var(--font-ui)",
+          }}
+        >
+          {copy.shell.viewportTooSmall}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
-      className="app-shell"
-      data-testid="app-shell"
+      className="app-stage"
+      data-testid="app-stage"
       style={{
-        display: "flex",
-        flexDirection: "row",
+        // 100vw/100vh per the ticket's own text (`.app-stage` — width:100vw;
+        // height:100vh; overflow:hidden). The overflow:hidden means the
+        // scrollbar gutter that 100vw includes on some platforms never
+        // causes a visible overflow — the stage simply clips to the window.
+        position: "relative",
+        width: "100vw",
         height: "100vh",
         margin: 0,
-        boxSizing: "border-box",
         overflow: "hidden",
       }}
     >
-      {/* Left pane: chat + upload */}
+      {/* Layer 0 — the canvas fills the stage; the pick layer shares its
+          exact box (both absolute inset:0). The viewer's size comes only
+          from its ResizeObserver; the handle's renderer.getSize() is the
+          single source of the CSS-pixel viewport size (issue #119). */}
       <div
-        className="app-left"
-        data-testid="app-left-pane"
+        className="viewer-pane"
+        data-testid="viewer-pane"
         style={{
-          flex: "1 1 0",
-          minWidth: 0,
-          overflowY: "auto",
-          boxSizing: "border-box",
+          position: "absolute",
+          inset: 0,
+          zIndex: Z_INDEX.canvas,
         }}
       >
-        <ChatPanel
-          messages={messages}
-          onSend={handleSendMessage}
-          renders={renders}
-          inFlight={designLoopInFlight}
+        {/* The viewer's pre-pass state is the named-module GLB fixture.
+         * After a stream-driven design-loop pass (issue #69) it is
+         * REPLACED by the design loop's rendered STL (streamModelData,
+         * from the version-created frame's stl_data_uri) so the browser
+         * displays the model the loop actually produced. */}
+        <ModelViewer
+          data={viewerSource.data}
+          format={viewerSource.format}
+          onReady={handleViewerReady}
+          onLoaded={handleViewerLoaded}
         />
-        <PhotoUpload
-          projectId={projectId ?? undefined}
-          onUploaded={handlePhotoUploaded}
-          onError={(msg) =>
-            setStreamError({
-              message: msg,
-              detail: undefined,
-              retryable: false,
-            })
-          }
+        {/* Single-click pick layer (issue #98) — fills the stage, the SAME
+            element box the viewer's ResizeObserver reads (issue #119). */}
+        <PickLayer
+          ready={pickLayerReady}
+          marker={pickMarker}
+          onPointSelected={handlePointSelected}
         />
-        {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
-          <DimensionCanvas
-            photoSrc={photoSrc}
-            photoWidth={photoDimensions.width}
-            photoHeight={photoDimensions.height}
-          />
-        )}
-        {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
-          <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
-            Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
-          </div>
-        )}
-        <PinnedParamStrip
-          params={pinnedParams}
-          onToggle={togglePinParam}
-        />
-        {streamError && (
-          <div className="app-error" data-testid="app-error" role="alert">
-            {streamError.message}
-            {streamError.detail && (
-              <details data-testid="app-error-detail" className="app-error-detail">
-                <summary>Details</summary>
-                {streamError.detail}
-              </details>
-            )}
-            {streamError.retryable && streamErrorKind === "stream" && (
-              <button
-                type="button"
-                className="app-error-retry-btn"
-                data-testid="app-error-retry"
-                onClick={handleRetry}
-                disabled={designLoopInFlight}
-              >
-                Retry
-              </button>
-            )}
-          </div>
-        )}
-        {designLoopInFlight && (
-          <div className="design-loop-progress" data-testid="design-loop-progress" role="status">
-            <span data-testid="design-loop-stage">
-              {designLoopStep === "design-loop-start"
-                ? "Generating design…"
-                : designLoopStep === "design-loop-pass"
-                  ? "Rendering and checking…"
-                  : designLoopStep === "version-created"
-                    ? "Saving version…"
-                    : "Working on your design…"}
-            </span>
-            <div
-              className="design-loop-progress-bar"
-              data-testid="design-loop-progress-bar"
-              aria-hidden="true"
-            >
-              <span className="design-loop-progress-indicator" />
-            </div>
-            <span data-testid="design-loop-elapsed">{designLoopElapsed}s</span>
-          </div>
-        )}
       </div>
 
-      {/* Right pane: version timeline (side rail) + viewer + validation */}
-      <div
-        className="app-right"
-        data-testid="app-right-pane"
-        style={{
-          flex: `0 0 ${VIEWER_WIDTH}px`,
-          width: VIEWER_WIDTH,
-          display: "flex",
-          flexDirection: "column",
-          overflowY: "auto",
-          boxSizing: "border-box",
-        }}
-      >
-        {/* The version timeline side rail (issue #8) — the project resumes
-            at its latest version; the timeline is the history surface. */}
-        {projectId !== null && (
-          <div className="version-tail-pane" data-testid="version-timeline-pane">
-            <VersionTimeline
-              versions={versions}
-              latestId={versions.length > 0 ? versions[versions.length - 1].id : 0}
-              onRestore={handleVersionRestore}
-              onPin={handleVersionPin}
-              onCompareSelect={handleCompareSelect}
-            />
-            {/* The two-viewport compare (surface 5) — rendered once two
-                versions have been selected from the timeline. */}
-            {compareIds !== null && compareResult !== null && (
-              <div data-testid="compare-pane">
-                {compareError && (
-                  <p data-testid="compare-error" role="alert">
-                    {compareError}
-                  </p>
-                )}
-                <CompareView
-                  compare={compareResult}
-                  aId={compareIds[0]}
-                  bId={compareIds[1]}
-                />
-              </div>
-            )}
-            {/* The pinned variant gallery (surface 2) — the browse-my-options
-                surface, distinct from the linear timeline. */}
-            {versions.filter((v) => v.pinned && !v.archived).length > 0 && (
-              <div data-testid="gallery-pane">
-                <VariantGallery
-                  cards={versions
-                    .filter((v) => v.pinned && !v.archived)
-                    .map((v) => ({
-                      ...v,
-                      actions: ["set-as-main", "branch-from", "archive"] as const,
-                    }))}
-                />
-              </div>
-            )}
-          </div>
-        )}
+      {/* Layer 20 — the conversation (chat + upload + errors). Floats over
+          the canvas; costs no layout height. Collapses to a RAIL by
+          choice (conversationCollapsed) — the last summary stays legible.
+          Hidden by backslash (panelsHidden). */}
+      {!panelsHidden && (
         <div
-          className="viewer-pane"
-          data-testid="viewer-pane"
+          className="app-left"
+          data-testid="app-left-pane"
           style={{
-            position: "relative",
-            width: VIEWER_WIDTH,
-            height: VIEWER_HEIGHT,
-            // flexShrink 0 pins this pane's box: a tall version-tail-pane
-            // above can no longer compress the 600x400 containing block that
-            // the pick layer (absolute, inset 0) and the inline region
-            // bar (absolute, bottom 0) are positioned against — their
-            // coordinate space stays locked to the canvas regardless of how
-            // much history the side rail grows (issue #76).
-            flex: "0 0 auto",
-            flexShrink: 0,
-            overflow: "hidden",
+            position: "absolute",
+            top: OVERLAY_INSET_PX,
+            left: OVERLAY_INSET_PX,
+            width: conversationCollapsed ? 240 : 420,
+            height: `calc(100% - ${OVERLAY_INSET_PX * 2}px)`,
+            zIndex: Z_INDEX.conversation,
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            minWidth: 0,
+            overflowY: "auto",
             boxSizing: "border-box",
           }}
         >
-          {/* The viewer's pre-pass state is the named-module GLB fixture.
-           * After a stream-driven design-loop pass (issue #69) it is
-           * REPLACED by the design loop's rendered STL (streamModelData,
-           * from the version-created frame's stl_data_uri) so the browser
-           * displays the model the loop actually produced. */}
-          <ModelViewer
-            data={viewerSource.data}
-            format={viewerSource.format}
-            width={VIEWER_WIDTH}
-            height={VIEWER_HEIGHT}
-            onReady={handleViewerReady}
-            onLoaded={handleViewerLoaded}
-          />
-          {/* Single-click pick layer (issue #98) — the replacement for the
-              pick layer (issue #98). `ready` flips once a model is loaded
-              (e2e waits on `data-ready`); `marker` is the visible red dot
-              while a selection is pending. The layer never swallows
-              drag/wheel events, so OrbitControls always gets the camera's
-              gestures. */}
-          <PickLayer
-            ready={pickLayerReady}
-            marker={pickMarker}
-            onPointSelected={handlePointSelected}
-            width={VIEWER_WIDTH}
-            height={VIEWER_HEIGHT}
-          />
-          {/* Inline region bar (issue #76) — the pending-selection affordance
-              relocated from a sibling-below card into .viewer-pane itself:
-              absolute, bottom 0, full width, semi-transparent so the model
-              shows through. Renders ONLY while a selection is pending —
-              with pendingSelection null it is absent from the DOM, so it can
-              never block the pick layer's clicks or cover the canvas.
-              Apply submits through the SAME handleSendMessage path as the
-              chat panel (same guard, attach, and race-guard); the draft
-              lives in local state, and Escape or Cancel clears it and the
-              selection together. The thumbnail stays small inside the bar —
-              the red marker dot on the canvas is the primary visual
-              reference, the crop is the secondary one. */}
-          {pendingSelection && (
-            <form
-              className="region-edit-bar"
-              data-testid="region-edit-bar"
-              role="group"
+          {/* The conversation rail: collapsed keeps the last summary
+              legible (copy.shell.conversationCollapsed). */}
+          {conversationCollapsed ? (
+            <button
+              type="button"
+              data-testid="conversation-rail"
+              onClick={() => setConversationCollapsed(false)}
               style={{
-                position: "absolute",
-                bottom: 0,
-                left: 0,
-                right: 0,
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
                 padding: "8px 12px",
-                backgroundColor: "rgba(0, 0, 0, 0.8)",
-                boxSizing: "border-box",
-                zIndex: 10,
-              }}
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleRegionBarSubmit();
+                border: "1px solid var(--color-hairline)",
+                borderRadius: 8,
+                background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+                color: "var(--color-fg)",
+                cursor: "pointer",
+                textAlign: "left",
               }}
             >
-              <img
-                src={pendingSelection.thumbnail}
-                alt={`pending selection on ${pendingSelection.viewId}`}
-                className="pending-selection-thumbnail"
-                data-testid="pending-selection-thumbnail"
-                style={{
-                  width: 32,
-                  height: 32,
-                  maxWidth: 200,
-                  objectFit: "cover",
-                  flex: "0 0 auto",
-                }}
+              {copy.shell.conversationCollapsed(messages.length)} · {copy.shell.openConversation}
+            </button>
+          ) : (
+            <>
+              <div data-testid="conversation-header" style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  type="button"
+                  data-testid="conversation-collapse-btn"
+                  onClick={() => setConversationCollapsed(true)}
+                  aria-label={copy.shell.collapseConversation}
+                  style={{
+                    border: "1px solid var(--color-hairline)",
+                    borderRadius: 8,
+                    background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+                    color: "var(--color-fg)",
+                    cursor: "pointer",
+                    padding: "4px 8px",
+                  }}
+                >
+                  {copy.shell.collapseConversation}
+                </button>
+              </div>
+              <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+                <ChatPanel
+                  messages={messages}
+                  onSend={handleSendMessage}
+                  renders={renders}
+                  inFlight={designLoopInFlight}
+                />
+                {designLoopInFlight && (
+                  <div className="design-loop-progress" data-testid="design-loop-progress" role="status">
+                    <span data-testid="design-loop-stage">
+                      {designLoopStep === "design-loop-start"
+                        ? "Generating design…"
+                        : designLoopStep === "design-loop-pass"
+                          ? "Rendering and checking…"
+                          : designLoopStep === "version-created"
+                            ? "Saving version…"
+                            : "Working on your design…"}
+                    </span>
+                    <div
+                      className="design-loop-progress-bar"
+                      data-testid="design-loop-progress-bar"
+                      aria-hidden="true"
+                    >
+                      <span className="design-loop-progress-indicator" />
+                    </div>
+                    <span data-testid="design-loop-elapsed">{designLoopElapsed}s</span>
+                  </div>
+                )}
+                {streamError && (
+                  <div className="app-error" data-testid="app-error" role="alert">
+                    {streamError.message}
+                    {streamError.detail && (
+                      <details data-testid="app-error-detail" className="app-error-detail">
+                        <summary>Details</summary>
+                        {streamError.detail}
+                      </details>
+                    )}
+                    {streamError.retryable && streamErrorKind === "stream" && (
+                      <button
+                        type="button"
+                        className="app-error-retry-btn"
+                        data-testid="app-error-retry"
+                        onClick={handleRetry}
+                        disabled={designLoopInFlight}
+                      >
+                        Retry
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+          <PhotoUpload
+            projectId={projectId ?? undefined}
+            onUploaded={handlePhotoUploaded}
+            onError={(msg) =>
+              setStreamError({
+                message: msg,
+                detail: undefined,
+                retryable: false,
+              })
+            }
+          />
+          {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
+            <DimensionCanvas
+              photoSrc={photoSrc}
+              photoWidth={photoDimensions.width}
+              photoHeight={photoDimensions.height}
+            />
+          )}
+          {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
+            <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
+              Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
+            </div>
+          )}
+          <PinnedParamStrip params={pinnedParams} onToggle={togglePinParam} />
+        </div>
+      )}
+
+      {/* Layer 10 — the Brief chip / full panel. The Brief renders as a
+          CHIP below 1200px wide OR 820px tall; a full panel above. */}
+      {!panelsHidden && (
+        <div
+          className="brief-panel"
+          data-testid="brief-panel"
+          data-mode={briefIsChip ? "chip" : "full"}
+          style={{
+            position: "absolute",
+            top: OVERLAY_INSET_PX,
+            left: OVERLAY_INSET_PX,
+            ...(conversationCollapsed ? {} : { marginTop: 0 }),
+            zIndex: Z_INDEX.panels,
+            padding: briefIsChip ? "8px 12px" : "16px",
+            borderRadius: 8,
+            background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+            color: "var(--color-fg)",
+            maxWidth: briefIsChip ? "none" : 420,
+          }}
+        >
+          {copy.brief.eyebrow}
+        </div>
+      )}
+
+      {/* Layer 10 — the version timeline (side rail), right edge. A failure
+          is CONTENT INSIDE THE CONVERSATION, never a layer of its own. */}
+      {!panelsHidden && projectId !== null && (
+        <div
+          className="version-tail-pane"
+          data-testid="version-timeline-pane"
+          style={{
+            position: "absolute",
+            top: OVERLAY_INSET_PX,
+            right: OVERLAY_INSET_PX,
+            width: 300,
+            zIndex: Z_INDEX.panels,
+            maxHeight: `calc(100% - ${OVERLAY_INSET_PX * 2}px)`,
+            overflowY: "auto",
+          }}
+        >
+          <VersionTimeline
+            versions={versions}
+            latestId={versions.length > 0 ? versions[versions.length - 1].id : 0}
+            onRestore={handleVersionRestore}
+            onPin={handleVersionPin}
+            onCompareSelect={handleCompareSelect}
+          />
+          {compareIds !== null && compareResult !== null && (
+            <div data-testid="compare-pane">
+              {compareError && (
+                <p data-testid="compare-error" role="alert">
+                  {compareError}
+                </p>
+              )}
+              <CompareView compare={compareResult} aId={compareIds[0]} bId={compareIds[1]} />
+            </div>
+          )}
+          {versions.filter((v) => v.pinned && !v.archived).length > 0 && (
+            <div data-testid="gallery-pane">
+              <VariantGallery
+                cards={versions
+                  .filter((v) => v.pinned && !v.archived)
+                  .map((v) => ({
+                    ...v,
+                    actions: ["set-as-main", "branch-from", "archive"] as const,
+                  }))}
               />
-              <input
-                type="text"
-                className="region-edit-input"
-                data-testid="region-edit-input"
-                placeholder="Describe the change to this region…"
-                value={regionBarText}
-                onChange={(e) => setRegionBarText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape") handleCancelPendingSelection();
-                }}
-                autoFocus
-                style={{
-                  flex: "1 1 auto",
-                  minWidth: 0,
-                  padding: "4px 8px",
-                  border: "none",
-                  borderRadius: 4,
-                  backgroundColor: "rgba(255, 255, 255, 0.95)",
-                  color: "#1f2328",
-                }}
-              />
-              <button
-                type="submit"
-                className="region-edit-apply-btn"
-                data-testid="region-edit-apply-btn"
-                aria-label="Apply"
-                disabled={regionBarText.trim().length === 0}
-                style={{
-                  flex: "0 0 auto",
-                  padding: "4px 12px",
-                  border: "none",
-                  borderRadius: 4,
-                  backgroundColor: "#0969da",
-                  color: "#ffffff",
-                  cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
-                  opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
-                }}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                className="region-edit-cancel-btn"
-                data-testid="pending-selection-cancel-btn"
-                aria-label="Cancel selection"
-                onClick={handleCancelPendingSelection}
-                style={{
-                  flex: "0 0 auto",
-                  padding: "4px 12px",
-                  border: "none",
-                  borderRadius: 4,
-                  backgroundColor: "rgba(255, 255, 255, 0.2)",
-                  color: "#ffffff",
-                  cursor: "pointer",
-                }}
-              >
-                Cancel
-              </button>
-            </form>
+            </div>
           )}
         </div>
-        {selectionNotice && (
-          <div className="selection-notice" data-testid="selection-notice" role="status">
-            {selectionNotice}
-          </div>
-        )}
-        {projectId !== null && (
-          <div className="validation-pane" data-testid="validation-pane">
-            <Export3MF projectId={projectId} client={apiClient} />
-          </div>
-        )}
-      </div>
+      )}
+
+      {/* Layer 30 — the region-edit bar. A STAGE-LEVEL SIBLING (not a child
+          of .viewer-pane) at the pin+bar z-index (issue #119). It floats
+          above the canvas, inset from the bottom edge, and hides with the
+          other panels on backslash. */}
+      {pendingSelection && !panelsHidden && (
+        <form
+          className="region-edit-bar"
+          data-testid="region-edit-bar"
+          role="group"
+          style={{
+            position: "absolute",
+            bottom: OVERLAY_INSET_PX,
+            left: "50%",
+            transform: "translateX(-50%)",
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "8px 12px",
+            backgroundColor: "rgba(0, 0, 0, 0.8)",
+            borderRadius: 8,
+            boxSizing: "border-box",
+            zIndex: Z_INDEX.pinAndBar,
+          }}
+          onSubmit={(e) => {
+            e.preventDefault();
+            handleRegionBarSubmit();
+          }}
+        >
+          <img
+            src={pendingSelection.thumbnail}
+            alt={`pending selection on ${pendingSelection.viewId}`}
+            className="pending-selection-thumbnail"
+            data-testid="pending-selection-thumbnail"
+            style={{
+              width: 32,
+              height: 32,
+              maxWidth: 200,
+              objectFit: "cover",
+              flex: "0 0 auto",
+            }}
+          />
+          <input
+            type="text"
+            className="region-edit-input"
+            data-testid="region-edit-input"
+            placeholder={copy.region.placeholder}
+            value={regionBarText}
+            onChange={(e) => setRegionBarText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") handleCancelPendingSelection();
+            }}
+            autoFocus
+            style={{
+              flex: "1 1 auto",
+              minWidth: 0,
+              padding: "4px 8px",
+              border: "none",
+              borderRadius: 4,
+              backgroundColor: "rgba(255, 255, 255, 0.95)",
+              color: "#1f2328",
+            }}
+          />
+          <button
+            type="submit"
+            className="region-edit-apply-btn"
+            data-testid="region-edit-apply-btn"
+            aria-label={copy.region.apply}
+            disabled={regionBarText.trim().length === 0}
+            style={{
+              flex: "0 0 auto",
+              padding: "4px 12px",
+              border: "none",
+              borderRadius: 4,
+              backgroundColor: "#0969da",
+              color: "#ffffff",
+              cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
+              opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
+            }}
+          >
+            {copy.region.apply}
+          </button>
+          <button
+            type="button"
+            className="region-edit-cancel-btn"
+            data-testid="pending-selection-cancel-btn"
+            aria-label={copy.region.cancel}
+            onClick={handleCancelPendingSelection}
+            style={{
+              flex: "0 0 auto",
+              padding: "4px 12px",
+              border: "none",
+              borderRadius: 4,
+              backgroundColor: "rgba(255, 255, 255, 0.2)",
+              color: "#ffffff",
+              cursor: "pointer",
+            }}
+          >
+            {copy.region.cancel}
+          </button>
+        </form>
+      )}
+
+      {/* Selection notice — a CONTENT surface inside the conversation
+          layer, not a separate z-index tier. */}
+      {selectionNotice && !panelsHidden && (
+        <div
+          className="selection-notice"
+          data-testid="selection-notice"
+          role="status"
+          style={{
+            position: "absolute",
+            top: OVERLAY_INSET_PX,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: Z_INDEX.conversation,
+          }}
+        >
+          {selectionNotice}
+        </div>
+      )}
+
+      {/* Layer 10 — validation pane (Export3MF), bottom-right. */}
+      {projectId !== null && !panelsHidden && (
+        <div
+          className="validation-pane"
+          data-testid="validation-pane"
+          style={{
+            position: "absolute",
+            bottom: OVERLAY_INSET_PX,
+            right: OVERLAY_INSET_PX,
+            zIndex: Z_INDEX.panels,
+          }}
+        >
+          <Export3MF projectId={projectId} client={apiClient} />
+        </div>
+      )}
     </div>
   );
 }

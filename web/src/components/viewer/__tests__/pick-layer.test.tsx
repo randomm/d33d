@@ -25,12 +25,13 @@ type ClickEvent = Parameters<
 function renderLayer(props: Partial<React.ComponentProps<typeof PickLayer>> = {}) {
   const onPointSelected = vi.fn();
   render(
+    // No width/height — issue #119 removed the fixed-size props: the layer
+    // fills its containing stage (position:absolute; inset:0), which is the
+    // single source of the pick's coordinate space.
     <PickLayer
       ready={props.ready ?? true}
       marker={props.marker ?? null}
       onPointSelected={onPointSelected}
-      width={props.width ?? 600}
-      height={props.height ?? 400}
     />,
   );
   return { onPointSelected };

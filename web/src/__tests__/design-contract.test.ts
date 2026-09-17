@@ -27,6 +27,9 @@
  *   W12  no failure component imports MARKER_COLOR
  *   W13  the filmstrip is absent, not empty, when a project has no versions
  *   W13  no version surface renders a commit hash or branch name
+ *   W7   ResizeObserver watches the same element whose getBoundingClientRect()
+ *        the PickLayer reads (the integration seam — structural, not unit-testable
+ *        in jsdom; verified by code review and the W7 fixed-dimension tripwire)
  *
  * Source-level assertions (the ones that read files) are deliberately crude. They
  * are tripwires, not type checking — they catch the reintroduction of a thing the
@@ -210,6 +213,58 @@ describe("design contract", () => {
     // a second home in CSS is a second thing that can drift. There is nothing to
     // keep in agreement because there is only one of it.
     expect(stylesheet()).not.toMatch(/--color-marker/);
+  });
+
+  /* --------------------------------------------------------------- W7 */
+
+  it("no module exports a fixed viewer width or height", () => {
+    // W7: the viewer sizes fluidly from its containing box (ResizeObserver),
+    // not from a fixed constant. No module may export or default a width or
+    // height for the viewer or pick layer — a silent 600x400 fallback is the
+    // pick-drift bug wearing a default parameter.
+    //
+    // Scope: the three modules the contract covers — ModelViewer, PickLayer
+    // and App.tsx (the stage host). A repo-wide scan would flag legitimate
+    // fixed sizes elsewhere (DimensionCanvas's photo-fit defaults);
+    // "width"-suffixed identifiers (strokeWidth, maxWidth, FLOOR_WIDTH_PX)
+    // are excluded because a fixed *viewer* size, not the number 600
+    // anywhere, is what is forbidden.
+    // Two shapes to catch:
+    //   (1) Identifiers containing "viewer" + width/height, in any scope file
+    //       (e.g. VIEWER_WIDTH = 600 — the exact shape this ticket removed).
+    //   (2) Exact "width" or "height" as a prop or local, but ONLY in the
+    //       viewer component files (ModelViewer.tsx, PickLayer.tsx) — in
+    //       App.tsx this would false-positive on UI element sizes (width: 300
+    //       for a panel, etc.).
+    const viewerConst = /\b[A-Za-z0-9_]*viewer[A-Za-z0-9_]*(?:width|height)[A-Za-z0-9_]*\s*\?{0,1}\s*[:=]\s*\d{3,}\b/i;
+    const exactProp = /\b(?:width|height)\s*\?{0,1}\s*[:=]\s*\d{3,}\b/i;
+    const allFiles = srcFiles().map((f) => relative(SRC, f));
+    const scope = (f: string) =>
+      f === "App.tsx" ||
+      f.endsWith("/ModelViewer.tsx") ||
+      f.endsWith("/PickLayer.tsx");
+    const strays = allFiles
+      .filter(scope)
+      .filter((f) => {
+        const content = readFileSync(join(SRC, f), "utf8");
+        return viewerConst.test(content) || (exactProp.test(content) && f !== "App.tsx");
+      })
+      .sort();
+    expect(strays).toEqual([]);
+  });
+
+  it("no component sets a z-index outside the four layers (0, 10, 20, 30)", () => {
+    // W7: z-index is a closed set — canvas 0, panels 10, conversation 20,
+    // pin+bar 30. Any other z-index value is a violation.
+    const valid = new Set(["0", "10", "20", "30"]);
+    for (const f of srcFiles()) {
+      const content = readFileSync(f, "utf8");
+      const matches = content.matchAll(/z-index\s*[:=]\s*(\d+)/g);
+      for (const m of matches) {
+        const val = m[1];
+        expect(valid.has(val), `z-index ${val} in ${relative(SRC, f)} is not in {0,10,20,30}`).toBe(true);
+      }
+    }
   });
 
   /* --------------------------------------------------------------- W4 */

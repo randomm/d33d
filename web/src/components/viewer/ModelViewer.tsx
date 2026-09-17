@@ -418,10 +418,6 @@ interface ModelViewerProps {
   /** Called when the viewer is ready (scene/camera/renderer available),
    *  and again whenever the loaded model root changes. */
   onReady?: (handle: ModelViewerHandle) => void;
-  /** Width in CSS pixels. */
-  width?: number;
-  /** Height in CSS pixels. */
-  height?: number;
 }
 
 /**
@@ -435,16 +431,15 @@ interface ModelViewerProps {
  *    for #98's single-click region picking.
  *  - Shows an empty state (background + message) when no mesh is loaded.
  *  - Shows an error state when loading fails.
+ *  - Sizes itself FLUIDLY from its containing box (issue #119): there is
+ *    deliberately NO width/height prop — a component silently falling back
+ *    to a fixed default is the pick-drift bug wearing a parameter. The
+ *    containing box comes from the stage (position:absolute; inset:0), so
+ *    the ResizeObserver's box IS the viewer's box. `renderer.getSize(new
+ *    Vector2())` on the handle is THE single source of the CSS-pixel
+ *    viewport size that the pick path reads.
  */
-export function ModelViewer({
-  data,
-  format,
-  onLoaded,
-  onError,
-  onReady,
-  width = 600,
-  height = 400,
-}: ModelViewerProps) {
+export function ModelViewer({ data, format, onLoaded, onError, onReady }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -454,6 +449,9 @@ export function ModelViewer({
   const raycasterRef = useRef<THREE.Raycaster | null>(null);
   const animationFrameRef = useRef<number>(0);
   const readyRef = useRef(false);
+  // Marks an unmounted component so a late ResizeObserver callback (which
+  // fires asynchronously and can still be queued at unmount) never re-publishes.
+  const unmountRef = useRef(false);
   // Latest onReady — held in a ref so the mesh-swap effect (whose deps are
   // only [data, format]) can re-notify without re-running the mount effect.
   const onReadyRef = useRef<ModelViewerProps['onReady']>(onReady);
@@ -464,9 +462,12 @@ export function ModelViewer({
     const container = containerRef.current;
     if (!container) return;
 
-    // Renderer
+    // Renderer. No fixed size: the fluid box arrives from the ResizeObserver
+    // below (issue #119) — if the first observation has not fired yet the
+    // renderer stays at a zero size and is UNPUBLISHED to the pick path
+    // (onReady waits for a non-zero box), so no pick can ever divide by a
+    // zero or stale viewport.
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    renderer.setSize(width, height);
     renderer.setPixelRatio(window.devicePixelRatio || 1);
     renderer.setClearColor(BG_COLOR);
     container.appendChild(renderer.domElement);
@@ -477,8 +478,9 @@ export function ModelViewer({
     scene.background = new THREE.Color(BG_COLOR);
     sceneRef.current = scene;
 
-    // Camera (mm scale)
-    const camera = new THREE.PerspectiveCamera(50, width / height, NEAR_MM, FAR_MM);
+    // Camera (mm scale). Aspect 1 until the first non-zero observation —
+    // the ResizeObserver sets the real aspect before the handle publishes.
+    const camera = new THREE.PerspectiveCamera(50, 1, NEAR_MM, FAR_MM);
     camera.position.set(0, INITIAL_DISTANCE_MM * 0.5, INITIAL_DISTANCE_MM);
     camera.lookAt(0, 0, 0);
     cameraRef.current = camera;
@@ -516,26 +518,10 @@ export function ModelViewer({
     };
     animate();
 
+    // The handle publishes ONCE a non-zero viewport box exists (see the
+    // ResizeObserver below) — never from this mount effect. Publishing a
+    // zero-size renderer would let a pick divide by zero.
     readyRef.current = true;
-
-    // Notify parent
-    if (
-      onReadyRef.current &&
-      rendererRef.current &&
-      sceneRef.current &&
-      cameraRef.current &&
-      controlsRef.current &&
-      raycasterRef.current
-    ) {
-      onReadyRef.current({
-        scene: sceneRef.current,
-        camera: cameraRef.current,
-        renderer: rendererRef.current,
-        controls: controlsRef.current,
-        raycaster: raycasterRef.current,
-        modelRoot: null,
-      });
-    }
 
     return () => {
       mounted = false;
@@ -649,39 +635,91 @@ export function ModelViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [data, format]);
 
-  // --- Resize handling ---
+  // --- Resize handling (issue #119 — the fluid sizing path) ---
+  // The ResizeObserver is the SOLE sizing path: on each non-zero box it
+  // calls renderer.setSize(w, h) AND camera.aspect = w/h +
+  // updateProjectionMatrix(). There is no fallback to a fixed width/height
+  // prop (that constant is gone) and a ZERO box — the observation that
+  // fires during mount, or when the element is display:none — is skipped
+  // entirely: never renderer.setSize(0, 0), never a divide-by-zero aspect.
+  // The handle is published from this same callback, so the pick path can
+  // only ever observe a renderer whose getSize() matches the on-screen box.
+  //
+  // devicePixelRatio: the ratio is applied once at mount. It changes when
+  // the window moves between displays; this viewer deliberately does NOT
+  // re-apply it (tracked as an explicit non-goal of issue #119 — the pick
+  // path is DPR-independent because it always reads the CSS-pixel size).
   useEffect(() => {
-    const renderer = rendererRef.current;
-    const camera = cameraRef.current;
-    if (!renderer || !camera) return;
+    const container = containerRef.current;
+    if (!container) return;
+
+    let published = false;
+    const publish = () => {
+      if (published || unmountRef.current) return;
+      published = true;
+      if (
+        onReadyRef.current &&
+        rendererRef.current &&
+        sceneRef.current &&
+        cameraRef.current &&
+        controlsRef.current &&
+        raycasterRef.current
+      ) {
+        onReadyRef.current({
+          scene: sceneRef.current,
+          camera: cameraRef.current,
+          renderer: rendererRef.current,
+          controls: controlsRef.current,
+          raycaster: raycasterRef.current,
+          modelRoot: null,
+        });
+      }
+    };
 
     const handleResize = () => {
-      if (!containerRef.current) return;
-      const w = containerRef.current.clientWidth || width;
-      const h = containerRef.current.clientHeight || height;
+      if (unmountRef.current) return; // late async observation after unmount
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      if (w === 0 || h === 0) return; // zero box: skip, never setSize(0,0)
+      const renderer = rendererRef.current;
+      const camera = cameraRef.current;
+      if (!renderer || !camera) return;
       renderer.setSize(w, h);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      publish();
     };
 
-    const container = containerRef.current;
-    if (container) {
-      const observer = new ResizeObserver(handleResize);
-      observer.observe(container);
-      return () => observer.disconnect();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [width, height]);
+    // A box may already be laid out at mount; cover that without a timer.
+    handleResize();
 
+    const observer = new ResizeObserver(handleResize);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  // --- Unmount safety: the unmount cleanup must never re-publish ---
+  useEffect(() => {
+    return () => {
+      unmountRef.current = true;
+    };
+  }, []);
+
+  // The container IS the stage's fluid box (position:absolute; inset:0 —
+  // see App.tsx): 100% of the containing block, in both axes. There is no
+  // pixel literal here on purpose (issue #119: the pick layer derives its
+  // box from this same element, so a fixed size anywhere would be a second
+  // size constant).
   return (
     <div
       ref={containerRef}
       role="img"
       aria-label="3D model viewer"
       style={{
-        width: `${width}px`,
-        height: `${height}px`,
-        position: 'relative',
+        width: '100%',
+        height: '100%',
+        position: 'absolute',
+        inset: 0,
         overflow: 'hidden',
       }}
     >

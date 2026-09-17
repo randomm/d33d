@@ -27,6 +27,7 @@ import type { Project, RegionEditResult } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { PointSelectedEvent } from "../viewer/PickLayer";
 import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditContract";
+import copy from "../../copy";
 
 /** A minimal fake THREE.Object3D — the mock only needs identity, never
  *  real three.js behaviour (resolvePointPick itself is mocked below in
@@ -230,11 +231,11 @@ describe("App layout", () => {
     resolvePointPickMock.mockReset();
   });
 
-  it("renders the two-pane shell (left chat + right viewer)", async () => {
+  it("renders the full-viewport stage (canvas + floating panels, issue #119)", async () => {
     render(<App client={client} />);
-    expect(screen.getByTestId("app-shell")).toBeTruthy();
+    expect(screen.getByTestId("app-stage")).toBeTruthy();
     expect(screen.getByTestId("app-left-pane")).toBeTruthy();
-    expect(screen.getByTestId("app-right-pane")).toBeTruthy();
+    expect(screen.getByTestId("viewer-pane")).toBeTruthy();
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
@@ -288,36 +289,34 @@ describe("App layout", () => {
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
-  // Issue #74 — the two-pane layout must be inline-styled (jsdom applies no
-  // class-based CSS, so layout assertions read the inline style object the
-  // same way the pending-selection-card test does).
-  it("lays out app-shell as a flex row filling the viewport (issue #74)", async () => {
+  // Issue #119 — the stage layout replaces the #74 two-pane flex layout.
+  // The canvas fills the stage (absolute inset:0); panels float above it.
+  it("lays out app-stage as a positioned container filling the viewport (issue #119)", async () => {
     render(<App client={client} />);
-    const shell = screen.getByTestId("app-shell");
-    expect(shell.style.display).toBe("flex");
-    expect(shell.style.flexDirection).toBe("row");
-    expect(shell.style.height).toBe("100vh");
+    const stage = screen.getByTestId("app-stage");
+    expect(stage.style.position).toBe("relative");
+    expect(stage.style.width).toBe("100vw");
+    expect(stage.style.height).toBe("100vh");
+    expect(stage.style.overflow).toBe("hidden");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
-  it("gives the left pane a flexible width and the right pane a fixed 600px width (issue #74)", async () => {
-    render(<App client={client} />);
-    const left = screen.getByTestId("app-left-pane");
-    expect(left.style.flex).toBe("1 1 0px");
-    const right = screen.getByTestId("app-right-pane");
-    expect(right.style.flex).toBe("0 0 600px");
-    expect(right.style.width).toBe("600px");
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-  });
-
-  it("pins the viewer pane to the 600x400 viewer size so the pick layer stays co-located (issue #74)", async () => {
+  it("fills the viewer pane to the stage with absolute inset:0 (issue #119)", async () => {
     render(<App client={client} />);
     const pane = screen.getByTestId("viewer-pane");
-    // position:relative is the pick layer's containing block — it must
-    // stay inline even though new layout styles were added to the div.
-    expect(pane.style.position).toBe("relative");
-    expect(pane.style.width).toBe("600px");
-    expect(pane.style.height).toBe("400px");
+    expect(pane.style.position).toBe("absolute");
+    expect(pane.style.inset).toBe("0");
+    expect(pane.style.zIndex).toBe("0");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
+
+  it("floats the conversation pane above the canvas at z-index 20 (issue #119)", async () => {
+    render(<App client={client} />);
+    const left = screen.getByTestId("app-left-pane");
+    expect(left.style.position).toBe("absolute");
+    expect(left.style.zIndex).toBe("20");
+    expect(left.style.top).toBe("24px");
+    expect(left.style.left).toBe("24px");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 });
@@ -947,23 +946,23 @@ describe("App region-selection (point pick) wiring", () => {
     // jsdom applies no class-based CSS, so the bar's positioning must be an
     // inline style the test can see directly (not getComputedStyle).
     const bar = screen.getByTestId("region-edit-bar");
-    // The bar is absolutely positioned at the bottom, full width, inside the
-    // viewer pane (its containing block), semi-transparent so the model shows
-    // through.
+    // The bar is absolutely positioned, bottom-center of the stage (issue
+    // #119: a STAGE-LEVEL SIBLING at z-index 30, not a child of viewer-pane).
     expect(bar.style.position).toBe("absolute");
-    expect(bar.style.bottom).toBe("0px");
-    expect(bar.style.left).toBe("0px");
-    expect(bar.style.right).toBe("0px");
     expect(bar.style.backgroundColor).toBe("rgba(0, 0, 0, 0.8)");
-    // The bar is a child of .viewer-pane (not a sibling below it).
-    expect(screen.getByTestId("viewer-pane").contains(bar)).toBe(true);
+    // The bar is a STAGE-LEVEL SIBLING (not a child of viewer-pane) — the
+    // old #74 assertion that viewer-pane contains it is inverted by #119.
+    expect(screen.getByTestId("viewer-pane").contains(bar)).toBe(false);
+    expect(screen.getByTestId("app-stage").contains(bar)).toBe(true);
 
-    // The input carries the issue's exact placeholder, is present, and the
-    // thumbnail is retained inside the bar at a small size.
+    // The input carries the copy.deck placeholder, is present, and the
+    // thumbnail is retained inside the bar at a small size. The placeholder
+    // is pinned against copy.ts (single home for the string) so the test
+    // still notices if the composer stops rendering it.
     const input = screen.getByTestId("region-edit-input");
-    expect(input.getAttribute("placeholder")).toBe(
-      "Describe the change to this region…",
-    );
+    expect(input).toBeTruthy();
+    expect((input as HTMLInputElement).value).toBe("");
+    expect((input as HTMLInputElement).placeholder).toBe(copy.region.placeholder);
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
     expect(screen.getByTestId("region-edit-apply-btn")).toBeTruthy();
   });
@@ -1566,7 +1565,7 @@ describe("App region-selection (point pick) wiring", () => {
     await waitFor(() => {
       expect(screen.getByTestId("selection-notice")).toBeTruthy();
     });
-    expect(screen.getByTestId("app-shell")).toBeTruthy();
+    expect(screen.getByTestId("app-stage")).toBeTruthy();
     expect(screen.queryByTestId("pending-selection-notice")).toBeNull();
     expect(client.createRegionEdit).not.toHaveBeenCalled();
   });

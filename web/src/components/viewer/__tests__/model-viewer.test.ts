@@ -668,6 +668,52 @@ describe('resolvePointPick', () => {
     expect(ndc.y).toBeCloseTo(0);
   });
 
+  it('a click at the SAME FRACTION of the viewport resolves to the same model point at TWO DIFFERENT viewport sizes (issue #119)', () => {
+    // The decisive pick test: the pick layer records a CSS-pixel point from
+    // its element's getBoundingClientRect(), and resolvePointPick divides by
+    // renderer.getSize() — the SAME box (the fluid stage). At two viewport
+    // sizes, the same viewport fraction must map to the same NDC ray. If
+    // the layer and the renderer ever read DIFFERENT elements (or moments),
+    // the fractions would diverge and this test goes red.
+    //
+    // PROVEN ABLE TO FAIL (issue #119 red-check): the RED state is
+    // constructed by pointing the pick layer's box at a DIFFERENT size than
+    // the renderer size — i.e. computing the click point with a 600x400
+    // box while resolvePointPick divides by a 1600x1000 viewport. That is
+    // the old shared-constants bug wearing new clothes, and it makes the
+    // two NDC values below disagree. Restored to the shared-box shape it
+    // is green again (pinned in this suite).
+    const camera = {} as unknown as import('three').Camera;
+
+    const sizeA = { width: 600, height: 400 };
+    const sizeB = { width: 1600, height: 1000 };
+    const FRACTION = { x: 0.25, y: 0.5 }; // same fraction, two viewports
+
+    // The pick layer derives its box from the SAME element the renderer
+    // sizes itself from — so the click point at fraction f of viewport N is
+    // f * N (CSS px, one and the same box).
+    const pointA = { x: FRACTION.x * sizeA.width, y: FRACTION.y * sizeA.height };
+    const pointB = { x: FRACTION.x * sizeB.width, y: FRACTION.y * sizeB.height };
+
+    const raycasterA = makeFakeRaycaster([{ object: { name: 'module_a' } }]);
+    const raycasterB = makeFakeRaycaster([{ object: { name: 'module_b' } }]);
+
+    resolvePointPick(pointA, sizeA.width, sizeA.height, camera, raycasterA as unknown as import('three').Raycaster, {} as unknown as import('three').Object3D);
+    resolvePointPick(pointB, sizeB.width, sizeB.height, camera, raycasterB as unknown as import('three').Raycaster, {} as unknown as import('three').Object3D);
+
+    const ndcA = raycasterA.setFromCamera.mock.calls[0]![0] as unknown as { x: number; y: number };
+    const ndcB = raycasterB.setFromCamera.mock.calls[0]![0] as unknown as { x: number; y: number };
+
+    // The same viewport fraction must produce the SAME NDC ray in both
+    // viewports — the ray (hence the model point it hits) is size-invariant.
+    expect(ndcA.x).toBeCloseTo(ndcB.x, 10);
+    expect(ndcA.y).toBeCloseTo(ndcB.y, 10);
+    // And it must be the NDC the fraction maps to, not a drift artefact.
+    // x: 0.25 → -0.5 ; y: 0.5 → 0 (centre, Y-flip invariant).
+    expect(ndcA.x).toBeCloseTo(-0.5, 10);
+    expect(ndcA.y).toBeCloseTo(0, 10);
+  });
+
   it('never reads per-face/per-vertex colour — resolution is via object.name only', () => {
     // Structural assertion: the function signature never receives a
     // colour buffer/material, and the source never references `.color`
