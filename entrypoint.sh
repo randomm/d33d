@@ -35,8 +35,8 @@
 #   View 5 (iso):   0,0,0,0,45,45,<dist>  — 45° about Y then 45° about Z (isometric corner view)
 #
 #   The 7th element (dist) is **not** a fixed constant. After the STL export
-#   (step 1) the entrypoint parses the binary STL's bounding box with
-#   ``od | awk`` (both present in the base image) and computes:
+#   (step 1) the entrypoint parses the ASCII STL's bounding box with
+#   ``awk`` (present in the base image) and computes:
 #
 #     max_extent = max(x_max−x_min, y_max−y_min, z_max−z_min)
 #     dist       = CAM_DIST_FACTOR × max_extent          (5 axis-aligned views)
@@ -254,6 +254,7 @@ if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ]; then
     CAM_DIST_AA=40.0
     CAM_DIST_ISO=55.0
     echo "[entrypoint] WARNING: bbox parse failed — falling back to dist 40.0/55.0" >&2
+    echo "[entrypoint] WARNING: bbox parse failed — falling back to dist 40.0/55.0" >>"${LOG_FILE}"
 else
     CAM_DIST_AA=$(awk -v m="${max_extent}" -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
     CAM_DIST_ISO=$(awk -v m="${max_extent}" -v f="${CAM_DIST_ISO_FACTOR}" 'BEGIN { printf "%.10f", m * f }')

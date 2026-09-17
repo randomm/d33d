@@ -74,19 +74,17 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #:
 #: The first six elements (translate + rotate) are fixed constants:
 #: they pin *which* face each view sees, verified empirically. The
-#: seventh element (``dist``) is a **placeholder** — the entrypoint
-#: substitutes the actual per-model distance computed by :func:`cam_dist`
-#: from the harvested STL bounding box (issue #111). The values below
-#: (40.0 / 55.0) are the legacy fixed distances kept only so the
-#: static-text sync test can parse the camera strings; the entrypoint
-#: never uses them at render time.
+#: seventh element (``dist``) is a **placeholder** (``0.0``) — the
+#: entrypoint substitutes the actual per-model distance computed by
+#: :func:`cam_dist` from the harvested STL bounding box (issue #111).
+#: The entrypoint never reads these ``0.0`` values at render time.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
-    ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 40.0)),
-    ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 40.0)),
-    ("view_02_left.png", (0.0, 0.0, 0.0, 0.0, 90.0, 0.0, 40.0)),
-    ("view_03_right.png", (0.0, 0.0, 0.0, 0.0, -90.0, 0.0, 40.0)),
-    ("view_04_top.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 40.0)),
-    ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 55.0)),
+    ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
+    ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 0.0)),
+    ("view_02_left.png", (0.0, 0.0, 0.0, 0.0, 90.0, 0.0, 0.0)),
+    ("view_03_right.png", (0.0, 0.0, 0.0, 0.0, -90.0, 0.0, 0.0)),
+    ("view_04_top.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 0.0)),
+    ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 0.0)),
 ]
 
 #: Multiplier between the model's max bounding-box extent (mm) and the
@@ -131,6 +129,18 @@ def cam_dist(max_extent_mm: float, view_name: str = "") -> float:
     (``max(bounds[1] - bounds[0])`` from trimesh). A value of 0 or
     below yields 0.0 (the caller classifies degenerate meshes as
     ``empty_model`` before the views are ever rendered).
+
+    This function is a **reference implementation** of the distance
+    formula. The authoritative computation at render time is the awk
+    in ``entrypoint.sh``, which parses the ASCII STL's vertex lines
+    to get the bounding box and applies the same factor. The two are
+    kept in sync by the ``CAM_DIST_FACTOR`` literal (guarded by
+    ``tests/fast/test_entrypoint_views_sync.py``). The host-side
+    trimesh ``mesh.bounds`` path in ``render_for_design_loop`` is not
+    used for the render itself — the container self-computes the
+    distance from the STL it just wrote — so this function is not
+    exercised by the production render pipeline; it exists to pin the
+    formula in tests and document the margin rule.
     """
     if max_extent_mm <= 0:
         return 0.0

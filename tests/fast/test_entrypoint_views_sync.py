@@ -166,3 +166,18 @@ def test_entrypoint_imgsize_matches_render_size() -> None:
     assert img_size == f"{w},{h}", (
         f"entrypoint.sh IMG_SIZE {img_size!r} != rw.RENDER_SIZE {rw.RENDER_SIZE!r}"
     )
+
+
+def test_entrypoint_cam_dist_factor_matches_python() -> None:
+    """The bash ``CAM_DIST_FACTOR=...`` literal in ``entrypoint.sh`` must
+    equal ``d33d.render_worker.CAM_DIST_FACTOR``. Guards against the
+    margin constant silently diverging between the two files — the
+    ticket's "single margin constant" requirement (issue #111)."""
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^CAM_DIST_FACTOR=([0-9.]+)", src)
+    assert m is not None, "CAM_DIST_FACTOR assignment not found in entrypoint.sh"
+    bash_factor = float(m.group(1))
+    assert bash_factor == rw.CAM_DIST_FACTOR, (
+        f"entrypoint.sh CAM_DIST_FACTOR {bash_factor} != "
+        f"rw.CAM_DIST_FACTOR {rw.CAM_DIST_FACTOR}"
+    )
