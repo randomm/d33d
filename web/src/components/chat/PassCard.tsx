@@ -10,8 +10,12 @@
  * contract, W10).
  *
  * Opening a thumbnail enlarges it in place and offers the "Beside the
- * photo" action (the enlarged render is what the model is compared
- * against). Delta chips and the elapsed-time meta row are not rendered:
+ * photo" action. The enlarged render is what the model is compared
+ * against; the views are PNG thumbnails (the frame carries no geometry),
+ * so the action closes the enlargement — the streamed model (mounted on
+ * the version-created frame's stl_data_uri) is what sits beside the photo
+ * in the stage. A ticket that carries view geometry on the frame can
+ * turn this into a real swap. Delta chips and the elapsed-time meta row are not rendered:
  * the version-created frame carries no previous dimensions, no elapsed
  * time and no changed-line data, and fabricating them is the house
  * anti-pattern (see the W10 comment on issue #125). They land with

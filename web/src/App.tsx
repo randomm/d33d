@@ -494,17 +494,13 @@ export default function App({ client }: AppProps) {
   }, []);
 
   // Issue #125 (W10): the "Beside the photo" action on a pass card's
-  // enlarged view. The rendered views are PNG thumbnails (no geometry), so
-  // the action's effect is to keep the streamed model on screen — the
-  // viewer swap itself already happens on the version-created frame
-  // (handleStreamViewerData). The card's own UI (the enlarged view and the
-  // action button) is the visible part of this seam.
-  const handleBesidePhoto = useCallback(() => {
-    // The streamed model is already mounted (or the fixture, before the
-    // first pass). There is nothing to load for the enlarged render itself;
-    // this hook exists so the action is wired and a future ticket that
-    // carries geometry on the frame can do the swap here.
-  }, []);
+  // enlarged view. The frame carries PNG thumbnails (no geometry), so
+  // there is nothing to load: the streamed model (mounted from the
+  // version-created frame's stl_data_uri) is what sits beside the photo
+  // in the stage. The action closes the enlargement via the card's own
+  // state; this hook exists so the seam is wired and a ticket that
+  // carries view geometry on the frame can do the swap here.
+  const handleBesidePhoto = useCallback(() => {}, []);
 
   // Create the (single, default) project on mount. Once it resolves,
   // load the version timeline (the side rail) — the project resumes at
