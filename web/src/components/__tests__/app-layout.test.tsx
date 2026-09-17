@@ -196,6 +196,26 @@ const STL_DATA_URI = `data:application/octet-stream;base64,${btoa(ASCII_STL)}`;
 function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   const client = new ApiClient();
   vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+  // App mounts a version-timeline effect (issue #8) that fires
+  // listVersions(projectId) as soon as createProject resolves. That call
+  // must be stubbed here — left to the real client, it goes through the
+  // global fetch, and the photo-upload wiring block below replaces that
+  // global fetch with a bare `vi.fn()` (default return `undefined`) for
+  // the upload's own POST. When a vitest worker runs this file's upload
+  // tests in a schedule where the two calls interleave, the upload's
+  // fetch resolves to `undefined` (its `mockResolvedValueOnce` is consumed
+  // by the versions call, or the versions call lands first on a stub whose
+  // once-value the upload then reads) — and PhotoUpload reads `resp.ok`
+  // on `undefined`, surfacing "Upload failed" ("Cannot read properties of
+  // undefined (reading 'ok')") in place of the DimensionCanvas.
+  // The full-suite run never hits it (the unstubbed path's real fetch
+  // rejects on the bogus host, which the timeline effect swallows), which
+  // is why it stays latent until a worker reuses state across tests and
+  // the once-only stub is in play — the same fire-once-race class as
+  // issue #109's `waitForResponse(POST /api/projects)`.
+  // Settling the mount's listVersions here removes the stray fetch
+  // entirely: no retry, no sleep, no bumped timeout.
+  vi.spyOn(client, "listVersions").mockResolvedValue([]);
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
   vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
   Object.assign(client, overrides);
