@@ -6,18 +6,18 @@ import globals from "globals";
 // Issue #132: flat config for the web workspace (ESLint 9, TS/TSX + React
 // hooks).
 //
-// `reportUnusedDisableDirectives` is set to "off" (the default is "warn")
-// so the gate exits 0 on a clean tree. The existing
-// `// eslint-disable-next-line react-hooks/exhaustive-deps` comments are
-// intentional: several of them sit above effects whose full dependency list
-// is deliberately narrowed. Turning the meta-rule on would flag the
-// resize effect in ModelViewer.tsx as an unused directive and block the
-// gate over a warning, not an error.
+// `reportUnusedDisableDirectives` is deliberately NOT overridden here: it
+// stays at the linter default ("warn"), so a `// eslint-disable` comment
+// that no longer suppresses anything is surfaced on the first lint run
+// instead of rotting silently. Warnings do not affect `eslint .`'s exit
+// code (the gate runs with no --max-warnings), so an honest tree stays
+// green while inert directives stay visible.
 //
 // The two scoped `off` rules are structural, not silencing:
-//   - @typescript-eslint/no-unused-vars: TS already enforces this for the
-//     project (noUnusedLocals / noUnusedParameters in tsconfig.json);
-//     the JS rule would double-report without adding coverage.
+//   - @typescript-eslint/no-unused-vars: tsconfig.json sets noUnusedLocals
+//     and noUnusedParameters (confirmed present), so tsc --noEmit already
+//     hard-blocks unused locals and params; the ESLint rule would only
+//     duplicate a check the type-check gate enforces.
 //   - @typescript-eslint/no-require-imports (tests only): `require('three')`
 //     inside vi.mock factory callbacks is the only import form that
 //     resolves through the mocks; top-level imports would bypass them.
@@ -29,11 +29,6 @@ const jsRecommended = { ...js.configs.recommended };
 const tsEslintRecommended = [...tseslint.configs.recommended];
 
 export default [
-  {
-    linterOptions: {
-      reportUnusedDisableDirectives: "off",
-    },
-  },
   {
     ignores: ["node_modules/", "dist/", "test-results/", "playwright-report/"],
   },
@@ -53,16 +48,22 @@ export default [
     rules: {
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "error",
-      // TS itself flags unused locals/params (noUnusedLocals/noUnusedParameters
-      // are on in tsconfig.json); the JS rule would double-report every
-      // conventionally underscore-prefixed argument.
+      // off (structural, not cosmetic): tsconfig.json sets noUnusedLocals and
+      // noUnusedParameters, so tsc --noEmit already hard-blocks unused locals
+      // and params. Turning this ESLint rule on would only duplicate a check
+      // the type-check gate enforces (and re-flag underscore-prefixed
+      // intentional arguments the compiler is configured to accept).
       "@typescript-eslint/no-unused-vars": "off",
     },
   },
   {
-    // `require('three')` inside vi.mock factory callbacks is deliberate: the
-    // factories run before the module under test is imported, and top-level
-    // `import { ... } from "three"` in the test file would bypass the mocks.
+    // off (structural, test-scoped only): `require('three')` inside vi.mock
+    // factory callbacks is deliberate — the factories run before the module
+    // under test is imported, and a top-level `import ... from "three"` in
+    // the test file would bypass the mocks. The scoping is genuinely
+    // test-only: the files glob matches `**/__tests__/**`, and a grep of
+    // src/ shows require() calls only in `__tests__` test files — src
+    // outside __tests__ is never covered by this block.
     files: ["**/__tests__/**/*.ts", "**/__tests__/**/*.tsx"],
     rules: {
       "@typescript-eslint/no-require-imports": "off",
