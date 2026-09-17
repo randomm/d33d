@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Deterministic test gate for d33d.
+#
+# This is the ONLY command the project's quality gates name. Running it:
+#
+#   1. Refuses to use a system / PATH pytest that lacks the project deps.
+#      When `uv` is available (local runs) the gate uses `uv run --with
+#      pytest`, which builds the project into a project-local venv and
+#      guarantees the pytest binary is the one that has the project's deps
+#      — not whichever `pytest` happens to be first on $PATH. The wrapper
+#      cannot fall through to $PATH, so the wrong-pytest failure mode
+#      cannot happen. When `uv` is absent (CI installs the project
+#      editable with the `[test]` extra, so a plain `pytest` on $PATH is
+#      the correctly-installed binary), the gate falls back to plain
+#      `pytest` and says so. In BOTH cases the guards in
+#      tests/__init__.py fire at import time, regardless of how pytest
+#      was invoked — the invocation path is provenance, the guards are
+#      the protection.
+#
+#   2. Refuses to report a result if `d33d` resolves to a source tree
+#      other than the one this script was invoked in (the provenance
+#      guard, in tests/__init__.py).
+#
+#   3. Refuses to report a result if the full suite does not collect
+#      (the dependency guard, in tests/__init__.py, runs at package
+#      import time and exits non-zero with a diagnostic if any required
+#      package is missing from the interpreter).
+#
+# Usage:
+#   ./scripts/test               # fast gate (what CI runs)
+#   ./scripts/test --full         # full suite including slow/Docker
+#   ./scripts/test -- collect-only
+#
+# Any arguments after `--` are passed to pytest verbatim, so the script
+# can also be used for one-off collection or a specific test:
+#   ./scripts/test -- tests/test_smoke.py
+set -euo pipefail
+
+# Refuse to be run from a directory that isn't a d33d checkout.
+if [[ ! -f pyproject.toml ]]; then
+    echo "scripts/test: must be invoked from the repo root (no pyproject.toml here)" >&2
+    exit 2
+fi
+
+# Default: fast gate. The marker expression is intentionally NOT
+# hardcoded to "not slow" so that when issue #108's `live` marker lands,
+# the expression can be updated in one place (here) without editing CI or
+# AGENTS.md again.
+MARKER_EXPR="${D33D_MARKER_EXPR:-not slow}"
+
+if command -v uv >/dev/null 2>&1; then
+    echo "gate: invoking via uv (uv run --with pytest pytest)"
+    UV="uv run --with pytest pytest"
+else
+    echo "gate: uv not found, invoking pytest directly (installed via pip)"
+    UV="pytest"
+fi
+
+# UV is intentionally unquoted so it word-splits into its components
+# (`uv run --with pytest pytest` or `pytest`).
+if [[ "${1:-}" == "--full" ]]; then
+    MARKER_EXPR=""
+    exec $UV -m "$MARKER_EXPR" "$@"
+elif [[ "${1:-}" == "--" ]]; then
+    # Everything after `--` is passed to pytest verbatim.
+    shift
+    exec $UV "$@"
+else
+    exec $UV -m "$MARKER_EXPR" "$@"
+fi
