@@ -39,35 +39,60 @@ def _env() -> dict[str, str]:
     return env
 
 
-def _depless_interpreter() -> str | None:
-    """Find an interpreter that lacks the project deps (the system
-    python). We deliberately do NOT try sys.executable, which has the
-    deps."""
-    candidates = ["/opt/homebrew/bin/python3", "python3", "python"]
-    for interp in candidates:
+def _interpreter_candidates() -> list[str]:
+    """Ordered interpreter candidates for probing, platform-aware.
+
+    The macOS Homebrew path is only a candidate on macOS: on Linux it
+    does not exist, and ``subprocess.run`` on a missing executable
+    raises ``FileNotFoundError`` rather than returning a non-zero exit
+    code — so a list that puts the Homebrew path first would crash the
+    probe on Linux instead of falling through to the next candidate.
+    Discriminate on ``sys.platform`` so a platform-specific path is
+    never probed on a platform it does not belong to.
+
+    ``sys.executable`` is first for the deps probe because the gate
+    (``scripts/test``) only ever runs an interpreter that has the
+    project's deps — the one running this test is the strongest
+    candidate there.
+    """
+    candidates = ["python3", "python"]
+    if sys.platform == "darwin":
+        candidates.insert(0, "/opt/homebrew/bin/python3")
+    # Deduplicate while preserving order (sys.executable may be found
+    # via the same PATH lookup as ``python3``).
+    return list(dict.fromkeys([sys.executable, *candidates]))
+
+
+def _probe(interp: str, code: str) -> int | None:
+    """Run ``interp -c code``; return the exit code, or None if the
+    interpreter itself could not be executed. A missing executable is a
+    *no match* in a candidate probe, not an error — the loop must
+    continue to the next candidate, never crash."""
+    try:
         probe = subprocess.run(
-            [interp, "-c", "import pydantic"],
+            [interp, "-c", code],
             capture_output=True,
             env=_env(),
         )
-        if probe.returncode != 0:
+    except (FileNotFoundError, OSError):
+        return None
+    return probe.returncode
+
+
+def _depless_interpreter() -> str | None:
+    """Find an interpreter that lacks the project deps (the bare system
+    python). On macOS that is the Homebrew python; on Linux it is the
+    system python, which the gate's pip-installed deps do not reach."""
+    for interp in _interpreter_candidates():
+        if _probe(interp, "import pydantic") == 1:
             return interp
     return None
 
 
 def _venv_python() -> str | None:
     """Find an interpreter that HAS the project deps."""
-    for interp in ["/opt/homebrew/bin/python3", "python3", "python"]:
-        probe = subprocess.run(
-            [
-                interp,
-                "-c",
-                "import pydantic, trimesh, fastapi, yaml, networkx, d33d",
-            ],
-            capture_output=True,
-            env=_env(),
-        )
-        if probe.returncode == 0:
+    for interp in _interpreter_candidates():
+        if _probe(interp, "import pydantic, trimesh, fastapi, yaml, networkx, d33d") == 0:
             return interp
     return None
 
@@ -84,7 +109,11 @@ def test_dependency_guard_refuses_bare_interpreter() -> None:
     if interp is None:
         import pytest
 
-        pytest.skip("no dependency-free interpreter found to simulate the bug")
+        tried = ", ".join(_interpreter_candidates())
+        pytest.skip(
+            "no dependency-free interpreter found (tried: "
+            f"{tried}) — cannot simulate the wrong-pytest condition"
+        )
 
     result = subprocess.run(
         [interp, "-c", "import tests"],
@@ -106,7 +135,11 @@ def test_dependency_guard_names_missing_packages() -> None:
     if interp is None:
         import pytest
 
-        pytest.skip("no dependency-free interpreter found to simulate the bug")
+        tried = ", ".join(_interpreter_candidates())
+        pytest.skip(
+            "no dependency-free interpreter found (tried: "
+            f"{tried}) — cannot simulate the wrong-pytest condition"
+        )
 
     result = subprocess.run(
         [interp, "-c", "import tests"],
@@ -127,7 +160,11 @@ def test_provenance_guard_safe_path() -> None:
     if venv_py is None:
         import pytest
 
-        pytest.skip("no interpreter with project deps found (venv not installed)")
+        tried = ", ".join(_interpreter_candidates())
+        pytest.skip(
+            "no interpreter with the project deps found (tried: "
+            f"{tried}) — venv not installed"
+        )
 
     code = f"import sys; sys.path.insert(0, r'{REPO_ROOT / 'tests'}'); import tests"
     result = subprocess.run(
@@ -154,7 +191,11 @@ def test_provenance_guard_refuses_stale_tree() -> None:
     if venv_py is None:
         import pytest
 
-        pytest.skip("no interpreter with project deps found (venv not installed)")
+        tried = ", ".join(_interpreter_candidates())
+        pytest.skip(
+            "no interpreter with the project deps found (tried: "
+            f"{tried}) — venv not installed"
+        )
 
     import tempfile
     from pathlib import Path as P
