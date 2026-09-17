@@ -543,6 +543,57 @@ def _design_system(stated: tuple[float, float, float]) -> str:
     )
 
 
+def _design_state_lines(
+    stated: tuple[float, float, float],
+    state_params: dict[str, Any] | None,
+) -> list[str]:
+    """The design-state block's prompt lines (issue #120).
+
+    Builds the block via the SHARED function (``d33d.design_state`` — the
+    same callable the API route the SPA reads calls) and formats it. The
+    block carries ALL declared parameters of the latest version (not a
+    fixed {W, D, H} triple) with provenance per value; ``unknown``
+    serialises as ``null`` (never 0, never an omitted key).
+
+    ``state_params`` is ``None`` when no version exists yet (the block
+    renders with zero entries — an honest empty state). When a version
+    exists, ``state_params`` is its full params snapshot, so the block is
+    the previous version's actual dimensions (the 30/60 bug: the prompt
+    carries the description of the existing design, so the model can no
+    longer invent 60 for a sphere it had itself made 30).
+
+    Inserted as its own labelled lines BETWEEN the chat-history lines and
+    the ``Reference dimensions`` line (the gate-resolution's named
+    insertion point). The system prompt's ground-truth triple line is
+    LEFT ALONGSIDE (unchanged — test_issue91's exact-string assertion
+    pins ``W=20, D=25, H=30`` in the system prompt).
+    """
+    from d33d.design_state import (
+        build_design_state_block,
+        format_design_state_block,
+        state_block_from_params,
+    )
+
+    block = build_design_state_block(state_block_from_params(state_params))
+    # ``format_design_state_block`` renders the header + the entries. The
+    # header (``Current design state (mm):``) and the entry lines are
+    # rendered verbatim (the block is a self-contained, size-bounded
+    # section — the bound ``MAX_STATE_BLOCK_ENTRIES`` is enforced inside
+    # ``build_design_state_block``). An empty block renders a single
+    # honest ``not specified`` line (never silently absent — the 30/60
+    # bug is a prompt that carries no description of the existing design).
+    text = format_design_state_block(block)
+    # ``format_design_state_block`` returns the header line + the entry
+    # lines joined by newlines; split on the first newline to get the
+    # header and the body (the body may itself be multiple lines for a
+    # multi-entry block).
+    parts = text.split("\n", 1)
+    lines: list[str] = [parts[0]]
+    if len(parts) > 1 and parts[1].strip():
+        lines.extend(parts[1].split("\n"))
+    return lines
+
+
 def _design_messages(
     *,
     photo: str,
@@ -550,6 +601,7 @@ def _design_messages(
     stated: tuple[float, float, float],
     repair: dict[str, Any] | None,
     request: str = "",
+    state_params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -571,6 +623,14 @@ def _design_messages(
         lines.append(f"Request: {request}")
     for turn in chat_history:
         lines.append(f"chat: {turn}")
+    # The design-state block (issue #120): the previous version's actual
+    # parameters with provenance per value, rendered BETWEEN the chat
+    # lines and the reference-dimensions line. The shared function
+    # (``d33d.design_state``) is the same callable the API route the SPA
+    # reads calls (asserted by the tests — not two functions that happen
+    # to agree). Empty when no version exists yet (an honest empty state,
+    # never a fabricated dimension).
+    lines.extend(_design_state_lines(stated, state_params))
     lines.append(
         f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}"
     )
@@ -715,6 +775,7 @@ async def run_design_loop_async(
     log: LogFn | None = None,
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
+    state_params: dict[str, Any] | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -755,6 +816,7 @@ async def run_design_loop_async(
                 stated=stated_dims,
                 repair=repair,
                 request=request,
+                state_params=state_params,
             ),
             _design_system(stated_dims),
         )
@@ -885,6 +947,7 @@ def run_design_loop(
     log: LogFn | None = None,
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
+    state_params: dict[str, Any] | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -904,6 +967,7 @@ def run_design_loop(
             log=log,
             max_iterations=max_iterations,
             request=request,
+            state_params=state_params,
         )
     )
 
