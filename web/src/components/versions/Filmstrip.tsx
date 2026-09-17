@@ -131,6 +131,15 @@ export function Filmstrip({
             data-testid="filmstrip-earlier"
             aria-label={`${copy.history.earlierCount(earlierCount)} ${copy.history.earlierLabel}`}
           >
+            {/* The collapsed count carries the mark if ANY of the hidden
+                versions was exported — the mark stays discoverable when its
+                version sits outside the four slots (issue #126 edge case).
+                A hidden version's mark is real server state, so the count
+                is never invented; it is augmented only when the data says
+                so. */}
+            {versions.some((v) => !visible.includes(v) && v.exported_at !== null) ? (
+              <span data-testid="filmstrip-earlier-exported">{copy.history.exported} </span>
+            ) : null}
             {copy.history.earlierCount(earlierCount)} {copy.history.earlierLabel}
           </span>
         )}
@@ -147,6 +156,11 @@ export function Filmstrip({
               data-testid={`filmstrip-slot-${v.id}`}
               onClick={() => onCompareSelect(v.id)}
               aria-current={isCurrent ? "true" : undefined}
+              title={
+                v.exported_at !== null
+                  ? copy.history.exportedAt(v.exported_at)
+                  : undefined
+              }
               style={
                 isCurrent
                   ? { outline: "2px solid var(--color-live)", outlineOffset: 2 }
@@ -175,6 +189,20 @@ export function Filmstrip({
                   aria-label={copy.history.variantCount(fork)}
                 >
                   ⑂ {copy.history.variantCount(fork)}
+                </span>
+              )}
+              {/* The exported mark (issue #126): which version was actually
+                  handed out as a 3MF. Server-side state — it survives a
+                  page reload. The mark is a WORD, not a colour: the motion
+                  budget and the marker-colour invariant leave no room for
+                  a badge colour here, and the time rides the title (the
+                  deck's exportedAt) rather than a new string. */}
+              {v.exported_at !== null && (
+                <span
+                  className="filmstrip-exported"
+                  data-testid={`filmstrip-exported-${v.id}`}
+                >
+                  {copy.history.exported}
                 </span>
               )}
             </button>

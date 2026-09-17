@@ -79,6 +79,7 @@ const TIMELINE: VersionTimelineEntry[] = [
     thumbnail: "/thumbs/v1.png",
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
+    exported_at: null,
   },
   {
     id: 2,
@@ -93,6 +94,7 @@ const TIMELINE: VersionTimelineEntry[] = [
     thumbnail: "/thumbs/v2.png",
     created_at: "2026-01-02T00:00:00Z",
     diff_count: 1,
+    exported_at: null,
   },
 ];
 
@@ -132,6 +134,7 @@ const TIMELINE_WITH_RESTORE: VersionTimelineEntry[] = [
     thumbnail: null,
     created_at: "2026-01-03T00:00:00Z",
     diff_count: 1,
+    exported_at: null,
   },
 ];
 

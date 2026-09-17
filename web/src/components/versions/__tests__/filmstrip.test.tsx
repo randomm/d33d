@@ -14,7 +14,11 @@ import { describe, it, expect, vi } from "vitest";
 import { Filmstrip } from "../Filmstrip";
 import type { VersionTimelineEntry } from "../../../lib/api";
 
-function entry(id: number, opts: Partial<VersionTimelineEntry> = {}): VersionTimelineEntry {
+function entry(
+  id: number,
+  opts: Partial<VersionTimelineEntry> & { exported_at?: string | null } = {},
+): VersionTimelineEntry {
+  const { exported_at, ...rest } = opts;
   return {
     id,
     name: `Version ${id}`,
@@ -28,7 +32,8 @@ function entry(id: number, opts: Partial<VersionTimelineEntry> = {}): VersionTim
     thumbnail: null,
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
-    ...opts,
+    exported_at: exported_at ?? null,
+    ...rest,
   };
 }
 
@@ -207,6 +212,56 @@ describe("Filmstrip", () => {
     expect(text).not.toMatch(/\b[0-9a-f]{7,40}\b/i);
     // No "branch:" git phrasing.
     expect(text).not.toMatch(/\bbranch\s*:/i);
+  });
+
+  it("renders the exported mark on the exported version and not on the others (issue #126)", () => {
+    // The mark belongs to the version that was ACTUALLY exported — not
+    // necessarily the latest. v2 is the exported one, v1 and v3 (the
+    // latest) are not.
+    const versions = [
+      entry(1),
+      entry(2, { exported_at: "2026-01-03T10:00:00.000Z" }),
+      entry(3),
+    ];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    expect(screen.getByTestId("filmstrip-exported-2").textContent).toBe("exported");
+    // The other versions carry no mark — the mark is per-version, not a
+    // project-wide state.
+    expect(screen.queryByTestId("filmstrip-exported-1")).toBeNull();
+    expect(screen.queryByTestId("filmstrip-exported-3")).toBeNull();
+  });
+
+  it("the exported mark carries the export time in its title (copy.history.exportedAt)", () => {
+    const versions = [entry(1, { exported_at: "2026-01-03T10:00:00.000Z" })];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    const slot = screen.getByTestId("filmstrip-slot-1");
+    expect(slot.getAttribute("title")).toBe("exported 2026-01-03T10:00:00.000Z");
+  });
+
+  it("an exported version outside the four slots is discoverable via the earlier-count (issue #126)", () => {
+    // 5 versions; the four visible are 2,3,4,5. v1 (hidden) was exported.
+    // The collapsed count must carry the mark so the exported version is
+    // not lost in the collapse.
+    const versions = [
+      entry(1, { exported_at: "2026-01-03T10:00:00.000Z" }),
+      entry(2),
+      entry(3),
+      entry(4),
+      entry(5),
+    ];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    expect(
+      screen.getByTestId("filmstrip-earlier-exported").textContent?.trim(),
+    ).toBe("exported");
+    // The visible slot for v1 does not exist (it is collapsed) — the mark
+    // is on the count, not on a slot.
+    expect(screen.queryByTestId("filmstrip-exported-1")).toBeNull();
+  });
+
+  it("the earlier-count carries no mark when no hidden version was exported", () => {
+    const versions = [entry(1), entry(2), entry(3), entry(4), entry(5)];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    expect(screen.queryByTestId("filmstrip-earlier-exported")).toBeNull();
   });
 });
 

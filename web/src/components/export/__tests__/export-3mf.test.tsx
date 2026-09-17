@@ -1,5 +1,8 @@
 /**
- * Export3MF tests — download-trigger UI + API-client plumbing.
+ * Export3MF tests — download-trigger UI + API-client plumbing, plus the
+ * designed ending (issue #126): the completion callback fires exactly once
+ * and only on success, with the version id the mark must belong to, and the
+ * download filename is the deck's slug contract.
  *
  * Scope note: there is no backend 3MF-generation endpoint yet (see the
  * component's doc comment). These tests exercise the client-side plumbing
@@ -44,13 +47,47 @@ describe("Export3MF", () => {
     expect((button as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("names the download by the deck's slug contract (exportFilename), not a default", async () => {
+    const blob = new Blob(["x"], { type: "model/3mf" });
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+
+    let capturedName = "";
+    vi.spyOn(HTMLAnchorElement.prototype, "download", "set").mockImplementation(
+      function (this: HTMLAnchorElement, value: string) {
+        capturedName = value;
+      },
+    );
+
+    render(
+      <Export3MF
+        projectId={projectId}
+        projectName="Curtain rod bracket"
+        versionId={4}
+        versionName="v4"
+        client={client}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(capturedName).toBe("curtain-rod-bracket-v4.3mf");
+    });
+  });
+
   it("downloads the 3MF blob and triggers a browser download on click", async () => {
     const blob = new Blob(["fake 3mf bytes"], { type: "model/3mf" });
     const client = new ApiClient();
     vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
 
     render(
-      <Export3MF projectId={projectId} client={client} fileName="widget.3mf" />,
+      <Export3MF
+        projectId={projectId}
+        projectName="widget"
+        versionId={1}
+        versionName="v1"
+        client={client}
+      />,
     );
     fireEvent.click(screen.getByTestId("export-3mf-button"));
 
@@ -108,24 +145,50 @@ describe("Export3MF", () => {
     expect(createObjectURLSpy).not.toHaveBeenCalled();
   });
 
-  it("defaults the download filename to model-{projectId}.3mf", async () => {
+  it("calls onExported exactly once, with the version id, AFTER a successful download", async () => {
     const blob = new Blob(["x"], { type: "model/3mf" });
     const client = new ApiClient();
     vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+    const onExported = vi.fn();
 
-    let capturedName = "";
-    vi.spyOn(HTMLAnchorElement.prototype, "download", "set").mockImplementation(
-      function (this: HTMLAnchorElement, value: string) {
-        capturedName = value;
-      },
+    render(
+      <Export3MF
+        projectId={projectId}
+        versionId={7}
+        versionName="v7"
+        client={client}
+        onExported={onExported}
+      />,
     );
-
-    render(<Export3MF projectId={projectId} client={client} />);
     fireEvent.click(screen.getByTestId("export-3mf-button"));
 
     await waitFor(() => {
-      expect(capturedName).toBe(`model-${projectId}.3mf`);
+      expect(onExported).toHaveBeenCalledTimes(1);
     });
+    expect(onExported).toHaveBeenCalledWith(7);
+  });
+
+  it("a failed export calls onExported NEVER (no turn, no mark)", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(404, "Not Found"),
+    );
+    const onExported = vi.fn();
+
+    render(
+      <Export3MF
+        projectId={projectId}
+        versionId={7}
+        client={client}
+        onExported={onExported}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    expect(onExported).not.toHaveBeenCalled();
   });
 
   it("uses a default same-origin ApiClient when none is injected", () => {
