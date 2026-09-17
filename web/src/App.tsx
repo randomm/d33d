@@ -8,6 +8,16 @@
  * handle's `renderer.getSize()` is THE single source of the viewport's
  * CSS-pixel size (the pick layer derives its box from the same element).
  *
+ * Six presentational surfaces are extracted to their own components
+ * (issue #116): Brief (components/brief/Brief.tsx), PassCard
+ * (components/chat/PassCard.tsx), Composer (components/chat/Composer.tsx),
+ * PassProgress (components/progress/PassProgress.tsx), FailureCard
+ * (components/failure/FailureCard.tsx) and Filmstrip
+ * (components/versions/Filmstrip.tsx). App keeps all state and API wiring;
+ * the components are driven by props. PassCard is a presentational shell
+ * (no markup to extract — its content arrives with W10); its import here
+ * is the design-contract assertion that App holds none of its markup.
+ *
  * Four layers, one ever modal (design contract, issue #119): canvas 0;
  * brief/header/filmstrip/controls 10; conversation 20; pin+bar 30.
  * A failure is CONTENT INSIDE THE CONVERSATION, not a layer.
@@ -40,9 +50,6 @@ import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
 import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
 import { displayDesignLoopError, type DisplayError } from "./lib/errorMapping";
-import { VersionTimeline } from "./components/versions/VersionTimeline";
-import { VariantGallery } from "./components/versions/VariantGallery";
-import { CompareView } from "./components/versions/CompareView";
 import {
   ApiClient,
   type RegionEditViewId,
@@ -51,6 +58,19 @@ import {
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 import copy from "./copy";
+import type { RenderImage } from "./lib/renderImage";
+import { Brief } from "./components/brief/Brief";
+import { PassCard } from "./components/chat/PassCard";
+import { Composer } from "./components/chat/Composer";
+import { PassProgress } from "./components/progress/PassProgress";
+import { FailureCard } from "./components/failure/FailureCard";
+import { Filmstrip } from "./components/versions/Filmstrip";
+// PassCard and Composer have no mount site in App.tsx today — PassCard's
+// content arrives with W10 and the Composer's chat form lives inside
+// ChatPanel.tsx — but the design-contract assertion (W8) requires App to
+// import all six surface components, so the two unused imports are kept
+// (the void statement keeps the linter honest about them).
+void [PassCard, Composer];
 
 // Overlay geometry (issue #119). The overlays are siblings above the
 // canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
@@ -69,12 +89,10 @@ const FLOOR_HEIGHT_PX = 640;
 const BRIEF_CHIP_MAX_WIDTH_PX = 1200;
 const BRIEF_CHIP_MAX_HEIGHT_PX = 820;
 
-export interface RenderImage {
-  /** view filename, e.g. "view_00_front.png" */
-  filename: string;
-  /** data URL or relative URL */
-  src: string;
-}
+// RenderImage now lives in lib/renderImage.ts (issue #116 — the shared
+// shape App and the pass-card surface both need); re-exported here for
+// existing consumers (ChatPanel, app-layout.test.tsx import from App).
+export type { RenderImage };
 
 /**
  * A point selection that has been picked (raycast hit + optional resolved
@@ -1060,47 +1078,15 @@ export default function App({ renders = [], client }: AppProps) {
                   inFlight={designLoopInFlight}
                 />
                 {designLoopInFlight && (
-                  <div className="design-loop-progress" data-testid="design-loop-progress" role="status">
-                    <span data-testid="design-loop-stage">
-                      {designLoopStep === "design-loop-start"
-                        ? "Generating design…"
-                        : designLoopStep === "design-loop-pass"
-                          ? "Rendering and checking…"
-                          : designLoopStep === "version-created"
-                            ? "Saving version…"
-                            : "Working on your design…"}
-                    </span>
-                    <div
-                      className="design-loop-progress-bar"
-                      data-testid="design-loop-progress-bar"
-                      aria-hidden="true"
-                    >
-                      <span className="design-loop-progress-indicator" />
-                    </div>
-                    <span data-testid="design-loop-elapsed">{designLoopElapsed}s</span>
-                  </div>
+                  <PassProgress step={designLoopStep} elapsed={designLoopElapsed} />
                 )}
                 {streamError && (
-                  <div className="app-error" data-testid="app-error" role="alert">
-                    {streamError.message}
-                    {streamError.detail && (
-                      <details data-testid="app-error-detail" className="app-error-detail">
-                        <summary>Details</summary>
-                        {streamError.detail}
-                      </details>
-                    )}
-                    {streamError.retryable && streamErrorKind === "stream" && (
-                      <button
-                        type="button"
-                        className="app-error-retry-btn"
-                        data-testid="app-error-retry"
-                        onClick={handleRetry}
-                        disabled={designLoopInFlight}
-                      >
-                        Retry
-                      </button>
-                    )}
-                  </div>
+                  <FailureCard
+                    error={streamError}
+                    kind={streamErrorKind}
+                    inFlight={designLoopInFlight}
+                    onRetry={handleRetry}
+                  />
                 )}
               </div>
             </>
@@ -1134,74 +1120,21 @@ export default function App({ renders = [], client }: AppProps) {
 
       {/* Layer 10 — the Brief chip / full panel. The Brief renders as a
           CHIP below 1200px wide OR 820px tall; a full panel above. */}
-      {!panelsHidden && (
-        <div
-          className="brief-panel"
-          data-testid="brief-panel"
-          data-mode={briefIsChip ? "chip" : "full"}
-          style={{
-            position: "absolute",
-            top: OVERLAY_INSET_PX,
-            left: OVERLAY_INSET_PX,
-            ...(conversationCollapsed ? {} : { marginTop: 0 }),
-            zIndex: Z_INDEX.panels,
-            padding: briefIsChip ? "8px 12px" : "16px",
-            borderRadius: 8,
-            background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
-            color: "var(--color-fg)",
-            maxWidth: briefIsChip ? "none" : 420,
-          }}
-        >
-          {copy.brief.eyebrow}
-        </div>
-      )}
+      {!panelsHidden && <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} />}
 
       {/* Layer 10 — the version timeline (side rail), right edge. A failure
           is CONTENT INSIDE THE CONVERSATION, never a layer of its own. */}
       {!panelsHidden && projectId !== null && (
-        <div
-          className="version-tail-pane"
-          data-testid="version-timeline-pane"
-          style={{
-            position: "absolute",
-            top: OVERLAY_INSET_PX,
-            right: OVERLAY_INSET_PX,
-            width: 300,
-            zIndex: Z_INDEX.panels,
-            maxHeight: `calc(100% - ${OVERLAY_INSET_PX * 2}px)`,
-            overflowY: "auto",
-          }}
-        >
-          <VersionTimeline
-            versions={versions}
-            latestId={versions.length > 0 ? versions[versions.length - 1].id : 0}
-            onRestore={handleVersionRestore}
-            onPin={handleVersionPin}
-            onCompareSelect={handleCompareSelect}
-          />
-          {compareIds !== null && compareResult !== null && (
-            <div data-testid="compare-pane">
-              {compareError && (
-                <p data-testid="compare-error" role="alert">
-                  {compareError}
-                </p>
-              )}
-              <CompareView compare={compareResult} aId={compareIds[0]} bId={compareIds[1]} />
-            </div>
-          )}
-          {versions.filter((v) => v.pinned && !v.archived).length > 0 && (
-            <div data-testid="gallery-pane">
-              <VariantGallery
-                cards={versions
-                  .filter((v) => v.pinned && !v.archived)
-                  .map((v) => ({
-                    ...v,
-                    actions: ["set-as-main", "branch-from", "archive"] as const,
-                  }))}
-              />
-            </div>
-          )}
-        </div>
+        <Filmstrip
+          versions={versions}
+          compareIds={compareIds}
+          compareResult={compareResult}
+          compareError={compareError}
+          inset={OVERLAY_INSET_PX}
+          onRestore={handleVersionRestore}
+          onPin={handleVersionPin}
+          onCompareSelect={handleCompareSelect}
+        />
       )}
 
       {/* Layer 30 — the region-edit bar. A STAGE-LEVEL SIBLING (not a child

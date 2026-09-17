@@ -12,10 +12,11 @@
  * - No auto-generated slider/parameter panel — input is text + photo only.
  */
 
-import { useRef, useEffect, useState, type FormEvent } from "react";
-import type { RenderImage } from "../../App";
+import { useRef, useEffect, useState } from "react";
+import type { RenderImage } from "../../lib/renderImage";
 import type { RegionEditViewId } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
+import { Composer } from "./Composer";
 
 // The marker colour's single home is lib/marker.ts (issue #110); the name
 // is re-exported here for existing consumers.
@@ -61,11 +62,8 @@ export function ChatPanel({ messages, onSend, renders, inFlight }: ChatPanelProp
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, renders]);
 
-  const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    const trimmed = input.trim();
-    if (!trimmed) return;
-    onSend(trimmed);
+  const handleSubmit = (text: string) => {
+    onSend(text);
     setInput("");
   };
 
@@ -114,25 +112,12 @@ export function ChatPanel({ messages, onSend, renders, inFlight }: ChatPanelProp
         <div ref={bottomRef} />
       </div>
 
-      <form className="chat-input-form" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          className="chat-input"
-          data-testid="chat-input"
-          placeholder="Type a message…"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          aria-label="Chat message input"
-        />
-        <button
-          type="submit"
-          className="chat-send-btn"
-          data-testid="chat-send-btn"
-          disabled={!input.trim() || inFlight}
-        >
-          Send
-        </button>
-      </form>
+      <Composer
+        value={input}
+        onChange={setInput}
+        onSend={handleSubmit}
+        inFlight={inFlight}
+      />
     </section>
   );
 }
