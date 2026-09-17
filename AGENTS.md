@@ -114,9 +114,12 @@ standard-library features, or meta-questions about the project.
 
 | kind | command |
 | --- | --- |
-| test | `pytest -m "not slow and not live"` |
-| test | `pytest` |
+| test (Python) | `pytest -m "not slow and not live"` |
+| test (Python) | `pytest` |
+| test (frontend) | `cd web && npm test` |
+| type-check (frontend) | `cd web && npm run type-check` |
 
+**Frontend provenance (issue #151):** `npm test` prints two `gate:` lines — the resolved project root and the resolved vitest module path. If a worktree is the target, both paths name that worktree. A path that names the main checkout instead of your worktree means the run measured the wrong tree and the result is a null result.
 
 ## Quality Gates
 
@@ -124,6 +127,9 @@ Run these before pushing. All must pass locally:
 
 - **Test (fast, no Docker)** — `pytest -m "not slow and not live"`
 - **Test (full incl. slow/Docker)** — `pytest`
+- **Frontend test** — `cd web && npm test` — 394 tests; the `gate:` lines in the output state which tree was measured
+- **Frontend type-check** — `cd web && npm run type-check` — 0 errors
+- **Frontend lint** — `cd web && npm run lint` — 0 errors, 1 known warning (inert `eslint-disable` in `ModelViewer.tsx`)
 - **Live e2e (NOT a PR gate)** — `uv run pytest -m live` — drives the real LLM + real Docker render worker (`tests/live_e2e/`, issue #108); needs Docker + `TRAIL_OPENERS_LLM_KEY`; not in CI (no repository secret); fails (never skips) when a prerequisite is missing; runtime is reported per case + total
 
 ## Code Style
