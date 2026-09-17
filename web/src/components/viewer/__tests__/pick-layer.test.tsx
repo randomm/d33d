@@ -130,6 +130,38 @@ describe("PickLayer", () => {
     render(<PickLayer ready marker={null} onPointSelected={() => {}} />);
     expect(screen.queryByTestId("viewer-pick-marker")).toBeNull();
   });
+
+  it("region: the pin desaturates at orbit gesture START (dimmed=true → outline, not filled)", () => {
+    // W15: when an orbit gesture has started but the pose has not yet
+    // crossed POSE_EPS_MM, the marker dot desaturates to an outline
+    // (transparent background, solid MARKER_COLOR border) — "about to go"
+    // while the user can still stop. The data-dimmed attribute is the
+    // test seam (the App sets it via the `dimmed` prop).
+    const { unmount } = render(
+      <PickLayer ready marker={{ x: 100, y: 50 }} dimmed onPointSelected={() => {}} />,
+    );
+    const marker = screen.getByTestId("viewer-pick-marker");
+    expect(marker).toBeTruthy();
+    expect(marker.getAttribute("data-dimmed")).toBe("true");
+    // Desaturated: transparent background, solid marker-colour border.
+    // MARKER_COLOR is #FF3300 = rgb(255, 51, 0).
+    expect(marker.style.backgroundColor).toBe("transparent");
+    expect(marker.style.border).toContain("rgb(255, 51, 0)");
+    unmount();
+  });
+
+  it("region: the pin is NOT desaturated when dimmed is false (default state)", () => {
+    const { unmount } = render(
+      <PickLayer ready marker={{ x: 100, y: 50 }} onPointSelected={() => {}} />,
+    );
+    const marker = screen.getByTestId("viewer-pick-marker");
+    expect(marker).toBeTruthy();
+    // Default (not dimmed): filled marker, white border.
+    expect(marker.getAttribute("data-dimmed")).toBe("false");
+    expect(marker.style.backgroundColor).toBe("rgb(255, 51, 0)");
+    expect(marker.style.border).toBe("2px solid rgb(255, 255, 255)");
+    unmount();
+  });
 });
 
 // The `ClickEvent` type above is the shape the layer's callback receives —
