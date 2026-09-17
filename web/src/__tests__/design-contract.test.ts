@@ -212,6 +212,33 @@ describe("design contract", () => {
     expect(stylesheet()).not.toMatch(/--color-marker/);
   });
 
+  /* --------------------------------------------------------------- W7 */
+
+  it("no module exports a fixed viewer width or height", () => {
+    // W7: the viewer sizes fluidly from its containing box (ResizeObserver),
+    // not from a fixed constant. No module may export or default a width or
+    // height prop for the viewer or pick layer — a silent 600x400 fallback
+    // is the pick-drift bug wearing a default parameter.
+    const strays = filesMatching(
+      /(?:width|height)\s*[?]\s*[:=]\s*(?:\d{3,}|600|400)/
+    ).filter((f) => f.includes("viewer") || f === "App.tsx");
+    expect(strays).toEqual([]);
+  });
+
+  it("no component sets a z-index outside the four layers (0, 10, 20, 30)", () => {
+    // W7: z-index is a closed set — canvas 0, panels 10, conversation 20,
+    // pin+bar 30. Any other z-index value is a violation.
+    const valid = new Set(["0", "10", "20", "30"]);
+    for (const f of srcFiles()) {
+      const content = readFileSync(f, "utf8");
+      const matches = content.matchAll(/z-index\s*[:=]\s*(\d+)/g);
+      for (const m of matches) {
+        const val = m[1];
+        expect(valid.has(val), `z-index ${val} in ${relative(SRC, f)} is not in {0,10,20,30}`).toBe(true);
+      }
+    }
+  });
+
   /* --------------------------------------------------------------- W4 */
 
   it("no static 'Waiting for render' placeholder survives in src", () => {
