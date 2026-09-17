@@ -49,6 +49,7 @@ import { resolvePointPick } from "./components/viewer/ModelViewer";
 import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
 import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
+import { MARKER_COLOR } from "./lib/marker";
 import { displayDesignLoopError, type DisplayError } from "./lib/errorMapping";
 import {
   ApiClient,
@@ -307,6 +308,30 @@ export default function App({ client }: AppProps) {
   // one the user drew afterward, or resurrect one they explicitly cancelled.
   const pendingSelectionGenerationRef = useRef(0);
 
+  // The region bar's anchoring (issue #129): the bar is anchored to the pin,
+  // not to the viewport's bottom edge. `viewportSize` is the bar's sizing
+  // source — driven by the stage element (the same element ModelViewer sizes
+  // from via its ResizeObserver), so there is no second size constant.
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [viewportSize, setViewportSize] = useState<{ width: number; height: number }>(() => ({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  }));
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const measure = () => setViewportSize({ width: el.clientWidth, height: el.clientHeight });
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  // The pin's live "orbiting" (orbit gesture in flight) and "cleared" (pose
+  // crossed POSE_EPS_MM, the pin is being torn down) states. Both are
+  // cleared on the next pick / cancel / submit (the new pin starts clean).
+  const [orbitingPin, setOrbitingPin] = useState(false);
+  const [orbitClearedPin, setOrbitClearedPin] = useState(false);
+
   // The camera-pose signature (position + OrbitControls target, in mm)
   // for the view-dependent selection guard. The threshold exists because
   // OrbitControls damping drifts the pose a fraction of a mm even on a
@@ -347,9 +372,12 @@ export default function App({ client }: AppProps) {
     pendingSelectionGenerationRef.current += 1;
     setPendingSelection(null);
     setRegionBarText("");
-    setSelectionNotice(
-      "Selection cleared — the view changed. Orbit to a good angle first, then click the model to point at a part.",
-    );
+    // The pin is cleared — the bar's inline hint takes over (the demoted
+    // version of the old "notice card" surface; W15: it is expected
+    // behaviour, not an error, so it lives in the bar's hint slot).
+    setOrbitClearedPin(true);
+    setOrbitingPin(false);
+    setSelectionNotice(copy.region.cleared);
   }, [pendingSelection, poseSignature]);
 
   // ModelViewer's onReady fires on mount and again whenever the loaded
@@ -366,6 +394,18 @@ export default function App({ client }: AppProps) {
     },
     [poseSignature, handleCameraMoved],
   );
+
+  // Gesture-start seam (issue #129): OrbitControls fires `start` at the
+  // first pose move of a gesture, BEFORE POSE_EPS_MM is crossed. The pin
+  // desaturates at that moment ("about to go", not "gone"); the bar dims
+  // alongside. Clearing on the same gesture's `end` is not wired (that
+  // seam does not exist yet); instead the cleared state takes over when
+  // the threshold IS crossed (the pin is genuinely gone) or when the
+  // user cancels/submits a new pick.
+  const handleOrbitStart = useCallback(() => {
+    if (pendingSelection === null) return;
+    setOrbitingPin(true);
+  }, [pendingSelection]);
   const handleViewerLoaded = useCallback(
     (result: LoadResult) => {
       if (result.ok && result.mesh) {
@@ -502,6 +542,11 @@ export default function App({ client }: AppProps) {
 
         setSelectionNotice(null);
         setRegionBarText("");
+        // A new pick resets the orbit state — the previous pin's "cleared"
+        // or "orbiting" flag must not leak into this one (the new pin is a
+        // fresh state: full colour, no dim, no hint).
+        setOrbitClearedPin(false);
+        setOrbitingPin(false);
 
         // The server requires a non-empty free-text `instruction`
         // (`RegionEditRequest.instruction`, `Field(min_length=1)`) that only
@@ -529,6 +574,8 @@ export default function App({ client }: AppProps) {
     pendingSelectionGenerationRef.current += 1;
     setPendingSelection(null);
     setRegionBarText("");
+    setOrbitClearedPin(false);
+    setOrbitingPin(false);
   }, []);
 
   // Issue #125: the pass card's enlarged-view action. The frame carries
@@ -1071,6 +1118,7 @@ export default function App({ client }: AppProps) {
     <div
       className="app-stage"
       data-testid="app-stage"
+      ref={stageRef}
       style={{
         // 100vw/100vh per the ticket's own text (`.app-stage` — width:100vw;
         // height:100vh; overflow:hidden). The overflow:hidden means the
@@ -1106,12 +1154,14 @@ export default function App({ client }: AppProps) {
           format={viewerSource.format}
           onReady={handleViewerReady}
           onLoaded={handleViewerLoaded}
+          onOrbitStart={handleOrbitStart}
         />
         {/* Single-click pick layer (issue #98) — fills the stage, the SAME
             element box the viewer's ResizeObserver reads (issue #119). */}
         <PickLayer
           ready={pickLayerReady}
           marker={pickMarker}
+          dimmed={orbitingPin || orbitClearedPin}
           onPointSelected={handlePointSelected}
         />
       </div>
@@ -1266,6 +1316,7 @@ export default function App({ client }: AppProps) {
           conversationCollapsed={conversationCollapsed}
           entries={designState}
           hasLivePin={pendingSelection !== null}
+          highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
           onChange={(label) => handleSendMessage(`${copy.brief.rowActions.change}: ${label}`)}
         />
@@ -1307,107 +1358,242 @@ export default function App({ client }: AppProps) {
         />
       )}
 
-      {/* Layer 30 — the region-edit bar. A STAGE-LEVEL SIBLING (not a child
-          of .viewer-pane) at the pin+bar z-index (issue #119). It floats
-          above the canvas, inset from the bottom edge, and hides with the
-          other panels on backslash. */}
-      {pendingSelection && !panelsHidden && (
-        <form
-          className="region-edit-bar"
-          data-testid="region-edit-bar"
-          role="group"
-          style={{
-            position: "absolute",
-            bottom: OVERLAY_INSET_PX,
-            left: "50%",
-            transform: "translateX(-50%)",
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            padding: "8px 12px",
-            backgroundColor: "rgba(0, 0, 0, 0.8)",
-            borderRadius: 8,
-            boxSizing: "border-box",
-            zIndex: Z_INDEX.pinAndBar,
-          }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleRegionBarSubmit();
-          }}
-        >
-          <img
-            src={pendingSelection.thumbnail}
-            alt={`pending selection on ${pendingSelection.viewId}`}
-            className="pending-selection-thumbnail"
-            data-testid="pending-selection-thumbnail"
-            style={{
-              width: 32,
-              height: 32,
-              maxWidth: 200,
-              objectFit: "cover",
-              flex: "0 0 auto",
-            }}
-          />
-          <input
-            type="text"
-            className="region-edit-input"
-            data-testid="region-edit-input"
-            placeholder={copy.region.placeholder}
-            value={regionBarText}
-            onChange={(e) => setRegionBarText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") handleCancelPendingSelection();
-            }}
-            autoFocus
-            style={{
-              flex: "1 1 auto",
-              minWidth: 0,
-              padding: "4px 8px",
-              border: "none",
-              borderRadius: 4,
-              backgroundColor: "rgba(255, 255, 255, 0.95)",
-              color: "#1f2328",
-            }}
-          />
-          <button
-            type="submit"
-            className="region-edit-apply-btn"
-            data-testid="region-edit-apply-btn"
-            aria-label={copy.region.apply}
-            disabled={regionBarText.trim().length === 0}
-            style={{
-              flex: "0 0 auto",
-              padding: "4px 12px",
-              border: "none",
-              borderRadius: 4,
-              backgroundColor: "#0969da",
-              color: "#ffffff",
-              cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
-              opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
-            }}
-          >
-            {copy.region.apply}
-          </button>
-          <button
-            type="button"
-            className="region-edit-cancel-btn"
-            data-testid="pending-selection-cancel-btn"
-            aria-label={copy.region.cancel}
-            onClick={handleCancelPendingSelection}
-            style={{
-              flex: "0 0 auto",
-              padding: "4px 12px",
-              border: "none",
-              borderRadius: 4,
-              backgroundColor: "rgba(255, 255, 255, 0.2)",
-              color: "#ffffff",
-              cursor: "pointer",
-            }}
-          >
-            {copy.region.cancel}
-          </button>
-        </form>
-      )}
+      {/* Layer 30 — the region-edit bar, anchored to the pin (issue #129).
+          A STAGE-LEVEL SIBLING (not a child of .viewer-pane) at the pin+bar
+          z-index. The bar's position is computed from the pin's position in
+          the viewport and the viewport size — placed in the quadrant OPPOSITE
+          the pin relative to the viewport centre; if that placement overflows,
+          it is clamped to the viewport edge AND the leader line reverses
+          (flipped = true). The bar never intersects the pin. The leader line
+          connects the pin to the bar — a thin 1px line in the marker colour,
+          which is the only place the marker legitimately belongs in the bar.
+          The bar dims (opacity 0.5) while the pin is in orbiting state. */}
+      {pendingSelection && !panelsHidden && (() => {
+        const pin = pendingSelection.point;
+        const { width: vw, height: vh } = viewportSize;
+        // The bar's width is fixed at 320px (the spec's gap-gate answer: a
+        // fixed width, clamped against the viewport). Height is derived from
+        // the bar's content (thumbnail 32 + input + buttons + module chip +
+        // hint); the tests pin the width, so the height is a measurement —
+        // the clamp uses the viewport's available space, not a magic height.
+        const BAR_WIDTH = 320;
+        const BAR_GAP = 12; // gap between pin and bar edge
+        const cx = vw / 2;
+        const cy = vh / 2;
+        // Quadrant: opposite the pin relative to the viewport centre.
+        // pin above-centre-left → bar bottom-right, etc.
+        const pinLeft = pin.x < cx;
+        const pinUp = pin.y < cy;
+        // Default position: the quadrant opposite the pin.
+        // If pin is upper-left, bar goes lower-right, and vice versa.
+        let barLeft: number;
+        let barTop: number;
+        // The bar's box: width BAR_WIDTH, height estimated at 120px
+        // (32px thumbnail + 8px gap + 24px input row + 4px gap + 16px module
+        // chip + 4px gap + 20px hint ≈ 90px content + 16px padding + border).
+        const BAR_HEIGHT = 120;
+        if (pinUp) {
+          barTop = cy + BAR_GAP; // bar in lower half
+        } else {
+          barTop = cy - BAR_GAP - BAR_HEIGHT; // bar in upper half
+        }
+        if (pinLeft) {
+          barLeft = cx + BAR_GAP; // bar in right half
+        } else {
+          barLeft = cx - BAR_GAP - BAR_WIDTH; // bar in left half
+        }
+        // Clamp: the bar's box must stay within the viewport.
+        const clampedLeft = Math.max(4, Math.min(barLeft, vw - BAR_WIDTH - 4));
+        const clampedTop = Math.max(4, Math.min(barTop, vh - BAR_HEIGHT - 4));
+        const clamped = clampedLeft !== barLeft || clampedTop !== barTop;
+        // The leader line goes from the pin to the bar's nearest edge.
+        // When clamped, the leader reverses: it points FROM the bar TO the pin,
+        // not from the pin to the bar's default (uncropped) position.
+        const leaderStartX = pin.x;
+        const leaderStartY = pin.y;
+        const leaderEndX = clamped ? pin.x : (pinLeft ? clampedLeft : clampedLeft + BAR_WIDTH);
+        const leaderEndY = clamped ? pin.y : (pinUp ? clampedTop + BAR_HEIGHT : clampedTop);
+        const dimmed = orbitingPin || orbitClearedPin;
+        const moduleChip = pendingSelection.moduleIds.length > 0
+          ? pendingSelection.moduleIds[0]
+          : null;
+        return (
+          <>
+            {/* The leader line — a thin 1px line in the marker colour.
+                The bar is at z-index 30; the leader is part of the bar's
+                visual unit and sits at the same z-index. The line goes from
+                the pin to the bar's nearest edge (default) or from the bar
+                to the pin (flipped — the pin is the "source" the line points
+                back to). */}
+            <svg
+              data-testid="region-edit-leader"
+              style={{
+                position: "absolute",
+                left: 0,
+                top: 0,
+                width: vw,
+                height: vh,
+                pointerEvents: "none",
+                zIndex: Z_INDEX.pinAndBar,
+              }}
+              aria-hidden="true"
+            >
+              <line
+                x1={leaderStartX}
+                y1={leaderStartY}
+                x2={leaderEndX}
+                y2={leaderEndY}
+                stroke={MARKER_COLOR}
+                strokeWidth={1}
+                strokeOpacity={0.6}
+              />
+            </svg>
+            <form
+              className="region-edit-bar"
+              data-testid="region-edit-bar"
+              role="group"
+              data-flipped={clamped ? "true" : "false"}
+              style={{
+                position: "absolute",
+                left: clampedLeft,
+                top: clampedTop,
+                width: BAR_WIDTH,
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                padding: "8px 12px",
+                backgroundColor: "rgba(0, 0, 0, 0.8)",
+                borderRadius: 8,
+                boxSizing: "border-box",
+                zIndex: Z_INDEX.pinAndBar,
+                opacity: dimmed ? 0.5 : 1,
+                transition: "opacity 120ms ease",
+              }}
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleRegionBarSubmit();
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <img
+                  src={pendingSelection.thumbnail}
+                  alt={`pending selection on ${pendingSelection.viewId}`}
+                  className="pending-selection-thumbnail"
+                  data-testid="pending-selection-thumbnail"
+                  style={{
+                    width: 32,
+                    height: 32,
+                    maxWidth: 200,
+                    objectFit: "cover",
+                    flex: "0 0 auto",
+                  }}
+                />
+                <input
+                  type="text"
+                  className="region-edit-input"
+                  data-testid="region-edit-input"
+                  placeholder={copy.region.placeholder}
+                  value={regionBarText}
+                  onChange={(e) => setRegionBarText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") handleCancelPendingSelection();
+                  }}
+                  autoFocus
+                  style={{
+                    flex: "1 1 auto",
+                    minWidth: 0,
+                    padding: "4px 8px",
+                    border: "none",
+                    borderRadius: 4,
+                    backgroundColor: "rgba(255, 255, 255, 0.95)",
+                    color: "#1f2328",
+                  }}
+                />
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  type="submit"
+                  className="region-edit-apply-btn"
+                  data-testid="region-edit-apply-btn"
+                  aria-label={copy.region.apply}
+                  disabled={regionBarText.trim().length === 0}
+                  style={{
+                    flex: "0 0 auto",
+                    padding: "4px 12px",
+                    border: "none",
+                    borderRadius: 4,
+                    backgroundColor: "#0969da",
+                    color: "#ffffff",
+                    cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
+                    opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
+                  }}
+                >
+                  {copy.region.apply}
+                </button>
+                <button
+                  type="button"
+                  className="region-edit-cancel-btn"
+                  data-testid="pending-selection-cancel-btn"
+                  aria-label={copy.region.cancel}
+                  onClick={handleCancelPendingSelection}
+                  style={{
+                    flex: "0 0 auto",
+                    padding: "4px 12px",
+                    border: "none",
+                    borderRadius: 4,
+                    backgroundColor: "rgba(255, 255, 255, 0.2)",
+                    color: "#ffffff",
+                    cursor: "pointer",
+                  }}
+                >
+                  {copy.region.cancel}
+                </button>
+              </div>
+              {/* The resolved module chip + the pose hint. The module name
+                  is in mono (the raw detail); the sentence is in the UI face. */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                {moduleChip !== null && (
+                  <span
+                    data-testid="region-edit-module-chip"
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                      color: "var(--color-fg-2)",
+                      padding: "2px 6px",
+                      background: "rgba(255,255,255,0.08)",
+                      borderRadius: 4,
+                      display: "inline-block",
+                      width: "fit-content",
+                    }}
+                  >
+                    {moduleChip}
+                    {" "}
+                    {copy.region.resolvedTo}
+                  </span>
+                )}
+                <span
+                  data-testid="region-edit-pose-hint"
+                  style={{ fontSize: 11, color: "var(--color-muted)" }}
+                >
+                  {copy.region.poseHint}
+                </span>
+                {orbitClearedPin && (
+                  <span
+                    data-testid="region-edit-cleared-hint"
+                    style={{
+                      fontSize: 11,
+                      color: "var(--color-muted)",
+                      marginTop: 2,
+                    }}
+                  >
+                    {copy.region.clearedHint}
+                  </span>
+                )}
+              </div>
+            </form>
+          </>
+        );
+      })()}
 
       {/* Selection notice — a CONTENT surface inside the conversation
           layer, not a separate z-index tier. */}

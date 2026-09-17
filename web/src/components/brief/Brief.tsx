@@ -39,6 +39,7 @@
 
 import { useState } from "react";
 import copy, { mm } from "../../copy";
+import { MARKER_COLOR } from "../../lib/marker";
 import type { DesignStateEntry } from "../../lib/api";
 
 /** Above this many rows the resolved list collapses to one honest count
@@ -98,6 +99,11 @@ interface BriefProps {
   /** A live region pin (the region bar owns the task) — the Brief
    *  collapses to its chip whatever the window size says. */
   hasLivePin?: boolean;
+  /** The resolved module id from a pending region pick — the matching
+   *  Brief row is outlined in the marker colour (taken as an inline style
+   *  from MARKER_COLOR — no CSS token, by design / W17). The outline
+   *  makes the click-on-pixels legibly a click-on-parameter. */
+  highlightModuleId?: string | null;
   /** The unknown-value control's question — sent to the assistant. */
   onAsk?: (label: string) => void;
   /** The expanded row's "Change it" — routed to the assistant. */
@@ -138,6 +144,7 @@ export function Brief({
   reMeasuring,
   failedPass,
   hasLivePin,
+  highlightModuleId,
   onAsk,
   onChange,
   onShowOnModel,
@@ -308,6 +315,20 @@ export function Brief({
         className="brief-row"
         data-testid={`brief-row-${name}`}
         data-provenance={entry.provenance}
+        // The resolved module id from a pending pick is outlined in the
+        // marker colour (MARKER_COLOR, inline style — no CSS token by design).
+        // A pick on pixels is a click on a parameter: the outline makes that
+        // mapping legible. The outline is 2px so it reads as a marker, not a
+        // subtle hover state.
+        style={
+          highlightModuleId === name
+            ? {
+                outline: `2px solid ${MARKER_COLOR}`,
+                outlineOffset: -1,
+                borderRadius: 6,
+              }
+            : undefined
+        }
       >
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
