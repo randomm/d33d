@@ -637,6 +637,35 @@ class VersionService:
             raise LookupError(f"version {version_id} not found")
         return v
 
+    async def record_export(
+        self, project_id: int, version_id: int
+    ) -> dict[str, Any]:
+        """Record that a 3MF of this version was handed to the operator
+        (issue #126 — the persistent "exported" mark in the filmstrip).
+
+        The mark belongs to the version actually downloaded, which is not
+        necessarily the latest. Re-exporting the SAME version updates the
+        mark to the LATEST export time (the mark answers "when did I last
+        take this one out", and ``copy.history.exportedAt`` shows that
+        time) — the last export wins, there is no counter and no first-
+        export timestamp. The event is server-side state: a mark held in
+        client state would not survive a reload, and the reload is the
+        whole point of the mark.
+        """
+        target = self.get_version(project_id, version_id)
+        if target is None:
+            raise LookupError(f"version {version_id} not found")
+        self.conn.raw.execute(
+            "UPDATE versions SET exported_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            " WHERE project_id = ? AND id = ?",
+            (project_id, version_id),
+        )
+        self.conn.commit()
+        v = self.get_version(project_id, version_id)
+        if v is None:
+            raise LookupError(f"version {version_id} not found")
+        return v
+
     async def set_archived(
         self, project_id: int, version_id: int, archived: bool
     ) -> dict[str, Any]:
@@ -804,6 +833,10 @@ class VersionService:
             "archived": version["archived"],
             "thumbnail": version["thumbnail"],
             "created_at": version["created_at"],
+            # The last export of this version (issue #126) — ``None``
+            # when it has never been exported (pre-change rows read back
+            # as NULL; never a fabricated timestamp).
+            "exported_at": version["exported_at"],
         }
 
 
@@ -869,6 +902,7 @@ def migrate(conn: db_mod.Connection) -> None:
             archived    INTEGER NOT NULL DEFAULT 0,
             thumbnail   TEXT,
             bbox        TEXT,
+            exported_at TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -898,6 +932,10 @@ def migrate(conn: db_mod.Connection) -> None:
     # would force a fabricated backfill. Pre-existing rows read back as
     # ``None`` (an absent measurement abstains; never a zero triple).
     _ensure_column(conn, "versions", "bbox", "TEXT")
+    # ``versions.exported_at``: the last 3MF export of the version (issue
+    # #126 — the persistent filmstrip mark). Nullable, no backfill: an
+    # unexported version is NULL (never a fabricated timestamp).
+    _ensure_column(conn, "versions", "exported_at", "TEXT")
 
 
 __all__ = [

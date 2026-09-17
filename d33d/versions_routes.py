@@ -327,6 +327,29 @@ def create_versions_router() -> APIRouter:
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
 
+    # -- export mark (issue #126 — the persistent filmstrip mark) --------------
+
+    @router.post("/api/projects/{project_id}/versions/{version_id}/export")
+    async def record_export(
+        request: Request, project_id: int, version_id: int
+    ) -> dict[str, Any]:
+        """Record that the 3MF of a SPECIFIC version was exported.
+
+        The mark belongs to the version actually downloaded (which is not
+        necessarily the latest — ``copy.shell.exportVersion`` exists for
+        exporting an older version) and is server-side state: the client
+        calls this AFTER a successful download and the mark survives a
+        page reload via the version timeline (``list_versions`` carries
+        ``exported_at``). A failed or cancelled download never reaches
+        this route — the SPA only fires it on success — so no 201 here
+        can mark a version whose 3MF the user never received.
+        """
+        svc = _service(request)
+        _project_or_404(svc, project_id)
+        _version_or_404(svc, project_id, version_id)
+        v = await svc.record_export(project_id, version_id)
+        return svc._version_public(v)
+
     # -- gallery (pinned variants) ---------------------------------------------
 
     @router.get("/api/projects/{project_id}/gallery")
