@@ -26,9 +26,12 @@ interface PlateBackdropProps {
   x: number;
   y: number;
   z: number;
+  /** True once the values have been confirmed against the machine; false
+   *  until then — the caption must carry that uncertainty, never hide it. */
+  verified: boolean;
 }
 
-export function PlateBackdrop({ x, y, z }: PlateBackdropProps) {
+export function PlateBackdrop({ x, y, z, verified }: PlateBackdropProps) {
   // The plate's top view: x wide, z deep (the print head's travel plane).
   // The viewBox is the envelope itself — the drawing scales with the API.
   return (
@@ -88,6 +91,7 @@ export function PlateBackdrop({ x, y, z }: PlateBackdropProps) {
           }}
         >
           {copy.firstRun.plateCaption(x, y, z)}
+          {!verified && copy.firstRun.plateCaptionUnverified}
         </span>
         <span
           className="plate-note"

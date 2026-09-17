@@ -1145,7 +1145,7 @@ export default function App({ client }: AppProps) {
           warning. The keep-out notch is NOT drawn: the envelope route
           does not expose it, and this surface must not infer it. */}
       {envelope !== null && !panelsHidden && (
-        <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} />
+        <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} verified={envelope.verified} />
       )}
 
       {/* Layer 20 — the conversation (chat + upload + errors). Floats over

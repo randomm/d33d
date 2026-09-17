@@ -2367,9 +2367,14 @@ describe("App first-run screen (issue #128, W14)", () => {
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(client.getEnvelope).toHaveBeenCalled());
-    // The caption renders the fetched numbers (320 × 320 × 300) and the
-    // plate's viewBox is drawn from them — 0 0 x z.
-    expect(screen.getByTestId("plate-caption").textContent).toBe("320 × 320 × 300\u202Fmm");
+    // The caption renders the fetched numbers (320 × 320 × 300) — and the
+    // unconfirmed-envelope qualifier, since the stub returns verified: false.
+    // The plate's viewBox is drawn from the numbers — 0 0 x z.
+    await waitFor(() =>
+      expect(screen.getByTestId("plate-caption").textContent).toBe(
+        "320 × 320 × 300\u202Fmm" + copy.firstRun.plateCaptionUnverified,
+      ),
+    );
     const svg = screen.getByTestId("app-stage").querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     expect(svg!.getAttribute("viewBox")).toBe("0 0 320 300");
@@ -2385,11 +2390,46 @@ describe("App first-run screen (issue #128, W14)", () => {
     });
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => expect(screen.getByTestId("plate-caption").textContent).toBe("220 × 220 × 255\u202Fmm"));
+    // The stub is verified: false, so the caption carries the qualifier.
+    await waitFor(() =>
+      expect(screen.getByTestId("plate-caption").textContent).toBe(
+        "220 × 220 × 255\u202Fmm" + copy.firstRun.plateCaptionUnverified,
+      ),
+    );
     // The drawing follows the numbers — a fixed-aspect plate with a
     // separately-fetched caption is the defect this asserts against.
     const svg = screen.getByTestId("app-stage").querySelector("svg.plate-backdrop");
     expect(svg!.getAttribute("viewBox")).toBe("0 0 220 255");
+  });
+
+  it("the plate caption carries the qualifier while the envelope is unconfirmed, and drops it when confirmed", async () => {
+    // The default stub (makeClient) returns verified: false — the caption must
+    // surface the uncertainty, in the deck's own words.
+    const first = render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByTestId("plate-caption").textContent).toContain(
+        copy.firstRun.plateCaptionUnverified,
+      ),
+    );
+    first.unmount();
+    // Now the machine is confirmed — the same numbers, but the qualifier must
+    // be gone. The plate never hides; only the claim of certainty does.
+    vi.spyOn(client, "getEnvelope").mockResolvedValue({
+      x: 320,
+      y: 320,
+      z: 300,
+      unit: "mm",
+      verified: true,
+    });
+    const { unmount } = render(<App client={client} />);
+    await waitFor(() =>
+      expect(screen.getByTestId("plate-caption").textContent).toBe("320 × 320 × 300\u202Fmm"),
+    );
+    expect(screen.getByTestId("plate-caption").textContent).not.toContain(
+      copy.firstRun.plateCaptionUnverified,
+    );
+    unmount();
   });
 
   it("goes away once a message has been sent (the conversation takes the centre)", async () => {

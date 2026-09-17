@@ -280,7 +280,7 @@ export const history = {
 
 export const firstRun = {
   headline: "What do you need to print?",
-  body: "Describe the part and the measurements you actually know. Everything here is in millimetres — say “3\u202Fcm” and it will be read as 30\u202Fmm.",
+  body: "Describe the part and the measurements you actually know. Everything here is in millimetres — give dimensions in mm: “30 mm”, not “3 cm”.",
   placeholder: "A bracket to hold a 34 mm curtain rod 45 mm off the wall…",
   start: "Start",
   startersLabel: "Or start from one of these",
@@ -295,6 +295,10 @@ export const firstRun = {
   plateCaption: (x: number, y: number, z: number): string =>
     `${x} × ${y} × ${z}\u202Fmm`,
   plateNote: "the volume every design is checked against — slicing stays in Orca",
+  /** The plate's caption qualifier for an unconfirmed envelope — the numbers
+   *  are the API's best report, not yet checked against the machine. The
+   *  deck's honest-degradation pattern: a qualifier, never a hidden plate. */
+  plateCaptionUnverified: " — not yet confirmed against your machine",
 } as const;
 
 export const shell = {

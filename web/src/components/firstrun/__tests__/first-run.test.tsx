@@ -91,7 +91,7 @@ describe("FirstRun", () => {
 
 describe("PlateBackdrop", () => {
   it("draws the plate to scale — the SVG viewBox matches the envelope dimensions", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     // The viewBox is `0 0 x z` — the plate's top view: x wide, z deep.
@@ -101,24 +101,40 @@ describe("PlateBackdrop", () => {
   });
 
   it("draws a different plate for different envelope dimensions", () => {
-    const { container } = render(<PlateBackdrop x={220} y={220} z={255} />);
+    const { container } = render(<PlateBackdrop x={220} y={220} z={255} verified={false} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
     expect(svg!.getAttribute("viewBox")).toBe("0 0 220 255");
   });
 
   it("renders the caption with the envelope numbers (from the deck)", () => {
-    render(<PlateBackdrop x={320} y={320} z={300} />);
+    render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
     expect(screen.getByTestId("plate-caption").textContent).toBe(copy.firstRun.plateCaption(320, 320, 300));
   });
 
+  it("the unconfirmed envelope's caption carries the qualifier; the confirmed one does not", () => {
+    const qualifier = copy.firstRun.plateCaptionUnverified;
+    // verified: false — the caption must say the numbers are not yet confirmed.
+    const first = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
+    const unconfirmedCaption = screen.getByTestId("plate-caption").textContent ?? "";
+    // The dimensions are still stated — a to-scale backdrop is genuinely
+    // useful; it just must not claim to be confirmed.
+    expect(unconfirmedCaption).toContain(copy.firstRun.plateCaption(320, 320, 300));
+    expect(unconfirmedCaption).toContain(qualifier);
+    first.unmount();
+    // verified: true — the same numbers, no qualifier.
+    render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    const confirmedCaption = screen.getByTestId("plate-caption").textContent ?? "";
+    expect(confirmedCaption).not.toContain(qualifier);
+  });
+
   it("renders the plate note (from the deck)", () => {
-    render(<PlateBackdrop x={320} y={320} z={300} />);
+    render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
     expect(screen.getByTestId("plate-note").textContent).toBe(copy.firstRun.plateNote);
   });
 
   it("the plate is low-contrast — the outline uses the hairline colour, not the marker", () => {
-    const { container } = render(<PlateBackdrop x={320} y={320} z={300} />);
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
     const rect = container.querySelector("rect.plate-outline");
     expect(rect).not.toBeNull();
     // The outline is the hairline colour at very low opacity — a backdrop,
