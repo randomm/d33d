@@ -180,7 +180,7 @@ describe("Filmstrip", () => {
     expect(pos.textContent).toContain("v2");
     expect(pos.textContent).toContain("D 30→45");
     // The first version (no parent, diff_count 0) shows the label alone.
-    expect(screen.getByTestId("filmstrip-pos-1").textContent).toBe("v1");
+    expect(screen.getByTestId("filmstrip-pos-1").textContent).toBe(" · v1");
   });
 
   it("shows a thumbnail when the version has one", () => {

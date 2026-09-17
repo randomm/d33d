@@ -165,7 +165,7 @@ export function Filmstrip({
                 {v.name}
               </span>
               <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                {`v${v.id}`}
+                {` · v${v.id}`}
                 {diff !== null ? ` · ${diff}` : ""}
               </span>
               {fork !== undefined && (
