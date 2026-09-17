@@ -78,6 +78,10 @@ export interface VersionTimelineEntry {
    *  GET /versions/{id} — the diff badge is computed in the timeline route
    *  from the parent pointer. */
   diff_count: number;
+  /** The last 3MF export of this version, ISO-8601 UTC (issue #126) —
+   *  server-side state, so the filmstrip mark survives a page reload.
+   *  `null` when the version was never exported. */
+  exported_at: string | null;
 }
 
 /**
@@ -468,6 +472,32 @@ export class ApiClient {
       `/api/projects/${id}/versions/${versionId}`,
       input,
     );
+  }
+
+  /**
+   * Record that the 3MF of a SPECIFIC version was exported (issue #126).
+   * The mark belongs to the version actually downloaded — not necessarily
+   * the latest — and is server-side state (it survives a page reload).
+   * The SPA calls this only AFTER a successful download, so no failed or
+   * cancelled export can set a mark.
+   *
+   * NOTE (follow-up wiring): the DOWNLOAD route
+   * `GET /api/projects/{id}/model.3mf` does not exist server-side yet (the
+   * 3MF is produced by d33d/print_validation.py but not exposed over HTTP —
+   * the same follow-up as `downloadModel3MF`). The mark route is real and
+   * lands now, so the reload-survival contract is in place before the
+   * download wires up.
+   */
+  async recordExport(
+    id: number,
+    versionId: number,
+  ): Promise<VersionTimelineEntry> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/versions/${versionId}/export`,
+      { method: "POST" },
+    );
+    if (!res.ok) await throwFor(res);
+    return (await res.json()) as VersionTimelineEntry;
   }
 
   /**

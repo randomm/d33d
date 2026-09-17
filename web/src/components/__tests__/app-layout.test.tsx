@@ -22,7 +22,7 @@ import { useEffect } from "react";
 import App from "../../App";
 
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
-import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
+import { ApiClient, ApiError, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project, RegionEditResult } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { PointSelectedEvent } from "../viewer/PickLayer";
@@ -215,8 +215,30 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   // the once-only stub is in play — the same fire-once-race class as
   // issue #109's `waitForResponse(POST /api/projects)`.
   // Settling the mount's listVersions here removes the stray fetch
-  // entirely: no retry, no sleep, no bumped timeout.
+  // entirely: no retry, no sleep, no bumped timeout. The entry carries
+  // the full VersionTimelineEntry shape (including exported_at, issue
+  // #126) so any test that overrides this stub with fewer fields still
+  // matches the timeline's declared type.
   vi.spyOn(client, "listVersions").mockResolvedValue([]);
+  // The export's completion moment (issue #126) POSTs the mark to the
+  // backend after a successful download. Stubbed here so the export tests
+  // never reach the global fetch (which the upload-wiring block below
+  // replaces with a bare `vi.fn()`).
+  vi.spyOn(client, "recordExport").mockResolvedValue({
+    id: 1,
+    name: "v1",
+    params: {},
+    created_by_message: "",
+    parent: null,
+    restored_from: null,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-01T00:00:00Z",
+    diff_count: 0,
+    exported_at: "2026-01-02T00:00:00Z",
+  });
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
   vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
   // App fetches the build envelope on mount (issue #128) for the first-run
@@ -284,6 +306,122 @@ describe("App layout", () => {
     // Brief is the always-visible parameter surface instead.
     expect(screen.queryByTestId("pinned-strip")).toBeNull();
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  });
+
+  it("a successful export appends the completion turn naming the file and records the mark (issue #126)", async () => {
+    // The project resolves (PROJECT, name "untitled project") and one
+    // version exists (v1) — the export button targets the latest version.
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+    ]);
+    const blob = new Blob(["fake 3mf"], { type: "model/3mf" });
+    vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    // The mark round-trip: recordExport resolves, then listVersions is
+    // re-fetched (the mark appears in the timeline for this session). The
+    // re-fetch returns the same entry with the mark set.
+    vi.spyOn(client, "recordExport").mockResolvedValue({
+      id: 1,
+      name: "v1",
+      params: {},
+      created_by_message: "",
+      parent: null,
+      restored_from: null,
+      forked_from: null,
+      pinned: false,
+      archived: false,
+      thumbnail: null,
+      created_at: "2026-01-01T00:00:00Z",
+      diff_count: 0,
+      exported_at: "2026-01-02T00:00:00Z",
+    });
+    const listVersions = vi
+      .spyOn(client, "listVersions")
+      .mockResolvedValue([
+        {
+          id: 1,
+          name: "v1",
+          params: {},
+          created_by_message: "",
+          parent: null,
+          restored_from: null,
+          forked_from: null,
+          pinned: false,
+          archived: false,
+          thumbnail: null,
+          created_at: "2026-01-01T00:00:00Z",
+          diff_count: 0,
+          exported_at: null,
+        },
+      ]);
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(listVersions).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    // The completion turn: copy.shell.exportDone(filename), where the
+    // filename is the deck's slug for ("untitled project", "v1").
+    const done = await screen.findByText(/untitled-project-v1\.3mf\. Open it in Orca/);
+    expect(done.textContent).toContain("untitled-project-v1.3mf");
+    expect(done.textContent).toContain("Open it in Orca");
+    // The mark was recorded for the exported version (the latest — v1 here
+    // is both, so the "not necessarily latest" case is pinned in the
+    // component tests, where an older version is exported instead).
+    expect(client.recordExport).toHaveBeenCalledWith(7, 1);
+  });
+
+  it("a failed export appends no completion turn and records no mark (issue #126)", async () => {
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+    ]);
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(404, "Not Found"),
+    );
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    // No completion turn: nothing in the transcript names the file.
+    expect(
+      screen.queryByText(/untitled-project-v1\.3mf\. Open it in Orca/),
+    ).toBeNull();
+    // No mark recorded.
+    expect(client.recordExport).not.toHaveBeenCalled();
   });
 
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {

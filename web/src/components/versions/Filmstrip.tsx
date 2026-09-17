@@ -147,6 +147,11 @@ export function Filmstrip({
               data-testid={`filmstrip-slot-${v.id}`}
               onClick={() => onCompareSelect(v.id)}
               aria-current={isCurrent ? "true" : undefined}
+              title={
+                v.exported_at !== null
+                  ? copy.history.exportedAt(v.exported_at)
+                  : undefined
+              }
               style={
                 isCurrent
                   ? { outline: "2px solid var(--color-live)", outlineOffset: 2 }
@@ -175,6 +180,20 @@ export function Filmstrip({
                   aria-label={copy.history.variantCount(fork)}
                 >
                   ⑂ {copy.history.variantCount(fork)}
+                </span>
+              )}
+              {/* The exported mark (issue #126): which version was actually
+                  handed out as a 3MF. Server-side state — it survives a
+                  page reload. The mark is a WORD, not a colour: the motion
+                  budget and the marker-colour invariant leave no room for
+                  a badge colour here, and the time rides the title (the
+                  deck's exportedAt) rather than a new string. */}
+              {v.exported_at !== null && (
+                <span
+                  className="filmstrip-exported"
+                  data-testid={`filmstrip-exported-${v.id}`}
+                >
+                  {copy.history.exported}
                 </span>
               )}
             </button>

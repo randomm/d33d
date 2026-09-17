@@ -170,6 +170,10 @@ export default function App({ client }: AppProps) {
   // conversation and the design together).
   const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
   const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
+  // The project's display name — the export filename's slug source
+  // (copy.shell.exportFilename reads it; the App creates the project on
+  // mount and knows it, so the filename is real, never a guess).
+  const [projectName, setProjectName] = useState("untitled project");
 
   // The design-state block (issue #120 / #123) — the Brief's data. Fetched
   // once the project exists and re-fetched on every version-created frame
@@ -594,7 +598,10 @@ export default function App({ client }: AppProps) {
     apiClient
       .createProject({ name: "untitled project" })
       .then((project) => {
-        if (!cancelled) setProjectId(project.id);
+        if (!cancelled) {
+          setProjectId(project.id);
+          setProjectName(project.name);
+        }
       })
       .catch((e) => {
         if (!cancelled) {
@@ -1037,6 +1044,53 @@ export default function App({ client }: AppProps) {
   // (streamErrorKind !== "stream" hides the control); a plain chat failure
   // whose request carried no region selection is. Guarded by
   // `!designLoopInFlight` so a retry cannot double-send.
+  // The export's designed ending (issue #126). Fires ONLY on a successful
+  // download (Export3MF calls it after the bytes are in the browser):
+  //   1. the conversation gains its final assistant turn — the file is
+  //      named and the handover to Orca is said once
+  //      (copy.shell.exportDone, copy.shell.exportFilename);
+  //   2. the version actually exported is marked in the filmstrip —
+  //      server-side (POST …/versions/{id}/export), so the mark survives
+  //      a page reload; a failed or cancelled download never reaches here,
+  //      so it can neither append the turn nor set the mark.
+  // The completion turn is CLIENT session state — a reload re-fetches the
+  // versions and the mark, but not the transcript; the mark, not the turn,
+  // is the half that must outlive the session (a maker three days later
+  // asks which version they printed).
+  const handleExported = useCallback(
+    async (versionId: number | undefined) => {
+      if (projectId === null || versionId === undefined) return;
+      const version = versions.find((v) => v.id === versionId);
+      const versionLabel = version?.name ?? `v${versionId}`;
+      const filename = copy.shell.exportFilename(projectName, versionLabel);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `msg-${Date.now()}-export-done`,
+          role: "assistant",
+          content: copy.shell.exportDone(filename),
+        },
+      ]);
+      try {
+        await apiClient.recordExport(projectId, versionId);
+        // The mark is now server state — pick it up in the timeline so the
+        // filmstrip shows it in THIS session, not only after a reload.
+        const vs = await apiClient.listVersions(projectId);
+        setVersions(vs);
+      } catch {
+        // The download already happened — the 3MF is in the browser and the
+        // completion turn is appended. Only the mark is missing; say so
+        // plainly rather than pretend the export itself failed.
+        setStreamError({
+          message: "The export was downloaded, but the exported mark could not be saved.",
+          detail: undefined,
+          retryable: false,
+        });
+      }
+    },
+    [projectId, projectName, versions, apiClient],
+  );
+
   const handleRetry = useCallback(() => {
     if (designLoopInFlight) return;
     const text = lastUserMessageRef.current;
@@ -1626,7 +1680,13 @@ export default function App({ client }: AppProps) {
             zIndex: Z_INDEX.panels,
           }}
         >
-          <Export3MF projectId={projectId} client={apiClient} />
+          <Export3MF
+            projectId={projectId}
+            projectName={projectName}
+            versionId={versions.length > 0 ? versions[versions.length - 1].id : undefined}
+            client={apiClient}
+            onExported={(vid) => void handleExported(vid)}
+          />
         </div>
       )}
     </div>

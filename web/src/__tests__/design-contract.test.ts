@@ -492,6 +492,7 @@ describe("design contract", () => {
         thumbnail: null,
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
+        exported_at: null,
       },
       {
         id: 2,
@@ -506,6 +507,7 @@ describe("design contract", () => {
         thumbnail: null,
         created_at: "2026-01-02T00:00:00Z",
         diff_count: 1,
+        exported_at: null,
       },
     ];
     const strip = render(
