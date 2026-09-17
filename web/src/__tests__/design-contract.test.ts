@@ -46,7 +46,9 @@ import { createElement } from "react";
 import copy, { mm } from "../copy";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
 import { Filmstrip } from "../components/versions/Filmstrip";
-import type { VersionTimelineEntry } from "../lib/api";
+import { CompareView } from "../components/versions/CompareView";
+import { VariantGallery } from "../components/versions/VariantGallery";
+import type { VersionCompare, VersionTimelineEntry } from "../lib/api";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -408,27 +410,43 @@ describe("design contract", () => {
   });
 
   it("no version surface renders a commit hash or branch name", () => {
-    // W13 / W16 invariant: the filmstrip (and every version surface) never
-    // shows git — no commit hashes, no branch names. The doc comment names the
-    // invariant in words, so the source tripwire targets the concrete thing a
-    // naive component would actually print: the git-only field the API carries
-    // (branch_name) — absent here. The real guarantee is the render check
-    // below: the DOM carries no 7-40 char hex run and no "branch:" phrasing,
-    // on a fixture whose name/diff would NOT be a hash.
+    // W13 / W16 invariant: no version surface ever shows git — no commit
+    // hashes, no branch names. The guarantee is behavioural, not lexical:
+    // a naive component could print a hash in a visible slot, in an
+    // alt/title attribute (textContent excludes attributes), or as a
+    // 7-char short hash — every one of those shapes must trip this check.
     //
-    // Source tripwire: the filmstrip must not reference the git-only field
-    // (branch_name) that a naive component would render.
-    const filmstrip = readFileSync(
-      join(SRC, "components", "versions", "Filmstrip.tsx"),
-      "utf8",
-    );
-    expect(filmstrip).not.toMatch(/\bbranch_name\b/);
-    expect(filmstrip).not.toMatch(/\.commit\b/i);
+    // The scan therefore walks BOTH textContent and every attribute value
+    // of every rendered element, and the hex detector is NOT word-anchored:
+    // the old /\b[0-9a-f]{7,40}\b/ failed on the real DOM because the slot
+    // renders the name immediately followed by `v{id}`, fusing a real hash
+    // into a 41-char run where the trailing 'v' destroys the word boundary
+    // (and a 7-char hash is itself at the anchor's edge).
+    const assertNoGit = (root: Element, label: string) => {
+      const nodes: Element[] = [root, ...Array.from(root.querySelectorAll("*"))];
+      const violations: string[] = [];
+      for (const el of nodes) {
+        const text = el.textContent ?? "";
+        if (/[0-9a-f]{7,}/i.test(text)) {
+          violations.push(`hex run in text: "${text.slice(0, 80)}"`);
+        }
+        if (/(?:feature|fix|hotfix|release|main|develop)\/[A-Za-z0-9_-]+/i.test(text)) {
+          violations.push(`branch-like name in text: "${text.slice(0, 80)}"`);
+        }
+        for (const attr of el.attributes) {
+          if (/[0-9a-f]{7,}/i.test(attr.value)) {
+            violations.push(`hex run in attribute ${attr.name}: "${attr.value.slice(0, 80)}"`);
+          }
+          if (/(?:feature|fix|hotfix|release|main|develop)\/[A-Za-z0-9_-]+/i.test(attr.value)) {
+            violations.push(`branch-like name in attribute ${attr.name}: "${attr.value.slice(0, 80)}"`);
+          }
+        }
+      }
+      expect(violations, `${label}: git-shaped output in DOM\n  ${violations.join("\n  ")}`).toEqual([]);
+    };
 
-    // Render check: feed two versions and prove the rendered DOM has no
-    // hex-hash run and no "branch:" phrasing. A naive component that printed a
-    // git hash field would add a 40-char hex run this regex catches; one that
-    // printed a branch name would add the "branch:" phrasing.
+    // (1) The filmstrip: a plain version with a diff fragment plus a version
+    //     whose name contains no 7+ hex run and no branch-like grammar.
     const versions: VersionTimelineEntry[] = [
       {
         id: 1,
@@ -459,7 +477,7 @@ describe("design contract", () => {
         diff_count: 1,
       },
     ];
-    const { container } = render(
+    const strip = render(
       createElement(Filmstrip, {
         versions,
         passInFlight: false,
@@ -468,8 +486,51 @@ describe("design contract", () => {
         onCompareSelect: () => {},
       }),
     );
-    const text = container.textContent ?? "";
-    expect(text).not.toMatch(/\b[0-9a-f]{7,40}\b/i);
-    expect(text).not.toMatch(/\bbranch\s*:/i);
+    assertNoGit(strip.container, "filmstrip");
+
+    // (2) The compare view: a 40-char hash fused directly against the
+    //     version number (the fusion shape that fooled the old word-boundary
+    //     check) and a branch-like name, each in text and in the viewport
+    //     thumbnails' alt (attributes textContent cannot see).
+    const compare: VersionCompare = {
+      project_id: 7,
+      a: { ...versions[0], id: 10, name: "rod 45 off wall" },
+      b: {
+        ...versions[1],
+        id: 11,
+        name: "rod 45.0 off wall",
+        thumbnail: null,
+      },
+      diff: {
+        count: 1,
+        changed: ["D"],
+        added: [],
+        removed: [],
+      },
+      shared_rotation: {
+        units: "mm",
+        axis_convention: "z-up",
+        identical_convention: true,
+      },
+    };
+    const cmp = render(createElement(CompareView, { compare, aId: 10, bId: 11 }));
+    assertNoGit(cmp.container, "compare-view");
+
+    // (3) The pinned gallery: a real card (name with no branch-like grammar,
+    //     no 7+ hex run in name, src or alt).
+    const gallery = render(
+      createElement(VariantGallery, {
+        cards: [
+          {
+            ...versions[1],
+            id: 12,
+            name: "rod 45.0 off wall",
+            pinned: true,
+            actions: ["set-as-main", "branch-from", "archive"] as const,
+          },
+        ],
+      }),
+    );
+    assertNoGit(gallery.container, "variant-gallery");
   });
 });
