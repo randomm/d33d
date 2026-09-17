@@ -6,9 +6,10 @@ and the CLI runs it as ``python evals/run.py <assert-name>`` — the
 assert's ``value`` selects one of the two assert functions below:
 
 * ``deterministic_gates_pass`` — the case's gate phase (gates 1-7 via
-  ``d33d.evals.harness.run_case_gates``). promptfoo runs this assert
-  BEFORE the judge assert; a failing gate short-circuits the judge
-  (the spec's "7 deterministic gates before any vision judge").
+  ``d33d.evals.harness.run_case_gates``) run on the MODEL'S OUTPUT,
+  rendered through the injected render worker. promptfoo runs this
+  assert BEFORE the judge assert; a failing gate short-circuits the
+  judge (the spec's "7 deterministic gates before any vision judge").
 * ``vision_judge_pass`` — the judge verdict (``d33d.evals.judge.
   judge_render``) for the gate-passing candidate.
 
@@ -17,8 +18,9 @@ local run without the promptfoo CLI: it loads the promptfoo config
 (:func:`d33d.evals.harness.load_promptfoo_config` — validating the
 cases floor of 20 and the 5 hash-pinned prompts), loads the golden set
 (``d33d.evals.case_schema.load_golden_set`` — re-checking every prompt
-pin), runs each case through ``d33d.evals.harness.run_case`` (gates ->
-design call -> judge, in that order), and writes the report
+pin), runs each case through ``d33d.evals.harness.run_case`` (design
+call -> real render of the model's output -> gates on that output ->
+judge, in that order — issue #108), and writes the report
 (``d33d.evals.report.build_report`` — the "best-candidate + reason"
 shape the design loop uses).
 
@@ -62,6 +64,7 @@ import httpx
 
 from d33d.evals.case_schema import load_golden_set
 from d33d.evals.harness import (
+    RenderFn,
     RequestFactory,
     load_promptfoo_config,
     run_case,
@@ -174,154 +177,34 @@ async def _run_all(
     request_factory: RequestFactory,
     model_id: str,
     cases_dir: Path,
-    catalogue_path: Path | None = None,
+    render_fn: RenderFn,
 ) -> str:
     """Run every golden-set case through the harness; return the report
     JSON.
 
-    The gates run first (per case, via ``run_case_gates``), then the
-    design call, then the judge — the ordering the spec pins. The
-    report is ``d33d.evals.report.build_report`` over the per-case
-    outcomes (the "best-candidate + reason" shape the design loop
-    uses).
+    Per case, the harness (issue #108 ordering) runs the design call
+    FIRST, then the injected ``render_fn`` renders the MODEL'S OUTPUT
+    through the render worker, then the gates run on that rendered
+    output, then the judge. The report is
+    ``d33d.evals.report.build_report`` over the per-case outcomes (the
+    "best-candidate + reason" shape the design loop uses).
     """
     cases = load_golden_set(cases_dir, repo_root)
 
     outcomes = []
     for case_id in sorted(cases):
         case = cases[case_id]
-        # The render input for this case: a local run has no render
-        # worker — the candidate is the case's own reference (the .scad
-        # stand-in the model is expected to reproduce). The harness
-        # shells into the render worker directly in a real run (the
-        # structural exclusion of the production hook); here the
-        # stand-in is a safe default for a promptfoo dry-run.
-        render_result, stl_path, mesh = _local_render_inputs(repo_root, case)
         outcome = await run_case(
             case=case,
             repo_root=repo_root,
-            render_result=render_result,
-            mesh=mesh,
-            stl_path=stl_path,
             model_id=model_id,
             request_factory=request_factory,
+            render_fn=render_fn,
         )
         outcomes.append(outcome)
 
     report = build_report(outcomes)
     return report.to_json()
-
-
-def _local_render_inputs(repo_root: Path, case: Any) -> tuple[Any, str | None, Any]:
-    """The render inputs a local (no render-worker) run can supply.
-
-    A local ``--run`` is a design-loop dry-run: the case's reference
-    fixture (a ``.scad`` stand-in) is rendered best-effort with
-    ``openscad`` so the case's own ``gate_expectations`` decide the
-    outcome — declared gates pass when their inputs are present (the
-    STL exists, the mesh is watertight) and gates that need the render
-    worker's pipeline (slice) fall out of the case's declared set or
-    report their pinned N/A. When ``openscad`` is not invocable the
-    case declares ``compile`` but the render stand-in cannot supply an
-    STL: the case then fails at gate 2 (``stl_export``) or the
-    watertight gate — a visible, correct result, not a silent
-    gate-2 failure for every case that merely declared ``stl_export``.
-    """
-    stl_path: str | None = None
-    mesh: Any = None
-    render_result = _null_render()
-    if case.reference_photo:
-        reference = case.reference_photo
-    elif case.rendered_views:
-        reference = case.rendered_views[0]
-    else:
-        reference = None
-    if reference:
-        fixture = Path(reference)
-        if not fixture.is_absolute():
-            fixture = repo_root / fixture
-        # Bound + confine the fixture: an unbounded fixture image sent to
-        # the LLM is a cost/volume DoS vector, and a case file that
-        # references a path outside the repo (symlink-escape) must not be
-        # read. The resolved path must stay inside ``evals/``.
-        resolved = fixture.resolve()
-        if not resolved.is_relative_to(repo_root.resolve() / "evals"):
-            print(f"# skip fixture outside evals/: {reference}", file=sys.stderr)
-            return render_result, stl_path, mesh
-        if fixture.suffix == ".scad":
-            mesh = _scad_to_mesh(repo_root, fixture)
-            if mesh is not None:
-                stl_path = f"local:{fixture.name}"
-        elif resolved.is_file() and resolved.stat().st_size > MAX_FIXTURE_IMAGE_BYTES:
-            # An over-size image fixture is skipped, not uploaded to the LLM.
-            print(
-                f"# skip image fixture over {MAX_FIXTURE_IMAGE_BYTES} bytes: {reference}",
-                file=sys.stderr,
-            )
-    return render_result, stl_path, mesh
-
-
-def _null_render() -> Any:
-    """A render-worker result with ``error_class='ok'`` and no STL.
-
-    A local run without the render worker (the default for ``--run``)
-    has no real render; the harness's gates consume this stand-in
-    (gate 1 passes on ``ok``; gate 2 is then decided by the case's own
-    declared expectations and the rendered STL, see
-    :func:`_local_render_inputs`).
-    """
-
-    class _Render:
-        error_class = "ok"
-        stderr = ""
-        scad_source = ""
-
-    return _Render()
-
-
-#: Hard cap on a fixture image the local ``--run`` path sends to the LLM
-#: (10 MB — a reference photo / rendered view is a few hundred KB in
-#: practice; larger fixtures are rejected, not uploaded).
-MAX_FIXTURE_IMAGE_BYTES = 10 * 1024 * 1024
-
-
-def _scad_to_mesh(repo_root: Path, scad_path: Path) -> Any:
-    """Best-effort mesh for a ``.scad`` fixture (``None`` when openscad
-    is not invocable or the load fails).
-
-    The case's ``.scad`` stand-in is the reference geometry; the judge
-    and the report use the mesh when available. A local run without
-    openscad simply has ``None`` (the judge evaluates on the source +
-    text only).
-    """
-    if not scad_path.is_absolute():
-        scad_path = repo_root / scad_path
-    if not scad_path.is_file():
-        return None
-    # The .scad path is derived from case data — confine the resolved path
-    # to the repo before shelling out to openscad (symlink-escape).
-    resolved = scad_path.resolve()
-    if not resolved.is_relative_to(repo_root.resolve()):
-        return None
-    try:
-        import subprocess
-        import tempfile
-
-        import trimesh
-
-        with tempfile.TemporaryDirectory() as tmp:
-            stl = Path(tmp) / "model.stl"
-            proc = subprocess.run(
-                ["openscad", "--stdout", str(stl), str(resolved)],
-                capture_output=True,
-                check=False,
-                timeout=60,
-            )
-            if proc.returncode != 0 or not stl.is_file():
-                return None
-            return trimesh.load(str(stl), process=False)
-    except (OSError, ValueError, KeyError):
-        return None
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -332,9 +215,10 @@ def main(argv: list[str] | None = None) -> int:
     and calls it with ``(output, test, vars)``).
 
     ``python evals/run.py --run`` — the local runner (no promptfoo CLI):
-    loads the config, resolves the model from the catalogue, runs every
-    golden-set case through the harness (gates -> design call -> judge),
-    and writes the report to stdout.
+    loads the config, resolves the model from the catalogue, and runs
+    every golden-set case through the harness (design call -> real
+    render of the model's output via the injected render worker -> gates
+    -> judge) — then writes the report to stdout.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -351,20 +235,38 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv[0] == "--run":
         parser = argparse.ArgumentParser(description="run the eval harness locally")
-        parser.add_argument("--catalogue", type=Path, default=None,
-                             help="path to models.yaml (default: the config's "
-                                  "catalogue_path or the app default)")
-        parser.add_argument("--model", type=str, default=None,
-                             help="explicit model id override (default: the "
-                                  "catalogue's design role)")
-        parser.add_argument("--base-url", type=str, default=None,
-                             help="OpenAI-compatible base URL (default: the "
-                                  "catalogue's provider base)")
-        parser.add_argument("--api-key", type=str, default=None,
-                             help="API key (default: D33D_EVAL_LLM_KEY env, "
-                                  "or the catalogue's provider key)")
-        parser.add_argument("--cases", type=Path, default=None,
-                             help="cases dir (default: the config's cases_dir)")
+        parser.add_argument(
+            "--catalogue",
+            type=Path,
+            default=None,
+            help="path to models.yaml (default: the config's "
+            "catalogue_path or the app default)",
+        )
+        parser.add_argument(
+            "--model",
+            type=str,
+            default=None,
+            help="explicit model id override (default: the catalogue's design role)",
+        )
+        parser.add_argument(
+            "--base-url",
+            type=str,
+            default=None,
+            help="OpenAI-compatible base URL (default: the catalogue's provider base)",
+        )
+        parser.add_argument(
+            "--api-key",
+            type=str,
+            default=None,
+            help="API key (default: D33D_EVAL_LLM_KEY env, "
+            "or the catalogue's provider key)",
+        )
+        parser.add_argument(
+            "--cases",
+            type=Path,
+            default=None,
+            help="cases dir (default: the config's cases_dir)",
+        )
         args = parser.parse_args(argv[1:])
 
         repo_root = _REPO_ROOT
@@ -420,6 +322,15 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         factory = make_openai_factory(base_url, api_key)
+        # The render seam (issue #108): the REAL Docker render worker —
+        # the harness's gates run on the model's rendered output, never
+        # on a reference fixture. The worker's temp/persist dirs live
+        # under $HOME (Docker on macOS cannot see /tmp — a /tmp render
+        # dir causes a silent multi-minute hang).
+        from d33d.render_worker import render_for_design_loop
+
+        render_fn: RenderFn = render_for_design_loop
+
         report_json = asyncio.run(
             _run_all(
                 repo_root=repo_root,
@@ -427,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
                 request_factory=factory,
                 model_id=model_id,
                 cases_dir=cases_dir,
-                catalogue_path=catalogue_path,
+                render_fn=render_fn,
             )
         )
         print(report_json)

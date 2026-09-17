@@ -13,7 +13,13 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[test]"
-      - run: ./scripts/test
+      # ``not live`` (issue #108): the live suite drives the REAL LLM and
+      # the REAL Docker render worker (trailing minutes per case, token
+      # cost, non-deterministic). CI has no repository secret for the key
+      # and no Docker — the marker exclusion is what keeps this fast
+      # job from ever calling the real LLM. The live suite is NOT a PR
+      # gate: it runs locally via `uv run pytest -m live` (see AGENTS.md).
+      - run: pytest -m "not slow and not live"
 
   web:
     runs-on: ubuntu-latest

@@ -72,8 +72,23 @@ def test_config_references_the_hash_pinned_prompts() -> None:
 
 def test_config_python_asserts_point_at_run_py_with_gates_first() -> None:
     """The config's custom asserts are python asserts through
-    ``evals/run.py`` with the deterministic-gates assert present — the
-    7 gates run before the judge."""
+    ``evals/run.py`` with the deterministic-gates assert present.
+
+    The assert name ``deterministic_gates_pass`` is unchanged, but its
+    MEANING changed with issue #108's re-ordering: it now means "the 7
+    gates ran on the MODEL'S OUTPUT, rendered through the real render
+    worker, AFTER the design call" — previously it meant "the gates
+    (run against a null render + a locally-openSCAD'd copy of the
+    case's OWN reference .scad) passed", i.e. the golden set measured
+    that the reference fixtures were valid, which is a vacuous
+    measurement of the model. The config only pins the assert's
+    presence, not the ordering — the ordering now lives in
+    ``d33d.evals.harness.run_case`` (design call -> render_fn(scad) ->
+    gates -> judge) and is pinned structurally (the harness has no
+    render_result/mesh/stl_path parameters any more) plus in
+    ``tests/evals/test_adversarial_cases.py`` (``render.handed``
+    carries the design call's output).
+    """
     doc = _load_config()
     asserts = doc["defaults"]["assert"]
     assert asserts, "no asserts"
@@ -198,61 +213,17 @@ def test_deterministic_gates_pass_passes_when_no_gates() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Local-run fixture bounds (evals/run.py --run path)
+# Local-run fixture bound tests (evals/run.py --run path) — REMOVED for
+# issue #108. The reference-fixture render path (``_local_render_inputs``
+# / ``_null_render`` / ``_scad_to_mesh`` / ``MAX_FIXTURE_IMAGE_BYTES``)
+# is gone from evals/run.py: the harness's gates now run on the MODEL'S
+# OUTPUT rendered through the injected render_fn, never on the case's
+# own reference fixture. The three tests below used to pin that path's
+# path-escape / over-size bounds; they are deleted with the path they
+# guarded (the image-size bound is a fixture-sent-to-the-LLM concern;
+# the harness's own message assembly still inlines image parts, and the
+# live-suite equivalents live in tests/live_e2e/).
 # ---------------------------------------------------------------------------
-
-
-class _CaseRef:
-    """Duck of the case's reference fields for the local-render input path."""
-
-    def __init__(self, reference_photo: str | None = None,
-                 rendered_views: tuple[str, ...] = ()) -> None:
-        self.reference_photo = reference_photo
-        self.rendered_views = rendered_views
-
-
-def test_local_render_inputs_rejects_path_outside_evals(tmp_path) -> None:
-    """A case fixture that resolves OUTSIDE ``evals/`` (symlink-escape) is
-    skipped, not read — the resolved path must stay inside ``evals/``."""
-    run = _load_run_module()
-    repo_root = tmp_path / "repo"
-    (repo_root / "evals").mkdir(parents=True)
-    outside = tmp_path / "outside.bin"
-    outside.write_bytes(b"x")
-    case = _CaseRef(reference_photo=str(outside))
-    _render, stl, mesh = run._local_render_inputs(repo_root, case)
-    assert stl is None
-    assert mesh is None
-
-
-def test_local_render_inputs_rejects_overlarge_image_fixture(tmp_path) -> None:
-    """An image fixture over the 10 MB cap is skipped (never uploaded to
-    the LLM) — the size bound is a cost/volume guard, not a crash.
-    Only image fixtures (non-``.scad``) are subject to the image cap."""
-    run = _load_run_module()
-    repo_root = tmp_path / "repo"
-    evals_dir = repo_root / "evals"
-    evals_dir.mkdir(parents=True)
-    big = evals_dir / "big.png"
-    # Write just over the 10 MB cap in one block (the content is never
-    # read — the size check skips before any processing).
-    big.write_bytes(b"x" * (run.MAX_FIXTURE_IMAGE_BYTES + 1))
-    case = _CaseRef(reference_photo=str(big))
-    _render, stl, mesh = run._local_render_inputs(repo_root, case)
-    assert stl is None
-    assert mesh is None
-
-
-def test_scad_to_mesh_rejects_path_outside_repo(tmp_path) -> None:
-    """A ``.scad`` fixture that resolves OUTSIDE the repo (symlink-escape)
-    is never handed to openscad — ``None`` (no mesh) is returned."""
-    run = _load_run_module()
-    repo_root = tmp_path / "repo"
-    repo_root.mkdir(parents=True)
-    outside = tmp_path / "outside.scad"
-    outside.write_text("cube([1, 1, 1]);\n", encoding="utf-8")
-    mesh = run._scad_to_mesh(repo_root, outside)
-    assert mesh is None
 
 
 # ---------------------------------------------------------------------------
