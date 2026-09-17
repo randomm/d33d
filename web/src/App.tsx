@@ -944,7 +944,7 @@ export default function App({ client }: AppProps) {
           setDesignLoopStep(null);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData],
+    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData, refetchDesignState],
   );
 
   // The inline bar's submit path — routes the typed instruction through the

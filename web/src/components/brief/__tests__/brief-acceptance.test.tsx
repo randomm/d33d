@@ -255,7 +255,3 @@ describe("Brief — live pin collapses to chip", () => {
     expect(screen.getByTestId("brief-chip-resolved").textContent).toContain("60.0");
   });
 });
-
-// Import at the bottom to keep the top of the file clean; `vi` is used in
-// the first describe block above.
-import { vi } from "vitest";

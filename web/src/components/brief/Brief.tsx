@@ -208,6 +208,10 @@ export function Brief({
       );
     } else {
       const formatted = formatValue(primaryValue(entry));
+      // `null` must never reach the number cell — the unknown branch above
+      // is the only path that produces it, and a `?? 0` here would
+      // re-introduce issue #91's null→0 defect (the W9 contract assertion
+      // is the tripwire).
       valueNode =
         formatted === null ? (
           <span className="brief-value" data-testid="brief-value">
