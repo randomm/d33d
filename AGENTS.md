@@ -18,6 +18,9 @@ Every line of code is a liability. Before creating anything:
 
 If you cannot justify necessity, DO NOT CREATE IT.
 
+- **Keep source files under 500 lines.** A file past that is almost always doing more than one thing — it is the point where a reader stops holding it in their head. Prompt to split by responsibility, not a hard gate.
+- **Existing files:** 41 files were over 500 lines at commit b68fb20 (2026-02-26): 14 production (d33d/, web/src/, scripts/), 27 test. No retrofit required. A file being edited should be split when the change would push it further over; never create a new file over the limit.
+
 # Git Workflow
 
 ## Conventional commits
