@@ -32,4 +32,5 @@ packages = ["d33d"]
 testpaths = ["tests"]
 markers = [
     "slow: tests that require Docker (run only on the linux/amd64 target box, never in CI)",
+    "live: tests that drive a request through the REAL LLM and the REAL Docker render worker (issue #108) — never in CI, no repository secret exists for the key; run locally with `uv run pytest -m live` when Docker and TRAIL_OPENERS_LLM_KEY are available",
 ]

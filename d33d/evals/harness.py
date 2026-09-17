@@ -195,10 +195,14 @@ def load_promptfoo_config(
 
     providers = doc.get("providers")
     if not isinstance(providers, list) or not providers:
-        raise ValueError(f"promptfoo config {path}: 'providers' must be a non-empty list")
+        raise ValueError(
+            f"promptfoo config {path}: 'providers' must be a non-empty list"
+        )
     for provider in providers:
         if not isinstance(provider, dict):
-            raise TypeError(f"promptfoo config {path}: every provider must be a mapping")
+            raise TypeError(
+                f"promptfoo config {path}: every provider must be a mapping"
+            )
         provider_type = provider.get("provider") or provider.get("type")
         if not isinstance(provider_type, str) or not provider_type.startswith("openai"):
             raise ValueError(
@@ -214,8 +218,12 @@ def load_promptfoo_config(
 
     cases_dir = doc.get("cases_dir")
     if not isinstance(cases_dir, str) or not cases_dir:
-        raise ValueError(f"promptfoo config {path}: 'cases_dir' must be a non-empty string")
-    resolved_cases = Path(cases_dir) if Path(cases_dir).is_absolute() else root / cases_dir
+        raise ValueError(
+            f"promptfoo config {path}: 'cases_dir' must be a non-empty string"
+        )
+    resolved_cases = (
+        Path(cases_dir) if Path(cases_dir).is_absolute() else root / cases_dir
+    )
     case_files = sorted(resolved_cases.glob("*.json"))
     if len(case_files) < 20:
         raise ValueError(
@@ -225,8 +233,12 @@ def load_promptfoo_config(
 
     prompts_dir = doc.get("prompts_dir")
     if not isinstance(prompts_dir, str) or not prompts_dir:
-        raise ValueError(f"promptfoo config {path}: 'prompts_dir' must be a non-empty string")
-    resolved_prompts = Path(prompts_dir) if Path(prompts_dir).is_absolute() else root / prompts_dir
+        raise ValueError(
+            f"promptfoo config {path}: 'prompts_dir' must be a non-empty string"
+        )
+    resolved_prompts = (
+        Path(prompts_dir) if Path(prompts_dir).is_absolute() else root / prompts_dir
+    )
     prompt_files = sorted(resolved_prompts.glob("*.md"))
     if not prompt_files:
         raise ValueError(
@@ -238,7 +250,9 @@ def load_promptfoo_config(
         raise TypeError(f"promptfoo config {path}: 'defaults' must be a mapping")
     asserts = defaults.get("assert")
     if not isinstance(asserts, list) or not asserts:
-        raise ValueError(f"promptfoo config {path}: 'defaults.assert' must be a non-empty list")
+        raise ValueError(
+            f"promptfoo config {path}: 'defaults.assert' must be a non-empty list"
+        )
     for item in asserts:
         if not isinstance(item, dict) or item.get("type") != "python":
             raise ValueError(
@@ -305,13 +319,17 @@ def case_messages(
     / rendered view (base64 ``image_url`` part when the file is an
     on-disk image, a text reference otherwise).
     """
-    system = prompt_text if prompt_text is not None else (
-        repo_root / case.prompt.path
-    ).read_text(encoding="utf-8")
+    system = (
+        prompt_text
+        if prompt_text is not None
+        else (repo_root / case.prompt.path).read_text(encoding="utf-8")
+    )
     parts: list[dict[str, Any]] = [{"type": "text", "text": case.request}]
     if case.reference_photo:
         part = _image_part(repo_root, case.reference_photo)
-        parts.append(part if part is not None else _text_reference(case.reference_photo))
+        parts.append(
+            part if part is not None else _text_reference(case.reference_photo)
+        )
     for view in case.rendered_views:
         part = _image_part(repo_root, view)
         parts.append(part if part is not None else _text_reference(view))
@@ -335,7 +353,10 @@ async def _call_design(
     unparseable LLM response is not a design defect).
     """
     response = await request_factory(
-        {"model": model_id, "messages": [{"role": "system", "content": system}, *messages]}
+        {
+            "model": model_id,
+            "messages": [{"role": "system", "content": system}, *messages],
+        }
     )
     try:
         data = response.json()
@@ -361,7 +382,11 @@ async def _call_design(
 def _dims_dict(case: GoldenCase) -> dict[str, float] | None:
     if case.expected_dims is None:
         return None
-    return {"x": case.expected_dims.x, "y": case.expected_dims.y, "z": case.expected_dims.z}
+    return {
+        "x": case.expected_dims.x,
+        "y": case.expected_dims.y,
+        "z": case.expected_dims.z,
+    }
 
 
 def run_case_gates(
@@ -519,19 +544,22 @@ async def run_case(
     catalogue — never hardcoded here). ``request_factory`` is the
     injected LLM request path (the key stays inside it).
     """
-    base = dict(
-        case_id=case.case_id,
-        kind=case.kind,
-        prompt_version=case.prompt.prompt_version,
-        prompt_sha256=case.prompt.sha256,
-        request=case.request,
-    )
+    base = {
+        "case_id": case.case_id,
+        "kind": case.kind,
+        "prompt_version": case.prompt.prompt_version,
+        "prompt_sha256": case.prompt.sha256,
+        "request": case.request,
+    }
 
     # 1. The design call — the model's output is what the gates measure.
     system, messages = case_messages(case, repo_root)
     try:
         scad_source = await _call_design(
-            model_id=model_id, request_factory=request_factory, system=system, messages=messages
+            model_id=model_id,
+            request_factory=request_factory,
+            system=system,
+            messages=messages,
         )
     except ValueError as e:
         return CaseOutcome(

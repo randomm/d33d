@@ -235,20 +235,38 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv[0] == "--run":
         parser = argparse.ArgumentParser(description="run the eval harness locally")
-        parser.add_argument("--catalogue", type=Path, default=None,
-                             help="path to models.yaml (default: the config's "
-                                  "catalogue_path or the app default)")
-        parser.add_argument("--model", type=str, default=None,
-                             help="explicit model id override (default: the "
-                                  "catalogue's design role)")
-        parser.add_argument("--base-url", type=str, default=None,
-                             help="OpenAI-compatible base URL (default: the "
-                                  "catalogue's provider base)")
-        parser.add_argument("--api-key", type=str, default=None,
-                             help="API key (default: D33D_EVAL_LLM_KEY env, "
-                                  "or the catalogue's provider key)")
-        parser.add_argument("--cases", type=Path, default=None,
-                             help="cases dir (default: the config's cases_dir)")
+        parser.add_argument(
+            "--catalogue",
+            type=Path,
+            default=None,
+            help="path to models.yaml (default: the config's "
+            "catalogue_path or the app default)",
+        )
+        parser.add_argument(
+            "--model",
+            type=str,
+            default=None,
+            help="explicit model id override (default: the catalogue's design role)",
+        )
+        parser.add_argument(
+            "--base-url",
+            type=str,
+            default=None,
+            help="OpenAI-compatible base URL (default: the catalogue's provider base)",
+        )
+        parser.add_argument(
+            "--api-key",
+            type=str,
+            default=None,
+            help="API key (default: D33D_EVAL_LLM_KEY env, "
+            "or the catalogue's provider key)",
+        )
+        parser.add_argument(
+            "--cases",
+            type=Path,
+            default=None,
+            help="cases dir (default: the config's cases_dir)",
+        )
         args = parser.parse_args(argv[1:])
 
         repo_root = _REPO_ROOT

@@ -106,7 +106,9 @@ def _judge_factory(pass_: bool, reason: str = "ok") -> Any:
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": _json.dumps({"pass": pass_, "reason": reason}),
+                                "content": _json.dumps(
+                                    {"pass": pass_, "reason": reason}
+                                ),
                             }
                         }
                     ]
@@ -166,7 +168,7 @@ def test_design_call_runs_before_render_and_gates(tmp_path: Path) -> None:
     design = _design_factory(content="cube([20,20,20]);")
     render = _render_fn(tmp_path)
 
-    outcome = _run(
+    _run(
         run_case(
             case=_case(),
             repo_root=REPO_ROOT,

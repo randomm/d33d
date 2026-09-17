@@ -114,17 +114,17 @@ standard-library features, or meta-questions about the project.
 
 | kind | command |
 | --- | --- |
-| test | `./scripts/test` (fast gate, what CI runs) |
-| test | `./scripts/test --full` (full suite incl. slow/Docker) |
+| test | `pytest -m "not slow"` |
+| test | `pytest` |
 
 
 ## Quality Gates
 
 Run these before pushing. All must pass locally:
 
-- **Test (fast, no Docker)** — `./scripts/test`
-- **Test (full incl. slow/Docker)** — `./scripts/test --full`
-
+- **Test (fast, no Docker)** — `pytest -m "not slow and not live"`
+- **Test (full incl. slow/Docker)** — `pytest`
+- **Live e2e (NOT a PR gate)** — `uv run pytest -m live` — drives the real LLM + real Docker render worker (`tests/live_e2e/`, issue #108); needs Docker + `TRAIL_OPENERS_LLM_KEY`; not in CI (no repository secret); fails (never skips) when a prerequisite is missing; runtime is reported per case + total
 
 ## Code Style
 
