@@ -46,6 +46,8 @@ import { createElement } from "react";
 import copy, { mm } from "../copy";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
 import { Filmstrip } from "../components/versions/Filmstrip";
+import { BranchGraph } from "../components/versions/BranchGraph";
+import { HistorySheet } from "../components/versions/HistorySheet";
 import { CompareView } from "../components/versions/CompareView";
 import { VariantGallery } from "../components/versions/VariantGallery";
 import { Brief } from "../components/brief/Brief";
@@ -423,6 +425,8 @@ describe("design contract", () => {
         pendingName: null,
         inset: 24,
         onCompareSelect: () => {},
+        onOpenSheet: () => {},
+        sheetOpenFor: null,
       }),
     );
     expect(container.querySelector(".filmstrip")).toBeNull();
@@ -435,6 +439,8 @@ describe("design contract", () => {
         pendingName: null,
         inset: 24,
         onCompareSelect: () => {},
+        onOpenSheet: () => {},
+        sheetOpenFor: null,
       }),
     );
     expect(inFlight.container.querySelector(".filmstrip")).not.toBeNull();
@@ -517,6 +523,8 @@ describe("design contract", () => {
         pendingName: null,
         inset: 24,
         onCompareSelect: () => {},
+        onOpenSheet: () => {},
+        sheetOpenFor: null,
       }),
     );
     assertNoGit(strip.container, "filmstrip");
@@ -548,6 +556,55 @@ describe("design contract", () => {
     };
     const cmp = render(createElement(CompareView, { compare, aId: 10, bId: 11 }));
     assertNoGit(cmp.container, "compare-view");
+
+    // (3) The history sheet (W16): the sheet mounts the timeline, the
+    //     branch riser graph and the compare — a hash in any of those
+    //     (the graph's nodes, the timeline's names, the compare's names)
+    //     must trip this check the same way.
+    // (3) The history sheet (W16): the sheet mounts the timeline, the
+    //     branch riser graph and the compare — a hash in any of those
+    //     (the graph's nodes, the timeline's names, the compare's names)
+    //     must trip this check the same way. (Red-checked 2026-07-05: a
+    //     40-char hex version name induced via RED_CHECK_SHEET went RED on
+    //     exactly this coverage, then was reverted.)
+    const sheet = render(
+      createElement(HistorySheet, {
+        versions,
+        compareIds: [1, 2] as [number, number],
+        compareResult: null,
+        compareError: null,
+        inset: 24,
+        onRestore: () => {},
+        onPin: () => {},
+        onCompareSelect: () => {},
+        onClose: () => {},
+      }),
+    );
+    assertNoGit(sheet.container, "history-sheet");
+    expect(sheet.container.querySelector("[data-testid='branch-graph']")).not.toBeNull();
+
+    // (4) The branch riser graph on its own: a restore riser (the rise-back
+    //     edge) is drawn from the version graph's restored_from pointer, not
+    //     from a git ref — a graph drawn from git would render a branch name.
+    const graph = render(
+      createElement(BranchGraph, {
+        versions: [
+          ...versions,
+          {
+            ...versions[1],
+            id: 3,
+            name: "restored back",
+            parent: 2,
+            restored_from: 1,
+            diff_count: 1,
+          },
+        ],
+      }),
+    );
+    assertNoGit(graph.container, "branch-graph");
+    expect(
+      graph.container.querySelector("[data-testid='branch-restore-riser-3']"),
+    ).not.toBeNull();
 
     // (3) The pinned gallery: a real card (name with no branch-like grammar,
     //     no 7+ hex run in name, src or alt).

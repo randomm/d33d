@@ -704,11 +704,18 @@ describe("App project lifecycle", () => {
     render(<App client={client} />);
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
 
-    // The rail's action buttons are live in the same tree (finding 1): each
-    // timeline entry carries a working Restore and Compare button, and the
-    // rail's Compare button hits the same rotation as the strip's slot.
-    const rail = screen.getByTestId("version-timeline");
-    expect(rail).toBeTruthy();
+    // The sheet (W16) is reached FROM the strip: the expand mark opens it,
+    // and the sheet's timeline carries the action buttons — compare, restore
+    // and pin all live there now (the transitional rail is gone).
+    expect(screen.queryByTestId("history-sheet")).toBeNull(); // closed by default
+    fireEvent.click(screen.getByTestId("filmstrip-expand-2"));
+    await waitFor(() => expect(screen.getByTestId("history-sheet")).toBeTruthy());
+
+    // The sheet's timeline action buttons are live: each entry carries a
+    // working Restore and Compare button, and the sheet's Compare button
+    // hits the same rotation as the strip's slot.
+    const timeline = screen.getByTestId("version-timeline");
+    expect(timeline.closest("[data-testid='history-sheet']")).toBeTruthy();
     expect(screen.getByTestId("timeline-restore-1")).not.toBeDisabled();
     expect(screen.getByTestId("timeline-restore-2")).toBeDisabled(); // latest
     expect(screen.getByTestId("timeline-compare-1")).toBeTruthy();
@@ -726,13 +733,64 @@ describe("App project lifecycle", () => {
       expect(client.compareVersions).toHaveBeenCalledWith(7, 2, 1);
     });
 
-    // The fetched compare result renders through the rail's compare pane.
+    // The fetched compare result renders inside the sheet's compare pane.
     await waitFor(() => expect(screen.getByTestId("compare-pane")).toBeTruthy());
     expect(screen.getByTestId("compare-view").textContent).toContain("box v1 vs box v2");
   });
 
-  it("restore and pin from the version rail reach the backend (issue #117)", async () => {
-    // The rail is user-reachable again (finding 1): the rail's Restore button
+  it("the filmstrip's expand mark opens the history sheet, and close removes it (issue #127)", async () => {
+    // W16: the sheet is an OVERLAY reached FROM the filmstrip — no route, no
+    // page. The expand mark sets the sheet's open state; the close button
+    // clears it. The sheet is absent before the click (nothing renders it
+    // at mount — there is no URL that could summon it) and gone after close.
+    const client = makeClient({
+      listVersions: vi
+        .fn()
+        .mockResolvedValue([
+          {
+            id: 1,
+            name: "box v1",
+            params: {},
+            created_by_message: "make a box",
+            parent: null,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-01T00:00:00Z",
+            diff_count: 0,
+          },
+        ]) as unknown as ApiClient["listVersions"],
+    });
+    render(<App client={client} />);
+    await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+
+    // No route or page: the sheet is absent at mount (nothing opens it),
+    // there is no router in the app, and no document navigation surface.
+    expect(screen.queryByTestId("history-sheet")).toBeNull();
+
+    // The expand mark opens it — the sheet renders as an overlay (absolute
+    // inside the stage, not a new document element).
+    fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+    const sheet = await screen.findByTestId("history-sheet");
+    expect(sheet.style.position).toBe("absolute");
+    // The sheet is a child of the stage div (the overlay contract), not
+    // attached to document.body as a portal/page.
+    expect(sheet.closest("[data-testid='app-stage']")).toBeTruthy();
+    expect(sheet.parentElement?.getAttribute("data-testid")).toBe("app-stage");
+
+    // Close returns to the filmstrip (the overlay's only exit).
+    fireEvent.click(screen.getByTestId("history-sheet-close"));
+    await waitFor(() => expect(screen.queryByTestId("history-sheet")).toBeNull());
+    // The filmstrip is still there — the sheet overlaid it, it did not
+    // replace a page.
+    expect(screen.getByTestId("version-filmstrip")).toBeTruthy();
+  });
+
+  it("restore and pin from the history sheet reach the backend (issue #127)", async () => {
+    // The sheet (W16) is the home of restore and pin (the transitional rail
+    // is gone — issue #117's actions moved here). The sheet's Restore button
     // fires apiClient.restoreVersion AND refetches the timeline; the Pin
     // button fires apiClient.updateVersion with the toggled pinned flag and
     // flips the entry's pin state in the list.
@@ -793,11 +851,16 @@ describe("App project lifecycle", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(screen.getByTestId("version-timeline")).toBeTruthy());
+    // The sheet opens from the strip's expand mark (W16's entry point).
+    await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+    await waitFor(() => expect(screen.getByTestId("history-sheet")).toBeTruthy());
 
-    // The versions land (two entries — the rail renders their buttons).
+    // The versions land (two entries — the sheet's timeline renders their
+    // buttons) and the sheet's timeline is inside the sheet.
     await waitFor(() => expect(screen.getByTestId("timeline-pin-1")).toBeTruthy());
     await waitFor(() => expect(screen.getByTestId("timeline-pin-2")).toBeTruthy());
+    expect(screen.getByTestId("version-timeline").closest("[data-testid='history-sheet']")).toBeTruthy();
 
     // Restore v1 (the latest, v2, is disabled): the restore fires and the
     // timeline refetches, landing on the new forward version (v3, enabled).
@@ -816,7 +879,7 @@ describe("App project lifecycle", () => {
     expect(screen.getByTestId("timeline-restore-2")).not.toBeDisabled();
     expect(screen.getByTestId("version-timeline-count").textContent).toBe("3");
 
-    // Pin v1 from the rail: updateVersion fires with the toggled flag and
+    // Pin v1 from the sheet: updateVersion fires with the toggled flag and
     // the entry's pin state flips in the list.
     const pinBtn = screen.getByTestId("timeline-pin-1");
     fireEvent.click(pinBtn);

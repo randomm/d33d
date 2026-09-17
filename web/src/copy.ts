@@ -280,6 +280,21 @@ export const history = {
    *  useful half of the completion moment. */
   exported: "exported",
   exportedAt: (when: string): string => `exported ${when}`,
+  /** The diff table's change column — one closed vocabulary, never recomputed. */
+  change: {
+    added: "added",
+    removed: "removed",
+    /** A value that is not present on that side of the table (added/removed). */
+    notPresent: "—",
+  },
+  /** The pinned variants' mark: which one was kept, dimmed — the version's
+   *  own message is the why (no separate pin_reason field exists). */
+  pinnedMark: (version: string): string => `${version} · pinned`,
+  /** The riser graph's legend entries. The graph itself is the version graph
+   *  the timeline returns: parent edges (the main line) and restored_from
+   *  edges (rise-backs). */
+  riserParent: "built from the previous version",
+  riserRestored: "restored from an earlier version",
 } as const;
 
 export const firstRun = {

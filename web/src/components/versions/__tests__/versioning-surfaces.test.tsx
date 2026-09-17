@@ -250,6 +250,41 @@ describe("CompareView (two viewports + param diff table)", () => {
     expect(panels).toHaveLength(2);
   });
 
+  it("the shared-camera caption is rendered (the claim the sheet makes)", () => {
+    render(<CompareView compare={COMPARE} aId={1} bId={2} />);
+    // The caption is the shared_camera claim — it is a claim, so it is
+    // present and the two viewports' pose readouts agree with it.
+    expect(screen.getByTestId("compare-shared-camera").textContent).toContain(
+      "Both models turn together",
+    );
+  });
+
+  it("both viewports share one camera state — a rotation in either updates both", () => {
+    // The shared camera is a CLAIM (copy.history.sharedCamera): if the two
+    // viewports can desynchronise, the caption is a lie. This test drives
+    // one viewport and asserts the OTHER follows — a desynchronised
+    // implementation (each viewport owning its own pose) fails here.
+    render(<CompareView compare={COMPARE} aId={1} bId={2} />);
+    const poseA = screen.getByTestId("compare-viewport-pose-1");
+    const poseB = screen.getByTestId("compare-viewport-pose-2");
+    expect(poseA.textContent).toBe(poseB.textContent);
+    const before = poseA.textContent;
+
+    // Rotate through viewport A: the SHARED pose updates, so BOTH readouts
+    // move to the same new value (one camera state, two viewports).
+    fireEvent.click(screen.getByTestId("compare-rotate-1"));
+    const afterA = screen.getByTestId("compare-viewport-pose-1").textContent;
+    const afterB = screen.getByTestId("compare-viewport-pose-2").textContent;
+    expect(afterA).not.toBe(before);
+    expect(afterB).toBe(afterA); // B followed A's rotation — same pose.
+
+    // And the reverse direction: a rotation through B lands on A too.
+    fireEvent.click(screen.getByTestId("compare-rotate-2"));
+    expect(screen.getByTestId("compare-viewport-pose-1").textContent).toBe(
+      screen.getByTestId("compare-viewport-pose-2").textContent,
+    );
+  });
+
   it("the shared-rotation contract is present and identical (shared rotation)", () => {
     render(<CompareView compare={COMPARE} aId={1} bId={2} />);
     // The shared-rotation marker is rendered with the contract's units +
@@ -259,20 +294,112 @@ describe("CompareView (two viewports + param diff table)", () => {
     expect(sr.textContent).toContain("z-up");
   });
 
-  it("the diff table shows changed keys", () => {
+  it("the diff table shows changed keys, with the endpoint's values", () => {
     render(<CompareView compare={COMPARE} aId={1} bId={2} />);
     // W is changed: the row shows a→b values and the change cell is "20 → 24".
     const row = screen.getByTestId("diff-changed-W");
     expect(row.textContent).toContain("20 → 24");
   });
 
-  it("an empty diff shows a no-change state", () => {
+  it("the rendered rows are the endpoint's diff, not a client recomputation", () => {
+    // The diff comes from the compare endpoint. This fixture's a.params
+    // {W:20,H:25,D:30} vs b.params {W:24,H:25,D:30} would yield the SAME
+    // changed set [W] by client-side comparison — so the fixture that
+    // proves the wiring is one where a client recompute would DISAGREE:
+    // the endpoint says D is unchanged (not in the diff), so a recompute
+    // that compared the values would render D as changed.
+    const endpointSays: VersionCompare = {
+      ...COMPARE,
+      a: {
+        ...COMPARE.a,
+        params: { W: 20, H: 25, D: 30, T: 2 },
+      },
+      b: {
+        ...COMPARE.b,
+        params: { W: 24, H: 25, D: 31, T: 2 },
+      },
+      // The endpoint says only W changed — D went 30→31 but the endpoint
+      // did not list it (a client that recomputed from the two param sets
+      // would render D as changed too, and the test would fail).
+      diff: { added: [], removed: [], changed: ["W"], count: 1 },
+    };
+    render(<CompareView compare={endpointSays} aId={1} bId={2} />);
+    // W renders as changed (the endpoint said so).
+    expect(screen.getByTestId("diff-changed-W").textContent).toContain("20 → 24");
+    // D is PRESENT (the union of both param sets) but UNCHANGED — dimmed,
+    // not a changed row, even though a client recompute would call it changed.
+    const dRow = screen.getByTestId("diff-unchanged-D");
+    expect(dRow).toBeTruthy();
+    expect(dRow.className).toContain("compare-diff-row--unchanged");
+    expect(screen.queryByTestId("diff-changed-D")).toBeNull();
+    // T (equal on both sides, not in the diff) is unchanged too.
+    expect(screen.getByTestId("diff-unchanged-T")).toBeTruthy();
+  });
+
+  it("unchanged parameters are present in the DOM and dimmed, not absent", () => {
+    // The whole point of the table: unchanged rows are PRESENT and DIMMED.
+    // H (25/25) and D (30/30) are unchanged in COMPARE — they must render
+    // as dimmed rows, never as holes.
+    render(<CompareView compare={COMPARE} aId={1} bId={2} />);
+    const hRow = screen.getByTestId("diff-unchanged-H");
+    const dRow = screen.getByTestId("diff-unchanged-D");
+    // PRESENCE: both rows are in the DOM.
+    expect(hRow).toBeTruthy();
+    expect(dRow).toBeTruthy();
+    // They carry their values (not blanked).
+    expect(hRow.textContent).toContain("25");
+    expect(dRow.textContent).toContain("30");
+    // DIMMING: the unchanged class is on both (the dimmed, not hidden,
+    // treatment — a hidden row is indistinguishable from a nonexistent one).
+    expect(hRow.className).toContain("compare-diff-row--unchanged");
+    expect(dRow.className).toContain("compare-diff-row--unchanged");
+    // And the changed row does NOT carry the dimmed class.
+    expect(screen.getByTestId("diff-changed-W").className).not.toContain(
+      "compare-diff-row--unchanged",
+    );
+  });
+
+  it("added parameters render a dash on the a-side, never a hidden row", () => {
+    const withAdded: VersionCompare = {
+      ...COMPARE,
+      b: { ...COMPARE.b, params: { W: 24, H: 25, D: 30, T: 12 } },
+      diff: { added: ["T"], removed: [], changed: ["W"], count: 2 },
+    };
+    render(<CompareView compare={withAdded} aId={1} bId={2} />);
+    const row = screen.getByTestId("diff-added-T");
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain("12"); // the b value
+    // The a side shows the not-present cell (a dash from the deck), not an
+    // absent cell.
+    expect(row.textContent).toContain("—");
+  });
+
+  it("removed parameters render a dash on the b-side, never a hidden row", () => {
+    const withRemoved: VersionCompare = {
+      ...COMPARE,
+      a: { ...COMPARE.a, params: { W: 20, H: 25, D: 30, T: 9 } },
+      b: { ...COMPARE.b, params: { W: 24, H: 25, D: 30 } },
+      diff: { added: [], removed: ["T"], changed: ["W"], count: 2 },
+    };
+    render(<CompareView compare={withRemoved} aId={1} bId={2} />);
+    const row = screen.getByTestId("diff-removed-T");
+    expect(row).toBeTruthy();
+    expect(row.textContent).toContain("9"); // the a value
+    expect(row.textContent).toContain("—");
+  });
+
+  it("a fully-identical compare still renders every row (dimmed), not an empty table", () => {
+    // diff count 0 → every key is unchanged. The rows are all present and
+    // dimmed; nothing is omitted. (The old "no-diff" empty branch is gone:
+    // an empty table would hide the identical-ness the caption claims.)
     const same: VersionCompare = {
       ...COMPARE,
       b: COMPARE.a,
       diff: { added: [], removed: [], changed: [], count: 0 },
     };
     render(<CompareView compare={same} aId={1} bId={1} />);
-    expect(screen.getByTestId("compare-no-diff").textContent).toContain("identical");
+    expect(screen.getByTestId("diff-unchanged-W")).toBeTruthy();
+    expect(screen.getByTestId("diff-unchanged-H")).toBeTruthy();
+    expect(screen.getByTestId("diff-unchanged-D")).toBeTruthy();
   });
 });

@@ -77,12 +77,12 @@ import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 void [PassCard, Composer];
 
 // The version surfaces (issue #8): the horizontal filmstrip (W13) is the
-// at-a-glance strip; the rail + compare + gallery (VersionTail) is the
-// user-reachable home of the compare-select, restore and pin actions.
-// Both render until W16 relocates the actions to the expanded sheet — a
-// transitional overlap, on purpose: a working rail beats a clean strip
-// that lost its actions.
-import { VersionTail } from "./components/versions/VersionTail";
+// at-a-glance strip; the history sheet (W16, HistorySheet) is the
+// expanded overlay the strip's expand mark opens — the home of the
+// compare, restore and pin actions. The transitional VersionTail rail
+// (issue #117 adversarial fix) is gone: every one of those actions is
+// reachable from the sheet.
+import { HistorySheet } from "./components/versions/HistorySheet";
 
 // Overlay geometry (issue #119). The overlays are siblings above the
 // canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
@@ -170,6 +170,11 @@ export default function App({ client }: AppProps) {
   // conversation and the design together).
   const [versions, setVersions] = useState<VersionTimelineEntry[]>([]);
   const [compareIds, setCompareIds] = useState<[number, number] | null>(null);
+  // The history sheet (W16): null while closed, the version id it was
+  // opened from while open. The sheet is an OVERLAY over the canvas — not
+  // a route, not a page (there is no router in the app); the filmstrip's
+  // expand mark opens it and its close button closes it.
+  const [sheetOpenFor, setSheetOpenFor] = useState<number | null>(null);
   // The project's display name — the export filename's slug source
   // (copy.shell.exportFilename reads it; the App creates the project on
   // mount and knows it, so the filename is real, never a guess).
@@ -1380,7 +1385,8 @@ export default function App({ client }: AppProps) {
           strip, W13). A failure is CONTENT INSIDE THE CONVERSATION, never a
           layer of its own. The strip is absent (not empty) until a version
           exists or a pass is in flight. The pass-in-flight flag drives the
-          dashed pending slot so the strip is never behind the conversation. */}
+          dashed pending slot so the strip is never behind the conversation.
+          The sheet (W16) is reached FROM the strip's expand mark. */}
       {!panelsHidden && projectId !== null && (
         <Filmstrip
           versions={versions}
@@ -1388,19 +1394,20 @@ export default function App({ client }: AppProps) {
           pendingName={lastUserMessageRef.current || null}
           inset={OVERLAY_INSET_PX}
           onCompareSelect={handleCompareSelect}
+          onOpenSheet={(id) => setSheetOpenFor(id)}
+          sheetOpenFor={sheetOpenFor}
         />
       )}
 
-      {/* Layer 10 — the version timeline rail (issue #8, right edge) + the
-          compare view + the pinned gallery. Restored as user-reachable
-          surfaces alongside the new strip (issue #117 adversarial fix): the
-          strip's slot click and the rail's Compare button both feed the same
-          compare-select rotation, so the filmstrip's compare-select is real
-          again (the compare fetch fires) and restore/pin are reachable from
-          the rail's buttons. Transitional until W16 relocates the actions
-          to the expanded sheet. */}
-      {!panelsHidden && projectId !== null && (
-        <VersionTail
+      {/* Layer 10 — the history sheet (W16, issue #127). The expanded
+          overlay: the branch riser graph, the two-viewport compare (shared
+          camera, dimmed unchanged rows) and the restore / pin / compare
+          actions. It is an overlay, not a route or a page, at the panels
+          layer (10) — the same layer as the filmstrip it is opened from.
+          It replaces the transitional VersionTail rail: compare, restore
+          and pin are all reachable here, so the rail retires. */}
+      {!panelsHidden && projectId !== null && sheetOpenFor !== null && (
+        <HistorySheet
           versions={versions}
           compareIds={compareIds}
           compareResult={compareResult}
@@ -1409,6 +1416,7 @@ export default function App({ client }: AppProps) {
           onRestore={handleVersionRestore}
           onPin={handleVersionPin}
           onCompareSelect={handleCompareSelect}
+          onClose={() => setSheetOpenFor(null)}
         />
       )}
 

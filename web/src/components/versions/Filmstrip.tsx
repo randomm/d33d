@@ -37,6 +37,10 @@ interface FilmstripProps {
   inset: number;
   /** Called with the version id (compare-select). The strip selects only. */
   onCompareSelect: (versionId: number) => void;
+  /** Called when a version's expand mark is clicked (opens the sheet). */
+  onOpenSheet: (versionId: number) => void;
+  /** True while the sheet is open (the open slot's mark is active). */
+  sheetOpenFor: number | null;
 }
 
 const SLOTS = 4;
@@ -96,6 +100,8 @@ export function Filmstrip({
   pendingName,
   inset,
   onCompareSelect,
+  onOpenSheet,
+  sheetOpenFor,
 }: FilmstripProps) {
   // ABSENT, NOT EMPTY: no versions and no in-flight pass → nothing at all.
   if (versions.length === 0 && !passInFlight) {
@@ -149,63 +155,89 @@ export function Filmstrip({
           const fork = siblings.get(v.id);
           const diff = diffFragment(v, versions);
           return (
-            <button
+            <span
               key={v.id}
-              type="button"
               className={`filmstrip-slot${isCurrent ? " filmstrip-slot--current" : ""}`}
-              data-testid={`filmstrip-slot-${v.id}`}
-              onClick={() => onCompareSelect(v.id)}
-              aria-current={isCurrent ? "true" : undefined}
-              title={
-                v.exported_at !== null
-                  ? copy.history.exportedAt(v.exported_at)
-                  : undefined
-              }
-              style={
-                isCurrent
-                  ? { outline: "2px solid var(--color-live)", outlineOffset: 2 }
-                  : undefined
-              }
             >
-              {v.thumbnail && (
-                <img
-                  className="filmstrip-thumb"
-                  src={v.thumbnail}
-                  alt={`${v.name} thumbnail`}
-                  data-testid={`filmstrip-thumb-${v.id}`}
-                />
-              )}
-              <span className="filmstrip-name" data-testid={`filmstrip-name-${v.id}`}>
-                {v.name}
-              </span>
-              <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                {` · v${v.id}`}
-                {diff !== null ? ` · ${diff}` : ""}
-              </span>
-              {fork !== undefined && (
-                <span
-                  className="filmstrip-fork"
-                  data-testid={`filmstrip-fork-${v.id}`}
-                  aria-label={copy.history.variantCount(fork)}
-                >
-                  ⑂ {copy.history.variantCount(fork)}
+              {/* The slot is a real <button> (issue #127): natively focusable
+                  and keyboard-activatable (Enter/Space fire the browser's
+                  native click bridge). The expand control is a SIBLING, not
+                  a child — no nested interactive elements. */}
+              <button
+                type="button"
+                className="filmstrip-slot-btn"
+                data-testid={`filmstrip-slot-${v.id}`}
+                aria-current={isCurrent ? "true" : undefined}
+                title={
+                  v.exported_at !== null
+                    ? copy.history.exportedAt(v.exported_at)
+                    : undefined
+                }
+                style={
+                  isCurrent
+                    ? { outline: "2px solid var(--color-live)", outlineOffset: 2 }
+                    : undefined
+                }
+                onClick={() => onCompareSelect(v.id)}
+              >
+                {v.thumbnail && (
+                  <img
+                    className="filmstrip-thumb"
+                    src={v.thumbnail}
+                    alt={`${v.name} thumbnail`}
+                    data-testid={`filmstrip-thumb-${v.id}`}
+                  />
+                )}
+                <span className="filmstrip-name" data-testid={`filmstrip-name-${v.id}`}>
+                  {v.name}
                 </span>
-              )}
-              {/* The exported mark (issue #126): which version was actually
-                  handed out as a 3MF. Server-side state — it survives a
-                  page reload. The mark is a WORD, not a colour: the motion
-                  budget and the marker-colour invariant leave no room for
-                  a badge colour here, and the time rides the title (the
-                  deck's exportedAt) rather than a new string. */}
-              {v.exported_at !== null && (
-                <span
-                  className="filmstrip-exported"
-                  data-testid={`filmstrip-exported-${v.id}`}
-                >
-                  {copy.history.exported}
+                <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
+                  {` · v${v.id}`}
+                  {diff !== null ? ` · ${diff}` : ""}
                 </span>
-              )}
-            </button>
+                {fork !== undefined && (
+                  <span
+                    className="filmstrip-fork"
+                    data-testid={`filmstrip-fork-${v.id}`}
+                    aria-label={copy.history.variantCount(fork)}
+                  >
+                    ⑂ {copy.history.variantCount(fork)}
+                  </span>
+                )}
+                {/* The exported mark (issue #126): which version was actually
+                    handed out as a 3MF. Server-side state — it survives a
+                    page reload. The mark is a WORD, not a colour: the motion
+                    budget and the marker-colour invariant leave no room for
+                    a badge colour here, and the time rides the title (the
+                    deck's exportedAt) rather than a new string. */}
+                {v.exported_at !== null && (
+                  <span
+                    className="filmstrip-exported"
+                    data-testid={`filmstrip-exported-${v.id}`}
+                  >
+                    {copy.history.exported}
+                  </span>
+                )}
+              </button>
+              {/* The expand mark (W16): the sheet is reached FROM the
+                  filmstrip — this is the affordance that opens it for the
+                  slot's version. It is a SIBLING of the slot button, not a
+                  child — no nested interactive elements. Its click does not
+                  propagate to the slot (compare-select). */}
+              <button
+                type="button"
+                className="filmstrip-expand"
+                data-testid={`filmstrip-expand-${v.id}`}
+                aria-label={`Expand ${v.name} in the history sheet`}
+                aria-pressed={sheetOpenFor === v.id ? "true" : undefined}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenSheet(v.id);
+                }}
+              >
+                ⌕
+              </button>
+            </span>
           );
         })}
 
