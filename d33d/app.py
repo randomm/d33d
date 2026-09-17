@@ -1074,6 +1074,7 @@ def _build_production_design_loop():
                 scad_source,
                 defines,
                 renders_dir=data_dir / "renders",
+                on_progress=kwargs.get("on_progress"),
             )
 
         cat = load_catalogue(catalogue_path)
@@ -1108,6 +1109,7 @@ def _build_production_design_loop():
         # (PM decision #97: the archive ``request`` equals the current
         # user's request, not a prior-turn fallback).
         request = str(kwargs.get("request") or "")
+        on_progress = kwargs.get("on_progress")
         # ``bbox_fn`` — per-axis extents from the render's harvested STL
         # (``d33d.design_loop_events.bbox_from_render``). The hook forwards
         # it through ``**kwargs`` to ``run_design_loop_async`` (which pops
@@ -1130,6 +1132,7 @@ def _build_production_design_loop():
             request=request,
             model=res.entry.model,
             prompt_version=prompt_version,
+            on_progress=on_progress,
         )
 
     def _wrapper(app: Any, **kwargs: Any) -> Any:

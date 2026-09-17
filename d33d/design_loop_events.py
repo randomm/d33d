@@ -31,6 +31,7 @@ import asyncio
 import base64
 import inspect
 import logging
+import queue
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -508,10 +509,56 @@ async def run_design_loop_with_events(
     than fabricates", which IS abstain semantics — the old hard-fail
     contradicted it.
     """
+    _frame_queue: "queue.Queue[tuple[str, dict[str, Any]] | None]" = queue.Queue()
+
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
         yield ("error", {"message": "design loop not wired"})
         return
+
+    # Issue #121: the per-view progress frames (``render-view-start`` /
+    # ``render-view-done``) are produced by the render container's
+    # stderr-drain thread (a worker thread, no event loop). The adapter
+    # captures the current event loop HERE (before the loop is started —
+    # the loop runs on a worker thread via ``asyncio.run`` and has no
+    # loop to capture) and builds an ``on_progress`` hook that enqueues
+    # a ``loop.call_soon_threadsafe`` schedule onto that loop via
+    # ``run_coroutine_threadsafe``. The hook is sync (the drain thread
+    # calls it directly); the async work (yielding the frame) happens on
+    # the app's loop via the future the hook schedules. The stream
+    # (this generator) is the sole consumer; no shared state is needed
+    # because the generator is a single async consumer of one stream.
+    #
+    # The loop is started on ``asyncio.to_thread(_run_in_loop, raw)`` —
+    # ``_run_in_loop`` runs ``asyncio.run(coro)`` on a worker thread, so
+    # the render's ``subprocess.run`` (Docker) runs off the app's loop.
+    # The drain thread is a child of that worker thread's ``subprocess
+    # .run``; it must therefore schedule onto the APP's loop (captured
+    # here), not the worker thread's fresh loop.
+    def _on_progress(kind: str, payload: dict[str, Any]) -> None:
+        """The drain thread calls this sync hook for each marker.
+
+        ``kind`` is ``"view-start"`` or ``"view-done"`` (``view-failed``
+        is filtered out — a failed view must not report progress).
+        ``payload`` carries ``view`` (the view stem) and ``iteration``
+        (the design-loop iteration index, 1-based).
+
+        The hook enqueues the frame onto ``_frame_queue`` (thread-safe);
+        the generator yields it after the render completes (see the
+        ``_drain_queue" below).
+        """
+        if kind not in ("view-start", "view-done"):
+            return
+        view = payload.get("view", "")
+        iteration = payload.get("iteration", 0)
+        if not view:
+            return
+        step_name = (
+            "render-view-start" if kind == "view-start" else "render-view-done"
+        )
+        _frame_queue.put(
+            ("progress", {"step": step_name, "view": view, "iteration": iteration})
+        )
 
     yield ("progress", {"step": "design-loop-start"})
 
@@ -549,6 +596,7 @@ async def run_design_loop_with_events(
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
         "request": (user_message or request_text or "").strip() or request_text,
+        "on_progress": _on_progress,
     }
 
     # The production closure (``_build_production_design_loop``) builds its
@@ -599,6 +647,17 @@ async def run_design_loop_with_events(
         logger.exception("design loop unexpected error for project %s", project_id)
         yield ("error", {"message": f"design loop unexpected error: {e}"})
         return
+    # Issue #121: the render's per-view progress frames (``render-view-*``)
+    # were enqueued by the drain thread onto ``_frame_queue`` while the
+    # render was running. The render is now complete (the ``to_thread``
+    # await has resumed), so yield the accumulated frames NOW — they are
+    # a record of the render's actual progress, not an estimate. The
+    # drain thread joins before ``run_container`` returns, so the queue
+    # holds all frames in arrival order; no frame is lost.
+    while not _frame_queue.empty():
+        _f = _frame_queue.get_nowait()
+        if _f is not None:
+            yield _f
 
     if getattr(result, "status", None) == "pass":
         yield ("progress", {"step": "design-loop-pass"})

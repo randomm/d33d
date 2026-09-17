@@ -114,6 +114,16 @@ LLMFn = Callable[
 LogFn = Callable[[str, str, str], None]
 #: ``bbox_fn(render) -> BboxInfo | None`` — per-axis extents from a render.
 BboxFn = Callable[[RenderResult], "BboxInfo | None"]
+#: ``on_progress(kind, payload) -> None`` — the caller's per-render arrival
+#: hook (issue #121). ``kind`` is ``"view-start"`` or ``"view-done"``
+#: (``view-failed`` is NOT delivered — a failed view must not report as
+#: complete), ``payload`` is a dict carrying at least ``view`` (the view
+#: stem, e.g. ``"view_00_front"``) and ``iteration`` (the design-loop
+#: iteration index, 1-based). The hook fires from the render subprocess's
+#: stderr-drain thread (a worker thread, NOT the event loop) while the
+#: container is still running; it must therefore be fast and side-effect-
+#: free (it may enqueue a future onto the app's loop but must not block).
+OnProgressFn = Callable[[str, dict[str, Any]], None]
 
 
 # ---------------------------------------------------------------------------
@@ -776,6 +786,7 @@ async def run_design_loop_async(
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    on_progress: OnProgressFn | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -791,6 +802,13 @@ async def run_design_loop_async(
     (e.g. FDM clearances) into both the render and the design prompt.
     ``bbox_fn`` extracts per-axis extents from a render (``None`` → the
     bbox gate fails, e.g. when the render isn't ``ok``).
+
+    ``on_progress`` (issue #121) is the per-view arrival hook. It is
+    NOT passed to ``render_fn`` directly (the loop calls it with 2 args,
+    the ``RenderFn`` contract); instead the production ``render_fn``
+    closure (``app.py`` / ``versions_routes.py``) bakes it in when
+    calling ``render_for_design_loop``. A test stub that does not accept
+    it simply ignores it; the loop's contract is unchanged.
     """
     # Normalize "no dimensions known" (None or a zero/absent axis) into the
     # triple itself: the prompt and the defines map must never carry a

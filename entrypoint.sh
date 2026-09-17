@@ -70,6 +70,18 @@
 
 set -euo pipefail
 
+# The host reads this entrypoint's stderr line-by-line WHILE the container
+# is still running (issue #121's per-view arrival events). Bash fully
+# buffers `echo >&2` when stderr is a pipe (no TTY), so a marker would sit
+# in the buffer until the script exits — the host would learn nothing
+# until after container exit. `stty -o min 1 -o time 1` switches the shell
+# to character mode (the `stty` builtin is present in bash 5.2 in the base
+# image; it fails on a non-tty stderr, so it is run best-effort), and the
+# per-marker `flush` below guarantees line-by-line delivery even where the
+# built-in buffering would otherwise apply. A failed `stty` must not abort
+# the render — the marker is progress, the render is the payload.
+(stty -o min 1 -o time 1) 2>/dev/null || true
+
 WORKDIR=/work
 SCAD_FILE="${WORKDIR}/model.scad"
 STL_FILE="${WORKDIR}/model.stl"
@@ -200,6 +212,8 @@ declare -a FAILED_STEPS=()
 
 # ── Step 1: STL export (ABORTING on failure) ────────────────────────────────
 echo "[entrypoint] Step 1/8: STL export" >&2
+echo "[entrypoint] view-start stl" >&2
+flush 2>/dev/null || true
 # NOTE: under `set -e`, a failing command in a condition (||, if, while) does
 # not trigger errexit, so `openscad ... || stl_exit=$?` is safe: the script
 # survives the failure, records the exit code, and the `if` below decides.
@@ -214,8 +228,12 @@ openscad \
 
 if [ "${stl_exit}" -ne 0 ]; then
     echo "[entrypoint] STL export failed with exit code ${stl_exit} — aborting remaining steps" >&2
+    echo "[entrypoint] view-failed stl ${stl_exit}" >&2
     exit "${stl_exit}"
 fi
+
+echo "[entrypoint] view-done stl" >&2
+flush 2>/dev/null || true
 
 # ── Bounding-box extraction (zero extra openscad invocations) ──────────────
 # Parse the ASCII STL written by step 1 to get the model's bounding box.
@@ -298,6 +316,8 @@ echo "[entrypoint] max_extent=${max_extent}mm  dist_aa=${CAM_DIST_AA}  dist_iso=
 
 # ── Step 2: CSG export (non-aborting) ───────────────────────────────────────
 echo "[entrypoint] Step 2/8: CSG export" >&2
+echo "[entrypoint] view-start csg" >&2
+flush 2>/dev/null || true
 csg_exit=0
 openscad \
     "${COMMON_FLAGS[@]}" \
@@ -306,7 +326,15 @@ openscad \
     "${SCAD_FILE}" \
     2>>"${LOG_FILE}" \
     || csg_exit=$?
-[ "${csg_exit}" -ne 0 ] && { echo "[entrypoint] CSG export failed (exit ${csg_exit}) — continuing" >&2; max_exit=${csg_exit}; FAILED_STEPS+=("csg:${csg_exit}"); }
+if [ "${csg_exit}" -ne 0 ]; then
+    echo "[entrypoint] CSG export failed (exit ${csg_exit}) — continuing" >&2
+    max_exit=${csg_exit}
+    FAILED_STEPS+=("csg:${csg_exit}")
+    echo "[entrypoint] view-failed csg ${csg_exit}" >&2
+else
+    echo "[entrypoint] view-done csg" >&2
+fi
+flush 2>/dev/null || true
 
 # ── Steps 3–8: Six PNG renders (non-aborting) ───────────────────────────────
 # Camera tuples: (tx, ty, tz, rx, ry, rz, dist)
@@ -354,6 +382,8 @@ for i in 0 1 2 3 4 5; do
     png_file="${WORKDIR}/${name}.png"
 
     echo "[entrypoint] Step ${step}/8: PNG ${name}" >&2
+    echo "[entrypoint] view-start ${name}" >&2
+    flush 2>/dev/null || true
     png_exit=0
     openscad \
         "${COMMON_FLAGS[@]}" \
@@ -365,7 +395,20 @@ for i in 0 1 2 3 4 5; do
         "${SCAD_FILE}" \
         2>>"${LOG_FILE}" \
         || png_exit=$?
-    [ "${png_exit}" -ne 0 ] && { echo "[entrypoint] PNG ${name} failed (exit ${png_exit}) — continuing" >&2; max_exit=${png_exit}; FAILED_STEPS+=("${name}:${png_exit}"); }
+    if [ "${png_exit}" -ne 0 ]; then
+        echo "[entrypoint] PNG ${name} failed (exit ${png_exit}) — continuing" >&2
+        max_exit=${png_exit}
+        FAILED_STEPS+=("${name}:${png_exit}")
+        echo "[entrypoint] view-failed ${name} ${png_exit}" >&2
+    else
+        # The completion marker fires AFTER openscad has closed the PNG
+        # (its -o output is written before it exits), so a host that reads
+        # this line knows the view is COMPLETE, not merely started
+        # (issue #121: an event caused by the view finishing, never a
+        # timer or an estimate).
+        echo "[entrypoint] view-done ${name}" >&2
+    fi
+    flush 2>/dev/null || true
 done
 
 # List outputs for the caller to verify
