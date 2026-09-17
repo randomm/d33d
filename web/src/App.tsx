@@ -65,11 +65,10 @@ import { Composer } from "./components/chat/Composer";
 import { PassProgress } from "./components/progress/PassProgress";
 import { FailureCard } from "./components/failure/FailureCard";
 import { Filmstrip } from "./components/versions/Filmstrip";
-// PassCard and Composer have no mount site in App.tsx today — PassCard's
-// content arrives with W10 and the Composer's chat form lives inside
-// ChatPanel.tsx — but the design-contract assertion (W8) requires App to
-// import all six surface components, so the two unused imports are kept
-// (the void statement keeps the linter honest about them).
+// Composer is rendered via ChatPanel (its form lives there) — App holds
+// none of its markup. The design-contract assertion (W8) requires App to
+// import all six surface components, so both imports below are kept (the
+// void statement keeps the linter honest about them).
 void [PassCard, Composer];
 
 // Overlay geometry (issue #119). The overlays are siblings above the
@@ -111,13 +110,10 @@ interface PendingRegionSelection {
 }
 
 interface AppProps {
-  /** Render images to display inline in the chat. Defaults to empty. */
-  renders?: RenderImage[];
   /** Injectable API client (test seam). Defaults to a same-origin ApiClient. */
   client?: ApiClient;
 }
-
-export default function App({ renders = [], client }: AppProps) {
+export default function App({ client }: AppProps) {
   const apiClient = useRef(client ?? new ApiClient()).current;
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -497,6 +493,14 @@ export default function App({ renders = [], client }: AppProps) {
     setRegionBarText("");
   }, []);
 
+  // Issue #125: the pass card's enlarged-view action. The frame carries
+  // PNG thumbnails (no geometry), so there is nothing to swap in — the
+  // button's honest job is closing the enlargement (the card's own
+  // state; the streamed model is already beside the photo in the stage
+  // the whole time). This hook exists so the seam is wired and a ticket that
+  // carries view geometry on the frame can do a real swap here.
+  const handleBesidePhoto = useCallback(() => {}, []);
+
   // Create the (single, default) project on mount. Once it resolves,
   // load the version timeline (the side rail) — the project resumes at
   // its latest version.
@@ -789,12 +793,20 @@ export default function App({ renders = [], client }: AppProps) {
           // The event source is registered synchronously before the 202
           // response — the SSE stream will find it. Open the stream now.
           return apiClient.streamEvents(projectId, {
-            onToken: (text) => {
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === assistantId ? { ...m, content: m.content + text } : m,
-                ),
-              );
+            onToken: (text, _data) => {
+              // Issue #125 (W10): the token frame carries the generated
+              // source. It is the pass card's DISCLOSURE content, not a
+              // chat message — appending it to the message text is the
+              // "a hundred lines of OpenSCAD in the transcript" defect
+              // this item removes. The streaming state machine is
+              // untouched: onDone/onError still clear `streaming`.
+              if (text.length > 0) {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === assistantId ? { ...m, source: (m.source ?? "") + text } : m,
+                  ),
+                );
+              }
             },
             onProgress: (step, data) => {
               handleStreamViewerData(data);
@@ -804,15 +816,57 @@ export default function App({ renders = [], client }: AppProps) {
               // an identical value is a no-op state update (React bails out),
               // so repeated steps do not reset the elapsed timer or flicker.
               if (typeof step === "string") setDesignLoopStep(step);
+              // Issue #125 (W10): the version-created frame carries the
+              // pass's `views` map (data URIs, one per view). Attach them
+              // to the in-flight assistant message — it is the turn that
+              // produced the version, and ChatPanel renders that turn as
+              // the PassCard.
+              if (step === "version-created") {
+                const viewsRaw = data.views;
+                if (viewsRaw && typeof viewsRaw === "object") {
+                  const views = Object.entries(viewsRaw).map(([filename, src]) => ({
+                    filename,
+                    src: typeof src === "string" ? src : "",
+                  }));
+                  const versionId =
+                    typeof data.version_id === "number" ? data.version_id : null;
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantId
+                        ? { ...m, versionId, views: views.length > 0 ? views : [] }
+                        : m,
+                    ),
+                  );
+                }
+              }
               // Issue #114: the version-created frame is the single trigger
               // for refetching the timeline — not every progress frame
               // (that would hammer the endpoint).
               if (step === "version-created")
                 void apiClient.listVersions(projectId).then(setVersions);
             },
-            onDone: () => {
+            onDone: (data) => {
               setMessages((prev) =>
-                prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+                prev.map((m) => {
+                  if (m.id !== assistantId) return m;
+                  // The done frame's `message` is the loop's result prose
+                  // ("Design loop passed validation") — the pass card's
+                  // summary line. The message's content was seeded "" on
+                  // send, so a REAL done message is always the summary:
+                  // an error/infra frame travels the error path (onError),
+                  // and the only thing that could land in content first is
+                  // the postChat rejection's "Error: …" text, which this
+                  // guard refuses to overwrite. Nothing else (token text
+                  // arrives on `source` only) can reach content, so no
+                  // guard is needed to keep source out of the summary.
+                  const msg = typeof data.message === "string" ? data.message : "";
+                  const isReal = msg.length > 0 && !msg.startsWith("Error:");
+                  return {
+                    ...m,
+                    streaming: false,
+                    ...(isReal && m.content === "" ? { content: msg } : {}),
+                  };
+                }),
               );
             },
             onError: (data) => {
@@ -1074,8 +1128,8 @@ export default function App({ renders = [], client }: AppProps) {
                 <ChatPanel
                   messages={messages}
                   onSend={handleSendMessage}
-                  renders={renders}
                   inFlight={designLoopInFlight}
+                  onBesidePhoto={handleBesidePhoto}
                 />
                 {designLoopInFlight && (
                   <PassProgress step={designLoopStep} elapsed={designLoopElapsed} />

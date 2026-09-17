@@ -158,15 +158,13 @@ body {
   font-size: var(--font-size-xs);
 }
 
-/* Chat content — SCAD arrives as plain text (the design loop emits the
-   full source as one token frame), so the content span itself gets the
-   monospace-friendly wrapping: long SCAD lines wrap instead of
-   overflowing the flex column. */
+/* Chat content — prose again (issue #125, W10): the SCAD source is no
+   longer appended to the transcript; it lives in the pass card's
+   disclosure, so the message body is plain summary prose in the UI face
+   (no monospace, no pre-wrap). */
 .chat-msg-content {
-  font-family: var(--font-mono);
+  font-family: var(--font-ui);
   font-size: var(--font-size-xs);
-  white-space: pre-wrap;
-  overflow-x: auto;
   word-break: break-word;
 }
 
@@ -195,6 +193,129 @@ body {
   height: auto;
   border: 1px solid var(--color-hairline);
   border-radius: var(--radius-sm);
+}
+
+/* Pass card (issue #125, W10) — an assistant turn that produced a
+   version. The six renders sit on the Tomorrow Night colour scheme
+   (#1d1f21 ground), so the frames use --color-recess to sit against
+   them without fighting. */
+.pass-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pass-card-version {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-faint);
+}
+
+.pass-card-summary {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-sm);
+  color: var(--color-fg);
+}
+
+.pass-card-views {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: var(--space-2);
+}
+
+.pass-card-view-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.pass-card-view-button {
+  padding: 0;
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
+  cursor: pointer;
+}
+
+.pass-card-view-button:hover {
+  border-color: var(--color-faint);
+}
+
+.pass-card-view {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.pass-card-view-label {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+  text-align: center;
+}
+
+.pass-card-partial {
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  color: var(--color-blocked);
+}
+
+.pass-card-source-toggle {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--color-fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.pass-card-source-toggle:hover {
+  border-color: var(--color-faint);
+}
+
+.pass-card-source {
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
+  color: var(--color-fg-2);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height);
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre;
+}
+
+.pass-card-enlarged {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pass-card-view-enlarged {
+  max-width: 100%;
+}
+
+.pass-card-action {
+  align-self: flex-start;
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: transparent;
+  color: var(--color-fg);
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.pass-card-action:hover {
+  border-color: var(--color-faint);
 }
 
 /* Composer (bottom of the chat panel) — minimal consistent treatment

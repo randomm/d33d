@@ -165,12 +165,15 @@ describe("web/src/styles.css (issue #81)", () => {
     expect(pane).not.toMatch(/\b(position|width|height|overflow)\s*:/);
   });
 
-  it("wraps SCAD content (pre-wrap, overflow-x auto, monospace) and styles buttons with :hover", () => {
+  it("wraps prose content (pre-wrap removed for the UI face — issue #125) and styles buttons with :hover", () => {
     const css = readStylesheet();
     const content = ruleFor(css, ".chat-msg-content");
-    expect(content).toContain("white-space: pre-wrap");
-    expect(content).toContain("overflow-x: auto");
-    expect(content).toContain("font-family: var(--font-mono)");
+    // W10: the SCAD source no longer lands in the transcript, so the
+    // monospace treatment is gone — the message body is prose in the UI
+    // face (the pass card's disclosure keeps the mono).
+    expect(content).toContain("font-family: var(--font-ui)");
+    expect(content).not.toContain("font-mono");
+    expect(content).not.toContain("white-space: pre-wrap");
     // A :hover rule exists (impossible with inline styles).
     expect(css).toMatch(/:hover/);
     // The disabled state gets a consistent treatment.

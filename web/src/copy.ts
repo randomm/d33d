@@ -98,9 +98,18 @@ export const passCard = {
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
 
   checksPassed: (count: number): string => `${count} checks`,
+  closeDisclosure: "Close the source",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
-  viewActions: { next: "Next view", besidePhoto: "Beside the photo" },
+  viewActions: {
+    next: "Next view",
+    /** The enlarged view's single action. The frame carries a PNG (no
+     *  geometry), so nothing moves to the stage — the button closes the
+     *  enlargement and the streamed model stays beside the photo as it
+     *  already is. Relabelled from "Beside the photo", which promised a
+     *  swap the data cannot make. */
+    closeView: "Close this view",
+  },
 } as const;
 
 /** The first pass of a new project — the one moment the "previous model stays on

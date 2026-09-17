@@ -20,7 +20,6 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
-import type { RenderImage } from "../../App";
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project, RegionEditResult } from "../../lib/api";
@@ -273,19 +272,43 @@ describe("App layout", () => {
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
-  it("renders six inline render images when provided", async () => {
-    const renders: RenderImage[] = [
-      { filename: "view_00_front.png", src: "data:image/png;base64,AAA" },
-      { filename: "view_01_back.png", src: "data:image/png;base64,AAA" },
-      { filename: "view_02_left.png", src: "data:image/png;base64,AAA" },
-      { filename: "view_03_right.png", src: "data:image/png;base64,AAA" },
-      { filename: "view_04_top.png", src: "data:image/png;base64,AAA" },
-      { filename: "view_05_iso.png", src: "data:image/png;base64,AAA" },
-    ];
-    render(<App renders={renders} client={client} />);
-    expect(screen.getByTestId("render-img-view_00_front.png")).toBeTruthy();
-    expect(screen.getByTestId("render-img-view_05_iso.png")).toBeTruthy();
-    expect(screen.getAllByTestId(/^render-img-/)).toHaveLength(6);
+  it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
+    // W10: the views map is on the wire in the version-created frame; the
+    // pass card (via ChatPanel) is what displays it. The App-level `renders`
+    // prop is gone — inline renders live on the pass turn itself.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    const views: Record<string, string> = {
+      "view_00_front.png": "data:image/png;base64,AAA",
+      "view_01_back.png": "data:image/png;base64,AAA",
+      "view_02_left.png": "data:image/png;base64,AAA",
+      "view_03_right.png": "data:image/png;base64,AAA",
+      "view_04_top.png": "data:image/png;base64,AAA",
+      "view_05_iso.png": "data:image/png;base64,AAA",
+    };
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("version-created", {
+        step: "version-created",
+        version_id: 3,
+        views,
+      });
+      handlers.onDone?.({});
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+
+    const card = await screen.findByTestId("pass-card");
+    expect(card.getAttribute("data-version")).toBe("3");
+    expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(6);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
@@ -384,9 +407,20 @@ describe("App chat wiring", () => {
     });
   });
 
-  it("appends streamed tokens to the assistant message via onToken", async () => {
+  it("streams token text into the turn's source, never the transcript (issue #125)", async () => {
+    // W10: this test pins the streaming STATE MACHINE at both ends — the
+    // in-flight turn renders as a plain (empty) message with the
+    // streaming cursor, and the cursor clears on done — and asserts the
+    // token text does not surface in the transcript. It does NOT pin
+    // the token→source path: nothing here asserts the token text
+    // arrived in the message's `source` field at all (commenting out
+    // both onToken calls leaves this test green). That path is pinned
+    // statically by the design-contract test (onToken writes `source:`,
+    // never `content:`) and exercised by the chat-panel test, which
+    // clicks the disclosure and checks its content.
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onToken("Hello", {});
@@ -398,11 +432,54 @@ describe("App chat wiring", () => {
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+
+    // The transcript exists, the token text is NOT in it, and the
+    // streaming cursor came and went (the state machine fired both
+    // ends).
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-msg-assistant")).toBeTruthy();
+    });
+    expect(screen.getByTestId("chat-msg-assistant").textContent).not.toContain(
+      "Hello world",
+    );
+    expect(screen.queryByTestId("streaming-cursor")).toBeNull();
+  });
+
+  it("writes the done frame's message into the pass card's summary line (issue #125)", async () => {
+    // The done frame carries the loop's result prose ("Design loop
+    // passed validation"). It must land in the assistant message's
+    // content — the field PassCard renders as its summary line — and
+    // therefore in pass-card-summary through the real frame path.
+    // Without this the summary rendered blank on every real pass.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("version-created", {
+        step: "version-created",
+        version_id: 3,
+        views: { "view_00_front.png": "data:image/png;base64,AAA" },
+      });
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
 
     await waitFor(() => {
-      expect(screen.getByTestId("chat-msg-assistant").textContent).toContain(
-        "Hello world",
+      expect(screen.getByTestId("pass-card-summary").textContent).toBe(
+        "Design loop passed validation",
       );
     });
   });
