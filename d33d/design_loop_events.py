@@ -421,6 +421,15 @@ async def _resolve_version_create(
     loop ALWAYS materialises a version (issue #93), with whatever params
     are known (possibly none).
 
+    The version OWNS its geometry (issue #105): the passing best
+    candidate's ``scad_source`` (a declared ``IterationRecord`` field —
+    the value the loop's prompt builder already carried in the
+    ``design_source`` prompt section on the loop's OWN iterations) is
+    persisted as ``versions/{id}/design.scad`` inside
+    ``create_version`` (same commit as the params snapshot). The loop's
+    best candidate is authoritative for BOTH params and source — a stub
+    without the declared field (or with an empty source) still versions
+    params only (no spurious empty source file).
     Params, in strict precedence:
 
     1. the best candidate's OWN render parameters — read as a DECLARED
@@ -456,11 +465,18 @@ async def _resolve_version_create(
         # to the latest-version snapshot rather than fabricate one.
         latest = app.state.versions.latest_version(project_id)
         named = dict(latest["params"]) if latest is not None else {}
+    # The candidate's OWN source (a declared field — ``best.scad_source``
+    # is verified against the real ``IterationRecord``, not a stub's
+    # assumed shape; an empty string / non-str yields no source file).
+    candidate_source = getattr(best, "scad_source", None)
+    if not isinstance(candidate_source, str) or not candidate_source.strip():
+        candidate_source = None
     version = await app.state.versions.create_version(
         project_id,
         dict(named),
         name="design",
         message=user_message[:200],
+        scad_source=candidate_source,
     )
     return int(version["id"])
 
@@ -604,6 +620,24 @@ async def run_design_loop_with_events(
     # hook's ``model``/``prompt_version``/``request`` kwargs before
     # forwarding to the real loop; a test stub (no ``app`` kwarg) is called
     # with none.
+    # The carried source (issue #105) is captured here — BEFORE the loop
+    # runs — so the loop's prompt renders the current design (turn 1
+    # renders the explicit clean-slate wording instead) and the value is
+    # the one this turn's prompt actually carried. ``None`` when no
+    # version owns a source yet; omitted from the kwargs then (a stub
+    # seam without the kwarg is still called cleanly — the production
+    # closure forwards **kwargs through the hook to the real loop, and
+    # the real loop's ``design_source`` parameter defaults to ``None``
+    # anyway, so the kwarg is only added when there IS a source to
+    # carry).
+    design_source: str | None = None
+    row = app.state.conn.get_project(project_id)
+    if row is not None:
+        from d33d.design_source import current_version_source
+
+        design_source = current_version_source(row, app.state.versions)
+    if design_source is not None:
+        kwargs["design_source"] = design_source
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)

@@ -572,6 +572,17 @@ def _design_state_lines(
     carries the description of the existing design, so the model can no
     longer invent 60 for a sphere it had itself made 30).
 
+    ``design_source`` (issue #105) is the CURRENT design's SCAD source
+    (the source of the version the project's ``current_version`` points
+    at). ``None`` renders the explicit clean-slate wording (never a
+    silently-absent section); a string renders the labelled
+    ``Current design source (OpenSCAD)`` section — distinct from the
+    REPAIR block's ``previous_scad:`` (the failed candidate of THIS turn,
+    never the accepted design). The section is orthogonal to #120's
+    parameter block: the parameters say what the numbers are, the source
+    says what the geometry is; the live prompt carries BOTH (pinned by
+    the integration test).
+
     Inserted as its own labelled lines BETWEEN the chat-history lines and
     the ``Reference dimensions`` line (the gate-resolution's named
     insertion point). The system prompt's ground-truth triple line is
@@ -604,6 +615,21 @@ def _design_state_lines(
     return lines
 
 
+def _design_source_lines(design_source: str | None) -> list[str]:
+    """The current-design source prompt lines (issue #105).
+
+    Thin caller over the SHARED section builder (``d33d.design_source.
+    design_source_lines``) — the same callable the route-side tests pin,
+    so the prompt cannot drift from the documented section. ``None``
+    renders the explicit clean-slate wording; a string renders the
+    labelled, size-bounded source (truncated with a VISIBLE marker past
+    ``MAX_SCAD_SOURCE_BYTES``).
+    """
+    from d33d.design_source import design_source_lines
+
+    return design_source_lines(design_source)
+
+
 def _design_messages(
     *,
     photo: str,
@@ -612,6 +638,7 @@ def _design_messages(
     repair: dict[str, Any] | None,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    design_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -641,6 +668,13 @@ def _design_messages(
     # to agree). Empty when no version exists yet (an honest empty state,
     # never a fabricated dimension).
     lines.extend(_design_state_lines(stated, state_params))
+    # The current design source (issue #105): the previous version's
+    # actual SCAD, rendered between the state block and the reference
+    # dimensions (same insertion point as the state block). One mechanism,
+    # one wording for both the chat and region-edit paths — the loop is
+    # the shared prompt builder, and ``design_source`` is supplied by
+    # every caller that knows the project.
+    lines.extend(_design_source_lines(design_source))
     lines.append(
         f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}"
     )
@@ -787,6 +821,7 @@ async def run_design_loop_async(
     request: str = "",
     state_params: dict[str, Any] | None = None,
     on_progress: OnProgressFn | None = None,
+    design_source: str | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -835,6 +870,7 @@ async def run_design_loop_async(
                 repair=repair,
                 request=request,
                 state_params=state_params,
+                design_source=design_source,
             ),
             _design_system(stated_dims),
         )
@@ -966,6 +1002,7 @@ def run_design_loop(
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    design_source: str | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -986,6 +1023,7 @@ def run_design_loop(
             max_iterations=max_iterations,
             request=request,
             state_params=state_params,
+            design_source=design_source,
         )
     )
 
