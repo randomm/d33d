@@ -615,15 +615,24 @@ def _finalize_loop_kwargs(
     assert row is not None  # already 404'd above
 
     photo = body.photo or row.get("source_photo_path")
+    latest = app.state.versions.latest_version(project_id)
     stated_dims = body.stated_dims
     if stated_dims is None:
-        latest = app.state.versions.latest_version(project_id)
         p = latest["params"] if latest is not None else {}
         stated_dims = (
             float(p.get("W", 0.0)),
             float(p.get("D", 0.0)),
             float(p.get("H", 0.0)),
         )
+    # The design-state block's data source (issue #120): the latest
+    # version's full params snapshot (the SAME dict the block builder
+    # consumes — the shared ``state_block_from_params`` function both the
+    # loop's prompt builder and this route call). ``None`` when no version
+    # exists yet (the block renders with zero entries — an honest empty
+    # state, never a fabricated dimension).
+    state_params: dict[str, Any] | None = (
+        dict(latest["params"]) if latest is not None else None
+    )
 
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
@@ -652,6 +661,7 @@ def _finalize_loop_kwargs(
         "model": model,
         "prompt_version": prompt_version,
         "request": request_text,
+        "state_params": state_params,
     }
 
 

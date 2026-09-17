@@ -470,4 +470,8 @@ def test_blank_request_renders_no_request_line():
     )
     user_text = _user_text(captured, 0)
     assert "Request:" not in user_text
-    assert user_text.startswith("Reference dimensions (mm, ground truth):")
+    # The dimensions line is present (issue #120 added a design-state block
+    # line before it — the block is an additive, self-contained section, so
+    # the dimensions line is no longer the FIRST line; assert its presence
+    # and content, not its absolute position).
+    assert "Reference dimensions (mm, ground truth):" in user_text
