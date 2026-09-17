@@ -275,4 +275,48 @@ describe("design contract", () => {
     // screen twice before this was removed (issue #114).
     expect(filesMatching(/Waiting for render/)).toEqual([]);
   });
+
+  /* --------------------------------------------------------------- W8 */
+
+  it("App.tsx imports all six surface components and holds none of their markup", () => {
+    // Issue #116: six presentational surfaces were extracted out of App.tsx
+    // (Brief, PassCard, Composer, PassProgress, FailureCard, Filmstrip) so
+    // the W9-W14 surface tickets can work in their own files in parallel.
+    // App.tsx must import each of the six — the contract the parallel
+    // tickets build against — and must hold NONE of their markup: every
+    // surface class name and testid lives in its own component file, not
+    // inline in the stage host.
+    const app = readFileSync(join(SRC, "App.tsx"), "utf8");
+    for (const surface of [
+      "brief/Brief",
+      "chat/PassCard",
+      "chat/Composer",
+      "progress/PassProgress",
+      "failure/FailureCard",
+      "versions/Filmstrip",
+    ]) {
+      const importLine = `from "./components/${surface}"`;
+      expect(app.includes(importLine), `App.tsx must import the ${surface} surface component`).toBe(true);
+    }
+    const surfaceMarkers = [
+      // PassProgress's inline block (the design-loop stage indicator)
+      "design-loop-progress",
+      // FailureCard's inline block (the app-level error card)
+      "app-error",
+      // Filmstrip's inline block (the version-tail pane + compare + gallery)
+      "version-tail-pane",
+      // Brief's inline block (the top-left overlay)
+      "brief-panel",
+      // Composer's markup (the chat input form — must live in
+      // components/chat/Composer.tsx, not in App.tsx)
+      "chat-input",
+      "chat-send-btn",
+    ];
+    for (const marker of surfaceMarkers) {
+      expect(
+        app.includes(marker),
+        `App.tsx must not hold the ${marker} markup — it belongs to its surface component`,
+      ).toBe(false);
+    }
+  });
 });
