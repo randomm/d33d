@@ -42,11 +42,15 @@ if [[ ! -f pyproject.toml ]]; then
     exit 2
 fi
 
-# Default: fast gate. The marker expression is intentionally NOT
-# hardcoded to "not slow" so that when issue #108's `live` marker lands,
-# the expression can be updated in one place (here) without editing CI or
-# AGENTS.md again.
-MARKER_EXPR="${D33D_MARKER_EXPR:-not slow}"
+# Default: fast gate — mirrors CI exactly (``not slow and not live``).
+# issue #108's live suite FAILS (deliberately, never skips) when its
+# prerequisites (LLM key, Docker daemon) are missing, so a default that
+# includes ``live`` would make the gate end in errors on every machine
+# without credentials. The live suite remains deliberately runnable:
+# pass your own ``-m`` after ``--`` (e.g. ``./scripts/test -- -m live``
+# — an explicit ``-m`` after ``--`` overrides the default, since pytest
+# takes the last one), or set D33D_MARKER_EXPR.
+MARKER_EXPR="${D33D_MARKER_EXPR:-not slow and not live}"
 
 if command -v uv >/dev/null 2>&1; then
     echo "gate: invoking via uv (uv run --with pytest pytest)"
