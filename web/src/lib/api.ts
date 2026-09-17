@@ -259,6 +259,21 @@ export interface Credential {
   model_alias: string;
 }
 
+/**
+ * The build envelope (GET /api/config/envelope) — x/y/z in millimetres plus
+ * a `verified` flag (true once the values have been confirmed against the
+ * machine; false until then). A third reader of the backend's named
+ * constants: the SPA prints these numbers and never a literal of its own.
+ * The keep-out notch is deliberately NOT in this payload.
+ */
+export interface Envelope {
+  x: number;
+  y: number;
+  z: number;
+  unit: "mm";
+  verified: boolean;
+}
+
 /** Max number of ranked module identifiers `RegionEditRequest.module_ids`
  *  accepts (matches `MAX_REGION_EDIT_MODULE_IDS` in `d33d/app.py`, enforced
  *  server-side via `Field(max_length=...)`). Callers must slice the
@@ -692,6 +707,18 @@ export class ApiClient {
 
   async getModelConfig(): Promise<ModelCatalogue> {
     return this.request<ModelCatalogue>("GET", "/api/config/models");
+  }
+
+  /**
+   * The build envelope for the machine (GET /api/config/envelope) — x/y/z in
+   * millimetres plus a `verified` flag. A third READER of the backend's named
+   * constants (never a copy of the numbers): the first-run plate backdrop and
+   * the failure card's envelope copy both print these values, so the SPA must
+   * read them from the API rather than literal a confident value it has not
+   * established. The keep-out notch is deliberately NOT in this payload.
+   */
+  async getEnvelope(): Promise<Envelope> {
+    return this.request<Envelope>("GET", "/api/config/envelope");
   }
 
   /**

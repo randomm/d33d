@@ -219,6 +219,17 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   vi.spyOn(client, "listVersions").mockResolvedValue([]);
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
   vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+  // App fetches the build envelope on mount (issue #128) for the first-run
+  // plate backdrop's caption. Stubbed here so the call never reaches the
+  // global fetch (which the upload-wiring block below replaces with a bare
+  // vi.fn()). The value matches the backend's QIDI Plus 5 constant.
+  vi.spyOn(client, "getEnvelope").mockResolvedValue({
+    x: 320,
+    y: 320,
+    z: 300,
+    unit: "mm",
+    verified: false,
+  });
   Object.assign(client, overrides);
   return client;
 }
@@ -2310,5 +2321,87 @@ describe("App design-loop error display (issue #82)", () => {
     // The second call should be with the same message (verified via postChat call count)
     // postChat is called again with the same message
     expect(client.postChat).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("App first-run screen (issue #128, W14)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("is shown while the project has no versions and no message has been sent", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+  });
+
+  it("renders four starters, each a complete sentence from the deck", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    const starters = screen.getAllByTestId("first-run-starter");
+    expect(starters).toHaveLength(4);
+    starters.forEach((el, i) => {
+      expect(el.textContent).toBe(copy.firstRun.starters[i]);
+    });
+  });
+
+  it("states the millimetre contract exactly once", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // The contract sentence ("Everything here is in millimetres…") lives in
+    // copy.firstRun.body and must appear exactly once in the app DOM — this
+    // surface is the only place it is not yet a constraint.
+    const occurrences = (screen.getByTestId("app-stage").textContent ?? "")
+      .split("Everything here is in millimetres")
+      .length - 1;
+    expect(occurrences).toBe(1);
+  });
+
+  it("fetches the build envelope and draws the plate to scale with the API's numbers", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(client.getEnvelope).toHaveBeenCalled());
+    // The caption renders the fetched numbers (320 × 320 × 300) and the
+    // plate's viewBox is drawn from them — 0 0 x z.
+    expect(screen.getByTestId("plate-caption").textContent).toBe("320 × 320 × 300\u202Fmm");
+    const svg = screen.getByTestId("app-stage").querySelector("svg.plate-backdrop");
+    expect(svg).not.toBeNull();
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 320 300");
+  });
+
+  it("re-draws the plate (caption AND outline) when the API returns different numbers", async () => {
+    vi.spyOn(client, "getEnvelope").mockResolvedValue({
+      x: 220,
+      y: 220,
+      z: 255,
+      unit: "mm",
+      verified: false,
+    });
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("plate-caption").textContent).toBe("220 × 220 × 255\u202Fmm"));
+    // The drawing follows the numbers — a fixed-aspect plate with a
+    // separately-fetched caption is the defect this asserts against.
+    const svg = screen.getByTestId("app-stage").querySelector("svg.plate-backdrop");
+    expect(svg!.getAttribute("viewBox")).toBe("0 0 220 255");
+  });
+
+  it("goes away once a message has been sent (the conversation takes the centre)", async () => {
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a bracket" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("first-run")).toBeNull();
   });
 });
