@@ -4,13 +4,14 @@ FAILS, never skips: a silently-skipped live suite is indistinguishable
 from a passing one — the exact defect class this ticket exists to remove
 (seven integration defects shipped this week were all invisible to the
 ~1130 passing fast tests). Prerequisites are checked in
-``pytest_configure`` — BEFORE any test is collected or runs — and a
-missing prerequisite raises :class:`LivePrerequisiteError`, a
-collection error, so ``pytest -m live`` exits NON-ZERO (never 0, never
-a green skip). The fast suite carries a hermetic meta-test that
-monkeypatches this check and asserts the named error is raised (see
-``tests/evals/test_live_fail_not_skip.py``), plus a subprocess check
-that the real exit code is non-zero.
+``pytest_collection_modifyitems`` — AFTER marker deselection, so a fast
+run (``-m "not slow and not live"``) that deselects every ``live`` test
+never checks — and a missing prerequisite raises
+:class:`LivePrerequisiteError`, a collection error, so ``pytest -m live``
+exits NON-ZERO (never 0, never a green skip). The fast suite carries a
+hermetic meta-test that monkeypatches this check and asserts the named
+error is raised (see ``tests/test_live_fail_not_skip.py``), plus a
+subprocess check that the real exit code is non-zero.
 
 Prerequisites (all three required, named in the failure message):
 - Docker is invocable (the real render worker is a Docker container).
@@ -38,13 +39,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _catalogue_path() -> Path:
-    """The real catalogue. The operator maintains models.yaml at the main
-    checkout (untracked — it holds no secret, only a
-    ``${TRAIL_OPENERS_LLM_KEY}`` reference); worktrees cut from
-    origin/main do not carry it, so resolve the main-checkout path first,
-    falling back to the worktree root for a non-worktree checkout."""
-    main = Path("/Users/janni/projects/d33d/models.yaml")
-    return main if main.is_file() else REPO_ROOT / "models.yaml"
+    """The real catalogue: ``models.yaml`` at THIS checkout's root
+    (untracked — it holds no secret, only a ``${TRAIL_OPENERS_LLM_KEY}``
+    reference). The operator keeps it at the repo root they run the
+    suite from; worktrees cut from origin/main do not carry it, so a
+    worktree run must place it at the worktree root first."""
+    return REPO_ROOT / "models.yaml"
 
 
 # Session wall-clock budget: each case gets the full budget (one
@@ -128,19 +128,24 @@ def check_live_prerequisites(
         ) from e
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    """Collection-time prerequisite check — FAIL, not skip.
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Pre-run prerequisite check — FAIL, not skip, but ONLY when a
+    ``live`` test is actually selected.
 
-    ``pytest_configure`` runs before collection, so a raised
-    :class:`LivePrerequisiteError` aborts the whole invocation with a
-    non-zero exit code and a message naming what is missing. The check
-    is deliberately NOT gated on the ``live`` marker (the marker filter
-    applies to test selection, which happens later) — gating on the
-    marker would let ``pytest -m live`` skip the check when the
-    expression excludes the marker, which is precisely the silent
-    failure being guarded against.
+    ``pytest_collection_modifyitems`` runs AFTER marker deselection, so a
+    fast run (``pytest -m "not slow and not live"`` — CI, which has no
+    Docker and no ``TRAIL_OPENERS_LLM_KEY`` secret) deselects every
+    ``live`` test and this hook sees zero live items: no check, no
+    error, the fast suite runs green. When any ``live`` item survives
+    selection (``pytest -m live``), the prerequisite check runs and a
+    missing prerequisite raises :class:`LivePrerequisiteError`, a
+    collection error: a non-zero exit naming what is missing — never a
+    skip, never a silent pass. The fast suite's hermetic meta-test
+    (``tests/test_live_fail_not_skip.py``) and its subprocess exit-code
+    test pin both halves of that contract.
     """
-    check_live_prerequisites()
+    if any("live" in item.keywords for item in items):
+        check_live_prerequisites()
 
 
 # ---------------------------------------------------------------------------

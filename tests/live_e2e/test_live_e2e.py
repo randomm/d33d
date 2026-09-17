@@ -43,7 +43,7 @@ from fastapi import FastAPI
 # importable without a package __init__).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from conftest import REPO_ROOT, case_timer
+from conftest import REPO_ROOT, _catalogue_path, case_timer
 
 from d33d import db as db_mod
 from d33d import print_validation as _pv
@@ -81,17 +81,6 @@ def _build_live_app(tmp_path: Path) -> FastAPI:
         catalogue_path=_catalogue_path(),
     )
     return app
-
-
-def _catalogue_path() -> Path:
-    """The real catalogue (models.yaml). The operator maintains it at
-    the main checkout (untracked — no secret, only the
-    ``${TRAIL_OPENERS_LLM_KEY}`` reference); worktrees cut from
-    origin/main do not carry it, so resolve the main-checkout path
-    first, falling back to the worktree root for a non-worktree
-    checkout."""
-    main = Path("/Users/janni/projects/d33d/models.yaml")
-    return main if main.is_file() else REPO_ROOT / "models.yaml"
 
 
 def _start_lifespan(app: FastAPI) -> FastAPI:

@@ -23,36 +23,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: The real catalogue's location. The operator maintains it at the MAIN
-#: CHECKOUT (repo root, untracked — it holds no secret, only a
-#: ${TRAIL_OPENERS_LLM_KEY} reference), and it is NOT a worktree file
-#: (worktrees cut from origin/main do not carry it). Resolve it there
-#: first, falling back to the worktree root for a non-worktree checkout.
-CATALOGUE_PATH = (
-    Path("/Users/janni/projects/d33d/models.yaml")
-    if Path("/Users/janni/projects/d33d/models.yaml").is_file()
-    else REPO_ROOT / "models.yaml"
-)
-
-
-def _catalogue_path() -> Path:
-    return CATALOGUE_PATH
-
-
 from tests.live_e2e.conftest import (
     LivePrerequisiteError,
+    _catalogue_path,
     check_live_prerequisites,
 )
-
-
-def _catalogue_path() -> Path:
-    """The real catalogue. The operator maintains models.yaml at the main
-    checkout (untracked — it holds no secret, only a
-    ``${TRAIL_OPENERS_LLM_KEY}`` reference); worktrees cut from
-    origin/main do not carry it, so resolve the main-checkout path first,
-    falling back to the worktree root for a non-worktree checkout."""
-    main = Path("/Users/janni/projects/d33d/models.yaml")
-    return main if main.is_file() else REPO_ROOT / "models.yaml"
 
 
 def test_missing_key_raises_named_error(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,8 +88,9 @@ def test_missing_key_exit_code_is_nonzero() -> None:
 
     Runs ``pytest -m live`` in a subprocess with
     ``TRAIL_OPENERS_LLM_KEY`` removed from the environment. The
-    conftest's ``pytest_configure`` check raises the named error at
-    collection time -> a non-zero exit. This test is marked ``slow``
+    conftest's ``pytest_collection_modifyitems`` check (which fires
+    because ``-m live`` selects the live tests) raises the named error
+    at collection time -> a non-zero exit. This test is marked ``slow``
     (it spawns a full pytest; a few seconds) so the fast
     ``-m "not slow"`` CI job does not pay for it, and it is NOT
     marked ``live`` (it must run without the key).
@@ -125,20 +101,19 @@ def test_missing_key_exit_code_is_nonzero() -> None:
     env["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", "")
     # The key is absent -> the conftest check raises at collection. The
     # subprocess still needs the catalogue to exist so the failure is
-    # the KEY (not the catalogue): it is at the main checkout (see
-    # _catalogue_path); the conftest's default is the worktree root, so
-    # copy the real catalogue in place for the subprocess's REPO_ROOT.
-    # (The catalogue holds no secret — only the ${ENV} reference.)
-
-    wt_catalogue = REPO_ROOT / "models.yaml"
-    main_catalogue = Path("/Users/janni/projects/d33d/models.yaml")
-    copied = False
-    if main_catalogue.is_file() and not wt_catalogue.is_file():
-        wt_catalogue.write_text(
-            main_catalogue.read_text(encoding="utf-8"), encoding="utf-8"
-        )
-        copied = True
+    # the KEY (not the catalogue): _catalogue_path resolves it at the
+    # subprocess's own repo root, so seed a minimal catalogue with the
+    # ``design`` role (no key material — the check must fail on the KEY,
+    # and the catalogue is only consulted after the key) and remove it
+    # afterwards.
+    catalogue = _catalogue_path()
+    existing = catalogue.is_file()
+    if existing:
+        backup = catalogue.read_text(encoding="utf-8")
     try:
+        catalogue.write_text(
+            "providers: []\nroles:\n  design: foo\n", encoding="utf-8"
+        )
         proc = subprocess.run(
             [
                 sys.executable,
@@ -156,8 +131,10 @@ def test_missing_key_exit_code_is_nonzero() -> None:
             timeout=120,
         )
     finally:
-        if copied:
-            wt_catalogue.unlink(missing_ok=True)
+        if existing:
+            catalogue.write_text(backup, encoding="utf-8")
+        else:
+            catalogue.unlink(missing_ok=True)
     assert proc.returncode != 0, (
         f"pytest -m live exited {proc.returncode} (0) with the key missing — "
         "a refusal that exits 0 is indistinguishable from a pass. stderr: "
