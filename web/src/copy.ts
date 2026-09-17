@@ -7,20 +7,34 @@
  *
  * House rules encoded here, not negotiable per surface:
  * - A value that has not been established renders `brief.unknownValue`, never a
- *   number, never "0", never an em-dash standing in for one.
+ *   number, never "0", never an em-dash standing in for one. The number
+ *   formatters below enforce this at their boundary, not at every call site.
  * - Failure copy names the measured number and the limit together, then offers
  *   actions, then the raw reason. It never leads with a code.
  * - Nothing implies d33d slices. Where Orca is the answer, say Orca.
+ *
+ * What is NOT in this deck:
+ * - Design-loop reason copy (`GATE_REASON_BITS` + render-worker `ErrorClass`
+ *   → sentence) lives in `lib/errorMapping.ts` — that module is authoritative
+ *   for those words, and this deck does not keep a second, drift-prone copy.
+ * - Filename construction lives in `lib/exportFilename.ts`. This deck holds
+ *   display strings only.
  */
 
 /** Narrow no-break space — keeps "34 mm" from breaking across a line. */
 const NB = "\u202F";
 
+/** The guard the formatters share: an unestablished value (NaN, Infinity —
+ *  a missing measurement or a failed parse) is never a number, per the house
+ *  rules. It falls back to the deck's unknown phrase rather than "NaN mm". */
+const fmt = (value: number): string =>
+  Number.isFinite(value) ? value.toFixed(1) : brief.unknownValue;
+
 /** One decimal, always, with the unit attached. Every displayed dimension. */
-export const mm = (value: number): string => `${value.toFixed(1)}${NB}mm`;
+export const mm = (value: number): string => `${fmt(value)}${NB}mm`;
 
 /** Diameter, for bores and shafts. */
-export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
+export const dia = (value: number): string => `Ø${fmt(value)}${NB}mm`;
 
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
@@ -138,8 +152,14 @@ export const progress = {
   /** An auto-repair round is announced, never hidden.
    *  Attempts are counted openly rather than named in ordinals — "Attempt 3 of 3"
    *  scales and stays grammatical where "Third try" does not, and a maker would
-   *  rather know how many are left than be soothed. */
+   *  rather know how many are left than be soothed.
+   *  An attempt count outside 1..max breaks the loop's counter invariant (the
+   *  backend over- or under-counted); surface that plainly rather than emit a
+   *  confidently wrong "Attempt 4 of 3 … last one". */
   repairAttempt: (attempt: number, max: number, whatChanged: string): string => {
+    if (attempt < 1 || attempt > max) {
+      return `The count is off — ${whatChanged} The loop's attempt count is wrong, so I'm telling you what I did instead of how many is left.`;
+    }
     const left = max - attempt;
     const tail =
       left <= 0
@@ -177,23 +197,18 @@ export const failure = {
     actions: { retry: "Try again", keep: "Keep it anyway" },
   },
 
-  /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
-   *  holds the words. The map must stay total — every GATE_REASON_BITS value and
-   *  every render ErrorClass value has an entry. */
+  /** One sentence per closed-set reason, for the validation gates that report
+   *  classes beyond the design loop's (load_error, watertight, …). The design
+   *  loop's own reason→sentence map lives in `lib/errorMapping.ts` — that module
+   *  is authoritative for those words, and this map does not repeat them.
+   *  Every print-validation ErrorClass that is not a design-loop reason has an
+   *  entry here. */
   reasons: {
     bbox_out_of_tolerance:
       "It came out a different size from the one you asked for.",
     stated_dims_not_named_parameters:
       "The dimensions you gave didn't end up as parameters, so the next change would not be able to hold them.",
     views_blank_or_missing: "It built, but the preview images came out blank.",
-    error_class_not_ok: "The design step produced nothing usable.",
-    syntax_error: "The generated design had a syntax error, so nothing was built.",
-    empty_model: "The design produced an empty model — there is nothing to print.",
-    artifact_error: "The model file came out unreadable.",
-    timeout: "The render ran out of time. A simpler shape will get through.",
-    oom: "The model was too heavy to render. A simpler shape will get through.",
-    container_error:
-      "The render environment failed. That is temporary — try again.",
     load_error: "The finished model could not be loaded back for checking.",
     watertight:
       "The model has holes in its surface, so a slicer can't tell inside from outside.",
@@ -295,8 +310,6 @@ export const shell = {
    *  at geometry; Orca takes it from here. */
   exportDone: (filename: string): string =>
     `${filename}. Open it in Orca — it's already in millimetres and oriented flat.`,
-  exportFilename: (project: string, version: string): string =>
-    `${project.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${version}.3mf`,
 
   /** Chat collapsed to its rail keeps the last summary legible. */
   conversationCollapsed: (messages: number): string => `${messages} messages`,
