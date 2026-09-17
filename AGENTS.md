@@ -114,16 +114,16 @@ standard-library features, or meta-questions about the project.
 
 | kind | command |
 | --- | --- |
-| test | `pytest -m "not slow"` |
-| test | `pytest` |
+| test | `./scripts/test` (fast gate, what CI runs) |
+| test | `./scripts/test --full` (full suite incl. slow/Docker) |
 
 
 ## Quality Gates
 
 Run these before pushing. All must pass locally:
 
-- **Test (fast, no Docker)** — `pytest -m "not slow"`
-- **Test (full incl. slow/Docker)** — `pytest`
+- **Test (fast, no Docker)** — `./scripts/test`
+- **Test (full incl. slow/Docker)** — `./scripts/test --full`
 
 
 ## Code Style

@@ -13,7 +13,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[test]"
-      - run: pytest -m "not slow"
+      - run: ./scripts/test
 
   web:
     runs-on: ubuntu-latest

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Deterministic test gate for d33d.
+#
+# This is the ONLY command the project's quality gates name. Running it:
+#
+#   1. Refuses to use a system / PATH pytest that lacks the project deps.
+#      `uv run` builds the project into a project-local venv and `--with
+#      pytest` guarantees the pytest binary is the one that has the
+#      project's deps — not whichever `pytest` happens to be first on
+#      $PATH. The wrapper cannot fall through to $PATH, so the
+#      wrong-pytest failure mode cannot happen.
+#
+#   2. Refuses to report a result if `d33d` resolves to a source tree
+#      other than the one this script was invoked in (the provenance
+#      guard, in tests/__init__.py).
+#
+#   3. Refuses to report a result if the full suite does not collect
+#      (the dependency guard, in tests/__init__.py, runs at package
+#      import time and exits non-zero with a diagnostic if any required
+#      package is missing from the interpreter).
+#
+# Usage:
+#   ./scripts/test               # fast gate (what CI runs)
+#   ./scripts/test --full         # full suite including slow/Docker
+#   ./scripts/test -- collect-only
+#
+# Any arguments after `--` are passed to pytest verbatim, so the script
+# can also be used for one-off collection or a specific test:
+#   ./scripts/test -- tests/test_smoke.py
+set -euo pipefail
+
+# Refuse to be run from a directory that isn't a d33d checkout.
+if [[ ! -f pyproject.toml ]]; then
+    echo "scripts/test: must be invoked from the repo root (no pyproject.toml here)" >&2
+    exit 2
+fi
+
+# Default: fast gate. The marker expression is intentionally NOT
+# hardcoded to "not slow" so that when issue #108's `live` marker lands,
+# the expression can be updated in one place (here) without editing CI or
+# AGENTS.md again.
+MARKER_EXPR="${D33D_MARKER_EXPR:-not slow}"
+
+if [[ "${1:-}" == "--full" ]]; then
+    MARKER_EXPR=""
+elif [[ "${1:-}" == "--" ]]; then
+    # Everything after `--` is passed to pytest verbatim.
+    shift
+    exec uv run --with pytest pytest "$@"
+else
+    exec uv run --with pytest pytest -m "$MARKER_EXPR" "$@"
+fi
