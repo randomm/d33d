@@ -1732,8 +1732,8 @@ describe("App design-loop progress indicator (issue #82)", () => {
   it("renders 'Generating design…' on design-loop-start and generic fallback for unknown step", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
-    let capturedHandlers: any = null;
-    vi.spyOn(client, "streamEvents").mockImplementation((_id: number, handlers: any) => {
+    let capturedHandlers: Parameters<typeof client.streamEvents>[1] | null = null;
+    vi.spyOn(client, "streamEvents").mockImplementation((_id, handlers) => {
       capturedHandlers = handlers;
       return new Promise(() => {});
     });
@@ -1748,10 +1748,12 @@ describe("App design-loop progress indicator (issue #82)", () => {
     await waitFor(() => {
       expect(capturedHandlers).not.toBeNull();
     });
+    if (!capturedHandlers) throw new Error("streamEvents handlers not captured");
+    const handlers: Parameters<typeof client.streamEvents>[1] = capturedHandlers;
 
     // Fire design-loop-start
     act(() => {
-      capturedHandlers.onProgress("design-loop-start", { step: "design-loop-start" });
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
     });
     await waitFor(() => {
       expect(screen.getByTestId("design-loop-stage").textContent).toBe("Generating design…");
@@ -1759,7 +1761,7 @@ describe("App design-loop progress indicator (issue #82)", () => {
 
     // Fire an unknown step — should show generic fallback, not the raw token
     act(() => {
-      capturedHandlers.onProgress("some-unknown-step", { step: "some-unknown-step" });
+      handlers.onProgress("some-unknown-step", { step: "some-unknown-step" });
     });
     await waitFor(() => {
       expect(screen.getByTestId("design-loop-stage").textContent).toBe("Working on your design…");

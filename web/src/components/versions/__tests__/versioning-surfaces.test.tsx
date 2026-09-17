@@ -38,8 +38,9 @@ vi.mock("../../viewer/ModelViewer", async () => {
     format: string;
     onReady?: (handle: ModelViewerHandle) => void;
   }) => {
+    const { format, onReady } = props;
     useEffect(() => {
-      props.onReady?.({
+      onReady?.({
         scene: {} as never,
         camera: {} as never,
         renderer: {
@@ -54,8 +55,8 @@ vi.mock("../../viewer/ModelViewer", async () => {
         raycaster: {} as never,
         modelRoot: null,
       });
-    }, []);
-    return <div data-testid={`model-viewer-slot-${props.format}`} />;
+    }, [onReady]);
+    return <div data-testid={`model-viewer-slot-${format}`} />;
   };
   return { ...actual, ModelViewer: MockModelViewer };
 });
