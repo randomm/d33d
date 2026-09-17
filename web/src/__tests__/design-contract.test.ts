@@ -262,6 +262,85 @@ describe("design contract", () => {
     expect(strays).toEqual([]);
   });
 
+  it("the viewer-pane element carries no fixed inline width or height", () => {
+    // W7 element-anchored tripwire (issue #149): the name-based assertion
+    // above catches identifiers that contain "viewer", but four slip-shapes
+    // were verified to evade it — STAGE_WIDTH, CANVAS_HEIGHT, PANE_WIDTH,
+    // and a bare style={{ width: 600 }} on the pane. All four only matter
+    // when applied to the viewer-pane element itself, so this assertion
+    // anchors on that element's own style block rather than on identifier
+    // names. The two assertions are complementary: the name-based one
+    // catches fixed dimensions exported from ModelViewer.tsx / PickLayer.tsx
+    // where no viewer-pane element exists; this one catches fixed dimensions
+    // applied directly to the pane in App.tsx.
+    //
+    // Boundary (honest, not a gap): this catches direct numeric forms
+    // (width: 600, width: "600px") inside the viewer-pane's own style={{…}}.
+    // It does NOT catch a spread from a variable (style={paneSize}) or
+    // flex-basis sizing (flex: '0 0 600px') — those require an AST walk
+    // or a DOM read, which the file's standing rule forbids.
+    const app = readFileSync(join(SRC, "App.tsx"), "utf8");
+
+    // Locate the viewer-pane element by its data-testid. The testid string
+    // "viewer-pane" appears exactly once in App.tsx's JSX (the opening tag
+    // of the pane div); the assertion's own doc comment names it, but this
+    // read is of App.tsx source, not of this test file, so there is no
+    // self-match risk.
+    const testidIdx = app.indexOf('data-testid="viewer-pane"');
+    expect(
+      testidIdx,
+      'App.tsx must contain the viewer-pane element (data-testid="viewer-pane")',
+    ).toBeGreaterThanOrEqual(0);
+
+    // From the testid position, find the style={{ … }} block that belongs
+    // to this element. Walk forward to the next "style=" after the testid,
+    // then capture the balanced-brace object.
+    const styleIdx = app.indexOf("style=", testidIdx);
+    expect(
+      styleIdx > testidIdx,
+      "the viewer-pane element must have a style prop",
+    ).toBe(true);
+
+    // The style value is {{…}} — two opening braces. Find the first { after
+    // "style=" and match its balanced partner.
+    const outerBrace = app.indexOf("{", styleIdx);
+    expect(outerBrace > styleIdx).toBe(true);
+    let depth = 0;
+    let end = -1;
+    for (let i = outerBrace; i < app.length; i += 1) {
+      if (app[i] === "{") depth += 1;
+      if (app[i] === "}") depth -= 1;
+      if (depth === 0) { end = i; break; }
+    }
+    expect(end > outerBrace, "could not find the closing brace of the viewer-pane style block").toBe(true);
+
+    // The style object's inner content: strip the outer pair of braces.
+    // style={{…}} → the inner {…} is at outerBrace+1 … end-1.
+    const styleBody = app.slice(outerBrace + 1, end);
+
+    // A fixed dimension is width/height set to a bare number (≥100, to
+    // exclude zIndex: 0 / inset: 0) or a numeric px string ("600px").
+    // Fluid values — "100vw", "100vh", "100%", "auto", "fit-content",
+    // "min-content", "max-content", "stretch", "100dvh" — are legitimate.
+    // The regex matches the KEY width or height (as a whole word inside the
+    // style object, i.e. preceded by { , or a newline+whitespace) followed
+    // by a colon and a number (bare or px-suffixed). It does NOT match
+    // maxWidth, minWidth, maxHeight, minHeight, or zIndex.
+    const fixedDim =
+      /(?:^|[,\n{\s])width\s*:\s*(?:\d{3,}(?:\.\d+)?\b|"\d+px"|'\d+px')/;
+    const fixedDimH =
+      /(?:^|[,\n{\s])height\s*:\s*(?:\d{3,}(?:\.\d+)?\b|"\d+px"|'\d+px')/;
+
+    expect(
+      fixedDim.test(styleBody),
+      `viewer-pane style block contains a fixed width: ${styleBody.slice(0, 200)}`,
+    ).toBe(false);
+    expect(
+      fixedDimH.test(styleBody),
+      `viewer-pane style block contains a fixed height: ${styleBody.slice(0, 200)}`,
+    ).toBe(false);
+  });
+
   it("no component sets a z-index outside the four layers (0, 10, 20, 30)", () => {
     // W7: z-index is a closed set — canvas 0, panels 10, conversation 20,
     // pin+bar 30. Any other z-index value is a violation.
