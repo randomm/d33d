@@ -12,7 +12,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { compositeMarkedPng, stripDataUrlPrefix } from "../markedPng";
-import { MARKER_COLOR } from "../../components/chat/ChatPanel";
+import { MARKER_COLOR } from "../marker";
 
 describe("stripDataUrlPrefix", () => {
   it("strips a data:image/png;base64, prefix", () => {

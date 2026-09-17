@@ -15,17 +15,11 @@
 import { useRef, useEffect, useState, type FormEvent } from "react";
 import type { RenderImage } from "../../App";
 import type { RegionEditViewId } from "../../lib/api";
+import { MARKER_COLOR } from "../../lib/marker";
 
-/**
- * Marker colour for region-selection marks (thumbnails).
- *
- * Must stay red / high-contrast warm — arXiv 2512.17875 (Berkeley) found
- * VLMs are fragile to marker details and a red-to-blue swap can flip
- * correctness. This is a functional requirement, not a styling choice,
- * so it is a named constant rather than an inline colour string, and a
- * test asserts its RGB channels rather than just its presence.
- */
-export const MARKER_COLOR = "#FF3300";
+// The marker colour's single home is lib/marker.ts (issue #110); the name
+// is re-exported here for existing consumers.
+export { MARKER_COLOR };
 
 /** A persisted region selection attached to a chat message (06-region-
  *  selection.md UX: "selection persists as a thumbnail on the chat

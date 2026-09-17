@@ -21,6 +21,8 @@
 
 import { useCallback, useRef, type PointerEvent } from "react";
 
+import { MARKER_COLOR } from "../../lib/marker";
+
 /** Maximum pointer travel (CSS pixels) between pointerdown and pointerup
  *  for the interaction to count as a SELECTING CLICK rather than a drag.
  *  4px exists because trackpad/trackpad-trackpads report a few pixels of
@@ -124,7 +126,7 @@ export function PickLayer({
             // The marker colour is the mandated red/high-contrast warm
             // (AGENTS.md: VLMs are marker-colour-fragile) — the same
             // compositeMarkedPng strokes the sent image with.
-            backgroundColor: "#FF3300",
+            backgroundColor: MARKER_COLOR,
             border: "2px solid #ffffff",
             boxSizing: "border-box",
             pointerEvents: "none",

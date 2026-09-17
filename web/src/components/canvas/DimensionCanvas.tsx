@@ -43,8 +43,8 @@
  *
  * Lasso markers (red/warm requirement)
  * -------------------------------------
- * The lasso outline reuses the same red stroke (`#FF3300`) already used
- * for dimension lines — VLM marker-fragility evidence (arXiv 2512.17875)
+ * The lasso outline reuses the marker colour (`MARKER_COLOR` from
+ * lib/marker.ts) — VLM marker-fragility evidence (arXiv 2512.17875)
  * requires selection markers to be red or high-contrast warm; a restyle to
  * blue/green must not silently pass review, so `LASSO_STROKE_COLOR` is a
  * named, tested constant rather than an inline literal.
@@ -58,6 +58,7 @@ import {
 } from "react";
 import { Stage, Layer, Line, Text, Image as KImage, Group } from "react-konva";
 import type Konva from "konva";
+import { MARKER_COLOR, markerAlpha } from "../../lib/marker";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -182,13 +183,13 @@ const CLOSE_POLYGON_THRESHOLD_PX = 12;
 /** Minimum vertex count for a valid (non-degenerate) polygon. */
 const MIN_POLYGON_POINTS = 3;
 
-/** Lasso outline colour. Reuses the dimension-line red so there is one
- *  red/warm marker convention across the whole canvas — VLM
+/** Lasso outline colour. Reuses the marker colour (lib/marker.ts) so
+ *  there is one red/warm marker convention across the whole canvas — VLM
  *  marker-fragility evidence (arXiv 2512.17875) requires markers to be
  *  red or high-contrast warm; a restyle to blue/green must not silently
  *  pass review, hence a named exported constant instead of an inline
  *  literal. */
-export const LASSO_STROKE_COLOR = "#FF3300";
+export const LASSO_STROKE_COLOR = MARKER_COLOR;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -527,7 +528,7 @@ export function DimensionCanvas({
               <Group key={d.id} data-testid={`dim-line-${d.id}`}>
                 <Line
                   points={pts}
-                  stroke="#FF3300"
+                  stroke={MARKER_COLOR}
                   strokeWidth={2}
                   lineCap="round"
                 />
@@ -536,7 +537,7 @@ export function DimensionCanvas({
                   x={(pts[0] + pts[2]) / 2}
                   y={(pts[1] + pts[3]) / 2 - 14}
                   fontSize={12}
-                  fill="#FF3300"
+                  fill={MARKER_COLOR}
                   align="center"
                   height={16}
                 />
@@ -585,7 +586,7 @@ export function DimensionCanvas({
                 lineCap="round"
                 lineJoin="round"
                 closed
-                fill="rgba(255,51,0,0.15)"
+                fill={markerAlpha(0.15)}
               />
             </Group>
           )}

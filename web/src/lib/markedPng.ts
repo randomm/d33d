@@ -16,7 +16,7 @@
  * `data:` prefix would fail to decode).
  */
 
-import { MARKER_COLOR } from "../components/chat/ChatPanel";
+import { MARKER_COLOR } from "./marker";
 
 /** A 2-D point in viewport CSS-pixel coordinates (matches ModelViewer's
  *  `ScreenPoint` — the same space the pick layer records via
