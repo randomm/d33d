@@ -102,17 +102,19 @@ def test_missing_key_exit_code_is_nonzero() -> None:
     # The key is absent -> the conftest check raises at collection. The
     # subprocess still needs the catalogue to exist so the failure is
     # the KEY (not the catalogue): _catalogue_path resolves it at the
-    # subprocess's own repo root, so seed a minimal catalogue with the
-    # ``design`` role (no key material — the check must fail on the KEY,
-    # and the catalogue is only consulted after the key) and remove it
-    # afterwards.
+    # subprocess's own repo root, so seed a MINIMAL catalogue — it must
+    # satisfy the catalogue precondition or the failure would be the
+    # catalogue, not the key (the minimal YAML satisfies load_catalogue
+    # and names a non-existent provider for the design role, which the
+    # resolve error then reports AFTER the key check already raised).
+    # Any existing catalogue is backed up and restored (or removed).
     catalogue = _catalogue_path()
     existing = catalogue.is_file()
     if existing:
         backup = catalogue.read_text(encoding="utf-8")
     try:
         catalogue.write_text(
-            "providers: []\nroles:\n  design: foo\n", encoding="utf-8"
+            "providers: []\nroles:\n  design: [foo]\n", encoding="utf-8"
         )
         proc = subprocess.run(
             [
