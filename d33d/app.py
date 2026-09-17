@@ -83,6 +83,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from d33d import db
+from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
@@ -601,6 +602,28 @@ def create_app(
                 "roles": {},
             }
         return _serialise_catalogue(cat)
+
+    @app.get("/api/config/envelope")
+    async def get_envelope() -> dict[str, Any]:
+        """Build envelope for the machine (x/y/z in millimetres) plus a
+        ``verified`` flag. The route is a third READER of the named
+        constants in ``d33d.print_validation`` — never a copy of the
+        numbers; the values are (320.0, 320.0, 300.0) only because the
+        constant is.
+
+        The keep-out notch (``QIDI_PLUS_5_KEEP_OUT_MM``) is deliberately
+        NOT exposed: it is a separate vendor-verified constraint with its
+        own gate-7b branch and its own source-invariant test; consumers
+        of this route (W12/W14) need only the envelope.
+        """
+        x, y, z = _print_validation.QIDI_PLUS_5_ENVELOPE_MM
+        return {
+            "x": x,
+            "y": y,
+            "z": z,
+            "unit": "mm",
+            "verified": _print_validation.QIDI_PLUS_5_ENVELOPE_VERIFIED,
+        }
 
     @app.put("/api/config/models")
     async def put_models(request: Request) -> JSONResponse:
