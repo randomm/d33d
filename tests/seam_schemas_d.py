@@ -8,6 +8,11 @@ The wire contract is the ``(kind, data)`` tuple
   (OMITTED, never null, when the durable bytes are unreadable — the
   omit-not-null policy) plus ``bbox_abstained`` (always present on
   pass frames — the ticket #91 field the stale spec inventory omitted);
+  the per-view progress frames (issue #121) carry ``step``
+  (``render-view-start`` / ``render-view-done``) plus ``view`` (the view
+  stem) and ``iteration`` (the 1-based design-loop index) — they are
+  plain progress frames (no version-created field-set check) emitted
+  while the render container is still running;
 - ``"token"`` — ``{"text": ...}`` (the sole owner of the SCAD source);
 - ``"done"`` — ``{"message": ...}`` (+ ``bbox_abstained`` on passes);
 - ``"error"`` — ``{"message": ...}`` (+ ``reason`` when the loop

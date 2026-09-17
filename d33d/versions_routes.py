@@ -581,7 +581,7 @@ def create_versions_router() -> APIRouter:
 
 
 def _finalize_loop_kwargs(
-    request: Request, project_id: int, body: FinalizeBody
+    request: Request, project_id: int, body: FinalizeBody, on_progress: Any = None
 ) -> dict[str, Any]:
     """The full design-loop kwargs contract for the FINALIZE seam.
 
@@ -632,6 +632,7 @@ def _finalize_loop_kwargs(
             scad_source,
             defines,
             renders_dir=project_renders_dir(data_dir, project_id),
+            on_progress=on_progress,
         )
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:

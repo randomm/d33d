@@ -558,7 +558,154 @@ def build_docker_argv(
     return argv
 
 
-def run_container(argv: list[str], timeout_s: int) -> subprocess.CompletedProcess:
+#: ``[entrypoint] <marker> <step>`` — the container's per-artifact progress
+#: markers (issue #121). The entrypoint writes one ``view-start``/
+#: ``view-done`` (or ``view-failed``) pair per artifact — ``stl`` and
+#: ``csg`` plus the six view stems — to its STDERR, flushed after each line
+#: (see entrypoint.sh), so the host can read them WHILE the container is
+#: still running. The event is CAUSED by the artifact actually finishing
+#: (the marker is written after the openscad call returns) — never by a
+#: timer, an elapsed-time estimate, or an assumed per-view duration
+#: (issue #121's core requirement: the measurement must be real).
+_ENTRYPOINT_MARKER_RE = re.compile(
+    r"\[entrypoint\] (view-start|view-done|view-failed) (\S+)"
+)
+
+#: The two progress markers the design loop surfaces as per-view SSE frames
+#: (issue #121). ``view-start`` is the "render is working" signal; the
+#: per-view progress the SPA's "4 of 6" counter tracks is the completed
+#: view, so the completion marker (``view-done``) is the arrival event.
+#: ``view-failed`` stops the stream for that artifact — a failed view must
+#: not report as complete (phantom views).
+MARKER_DONE = "view-done"
+MARKER_FAILED = "view-failed"
+
+
+@dataclass
+class _StderrReader:
+    """Drains a running child's stderr in a background thread.
+
+    The render container writes unbounded stderr (openscad diagnostics are
+    appended to /work/render.log, but the entrypoint's own markers and any
+    uncaptured output flow through the pipe). A full pipe buffer would
+    DEADLOCK the container, so the reader thread is the only thing that
+    keeps the render unblocked; it is ALWAYS joined before
+    :func:`run_container` returns (every path joins, including the timeout
+    and exception paths) so no thread leaks past the call.
+
+    The reader accumulates the full stderr byte stream (truncation to the
+    256 KiB contract happens at the caller, exactly as with the legacy
+    ``subprocess.run(capture_output=True)`` path) and feeds each
+    line-buffered chunk to :func:`parse_entrypoint_markers` as it arrives —
+    that is how a per-view event reaches the host before container exit.
+    Line buffering is the reader's own (it splits on ``\\n`` across chunk
+    boundaries); the container side never sees a full buffer because this
+    thread is continuously consuming.
+    """
+
+    pipe: Any
+    on_marker: Any  # Callable[[str, str], None] | None
+    _eof: bool = False
+    stderr_chunks: list[bytes] = field(default_factory=list)
+    _lock: Any = None
+    _thread: Any = None
+    _buf: bytes = b""
+    _done: Any = None  # threading.Event — set when the drain loop exits
+
+    def __post_init__(self) -> None:
+        import threading
+
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+
+    def start(self) -> None:
+        import threading
+
+        self._thread = threading.Thread(target=self._drain, daemon=True)
+        self._thread.start()
+
+    def _drain(self) -> None:
+        try:
+            while True:
+                chunk = self.pipe.read(65536)
+                if not chunk:
+                    break
+                with self._lock:
+                    self.stderr_chunks.append(chunk)
+                self._feed_lines(chunk)
+            self.mark_eof()
+            self._feed_lines(b"")  # flush any partial trailing line
+        finally:
+            self._done.set()
+
+    def _feed_lines(self, chunk: bytes) -> None:
+        with self._lock:
+            self._buf += chunk
+            ready: list[bytes] = []
+            while b"\n" in self._buf:
+                line, self._buf = self._buf.split(b"\n", 1)
+                ready.append(line)
+            if self._eof and self._buf:
+                ready.append(self._buf)
+                self._buf = b""
+        # Dispatch OUTSIDE the lock — the callback (on_marker) may block
+        # (e.g. a queue.put with a full queue); holding the lock would
+        # deadlock the drain thread and stall the render (the pipe buffer
+        # fills and the container blocks on write).
+        for line in ready:
+            self._dispatch(line)
+
+    def _dispatch(self, line: bytes) -> None:
+        if self.on_marker is None:
+            return
+        text = line.decode("utf-8", errors="replace")
+        for marker, step in parse_entrypoint_markers(text):
+            self.on_marker(marker, step)
+
+    def mark_eof(self) -> None:
+        self._eof = True
+
+    def join(self) -> None:
+        """Wait for the drain thread to exit. Always safe to call.
+
+        The drain loop exits on EOF (the child closed its stderr) or an
+        OSError (the child died); ``pipe.read`` on a closed/pipe-backed
+        stream returns b"" at EOF, so a well-behaved child always
+        terminates the thread. A pathological reader (a pipe that neither
+        closes nor errors) is impossible for a subprocess whose stderr is
+        a pipe — the child's death closes the write end.
+        """
+        if self._thread is not None:
+            self._thread.join()
+
+    def bytes(self) -> bytes:
+        with self._lock:
+            return b"".join(self.stderr_chunks)
+
+
+def parse_entrypoint_markers(
+    line: str,
+) -> list[tuple[str, str]]:
+    """The entrypoint markers carried by one stderr line.
+
+    Returns ``(marker, step)`` pairs — ``marker`` is one of ``view-start``
+    / ``view-done`` / ``view-failed`` and ``step`` the artifact name
+    (``stl``, ``csg`` or a view stem such as ``view_00_front``). A line
+    with no marker yields ``[]``; a line is allowed to carry at most one
+    marker (the entrypoint writes one per line), but the return type is a
+    list so a future multi-marker line parses without a contract change.
+    """
+    out: list[tuple[str, str]] = []
+    for m in _ENTRYPOINT_MARKER_RE.finditer(line):
+        out.append((m.group(1), m.group(2)))
+    return out
+
+
+def run_container(
+    argv: list[str],
+    timeout_s: int,
+    on_marker: Any = None,
+) -> subprocess.CompletedProcess:
     """Execute a ``docker run`` argv with a wall-clock timeout.
 
     ``subprocess.run`` enforces ``timeout_s`` on the whole call; on
@@ -578,16 +725,86 @@ def run_container(argv: list[str], timeout_s: int) -> subprocess.CompletedProces
 
     The caller contract: pass ``params.timeout_s`` (default 120s) as
     ``timeout_s``.
+
+    ``on_marker`` (issue #121): when given, the child's stderr is drained
+    in a background thread instead of accumulated by ``subprocess.run``,
+    and each entrypoint marker line reaches ``on_marker(marker, step)``
+    WHILE THE CONTAINER IS STILL RUNNING. The stderr bytes are preserved
+    identically to the blocking path (full stream, then the caller's
+    256 KiB ``truncate_stderr`` contract — see :func:`truncate_stderr`),
+    and the timeout path still returns the 124 sentinel with the same
+    kill+rm cleanup, so the ``timeout`` / ``oom`` classification rows are
+    unchanged. ``on_marker=None`` (the default) preserves the legacy
+    blocking ``subprocess.run`` behaviour exactly — every existing caller
+    and its tests are unaffected.
     """
+    if on_marker is None:
+        try:
+            return subprocess.run(
+                argv, timeout=timeout_s, capture_output=True, check=False
+            )
+        except subprocess.TimeoutExpired:
+            name = _argv_container_name(argv)
+            if name:
+                _cleanup_container(name)
+            return subprocess.CompletedProcess(
+                args=argv, returncode=124, stdout=b"", stderr=b""
+            )
+
+    reader = _StderrReader(pipe=None, on_marker=on_marker)
+    proc = None
     try:
-        return subprocess.run(argv, timeout=timeout_s, capture_output=True, check=False)
+        proc = subprocess.Popen(
+            argv,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+        )
+        reader.pipe = proc.stderr
+        reader.start()
+        try:
+            proc.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            name = _argv_container_name(argv)
+            if name:
+                _cleanup_container(name)
+            reader.join()
+            return subprocess.CompletedProcess(
+                args=argv, returncode=124, stdout=b"", stderr=b""
+            )
+        reader.join()
+        return subprocess.CompletedProcess(
+            args=argv,
+            returncode=proc.returncode or 0,
+            stdout=b"",
+            stderr=reader.bytes(),
+        )
     except subprocess.TimeoutExpired:
+        # Popen itself raised (e.g. the docker CLI refused to start under
+        # the timeout budget): same kill+rm+124 sentinel as the legacy path.
         name = _argv_container_name(argv)
         if name:
             _cleanup_container(name)
+        if reader._thread is not None:
+            reader.join()
         return subprocess.CompletedProcess(
             args=argv, returncode=124, stdout=b"", stderr=b""
         )
+    except (OSError, ValueError):
+        if reader._thread is not None:
+            reader.join()
+        raise
+    finally:
+        # Close the pipe on every path so the drain thread cannot outlive
+        # the call; the thread is daemon and joined on every path above,
+        # but a leaked pipe would hold the reader's lock indefinitely.
+        if reader.pipe is not None:
+            try:
+                reader.pipe.close()
+            except OSError:
+                pass
 
 
 def _cleanup_container(name: str) -> None:
@@ -851,6 +1068,7 @@ def render_for_design_loop(
     scad_source: str,
     defines: dict[str, str],
     renders_dir: str | Path | None = None,
+    on_progress: Any = None,
 ) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
@@ -861,6 +1079,16 @@ def render_for_design_loop(
     7-class ``error_class`` enum. Any exception in the pipeline is a
     ``container_error`` — a loop render failure is a classified render
     outcome, never an unclassified raise.
+
+    ``on_progress`` (issue #121): a sync callback ``(kind, payload)``
+    invoked from the render container's stderr-drain thread (a worker
+    thread, NOT the event loop) for each entrypoint marker line —
+    ``kind`` is ``"view-start"`` or ``"view-done"`` (``view-failed`` is
+    NOT delivered — a failed view must not report as complete),
+    ``payload`` carries ``view`` (the view stem) and ``index`` (the
+    0-based view index for ``view_done``). The callback MUST be fast and
+    side-effect-free; it fires while the container is still running.
+    ``None`` (the default) preserves the legacy blocking behaviour.
 
     Post-harvest persistence (issue #72): on a fully ``ok`` render, the
     harvested ``model.stl`` + 6 ``view_*.png`` are copied into
@@ -974,7 +1202,23 @@ def render_for_design_loop(
                 workdir_volume=volume,
                 params=params,
             )
-            proc = run_container(argv, timeout_s=params.timeout_s)
+            if on_progress is not None:
+                _view_index_by_stem = {
+                    name[:-4]: i for i, (name, _c) in enumerate(VIEWS)
+                }
+
+                def _on_marker(marker: str, step: str) -> None:
+                    if marker not in ("view-start", "view-done"):
+                        return  # view-failed: never report a failed view as complete
+                    payload: dict[str, Any] = {"view": step}
+                    idx = _view_index_by_stem.get(step)
+                    if idx is not None:
+                        payload["index"] = idx
+                    on_progress(marker, payload)
+
+                proc = run_container(argv, timeout_s=params.timeout_s, on_marker=_on_marker)
+            else:
+                proc = run_container(argv, timeout_s=params.timeout_s)
             duration_ms = int((time.monotonic() - start) * 1000)
             stderr = truncate_stderr(proc.stderr)
 
