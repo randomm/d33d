@@ -172,7 +172,7 @@ class _StubVersions:
     def __init__(self) -> None:
         self._next = 1
 
-    async def create_version(self, project_id, params, name, message):
+    async def create_version(self, project_id, params, name, message, **kwargs):
         v = self._next
         self._next += 1
         return {"id": v, "params": params, "name": name, "message": message}

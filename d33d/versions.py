@@ -344,6 +344,7 @@ class VersionService:
         restored_from: int | None = None,
         forked_from: tuple[int, int] | None = None,
         thumbnail: str | None = None,
+        scad_source: str | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -367,6 +368,7 @@ class VersionService:
                 restored_from=restored_from,
                 forked_from=forked_from,
                 thumbnail=thumbnail,
+                scad_source=scad_source,
             ),
         )
 
@@ -380,6 +382,7 @@ class VersionService:
         restored_from: int | None = None,
         forked_from: tuple[int, int] | None = None,
         thumbnail: str | None = None,
+        scad_source: str | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -424,7 +427,12 @@ class VersionService:
             thumbnail=thumbnail,
         )
 
-        # Commit the full snapshot to the project's git repo.
+        # Commit the full snapshot to the project's git repo. The version
+        # OWNS its geometry (issue #105): when the caller carried a
+        # ``scad_source`` (the design loop's passing best candidate), it
+        # is written to ``versions/{id}/design.scad`` and committed in the
+        # SAME commit as ``params.json`` — one writer, one lock, one
+        # commit, so a version row and its geometry can never diverge.
         repo_dir = Path(project["git_repo_path"])
         versions_dir = repo_dir / "versions"
         vdir = versions_dir / str(version_id)
@@ -433,6 +441,10 @@ class VersionService:
             install_text_file_atomic(
                 snapshot_path, json.dumps(params, indent=2, sort_keys=True) + "\n"
             )
+            if scad_source is not None:
+                from d33d.design_source import store_version_source
+
+                store_version_source(repo_dir, version_id, scad_source)
             commit_subject = (
                 f"version: {_sanitize_commit_message(version_name)}"
                 if restored_from is None
@@ -449,6 +461,10 @@ class VersionService:
             # Keep DB, git, and filesystem consistent: roll back the row
             # and clean up the snapshot file if the write succeeded.
             snapshot_path.unlink(missing_ok=True)
+            if scad_source is not None:
+                from d33d.design_source import source_path_for_version
+
+                source_path_for_version(repo_dir, version_id).unlink(missing_ok=True)
             self.conn.raw.execute("DELETE FROM versions WHERE id = ?", (version_id,))
             self.conn.commit()
             raise RuntimeError(f"version commit failed: {e}") from e
@@ -467,11 +483,33 @@ class VersionService:
 
     async def restore_version(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Non-destructive restore: a NEW forward version with the target's
-        full snapshot; parent = current latest. No-op (409-style) when the
-        target IS the current latest — dedupe, no spurious entry."""
+        full snapshot AND its per-version design source (issue #105 — a
+        restore carries the geometry, not just the parameters); parent =
+        current latest. No-op (409-style) when the target IS the current
+        latest — dedupe, no spurious entry. The restored source rides on
+        the new version's ``versions/{id}/design.scad`` file (written +
+        committed inside ``_run_create`` with the params snapshot). A
+        pre-#105 version without a source file restores params only (the
+        honest case — a forward version of a design with no recorded
+        geometry, the prompt renders the clean-slate wording)."""
         target = self.get_version(project_id, version_id)
         if target is None:
             raise LookupError(f"version {version_id} not found")
+
+        # The target version's per-version source (None when the version
+        # predates per-version sources or was created without geometry).
+        project_row = self.conn.get_project(project_id)
+        assert project_row is not None
+        from d33d.design_source import source_path_for_version
+
+        source_path = source_path_for_version(
+            Path(project_row["git_repo_path"]), version_id
+        )
+        target_source = (
+            source_path.read_text(encoding="utf-8")
+            if source_path.is_file()
+            else None
+        )
 
         async def _restore() -> dict[str, Any]:
             latest = self.latest_version(project_id)
@@ -485,6 +523,7 @@ class VersionService:
                 name=None,  # auto-named from the provenance below
                 message=f"restored from version {version_id}",
                 restored_from=version_id,
+                scad_source=target_source,
             )
 
         return await self._with_project_lock(project_id, _restore)

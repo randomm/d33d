@@ -465,25 +465,14 @@ def create_versions_router() -> APIRouter:
         version). ``params`` defaults to the current version's snapshot."""
         svc = _service(request)
         _project_or_404(svc, project_id)
-        # The design loop is an injected duck type (app.state.run_design_loop;
-        # the same DI seam as build_registry_glb — see the module docstring):
-        # an object with .status ("pass" | "exhausted") and .best (the best
-        # candidate). Tests inject a stub with the same shape; the real
-        # IterationRecord carries a declared ``params`` field (issue #93),
-        # so the route reads it directly — the best candidate's params win,
-        # and the fallback to the body's params or the latest version's
-        # snapshot only fires for a candidate whose ``params`` is not a
-        # dict (a duck-typed stub without the field).
-        #
-        # The route inspects the injected seam's signature before calling:
-        # a production loop (``_build_production_design_loop``) takes
-        # (app, **kwargs) and is called with the FULL design-loop kwargs
-        # contract (``_finalize_loop_kwargs`` — photo, chat_history,
-        # stated_dims, render_fn, llm_fn, model, prompt_version, request
-        # built from the app state and the project row); a test stub that
-        # takes no args is called with none (backward-compat with
-        # existing stubs). The inspection is a static contract check, not
-        # a per-call dynamic behavior change.
+        # The current design source (issue #105): the project's current
+        # version's per-version source, captured BEFORE the loop runs.
+        # ``None`` when no version owns a source yet (turn one).
+        row = svc.get_project(project_id)
+        assert row is not None  # already 404'd above
+        from d33d.design_source import current_version_source
+
+        design_source = current_version_source(row, svc)
         run_loop = request.app.state.run_design_loop
         if run_loop is None:
             raise HTTPException(status_code=503, detail="design loop not wired")
@@ -561,12 +550,23 @@ def create_versions_router() -> APIRouter:
             )
         params = dict(named)
 
+        # The version OWNS its geometry (issue #105): the passing best
+        # candidate's source is persisted as ``versions/{id}/design.scad``
+        # (written + committed inside create_version, same commit as the
+        # params snapshot). A stub without a declared field falls back to
+        # the candidate's ``scad_source`` attribute; a candidate with an
+        # empty source persists params only (no spurious empty source file).
+        best_record = getattr(result, "best", None)
+        candidate_source = getattr(best_record, "scad_source", None)
+        if not isinstance(candidate_source, str):
+            candidate_source = None
         try:
             v = await svc.create_version(
                 project_id,
                 params,
                 name=body.name,
                 message=body.message or "design finalize",
+                scad_source=(candidate_source or None),
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
@@ -665,6 +665,15 @@ def _finalize_loop_kwargs(
         dict(latest["params"]) if latest is not None else None
     )
 
+    # The current design source (issue #105): the project's current
+    # version's per-version source, captured BEFORE the loop runs (the
+    # loop pass creates a version that must NOT carry its own output
+    # forward — the carried source is what the model saw as the prior
+    # design). ``None`` when no version owns a source yet (turn one).
+    from d33d.design_source import current_version_source
+
+    design_source = current_version_source(row, app.state.versions)
+
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
     # failures.jsonl line for an exhausted loop.
@@ -693,6 +702,7 @@ def _finalize_loop_kwargs(
         "prompt_version": prompt_version,
         "request": request_text,
         "state_params": state_params,
+        "design_source": design_source,
     }
 
 
