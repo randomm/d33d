@@ -715,6 +715,11 @@ export default function App({ renders = [], client }: AppProps) {
               // an identical value is a no-op state update (React bails out),
               // so repeated steps do not reset the elapsed timer or flicker.
               if (typeof step === "string") setDesignLoopStep(step);
+              // Issue #114: the version-created frame is the single trigger
+              // for refetching the timeline — not every progress frame
+              // (that would hammer the endpoint).
+              if (step === "version-created")
+                void apiClient.listVersions(projectId).then(setVersions);
             },
             onDone: () => {
               setMessages((prev) =>
@@ -1148,10 +1153,11 @@ export default function App({ renders = [], client }: AppProps) {
             {selectionNotice}
           </div>
         )}
-        <div className="validation-pane" data-testid="validation-pane">
-          <span data-testid="validation-status">Waiting for render…</span>
-          {projectId !== null && <Export3MF projectId={projectId} client={apiClient} />}
-        </div>
+        {projectId !== null && (
+          <div className="validation-pane" data-testid="validation-pane">
+            <Export3MF projectId={projectId} client={apiClient} />
+          </div>
+        )}
       </div>
     </div>
   );

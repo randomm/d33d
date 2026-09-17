@@ -252,12 +252,16 @@ describe("App layout", () => {
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
-  it("renders validation status and a real Export3MF once the project loads", async () => {
+  it("renders the validation pane (Export3MF only — no static status) once the project loads", async () => {
+    // The pane is absent until the project resolves (issue #114: the pane
+    // shows the real validation state or nothing, and the export button is
+    // its only surviving content in the interim). Wait for the load, then
+    // assert the pane's contents.
     render(<App client={client} />);
-    expect(screen.getByTestId("validation-pane")).toBeTruthy();
     await waitFor(() => {
       expect(screen.getByTestId("export-3mf")).toBeTruthy();
     });
+    expect(screen.getByTestId("validation-pane")).toBeTruthy();
     expect(screen.queryByTestId("export-3mf-btn")).toBeNull();
   });
 
@@ -605,6 +609,97 @@ describe("App stream-driven model (issue #69)", () => {
     expect(screen.getByTestId("viewer-pick-layer").getAttribute("data-ready")).toBe(
       "true",
     );
+  });
+
+  it("refetches the version timeline when a version-created frame arrives (issue #114)", async () => {
+    // The mount-time effect's initial fetch returns an empty timeline (the
+    // pass below creates the first version); the frame's refetch returns the
+    // created version. listVersions is called at most twice here, so the two
+    // queued values cover mount + refetch in order.
+    const client = makeClient({
+      listVersions: vi
+        .fn()
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          {
+            id: 1,
+            name: "v1",
+            params: {},
+            created_by_message: "make a box",
+            parent: null,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-02T00:00:00Z",
+            diff_count: 0,
+          },
+        ]) as unknown as ApiClient["listVersions"],
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
+    // The initial (mount-time) fetch settled on an empty timeline.
+    expect(screen.getByTestId("version-timeline-empty")).toBeTruthy();
+
+    // Send a message and fire the version-created frame (the real wire shape:
+    // step + version_id — issue #114 verified against the recorded seam
+    // fixture tests/fixtures/e2e/D.json and the live emitter in
+    // d33d/design_loop_events.py).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+      const spy = vi.mocked(client.streamEvents);
+      const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+        undefined) as
+        | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
+        | undefined;
+      handlers?.onProgress?.("version-created", {
+        step: "version-created",
+        version_id: 1,
+      });
+    });
+
+    // The frame must have triggered a SECOND listVersions call — the rail
+    // reflects the created version instead of staying on the stale (empty)
+    // list. Without the refetch this call count stays at 1 and the empty
+    // branch stays on screen, so this test fails when the refetch is gone.
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(screen.getByTestId("version-timeline")).toBeTruthy();
+    });
+    expect(screen.getByTestId("timeline-entry-1")).toBeTruthy();
+  });
+
+  it("does NOT refetch the version timeline for non-version-created progress frames (issue #114)", async () => {
+    const client = makeClient();
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      // design-loop-pass and design-loop-start frames — neither of these may
+      // trigger a refetch (a refetch on every progress frame hammers the
+      // endpoint); only version-created does.
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+      handlers.onProgress("design-loop-pass", { step: "design-loop-pass" });
+      handlers.onDone?.({});
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+
+    // The two progress frames above must not add a single refetch.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.listVersions).toHaveBeenCalledTimes(1);
   });
 
   it("leaves the GLB fixture mounted when a progress frame carries no stl_data_uri", async () => {

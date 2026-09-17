@@ -211,4 +211,13 @@ describe("design contract", () => {
     // keep in agreement because there is only one of it.
     expect(stylesheet()).not.toMatch(/--color-marker/);
   });
+
+  /* --------------------------------------------------------------- W4 */
+
+  it("no static 'Waiting for render' placeholder survives in src", () => {
+    // The validation pane shows the real validation state or nothing — a
+    // static placeholder under a completed render is a lie the user saw on
+    // screen twice before this was removed (issue #114).
+    expect(filesMatching(/Waiting for render/)).toEqual([]);
+  });
 });
