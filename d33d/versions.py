@@ -345,6 +345,7 @@ class VersionService:
         forked_from: tuple[int, int] | None = None,
         thumbnail: str | None = None,
         scad_source: str | None = None,
+        bbox: tuple[float, float, float] | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -357,6 +358,14 @@ class VersionService:
         underneath it, or a ``forked_from`` seed arriving at a project
         that is no longer empty, gets a ``VersionConflictError`` instead
         of forking the chain.
+
+        ``bbox`` (issue #137): the measured per-axis extents of the render
+        that produced this version — threaded by the design-loop adapter
+        from the best candidate's render (``BboxInfo`` → the matched
+        component's extents for a multi-part model, ``None`` when the
+        measurement was not obtainable). It is PERSISTED, never
+        re-derived; ``None`` stores a NULL (an absent measurement
+        abstains — never a fabricated ``(0, 0, 0)``).
         """
         return await self._with_project_lock(
             project_id,
@@ -369,6 +378,7 @@ class VersionService:
                 forked_from=forked_from,
                 thumbnail=thumbnail,
                 scad_source=scad_source,
+                bbox=bbox,
             ),
         )
 
@@ -383,6 +393,7 @@ class VersionService:
         forked_from: tuple[int, int] | None = None,
         thumbnail: str | None = None,
         scad_source: str | None = None,
+        bbox: tuple[float, float, float] | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -425,6 +436,7 @@ class VersionService:
             restored_from=restored_from,
             forked_from=forked_from,
             thumbnail=thumbnail,
+            bbox=bbox,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -720,15 +732,21 @@ class VersionService:
         restored_from: int | None,
         forked_from: tuple[int, int] | None,
         thumbnail: str | None,
+        bbox: tuple[float, float, float] | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
             fork = [forked_from[0], forked_from[1]]
+        # ``bbox``: the measured per-axis extents of the render that
+        # produced this version (issue #137), JSON-encoded. ``None``
+        # persists a NULL — an absent measurement ABSTAINS (issue #91's
+        # precedent), it is never encoded as (0,0,0).
+        bbox_json = json.dumps({"x": bbox[0], "y": bbox[1], "z": bbox[2]}) if bbox else None
         cur = self.conn.raw.execute(
             "INSERT INTO versions"
             " (project_id, params, name, created_by_message, parent,"
-            "  restored_from, forked_from, thumbnail)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "  restored_from, forked_from, thumbnail, bbox)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -738,6 +756,7 @@ class VersionService:
                 restored_from,
                 json.dumps(fork) if fork else None,
                 thumbnail,
+                bbox_json,
             ),
         )
         self.conn.commit()
@@ -751,6 +770,12 @@ class VersionService:
         out["forked_from"] = tuple(json.loads(fork)) if fork else None
         out["pinned"] = bool(out.get("pinned"))
         out["archived"] = bool(out.get("archived"))
+        # ``bbox``: NULL (no measurement — pre-change rows, or a version
+        # whose measurement was not obtainable) maps to ``None``, NEVER
+        # to a zero triple (issue #91: a fabricated (0,0,0) once made a
+        # gate unsatisfiable — an absent measurement abstains).
+        raw_bbox = out.get("bbox")
+        out["bbox"] = json.loads(raw_bbox) if raw_bbox else None
         return out
 
     @staticmethod
@@ -843,6 +868,7 @@ def migrate(conn: db_mod.Connection) -> None:
             pinned      INTEGER NOT NULL DEFAULT 0,
             archived    INTEGER NOT NULL DEFAULT 0,
             thumbnail   TEXT,
+            bbox        TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -866,6 +892,12 @@ def migrate(conn: db_mod.Connection) -> None:
         "TEXT",
         backfill_value='{"ts": null, "version_id": null, "name": null}',
     )
+    # ``versions.bbox``: the measured per-axis extents (JSON) of the render
+    # that produced the version (issue #137). Nullable with no default —
+    # SQLite rejects non-constant defaults on ALTER, and a NOT NULL column
+    # would force a fabricated backfill. Pre-existing rows read back as
+    # ``None`` (an absent measurement abstains; never a zero triple).
+    _ensure_column(conn, "versions", "bbox", "TEXT")
 
 
 __all__ = [

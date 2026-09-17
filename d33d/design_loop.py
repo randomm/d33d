@@ -220,6 +220,14 @@ class IterationRecord:
     repair: dict[str, Any] | None = None
     #: The ``role -> prompt_hash`` pairs this iteration produced.
     prompt_hashes: dict[str, str] = field(default_factory=dict)
+    #: The per-axis rendered extents this iteration's render measured to
+    #: (issue #137: the caller's ``bbox_fn`` output, ``None`` when the
+    #: render produced no measurement). Declared — never a duck-typed
+    #: read (issue #93's precedent): the version write path persists the
+    #: BEST candidate's measurement from this field, and a stub loop
+    #: result without it simply carries ``None`` (a missing field is not
+    #: a fabricated measurement).
+    bbox: "BboxInfo | None" = None
     #: The named parameters THIS candidate's render was made with — the
     #: ``_dim_params`` defines map passed to ``render_fn``, converted for
     #: the versions table's scalar-param representation (issue #93):
@@ -556,14 +564,20 @@ def _design_system(stated: tuple[float, float, float]) -> str:
 def _design_state_lines(
     stated: tuple[float, float, float],
     state_params: dict[str, Any] | None,
+    state_bbox: dict[str, float] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
-    Builds the block via the SHARED function (``d33d.design_state`` — the
-    same callable the API route the SPA reads calls) and formats it. The
-    block carries ALL declared parameters of the latest version (not a
-    fixed {W, D, H} triple) with provenance per value; ``unknown``
-    serialises as ``null`` (never 0, never an omitted key).
+    Builds the block via the SHARED function (``d33d.design_state.
+    state_block_for_version`` — the same callable the API route the SPA
+    reads calls) and formats it. The block carries ALL declared
+    parameters of the latest version (not a fixed {W, D, H} triple) with
+    provenance per value; ``unknown`` serialises as ``null`` (never 0,
+    never an omitted key). ``state_bbox`` (issue #137) is the latest
+    version's persisted measured bbox — when present, the block upgrades
+    axis parameters to ``measured``/``disagrees`` (the measurement-aware
+    shared function); when ``None`` (no version yet, or no persisted
+    measurement) the block renders the pure params-only substrate.
 
     ``state_params`` is ``None`` when no version exists yet (the block
     renders with zero entries — an honest empty state). When a version
@@ -592,10 +606,12 @@ def _design_state_lines(
     from d33d.design_state import (
         build_design_state_block,
         format_design_state_block,
-        state_block_from_params,
+        state_block_for_version,
     )
 
-    block = build_design_state_block(state_block_from_params(state_params))
+    block = build_design_state_block(
+        state_block_for_version(state_params, state_bbox)
+    )
     # ``format_design_state_block`` renders the header + the entries. The
     # header (``Current design state (mm):``) and the entry lines are
     # rendered verbatim (the block is a self-contained, size-bounded
@@ -638,6 +654,7 @@ def _design_messages(
     repair: dict[str, Any] | None,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    state_bbox: dict[str, float] | None = None,
     design_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
@@ -667,7 +684,7 @@ def _design_messages(
     # reads calls (asserted by the tests — not two functions that happen
     # to agree). Empty when no version exists yet (an honest empty state,
     # never a fabricated dimension).
-    lines.extend(_design_state_lines(stated, state_params))
+    lines.extend(_design_state_lines(stated, state_params, state_bbox))
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,
@@ -820,6 +837,7 @@ async def run_design_loop_async(
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    state_bbox: dict[str, float] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
 ) -> DesignResult:
@@ -870,6 +888,7 @@ async def run_design_loop_async(
                 repair=repair,
                 request=request,
                 state_params=state_params,
+                state_bbox=state_bbox,
                 design_source=design_source,
             ),
             _design_system(stated_dims),
@@ -904,6 +923,7 @@ async def run_design_loop_async(
                 failure_class="empty_scad",
                 repair=None,
                 prompt_hashes={"design": design_hash},
+                bbox=None,
                 params=_params_for_record(defines_map),
             )
             iterations.append(record)
@@ -959,6 +979,7 @@ async def run_design_loop_async(
             failure_class=failure_class,
             repair=next_repair,
             prompt_hashes={"design": design_hash},
+            bbox=bbox,
             params=_params_for_record(defines_map),
         )
         iterations.append(record)
@@ -1002,6 +1023,7 @@ def run_design_loop(
     max_iterations: int = MAX_ITERATIONS,
     request: str = "",
     state_params: dict[str, Any] | None = None,
+    state_bbox: dict[str, float] | None = None,
     design_source: str | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
@@ -1023,6 +1045,7 @@ def run_design_loop(
             max_iterations=max_iterations,
             request=request,
             state_params=state_params,
+            state_bbox=state_bbox,
             design_source=design_source,
         )
     )
