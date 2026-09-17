@@ -7,12 +7,11 @@
  * browser-default serif with no spacing, colour, or hierarchy. This
  * stylesheet activates those existing class names (no parallel class
  * vocabulary) using a small token set as CSS custom properties:
- * a system font stack, a 4px spacing scale, and a neutral grey ramp.
- *
- * The colours are GitHub Primer's ramp; #1f2328 (fg) and #0969da
- * (accent) already existed in the codebase as inline literals in
- * App.tsx's region-edit bar, so the ramp unifies rather than
- * introduces new values.
+ * a Space Grotesk / JetBrains Mono type stack, a 4px spacing scale,
+ * and the dark-instrument colour ramp (issue #112 — values swapped
+ * from the old GitHub Primer light ramp; the rule bodies were
+ * re-mapped onto the new token set: bg→panel, bg-subtle→recess,
+ * border→hairline, accent→live).
  *
  * The app-shell / pane / viewer-pane geometry stays in the components'
  * inline styles — the pick layer's containing block depends on the
@@ -28,20 +27,33 @@
   --space-4: 16px;
   --space-6: 24px;
 
-  --color-bg: #ffffff;
-  --color-bg-subtle: #f6f8fa;
-  --color-border: #d0d7de;
-  --color-muted: #57606a;
-  --color-fg: #1f2328;
-  --color-accent: #0969da;
+  --color-canvas: #0B0D0F; /* the 3D viewport */
+  --color-panel: #13161A; /* overlay panels, used at 92% alpha */
+  --color-recess: #1B2023; /* insets, bores, empty render frames */
+  --color-hairline: rgba(255, 255, 255, 0.09);
+
+  --color-fg: #E9E7E3;
+  --color-fg-2: #C9C5BE;
+  --color-muted: #A8AEB5; /* 8.0:1 on panel */
+  --color-faint: #8A9098; /* 5.5:1 on panel — never lighter-on-dark than this */
+
+  --color-live: #4FA3C4; /* in progress · current version · value you stated */
+  --color-blocked: #D2A63C; /* will not print · measured disagrees with stated */
+  /* There is deliberately NO marker token. See W17: the marker is a
+     functional constant with one home in TypeScript (web/src/lib/marker.ts),
+     not a palette entry. A token here would be a second thing that can
+     drift — and the drift is silent. */
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font-ui: 'Space Grotesk', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
   --font-size-xs: 12px;
   --font-size-sm: 14px;
   --font-size-base: 16px;
   --font-size-lg: 20px;
   --line-height: 1.5;
-  --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
 /* Base — replaces the browser-default serif. The zero-margin / full
@@ -56,36 +68,36 @@ body,
 }
 
 body {
-  font-family: var(--font-family);
+  font-family: var(--font-ui);
   font-size: var(--font-size-sm);
   line-height: var(--line-height);
   color: var(--color-fg);
-  background-color: var(--color-bg);
+  background-color: var(--color-canvas);
 }
 
 /* App panes — the two-pane shell from App.tsx. */
 .app-right {
-  border-left: 1px solid var(--color-border);
+  border-left: 1px solid var(--color-hairline);
 }
 
 /* The viewer pane is a fixed 600x400 container whose inline geometry
    (position/width/height/overflow) the pick layer depends on —
    colour and border only here, never box properties. */
 .viewer-pane {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-hairline);
   border-bottom: 0;
-  background-color: var(--color-bg);
+  background-color: var(--color-canvas);
 }
 
 /* Version timeline side rail + validation pane. */
 .version-tail-pane {
   padding: var(--space-2) var(--space-4);
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-hairline);
 }
 
 .validation-pane {
   padding: var(--space-2) var(--space-4);
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-hairline);
 }
 
 /* Chat panel (left pane) — flat full-width messages, no bubbles. */
@@ -100,7 +112,7 @@ body {
 .chat-msg {
   box-sizing: border-box;
   padding: var(--space-2) var(--space-3);
-  border-radius: var(--space-1);
+  border-radius: var(--radius-sm);
   word-break: break-word;
 }
 
@@ -127,10 +139,12 @@ body {
   margin-top: var(--space-4);
 }
 
-/* Role differentiation by background tint: user is a light tint of
-   the accent, assistant is subtle neutral, system is bordered muted. */
+/* Role differentiation by background tint: user is the overlay panel
+   colour at 92% alpha (the W1 overlay recipe — the one alpha usage the
+   token block calls for), assistant is subtle neutral, system is
+   bordered muted. */
 .chat-msg--user {
-  background-color: var(--color-bg-subtle);
+  background-color: color-mix(in srgb, var(--color-panel) 92%, transparent);
 }
 
 .chat-msg--assistant {
@@ -139,7 +153,7 @@ body {
 
 .chat-msg--system {
   background-color: transparent;
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--color-hairline);
   color: var(--color-muted);
   font-size: var(--font-size-xs);
 }
@@ -179,8 +193,8 @@ body {
   display: block;
   max-width: 100%;
   height: auto;
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-1);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
 }
 
 /* Composer (bottom of the chat panel) — minimal consistent treatment
@@ -201,27 +215,27 @@ input.chat-input {
   flex: 1 1 auto;
   min-width: 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-1);
-  background-color: var(--color-bg);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
   color: var(--color-fg);
 }
 
 input.chat-input:hover {
-  border-color: var(--color-muted);
+  border-color: var(--color-faint);
 }
 
 input.chat-input:focus {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--color-live);
   outline-offset: -1px;
 }
 
 button.chat-send-btn {
   padding: var(--space-2) var(--space-3);
   border: 1px solid transparent;
-  border-radius: var(--space-1);
-  background-color: var(--color-accent);
-  color: var(--color-bg);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-live);
+  color: var(--color-canvas);
   cursor: pointer;
 }
 
@@ -264,15 +278,15 @@ button.chat-send-btn:disabled {
 }
 
 .region-edit-bar .region-edit-cancel-btn:hover {
-  background-color: var(--color-bg-subtle);
+  background-color: var(--color-recess);
   color: var(--color-fg);
 }
 
 .selection-notice {
   margin: var(--space-2) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-1);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
   color: var(--color-muted);
   font-size: var(--font-size-xs);
 }
@@ -281,8 +295,8 @@ button.chat-send-btn:disabled {
 .app-error {
   margin: var(--space-2) var(--space-4);
   padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-1);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
   color: var(--color-fg);
   font-size: var(--font-size-xs);
 }
@@ -299,7 +313,7 @@ button.chat-send-btn:disabled {
   align-items: center;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-4);
-  border-top: 1px solid var(--color-border);
+  border-top: 1px solid var(--color-hairline);
   font-size: var(--font-size-xs);
   color: var(--color-muted);
 }
@@ -308,8 +322,8 @@ button.chat-send-btn:disabled {
   flex: 1 1 auto;
   min-width: 40px;
   height: 4px;
-  background-color: var(--color-bg-subtle);
-  border-radius: var(--space-1);
+  background-color: var(--color-recess);
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
@@ -322,8 +336,8 @@ button.chat-send-btn:disabled {
   display: block;
   width: 40%;
   height: 100%;
-  background-color: var(--color-accent);
-  border-radius: var(--space-1);
+  background-color: var(--color-live);
+  border-radius: var(--radius-sm);
   animation: design-loop-progress-slide 1.5s ease-in-out infinite;
 }
 
@@ -339,16 +353,16 @@ button.chat-send-btn:disabled {
 .app-error-retry-btn {
   margin-top: var(--space-2);
   padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-border);
-  border-radius: var(--space-1);
-  background-color: var(--color-bg);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
   color: var(--color-fg);
   font-size: var(--font-size-xs);
   cursor: pointer;
 }
 
 .app-error-retry-btn:hover:not(:disabled) {
-  background-color: var(--color-bg-subtle);
+  background-color: var(--color-panel);
 }
 
 .app-error-retry-btn:disabled {

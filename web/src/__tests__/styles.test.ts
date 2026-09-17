@@ -1,7 +1,16 @@
 /**
- * Stylesheet tests (issue #81): assert the single stylesheet exists,
- * defines the token block, activates the class names the components
- * already use, and is imported from main.tsx.
+ * Stylesheet tests (issue #81, retargeted by issue #112): assert the
+ * single stylesheet exists, defines the token block, activates the
+ * class names the components already use, and is imported from
+ * main.tsx.
+ *
+ * Issue #112 replaced the Primer colour ramp with the dark-instrument
+ * token set and two webfonts (Space Grotesk / JetBrains Mono), and
+ * added the font <link> to web/index.html. The :root token list, the
+ * body font stack, and the chat-role tint assertions below now read
+ * the new token names; the chat-role test additionally pins the
+ * user-tint to the overlay recipe's 92% alpha panel tint
+ * (rgba(19,22,25,0.92) — the --color-panel value #13161A at 92% alpha).
  *
  * jsdom applies no CSS, so the rules are verified by reading the file
  * from disk (the same file Vite bundles and Playwright's e2e specs
@@ -52,26 +61,37 @@ describe("web/src/styles.css (issue #81)", () => {
       "--space-3",
       "--space-4",
       "--space-6",
-      "--color-bg",
-      "--color-bg-subtle",
-      "--color-border",
-      "--color-muted",
+      "--color-canvas",
+      "--color-panel",
+      "--color-recess",
+      "--color-hairline",
       "--color-fg",
-      "--color-accent",
+      "--color-fg-2",
+      "--color-muted",
+      "--color-faint",
+      "--color-live",
+      "--color-blocked",
       "--font-size-xs",
       "--font-size-sm",
       "--font-size-base",
       "--font-size-lg",
       "--line-height",
-      "--font-family",
+      "--radius",
+      "--radius-sm",
+      "--font-ui",
+      "--font-mono",
     ]) {
       expect(root).toContain(`${token}:`);
     }
+    // W1/W17: the region marker lives only in web/src/lib/marker.ts — the
+    // stylesheet declares no marker token (checked at the custom-property
+    // position, so the "no marker token" doc comment is not a false positive).
+    expect(root).not.toContain("--color-marker:");
   });
 
-  it("sets the base font stack, 14px size, and line height on body", () => {
+  it("sets the UI face, 14px size, and line height on body", () => {
     const body = ruleFor(readStylesheet(), "body");
-    expect(body).toContain("font-family: var(--font-family)");
+    expect(body).toContain("font-family: var(--font-ui)");
     expect(body).toContain("font-size: var(--font-size-sm)");
     expect(body).toContain("line-height: var(--line-height)");
   });
@@ -134,7 +154,9 @@ describe("web/src/styles.css (issue #81)", () => {
   it("distinguishes chat roles by background tint, without touching .viewer-pane geometry", () => {
     const css = readStylesheet();
     const user = ruleFor(css, ".chat-msg--user");
-    expect(user).toContain("background-color: var(--color-bg-subtle)");
+    // #112: the user tint is the panel colour at the overlay recipe's 92% alpha,
+    // expressed via color-mix so it cannot drift from --color-panel.
+    expect(user).toContain("background-color: color-mix(in srgb, var(--color-panel) 92%, transparent)");
     expect(ruleFor(css, ".chat-msg--assistant")).not.toBeNull();
     // The lasso overlay's containing block depends on .viewer-pane's
     // inline geometry (issues #74/#76) — colour/border only, never
@@ -159,5 +181,22 @@ describe("web/src/styles.css (issue #81)", () => {
     const css = readStylesheet();
     expect(css).not.toMatch(/@import/);
     expect(css).not.toMatch(/@use|@mixin|@media/);
+  });
+
+  it("loads the two webfonts from web/index.html (400 and 500 only)", () => {
+    // #112: --font-ui / --font-mono name Space Grotesk and JetBrains Mono,
+    // neither of which is available system-wide — index.html loads them via
+    // a Google Fonts <link> (a runtime network dependency the app did not
+    // have before; the browser falls back to the system stacks in the
+    // tokens when the fetch fails). One direct assertion on the exact href
+    // pins both families, both weights, and display=swap in one shot.
+    const html = readFileSync(
+      path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../index.html"),
+      "utf-8",
+    );
+    const href = /href="([^"]*css2[^"]*)"/.exec(html)?.[1] ?? "";
+    expect(href).toBe(
+      "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400,500&family=JetBrains+Mono:wght@400,500&display=swap",
+    );
   });
 });
