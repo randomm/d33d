@@ -462,11 +462,31 @@ def test_measurement_comes_from_best_candidate_not_last() -> None:
 def test_design_state_get_serves_measured_without_re_render(app_with_versions) -> None:
     """A project whose version carries a persisted bbox (the block would
     be ``measured``/``disagrees``): the GET returns that provenance from
-    the persisted row, and no render/bbox function is invoked during the
-    request (a GET never triggers a Docker render)."""
-    from d33d.versions_routes import create_versions_router
+    the persisted row, and it reads the persisted row only — no render
+    and no bbox extraction are invoked during the request.
+
+    The render is spied on ``d33d.render_worker.render_for_design_loop``
+    — the symbol the production render path binds (``d33d/app.py`` does
+    ``from d33d.render_worker import render_for_design_loop`` at import
+    time, and the production closure in ``app.py`` calls the name in
+    ``app.py``'s own namespace — the same function object the worker
+    module exports, so a spy on the worker module sees any render the
+    production closure triggers). The ``subprocess.Popen`` probe
+    corroborates: the render physically acts through Docker, so any
+    render — through ANY binding — spawns a ``Popen``. The bbox is
+    spied on the ``d33d.design_loop_events.bbox_from_render`` name the
+    design loop binds. Together the three cannot be satisfied
+    vacuously.
+    """
+    import subprocess
 
     calls = {"render": 0, "bbox": 0}
+    spawn_calls: list[tuple] = []
+    orig_spawn = subprocess.Popen
+
+    def _spy_spawn(*a, **k):
+        spawn_calls.append((a, k))
+        return orig_spawn(*a, **k)
 
     def _spy_render(*a, **k):
         calls["render"] += 1
@@ -475,6 +495,27 @@ def test_design_state_get_serves_measured_without_re_render(app_with_versions) -
     def _spy_bbox(render):
         calls["bbox"] += 1
         return BboxInfo(x=30.4, y=30.0, z=30.0, volume=27000.0)
+
+    def _install():
+        """Patch every render/bbox seam a re-render on GET could use, and
+        the subprocess act beneath the render, so a re-render on GET
+        would be visible. Returns (orig_render, orig_bbox, orig_spawn)."""
+        import d33d.design_loop_events as dle
+        import d33d.render_worker as rw
+
+        # The render seam (the production binding), the loop's bbox seam,
+        # and the physical act of rendering (Docker subprocess).
+        orig = (rw.render_for_design_loop, dle.bbox_from_render, subprocess.Popen)
+        rw.render_for_design_loop = _spy_render
+        dle.bbox_from_render = _spy_bbox
+        subprocess.Popen = _spy_spawn
+        return orig
+
+    def _revert(orig: tuple) -> None:
+        import d33d.design_loop_events as dle
+        import d33d.render_worker as rw
+
+        rw.render_for_design_loop, dle.bbox_from_render, subprocess.Popen = orig
 
     async def _call(client):
         proj = await _create_project_via_api(client)
@@ -489,28 +530,41 @@ def test_design_state_get_serves_measured_without_re_render(app_with_versions) -
         )
         # Instrument every render/bbox seam in the app so a re-render on
         # GET would be visible.
-        import d33d.render_worker as rw
-        import d33d.design_loop_events as dle
+        orig = _install()
+        # INDUCE (proof the spies are not vacuous): make the GET handler
+        # re-render ONCE, resolved through the worker-module binding the
+        # production closure uses (the induced-failure probe established
+        # this is the binding a render on the GET path goes through).
+        svc = app_with_versions.state.versions
+        orig_latest = svc.latest_version
 
-        orig_render, orig_bbox = rw.render_for_design_loop, dle.bbox_from_render
-        rw.render_for_design_loop = _spy_render
-        dle.bbox_from_render = _spy_bbox
+        def _rendering_latest(project_id):
+            import d33d.render_worker as rw
+
+            rw.render_for_design_loop("W = 30;\ncube([W, W, W]);", {})
+            return orig_latest(project_id)
+
+        svc.latest_version = _rendering_latest
         try:
             r = await client.get(f"/api/projects/{pid}/design-state")
         finally:
-            rw.render_for_design_loop = orig_render
-            dle.bbox_from_render = orig_bbox
-        return r, calls
+            svc.latest_version = orig_latest
+            _revert(orig)
+        return r
 
-    resp, calls = run_async(app_with_versions, _call)
+    resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
     by_name = {e["name"]: e for e in resp.json()}
     # The persisted measurement is served (measured, displayed value).
     assert by_name["W"]["provenance"] == "measured"
     assert by_name["W"]["value"] == 30.4  # the measured value (not the stated 30)
-    # NO re-render: the GET read the persisted row only.
-    assert calls["render"] == 0, "a GET must never trigger a render"
+    # The induced re-render is observed by the render spy (the assertion
+    # the spies are not vacuous — this goes RED if the spy is broken).
+    assert calls["render"] == 1, (
+        f"expected exactly 1 induced render, got {calls['render']}"
+    )
     assert calls["bbox"] == 0, "a GET must never invoke bbox_fn"
+    assert spawn_calls == [], f"a GET must never spawn a subprocess, got {spawn_calls}"
 
 
 # ---------------------------------------------------------------------------
