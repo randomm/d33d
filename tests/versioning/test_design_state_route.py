@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from d33d.design_state import state_block_from_params
+from d33d.design_state import state_block_for_version
 from tests.versioning.helpers import create_project, create_version, run_async
 
 # ---------------------------------------------------------------------------
@@ -63,10 +63,10 @@ def test_design_prompt_contains_previous_versions_stated_dimension(
     # The block the ROUTE built and the block the PROMPT BUILDER builds
     # come from the same shared function on the same params snapshot —
     # the 30 the route serves is the 30 the prompt carries.
-    from d33d.design_state import state_block_from_params as _shared
+    from d33d.design_state import state_block_for_version as _shared
 
-    assert _shared is state_block_from_params
-    prompt_block = state_block_from_params({"W": 30.0, "D": 30.0, "H": 30.0})
+    assert _shared is state_block_for_version
+    prompt_block = state_block_for_version({"W": 30.0, "D": 30.0, "H": 30.0})
     # Compare name-indexed (the persisted params snapshot may re-key in
     # order — the contract is per-name equality, and the 30 per name is
     # the bug this pins).
@@ -82,10 +82,10 @@ def test_design_prompt_contains_previous_versions_stated_dimension(
 
 def test_prompt_builder_and_route_share_the_same_callable(app_with_versions) -> None:
     """The prompt builder and the GET route call THE SAME FUNCTION —
-    ``state_block_from_params``. The route's response is built by
-    ``state_block_from_params`` (the same object the live prompt builder
-    in ``d33d.design_loop`` calls), and the route does not carry its own
-    parallel implementation."""
+    ``state_block_for_version`` (issue #137: the measurement-aware shared
+    callable the route's response is built by — the same object the live
+    prompt builder in ``d33d.design_loop`` calls), and the route does not
+    carry its own parallel implementation."""
     import d33d.design_state as ds
 
     async def _call(client):
@@ -102,8 +102,8 @@ def test_prompt_builder_and_route_share_the_same_callable(app_with_versions) -> 
     body = r.json()
 
     # The prompt builder's callable (the module the live loop imports).
-    prompt_fn = ds.state_block_from_params
-    assert prompt_fn is state_block_from_params  # identity
+    prompt_fn = ds.state_block_for_version
+    assert prompt_fn is state_block_for_version  # identity
     # The route's output is exactly what the shared callable produces on
     # the latest version's params — same callable, same result.
     route_names = {e["name"] for e in body}
