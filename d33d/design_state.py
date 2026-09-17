@@ -34,17 +34,24 @@ JSON objects preserve insertion order) render, and a final
 silently).
 
 ``measured`` / ``disagrees`` provenance requires a measurement to compare
-against. Measured values come from the rendered bbox — but the versions
-table has no bbox column, so NO measurement is persisted at version
-creation yet. The builder therefore supports ``measured``/``disagrees``
-synthetically (the unit tests exercise that branch); the LIVE route reads
-only the params snapshot and emits ``stated``/``unknown``. It does NOT
-re-render to obtain a measurement.
+against, and at this commit ``measured`` and ``disagrees`` are FORWARD-
+COMPATIBLE CONTRACT VALUES with NO PRODUCTION DATA SOURCE: the versions
+table has no bbox column and no write path persists a measurement at
+version creation, so neither the live prompt builder nor the GET the SPA
+reads (``d33d.versions_routes``) can ever emit them from real data —
+they emit only ``stated`` and ``unknown``. Making them reachable would
+require persisting a rendered bbox at version creation (tracked
+separately — a follow-up issue for bbox persistence); the enum keeps the
+values so that change is additive, not a contract rewrite. The builder
+therefore supports ``measured``/``disagrees`` synthetically (the unit
+tests that exercise those branches say so in a comment); the live
+consumers read only the params snapshot and do NOT re-render to obtain a
+measurement.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 __all__ = [
     "MAX_STATE_BLOCK_ENTRIES",
@@ -78,7 +85,9 @@ class StateEntry(TypedDict):
     ``value`` is nullable: ``"unknown"`` provenance carries ``None``.
     ``stated_value`` is present ONLY when ``provenance == "disagrees"``
     (the displayed value is the MEASURED one — what will print — and the
-    stated value rides alongside; they are never collapsed).
+    stated value rides alongside; they are never collapsed), so it is
+    ``NotRequired``: the common (``stated``/``unknown``) case carries no
+    ``stated_value`` key at all.
     """
 
     name: str
@@ -86,7 +95,7 @@ class StateEntry(TypedDict):
     value: float | str | bool | None
     unit: str | None
     provenance: Provenance
-    stated_value: float | str | bool | None
+    stated_value: NotRequired[float | str | bool | None]
 
 
 def _is_number(value: Any) -> bool:

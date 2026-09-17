@@ -65,6 +65,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
+from d33d.design_state import state_block_from_params
 
 logger = logging.getLogger(__name__)
 
@@ -365,6 +366,34 @@ def create_versions_router() -> APIRouter:
         svc = _service(request)
         return svc.library_cards()
 
+    # -- design state (the block the SPA's Brief renders — issue #120) -------
+
+    @router.get("/api/projects/{project_id}/design-state")
+    async def get_design_state(request: Request, project_id: int) -> list[dict[str, Any]]:
+        """The design-state block for the project's LATEST version (issue
+        #120, consumer 2 — the GET the SPA reads to render the Brief).
+
+        Returns a JSON array of entries: ``name``, ``label``, ``value``
+        (nullable — ``unknown`` serialises as ``null``), ``unit`` (``mm``
+        for numeric params, ``null`` for non-numeric), and ``provenance``
+        (``stated``/``unknown`` at this commit; ``stated_value`` rides
+        alongside ONLY for ``disagrees`` entries, which no production data
+        source can produce yet — see ``d33d.design_state``). A project
+        with no version yet returns an EMPTY array with 200 (never a 404,
+        never null — turn one is the commonest case).
+
+        This calls the SAME ``state_block_from_params`` the live prompt
+        builder (``d33d.design_loop``) calls — the shared callable, not a
+        parallel implementation — so the prompt and the Brief cannot
+        drift apart. The route reads the persisted params snapshot only:
+        it does NOT re-render to obtain a measurement.
+        """
+        svc = _service(request)
+        _project_or_404(svc, project_id)
+        latest = svc.latest_version(project_id)
+        params = dict(latest["params"]) if latest is not None else None
+        return state_block_from_params(params)
+
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
     @router.get("/api/projects/{project_id}/design-source")
@@ -625,11 +654,12 @@ def _finalize_loop_kwargs(
             float(p.get("H", 0.0)),
         )
     # The design-state block's data source (issue #120): the latest
-    # version's full params snapshot (the SAME dict the block builder
-    # consumes — the shared ``state_block_from_params`` function both the
-    # loop's prompt builder and this route call). ``None`` when no version
-    # exists yet (the block renders with zero entries — an honest empty
-    # state, never a fabricated dimension).
+    # version's full params snapshot, passed INTO the loop (the loop's
+    # prompt builder renders it). The GET the SPA reads
+    # (``GET /api/projects/{id}/design-state``) calls the SAME shared
+    # ``state_block_from_params`` on the same snapshot. ``None`` when no
+    # version exists yet (the block renders with zero entries — an honest
+    # empty state, never a fabricated dimension).
     state_params: dict[str, Any] | None = (
         dict(latest["params"]) if latest is not None else None
     )
