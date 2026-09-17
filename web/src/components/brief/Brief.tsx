@@ -16,9 +16,13 @@ interface BriefProps {
   isChip: boolean;
   /** The top/left inset from the stage edge (px). */
   inset: number;
+  /** True when the conversation pane is collapsed — threaded from App
+   *  to keep the style object byte-identical to the pre-extraction
+   *  inline style (issue #116: extract AS-IS). */
+  conversationCollapsed: boolean;
 }
 
-export function Brief({ isChip, inset }: BriefProps) {
+export function Brief({ isChip, inset, conversationCollapsed }: BriefProps) {
   return (
     <div
       className="brief-panel"
@@ -28,6 +32,7 @@ export function Brief({ isChip, inset }: BriefProps) {
         position: "absolute",
         top: inset,
         left: inset,
+        ...(conversationCollapsed ? {} : { marginTop: 0 }),
         zIndex: 10,
         padding: isChip ? "8px 12px" : "16px",
         borderRadius: 8,

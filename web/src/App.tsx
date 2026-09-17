@@ -1120,7 +1120,9 @@ export default function App({ renders = [], client }: AppProps) {
 
       {/* Layer 10 — the Brief chip / full panel. The Brief renders as a
           CHIP below 1200px wide OR 820px tall; a full panel above. */}
-      {!panelsHidden && <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} />}
+      {!panelsHidden && (
+        <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} conversationCollapsed={conversationCollapsed} />
+      )}
 
       {/* Layer 10 — the version timeline (side rail), right edge. A failure
           is CONTENT INSIDE THE CONVERSATION, never a layer of its own. */}
