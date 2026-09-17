@@ -1,13 +1,14 @@
-"""Regression tests for the deterministic test gate (issue #145).
+"""Regression tests for the deterministic test gate (issue #145, #148).
 
 These tests prove the two guards actually refuse — not merely that the
 right invocation works:
 
-1. Dependency guard — simulates the wrong-pytest condition by running
-   ``import tests`` in a bare, dependency-free interpreter (system
-   ``python3`` has none of the project's packages). The import must
-   exit non-zero with a dependency-guard diagnostic, never quietly
-   succeed or under-report.
+1. Dependency guard — simulates the wrong-pytest condition by shadowing
+   required packages (pydantic, trimesh) with stub modules that raise
+   ImportError, so that ``import tests`` in the *current* interpreter
+   (which actually has the project deps) still triggers the dependency
+   guard's refusal. The guard must exit with code 3, print its
+   diagnostic, and name the shadowed packages.
 
 2. Provenance guard — simulates the wrong-tree condition by creating a
    minimal foreign ``d33d`` package and putting it first on ``sys.path``
@@ -15,10 +16,15 @@ right invocation works:
    project's deps (so the dependency guard passes). The provenance
    guard must refuse and name both paths.
 
-The dependency-guard simulation deliberately uses the bare system
-interpreter (not ``uv run``) because that is exactly the failure
-condition: a pytest/python that does not have the project's
-dependencies.
+Why shadowing rather than hunting for a bare interpreter (issue #148):
+the original approach probed a candidate list of interpreters looking
+for one that could NOT ``import pydantic``. On Linux CI every candidate
+already has the project deps installed (``pip install -e ".[test]"``),
+so no such interpreter exists and the tests skip. Shadowing a module
+on ``sys.path`` is platform-independent: the shadow directory is placed
+first on ``sys.path`` in the spawned subprocess, so ``import pydantic``
+picks up the stub (which raises ImportError) before the real package
+is ever reached. No special interpreter is needed.
 """
 
 from __future__ import annotations
@@ -26,9 +32,16 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# Packages that the dependency guard checks and that the meta-tests
+# shadow to simulate their absence. Two are shadowed so the
+# "names missing packages" test can prove the guard enumerates more
+# than one.
+_SHADOWED_PACKAGES = ("pydantic", "trimesh")
 
 
 def _env() -> dict[str, str]:
@@ -79,16 +92,6 @@ def _probe(interp: str, code: str) -> int | None:
     return probe.returncode
 
 
-def _depless_interpreter() -> str | None:
-    """Find an interpreter that lacks the project deps (the bare system
-    python). On macOS that is the Homebrew python; on Linux it is the
-    system python, which the gate's pip-installed deps do not reach."""
-    for interp in _interpreter_candidates():
-        if _probe(interp, "import pydantic") == 1:
-            return interp
-    return None
-
-
 def _venv_python() -> str | None:
     """Find an interpreter that HAS the project deps."""
     for interp in _interpreter_candidates():
@@ -97,59 +100,84 @@ def _venv_python() -> str | None:
     return None
 
 
-def test_dependency_guard_refuses_bare_interpreter() -> None:
-    """``import tests`` under a bare interpreter (no project deps) must
-    exit non-zero with the dependency-guard diagnostic.
+def _shadow_env(tmpdir: Path) -> dict[str, str]:
+    """Build an env dict for a subprocess where the shadow directory
+    is first on PYTHONPATH, so stub modules shadow the real packages."""
+    env = _env()
+    existing = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(tmpdir) + (":" + existing if existing else "")
+    return env
 
-    Simulates the wrong-pytest condition: the system interpreter has
-    none of pydantic/trimesh/fastapi/etc., so the guard must refuse
-    instead of allowing a silently partial run.
+
+def _write_shadow_stubs(shadow_dir: Path) -> None:
+    """Create stub .py files that raise ImportError when imported.
+
+    The stubs simulate the situation where the real package is not
+    installed: ``import pydantic`` finds the stub first (shadow dir is
+    first on sys.path), executes ``raise ImportError``, and the
+    dependency guard in tests/__init__.py records the package as
+    missing.
     """
-    interp = _depless_interpreter()
-    if interp is None:
-        import pytest
+    for pkg in _SHADOWED_PACKAGES:
+        stub = shadow_dir / f"{pkg}.py"
+        stub.write_text(f"raise ImportError('{pkg} is not installed')\n")
 
-        tried = ", ".join(_interpreter_candidates())
-        pytest.skip(
-            "no dependency-free interpreter found (tried: "
-            f"{tried}) — cannot simulate the wrong-pytest condition"
-        )
 
-    result = subprocess.run(
-        [interp, "-c", "import tests"],
+def _run_import_tests(shadow_dir: Path | None) -> subprocess.CompletedProcess:
+    """Run ``import tests`` in the current interpreter, with the shadow
+    directory first on PYTHONPATH (if given). The shadow dir, if present,
+    is consulted before site-packages, so the stub modules shadow the
+    real packages."""
+    env = _env()
+    if shadow_dir is not None:
+        env["PYTHONPATH"] = str(shadow_dir)
+    code = f"import sys; sys.path.insert(0, r'{REPO_ROOT / 'tests'}'); import tests"
+    return subprocess.run(
+        [sys.executable, "-c", code],
         cwd=REPO_ROOT,
         capture_output=True,
-        env=_env(),
+        env=env,
     )
-    assert result.returncode != 0, (
-        f"dependency guard did not refuse; interpreter={interp}\n"
+
+
+def test_dependency_guard_refuses_bare_interpreter() -> None:
+    """``import tests`` with required packages shadowed must exit with
+    code 3 and the dependency-guard diagnostic.
+
+    Simulates the wrong-pytest condition: pydantic and trimesh are
+    shadowed by stubs that raise ImportError, so the guard must refuse
+    instead of allowing a silently partial run.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        shadow = Path(td)
+        _write_shadow_stubs(shadow)
+        result = _run_import_tests(shadow)
+
+    assert result.returncode == 3, (
+        f"dependency guard did not refuse (expected exit 3, got "
+        f"{result.returncode}); interpreter={sys.executable}\n"
         f"stderr: {result.stderr.decode()}"
     )
     assert "GATE FAILED (dependency guard)" in result.stderr.decode()
 
 
 def test_dependency_guard_names_missing_packages() -> None:
-    """The refusal must name at least one missing package and the
-    interpreter — a number without provenance is the defect."""
-    interp = _depless_interpreter()
-    if interp is None:
-        import pytest
+    """The refusal must name every shadowed package and the interpreter
+    — a number without provenance is the defect.
 
-        tried = ", ".join(_interpreter_candidates())
-        pytest.skip(
-            "no dependency-free interpreter found (tried: "
-            f"{tried}) — cannot simulate the wrong-pytest condition"
-        )
+    Shadows two distinct packages (pydantic, trimesh) to prove the
+    guard enumerates them, not just the first it encounters.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        shadow = Path(td)
+        _write_shadow_stubs(shadow)
+        result = _run_import_tests(shadow)
 
-    result = subprocess.run(
-        [interp, "-c", "import tests"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        env=_env(),
-    )
     stderr = result.stderr.decode()
     assert "interpreter:" in stderr
-    assert any(p in stderr for p in ("pydantic", "trimesh", "fastapi"))
+    # Both shadowed packages must be named in the refusal message.
+    for pkg in _SHADOWED_PACKAGES:
+        assert pkg in stderr, f"shadowed package {pkg!r} not named in: {stderr}"
 
 
 def test_provenance_guard_safe_path() -> None:
@@ -197,11 +225,8 @@ def test_provenance_guard_refuses_stale_tree() -> None:
             f"{tried}) — venv not installed"
         )
 
-    import tempfile
-    from pathlib import Path as P
-
     with tempfile.TemporaryDirectory() as td:
-        foreign = P(td) / "foreign-tree"
+        foreign = Path(td) / "foreign-tree"
         pkg = foreign / "d33d"
         pkg.mkdir(parents=True)
         (pkg / "__init__.py").write_text("__version__ = '0.0.0-foreign'\n")
