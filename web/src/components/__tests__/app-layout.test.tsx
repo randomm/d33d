@@ -20,7 +20,7 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
-import type { RenderImage } from "../../App";
+
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project, RegionEditResult } from "../../lib/api";

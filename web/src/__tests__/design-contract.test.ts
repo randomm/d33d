@@ -376,6 +376,7 @@ describe("design contract", () => {
       contentSpan.includes("msg.source"),
       "the transcript content span must render only content, never the source",
     ).toBe(false);
+  });
 
   /* --------------------------------------------------------------- W13 */
 
