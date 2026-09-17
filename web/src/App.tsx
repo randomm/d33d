@@ -71,6 +71,14 @@ import { Filmstrip } from "./components/versions/Filmstrip";
 // void statement keeps the linter honest about them).
 void [PassCard, Composer];
 
+// The version surfaces (issue #8): the horizontal filmstrip (W13) is the
+// at-a-glance strip; the rail + compare + gallery (VersionTail) is the
+// user-reachable home of the compare-select, restore and pin actions.
+// Both render until W16 relocates the actions to the expanded sheet — a
+// transitional overlap, on purpose: a working rail beats a clean strip
+// that lost its actions.
+import { VersionTail } from "./components/versions/VersionTail";
+
 // Overlay geometry (issue #119). The overlays are siblings above the
 // canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
 // CLOSED set of four values (the design contract): canvas 0, panels 10,
@@ -1178,10 +1186,31 @@ export default function App({ client }: AppProps) {
         <Brief isChip={briefIsChip} inset={OVERLAY_INSET_PX} conversationCollapsed={conversationCollapsed} />
       )}
 
-      {/* Layer 10 — the version timeline (side rail), right edge. A failure
-          is CONTENT INSIDE THE CONVERSATION, never a layer of its own. */}
+      {/* Layer 10 — the version filmstrip (bottom-left, horizontal four-slot
+          strip, W13). A failure is CONTENT INSIDE THE CONVERSATION, never a
+          layer of its own. The strip is absent (not empty) until a version
+          exists or a pass is in flight. The pass-in-flight flag drives the
+          dashed pending slot so the strip is never behind the conversation. */}
       {!panelsHidden && projectId !== null && (
         <Filmstrip
+          versions={versions}
+          passInFlight={designLoopInFlight}
+          pendingName={lastUserMessageRef.current || null}
+          inset={OVERLAY_INSET_PX}
+          onCompareSelect={handleCompareSelect}
+        />
+      )}
+
+      {/* Layer 10 — the version timeline rail (issue #8, right edge) + the
+          compare view + the pinned gallery. Restored as user-reachable
+          surfaces alongside the new strip (issue #117 adversarial fix): the
+          strip's slot click and the rail's Compare button both feed the same
+          compare-select rotation, so the filmstrip's compare-select is real
+          again (the compare fetch fires) and restore/pin are reachable from
+          the rail's buttons. Transitional until W16 relocates the actions
+          to the expanded sheet. */}
+      {!panelsHidden && projectId !== null && (
+        <VersionTail
           versions={versions}
           compareIds={compareIds}
           compareResult={compareResult}

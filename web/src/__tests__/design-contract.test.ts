@@ -40,9 +40,15 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
+import { render } from "@testing-library/react";
+import { createElement } from "react";
 
 import copy, { mm } from "../copy";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
+import { Filmstrip } from "../components/versions/Filmstrip";
+import { CompareView } from "../components/versions/CompareView";
+import { VariantGallery } from "../components/versions/VariantGallery";
+import type { VersionCompare, VersionTimelineEntry } from "../lib/api";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -370,5 +376,162 @@ describe("design contract", () => {
       contentSpan.includes("msg.source"),
       "the transcript content span must render only content, never the source",
     ).toBe(false);
+  });
+
+  /* --------------------------------------------------------------- W13 */
+
+  it("the filmstrip is absent, not empty, when a project has no versions", () => {
+    // W13: a project with zero versions (and no pass in flight) renders NO
+    // filmstrip at all — not an empty rail, not a "No versions yet" branch.
+    // A pass in flight with zero versions DOES render (just the dashed
+    // pending slot), so the absence is specifically the no-versions-no-pass
+    // case. Rendering the real component proves the branch, not the copy.
+    const { container } = render(
+      createElement(Filmstrip, {
+        versions: [],
+        passInFlight: false,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    expect(container.querySelector(".filmstrip")).toBeNull();
+    // And the in-flight case does render (the strip is never behind the
+    // conversation) — the absence is the no-pass case, not a blanket null.
+    const inFlight = render(
+      createElement(Filmstrip, {
+        versions: [],
+        passInFlight: true,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    expect(inFlight.container.querySelector(".filmstrip")).not.toBeNull();
+  });
+
+  it("no version surface renders a commit hash or branch name", () => {
+    // W13 / W16 invariant: no version surface ever shows git — no commit
+    // hashes, no branch names. The guarantee is behavioural, not lexical:
+    // a naive component could print a hash in a visible slot, in an
+    // alt/title attribute (textContent excludes attributes), or as a
+    // 7-char short hash — every one of those shapes must trip this check.
+    //
+    // The scan therefore walks BOTH textContent and every attribute value
+    // of every rendered element, and the hex detector is NOT word-anchored:
+    // the old /\b[0-9a-f]{7,40}\b/ failed on the real DOM because the slot
+    // renders the name immediately followed by `v{id}`, fusing a real hash
+    // into a 41-char run where the trailing 'v' destroys the word boundary
+    // (and a 7-char hash is itself at the anchor's edge).
+    const assertNoGit = (root: Element, label: string) => {
+      const nodes: Element[] = [root, ...Array.from(root.querySelectorAll("*"))];
+      const violations: string[] = [];
+      for (const el of nodes) {
+        const text = el.textContent ?? "";
+        if (/[0-9a-f]{7,}/i.test(text)) {
+          violations.push(`hex run in text: "${text.slice(0, 80)}"`);
+        }
+        if (/(?:feature|fix|hotfix|release|main|develop)\/[A-Za-z0-9_-]+/i.test(text)) {
+          violations.push(`branch-like name in text: "${text.slice(0, 80)}"`);
+        }
+        for (const attr of el.attributes) {
+          if (/[0-9a-f]{7,}/i.test(attr.value)) {
+            violations.push(`hex run in attribute ${attr.name}: "${attr.value.slice(0, 80)}"`);
+          }
+          if (/(?:feature|fix|hotfix|release|main|develop)\/[A-Za-z0-9_-]+/i.test(attr.value)) {
+            violations.push(`branch-like name in attribute ${attr.name}: "${attr.value.slice(0, 80)}"`);
+          }
+        }
+      }
+      expect(violations, `${label}: git-shaped output in DOM\n  ${violations.join("\n  ")}`).toEqual([]);
+    };
+
+    // (1) The filmstrip: a plain version with a diff fragment plus a version
+    //     whose name contains no 7+ hex run and no branch-like grammar.
+    const versions: VersionTimelineEntry[] = [
+      {
+        id: 1,
+        name: "rod 45 off wall",
+        params: {},
+        created_by_message: "make a rod",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+      },
+      {
+        id: 2,
+        name: "rod 45.0 off wall",
+        params: { D: 45 },
+        created_by_message: "widen",
+        parent: 1,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-02T00:00:00Z",
+        diff_count: 1,
+      },
+    ];
+    const strip = render(
+      createElement(Filmstrip, {
+        versions,
+        passInFlight: false,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    assertNoGit(strip.container, "filmstrip");
+
+    // (2) The compare view: a 40-char hash fused directly against the
+    //     version number (the fusion shape that fooled the old word-boundary
+    //     check) and a branch-like name, each in text and in the viewport
+    //     thumbnails' alt (attributes textContent cannot see).
+    const compare: VersionCompare = {
+      project_id: 7,
+      a: { ...versions[0], id: 10, name: "rod 45 off wall" },
+      b: {
+        ...versions[1],
+        id: 11,
+        name: "rod 45.0 off wall",
+        thumbnail: null,
+      },
+      diff: {
+        count: 1,
+        changed: ["D"],
+        added: [],
+        removed: [],
+      },
+      shared_rotation: {
+        units: "mm",
+        axis_convention: "z-up",
+        identical_convention: true,
+      },
+    };
+    const cmp = render(createElement(CompareView, { compare, aId: 10, bId: 11 }));
+    assertNoGit(cmp.container, "compare-view");
+
+    // (3) The pinned gallery: a real card (name with no branch-like grammar,
+    //     no 7+ hex run in name, src or alt).
+    const gallery = render(
+      createElement(VariantGallery, {
+        cards: [
+          {
+            ...versions[1],
+            id: 12,
+            name: "rod 45.0 off wall",
+            pinned: true,
+            actions: ["set-as-main", "branch-from", "archive"] as const,
+          },
+        ],
+      }),
+    );
+    assertNoGit(gallery.container, "variant-gallery");
   });
 });

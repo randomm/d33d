@@ -95,6 +95,52 @@ body {
   border-bottom: 1px solid var(--color-hairline);
 }
 
+/* The horizontal version filmstrip (W13) — bottom-left overlay. Colour and
+   type only here; the position/size/z-index live inline in the component
+   (the four-slot track's box is component-owned, mirroring .viewer-pane). */
+.filmstrip {
+  background: color-mix(in srgb, var(--color-panel) 92%, transparent);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius);
+}
+
+.filmstrip-slot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
+  color: var(--color-fg);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.filmstrip-slot--pending {
+  cursor: default;
+}
+
+.filmstrip-thumb {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+}
+
+.filmstrip-earlier {
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}
+
+.filmstrip-fork {
+  color: var(--color-fg-2);
+}
+
 .validation-pane {
   padding: var(--space-2) var(--space-4);
   border-top: 1px solid var(--color-hairline);

@@ -20,6 +20,7 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
+
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project, RegionEditResult } from "../../lib/api";
@@ -379,6 +380,214 @@ describe("App project lifecycle", () => {
     });
     expect(screen.getByTestId("app-error").textContent).toContain("boom");
   });
+
+  it("wires the filmstrip's compare-select through to App's compare fetch (issue #117)", async () => {
+    // The per-component filmstrip test proves the slot calls its onCompareSelect
+    // prop; this test proves APP's callback does real work end-to-end: a slot
+    // click sets the compare selection, a second click makes two DISTINCT
+    // versions, and App's compare effect fires apiClient.compareVersions —
+    // the actual user-reachable effect of the strip's click (the seam-era
+    // __compareSelectLog export is gone; we assert on what compare DOES, not
+    // on a log of calls). The versions list is stubbed with two entries so
+    // the filmstrip renders (absent at zero versions, W13).
+    const client = makeClient({
+      listVersions: vi
+        .fn()
+        .mockResolvedValue([
+          {
+            id: 1,
+            name: "box v1",
+            params: {},
+            created_by_message: "make a box",
+            parent: null,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-01T00:00:00Z",
+            diff_count: 0,
+          },
+          {
+            id: 2,
+            name: "box v2",
+            params: { D: 45 },
+            created_by_message: "widen",
+            parent: 1,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-02T00:00:00Z",
+            diff_count: 1,
+          },
+        ]) as unknown as ApiClient["listVersions"],
+      compareVersions: vi.fn().mockResolvedValue({
+        project_id: 7,
+        a: {
+          id: 1,
+          name: "box v1",
+          params: {},
+          created_by_message: "make a box",
+          parent: null,
+          restored_from: null,
+          forked_from: null,
+          pinned: false,
+          archived: false,
+          thumbnail: null,
+          created_at: "2026-01-01T00:00:00Z",
+          diff_count: 0,
+        },
+        b: {
+          id: 2,
+          name: "box v2",
+          params: { D: 45 },
+          created_by_message: "widen",
+          parent: 1,
+          restored_from: null,
+          forked_from: null,
+          pinned: false,
+          archived: false,
+          thumbnail: null,
+          created_at: "2026-01-02T00:00:00Z",
+          diff_count: 1,
+        },
+        diff: { added: [], removed: [], changed: ["D"], count: 1 },
+        shared_rotation: {
+          units: "mm",
+          axis_convention: "right-handed",
+          identical_convention: true,
+        },
+      } as unknown as Awaited<ReturnType<ApiClient["compareVersions"]>>),
+    });
+    vi.spyOn(client, "updateVersion");
+    vi.spyOn(client, "restoreVersion");
+
+    render(<App client={client} />);
+    await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+
+    // The rail's action buttons are live in the same tree (finding 1): each
+    // timeline entry carries a working Restore and Compare button, and the
+    // rail's Compare button hits the same rotation as the strip's slot.
+    const rail = screen.getByTestId("version-timeline");
+    expect(rail).toBeTruthy();
+    expect(screen.getByTestId("timeline-restore-1")).not.toBeDisabled();
+    expect(screen.getByTestId("timeline-restore-2")).toBeDisabled(); // latest
+    expect(screen.getByTestId("timeline-compare-1")).toBeTruthy();
+
+    // Slot click 1: the first selection is [id, id] — a pending compare
+    // selection with no network call yet (App skips the fetch while both
+    // ids match).
+    fireEvent.click(screen.getByTestId("filmstrip-slot-2"));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.compareVersions).not.toHaveBeenCalled();
+
+    // Slot click 2: two DISTINCT versions — the compare effect fires.
+    fireEvent.click(screen.getByTestId("filmstrip-slot-1"));
+    await waitFor(() => {
+      expect(client.compareVersions).toHaveBeenCalledWith(7, 2, 1);
+    });
+
+    // The fetched compare result renders through the rail's compare pane.
+    await waitFor(() => expect(screen.getByTestId("compare-pane")).toBeTruthy());
+    expect(screen.getByTestId("compare-view").textContent).toContain("box v1 vs box v2");
+  });
+
+  it("restore and pin from the version rail reach the backend (issue #117)", async () => {
+    // The rail is user-reachable again (finding 1): the rail's Restore button
+    // fires apiClient.restoreVersion AND refetches the timeline; the Pin
+    // button fires apiClient.updateVersion with the toggled pinned flag and
+    // flips the entry's pin state in the list.
+    const restoreList = [
+      {
+        id: 1,
+        name: "box v1",
+        params: {},
+        created_by_message: "make a box",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+      },
+      {
+        id: 2,
+        name: "box v2",
+        params: { D: 45 },
+        created_by_message: "widen",
+        parent: 1,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-02T00:00:00Z",
+        diff_count: 1,
+      },
+    ];
+    const client = makeClient({
+      listVersions: vi
+        .fn()
+        .mockResolvedValueOnce(restoreList)
+        .mockResolvedValue(
+          [
+            ...restoreList,
+            {
+            id: 3,
+            name: "box v3",
+            params: { D: 45 },
+            created_by_message: "restored to v1",
+            parent: 2,
+            restored_from: 1,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-03T00:00:00Z",
+            diff_count: 0,
+          },
+        ]) as unknown as ApiClient["listVersions"],
+      restoreVersion: vi.fn().mockResolvedValue({ id: 3, name: "box v3" } as unknown as Awaited<ReturnType<ApiClient["restoreVersion"]>>),
+      updateVersion: vi.fn().mockResolvedValue({ id: 1, name: "box v1", pinned: true } as unknown as Awaited<ReturnType<ApiClient["updateVersion"]>>),
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(screen.getByTestId("version-timeline")).toBeTruthy());
+
+    // The versions land (two entries — the rail renders their buttons).
+    await waitFor(() => expect(screen.getByTestId("timeline-pin-1")).toBeTruthy());
+    await waitFor(() => expect(screen.getByTestId("timeline-pin-2")).toBeTruthy());
+
+    // Restore v1 (the latest, v2, is disabled): the restore fires and the
+    // timeline refetches, landing on the new forward version (v3, enabled).
+    fireEvent.click(screen.getByTestId("timeline-restore-1"));
+    await waitFor(() => {
+      expect(client.restoreVersion).toHaveBeenCalledWith(7, 1);
+    });
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(2));
+    // The refetched list landed: it carries the new forward version (v3),
+    // which is now the latest — so its restore is DISABLED and the other
+    // two (v1, v2) are enabled.
+    await waitFor(() => {
+      expect(screen.getByTestId("timeline-restore-3")).toBeDisabled();
+    });
+    expect(screen.getByTestId("timeline-restore-1")).not.toBeDisabled();
+    expect(screen.getByTestId("timeline-restore-2")).not.toBeDisabled();
+    expect(screen.getByTestId("version-timeline-count").textContent).toBe("3");
+
+    // Pin v1 from the rail: updateVersion fires with the toggled flag and
+    // the entry's pin state flips in the list.
+    const pinBtn = screen.getByTestId("timeline-pin-1");
+    fireEvent.click(pinBtn);
+    await waitFor(() => {
+      expect(client.updateVersion).toHaveBeenCalledWith(7, 1, { pinned: true });
+    });
+    expect(screen.getByTestId("timeline-pin-1").textContent).toBe("★");
+  });
 });
 
 describe("App chat wiring", () => {
@@ -716,8 +925,11 @@ describe("App stream-driven model (issue #69)", () => {
 
     render(<App client={client} />);
     await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
-    // The initial (mount-time) fetch settled on an empty timeline.
-    expect(screen.getByTestId("version-timeline-empty")).toBeTruthy();
+    // The initial (mount-time) fetch settled on an empty timeline. W13 (issue
+    // #117) made the filmstrip ABSENT, not empty: with zero versions and no
+    // pass in flight the strip renders nothing at all (the old
+    // version-timeline-empty branch is gone).
+    expect(screen.queryByTestId("version-filmstrip")).toBeNull();
 
     // Send a message and fire the version-created frame (the real wire shape:
     // step + version_id — issue #114 verified against the recorded seam
@@ -740,15 +952,15 @@ describe("App stream-driven model (issue #69)", () => {
       });
     });
 
-    // The frame must have triggered a SECOND listVersions call — the rail
+    // The frame must have triggered a SECOND listVersions call — the strip
     // reflects the created version instead of staying on the stale (empty)
-    // list. Without the refetch this call count stays at 1 and the empty
-    // branch stays on screen, so this test fails when the refetch is gone.
+    // list. Without the refetch this call count stays at 1 and the strip
+    // stays absent, so this test fails when the refetch is gone.
     await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(2));
     await waitFor(() => {
-      expect(screen.getByTestId("version-timeline")).toBeTruthy();
+      expect(screen.getByTestId("version-filmstrip")).toBeTruthy();
     });
-    expect(screen.getByTestId("timeline-entry-1")).toBeTruthy();
+    expect(screen.getByTestId("filmstrip-slot-1")).toBeTruthy();
   });
 
   it("does NOT refetch the version timeline for non-version-created progress frames (issue #114)", async () => {
