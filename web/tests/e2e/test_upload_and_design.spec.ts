@@ -107,14 +107,11 @@ test("happy path: upload photo → settle", async ({ page }) => {
   await expect(page.getByText("📎 Attach reference photo")).toHaveCount(0);
 
   // --- Settle -------------------------------------------------------------
-  // The design-loop-to-SSE wiring (onProgress) is a separate ticket, so
-  // the validation-status span is intentionally a static placeholder in
-  // the current app: the "settle" in this happy path is the UI reaching
-  // its stable post-upload state — preview shown, no upload error, no
-  // app-level error.
-  await expect(page.getByTestId("validation-status")).toHaveText(
-    "Waiting for render…",
-  );
+  // The validation pane shows the real validation state or nothing — no
+  // static placeholder (issue #114 removed the static status span): the
+  // pane is absent before the project loads, and once it loads it carries
+  // only the Export3MF button.
+  await expect(page.getByTestId("export-3mf")).toBeVisible();
   await expect(page.getByTestId("upload-error")).toHaveCount(0);
   await expect(page.getByTestId("app-error")).toHaveCount(0);
 });
