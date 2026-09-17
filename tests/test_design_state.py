@@ -127,9 +127,12 @@ def test_design_state_block_no_version_yields_empty_block() -> None:
 def test_design_state_block_disagrees_carries_both_values() -> None:
     """``disagrees`` carries BOTH the measured value (the displayed one —
     what will print) AND ``stated_value``. They are never collapsed.
-    (``measured``/``disagrees`` require a measurement to compare against;
-    the route reads only the params snapshot, so this branch is exercised
-    synthetically via a hand-built entry — the unit is the contract.)"""
+
+    NOTE: ``measured``/``disagrees`` are forward-compatible contract
+    values with NO production data source at this commit (no bbox is
+    persisted at version creation — see ``d33d.design_state``'s
+    docstring). This branch is exercised SYNTHETICALLY via a hand-built
+    entry; it is not coverage of a live path."""
     import json
 
     entry: StateEntry = {
@@ -154,7 +157,12 @@ def test_design_state_block_disagrees_carries_both_values() -> None:
 
 def test_disagrees_entry_renders_measured_value_with_stated_ridealong() -> None:
     """The formatted block renders the MEASURED value as the displayed
-    value and carries the stated value alongside (never collapsed)."""
+    value and carries the stated value alongside (never collapsed).
+
+    NOTE: synthetic branch — ``disagrees`` has no production data source
+    at this commit (see the ``test_design_state_block_disagrees_carries_
+    both_values`` note); this pins the formatter's handling of the
+    forward-compatible contract value."""
     entry: StateEntry = {
         "name": "W",
         "label": "W",
@@ -336,25 +344,15 @@ def test_design_state_block_function_identity() -> None:
     assert ds.state_block_from_params is state_block_from_params
 
 
-# ---------------------------------------------------------------------------
-# The 30/60 bug pinned: prompt contains the previous version's dimension
-# ---------------------------------------------------------------------------
-
-
-def test_design_prompt_contains_previous_versions_stated_dimension() -> None:
-    """A project whose latest version established a 30 mm dimension
-    produces a design prompt containing 30. This is the 30/60 bug,
-    pinned: the block (built from the previous version's params) is what
-    reaches the prompt, so the model can no longer invent 60 for a
-    sphere it had itself made 30."""
-    # The previous version established W = 30 (the 30 mm sphere).
-    previous_params = {"W": 30.0, "D": 30.0, "H": 30.0}
-    block = state_block_from_params(previous_params)
-    prompt_text = format_design_state_block(build_design_state_block(block))
-    # The prompt carries the actual 30 — the 30/60 bug is pinned.
-    assert "30" in prompt_text
-    # And it carries the entry explicitly.
-    assert "W = 30" in prompt_text
+# The 30/60 bug's named test lives in
+# tests/versioning/test_design_state_route.py and
+# tests/versioning/test_issue120_design_state_block.py — on the LIVE
+# consumer paths (the GET route and the live prompt). The unit-level
+# duplicate that once sat here (which built the block and asserted on its
+# own output — passing under any implementation that renders values, and
+# staying green if the block were removed from the live prompt entirely)
+# is deleted: the name now sits on a test that actually goes RED when the
+# block stops reaching the prompt.
 
 
 def test_design_prompt_renders_the_block_when_removed_it_is_red() -> None:

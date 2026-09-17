@@ -192,42 +192,13 @@ def test_design_prompt_no_version_yet_renders_empty_block():
     assert "(no parameters yet)" in user_text
 
 
-# ---------------------------------------------------------------------------
-# The shared callable: prompt builder and route resolve to the SAME
-# function (identity, not merely equal output).
-# ---------------------------------------------------------------------------
-
-
-def test_prompt_builder_and_route_share_the_same_callable():
-    """The prompt builder and the API route call THE SAME FUNCTION —
-    ``state_block_from_params``. Assert the shared callable by identity:
-    the route reads ``latest_version(project_id)['params']`` and calls the
-    same function the live prompt builder uses."""
-    import d33d.design_state as ds
-
-    # The route's data source (the versions service's latest_version).
-    class _Svc:
-        def latest_version(self, project_id):
-            return {"params": {"W": 30.0, "bore_diameter": 8.0}}
-
-    latest = _Svc().latest_version(1)
-    assert latest is not None
-
-    # The route builds the block from latest_version's params.
-    route_block = state_block_from_params(latest["params"])
-
-    # The prompt builder builds the block from the same params snapshot,
-    # using the SAME function (identity — not two functions that happen
-    # to agree).
-    prompt_fn = ds.state_block_from_params
-    assert prompt_fn is state_block_from_params
-    prompt_block = prompt_fn(latest["params"])
-
-    # Same callable, same output.
-    assert route_block == prompt_block
-    names = {e["name"] for e in route_block}
-    assert names == {"W", "bore_diameter"}
-
+# The shared-callable identity test lives in
+# tests/versioning/test_design_state_route.py, repointed at the real
+# ``GET /api/projects/{id}/design-state`` route (this file's old copy
+# asserted the identity against the finalize seam's kwargs — honest about
+# identity, but wrong about which consumer it named; the second consumer
+# the ticket describes is the GET the SPA reads, and the route now
+# exists).
 
 # ---------------------------------------------------------------------------
 # End-to-end through the REAL route: a version with W=30 → the finalize
@@ -247,7 +218,7 @@ def test_route_latest_version_params_feed_the_block(app_with_versions):
         proj = await create_project(client)
         pid = proj["id"]
         await create_version(client, pid, {"W": 30.0, "D": 30.0, "H": 30.0})
-        # The route's data source: the latest version's params.
+        # The GET route's data source: the latest version's params.
         latest = app_with_versions.state.versions.latest_version(pid)
         assert latest is not None
         block = build_design_state_block(
@@ -256,8 +227,8 @@ def test_route_latest_version_params_feed_the_block(app_with_versions):
         return format_design_state_block(block)
 
     text = run_async(app_with_versions, _call)
-    # The route's data source feeds the block; the block contains 30.
-    assert "30" in text
+    # The GET route serves the same block (the SPA's second consumer
+    # reads exactly what the prompt builder renders).
     assert "W = 30" in text
 
 
@@ -267,7 +238,11 @@ def test_finalize_seam_state_params_match_route_callable(app_with_versions):
     function consumes — the route and the prompt builder resolve to the
     same callable (asserted by the block they both produce, not merely
     equal output)."""
-    from d33d.design_state import build_design_state_block, format_design_state_block
+    from d33d.design_state import (
+        build_design_state_block,
+        format_design_state_block,
+        state_block_from_params as _shared,
+    )
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict[str, Any] = {}
@@ -293,7 +268,7 @@ def test_finalize_seam_state_params_match_route_callable(app_with_versions):
     assert state_params["bore_diameter"] == 8.0
     # The shared callable (the route AND the prompt builder) builds the
     # block from these params — the 30/60 bug pinned at the seam.
-    block = build_design_state_block(state_block_from_params(state_params))
+    block = build_design_state_block(_shared(state_params))
     text = format_design_state_block(block)
     assert "30" in text
     assert "bore_diameter = 8" in text
