@@ -564,4 +564,40 @@ describe("design contract", () => {
     );
     assertNoGit(gallery.container, "variant-gallery");
   });
+
+  /* --------------------------------------------------------------- W14 */
+
+  it("no build-volume literal (320 / 300) appears in web/src/components/firstrun/*", () => {
+    // W14 (issue #128): the first-run plate's caption and drawing come from
+    // the envelope the API reports (GET /api/config/envelope), never from a
+    // literal in the SPA. Typing 320 or 300 into the first-run component is
+    // the "a confident value the SPA has not established" defect this
+    // assertion trips. The scan is scoped to the firstrun components — the
+    // rest of the SPA legitimately references the plate's dimensions in
+    // comments (e.g. ModelViewer's far-plane docstring), and those are not
+    // the surface this ticket governs.
+    const firstrunDir = join(SRC, "components/firstrun");
+    const files = readdirSync(firstrunDir)
+      .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"))
+      .map((f) => join(firstrunDir, f));
+    for (const file of files) {
+      const content = readFileSync(file, "utf8");
+      // The build-volume literals — 320 (x/y) and 300 (z) — must not appear
+      // as bare numbers in the component source. A test file is exempt:
+      // the component's OWN test asserts the drawn dimensions against the
+      // deck's caption function, so the literal lives in the test, not the
+      // component.
+      if (file.includes("__tests__")) continue;
+      const bare320 = /(?<![\d\w.])320(?![\d\w.])/.test(content);
+      const bare300 = /(?<![\d\w.])300(?![\d\w.])/.test(content);
+      expect(
+        bare320,
+        `build-volume literal 320 found in ${relative(SRC, file)} — the plate must read the envelope from the API, not a literal`,
+      ).toBe(false);
+      expect(
+        bare300,
+        `build-volume literal 300 found in ${relative(SRC, file)} — the plate must read the envelope from the API, not a literal`,
+      ).toBe(false);
+    }
+  });
 });

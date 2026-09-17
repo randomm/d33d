@@ -56,6 +56,7 @@ import {
   type VersionTimelineEntry,
   type VersionCompare,
   type DesignStateEntry,
+  type Envelope,
 } from "./lib/api";
 import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 import copy from "./copy";
@@ -66,6 +67,8 @@ import { Composer } from "./components/chat/Composer";
 import { PassProgress } from "./components/progress/PassProgress";
 import { FailureCard } from "./components/failure/FailureCard";
 import { Filmstrip } from "./components/versions/Filmstrip";
+import { FirstRun } from "./components/firstrun/FirstRun";
+import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
 // none of its markup. The design-contract assertion (W8) requires App to
 // import all six surface components, so both imports below are kept (the
@@ -127,6 +130,11 @@ export default function App({ client }: AppProps) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
+  // The build envelope (GET /api/config/envelope) — the first-run plate
+  // backdrop's caption and the plate's drawn dimensions both come from this
+  // fetch, never from a literal in the SPA (issue #128, W14). Null until the
+  // fetch resolves; the plate renders only once it has.
+  const [envelope, setEnvelope] = useState<Envelope | null>(null);
   const [photoSrc, setPhotoSrc] = useState<string | null>(null);
   const [photoDimensions, setPhotoDimensions] = useState<{ width: number; height: number } | null>(
     null,
@@ -576,6 +584,27 @@ export default function App({ client }: AppProps) {
       cancelled = true;
     };
   }, [projectId, apiClient]);
+
+  // The build envelope (issue #128) — fetched once on mount, independent of
+  // the project id (it is machine config, not project state). A failure
+  // leaves the plate unrendered (no caption, no drawing) — a confident value
+  // the SPA has not established must never be invented.
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getEnvelope()
+      .then((env) => {
+        if (!cancelled) setEnvelope(env);
+      })
+      .catch(() => {
+        // Envelope fetch failed — the plate stays hidden rather than
+        // displaying a number the SPA has not established.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Timeline callbacks (issue #8): restore (non-destructive forward
   // version), pin (the gallery), compare-select (the two-viewport compare).
@@ -1086,6 +1115,38 @@ export default function App({ client }: AppProps) {
           onPointSelected={handlePointSelected}
         />
       </div>
+
+      {/* Layer 10 — the first-run screen (issue #128, W14). Shown while the
+          project has no versions and no message has been sent — the
+          moment the user has no idea what to type. The build plate is
+          drawn to scale behind it; the screen goes away once the
+          conversation starts. Hidden with the other panels on backslash. */}
+      {versions.length === 0 && messages.length === 0 && !panelsHidden && (
+        <FirstRun
+          onSend={handleSendMessage}
+          onPhotoSelect={() => {
+            // The photo button routes to the left pane's file input — the
+            // same photo path as everywhere else. A label[htmlFor] click
+            // natively triggers the file picker (a hidden input's .click()
+            // does not fire change without a file chosen, and the input is
+            // display:none).
+            const label = document.querySelector<HTMLLabelElement>(
+              'label[htmlfor="photo-file-input"]',
+            );
+            if (label) label.click();
+          }}
+          inFlight={designLoopInFlight}
+        />
+      )}
+
+      {/* Layer 10 — the build-plate backdrop (issue #128, W14). Drawn to
+          scale from the envelope the API reports; behind the first-run
+          column, very low contrast — the constraint as a room, not a
+          warning. The keep-out notch is NOT drawn: the envelope route
+          does not expose it, and this surface must not infer it. */}
+      {envelope !== null && !panelsHidden && (
+        <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} verified={envelope.verified} />
+      )}
 
       {/* Layer 20 — the conversation (chat + upload + errors). Floats over
           the canvas; costs no layout height. Collapses to a RAIL by
