@@ -154,9 +154,9 @@ describe("web/src/styles.css (issue #81)", () => {
   it("distinguishes chat roles by background tint, without touching .viewer-pane geometry", () => {
     const css = readStylesheet();
     const user = ruleFor(css, ".chat-msg--user");
-    // #112: the user tint is the panel colour at the overlay recipe's 92% alpha
-    // (--color-panel is #13161A = rgb(19,22,25)).
-    expect(user).toContain("background-color: rgba(19, 22, 25, 0.92)");
+    // #112: the user tint is the panel colour at the overlay recipe's 92% alpha,
+    // expressed via color-mix so it cannot drift from --color-panel.
+    expect(user).toContain("background-color: color-mix(in srgb, var(--color-panel) 92%, transparent)");
     expect(ruleFor(css, ".chat-msg--assistant")).not.toBeNull();
     // The lasso overlay's containing block depends on .viewer-pane's
     // inline geometry (issues #74/#76) — colour/border only, never
@@ -188,23 +188,15 @@ describe("web/src/styles.css (issue #81)", () => {
     // neither of which is available system-wide — index.html loads them via
     // a Google Fonts <link> (a runtime network dependency the app did not
     // have before; the browser falls back to the system stacks in the
-    // tokens when the fetch fails). The href may be multi-line in the
-    // source, so the query string is extracted first.
+    // tokens when the fetch fails). One direct assertion on the exact href
+    // pins both families, both weights, and display=swap in one shot.
     const html = readFileSync(
       path.resolve(path.dirname(new URL(import.meta.url).pathname), "../../index.html"),
       "utf-8",
     );
     const href = /href="([^"]*css2[^"]*)"/.exec(html)?.[1] ?? "";
-    expect(href).not.toBe("");
-    expect(href).toContain("family=Space+Grotesk");
-    expect(href).toContain("family=JetBrains+Mono");
-    expect(href).toContain("display=swap");
-    // Weights 400 and 500 only — no third weight to solve a hierarchy problem.
-    for (const fam of ["Space+Grotesk", "JetBrains+Mono"]) {
-      const seg = href.split(`family=${fam}`).pop() as string;
-      const weights = (seg.match(/wght@([^&]*)/) ?? [])[1]?.split(",") ?? [];
-      expect(weights).toHaveLength(2);
-      expect(new Set(weights).size).toBe(2);
-    }
+    expect(href).toBe(
+      "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400,500&family=JetBrains+Mono:wght@400,500&display=swap",
+    );
   });
 });

@@ -144,7 +144,7 @@ body {
    token block calls for), assistant is subtle neutral, system is
    bordered muted. */
 .chat-msg--user {
-  background-color: rgba(19, 22, 25, 0.92);
+  background-color: color-mix(in srgb, var(--color-panel) 92%, transparent);
 }
 
 .chat-msg--assistant {
