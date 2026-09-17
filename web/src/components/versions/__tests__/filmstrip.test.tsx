@@ -44,6 +44,8 @@ function baseProps(overrides: Partial<React.ComponentProps<typeof Filmstrip>> = 
     pendingName: null,
     inset: 24,
     onCompareSelect: vi.fn(),
+    onOpenSheet: vi.fn(),
+    sheetOpenFor: null,
     ...overrides,
   };
 }

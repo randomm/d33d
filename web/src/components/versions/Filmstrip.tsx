@@ -37,6 +37,10 @@ interface FilmstripProps {
   inset: number;
   /** Called with the version id (compare-select). The strip selects only. */
   onCompareSelect: (versionId: number) => void;
+  /** Called when a version's expand mark is clicked (opens the sheet). */
+  onOpenSheet: (versionId: number) => void;
+  /** True while the sheet is open (the open slot's mark is active). */
+  sheetOpenFor: number | null;
 }
 
 const SLOTS = 4;
@@ -96,6 +100,8 @@ export function Filmstrip({
   pendingName,
   inset,
   onCompareSelect,
+  onOpenSheet,
+  sheetOpenFor,
 }: FilmstripProps) {
   // ABSENT, NOT EMPTY: no versions and no in-flight pass → nothing at all.
   if (versions.length === 0 && !passInFlight) {
@@ -149,9 +155,9 @@ export function Filmstrip({
           const fork = siblings.get(v.id);
           const diff = diffFragment(v, versions);
           return (
-            <button
+            <span
               key={v.id}
-              type="button"
+              role="presentation"
               className={`filmstrip-slot${isCurrent ? " filmstrip-slot--current" : ""}`}
               data-testid={`filmstrip-slot-${v.id}`}
               onClick={() => onCompareSelect(v.id)}
@@ -205,7 +211,24 @@ export function Filmstrip({
                   {copy.history.exported}
                 </span>
               )}
-            </button>
+              {/* The expand mark (W16): the sheet is reached FROM the
+                  filmstrip — this is the affordance that opens it for the
+                  slot's version. It is separate from the slot's click
+                  (compare-select) so the two gestures don't collide. */}
+              <button
+                type="button"
+                className="filmstrip-expand"
+                data-testid={`filmstrip-expand-${v.id}`}
+                aria-label={`Expand ${v.name} in the history sheet`}
+                aria-pressed={sheetOpenFor === v.id ? "true" : undefined}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenSheet(v.id);
+                }}
+              >
+                ⌕
+              </button>
+            </span>
           );
         })}
 
