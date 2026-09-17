@@ -40,9 +40,13 @@ import { describe, it, expect } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
+import { render } from "@testing-library/react";
+import { createElement } from "react";
 
 import copy, { mm } from "../copy";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
+import { Filmstrip } from "../components/versions/Filmstrip";
+import type { VersionTimelineEntry } from "../lib/api";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -370,5 +374,102 @@ describe("design contract", () => {
       contentSpan.includes("msg.source"),
       "the transcript content span must render only content, never the source",
     ).toBe(false);
+
+  /* --------------------------------------------------------------- W13 */
+
+  it("the filmstrip is absent, not empty, when a project has no versions", () => {
+    // W13: a project with zero versions (and no pass in flight) renders NO
+    // filmstrip at all — not an empty rail, not a "No versions yet" branch.
+    // A pass in flight with zero versions DOES render (just the dashed
+    // pending slot), so the absence is specifically the no-versions-no-pass
+    // case. Rendering the real component proves the branch, not the copy.
+    const { container } = render(
+      createElement(Filmstrip, {
+        versions: [],
+        passInFlight: false,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    expect(container.querySelector(".filmstrip")).toBeNull();
+    // And the in-flight case does render (the strip is never behind the
+    // conversation) — the absence is the no-pass case, not a blanket null.
+    const inFlight = render(
+      createElement(Filmstrip, {
+        versions: [],
+        passInFlight: true,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    expect(inFlight.container.querySelector(".filmstrip")).not.toBeNull();
+  });
+
+  it("no version surface renders a commit hash or branch name", () => {
+    // W13 / W16 invariant: the filmstrip (and every version surface) never
+    // shows git — no commit hashes, no branch names. The doc comment names the
+    // invariant in words, so the source tripwire targets the concrete thing a
+    // naive component would actually print: the git-only field the API carries
+    // (branch_name) — absent here. The real guarantee is the render check
+    // below: the DOM carries no 7-40 char hex run and no "branch:" phrasing,
+    // on a fixture whose name/diff would NOT be a hash.
+    //
+    // Source tripwire: the filmstrip must not reference the git-only field
+    // (branch_name) that a naive component would render.
+    const filmstrip = readFileSync(
+      join(SRC, "components", "versions", "Filmstrip.tsx"),
+      "utf8",
+    );
+    expect(filmstrip).not.toMatch(/\bbranch_name\b/);
+    expect(filmstrip).not.toMatch(/\.commit\b/i);
+
+    // Render check: feed two versions and prove the rendered DOM has no
+    // hex-hash run and no "branch:" phrasing. A naive component that printed a
+    // git hash field would add a 40-char hex run this regex catches; one that
+    // printed a branch name would add the "branch:" phrasing.
+    const versions: VersionTimelineEntry[] = [
+      {
+        id: 1,
+        name: "rod 45 off wall",
+        params: {},
+        created_by_message: "make a rod",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+      },
+      {
+        id: 2,
+        name: "rod 45.0 off wall",
+        params: { D: 45 },
+        created_by_message: "widen",
+        parent: 1,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-02T00:00:00Z",
+        diff_count: 1,
+      },
+    ];
+    const { container } = render(
+      createElement(Filmstrip, {
+        versions,
+        passInFlight: false,
+        pendingName: null,
+        inset: 24,
+        onCompareSelect: () => {},
+      }),
+    );
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(/\b[0-9a-f]{7,40}\b/i);
+    expect(text).not.toMatch(/\bbranch\s*:/i);
   });
 });

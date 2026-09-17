@@ -20,6 +20,8 @@ import { render, screen, fireEvent, waitFor, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
+import { __compareSelectLog, __resetCompareSelectLog } from "../../App";
+import type { RenderImage } from "../../App";
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type { Project, RegionEditResult } from "../../lib/api";
@@ -379,6 +381,59 @@ describe("App project lifecycle", () => {
     });
     expect(screen.getByTestId("app-error").textContent).toContain("boom");
   });
+
+  it("wires the filmstrip's compare-select through to App (issue #117 coverage gap)", async () => {
+    // The per-component filmstrip test proves the slot calls its onCompareSelect
+    // prop; this test proves APP still passes a live callback down to it. The
+    // __compareSelectLog seam (exported from App) records every compare-select
+    // the filmstrip reports: a broken wiring in App.tsx (dropping the prop)
+    // would leave the log empty and this test red — the seam is the thing the
+    // component test cannot see. The versions list is stubbed with two entries
+    // so the filmstrip renders (absent at zero versions, W13).
+    __resetCompareSelectLog();
+    const client = makeClient({
+      listVersions: vi
+        .fn()
+        .mockResolvedValue([
+          {
+            id: 1,
+            name: "v1",
+            params: {},
+            created_by_message: "make a box",
+            parent: null,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-01T00:00:00Z",
+            diff_count: 0,
+          },
+          {
+            id: 2,
+            name: "v2",
+            params: { D: 45 },
+            created_by_message: "widen",
+            parent: 1,
+            restored_from: null,
+            forked_from: null,
+            pinned: false,
+            archived: false,
+            thumbnail: null,
+            created_at: "2026-01-02T00:00:00Z",
+            diff_count: 1,
+          },
+        ]) as unknown as ApiClient["listVersions"],
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+    const before = __compareSelectLog.length;
+    fireEvent.click(screen.getByTestId("filmstrip-slot-2"));
+    // The click must reach App's handler: the log records version id 2.
+    expect(__compareSelectLog.length).toBe(before + 1);
+    expect(__compareSelectLog[before]).toBe(2);
+  });
 });
 
 describe("App chat wiring", () => {
@@ -716,8 +771,11 @@ describe("App stream-driven model (issue #69)", () => {
 
     render(<App client={client} />);
     await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
-    // The initial (mount-time) fetch settled on an empty timeline.
-    expect(screen.getByTestId("version-timeline-empty")).toBeTruthy();
+    // The initial (mount-time) fetch settled on an empty timeline. W13 (issue
+    // #117) made the filmstrip ABSENT, not empty: with zero versions and no
+    // pass in flight the strip renders nothing at all (the old
+    // version-timeline-empty branch is gone).
+    expect(screen.queryByTestId("version-filmstrip")).toBeNull();
 
     // Send a message and fire the version-created frame (the real wire shape:
     // step + version_id — issue #114 verified against the recorded seam
@@ -740,15 +798,15 @@ describe("App stream-driven model (issue #69)", () => {
       });
     });
 
-    // The frame must have triggered a SECOND listVersions call — the rail
+    // The frame must have triggered a SECOND listVersions call — the strip
     // reflects the created version instead of staying on the stale (empty)
-    // list. Without the refetch this call count stays at 1 and the empty
-    // branch stays on screen, so this test fails when the refetch is gone.
+    // list. Without the refetch this call count stays at 1 and the strip
+    // stays absent, so this test fails when the refetch is gone.
     await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(2));
     await waitFor(() => {
-      expect(screen.getByTestId("version-timeline")).toBeTruthy();
+      expect(screen.getByTestId("version-filmstrip")).toBeTruthy();
     });
-    expect(screen.getByTestId("timeline-entry-1")).toBeTruthy();
+    expect(screen.getByTestId("filmstrip-slot-1")).toBeTruthy();
   });
 
   it("does NOT refetch the version timeline for non-version-created progress frames (issue #114)", async () => {
