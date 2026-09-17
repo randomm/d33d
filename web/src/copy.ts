@@ -98,6 +98,7 @@ export const passCard = {
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
 
   checksPassed: (count: number): string => `${count} checks`,
+  closeDisclosure: "Close the source",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
   viewActions: { next: "Next view", besidePhoto: "Beside the photo" },

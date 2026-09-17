@@ -1,15 +1,16 @@
 /**
  * ChatPanel tests — message display, input, send, streaming indicator,
- * and inline render images.
+ * and pass-bearing turns (issue #125, W10).
  */
 
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ChatPanel, type ChatMessage, MARKER_COLOR } from "../ChatPanel";
+import type { RenderImage } from "../../../lib/renderImage";
 
 describe("ChatPanel", () => {
   it("renders empty state with no messages", () => {
-    render(<ChatPanel messages={[]} onSend={vi.fn()} renders={[]} />);
+    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-panel")).toBeTruthy();
     expect(screen.getByTestId("chat-input")).toBeTruthy();
   });
@@ -19,7 +20,7 @@ describe("ChatPanel", () => {
       { id: "m1", role: "user", content: "Make me a box" },
       { id: "m2", role: "assistant", content: "I'll design a box for you." },
     ];
-    render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-msg-user")).toHaveTextContent("Make me a box");
     expect(
       screen.getByTestId("chat-msg-assistant"),
@@ -28,7 +29,7 @@ describe("ChatPanel", () => {
 
   it("calls onSend with trimmed text when user submits", () => {
     const onSend = vi.fn();
-    render(<ChatPanel messages={[]} onSend={onSend} renders={[]} />);
+    render(<ChatPanel messages={[]} onSend={onSend} />);
     const input = screen.getByTestId("chat-input");
     fireEvent.change(input, { target: { value: "  hello  " } });
     fireEvent.submit(input.closest("form")!);
@@ -37,7 +38,7 @@ describe("ChatPanel", () => {
 
   it("does not send empty or whitespace-only messages", () => {
     const onSend = vi.fn();
-    render(<ChatPanel messages={[]} onSend={onSend} renders={[]} />);
+    render(<ChatPanel messages={[]} onSend={onSend} />);
     const input = screen.getByTestId("chat-input");
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.submit(input.closest("form")!);
@@ -48,22 +49,65 @@ describe("ChatPanel", () => {
     const messages: ChatMessage[] = [
       { id: "m1", role: "assistant", content: "Thinking…", streaming: true },
     ];
-    render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
     expect(screen.getByTestId("streaming-cursor")).toBeTruthy();
   });
 
-  it("renders inline render images in order", () => {
-    const renders = [
+  describe("pass-bearing turns (issue #125)", () => {
+    const views: RenderImage[] = [
       { filename: "view_00_front.png", src: "data:image/png;base64,AAA" },
       { filename: "view_01_back.png", src: "data:image/png;base64,AAA" },
     ];
-    render(<ChatPanel messages={[]} onSend={vi.fn()} renders={renders} />);
-    expect(screen.getByTestId("render-img-view_00_front.png")).toBeTruthy();
-    expect(screen.getByTestId("render-img-view_01_back.png")).toBeTruthy();
+
+    it("renders a PassCard for an assistant message that carries a versionId", () => {
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: "A box, per your ask.", versionId: 4, views },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      expect(screen.getByTestId("pass-card")).toBeTruthy();
+      // The views live on the pass card, not as the old chat-renders block.
+      expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(2);
+      expect(screen.queryByTestId("chat-renders")).toBeNull();
+    });
+
+    it("keeps the source in the disclosure, never as chat message text", () => {
+      const source = "cube([20, 20, 20]);\n// two lines";
+      const messages: ChatMessage[] = [
+        {
+          id: "m1",
+          role: "assistant",
+          content: "A box.",
+          versionId: 4,
+          views,
+          source,
+        },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      // Collapsed by default: the source is not visible in the DOM.
+      expect(screen.queryByTestId("pass-card-source")).toBeNull();
+      // ...and the source string does not appear anywhere in the message.
+      expect(screen.getByTestId("chat-msg-assistant").textContent).not.toContain(
+        "cube([20, 20, 20])",
+      );
+      // Expanding the disclosure surfaces it as disclosure content.
+      fireEvent.click(screen.getByTestId("pass-card-source-toggle"));
+      expect(screen.getByTestId("pass-card-source").textContent).toBe(source);
+    });
+
+    it("renders a plain message for an assistant turn that produced no version", () => {
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: "What size do you need?" },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      expect(screen.queryByTestId("pass-card")).toBeNull();
+      expect(screen.getByTestId("chat-msg-assistant")).toHaveTextContent(
+        "What size do you need?",
+      );
+    });
   });
 
   it("disables send button when input is empty", () => {
-    render(<ChatPanel messages={[]} onSend={vi.fn()} renders={[]} />);
+    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-send-btn")).toBeDisabled();
   });
 
@@ -81,7 +125,7 @@ describe("ChatPanel", () => {
           },
         },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
       const thumb = screen.getByTestId("selection-thumbnail-m1");
       expect(thumb).toBeTruthy();
       expect(thumb.getAttribute("src")).toBe("data:image/png;base64,AAA");
@@ -91,7 +135,7 @@ describe("ChatPanel", () => {
       const messages: ChatMessage[] = [
         { id: "m1", role: "user", content: "make a box" },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
       expect(screen.queryByTestId("selection-thumbnail-m1")).toBeNull();
     });
 
@@ -120,7 +164,7 @@ describe("ChatPanel", () => {
           },
         },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
       // The earlier message's thumbnail is still attached to its own turn,
       // not overwritten or lost as later turns without a selection arrive.
       expect(screen.getByTestId("selection-thumbnail-m1").getAttribute("src")).toBe(
@@ -162,7 +206,7 @@ describe("ChatPanel", () => {
           },
         },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} renders={[]} />);
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
       const thumb = screen.getByTestId("selection-thumbnail-m1");
       expect(thumb.style.borderColor.length).toBeGreaterThan(0);
     });

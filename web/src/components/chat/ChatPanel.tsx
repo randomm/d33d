@@ -1,13 +1,16 @@
 /**
  * ChatPanel — the operator-facing chat surface (left pane).
  *
- * Displays the conversation transcript, inline render images, and an input
- * area for the next message. The panel is a pure presentational component
- * driven by props; the parent (App) owns the message state.
+ * Displays the conversation transcript, and an input area for the next
+ * message. The panel is a pure presentational component driven by props;
+ * the parent (App) owns the message state.
  *
- * Design notes from 05-spa-core.md:
- * - Inline render images appear in the chat turn where they arrive (not in
- *   a separate gallery).
+ * Design notes:
+ * - An assistant turn that produced a version renders as a PassCard:
+ *   summary prose, the view thumbnails, and the source disclosure —
+ *   the SCAD source arrives on the token frame and is disclosure
+ *   content, never chat text (issue #125, W10).
+ * - Clarifying questions stay plain sentences in the flow.
  * - SSE token streaming appends to the active assistant message.
  * - No auto-generated slider/parameter panel — input is text + photo only.
  */
@@ -17,6 +20,7 @@ import type { RenderImage } from "../../lib/renderImage";
 import type { RegionEditViewId } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
 import { Composer } from "./Composer";
+import { PassCard } from "./PassCard";
 
 // The marker colour's single home is lib/marker.ts (issue #110); the name
 // is re-exported here for existing consumers.
@@ -43,24 +47,33 @@ export interface ChatMessage {
   /** Region selection this message was sent with, if any. Persists with
    *  the message so scrolling back shows what "this bit" meant. */
   selection?: ChatMessageSelection;
+  /** The version id this turn produced — set when the version-created
+   *  frame arrives (issue #125). An assistant message with this set
+   *  renders as a PassCard. */
+  versionId?: number | null;
+  /** The render view images this turn produced (up to six). */
+  views?: RenderImage[];
+  /** The generated source for this turn's disclosure. Arrives on the
+   *  token frame; disclosure content, never chat text (W10). */
+  source?: string;
 }
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSend: (text: string) => void;
-  /** Render images to display inline (arrived over SSE). */
-  renders: RenderImage[];
   /** True while a design loop is in flight — disables the send button. */
   inFlight?: boolean;
+  /** "Beside the photo" action on a PassCard's enlarged view (issue #125). */
+  onBesidePhoto?: () => void;
 }
 
-export function ChatPanel({ messages, onSend, renders, inFlight }: ChatPanelProps) {
+export function ChatPanel({ messages, onSend, inFlight, onBesidePhoto }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, renders]);
+  }, [messages]);
 
   const handleSubmit = (text: string) => {
     onSend(text);
@@ -70,44 +83,45 @@ export function ChatPanel({ messages, onSend, renders, inFlight }: ChatPanelProp
   return (
     <section className="chat-panel" data-testid="chat-panel">
       <div className="chat-messages" role="log" aria-label="Conversation">
-        {messages.map((msg) => (
-          <div
-            key={msg.id}
-            className={`chat-msg chat-msg--${msg.role}`}
-            data-testid={`chat-msg-${msg.role}`}
-          >
-            <span className="chat-msg-content">{msg.content}</span>
-            {msg.selection && (
-              <img
-                src={msg.selection.thumbnail}
-                alt={`selection on ${msg.selection.viewId}`}
-                className="chat-selection-thumbnail"
-                data-testid={`selection-thumbnail-${msg.id}`}
-                style={{ borderColor: MARKER_COLOR }}
-              />
-            )}
-            {msg.streaming && (
-              <span className="streaming-cursor" data-testid="streaming-cursor">
-                ▌
-              </span>
-            )}
-          </div>
-        ))}
-
-        {/* Inline render images — appear in chat turn order */}
-        {renders.length > 0 && (
-          <div className="chat-renders" data-testid="chat-renders">
-            {renders.map((r) => (
-              <img
-                key={r.filename}
-                src={r.src}
-                alt={r.filename}
-                className="chat-render-img"
-                data-testid={`render-img-${r.filename}`}
-              />
-            ))}
-          </div>
-        )}
+        {messages.map((msg) => {
+          // An assistant turn that produced a version is a PassCard;
+          // everything else (user turns, clarifying questions, the
+          // in-flight streaming turn) stays a plain sentence in the flow.
+          const isPass = msg.role === "assistant" && msg.versionId !== undefined;
+          return (
+            <div
+              key={msg.id}
+              className={`chat-msg chat-msg--${msg.role}`}
+              data-testid={`chat-msg-${msg.role}`}
+            >
+              {isPass ? (
+                <PassCard
+                  versionId={msg.versionId ?? null}
+                  views={msg.views ?? []}
+                  summary={msg.content}
+                  source={msg.source}
+                  onBesidePhoto={onBesidePhoto}
+                />
+              ) : (
+                <span className="chat-msg-content">{msg.content}</span>
+              )}
+              {msg.selection && (
+                <img
+                  src={msg.selection.thumbnail}
+                  alt={`selection on ${msg.selection.viewId}`}
+                  className="chat-selection-thumbnail"
+                  data-testid={`selection-thumbnail-${msg.id}`}
+                  style={{ borderColor: MARKER_COLOR }}
+                />
+              )}
+              {msg.streaming && (
+                <span className="streaming-cursor" data-testid="streaming-cursor">
+                  ▌
+                </span>
+              )}
+            </div>
+          );
+        })}
 
         <div ref={bottomRef} />
       </div>

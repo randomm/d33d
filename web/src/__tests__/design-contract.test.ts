@@ -319,4 +319,56 @@ describe("design contract", () => {
       ).toBe(false);
     }
   });
+
+  /* --------------------------------------------------------------- W10 */
+
+  it("no chat message contains OpenSCAD source", () => {
+    // W10 (issue #125): the token frame still carries the generated
+    // source, but it is the pass card's disclosure content — App's
+    // onToken must write it to the message's `source` field, never to
+    // the message's `content` (the text that renders in the transcript).
+    // Appending to content is the "a hundred lines of OpenSCAD in the
+    // chat column" defect this item removes. The source field is
+    // disclosure-only: ChatPanel renders it inside the PassCard,
+    // collapsed by default.
+    // The token handler must target the source field, not the content
+    // field. The handler's body is delimited by the onProgress handler
+    // that follows it in the stream wiring.
+    const app = readFileSync(join(SRC, "App.tsx"), "utf8");
+    const onTokenIdx = app.indexOf("onToken: (text");
+    expect(onTokenIdx, "App.tsx must have an onToken handler in the stream wiring").toBeGreaterThanOrEqual(0);
+    const onTokenEnd = app.indexOf("onProgress: (step", onTokenIdx);
+    expect(onTokenEnd).toBeGreaterThan(onTokenIdx);
+    const onToken = app.slice(onTokenIdx, onTokenEnd);
+    expect(
+      /source:\s*\(/.test(onToken),
+      "App.tsx onToken must write the token text to the message's source field (the pass card's disclosure content)",
+    ).toBe(true);
+    expect(
+      onToken.includes("content:"),
+      "App.tsx onToken must NOT append token text to the message's content field (that is the SCAD-in-transcript defect)",
+    ).toBe(false);
+    // The message type carries the source as a first-class field, not as
+    // a free-form string the transcript could render.
+    // The transcript span renders only content — the source must not be
+    // passed to the .chat-msg-content span. The span is a plain
+    // `<span>…{msg.content}</span>`: slice to its closing tag and check.
+    const chatPanel = readFileSync(
+      join(SRC, "components/chat/ChatPanel.tsx"),
+      "utf8",
+    );
+    expect(
+      chatPanel.includes("source?: string"),
+      "ChatMessage must carry the pass's source as its own field",
+    ).toBe(true);
+    const contentSpanIdx = chatPanel.indexOf("chat-msg-content");
+    expect(contentSpanIdx).toBeGreaterThanOrEqual(0);
+    const closeIdx = chatPanel.indexOf("</span>", contentSpanIdx);
+    expect(closeIdx).toBeGreaterThan(contentSpanIdx);
+    const contentSpan = chatPanel.slice(contentSpanIdx, closeIdx);
+    expect(
+      contentSpan.includes("msg.source"),
+      "the transcript content span must render only content, never the source",
+    ).toBe(false);
+  });
 });

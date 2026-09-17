@@ -1,43 +1,99 @@
 /**
- * PassCard tests — the presentational shell for an assistant turn that
- * produced a version (issue #116 shell; content arrives with W10).
+ * PassCard tests — the pass card for an assistant turn that produced a
+ * version (issue #116 shell; filled by issue #125 / W10).
+ *
+ * Acceptance (issue #125):
+ * - renders six view thumbnails when the frame carries six views
+ * - renders the views that arrived when fewer than six did, and SAYS HOW
+ *   MANY (copy.passCard.partialViews)
+ * - the summary prose renders in the UI face (the .chat-msg-content
+ *   monospace treatment is gone — W10)
+ * - the source disclosure is collapsed by default and reports its line
+ *   count; the source itself never renders as visible chat text
  */
 
-import { render, screen } from "@testing-library/react";
-import { describe, it, expect } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, it, expect, vi } from "vitest";
 import { PassCard } from "../PassCard";
 import type { RenderImage } from "../../../lib/renderImage";
+import copy from "../../../copy";
 
-const views: RenderImage[] = [
+const SIX_VIEWS: RenderImage[] = [
   { filename: "view_00_front.png", src: "data:image/png;base64,AAA" },
   { filename: "view_01_back.png", src: "data:image/png;base64,AAA" },
+  { filename: "view_02_left.png", src: "data:image/png;base64,AAA" },
+  { filename: "view_03_right.png", src: "data:image/png;base64,AAA" },
+  { filename: "view_04_top.png", src: "data:image/png;base64,AAA" },
+  { filename: "view_05_iso.png", src: "data:image/png;base64,AAA" },
 ];
 
+const SCAD = "cube([20, 20, 20]);\n// a comment line\ntranslate([0, 0, 20]) cube([10, 10, 10]);";
+
 describe("PassCard", () => {
+  it("renders six view thumbnails when the frame carries six views", () => {
+    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box, per your ask." />);
+    for (const label of copy.passCard.viewLabels) {
+      expect(screen.getByText(label), `caption ${label}`).toBeTruthy();
+    }
+    expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(6);
+  });
+
+  it("renders the views that arrived when fewer than six did, and says how many", () => {
+    render(<PassCard versionId={2} views={SIX_VIEWS.slice(0, 4)} summary="A box." />);
+    expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(4);
+    expect(screen.getByTestId("pass-card-partial").textContent).toBe(
+      copy.passCard.partialViews(4, 6),
+    );
+  });
+
+  it("renders no partial-views line when all six arrived", () => {
+    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box." />);
+    expect(screen.queryByTestId("pass-card-partial")).toBeNull();
+  });
+
   it("renders the version label when a version id is present", () => {
-    render(<PassCard versionId={4} views={views} />);
+    render(<PassCard versionId={4} views={SIX_VIEWS} />);
     expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");
   });
 
   it("renders no version label when no version exists yet", () => {
-    render(<PassCard versionId={null} views={views} />);
-    expect(screen.getByTestId("pass-card-version").textContent).toBe("");
+    render(<PassCard versionId={null} views={SIX_VIEWS} />);
+    expect(screen.queryByTestId("pass-card-version")).toBeNull();
   });
 
-  it("renders one image per view that arrived", () => {
-    render(<PassCard versionId={null} views={views} />);
-    expect(screen.getByTestId("pass-card-view-view_00_front.png")).toBeTruthy();
-    expect(screen.getByTestId("pass-card-view-view_01_back.png")).toBeTruthy();
-    expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(2);
-  });
-
-  it("records the view count on the card", () => {
-    render(<PassCard versionId={null} views={views} />);
-    expect(screen.getByTestId("pass-card").getAttribute("data-views")).toBe("2");
-  });
-
-  it("renders no view images when none arrived", () => {
-    render(<PassCard versionId={1} views={[]} />);
+  it("renders no view images and no grid when none arrived", () => {
+    render(<PassCard versionId={1} views={[]} summary="A box." />);
     expect(screen.queryAllByTestId(/^pass-card-view-/)).toHaveLength(0);
+    expect(screen.queryByTestId("pass-card-views")).toBeNull();
+    // Zero views is not a "partial" pass — nothing rendered at all.
+    expect(screen.queryByTestId("pass-card-partial")).toBeNull();
+  });
+
+  it("keeps the source collapsed by default and reports its line count", () => {
+    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box." source={SCAD} />);
+    const lines = SCAD.split("\n").length;
+    expect(screen.getByTestId("pass-card-source-toggle").textContent).toBe(
+      copy.passCard.sourceDisclosure(lines),
+    );
+    // Collapsed: the source body is not in the DOM.
+    expect(screen.queryByTestId("pass-card-source")).toBeNull();
+  });
+
+  it("expands the source disclosure on demand", () => {
+    render(<PassCard versionId={4} views={SIX_VIEWS} source={SCAD} />);
+    fireEvent.click(screen.getByTestId("pass-card-source-toggle"));
+    expect(screen.getByTestId("pass-card-source").textContent).toBe(SCAD);
+  });
+
+  it("opens a thumbnail enlarged with the Beside-the-photo action", () => {
+    const onBesidePhoto = vi.fn();
+    render(
+      <PassCard versionId={4} views={SIX_VIEWS} summary="A box." onBesidePhoto={onBesidePhoto} />,
+    );
+    expect(screen.queryByTestId("pass-card-enlarged")).toBeNull();
+    fireEvent.click(screen.getByTestId("pass-card-view-view_00_front.png"));
+    expect(screen.getByTestId("pass-card-enlarged")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("pass-card-beside-photo"));
+    expect(onBesidePhoto).toHaveBeenCalledTimes(1);
   });
 });
