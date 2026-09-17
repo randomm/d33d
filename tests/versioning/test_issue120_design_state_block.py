@@ -297,3 +297,63 @@ def test_finalize_seam_state_params_match_route_callable(app_with_versions):
     text = format_design_state_block(block)
     assert "30" in text
     assert "bore_diameter = 8" in text
+
+
+# ---------------------------------------------------------------------------
+# The stated prompt bound, exercised through the LIVE loop path.
+#
+# The bound is a property of the block builder (unit-pinned in
+# tests/test_design_state.py), but it must also hold on the LIVE path the
+# model actually reads: when the latest version declares MORE than
+# ``MAX_STATE_BLOCK_ENTRIES`` parameters, ``_design_messages`` renders only
+# the bound entries plus the honest drop-and-count line — it never leaks
+# the overflow into the prompt (the bound is a stated, tested property of
+# how many entries reach the prompt, not merely of the serialised block).
+# ---------------------------------------------------------------------------
+
+
+def test_live_prompt_enforces_entry_bound_and_counts_overflow():
+    """A version whose params exceed the bound (13 entries) reaches the
+    LIVE prompt through the loop with the bound enforced: only the first
+    ``MAX_STATE_BLOCK_ENTRIES`` entries render, the overflow is dropped, and
+    the honest ``… 1 more parameter`` count line names the drop. The 13th
+    (overflow) parameter is never in the prompt."""
+    from d33d.design_state import MAX_STATE_BLOCK_ENTRIES
+
+    captured: list[list[dict[str, Any]]] = []
+    n = MAX_STATE_BLOCK_ENTRIES + 1  # one past the bound
+    state_params = {f"p{i}": float(i + 1) for i in range(n)}
+
+    async def llm_fn(role, messages, system):
+        captured.append(messages)
+        return _llm_result("x = 20;\ncube([x, x, x]);\n")
+
+    async def render_fn(scad, defines):
+        return _passing_render()
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: _bbox_ok(r),
+        request="make a part",
+        state_params=state_params,
+    )
+    assert result.status == "pass"
+    user_text = _user_text(captured, 0)
+    # The section header is present.
+    assert "Current design state (mm):" in user_text
+    # All bound entries render (declaration order, first 12).
+    for i in range(MAX_STATE_BLOCK_ENTRIES):
+        assert f"p{i} = {i + 1:g}" in user_text
+    # The overflow entry (the 13th) never reaches the prompt.
+    assert f"p{MAX_STATE_BLOCK_ENTRIES} =" not in user_text
+    # The drop is named honestly, never silently.
+    assert "… 1 more parameter" in user_text
+    # The block is still between the chat/request lines and the reference
+    # dims (line order preserved at the bound).
+    state_pos = user_text.index("Current design state (mm):")
+    ref_pos = user_text.index("Reference dimensions (mm, ground truth):")
+    assert state_pos < ref_pos
