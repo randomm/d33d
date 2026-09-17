@@ -245,9 +245,13 @@ export const region = {
   apply: "Apply",
   cancel: "Cancel selection",
   resolvedTo: "this point is on the",
+  /** The module chip's inline hint — names the module's local name (mono) and
+   *  the human phrasing. The full sentence is `resolvedTo` + " " + `name`. */
   poseHint: "Turning the model clears the pin — it only means this from here.",
   cleared:
     "Pin cleared, the view changed. Turn to the angle you want, then click the model.",
+  clearedHint:
+    "The view turned, so the pin is gone. Re-pick once the angle is right.",
   missedGeometry: "Click on the model to point at a part.",
   notLoaded: "Model not loaded yet — click again once it appears.",
   pending: "A point is selected. Finish in the bar on the model, or press Esc.",

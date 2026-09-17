@@ -53,10 +53,16 @@ export interface PickLayerProps {
   ready: boolean;
   /** The currently placed marker, or null when none is selected. */
   marker: { x: number; y: number } | null;
+  /** When true (an orbit gesture has started but the pose has not yet
+   *  crossed the clear threshold), the marker dot desaturates to an outline
+   *  and the layer exposes `data-dimmed="true"` — the pin is about to go
+   *  while the user can still stop, not a surprise afterwards (issue #129).
+   *  Driven by the gesture-start seam, never by polling. */
+  dimmed?: boolean;
   onPointSelected: (event: PointSelectedEvent) => void;
 }
 
-export function PickLayer({ ready, marker, onPointSelected }: PickLayerProps) {
+export function PickLayer({ ready, marker, dimmed = false, onPointSelected }: PickLayerProps) {
   // pointerdown position (CSS px, client coords). A ref, not state — it
   // exists only for the pointerup decision and must not re-render.
   const downRef = useRef<{ x: number; y: number } | null>(null);
@@ -113,6 +119,7 @@ export function PickLayer({ ready, marker, onPointSelected }: PickLayerProps) {
       {ready && marker && (
         <span
           data-testid="viewer-pick-marker"
+          data-dimmed={dimmed ? "true" : "false"}
           aria-label="selected point marker"
           style={{
             position: "absolute",
@@ -124,8 +131,10 @@ export function PickLayer({ ready, marker, onPointSelected }: PickLayerProps) {
             // The marker colour is the mandated red/high-contrast warm
             // (AGENTS.md: VLMs are marker-colour-fragile) — the same
             // compositeMarkedPng strokes the sent image with.
-            backgroundColor: MARKER_COLOR,
-            border: "2px solid #ffffff",
+            backgroundColor: dimmed ? "transparent" : MARKER_COLOR,
+            border: dimmed
+              ? `2px solid ${MARKER_COLOR}`
+              : "2px solid #ffffff",
             boxSizing: "border-box",
             pointerEvents: "none",
           }}

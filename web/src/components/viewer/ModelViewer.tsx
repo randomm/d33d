@@ -418,6 +418,13 @@ interface ModelViewerProps {
   /** Called when the viewer is ready (scene/camera/renderer available),
    *  and again whenever the loaded model root changes. */
   onReady?: (handle: ModelViewerHandle) => void;
+  /** Called ONCE per orbit gesture, at the gesture's start — the moment
+   *  OrbitControls begins moving the camera, BEFORE the pose has crossed
+   *  any clear threshold (issue #129). The region pin uses this to
+   *  desaturate "about to go" while the user can still stop, rather than
+   *  announcing its clearance afterwards. Fires from OrbitControls'
+   *  `start` event; the `end`/`changed` events are left alone. */
+  onOrbitStart?: () => void;
 }
 
 /**
@@ -439,7 +446,7 @@ interface ModelViewerProps {
  *    Vector2())` on the handle is THE single source of the CSS-pixel
  *    viewport size that the pick path reads.
  */
-export function ModelViewer({ data, format, onLoaded, onError, onReady }: ModelViewerProps) {
+export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitStart }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -452,6 +459,10 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady }: ModelV
   // Marks an unmounted component so a late ResizeObserver callback (which
   // fires asynchronously and can still be queued at unmount) never re-publishes.
   const unmountRef = useRef(false);
+  // Latest onOrbitStart — held in a ref so the mount effect's OrbitControls
+  // `start` listener always invokes the current callback without re-binding.
+  const onOrbitStartRef = useRef<ModelViewerProps['onOrbitStart']>(onOrbitStart);
+  onOrbitStartRef.current = onOrbitStart;
   // Latest onReady — held in a ref so the mesh-swap effect (whose deps are
   // only [data, format]) can re-notify without re-running the mount effect.
   const onReadyRef = useRef<ModelViewerProps['onReady']>(onReady);
@@ -493,6 +504,14 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady }: ModelV
     controls.maxDistance = MAX_DISTANCE_MM;
     controlsRef.current = controls;
 
+    // The gesture-start seam (issue #129): the region pin must desaturate
+    // at the first pose move of a gesture, before POSE_EPS_MM is crossed.
+    // OrbitControls fires `start` at exactly that moment. The callback is
+    // held in a ref so a re-render never loses the listener; the listener is
+    // always registered so OrbitControls' event plumbing is uniform.
+    const startHandler = () => onOrbitStartRef.current?.();
+    controls.addEventListener('start', startHandler);
+
     // Raycaster (exposed for #98's single-click picking)
     const raycaster = new THREE.Raycaster();
     raycaster.far = FAR_MM;
@@ -526,6 +545,7 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady }: ModelV
     return () => {
       mounted = false;
       cancelAnimationFrame(animationFrameRef.current);
+      controls.removeEventListener('start', startHandler);
       // Dispose the current mesh
       if (currentMeshRef.current) {
         disposeObject(currentMeshRef.current);
