@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Self
 
 import pytest
+from _pytest.mark import MarkMatcher
+from _pytest.mark import expression as _mark_expression
 
 # tests/live_e2e/ is its own directory (no __init__.py), so the repo
 # root is parents[2].
@@ -132,19 +134,45 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     """Pre-run prerequisite check — FAIL, not skip, but ONLY when a
     ``live`` test is actually selected.
 
-    ``pytest_collection_modifyitems`` runs AFTER marker deselection, so a
-    fast run (``pytest -m "not slow and not live"`` — CI, which has no
-    Docker and no ``TRAIL_OPENERS_LLM_KEY`` secret) deselects every
-    ``live`` test and this hook sees zero live items: no check, no
-    error, the fast suite runs green. When any ``live`` item survives
-    selection (``pytest -m live``), the prerequisite check runs and a
-    missing prerequisite raises :class:`LivePrerequisiteError`, a
+    Gated on selection, NOT on mere collection: a fast run (``pytest -m
+    "not slow and not live"`` — CI, which has no Docker and no
+    ``TRAIL_OPENERS_LLM_KEY`` secret) deselects every ``live`` test, the
+    hook sees zero live items, and never checks. When any ``live`` item
+    survives selection (``pytest -m live``), the prerequisite check runs
+    and a missing prerequisite raises :class:`LivePrerequisiteError`, a
     collection error: a non-zero exit naming what is missing — never a
     skip, never a silent pass. The fast suite's hermetic meta-test
     (``tests/test_live_fail_not_skip.py``) and its subprocess exit-code
     test pin both halves of that contract.
+
+    The hook does its own marker deselection (and then calls pytest's
+    ``pytest_deselected`` so the ``N deselected`` count is accurate):
+    pytest 9.x invokes ``pytest_collection_modifyitems`` BEFORE its own
+    ``deselect_by_mark`` step, so gating on ``"live" in item.keywords``
+    alone would see the live tests during a fast run too — they are
+    merely *pending* deselection — and a catalogue-less, keyless CI run
+    would die with an INTERNALERROR (exit 3) instead of running the fast
+    suite normally.
     """
-    if any("live" in item.keywords for item in items):
+    matchexpr = getattr(config.option, "markexpr", None) or ""
+    expr = None
+    if matchexpr:
+        expr = _mark_expression.Expression.compile(matchexpr)
+
+    def _selected(item: pytest.Item) -> bool:
+        if expr is None:
+            return True
+        return expr.evaluate(MarkMatcher.from_markers(item.iter_markers()))
+
+    selected: list[pytest.Item] = []
+    deselected: list[pytest.Item] = []
+    for item in items:
+        (selected if _selected(item) else deselected).append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = selected
+
+    if any("live" in item.keywords for item in selected):
         check_live_prerequisites()
 
 
