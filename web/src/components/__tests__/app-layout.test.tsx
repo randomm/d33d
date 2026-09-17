@@ -27,6 +27,7 @@ import type { Project, RegionEditResult } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { PointSelectedEvent } from "../viewer/PickLayer";
 import { assertValidRegionEditRequest } from "../../lib/__tests__/regionEditContract";
+import copy from "../../copy";
 
 /** A minimal fake THREE.Object3D — the mock only needs identity, never
  *  real three.js behaviour (resolvePointPick itself is mocked below in
@@ -955,9 +956,13 @@ describe("App region-selection (point pick) wiring", () => {
     expect(screen.getByTestId("app-stage").contains(bar)).toBe(true);
 
     // The input carries the copy.deck placeholder, is present, and the
-    // thumbnail is retained inside the bar at a small size.
+    // thumbnail is retained inside the bar at a small size. The placeholder
+    // is pinned against copy.ts (single home for the string) so the test
+    // still notices if the composer stops rendering it.
     const input = screen.getByTestId("region-edit-input");
     expect(input).toBeTruthy();
+    expect((input as HTMLInputElement).value).toBe("");
+    expect((input as HTMLInputElement).placeholder).toBe(copy.region.placeholder);
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
     expect(screen.getByTestId("region-edit-apply-btn")).toBeTruthy();
   });
