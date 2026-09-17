@@ -24,15 +24,33 @@
 #   With --autocenter, the origin is shifted to the object's bounding-box centre
 #   before the rotation is applied.
 #
-#   View 0 (front): 0,0,0,0,0,0,40    — camera on -Z axis, no rotation
-#   View 1 (back):  0,0,0,0,180,0,40  — 180° about Y
-#   View 2 (left):  0,0,0,0,90,0,40   — 90° about Y  (red slab x=0 appears on the left of image)
-#   View 3 (right): 0,0,0,0,-90,0,40  — -90° about Y (red slab x=0 appears on the right of image)
-#   View 4 (top):   0,0,0,90,0,0,40   — 90° about X  (looking down from +Z)
-#   View 5 (iso):   0,0,0,0,45,45,55  — 45° about Y then 45° about Z (isometric corner view)
+#   The first six tuple elements (translate + rotate) are fixed constants that
+#   pin *which* face each view sees:
 #
-# The 7-element tuple order is (tx, ty, tz, rx, ry, rz, dist).
-# The spec's VIEWS constant in d33d/__init__.py pins these exact values.
+#   View 0 (front): 0,0,0,0,0,0,<dist>    — camera on -Z axis, no rotation
+#   View 1 (back):  0,0,0,0,180,0,<dist>  — 180° about Y
+#   View 2 (left):  0,0,0,0,90,0,<dist>   — 90° about Y  (red slab x=0 appears on the left of image)
+#   View 3 (right): 0,0,0,0,-90,0,<dist>  — -90° about Y (red slab x=0 appears on the right of image)
+#   View 4 (top):   0,0,0,90,0,0,<dist>   — 90° about X  (looking down from +Z)
+#   View 5 (iso):   0,0,0,0,45,45,<dist>  — 45° about Y then 45° about Z (isometric corner view)
+#
+#   The 7th element (dist) is **not** a fixed constant. After the STL export
+#   (step 1) the entrypoint parses the binary STL's bounding box with
+#   ``od | awk`` (both present in the base image) and computes:
+#
+#     max_extent = max(x_max−x_min, y_max−y_min, z_max−z_min)
+#     dist       = CAM_DIST_FACTOR × max_extent          (5 axis-aligned views)
+#     dist_iso   = CAM_DIST_FACTOR × √2 × max_extent     (isometric view)
+#
+#   CAM_DIST_FACTOR is 3.0 (mirrored from d33d.render_worker.CAM_DIST_FACTOR).
+#   The fit is a pure function of the bounding box — no timestamps, no
+#   randomised seeds, no wall-clock — so two renders of the same source
+#   produce byte-identical view PNGs (issue #111 acceptance gate).
+#
+#   The 7-element tuple order is (tx, ty, tz, rx, ry, rz, dist).
+#   The spec's VIEWS constant in d33d/render_worker.py pins the rotation
+#   semantics; the dist element is substituted at render time from the
+#   per-model bounding box.
 
 set -euo pipefail
 
@@ -183,6 +201,65 @@ if [ "${stl_exit}" -ne 0 ]; then
     exit "${stl_exit}"
 fi
 
+# ── Bounding-box extraction (zero extra openscad invocations) ──────────────
+# Parse the ASCII STL written by step 1 to get the model's bounding box.
+# OpenSCAD's STL export produces ASCII STL ("solid ... vertex x y z ... endsolid").
+# The awk parser reads only the "vertex" lines (not the "facet normal" lines,
+# which carry unit vectors, not model coordinates).
+#
+# awk (mawk) is present in the base image (openscad/openscad:trixie);
+# python3 and jq are NOT.
+#
+# The result is a single number: max_extent = max(x_max−x_min, y_max−y_min,
+# z_max−z_min) in mm. If the parse fails (corrupt or empty STL), the
+# fallback is the legacy fixed distance 40.0 — the render still runs, the
+# caller classifies the artifact_error from the PNG content.
+CAM_DIST_FACTOR=3.0
+CAM_DIST_ISO_FACTOR=$(awk -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", f * 2.0^0.5 }')
+
+max_extent=$(awk '
+# OpenSCAD STL export produces ASCII STL ("solid ... vertex x y z ... endsolid").
+# Each "vertex" line carries one model coordinate. The "facet normal" lines
+# carry unit vectors (not model coords) and must be excluded.
+/^ *vertex[[:space:]]/ {
+    x = $2 + 0
+    y = $3 + 0
+    z = $4 + 0
+    if (x < minx) minx = x
+    if (y < miny) miny = y
+    if (z < minz) minz = z
+    if (x > maxx) maxx = x
+    if (y > maxy) maxy = y
+    if (z > maxz) maxz = z
+    found = 1
+}
+BEGIN {
+    minx=1e30; miny=1e30; minz=1e30
+    maxx=-1e30; maxy=-1e30; maxz=-1e30
+    found=0
+}
+END {
+    if (!found) { print "0"; exit }
+    ex = maxx - minx
+    ey = maxy - miny
+    ez = maxz - minz
+    m = ex; if (ey > m) m = ey; if (ez > m) m = ez
+    if (m < 0) m = 0
+    printf "%.10f", m
+}' "${STL_FILE}" 2>/dev/null)
+
+if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ]; then
+    # Fallback: the STL was corrupt or empty. Use the legacy distance so
+    # the render still produces artifacts the caller can classify.
+    CAM_DIST_AA=40.0
+    CAM_DIST_ISO=55.0
+    echo "[entrypoint] WARNING: bbox parse failed — falling back to dist 40.0/55.0" >&2
+else
+    CAM_DIST_AA=$(awk -v m="${max_extent}" -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
+    CAM_DIST_ISO=$(awk -v m="${max_extent}" -v f="${CAM_DIST_ISO_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
+    echo "[entrypoint] max_extent=${max_extent}mm  dist_aa=${CAM_DIST_AA}  dist_iso=${CAM_DIST_ISO}" >&2
+fi
+
 # ── Step 2: CSG export (non-aborting) ───────────────────────────────────────
 echo "[entrypoint] Step 2/8: CSG export" >&2
 csg_exit=0
@@ -209,19 +286,35 @@ declare -a VIEW_NAMES=(
     "view_05_iso"
 )
 
+# Camera tuples: (tx, ty, tz, rx, ry, rz, dist).
+# The first six elements are fixed (they pin which face each view sees);
+# the dist element is substituted from the per-model bounding box computed
+# above (issue #111). The values below use a placeholder "0" for dist —
+# the loop at the bottom of the file substitutes CAM_DIST_AA / CAM_DIST_ISO
+# before each openscad invocation.
 declare -a VIEW_CAMERAS=(
-    "0,0,0,0,0,0,40"     # front:  camera on -Z, no rotation
-    "0,0,0,0,180,0,40"   # back:   180° about Y
-    "0,0,0,0,90,0,40"    # left:   90° about Y
-    "0,0,0,0,-90,0,40"   # right:  -90° about Y
-    "0,0,0,90,0,0,40"    # top:    90° about X (looking down from +Z)
-    "0,0,0,0,45,45,55"   # iso:    45° about Y + 45° about Z (isometric)
+    "0,0,0,0,0,0,0"     # front:  camera on -Z, no rotation
+    "0,0,0,0,180,0,0"   # back:   180° about Y
+    "0,0,0,0,90,0,0"    # left:   90° about Y
+    "0,0,0,0,-90,0,0"   # right:  -90° about Y
+    "0,0,0,90,0,0,0"    # top:    90° about X (looking down from +Z)
+    "0,0,0,0,45,45,0"   # iso:    45° about Y + 45° about Z (isometric)
 )
 
 for i in 0 1 2 3 4 5; do
     step=$(( i + 3 ))
     name="${VIEW_NAMES[$i]}"
-    cam="${VIEW_CAMERAS[$i]}"
+    # Substitute the per-model distance into the camera tuple.
+    # All views use CAM_DIST_AA except the iso view (index 5), which uses
+    # CAM_DIST_ISO (the 45° rotation projects a larger silhouette).
+    if [ "${i}" -eq 5 ]; then
+        dist="${CAM_DIST_ISO}"
+    else
+        dist="${CAM_DIST_AA}"
+    fi
+    # Strip the placeholder ",0" (last two chars) from the camera tuple
+    # and append the computed per-model distance.
+    cam="${VIEW_CAMERAS[$i]%,0},${dist}"
     png_file="${WORKDIR}/${name}.png"
 
     echo "[entrypoint] Step ${step}/8: PNG ${name}" >&2

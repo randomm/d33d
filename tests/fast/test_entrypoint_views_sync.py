@@ -61,8 +61,12 @@ def test_entrypoint_view_names_match_views_filenames() -> None:
 
 
 def test_entrypoint_view_cameras_match_views_tuples() -> None:
-    """``VIEW_CAMERAS[i]`` (comma-separated 7-float string) must equal
-    the stringified ``VIEWS[i][1]`` camera tuple, in order."""
+    """``VIEW_CAMERAS[i]`` (comma-separated 7-float string) must match
+    the stringified ``VIEWS[i][1]`` camera tuple in the first six
+    elements (translate + rotate). The 7th element (dist) is a
+    placeholder in ``VIEW_CAMERAS`` (the entrypoint substitutes the
+    per-model bounding-box distance at render time, issue #111), so
+    only the rotation semantics are compared here."""
     src = ENTRYPOINT.read_text(encoding="utf-8")
     view_cameras = _parse_bash_string_array(src, "VIEW_CAMERAS")
     assert len(view_cameras) == 6, (
@@ -75,8 +79,12 @@ def test_entrypoint_view_cameras_match_views_tuples() -> None:
         assert len(parsed) == 7, (
             f"VIEW_CAMERAS[{i}] {cam_str!r} does not have 7 elements"
         )
-        assert parsed == tuple(float(v) for v in cam_tuple), (
-            f"VIEW_CAMERAS[{i}] {cam_str!r} != VIEWS[{i}] camera tuple {cam_tuple!r}"
+        # Compare the first six elements (translate + rotate).
+        # The 7th (dist) is substituted at render time from the
+        # per-model bounding box — see issue #111.
+        assert parsed[:6] == tuple(float(v) for v in cam_tuple[:6]), (
+            f"VIEW_CAMERAS[{i}] {cam_str!r} rotation != "
+            f"VIEWS[{i}] camera tuple rotation {cam_tuple[:6]!r}"
         )
 
 
