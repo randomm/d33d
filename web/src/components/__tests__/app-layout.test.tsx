@@ -408,12 +408,16 @@ describe("App chat wiring", () => {
   });
 
   it("streams token text into the turn's source, never the transcript (issue #125)", async () => {
-    // W10: the token frame still carries the generated text, but it lands
-    // in the pass card's disclosure (the message's `source` field), not
-    // in the transcript. The streaming state machine is untouched: the
+    // W10: this test pins the streaming STATE MACHINE at both ends — the
     // in-flight turn renders as a plain (empty) message with the
-    // streaming cursor, and the cursor clears on done — exactly as
-    // before, only the token text no longer appends to content.
+    // streaming cursor, and the cursor clears on done — and asserts the
+    // token text does not surface in the transcript. It does NOT pin
+    // the token→source path: nothing here asserts the token text
+    // arrived in the message's `source` field at all (commenting out
+    // both onToken calls leaves this test green). That path is pinned
+    // statically by the design-contract test (onToken writes `source:`,
+    // never `content:`) and exercised by the chat-panel test, which
+    // clicks the disclosure and checks its content.
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
@@ -443,6 +447,41 @@ describe("App chat wiring", () => {
       "Hello world",
     );
     expect(screen.queryByTestId("streaming-cursor")).toBeNull();
+  });
+
+  it("writes the done frame's message into the pass card's summary line (issue #125)", async () => {
+    // The done frame carries the loop's result prose ("Design loop
+    // passed validation"). It must land in the assistant message's
+    // content — the field PassCard renders as its summary line — and
+    // therefore in pass-card-summary through the real frame path.
+    // Without this the summary rendered blank on every real pass.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("version-created", {
+        step: "version-created",
+        version_id: 3,
+        views: { "view_00_front.png": "data:image/png;base64,AAA" },
+      });
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+
+    render(<App client={client} />);
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("pass-card-summary").textContent).toBe(
+        "Design loop passed validation",
+      );
+    });
   });
 
   it("surfaces a stream error via onError without crashing", async () => {

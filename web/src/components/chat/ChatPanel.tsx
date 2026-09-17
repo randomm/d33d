@@ -63,7 +63,7 @@ interface ChatPanelProps {
   onSend: (text: string) => void;
   /** True while a design loop is in flight — disables the send button. */
   inFlight?: boolean;
-  /** "Beside the photo" action on a PassCard's enlarged view (issue #125). */
+  /** The PassCard's enlarged-view close action (issue #125). */
   onBesidePhoto?: () => void;
 }
 

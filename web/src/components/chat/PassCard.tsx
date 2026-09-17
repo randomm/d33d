@@ -9,13 +9,17 @@
  * the token frame and must never appear as chat message text (design
  * contract, W10).
  *
- * Opening a thumbnail enlarges it in place and offers the "Beside the
- * photo" action. The enlarged render is what the model is compared
+ * Opening a thumbnail enlarges it in place and offers a "Close this
+ * view" action. The enlarged render is what the model is compared
  * against; the views are PNG thumbnails (the frame carries no geometry),
- * so the action closes the enlargement — the streamed model (mounted on
- * the version-created frame's stl_data_uri) is what sits beside the photo
- * in the stage. A ticket that carries view geometry on the frame can
- * turn this into a real swap. Delta chips and the elapsed-time meta row are not rendered:
+ * so the button closes the enlargement and the streamed model (mounted
+ * on the version-created frame's stl_data_uri) simply remains beside the
+ * photo in the stage — it was there the whole time. The label was
+ * formerly "Beside the photo", which advertised a placement the PNG
+ * cannot perform: one click showed nothing and the audience — makers
+ * who check every control — learned not to trust the next one.
+ * A ticket that carries view geometry on the frame can turn the action
+ * into a real swap and relabel it accordingly. Delta chips and the elapsed-time meta row are not rendered:
  * the version-created frame carries no previous dimensions, no elapsed
  * time and no changed-line data, and fabricating them is the house
  * anti-pattern (see the W10 comment on issue #125). They land with
@@ -50,7 +54,7 @@ interface PassCardProps {
   summary?: string;
   /** The generated source (the disclosure's content — never chat text). */
   source?: string;
-  /** The "Beside the photo" action on the enlarged view (issue #125). */
+  /** The enlarged view's close action (issue #125). */
   onBesidePhoto?: () => void;
 }
 
@@ -153,7 +157,7 @@ export function PassCard({
                   setEnlarged(null);
                 }}
               >
-                {copy.passCard.viewActions.besidePhoto}
+                {copy.passCard.viewActions.closeView}
               </button>
             </div>
           );

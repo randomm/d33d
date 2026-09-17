@@ -493,13 +493,12 @@ export default function App({ client }: AppProps) {
     setRegionBarText("");
   }, []);
 
-  // Issue #125 (W10): the "Beside the photo" action on a pass card's
-  // enlarged view. The frame carries PNG thumbnails (no geometry), so
-  // there is nothing to load: the streamed model (mounted from the
-  // version-created frame's stl_data_uri) is what sits beside the photo
-  // in the stage. The action closes the enlargement via the card's own
-  // state; this hook exists so the seam is wired and a ticket that
-  // carries view geometry on the frame can do the swap here.
+  // Issue #125: the pass card's enlarged-view action. The frame carries
+  // PNG thumbnails (no geometry), so there is nothing to swap in — the
+  // button's honest job is closing the enlargement (the card's own
+  // state; the streamed model is already beside the photo in the stage
+  // the whole time). This hook exists so the seam is wired and a ticket that
+  // carries view geometry on the frame can do a real swap here.
   const handleBesidePhoto = useCallback(() => {}, []);
 
   // Create the (single, default) project on mount. Once it resolves,
@@ -846,9 +845,28 @@ export default function App({ client }: AppProps) {
               if (step === "version-created")
                 void apiClient.listVersions(projectId).then(setVersions);
             },
-            onDone: () => {
+            onDone: (data) => {
               setMessages((prev) =>
-                prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
+                prev.map((m) => {
+                  if (m.id !== assistantId) return m;
+                  // The done frame's `message` is the loop's result prose
+                  // ("Design loop passed validation") — the pass card's
+                  // summary line. The message's content was seeded "" on
+                  // send, so a REAL done message is always the summary:
+                  // an error/infra frame travels the error path (onError),
+                  // and the only thing that could land in content first is
+                  // the postChat rejection's "Error: …" text, which this
+                  // guard refuses to overwrite. Nothing else (token text
+                  // arrives on `source` only) can reach content, so no
+                  // guard is needed to keep source out of the summary.
+                  const msg = typeof data.message === "string" ? data.message : "";
+                  const isReal = msg.length > 0 && !msg.startsWith("Error:");
+                  return {
+                    ...m,
+                    streaming: false,
+                    ...(isReal && m.content === "" ? { content: msg } : {}),
+                  };
+                }),
               );
             },
             onError: (data) => {
