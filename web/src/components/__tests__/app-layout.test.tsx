@@ -256,6 +256,59 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return client;
 }
 
+/**
+ * Drive the viewer to a REAL model (issue #107).
+ *
+ * The production GLB fixture is gone: a fresh mount is the EMPTY viewer
+ * (data=null), and the pick layer is only ready once a streamed STL has
+ * been decoded and mounted. Every test that needs a mounted model used to
+ * get one for free from the fixture; it now gets one the same way a real
+ * user does — through the version-created frame's `stl_data_uri`. Render
+ * the app, send one message (the mocked stream resolves synchronously),
+ * and dispatch a version-created frame carrying the test STL, then wait
+ * for the mocked viewer to report the mounted data (data-has-data=true,
+ * data-format=stl). The pick layer's `data-ready` flips at exactly this
+ * moment in the mock, mirroring the real viewer's model-swap re-notify.
+ */
+async function settleModelMount(client: ApiClient): Promise<void> {
+  render(<App client={client} />);
+  await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  fireEvent.change(screen.getByTestId("chat-input"), {
+    target: { value: "make a box" },
+  });
+  await act(async () => {
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await Promise.resolve();
+  });
+  // The version-created frame (with stl_data_uri) is dispatched on its OWN
+  // act() tick — NOT inside the send's batch. The send's act() is where
+  // postChat resolves and streamEvents is called; dispatching the frame
+  // within the same batch lets the mock viewer's effect (driven by the
+  // data change) miss the update in jsdom, where the frame then has to be
+  // re-fired to take effect. A separate act() tick gives the batch a clean
+  // boundary so the decode + re-render settle deterministically.
+  const spy = vi.mocked(client.streamEvents);
+  const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+    undefined) as
+    | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
+    | undefined;
+  await act(async () => {
+    handlers?.onProgress?.("version-created", {
+      step: "version-created",
+      version_id: 1,
+      stl_data_uri: STL_DATA_URI,
+      views: {
+        ["view_00_front.png"]: "data:image/png;base64,AAA",
+      },
+    });
+  });
+  await waitFor(() => {
+    const viewer = screen.getByTestId("model-viewer-mock");
+    expect(viewer.getAttribute("data-has-data")).toBe("true");
+    expect(viewer.getAttribute("data-format")).toBe("stl");
+  });
+}
+
 describe("App layout", () => {
   let client: ApiClient;
 
@@ -1123,20 +1176,21 @@ describe("App photo upload wiring", () => {
 });
 
 describe("App stream-driven model (issue #69)", () => {
-  /** Render the app, let the project + fixture settle, then fire a
-   *  version-created progress frame (carrying stl_data_uri + views)
-   *  through the mocked stream and send a message. */
+  /** Render the app, let the project settle, then fire a version-created
+   *  progress frame (carrying stl_data_uri + views) through the mocked
+   *  stream and send a message. The viewer starts EMPTY (issue #107 — the
+   *  GLB fixture is gone), so the frame's STL is the first model ever
+   *  mounted, not a replacement. */
   async function renderAndStreamVersionCreated(
     client: ApiClient,
   ): Promise<void> {
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    // Pre-pass settle: the GLB fixture mount has landed.
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    // Pre-pass state is the EMPTY viewer (issue #107): no model until the
+    // stream fires — the fixture that used to settle here is gone.
+    expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+      "false",
+    );
     // Send the chat message, then synchronously dispatch the version-created
     // frame (the real stream delivers it mid-flight; act() keeps the
     // setState batch deterministic in the unit environment).
@@ -1162,24 +1216,27 @@ describe("App stream-driven model (issue #69)", () => {
     });
   }
 
-  it("replaces the static GLB fixture with the decoded streamed STL after a stream-driven pass", async () => {
+  it("mounts the empty viewer before a pass, and the decoded streamed STL after one (issue #107)", async () => {
     const client = makeClient();
     await renderAndStreamVersionCreated(client);
 
     // After the version-created frame: the viewer is fed the decoded
-    // stream-derived STL ArrayBuffer — data-format flips to "stl" and the
-    // buffer is the decoded stl_data_uri payload, not the fixture.
+    // stream-derived STL ArrayBuffer — data-format is "stl" and the data
+    // is the decoded stl_data_uri payload. There is no other model in the
+    // app anymore (issue #107 removed the fixture), so "has data" is the
+    // streamed model, not a stand-in.
     await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-format")).toBe("stl");
+      const viewer = screen.getByTestId("model-viewer-mock");
+      expect(viewer.getAttribute("data-format")).toBe("stl");
+      expect(viewer.getAttribute("data-has-data")).toBe("true");
     });
-    // The decoded payload is the stream's STL — not the fixture's GLB
-    // bytes (which start with the GLB magic; the decoded STL decodes back
-    // to the exact ASCII source we streamed).
+    // The decoded payload is the stream's STL — it decodes back to the
+    // exact ASCII source we streamed.
     const decoded = new TextDecoder().decode(dataUriToArrayBuffer(STL_DATA_URI));
     expect(decoded).toContain("solid test");
   });
 
-  it("keeps the pick layer ready once the streamed STL replaces the fixture (selection still works — the degradation notice is gone)", async () => {
+  it("keeps the pick layer ready once the streamed STL is mounted (selection still works — no degradation notice)", async () => {
     const client = makeClient();
     await renderAndStreamVersionCreated(client);
 
@@ -1290,7 +1347,7 @@ describe("App stream-driven model (issue #69)", () => {
     expect(client.listVersions).toHaveBeenCalledTimes(1);
   });
 
-  it("leaves the GLB fixture mounted when a progress frame carries no stl_data_uri", async () => {
+  it("keeps the viewer empty when a progress frame carries no stl_data_uri (no model is fabricated — issue #107)", async () => {
     const client = makeClient();
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("design-loop-pass", { step: "design-loop-pass" });
@@ -1299,23 +1356,27 @@ describe("App stream-driven model (issue #69)", () => {
     });
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("true");
-    });
+    // The pre-pass state is the EMPTY viewer (issue #107).
+    expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("false");
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
-    // No stl_data_uri on the frame — the fixture GLB stays mounted and
-    // picking keeps working (no degradation notice).
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-format")).toBe("glb");
-    });
+    // No stl_data_uri on the frame — the viewer STAYS empty. There is no
+    // fixture to fall back to and the one-way latch never invents a
+    // model: a frame without stl_data_uri must not fabricate one. The
+    // "nothing yet" presentation itself (the real ModelViewer's empty
+    // overlay) is pinned by the model-viewer.test.ts suite, which drives
+    // the real component; here the mock viewer asserts the source state
+    // only (data-has-data=false — no model fabricated).
+    expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("false");
+    // Distinct from a failure (the selection notice), and the pick layer
+    // is NOT ready (no model to pick on).
     expect(screen.queryByTestId("selection-notice")).toBeNull();
     expect(
       screen.getByTestId("viewer-pick-layer").getAttribute("data-ready"),
-    ).toBe("true");
+    ).toBe("false");
   });
 });
 
@@ -1413,19 +1474,12 @@ describe("App region-selection (point pick) wiring", () => {
 
   it("mounts ModelViewer with an onReady handler and a pick layer over the viewport", async () => {
     const client = makeClient();
-    render(<App client={client} />);
+    await settleModelMount(client);
 
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
-    // The mock ModelViewer only renders data-has-data=true once its onReady
-    // (and onLoaded, for non-null data) fired — asserting this confirms
-    // App.tsx actually wires onReady/onLoaded rather than mounting a bare
-    // placeholder.
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    // The mock ModelViewer only renders data-has-data=true once a model has
+    // been mounted through the stream path (issue #107: the pre-pass state
+    // is empty, so reaching this state proves the stream wiring works).
+    expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("true");
     expect(screen.getByTestId("viewer-pick-layer")).toBeTruthy();
     // The pick layer flips to ready exactly when a model is loaded (the e2e
     // data-ready wait rides on this attribute).
@@ -1437,13 +1491,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // ONE click — the marker dot appears and the bar opens (no polygon,
     // no second/closing click, no Enter-to-close).
@@ -1464,13 +1512,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1491,13 +1533,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // No pending selection yet — the bar must be entirely absent from the DOM
     // (pendingSelection null), so it can neither block the pick layer's
@@ -1516,13 +1552,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1583,13 +1613,7 @@ describe("App region-selection (point pick) wiring", () => {
     } as RegionEditResult);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1636,13 +1660,7 @@ describe("App region-selection (point pick) wiring", () => {
     } as RegionEditResult);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // The mocked layer reports the pick at (300, 200) CSS px. The marked
     // PNG must composite the red marker at EXACTLY that point (scaled into
@@ -1701,13 +1719,7 @@ describe("App region-selection (point pick) wiring", () => {
     } as RegionEditResult);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1749,13 +1761,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1781,13 +1787,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1812,13 +1812,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1854,13 +1848,7 @@ describe("App region-selection (point pick) wiring", () => {
     // PNG alone.
     resolvePointPickMock.mockReturnValue({ hit: true, module: null });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1893,13 +1881,7 @@ describe("App region-selection (point pick) wiring", () => {
     // would actively mislead the vision model.
     resolvePointPickMock.mockReturnValue({ hit: false, module: null });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
 
@@ -1924,13 +1906,7 @@ describe("App region-selection (point pick) wiring", () => {
     // this pins the request shape under the new point-based contract.
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -1956,13 +1932,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit").mockRejectedValue(new Error("422 Unprocessable"));
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -2002,13 +1972,7 @@ describe("App region-selection (point pick) wiring", () => {
 
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // Draw and send selection A ("wing_left") — createRegionEdit(A) is now
     // in flight on a promise that won't resolve until we reject it below.
@@ -2064,13 +2028,7 @@ describe("App region-selection (point pick) wiring", () => {
 
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -2101,27 +2059,26 @@ describe("App region-selection (point pick) wiring", () => {
     expect(screen.queryByTestId("region-edit-bar")).toBeNull();
   });
 
-  it("does NOT attach a selection to the chat message when there is no project to send it to", async () => {
-    // Simulate the createProject round-trip never resolving (or having
-    // failed) so projectId stays null while the module fixture (loaded
-    // independently of projectId) is already ready and a point pick can be made.
+  it("bails with no project selected BEFORE any message is appended (issue #107: no model without a project either)", async () => {
+    // The createProject round-trip never resolves, so projectId stays null.
+    // Issue #107 removed the GLB fixture, so the viewer stays EMPTY while
+    // there is no project (there is no model loaded independently of the
+    // project anymore) and a send must bail with the "No project selected"
+    // error before the message is appended.
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockReturnValue(new Promise(() => {}));
     vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
     vi.spyOn(client, "createRegionEdit");
-    resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
     render(<App client={client} />);
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
-
-    fireEvent.click(screen.getByTestId("viewer-pick-layer"));
-    await waitFor(() => {
-      expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
-    });
+    // No project has resolved — the viewer stays on the empty state and
+    // the pick layer is not ready.
+    expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
+      "false",
+    );
+    expect(screen.getByTestId("viewer-pick-layer").getAttribute("data-ready")).toBe(
+      "false",
+    );
 
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "make the wing thinner" },
@@ -2133,16 +2090,13 @@ describe("App region-selection (point pick) wiring", () => {
     });
     expect(client.createRegionEdit).not.toHaveBeenCalled();
     // Bailing on "no project" must happen BEFORE the message (and any
-    // Bailing on "no project" must happen BEFORE the message (and any
     // selection thumbnail) is ever appended to the transcript — a message
-    // that looks sent but never went anywhere would be misleading. And the
-    // selection stays pending so it's not lost.
+    // that looks sent but never went anywhere would be misleading.
     expect(
       screen.queryAllByTestId(/^chat-msg-/).some((el) =>
         el.textContent?.includes("make the wing thinner"),
       ),
     ).toBe(false);
-    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
   });
 
   it("a composite failure (getContext returning null) surfaces a notice and does not crash the app", async () => {
@@ -2158,13 +2112,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
 
@@ -2194,13 +2142,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // Simulate a pick at each of the four corners of the viewport.
     // The mock pick layer always reports (300, 200), so we need to check
@@ -2225,13 +2167,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -2288,13 +2224,7 @@ describe("App region-selection (point pick) wiring", () => {
     ]);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
     // Wait for the design-state to be fetched and the Brief to render rows.
     await waitFor(() => {
       expect(screen.getByTestId("brief-row-wing_left")).toBeTruthy();
@@ -2369,13 +2299,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // The PickLayer is present and ready.
     expect(screen.getByTestId("viewer-pick-layer")).toBeTruthy();
@@ -2425,13 +2349,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "createRegionEdit");
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -2450,13 +2368,7 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     // Pick the model — the pending selection is set, hasLivePin becomes true.
     // The Brief must collapse to chip mode (hasLivePin=true forces chip).
@@ -2482,12 +2394,13 @@ describe("App model load-error handling", () => {
     // loading" and "failed to load" into the same state with zero user-
     // facing signal — a decode/parse failure left the pick layer without a
     // model root and no explanation. The error notice distinguishes the
-    // failure from "still loading".
+    // failure from "still loading". The model is driven through the stream
+    // path (issue #107: the fixture is gone); the mock viewer's failed
+    // load result is consumed once data is mounted.
     mockLoadResultRef.current = { ok: false, error: "unsupported GLB version" };
 
     const client = makeClient();
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await settleModelMount(client);
 
     await waitFor(() => {
       expect(screen.getByTestId("selection-notice")).toBeTruthy();
@@ -2554,13 +2467,7 @@ describe("App region-edit success feedback", () => {
     } as RegionEditResult);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
-        "true",
-      );
-    });
+    await settleModelMount(client);
 
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));
     await waitFor(() => {
@@ -2764,12 +2671,7 @@ describe("App design-loop error display (issue #82)", () => {
     // Mock the point pick to return a valid selection
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
-    render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    // Wait for the GLB fixture to load (the pick layer goes ready)
-    await waitFor(() => {
-      expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("true");
-    });
+    await settleModelMount(client);
 
     // Click to pick (this sets pendingSelection)
     fireEvent.click(screen.getByTestId("viewer-pick-layer"));

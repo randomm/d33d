@@ -365,6 +365,11 @@ export const shell = {
   /** Below the floor we say so plainly rather than degrading. */
   viewportTooSmall:
     "This needs a window at least 1024 × 640 to show the model and the conversation at once.",
+  /** The viewer's "nothing yet" state (issue #107): shown when no model has
+   *  been streamed. Distinct from the in-progress state (the design-loop
+   *  progress surface) and from a failure (the selection notice) — this is
+   *  simply "empty so far", not an error and not work in flight. */
+  viewerEmpty: "Your model will appear here once a design is generated.",
 
   resetView: "Reset view",
   showDimensions: "Show dimensions",
