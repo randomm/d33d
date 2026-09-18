@@ -612,13 +612,13 @@ button.chat-send-btn:disabled {
   font-size: var(--font-size-xs);
 }
 
-/* Design-loop progress indicator (issue #82): the indeterminate bar +
-   stage label shown while a design loop is in flight. The bar's geometry
-   (position, height) stays inline in App.tsx; these rules add the
-   animation the inline styles cannot express. The indicator is an
-   indeterminate progress bar — a moving gradient that does not imply a
-   specific percentage, matching the "unknown duration" pattern NN/g
-   prescribes for multi-stage operations of unknown length. */
+/* Design-loop progress indicator (issue #82, reworked in issue #118):
+   the stage label + deterministic bar shown while a design loop is in
+   flight. The bar's FILL is driven by the real per-view frames (the
+   "N of 6" counter) — its width is a layout property of the count, not
+   an animation: no keyframes, no transition, no indeterminate slide.
+   A moving gradient implied motion the system cannot substantiate; the
+   deterministic fill only moves when a real event arrived. */
 .design-loop-progress {
   display: flex;
   align-items: center;
@@ -638,18 +638,11 @@ button.chat-send-btn:disabled {
   overflow: hidden;
 }
 
-@keyframes design-loop-progress-slide {
-  0%   { transform: translateX(-100%); }
-  100% { transform: translateX(200%); }
-}
-
-.design-loop-progress-indicator {
+.design-loop-progress-fill {
   display: block;
-  width: 40%;
   height: 100%;
   background-color: var(--color-live);
   border-radius: var(--radius-sm);
-  animation: design-loop-progress-slide 1.5s ease-in-out infinite;
 }
 
 /* Error detail — the collapsed <details> that holds the raw code. */

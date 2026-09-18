@@ -66,6 +66,11 @@ import { Brief } from "./components/brief/Brief";
 import { PassCard } from "./components/chat/PassCard";
 import { Composer } from "./components/chat/Composer";
 import { PassProgress } from "./components/progress/PassProgress";
+import {
+  INITIAL_VIEW_PROGRESS,
+  reduceViewProgress,
+  type ViewProgressState,
+} from "./lib/viewProgress";
 import { FailureCard } from "./components/failure/FailureCard";
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { FirstRun } from "./components/firstrun/FirstRun";
@@ -159,6 +164,15 @@ export default function App({ client }: AppProps) {
   // a 1s interval while in flight; reset on completion/error. Cleaned up
   // on unmount AND completion to avoid leaked intervals.
   const [designLoopElapsed, setDesignLoopElapsed] = useState(0);
+  // The per-view progress state (issue #118): reduced from the real
+  // render-view-start / render-view-done SSE frames — the honest "N of 6"
+  // counter. Only those frames advance it (no timer, no interpolation);
+  // a new design-loop iteration resets it (the attempt is announced via
+  // the state, never a silent "view 9 of 6"). Reset to idle on completion
+  // and error so the counter never survives the pass that fed it.
+  const [viewProgress, setViewProgress] = useState<ViewProgressState>(
+    INITIAL_VIEW_PROGRESS,
+  );
   // The start timestamp (ms) of the current design loop, used to compute
   // elapsed seconds. Held in a ref (not state) so the interval can read
   // the current value without re-running the effect.
@@ -934,6 +948,23 @@ export default function App({ client }: AppProps) {
               // an identical value is a no-op state update (React bails out),
               // so repeated steps do not reset the elapsed timer or flicker.
               if (typeof step === "string") setDesignLoopStep(step);
+              // Issue #118: the per-view frames (render-view-start /
+              // render-view-done, each carrying `view` + `iteration`) drive
+              // the honest counter. Only those steps reach the reducer
+              // (any other step is ignored), and only those frames can
+              // advance the count — a hung render freezes the counter at
+              // its last real value (stream death clears the whole surface
+              // via the terminal error frame).
+              if (step === "render-view-start" || step === "render-view-done") {
+                const view = typeof data.view === "string" ? data.view : "";
+                const iteration =
+                  typeof data.iteration === "number" ? data.iteration : 0;
+                if (view !== "") {
+                  setViewProgress((prev) =>
+                    reduceViewProgress(prev, step, view, iteration),
+                  );
+                }
+              }
               // Issue #125 (W10): the version-created frame carries the
               // pass's `views` map (data URIs, one per view). Attach them
               // to the in-flight assistant message — it is the turn that
@@ -1030,6 +1061,7 @@ export default function App({ client }: AppProps) {
           setDesignLoopInFlight(false);
           designLoopStartRef.current = null;
           setDesignLoopStep(null);
+          setViewProgress(INITIAL_VIEW_PROGRESS);
         });
     },
     [projectId, apiClient, pendingSelection, messages, handleStreamViewerData, refetchDesignState],
@@ -1327,7 +1359,11 @@ export default function App({ client }: AppProps) {
                   onBesidePhoto={handleBesidePhoto}
                 />
                 {designLoopInFlight && (
-                  <PassProgress step={designLoopStep} elapsed={designLoopElapsed} />
+                  <PassProgress
+                    step={designLoopStep}
+                    elapsed={designLoopElapsed}
+                    viewProgress={viewProgress}
+                  />
                 )}
                 {streamError && (
                   <FailureCard

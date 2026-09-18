@@ -1085,10 +1085,14 @@ def render_for_design_loop(
     thread, NOT the event loop) for each entrypoint marker line —
     ``kind`` is ``"view-start"`` or ``"view-done"`` (``view-failed`` is
     NOT delivered — a failed view must not report as complete),
-    ``payload`` carries ``view`` (the view stem) and ``index`` (the
-    0-based view index for ``view_done``). The callback MUST be fast and
-    side-effect-free; it fires while the container is still running.
-    ``None`` (the default) preserves the legacy blocking behaviour.
+    ``payload`` carries ``view`` (the view stem), ``index`` (the
+    0-based view index for ``view_done``) and, when the hook carries a
+    stamped ``_current`` int >= 1 (the design loop stamps it once per
+    pass — see ``d33d.design_loop._stamp_on_progress_iteration``),
+    ``iteration`` (the 1-based design-loop iteration index). The
+    callback MUST be fast and side-effect-free; it fires while the
+    container is still running. ``None`` (the default) preserves the
+    legacy blocking behaviour.
 
     Post-harvest persistence (issue #72): on a fully ``ok`` render, the
     harvested ``model.stl`` + 6 ``view_*.png`` are copied into
@@ -1214,6 +1218,16 @@ def render_for_design_loop(
                     idx = _view_index_by_stem.get(step)
                     if idx is not None:
                         payload["index"] = idx
+                    # issue #121: the payload carries the 1-based design-loop
+                    # iteration index. The loop stamps it onto the hook
+                    # (``on_progress._current``) once per iteration; the
+                    # worker forwards it verbatim (absent — a non-loop
+                    # caller or a hook that refuses attributes — the field
+                    # is omitted, the adapter defaults to 0, and the client
+                    # treats 0 as "unknown").
+                    stamped = getattr(on_progress, "_current", None)
+                    if isinstance(stamped, int) and not isinstance(stamped, bool) and stamped >= 1:
+                        payload["iteration"] = stamped
                     on_progress(marker, payload)
 
                 proc = run_container(argv, timeout_s=params.timeout_s, on_marker=_on_marker)

@@ -703,6 +703,47 @@ describe("design contract", () => {
     assertNoGit(gallery.container, "variant-gallery");
   });
 
+  /* --------------------------------------------------------------- W11 */
+
+  it("no indeterminate progress animation exists", () => {
+    // W11 / issue #118: the indeterminate sliding bar (the moving gradient
+    // that implied motion the system cannot substantiate) is gone. The bar
+    // is now a deterministic fill driven by the real per-view frames — a
+    // layout width, not an animation. Tripwire: the old keyframes name and
+    // the indeterminate class name must not appear anywhere in src, and the
+    // stylesheet must carry no infinite animation.
+    expect(filesMatching(/design-loop-progress-slide/)).toEqual([]);
+    expect(filesMatching(/design-loop-progress-indicator/)).toEqual([]);
+    // No infinite animation may live in the PROGRESS surface — the
+    // indeterminate slide is the specific thing this ticket removes. A
+    // blanket "no infinite animation anywhere" assertion would trip on
+    // pre-existing, non-progress surfaces (the streaming cursor), which
+    // is a different ticket's decision, not this one's.
+    const progressBlock = stylesheet().match(/\.design-loop-progress[\s\S]*?\n\}/);
+    expect(progressBlock, "the progress surface styles must exist").not.toBeNull();
+    expect(progressBlock![0]).not.toMatch(/animation:/);
+    // And the indeterminate bar itself is gone: no keyframes for it,
+    // no element carrying an infinite animation inside the progress block.
+    expect(stylesheet()).not.toMatch(/@keyframes[^{]*progress/);
+  });
+
+  it("no CSS animation is infinite except the one attested stage ring", () => {
+    // The closed motion set: exactly three non-infinite transitions plus
+    // ONE attested infinite animation. A progress surface is precisely
+    // where a fourth infinite animation gets added — the tripwire keeps
+    // the progress surface clear of ANY infinite animation and pins the
+    // total stylesheet count. (The streaming cursor's blink pre-dates
+    // this ticket and is tracked separately on issue #118 — it is a
+    // live chat affordance, not a progress-surface concern.)
+    const css = stylesheet();
+    const infinite = [...css.matchAll(/animation:[^;]*infinite/g)];
+    // Exactly the one non-progress infinite animation attested on main
+    // (the streaming cursor); the progress surface contributes none.
+    expect(infinite).toHaveLength(1);
+    const progressBlock = css.match(/\.design-loop-progress[\s\S]*?\n\}/);
+    expect(progressBlock![0]).not.toMatch(/animation:[^;]*infinite/);
+  });
+
   /* --------------------------------------------------------------- W14 */
 
   it("no build-volume literal (320 / 300) appears in web/src/components/firstrun/*", () => {
