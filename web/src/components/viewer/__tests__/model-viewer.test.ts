@@ -553,9 +553,12 @@ describe('ModelViewer module', () => {
   // --- Empty state ---
 
   describe('empty state (no model loaded)', () => {
-    it('renders a "No model loaded" overlay when data is null', () => {
+    it('renders the "nothing yet" overlay (issue #107) when data is null', () => {
       const source = readFileSync(SOURCE_PATH, 'utf-8');
-      expect(source).toContain('No model loaded');
+      // The overlay's copy lives in copy.ts (copy.shell.viewerEmpty) and is
+      // pinned against that single source here.
+      expect(source).toContain('copy.shell.viewerEmpty');
+      expect(source).toContain('data-testid="viewer-empty"');
     });
   });
 
