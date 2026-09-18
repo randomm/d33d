@@ -754,24 +754,4 @@ button.chat-send-btn:disabled {
   color: var(--color-muted);
 }
 
-/* Retry button inside the error surface. */
-.app-error-retry-btn {
-  margin-top: var(--space-2);
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-recess);
-  color: var(--color-fg);
-  font-size: var(--font-size-xs);
-  cursor: pointer;
-}
-
-.app-error-retry-btn:hover:not(:disabled) {
-  background-color: var(--color-panel);
-}
-
-.app-error-retry-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
