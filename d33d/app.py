@@ -84,6 +84,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from d33d import db
 from d33d import print_validation as _print_validation
+from d33d import slicer
 from d33d import versions as versions_mod
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
@@ -93,7 +94,7 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
-from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, latest_version_stated_dims
 from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
@@ -119,6 +120,28 @@ MAX_CATALOGUE_BODY_BYTES = 1024 * 1024  # 1 MB
 #: ``${ENV_VAR}`` key reference (reused from the catalogue module — the
 #: PUT boundary only accepts this form for provider keys).
 _ENV_VAR_KEY_RE = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
+
+#: Every run of non-alphanumeric characters, in a project display name —
+#: reduced to a single hyphen when building a download filename.
+#: Mirrors ``copy.shell.exportFilename``'s ``/[^a-z0-9]+/g`` (web/src/
+#: copy.ts) on the lower-cased name.
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _export_filename(project_name: str, version: str) -> str:
+    """The 3MF download filename for a version (issue #163).
+
+    Mirrors ``copy.shell.exportFilename(project, version)`` in web/src/
+    copy.ts EXACTLY — the client slugs the same way when it names the
+    downloaded Blob, and the design contract pins "Curtain rod bracket" +
+    "v4" → ``curtain-rod-bracket-v4.3mf``: lower-case the project name,
+    reduce every non-alphanumeric run to a single hyphen, trim leading and
+    trailing hyphens, then append ``-<version>.3mf``. A backend test
+    reproduces the pinned case against this function so the two
+    implementations cannot drift undetected.
+    """
+    slug = _SLUG_RE.sub("-", project_name.lower()).strip("-")
+    return f"{slug}-{version}.3mf"
 
 
 async def _read_bounded_body(request: Request, cap: int) -> bytes | JSONResponse:
@@ -848,6 +871,178 @@ def create_app(
             content=result.glb_bytes,
             media_type="model/gltf-binary",
             headers=headers,
+        )
+
+    @app.get("/api/projects/{project_id}/model.3mf")
+    async def download_model_3mf(request: Request, project_id: int) -> Response:
+        """Serve the validated 3MF for the project's LATEST version (issue #163).
+
+        The SPA's export button (``ApiClient.downloadModel3MF``) GETs this
+        path and consumes the bytes as a Blob — a raw binary download with
+        ``model/3mf`` content type and a ``Content-Disposition`` filename
+        matching ``copy.shell.exportFilename``'s slug contract (the
+        design-contract-pinned "Curtain rod bracket" + "v4" →
+        ``curtain-rod-bracket-v4.3mf``), so the client-side and server-side
+        slugs cannot drift.
+
+        The route is a THIN HTTP wrapper around
+        ``d33d.print_validation.validate_stl`` (ticket #3 — the SOLE 3MF
+        producer; the render worker never emits 3MF). The STL to validate
+        is the one the version's own render produced, resolved through the
+        version row's PERSISTED ``render_artifact_dir`` (issue #163:
+        renders land under a per-render uuid, so the link is persisted at
+        version creation — never mtime-inferred).
+
+        Re-validates on EVERY request (stateless, matching the rest of the
+        design — no cache) and SERIALIZES per project under
+        ``VersionService._with_project_lock`` (the existing per-project lock
+        pattern) so a second request never streams a half-written
+        ``model.3mf``.
+
+        Error cases (each a clear non-2xx naming the cause — never an
+        empty, partial or truncated 200; the SPA throws on non-ok so a
+        4xx/5xx body never becomes a file):
+
+        - 404 — the project does not exist, or the project has NO VERSIONS;
+        - 409 — a design loop is in flight for the project (the latest
+          version's render may still be in production; re-validating
+          mid-write would read a partial STL), or the latest version has NO
+          RECORDED RENDER (pre-#163 row: no render directory was persisted
+          — a clear error naming that, never a guess at which directory
+          might be its own), or the recorded render directory no longer
+          exists on disk (the render artifact was deleted); the in-flight
+          and stale-render 409s both carry ``error_class: "conflict"``;
+        - 502 — validation ran but a gate failed (no 3MF was produced) or
+          the 3MF could not be read back; ``error_class`` is the
+          :class:`~d33d.print_validation` gate's closed-enum value.
+        """
+        conn: db.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        app = request.app
+        inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
+        if inflight is None:
+            inflight = set()
+            app.state.design_loop_inflight = inflight
+        if project_id in inflight:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "validation in progress: a design loop is in "
+                    "flight for this project",
+                    "error_class": "conflict",
+                },
+            )
+
+        versions = app.state.versions
+        latest = versions.latest_version(project_id)
+        if latest is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "the project has no versions yet — nothing to "
+                    "validate into a 3MF",
+                },
+            )
+
+        artifact_dir = latest.get("render_artifact_dir")
+        if artifact_dir is None:
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "no render is recorded for this version — the "
+                    "version predates render recording (issue #163); run the "
+                    "design loop to produce one",
+                    "error_class": "conflict",
+                },
+            )
+        stl_path = Path(artifact_dir) / "model.stl"
+        if not stl_path.is_file():
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "the render recorded for this version no longer "
+                    "exists on disk — the model cannot be validated",
+                    "error_class": "conflict",
+                },
+            )
+
+        # ``stated_mm`` ABSTAINS, it does not compare against zero: the
+        # latest version's W/D/H via ``latest_version_stated_dims`` — a
+        # fully-positive triple, or ``None`` when any axis is missing,
+        # null, or <= 0 (so ``validate_stl``'s dimension gate skips rather
+        # than measuring a perfectly good model against 0.0 and failing
+        # it — the #91 bug). A bbox-gate abstention is still ``ok=True``
+        # (issue #91); the route carries no metadata claiming otherwise —
+        # a 3MF served under an abstention is a valid millimetre artefact.
+        stated = latest_version_stated_dims(versions, project_id)
+
+        # The 3MF is written to the render's OWN durable directory (next to
+        # its model.stl) — re-validate per request, never a cache. The
+        # per-project lock serializes every 3MF write for this project so
+        # a concurrent GET never observes a half-written file. The
+        # PRODUCTION slicer hook (``slicer.slice_dry_run``) is injected —
+        # the default fails closed where no slicer binary exists, which is
+        # the correct production behaviour (gate 6 reports the cause).
+        def _validate() -> _print_validation.ValidationResult:
+            return _print_validation.validate_stl(
+                str(stl_path),
+                stated_mm=stated,
+                output_dir=str(Path(artifact_dir)),
+                slice_dry_run_fn=slicer.slice_dry_run,
+            )
+
+        result = await versions._with_project_lock(project_id, _validate)
+        if not result.ok or not result.export_3mf:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": f"validation failed — no 3MF produced: "
+                    f"{result.message or 'unknown gate failure'}",
+                    "error_class": result.error_class or "unknown",
+                },
+            )
+
+        out_path = Path(result.export_3mf)
+        try:
+            data = out_path.read_bytes()
+        except OSError as e:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": f"the 3MF could not be read back after "
+                    f"validation: {e}",
+                    "error_class": "export_error",
+                },
+            )
+        if not data:
+            # A zero-byte 3MF is a truncated artefact — serving it would
+            # hand the client a file that cannot be opened. Fail, never
+            # stream empty bytes as a 200.
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": "validation produced an empty 3MF — no bytes to "
+                    "serve",
+                    "error_class": "export_error",
+                },
+            )
+
+        # The filename mirrors copy.shell.exportFilename (web/src/copy.ts):
+        # project name lower-cased, every non-alphanumeric RUN reduced to a
+        # single hyphen, leading/trailing hyphens trimmed, then the version
+        # id suffixed ``vN`` + ``.3mf``. Pinned by a backend test ("Curtain
+        # rod bracket" + "v4" → "curtain-rod-bracket-v4.3mf") so the two
+        # implementations cannot drift undetected.
+        filename = _export_filename(row["name"], f"v{latest['id']}")
+        return Response(
+            content=data,
+            media_type="model/3mf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            },
         )
 
     @app.post("/api/projects/{project_id}/region-edits", status_code=202)

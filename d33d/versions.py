@@ -346,6 +346,7 @@ class VersionService:
         thumbnail: str | None = None,
         scad_source: str | None = None,
         bbox: tuple[float, float, float] | None = None,
+        render_artifact_dir: str | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -366,6 +367,19 @@ class VersionService:
         measurement was not obtainable). It is PERSISTED, never
         re-derived; ``None`` stores a NULL (an absent measurement
         abstains — never a fabricated ``(0, 0, 0)``).
+
+        ``render_artifact_dir`` (issue #163): the on-disk path of the
+        per-render directory (``<renders_dir>/<uuid8>``) whose
+        ``model.stl`` produced this version — threaded by the
+        design-loop adapter from the best candidate's render's
+        ``RenderResult.render_artifact_dir`` (issue #72's durable
+        per-render directory). It is PERSISTED, never re-derived:
+        renders land under a per-render uuid unrelated to version ids, so
+        a version-to-render link is not inferable after the fact (no
+        mtime inference, ever). ``None`` stores a NULL — a pre-existing
+        row (pre-#163) or a version created without a recorded render
+        must degrade honestly (the 3MF route 409s), never guess which
+        directory might be its own.
         """
         return await self._with_project_lock(
             project_id,
@@ -379,6 +393,7 @@ class VersionService:
                 thumbnail=thumbnail,
                 scad_source=scad_source,
                 bbox=bbox,
+                render_artifact_dir=render_artifact_dir,
             ),
         )
 
@@ -394,6 +409,7 @@ class VersionService:
         thumbnail: str | None = None,
         scad_source: str | None = None,
         bbox: tuple[float, float, float] | None = None,
+        render_artifact_dir: str | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -437,6 +453,7 @@ class VersionService:
             forked_from=forked_from,
             thumbnail=thumbnail,
             bbox=bbox,
+            render_artifact_dir=render_artifact_dir,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -762,6 +779,7 @@ class VersionService:
         forked_from: tuple[int, int] | None,
         thumbnail: str | None,
         bbox: tuple[float, float, float] | None = None,
+        render_artifact_dir: str | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -771,11 +789,17 @@ class VersionService:
         # persists a NULL — an absent measurement ABSTAINS (issue #91's
         # precedent), it is never encoded as (0,0,0).
         bbox_json = json.dumps({"x": bbox[0], "y": bbox[1], "z": bbox[2]}) if bbox else None
+        # ``render_artifact_dir``: the on-disk path of the per-render
+        # directory whose model.stl produced this version (issue #163).
+        # Stored as a plain path string (no JSON wrapping — it is a single
+        # value, not a structure); ``None`` persists a NULL, never an
+        # empty string (an absent render degrades to a clear error at the
+        # 3MF route, never a guess at a directory).
         cur = self.conn.raw.execute(
             "INSERT INTO versions"
             " (project_id, params, name, created_by_message, parent,"
-            "  restored_from, forked_from, thumbnail, bbox)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  restored_from, forked_from, thumbnail, bbox, render_artifact_dir)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -786,6 +810,7 @@ class VersionService:
                 json.dumps(fork) if fork else None,
                 thumbnail,
                 bbox_json,
+                render_artifact_dir,
             ),
         )
         self.conn.commit()
@@ -805,6 +830,12 @@ class VersionService:
         # gate unsatisfiable — an absent measurement abstains).
         raw_bbox = out.get("bbox")
         out["bbox"] = json.loads(raw_bbox) if raw_bbox else None
+        # ``render_artifact_dir``: NULL (pre-#163 rows, or a version
+        # created without a recorded render) maps to ``None``, NEVER to a
+        # sentinel or empty string (issue #163: an absent render record
+        # degrades honestly — the 3MF route 409s with a clear cause — it
+        # is never a guessed directory, never mtime inference).
+        out["render_artifact_dir"] = out.get("render_artifact_dir") or None
         return out
 
     @staticmethod
@@ -903,6 +934,7 @@ def migrate(conn: db_mod.Connection) -> None:
             thumbnail   TEXT,
             bbox        TEXT,
             exported_at TEXT,
+            render_artifact_dir TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -936,6 +968,13 @@ def migrate(conn: db_mod.Connection) -> None:
     # #126 — the persistent filmstrip mark). Nullable, no backfill: an
     # unexported version is NULL (never a fabricated timestamp).
     _ensure_column(conn, "versions", "exported_at", "TEXT")
+    # ``versions.render_artifact_dir``: the on-disk path of the per-render
+    # directory whose model.stl produced the version (issue #163). Nullable
+    # with no default — SQLite rejects non-constant defaults on ALTER, and
+    # a NOT NULL column would force a fabricated backfill. Pre-existing
+    # rows read back as ``None`` (an absent render record degrades
+    # honestly — never a guessed directory, never mtime inference).
+    _ensure_column(conn, "versions", "render_artifact_dir", "TEXT")
 
 
 __all__ = [
