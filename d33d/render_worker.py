@@ -1290,14 +1290,31 @@ def render_for_design_loop(
                 try:
                     import trimesh
 
-                    mesh = trimesh.load(str(stl), process=False)
+                    # force="mesh" (issue #86): trimesh.load returns a
+                    # Trimesh for a single-body STL but a trimesh.Scene
+                    # for a zero-facet STL (no solid block carries
+                    # geometry) and for an ASCII STL with more than one
+                    # ``solid``/``endsolid`` block (OpenSCAD's exporter
+                    # writes one such block per disjoint body, e.g. a
+                    # ``cube()`` plus a separate sphere). A Scene has no
+                    # merge_vertices/vertices/is_watertight — reading them
+                    # raises AttributeError, which escapes BOTH except
+                    # tuples below (neither covers AttributeError) and
+                    # crashes render_for_design_loop; the render then
+                    # surfaces as an unclassified failure instead of being
+                    # measured. force="mesh" concatenates a Scene's
+                    # geometries into a single Trimesh, so the same code
+                    # path handles every STL shape.
+                    mesh = trimesh.load(str(stl), process=False, force="mesh")
                     # OpenSCAD's STL export emits per-facet DUPLICATED
                     # vertices, so with process=False the mesh must be
                     # merged before a watertightness check is meaningful
                     # (an unmerged valid cube reports watertight=False →
                     # bogus empty_model). merge_vertices() is deliberately
                     # narrower than process=True, which would also drop
-                    # degenerate/duplicate faces.
+                    # degenerate/duplicate faces. It is required for the
+                    # concatenated multi-body mesh too — each component
+                    # body carries its own per-facet duplicates.
                     mesh.merge_vertices()
                     vertex_count = len(mesh.vertices)
                     watertight = bool(mesh.is_watertight)
