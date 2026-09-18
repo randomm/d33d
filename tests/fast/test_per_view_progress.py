@@ -10,6 +10,16 @@ markers to stderr with short sleeps between them, simulating a real render)
 and verifies that ``run_container``'s reader thread delivers at least one
 view-done marker while the fake container is still running.
 
+The ordering property is established STRUCTURALLY, not by comparing two
+independent ``time.monotonic()`` stamps (issue #177): the fake container
+exposes a ``threading.Event`` that it sets on construction (the process
+starts) and clears only AFTER ``_proc.wait()`` returns. The ``on_marker``
+callback observes that event, so "the marker arrived while the container
+was still running" is true by construction when delivery is real, and false
+(bounded failure, no wall-clock comparison) when it is not. This removes
+the harness race where two monotonic reads on independent threads could
+invert under scheduling latency even though delivery order was correct.
+
 Against the legacy blocking path (``subprocess.run`` without the reader
 thread), no event would be delivered before the exit — the host would learn
 nothing until ``subprocess.run`` returns, which is exactly the lie issue
@@ -19,7 +29,7 @@ nothing until ``subprocess.run`` returns, which is exactly the lie issue
 from __future__ import annotations
 
 import subprocess
-import time
+import threading
 from typing import Any
 
 import pytest
@@ -78,11 +88,25 @@ def _synthetic_render_script(num_views: int = 6, delay: str = "0.1") -> str:
     return "\n".join(lines)
 
 
-def _patch_popen(monkeypatch: pytest.MonkeyPatch, script: str):
+def _patch_popen(
+    monkeypatch: pytest.MonkeyPatch,
+    script: str,
+):
     """Patch ``rw.subprocess.Popen`` so the render-worker image launches a
-    bash script instead of a real docker run. Returns (factory, exit_time)."""
-    exit_time: list[float] = []
+    bash script instead of a real docker run. Returns the factory and a
+    structural "container running" signal.
+
+    The fake container sets ``container_running`` on construction (the
+    process starts) and clears it only AFTER ``_proc.wait()`` returns.
+    ``on_marker`` runs on the reader thread; by observing the event at
+    call time, the test establishes the ordering property (marker delivered
+    while the container was still running) WITHOUT comparing two
+    independent wall-clock stamps — see issue #177 for why the old
+    monotonic-stamp comparison was the harness's source of the flake.
+    """
     orig_popen = subprocess.Popen
+    container_running = threading.Event()
+    container_running.set()
 
     class _FakeContainer:
         def __init__(self, argv: list[str], **kwargs: Any) -> None:
@@ -95,7 +119,10 @@ def _patch_popen(monkeypatch: pytest.MonkeyPatch, script: str):
 
         def wait(self, timeout: float | None = None) -> None:
             self._proc.wait(timeout=timeout)
-            exit_time.append(time.monotonic())
+            # Clear only after the real wait returns: from this point on,
+            # "the container is running" is false. Any marker callback that
+            # fired earlier observed the event already set.
+            container_running.clear()
 
         def kill(self) -> None:
             self._proc.kill()
@@ -115,7 +142,7 @@ def _patch_popen(monkeypatch: pytest.MonkeyPatch, script: str):
             return orig_popen(argv, **kwargs)
 
     monkeypatch.setattr(rw.subprocess, "Popen", _PopenFactory())
-    return _PopenFactory(), exit_time
+    return _PopenFactory(), container_running
 
 
 def test_view_event_arrives_before_container_exit(
@@ -127,19 +154,25 @@ def test_view_event_arrives_before_container_exit(
     Harness: a synthetic entrypoint (a bash script that writes per-view
     markers to stderr with 100ms sleeps between them). ``run_container``'s
     reader thread drains the pipe and calls ``on_marker`` as each marker
-    line arrives. The test records the arrival time of each view-done
-    marker and the container's exit time, then asserts that at least one
-    view-done marker arrived strictly before the exit.
+    line arrives. The fake container sets a ``threading.Event`` on start
+    and clears it only after ``_proc.wait()`` returns; the ``on_marker``
+    callback records whether that event was set at the moment of delivery.
+
+    The decisive assertion is structural: at least one view-done marker was
+    delivered WHILE the container was still running (event set). No wall-
+    clock comparison — the ordering is true by construction when delivery
+    is real, and a bounded assertion failure (not a hang, not a timeout)
+    when it is not.
 
     This proves the event is real-time (caused by the view finishing), not
     a post-exit harvest. Against the legacy blocking path, no event would
     be delivered before the exit — the host would learn nothing until
     ``subprocess.run`` returns.
     """
-    events: list[tuple[float, str, str]] = []  # (arrival_time, marker, step)
+    events: list[tuple[bool, str, str]] = []  # (was_running, marker, step)
 
     def on_marker(marker: str, step: str) -> None:
-        events.append((time.monotonic(), marker, step))
+        events.append((container_running.is_set(), marker, step))
 
     # Use the VIEWS contract's actual stems so the parser sees real names
     script_lines = [
@@ -154,7 +187,7 @@ def test_view_event_arrives_before_container_exit(
     script_lines.append("echo '[entrypoint] All 8 steps complete.' >&2")
     script = "\n".join(script_lines)
 
-    _, exit_time = _patch_popen(monkeypatch, script)
+    _, container_running = _patch_popen(monkeypatch, script)
 
     proc = rw.run_container(
         ["docker", "run", "--name", "render-121decis", "d33d/render-worker:local"],
@@ -164,24 +197,32 @@ def test_view_event_arrives_before_container_exit(
 
     # The container exited cleanly
     assert proc.returncode == 0, f"fake container exited {proc.returncode}: {proc.stderr[:200]}"
-    assert exit_time, "container exit time not recorded"
-    exit_t = exit_time[0]
+    assert not container_running.is_set(), (
+        "fake container's running-signal was never cleared — "
+        "wait() did not run; the harness is broken"
+    )
 
     # Find all view-done events
-    view_done_events = [(t, m, s) for t, m, s in events if m == "view-done"]
+    view_done_events = [(r, m, s) for r, m, s in events if m == "view-done"]
     assert view_done_events, "no view-done events recorded"
 
-    # The decisive assertion: at least one view-done event arrived BEFORE
-    # the container exited. With 100ms delays between markers and a total
-    # script runtime of ~600ms, the reader thread delivers the first
-    # view-done (stl) almost immediately — well before the 600ms exit.
-    early_events = [e for e in view_done_events if e[0] < exit_t]
+    # The decisive assertion: at least one view-done event was delivered
+    # WHILE the container was still running. With 100ms delays between
+    # markers and a total script runtime of ~600ms, the reader thread
+    # delivers the first view-done (stl) almost immediately — well before
+    # the process exits and the fake's wait() clears the running-signal.
+    # No wall-clock comparison: the running-signal is set by construction
+    # at process start and cleared only after _proc.wait() returns, so a
+    # marker observed with the signal set genuinely arrived while the
+    # container was still running.
+    early_events = [e for e in view_done_events if e[0]]
     assert early_events, (
-        f"NO view-done event arrived before container exit at t={exit_t:.3f}. "
-        f"All {len(view_done_events)} view-done events arrived after exit. "
-        f"Earliest arrival: {min(e[0] for e in view_done_events):.3f}. "
-        f"This means the reader thread did NOT deliver markers in real time — "
-        f"the implementation is still blocking (the lie issue #121 deletes)."
+        f"NO view-done event was delivered while the container was still "
+        f"running. All {len(view_done_events)} view-done events were "
+        f"observed AFTER the running-signal was cleared (i.e. after "
+        f"container exit). This means the reader thread did NOT deliver "
+        f"markers in real time — the implementation is still blocking "
+        f"(the lie issue #121 deletes)."
     )
     # Verify the full stderr was preserved
     assert b"view-done view_00_front" in proc.stderr
@@ -195,7 +236,7 @@ def test_view_events_arrive_in_order_with_index(
     (view 0, 1, 2, 3, 4, 5). The index is the 0-based position in the
     VIEWS contract; the test verifies both the index values and the
     arrival order via ``render_for_design_loop``'s ``on_progress``."""
-    events: list[tuple[float, int, str]] = []  # (time, index, view)
+    events: list[tuple[int, str]] = []  # (index, view)
 
     def on_progress(kind: str, payload: dict) -> None:
         if kind != "view-done":
@@ -203,7 +244,7 @@ def test_view_events_arrive_in_order_with_index(
         idx = payload.get("index")
         view = payload.get("view", "")
         if idx is not None and view in [n[:-4] for n, _ in rw.VIEWS]:
-            events.append((time.monotonic(), idx, view))
+            events.append((idx, view))
 
     script_lines = [
         "echo '[entrypoint] view-start stl' >&2",
@@ -267,14 +308,14 @@ def test_view_events_arrive_in_order_with_index(
     assert result.ok, f"render failed: {result.error_class}"
 
     # Verify the 6 view-done events arrived in order with correct indices
-    view_indices = [idx for _, idx, view in events]
+    view_indices = [idx for idx, _view in events]
     assert len(view_indices) == 6, f"expected 6 view-done events, got {len(view_indices)}: {events}"
     assert view_indices == [0, 1, 2, 3, 4, 5], (
         f"view indices did not arrive in order: {view_indices}"
     )
     # Verify the view names match the VIEWS contract
     expected_names = [n[:-4] for n, _ in rw.VIEWS]
-    actual_names = [view for _, _, view in events]
+    actual_names = [view for _idx, view in events]
     assert actual_names == expected_names, (
         f"view names do not match VIEWS contract: {actual_names} != {expected_names}"
     )
