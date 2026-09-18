@@ -183,9 +183,24 @@ export const failure = {
 
   envelope: {
     headline: "It won't fit on the bed.",
+    /** Part 1 + part 2 in one sentence: the measured value and the limit
+     *  together, then the Orca hand-off — the limit is the API's number, so
+     *  the sentence is only ever printed once both are established. */
     body: (actualMm: number, limitMm: number): string =>
       `It came out ${mm(actualMm)} across and the plate is ${mm(limitMm)}. Orca can't slice around this — the part itself has to get smaller, or come apart.`,
     overhang: (byMm: number): string => `${mm(byMm)} past the edge`,
+    /** The part-2 axis row when the envelope failure carries a measurement:
+     *  the measured value beside the limit, the failing axis in the blocked
+     *  colour. `label` is the axis letter from the API's x/y/z. */
+    axisRow: (label: string, actualMm: number, limitMm: number): string =>
+      `${label}: ${mm(actualMm)} / ${mm(limitMm)}`,
+    /** The axis row for a measured axis that FITS — the same component
+     *  renders at every severity (W12's design-team answer 3). */
+    axisRowFits: (label: string, actualMm: number, limitMm: number): string =>
+      `${label}: ${mm(actualMm)} / ${mm(limitMm)} — fits`,
+    /** The axis row when the measurement for that axis is not established —
+     *  the house rule: a phrase, never an invented number. */
+    axisNotMeasured: (label: string): string => `${label}: not measured yet`,
     actions: {
       split: "Split it into two parts that bolt together",
       scale: "Scale the whole thing down to fit",
@@ -210,6 +225,7 @@ export const failure = {
       "The dimensions you gave didn't end up as parameters, so the next change would not be able to hold them.",
     views_blank_or_missing: "It built, but the preview images came out blank.",
     error_class_not_ok: "The design step produced nothing usable.",
+    ok: "The design step produced nothing usable.",
     syntax_error: "The generated design had a syntax error, so nothing was built.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
@@ -236,12 +252,9 @@ export const failure = {
   /** The card points at the canvas so the two halves read as one thing. */
   seeItOnThePlate: "It's on the plate to your left, with the overhang picked out.",
 
-  /** After TWO failures on the same goal, stop offering "Try again" and ask.
-   *  Repeating an offer that has already failed twice is how you lose someone.
-   *  This REPLACES the action set; it does not sit alongside it. */
-  askInstead: (goal: string): string =>
-    `Twice now I haven't got ${goal} right, and a third go the same way is unlikely to land. Tell me what I'm getting wrong and I'll start from that instead.`,
-
+  /** Part 3 — the retry action for a failure with no dedicated action
+   *  set: a concrete, sendable line. */
+  retryAction: "Try again",
   rawDisclosure: "What the checker actually said",
   genericRetry:
     "Something went wrong on the way there. Try again — if it keeps happening, the detail below is the useful part.",

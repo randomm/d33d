@@ -602,6 +602,107 @@ button.chat-send-btn:disabled {
   font-size: var(--font-size-xs);
 }
 
+/* Failure turn (issue #124, W12): a failure is a turn in the
+   conversation, not a modal. Four parts in fixed order — the sentence,
+   the number beside the limit, the actions, the collapsed raw reason.
+   The blocked colour names the failing axis; red is spoken for by the
+   region marker. No animation (the motion budget is closed). */
+.failure-turn {
+  box-sizing: border-box;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+}
+
+.failure-turn-sentence {
+  margin: 0 0 var(--space-2);
+  color: var(--color-fg);
+}
+
+.failure-turn-body {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-fg-2);
+}
+
+.failure-turn-bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.failure-turn-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.failure-turn-bar-text {
+  font-family: var(--font-mono);
+  color: var(--color-fg-2);
+}
+
+.failure-turn-bar--failing .failure-turn-bar-text {
+  color: var(--color-blocked);
+}
+
+.failure-turn-bar-track {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
+  overflow: hidden;
+}
+
+.failure-turn-bar-fill {
+  display: block;
+  height: 100%;
+  background-color: var(--color-fg-2);
+}
+
+.failure-turn-bar--failing .failure-turn-bar-fill {
+  background-color: var(--color-blocked);
+}
+
+.failure-turn-survived {
+  margin: 0 0 var(--space-2);
+  color: var(--color-muted);
+}
+
+.failure-turn-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.failure-turn-action {
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-recess);
+  color: var(--color-fg);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.failure-turn-action:hover:not(:disabled) {
+  background-color: var(--color-panel);
+}
+
+.failure-turn-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.failure-turn-raw {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+}
+
 /* App-level error surface (stream errors, etc.). */
 .app-error {
   margin: var(--space-2) var(--space-4);
