@@ -157,7 +157,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   const created = (await (await projectResp).json()) as { id: number };
   const projectId = created.id;
 
-  await page.getByTestId("app-shell").waitFor();
+  await page.getByTestId("app-stage").waitFor();
 
   // The SPA's listVersions is now hanging on the gate (its GET matched the
   // route and is awaiting `gate`). Create both versions on the SPA's own

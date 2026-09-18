@@ -65,7 +65,7 @@ test.beforeEach(async ({ request }) => {
 test("happy path: upload photo → settle", async ({ page }) => {
   // --- SPA boot: the app auto-creates a project on mount -----------------
   await page.goto("/");
-  await expect(page.getByTestId("app-shell")).toBeVisible();
+  await expect(page.getByTestId("app-stage")).toBeVisible();
 
   const project = await waitForAutoCreatedProject(page);
   expect(project.source_photo_path).toBeNull();
