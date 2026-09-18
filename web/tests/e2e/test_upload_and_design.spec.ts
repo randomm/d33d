@@ -12,10 +12,20 @@
  *     intercepted in this spec — the happy path exercises the upload path,
  *     and the app's SSE fetch only fires on chat send.
  *   - The SPA auto-creates a project on mount (App.tsx). Project creation
- *     and photo upload are both REAL (unintercepted) backend behaviour:
- *     we assert the settled API state (project exists, its
- *     source_photo_path is populated) rather than racing a network
- *     response, which makes the spec resilient to the mount-time race
+ *     and photo upload are both REAL (unintercepted) backend behaviour.
+ *   - OWN-PROJECT OWNERSHIP (issue #186): the spec discovers the project
+ *     THIS page load created from the mount-time `POST /api/projects`
+ *     response and asserts against that project — never from
+ *     `GET /api/projects` index 0. The SPA creates a fresh project on
+ *     every page load against a long-lived backend whose id sequence is
+ *     global, so under a dirty server (a prior spec or run left projects
+ *     behind) index 0 is some other spec's project and the spec would
+ *     assert against the wrong one. The SPA's POST always yields a
+ *     source_photo_path=null project, so the toBeNull assertion stays
+ *     meaningful regardless of what else the server holds. The settled
+ *     state (source_photo_path populated) is then verified via the API —
+ *     we assert the settled API state rather than racing a network
+ *     response, which keeps the spec resilient to the mount-time race
  *     where the SPA's POST lands before page.waitForResponse is armed.
  *
  * The 3MF download half of this spec was removed in issue #109: the
@@ -24,7 +34,7 @@
  * capability that was unimplemented.
  */
 
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 
@@ -41,19 +51,6 @@ type Project = {
   source_photo_path: string | null;
 };
 
-/**
- * Wait until the SPA has auto-created its project on mount (App.tsx
- * creates one; POST /api/projects is real backend behaviour) and return
- * its id. Polls the API — no network-stream race.
- */
-async function waitForAutoCreatedProject(page: Page): Promise<Project> {
-  const poll = async () =>
-    (await page.request.get(`${BASE()}/api/projects`)).json();
-  await expect.poll(poll, { timeout: 15_000 }).not.toHaveLength(0);
-  const projects = (await poll()) as Project[];
-  return projects[0];
-}
-
 test.beforeEach(async ({ request }) => {
   // Wait for the app to be reachable (webServer hook / E2E_SKIP_SERVER).
   await expect
@@ -65,10 +62,16 @@ test.beforeEach(async ({ request }) => {
 
 test("happy path: upload photo → settle", async ({ page }) => {
   // --- SPA boot: the app auto-creates a project on mount -----------------
+  // The SPA's own project for THIS page load — discovered from the
+  // mount-time POST response, never from the global projects list
+  // (issue #186: on a dirty backend projects[0] belongs to another spec).
+  const projectResp = page.waitForResponse(
+    (r) =>
+      r.url().endsWith("/api/projects") && r.request().method() === "POST",
+  );
   await page.goto("/");
+  const project = (await (await projectResp).json()) as Project;
   await expect(page.getByTestId("app-stage")).toBeVisible();
-
-  const project = await waitForAutoCreatedProject(page);
   expect(project.source_photo_path).toBeNull();
 
   // The upload input is rendered once the project id exists.

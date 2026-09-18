@@ -61,6 +61,18 @@
  *   - data-testid="first-run-input"          (the FirstRun input)
  *   - data-testid="region-edit-bar"          (pick hit geometry -> bar)
  *   - data-testid="selection-notice"         (pick missed -> notice)
+ *
+ * Project ownership: App.tsx auto-creates exactly one project on mount
+ * (`createProject("untitled project")`); the SPA never lists projects, so
+ * the project the SPA is displaying is ONLY the id in the mount-time
+ * POST /api/projects response. The spec discovers that id there (armed
+ * before navigation) and arms the SSE transport interception on that
+ * exact id — so the intercepted stream (and, with it, the delivered
+ * model) belongs to THIS load's project even when the shared backend
+ * already holds projects from earlier specs in the same suite run. On a
+ * shared-state server a wildcard /api/stream/{id} interception would
+ * deliver the model to whichever stream the SPA opens — and the spec
+ * would pass regardless of which project it was looking at.
  */
 
 import { expect, test, type Page } from "@playwright/test";
@@ -112,14 +124,37 @@ test("single click on the model surfaces the region-edit bar or a selection noti
   page,
 }) => {
   test.setTimeout(90_000);
+
+  // Navigate to the SPA root — the app auto-creates a project on mount.
+  // A fresh project mounts NO model (issue #107); the first-run screen
+  // (issue #128) is what the operator sees instead.
+  //
+  // Project ownership (issue #186): the SPA never lists projects — the
+  // project it displays is ONLY the one its mount-time POST /api/projects
+  // created. Discover THAT id from the response (armed before navigation
+  // so the auto-create cannot land before the wait) and own the rest of
+  // the spec from it. On a backend that already holds projects from
+  // earlier specs in the same suite run, a spec that only looked at
+  // "some project" would not be testing the thing it names.
+  const projectResp = page.waitForResponse(
+    (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
+  );
+  await page.goto("/");
+  const { id: projectId } = (await (await projectResp).json()) as {
+    id: number;
+  };
+
   // Interception point (issue #182 mode (b)): the ONLY thing this spec
-  // intercepts is the SSE transport — GET /api/stream/{id} — and it
-  // answers with the same frame shape d33d/streaming.py emits on a
+  // intercepts is the SSE transport — GET /api/stream/{projectId} — and
+  // it answers with the same frame shape d33d/streaming.py emits on a
   // passed design loop: a version-created progress frame carrying a
   // genuine rendered STL as `stl_data_uri`, then a terminal done frame.
   // Project creation, the postChat round-trip and the SPA's own SSE
   // demultiplexing all run for real; only the bytes behind the stream
-  // are delivered from the fixture (a real rendered artifact).
+  // are delivered from the fixture (a real rendered artifact). The route
+  // is armed on the discovered id (not a wildcard), so the delivered
+  // model belongs to this load's project even when the shared backend
+  // already holds other projects' streams.
   const stlBytes = readFileSync(STL_FIXTURE_PATH);
   const stlDataUri = `data:model/stl;base64,${stlBytes.toString("base64")}`;
   const frames = [
@@ -135,7 +170,7 @@ test("single click on the model surfaces the region-edit bar or a selection noti
   ].join("");
 
   await page.route(
-    (url) => url.pathname.match(/^\/api\/stream\/\d+$/),
+    (url) => url.pathname === `/api/stream/${projectId}`,
     async (route) => {
       await route.fulfill({
         status: 200,
@@ -147,11 +182,6 @@ test("single click on the model surfaces the region-edit bar or a selection noti
       });
     },
   );
-
-  // Navigate to the SPA root — the app auto-creates a project on mount.
-  // A fresh project mounts NO model (issue #107); the first-run screen
-  // (issue #128) is what the operator sees instead.
-  await page.goto("/");
 
   // The app stage must mount (project creation + SPA build are both live).
   await expect(page.locator('[data-testid="app-stage"]')).toBeVisible();
