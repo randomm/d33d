@@ -23,7 +23,7 @@
  *   W9   the Brief never renders a numeric value for provenance "unknown"
  *   W10  no chat message contains OpenSCAD source
  *   W11  no indeterminate progress animation exists
- *   W11  no CSS animation is infinite except the one attested stage ring
+ *   W11  no CSS animation is infinite except the attested streaming cursor
  *   W12  no failure component imports MARKER_COLOR
  *   W13  the filmstrip is absent, not empty, when a project has no versions
  *   W13  no version surface renders a commit hash or branch name
@@ -727,18 +727,20 @@ describe("design contract", () => {
     expect(stylesheet()).not.toMatch(/@keyframes[^{]*progress/);
   });
 
-  it("no CSS animation is infinite except the one attested stage ring", () => {
+  it("no CSS animation is infinite except the attested streaming cursor", () => {
     // The closed motion set: exactly three non-infinite transitions plus
-    // ONE attested infinite animation. A progress surface is precisely
-    // where a fourth infinite animation gets added — the tripwire keeps
-    // the progress surface clear of ANY infinite animation and pins the
-    // total stylesheet count. (The streaming cursor's blink pre-dates
-    // this ticket and is tracked separately on issue #118 — it is a
-    // live chat affordance, not a progress-surface concern.)
+    // ONE attested infinite animation — the .streaming-cursor blink
+    // (streaming-blink 1s step-end), the blinking cursor shown while the
+    // assistant streams. The count is pinned to exactly one so any new
+    // infinite animation added anywhere in the stylesheet trips this
+    // assertion.
+    // (The streaming cursor's blink pre-dates the motion-budget work and
+    // is attested here — it is a live chat affordance covered by
+    // chat-panel.test.tsx, not a progress-surface concern.)
     const css = stylesheet();
     const infinite = [...css.matchAll(/animation:[^;]*infinite/g)];
-    // Exactly the one non-progress infinite animation attested on main
-    // (the streaming cursor); the progress surface contributes none.
+    // Exactly the one attested infinite animation (the streaming cursor);
+    // the progress surface contributes none.
     expect(infinite).toHaveLength(1);
     const progressBlock = css.match(/\.design-loop-progress[\s\S]*?\n\}/);
     expect(progressBlock![0]).not.toMatch(/animation:[^;]*infinite/);
