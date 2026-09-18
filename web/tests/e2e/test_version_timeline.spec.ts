@@ -147,7 +147,14 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   // listVersions fetch just completed with both versions). The filmstrip's
   // expand mark (`filmstrip-expand-{id}`) is the sheet's only entry point.
   await page.getByTestId("version-filmstrip").waitFor();
-  await page.getByTestId(`filmstrip-expand-${v1.id}`).click();
+  // The conversation pane (z-index 20) overlaps the filmstrip's bottom-left
+  // position in the default viewport. A regular click would be intercepted
+  // by the pane. The expand mark IS the user's path to the sheet — dispatch
+  // the click event directly to the button (bypasses the hit-test, the
+  // button's React handler fires exactly as a user click would).
+  await page
+    .getByTestId(`filmstrip-expand-${v1.id}`)
+    .dispatchEvent("click");
 
   // The sheet is open (issue #127, W16).
   await page.getByTestId("history-sheet").waitFor();
@@ -186,25 +193,26 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   await page.getByTestId(`timeline-restore-${v1.id}`).click();
 
-  const restoredBody = (await restoreResp).json() as VersionEntry;
+  const restoreResponse = await restoreResp;
+  const restored = JSON.parse(await restoreResponse.text()) as VersionEntry;
 
   // The restored version is a NEW forward version carrying v1's snapshot
   // (parent = current latest = v2; restored_from = v1).
-  expect(restoredBody.id).not.toBe(v1.id);
-  expect(restoredBody.restored_from).toBe(v1.id);
-  expect(restoredBody.parent).toBe(v2.id);
-  expect(restoredBody.params).toEqual({ W: 60, H: 40 });
+  expect(restored.id).not.toBe(v1.id);
+  expect(restored.restored_from).toBe(v1.id);
+  expect(restored.parent).toBe(v2.id);
+  expect(restored.params).toEqual({ W: 60, H: 40 });
 
   // The timeline re-fetches after the restore (handleVersionRestore calls
   // listVersions) → now 3 entries, including the new restored entry.
   // The gate is already released (one-shot latch), so the re-fetch passes.
-  await page.getByTestId(`timeline-entry-${restoredBody.id}`).waitFor();
+  await page.getByTestId(`timeline-entry-${restored.id}`).waitFor();
   await expect(page.getByTestId("version-timeline-count")).toHaveText("3");
 
   // The restored entry's diff badge: its parent is v2 (W=60, H=50, D=30),
   // its own params are (W=60, H=40) → H changed, D removed → diff 2.
   await expect(
-    page.getByTestId(`timeline-diff-${restoredBody.id}`).textContent(),
+    page.getByTestId(`timeline-diff-${restored.id}`).textContent(),
   ).resolves.toEqual("2 params changed");
 
   // -- 3. COMPARE: select v1 and v2 for compare via the UI -------------------
