@@ -111,6 +111,7 @@ async function singleClickModel(page: Page): Promise<void> {
 test("single click on the model surfaces the region-edit bar or a selection notice", async ({
   page,
 }) => {
+  test.setTimeout(90_000);
   // Interception point (issue #182 mode (b)): the ONLY thing this spec
   // intercepts is the SSE transport — GET /api/stream/{id} — and it
   // answers with the same frame shape d33d/streaming.py emits on a

@@ -146,17 +146,30 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   // The filmstrip renders once the versions list is non-empty (the SPA's
   // listVersions fetch just completed with both versions). The filmstrip's
   // expand mark (`filmstrip-expand-{id}`) is the sheet's only entry point.
-  await page.getByTestId("version-filmstrip").waitFor();
-  // The conversation pane (z-index 20) overlaps the filmstrip's bottom-left
-  // position in the default viewport. A regular click would be intercepted
-  // by the pane. The expand mark IS the user's path to the sheet — dispatch
-  // the click event directly to the button (bypasses the hit-test, the
-  // button's React handler fires exactly as a user click would).
-  await page
-    .getByTestId(`filmstrip-expand-${v1.id}`)
-    .dispatchEvent("click");
+  // This is a GENUINE pointer click — no force, no dispatchEvent, no panel
+  // hidden first. It is the regression test for issue #184 (the defect where
+  // the conversation pane's box covered the expand mark, so the browser hit
+  // test delivered the click to the pane instead of the button).
+  for (const viewport of [
+    { width: 1024, height: 640 }, // the documented floor — tightest case
+    { width: 1280, height: 720 },
+    { width: 1440, height: 900 },
+  ]) {
+    page.setViewportSize(viewport);
+    await page.getByTestId("version-filmstrip").waitFor();
+    await page.getByTestId(`filmstrip-expand-${v1.id}`).click();
+    await page.getByTestId("history-sheet").waitFor();
+    // Close the sheet again — the next iteration re-clicks a fresh pointer
+    // (the open slot's mark is aria-pressed while the sheet is open).
+    await page.getByTestId("history-sheet-close").click();
+    await page
+      .getByTestId("history-sheet")
+      .waitFor({ state: "detached" });
+  }
 
-  // The sheet is open (issue #127, W16).
+  // Re-open the sheet (still via the genuine click) for the assertions below.
+  page.setViewportSize({ width: 1280, height: 720 });
+  await page.getByTestId(`filmstrip-expand-${v1.id}`).click();
   await page.getByTestId("history-sheet").waitFor();
 
   // -- 1. CREATE: assert the timeline renders both entries ------------------
@@ -244,4 +257,22 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   // The shared-rotation contract row.
   await expect(page.getByTestId("compare-shared-rotation")).toBeVisible();
+
+  // -- PIN: reachable from this (session with versions) by pointer alone ----
+  // The sheet's right-side box (right-anchored, 360px) is clear of the
+  // left-anchored pane, so every timeline action inside the sheet is
+  // pointer-reachable with the sheet open — pin included. Pin v1 from the
+  // sheet's own timeline; the pointer path is the sheet open (real click on
+  // the expand mark, above) plus this click.
+  const pinBefore = await page.getByTestId(`timeline-pin-${v1.id}`).textContent();
+  const pinResp: Promise<Response> = page.waitForResponse(
+    (r) =>
+      r.url() ===
+        `${baseURL}/api/projects/${projectId}/versions/${v1.id}` &&
+      r.status() === 200,
+  );
+  await page.getByTestId(`timeline-pin-${v1.id}`).click();
+  await pinResp;
+  const pinAfter = await page.getByTestId(`timeline-pin-${v1.id}`).textContent();
+  expect(pinAfter).not.toEqual(pinBefore);
 });
