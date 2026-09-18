@@ -1008,7 +1008,7 @@ describe("App chat wiring", () => {
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("app-error").textContent).toContain(
+      expect(screen.getByTestId("failure-turn").textContent).toContain(
         "stream interrupted",
       );
     });
@@ -1114,8 +1114,8 @@ describe("App photo upload wiring", () => {
     // DimensionCanvas must never mount with degenerate 0x0 dimensions —
     // that would divide by zero in its internal scale computation.
     expect(screen.queryByTestId("dimension-canvas-container")).toBeNull();
-    // No app-level error surfaced — the upload succeeded.
-    expect(screen.queryByTestId("app-error")).toBeNull();
+    // No failure turn surfaced — the upload succeeded.
+    expect(screen.queryByTestId("failure-turn")).toBeNull();
 
     // Restore the shared FakeImage stub for subsequent tests in this file.
     vi.stubGlobal("Image", FakeImage);
@@ -1347,7 +1347,7 @@ describe("App streamEvents rejection handling", () => {
 
       // The onError path still updates UI state as expected.
       await waitFor(() => {
-        expect(screen.getByTestId("app-error").textContent).toContain(
+        expect(screen.getByTestId("failure-turn").textContent).toContain(
           "stream interrupted",
         );
       });
@@ -1980,7 +1980,7 @@ describe("App region-selection (point pick) wiring", () => {
     // as success) AND the selection must be recoverable — not lost, forcing
     // a redraw.
     await waitFor(() => {
-      expect(screen.getByTestId("app-error").textContent).toContain("422 Unprocessable");
+      expect(screen.getByTestId("failure-turn-sentence").textContent).toContain("422 Unprocessable");
     });
     expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
     expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
@@ -2036,7 +2036,7 @@ describe("App region-selection (point pick) wiring", () => {
     // NOW reject the stale request for A.
     rejectFirst(new Error("stale 500"));
     await waitFor(() => {
-      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+      expect(screen.getByTestId("failure-turn-sentence").textContent).toContain("stale 500");
     });
 
     // The still-visible pending selection must be B ("wing_right"), not a
@@ -2094,7 +2094,7 @@ describe("App region-selection (point pick) wiring", () => {
     // NOW A rejects.
     rejectFirst(new Error("stale 500"));
     await waitFor(() => {
-      expect(screen.getByTestId("app-error").textContent).toContain("stale 500");
+      expect(screen.getByTestId("failure-turn-sentence").textContent).toContain("stale 500");
     });
 
     // The cancellation must stick — no pending-selection bar reappears.
@@ -2132,6 +2132,7 @@ describe("App region-selection (point pick) wiring", () => {
       expect(screen.getByTestId("app-error").textContent).toContain("No project selected");
     });
     expect(client.createRegionEdit).not.toHaveBeenCalled();
+    // Bailing on "no project" must happen BEFORE the message (and any
     // Bailing on "no project" must happen BEFORE the message (and any
     // selection thumbnail) is ever appended to the transcript — a message
     // that looks sent but never went anywhere would be misleading. And the
@@ -2695,17 +2696,17 @@ describe("App design-loop error display (issue #82)", () => {
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("app-error")).toBeTruthy();
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
     });
     // Mapped sentence (not the raw message)
-    expect(screen.getByTestId("app-error").textContent).toContain(
-      "The model could not be generated",
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
+      "The design step produced nothing usable",
     );
     // The raw code is in the detail element
-    const detail = screen.getByTestId("app-error-detail");
+    const detail = screen.getByTestId("failure-turn-raw-code");
     expect(detail.textContent).toContain("error_class_not_ok");
     // Retry button is present (design-loop failure, retryable)
-    expect(screen.getByTestId("app-error-retry")).toBeTruthy();
+    expect(screen.getByTestId("failure-action-retry")).toBeTruthy();
   });
 
   it("maps an unknown reason code to the generic sentence plus the raw code", async () => {
@@ -2725,20 +2726,21 @@ describe("App design-loop error display (issue #82)", () => {
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
     await waitFor(() => {
-      expect(screen.getByTestId("app-error")).toBeTruthy();
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
     });
     // Generic sentence for unknown codes
-    expect(screen.getByTestId("app-error").textContent).toContain(
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
       "The design could not be generated",
     );
     // Raw code in detail
-    const detail = screen.getByTestId("app-error-detail");
+    const detail = screen.getByTestId("failure-turn-raw-code");
     expect(detail.textContent).toContain("totally_unknown_code");
   });
 
   it("shows no Retry button for a region-edit failure", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
     // Simulate a region-edit failure: createRegionEdit rejects
     vi.spyOn(client, "createRegionEdit").mockRejectedValue(new Error("500 Internal Server Error"));
 
@@ -2777,14 +2779,19 @@ describe("App design-loop error display (issue #82)", () => {
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "edit this region" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
-    // The region-edit failure appears
+    // The region-edit failure appears (as a failure turn in the
+    // conversation, like all stream failures — W12).
     await waitFor(() => {
-      expect(screen.getByTestId("app-error")).toBeTruthy();
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
     });
-    // No Retry button for region-edit failures
-    expect(screen.queryByTestId("app-error-retry")).toBeNull();
-    // The error message mentions the region selection
-    expect(screen.getByTestId("app-error").textContent).toContain("Region edit failed");
+    // The region-edit failure uses the generic action set (no dedicated
+    // envelope actions), so the specific region-edit "no retry" property
+    // is: no envelope actions appear.
+    expect(screen.queryByTestId("failure-action-split")).toBeNull();
+    // The error message mentions the region selection.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
+      "Region edit failed",
+    );
 
     // Restore the canvas stubs
     HTMLCanvasElement.prototype.getContext = origGetContext;
@@ -2816,10 +2823,10 @@ describe("App design-loop error display (issue #82)", () => {
 
     // First error appears
     await waitFor(() => {
-      expect(screen.getByTestId("app-error")).toBeTruthy();
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
     });
     // Retry button is present
-    const retryBtn = screen.getByTestId("app-error-retry");
+    const retryBtn = screen.getByTestId("failure-action-retry");
     expect(retryBtn).toBeTruthy();
     expect((retryBtn as HTMLButtonElement).disabled).toBe(false);
 

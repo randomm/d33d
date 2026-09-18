@@ -21,6 +21,8 @@ import type { RegionEditViewId } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
 import { Composer } from "./Composer";
 import { PassCard } from "./PassCard";
+import type { DisplayError } from "../../lib/errorMapping";
+import { FailureTurn } from "../failure/FailureTurn";
 
 // The marker colour's single home is lib/marker.ts (issue #110); the name
 // is re-exported here for existing consumers.
@@ -56,6 +58,10 @@ export interface ChatMessage {
   /** The generated source for this turn's disclosure. Arrives on the
    *  token frame; disclosure content, never chat text (W10). */
   source?: string;
+  /** Present ONLY on a failure turn (issue #124, W12): the failure is a
+   *  turn in the conversation, not a card beside it. A message with this
+   *  set renders as a FailureTurn. */
+  failure?: DisplayError;
 }
 
 interface ChatPanelProps {
@@ -65,9 +71,22 @@ interface ChatPanelProps {
   inFlight?: boolean;
   /** The PassCard's enlarged-view close action (issue #125). */
   onBesidePhoto?: () => void;
+  /** The build envelope (API-reported) for the failure turn's measured
+   *  number (issue #124). Absent → no bars, no numbers. */
+  envelope?: { x: number; y: number; z: number } | null;
+  /** The version label the failure turn says survived (the latest
+   *  version — the failure was never a version). */
+  keptVersion?: string | null;
 }
 
-export function ChatPanel({ messages, onSend, inFlight, onBesidePhoto }: ChatPanelProps) {
+export function ChatPanel({
+  messages,
+  onSend,
+  inFlight,
+  onBesidePhoto,
+  envelope,
+  keptVersion,
+}: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -88,13 +107,22 @@ export function ChatPanel({ messages, onSend, inFlight, onBesidePhoto }: ChatPan
           // everything else (user turns, clarifying questions, the
           // in-flight streaming turn) stays a plain sentence in the flow.
           const isPass = msg.role === "assistant" && msg.versionId !== undefined;
+          const isFailure = msg.failure !== undefined;
           return (
             <div
               key={msg.id}
               className={`chat-msg chat-msg--${msg.role}`}
               data-testid={`chat-msg-${msg.role}`}
             >
-              {isPass ? (
+              {isFailure ? (
+                <FailureTurn
+                  error={msg.failure!}
+                  envelope={envelope}
+                  keptVersion={keptVersion}
+                  inFlight={inFlight === true}
+                  onAction={onSend}
+                />
+              ) : isPass ? (
                 <PassCard
                   versionId={msg.versionId ?? null}
                   views={msg.views ?? []}

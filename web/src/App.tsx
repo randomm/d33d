@@ -830,6 +830,9 @@ export default function App({ client }: AppProps) {
         const sentGeneration = pendingSelectionGenerationRef.current;
         pendingSelectionGenerationRef.current += 1;
         setPendingSelection(null);
+        // W12: a region-edit failure is a turn in the conversation, like
+        // any other stream failure — append it to messages, not a card.
+        const turnId = `msg-${Date.now()}-failure`;
         void apiClient
           .createRegionEdit(projectId, {
             module_ids: selectionToAttach.moduleIds,
@@ -878,21 +881,28 @@ export default function App({ client }: AppProps) {
             const detail = e instanceof Error ? e.message : "unknown error";
             if (pendingSelectionGenerationRef.current === sentGeneration + 1) {
               setPendingSelection(selectionToAttach);
-              setStreamError({
-                message: `Region edit failed — selection restored, please resend: ${detail}`,
-                detail,
-                retryable: false,
-              });
-            } else {
-              // The user already drew a new selection or cancelled while this
-              // request was in flight — nothing to restore, and claiming so
-              // would be dishonest about what state the UI is actually in.
-              setStreamError({
-                message: `Region edit failed: ${detail}`,
-                detail,
-                retryable: false,
-              });
             }
+            // The region-edit failure is a turn in the conversation (W12):
+            // the message says what failed (with the selection restored if
+            // the generation is unchanged), and the action set is the
+            // generic one (no envelope-specific actions for a request that
+            // never reached the design loop).
+            const msg =
+              pendingSelectionGenerationRef.current === sentGeneration + 1
+                ? `Region edit failed — selection restored, please resend: ${detail}`
+                : `Region edit failed: ${detail}`;
+            setMessages((prev) => {
+              const withoutPrevious = prev.filter((m) => m.failure === undefined);
+              return [
+                ...withoutPrevious,
+                {
+                  id: turnId,
+                  role: "assistant" as const,
+                  content: "",
+                  failure: { message: msg, detail, retryable: false },
+                },
+              ];
+            });
           });
       }
 
@@ -1031,7 +1041,25 @@ export default function App({ client }: AppProps) {
               // The structured `reason` (when present) is mapped to plain
               // language; a missing reason is an infra failure (or a legacy
               // frame) — generic copy, never a gate mapping (issue #82).
-              setStreamError(displayDesignLoopError(data));
+              // The envelope limits (from GET /api/config/envelope, already
+              // fetched for the plate) enable the failure turn's measured
+              // number for the envelope gate — never a literal (W12).
+              const failure = displayDesignLoopError(
+                data,
+                envelope === null ? undefined : [envelope.x, envelope.y, envelope.z],
+              );
+              // W12: a failure is a TURN in the conversation — it is
+              // appended to `messages` (rendered by the ChatPanel), not a
+              // card beside it. A new failure replaces the previous turn, so
+              // the conversation never stacks failure turns.
+              const turnId = `msg-${Date.now()}-failure`;
+              setMessages((prev) => {
+                const withoutPrevious = prev.filter((m) => m.failure === undefined);
+                return [
+                  ...withoutPrevious,
+                  { id: turnId, role: "assistant" as const, content: "", failure },
+                ];
+              });
             },
           });
         })
@@ -1046,10 +1074,20 @@ export default function App({ client }: AppProps) {
             ),
           );
           setStreamErrorKind("stream");
-          setStreamError({
-            message: "The request could not be sent. The design did not start — you can retry.",
-            detail,
-            retryable: true,
+          // W12: a stream failure is a TURN in the conversation — append
+          // it to `messages` (ChatPanel renders it as a FailureTurn), not
+          // a card beside the panel.
+          const turnId = `msg-${Date.now()}-failure`;
+          setMessages((prev) => {
+            const withoutPrevious = prev.filter((m) => m.failure === undefined);
+            return [
+              ...withoutPrevious,
+              { id: turnId, role: "assistant" as const, content: "", failure: {
+                  message: "The request could not be sent. The design did not start — you can retry.",
+                  detail,
+                  retryable: true,
+                } },
+            ];
           });
         })
         .finally(() => {
@@ -1064,7 +1102,7 @@ export default function App({ client }: AppProps) {
           setViewProgress(INITIAL_VIEW_PROGRESS);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, handleStreamViewerData, refetchDesignState],
+    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState],
   );
 
   // The inline bar's submit path — routes the typed instruction through the
@@ -1357,6 +1395,10 @@ export default function App({ client }: AppProps) {
                   onSend={handleSendMessage}
                   inFlight={designLoopInFlight}
                   onBesidePhoto={handleBesidePhoto}
+                  envelope={envelope}
+                  keptVersion={
+                    versions.length > 0 ? versions[versions.length - 1].name : null
+                  }
                 />
                 {designLoopInFlight && (
                   <PassProgress
@@ -1365,7 +1407,7 @@ export default function App({ client }: AppProps) {
                     viewProgress={viewProgress}
                   />
                 )}
-                {streamError && (
+                {streamError && streamErrorKind !== "stream" && (
                   <FailureCard
                     error={streamError}
                     kind={streamErrorKind}

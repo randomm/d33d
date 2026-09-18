@@ -779,4 +779,73 @@ describe("design contract", () => {
       ).toBe(false);
     }
   });
+
+  /* --------------------------------------------------------------- W12 */
+
+  it("no failure surface uses the marker colour (no #FF3300, no MARKER_COLOR import)", () => {
+    // #FF3300 is the region marker and nothing else. Blocked, failed and
+    // disagreeing states use --color-blocked (#D2A63C). The scan is
+    // restricted to the failure surface: files under components/failure/
+    // plus errorMapping.ts — no failure file may import MARKER_COLOR or
+    // carry the hex literal (in comments either, since the single home is
+    // lib/marker.ts).
+    const failureDir = join(SRC, "components/failure");
+    const files = readdirSync(failureDir)
+      .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"))
+      .map((f) => join(failureDir, f));
+    files.push(join(SRC, "lib/errorMapping.ts"));
+    for (const file of files) {
+      const content = readFileSync(file, "utf8");
+      expect(
+        content.includes("#FF3300") || content.includes("MARKER_COLOR"),
+        `failure surface file ${relative(SRC, file)} must not reference the marker colour`,
+      ).toBe(false);
+    }
+  });
+
+  it("no build-volume literal (320 / 300) appears in the failure surface", () => {
+    // The build volume comes from the API (GET /api/config/envelope),
+    // never from a literal in the SPA. The scan covers the failure
+    // components and the mapping; test files are exempt (they assert
+    // against the deck's caption functions).
+    const failureDir = join(SRC, "components/failure");
+    const files = readdirSync(failureDir)
+      .filter((f) => f.endsWith(".ts") || f.endsWith(".tsx"))
+      .map((f) => join(failureDir, f));
+    files.push(join(SRC, "lib/errorMapping.ts"));
+    for (const file of files) {
+      if (file.includes("__tests__")) continue;
+      const content = readFileSync(file, "utf8");
+      const bare320 = /(?<![\d\w.])320(?![\d\w.])/.test(content);
+      const bare300 = /(?<![\d\w.])300(?![\d\w.])/.test(content);
+      expect(
+        bare320,
+        `build-volume literal 320 found in ${relative(SRC, file)} — the limit must come from the API`,
+      ).toBe(false);
+      expect(
+        bare300,
+        `build-volume literal 300 found in ${relative(SRC, file)} — the limit must come from the API`,
+      ).toBe(false);
+    }
+  });
+
+  it("failure copy has no attempt counting (the two-failure rule is dropped)", () => {
+    // The design deck's two-failures-same-goal rule was dropped (no goal
+    // object exists, and inferring one from message text is guesswork). No
+    // copy may vary by attempt: `askInstead` is removed, and no failure
+    // copy names a second failure.
+    expect((copy.failure as Record<string, unknown>).askInstead).toBeUndefined();
+    for (const key of Object.keys(copy.failure.reasons)) {
+      const value = (copy.failure.reasons as Record<string, string>)[key];
+      expect(value).not.toMatch(/\btwice\b|\bsecond\b/i);
+    }
+  });
+
+  it("the failure turn's failing axis uses the blocked colour token, not the marker", () => {
+    // The failing axis is drawn in --color-blocked (#D2A63C). The CSS for
+    // the failing bar references the token; no failure CSS references the
+    // marker hex.
+    expect(stylesheet()).toMatch(/\.failure-turn-bar--failing[\s\S]*?var\(--color-blocked\)/);
+    expect(stylesheet()).not.toMatch(/\.failure-turn[\s\S]*?#FF3300/i);
+  });
 });
