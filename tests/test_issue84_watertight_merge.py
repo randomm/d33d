@@ -25,6 +25,15 @@ import d33d.render_worker as rw
 
 FIXTURE = Path(__file__).parent / "fixtures" / "stl" / "box_20mm.stl"
 
+#: Issue #86 fixture: an ASCII STL with TWO ``solid``/``endsolid`` blocks
+#: (box 20×20×20 at the origin + icosphere r=5 at x+30), OpenSCAD-style
+#: (per-facet duplicated vertices). Plain ``trimesh.load(..., process=False)``
+#: returns a ``trimesh.Scene`` for it — the shape that used to crash the
+#: worker's load block with ``AttributeError`` (issue #86).
+MULTISOLID_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "stl" / "two_body_multisolid.stl"
+)
+
 SIX_VIEW_NAMES = [name for name, _cam in rw.VIEWS]
 
 
@@ -220,3 +229,126 @@ def test_worker_load_path_catches_indexerror_from_volume(
     assert isinstance(result, rw.RenderResult)
     assert result.error_class == "empty_model"
     assert result.ok is False
+
+
+# ── Issue #86: Scene-returning STLs (multi-solid + zero-facet) ────────────
+
+
+def test_multisolid_ascii_stl_plain_load_returns_scene() -> None:
+    """The committed multi-solid fixture (two ``solid``/``endsolid``
+    blocks, OpenSCAD-style) loads as a ``trimesh.Scene`` under the worker's
+    pre-fix load call (``process=False``, no ``force``) — pinning the
+    shape that made ``mesh.merge_vertices()`` raise ``AttributeError``."""
+    loaded = trimesh.load(str(MULTISOLID_FIXTURE), process=False)
+    assert isinstance(loaded, trimesh.Scene)
+    # A Scene has no merge_vertices — the exact attribute lookup that
+    # used to escape both except tuples.
+    assert not hasattr(loaded, "merge_vertices")
+
+
+def test_multisolid_fixture_measured_values() -> None:
+    """The multi-solid fixture through the worker's POST-fix load path
+    (``force="mesh"`` → ``merge_vertices``) yields the measured geometry:
+    50 vertices (8 box corners + 42 icosphere vertices), watertight=True
+    (both component bodies are watertight; a concatenated mesh is
+    watertight iff every component is), volume = 8000.0 (box) +
+    457.339026064024 (icosphere) = 8457.339026064024."""
+    mesh = trimesh.load(str(MULTISOLID_FIXTURE), process=False, force="mesh")
+    mesh.merge_vertices()  # the worker's load block calls this unconditionally
+
+    vertex_count = len(mesh.vertices)
+    watertight = bool(mesh.is_watertight)
+    volume = float(mesh.volume)
+
+    assert vertex_count == 50
+    assert watertight is True
+    assert volume == pytest.approx(8457.339026064024, rel=1e-12)
+
+    result = rw.classify(
+        exit_code=0,
+        stl_path="model.stl",
+        csg_path="model.csg",
+        views=list(SIX_VIEW_NAMES),
+        stderr="",
+        vertex_count=vertex_count,
+        watertight=watertight,
+        volume=volume,
+    )
+    assert result == "ok"
+
+
+def _record_stl(stl_bytes: bytes) -> Any:
+    """Build a ``subprocess.run`` stub that plants ``stl_bytes`` as the
+    harvested model.stl (plus a CSG and 6 view PNGs), mirroring
+    :func:`_record` but with a caller-supplied STL payload."""
+
+    def _rec(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess[str]:
+        if "cp /work/model.stl /host/" in " ".join(argv):
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    out = Path(tok.rsplit(":", 1)[0])
+                    out.mkdir(parents=True, exist_ok=True)
+                    (out / "model.stl").write_bytes(stl_bytes)
+                    (out / "model.csg").write_bytes(b"fake-csg-bytes")
+                    for name in SIX_VIEW_NAMES:
+                        (out / name).write_bytes(b"fake-png-bytes")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    return _rec
+
+
+def test_multisolid_render_classifies_ok_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """End-to-end (Docker-stubbed): a render whose harvested model.stl is
+    the multi-solid fixture (which plain-loads as a ``Scene``) classifies
+    ``ok`` through ``render_for_design_loop``. Pre-fix this render's load
+    block raised ``AttributeError`` on ``Scene.merge_vertices()`` — the
+    exception escaped both except tuples and the render could not be
+    classified."""
+    monkeypatch.setattr(rw.subprocess, "run", _record_stl(MULTISOLID_FIXTURE.read_bytes()))
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000086")
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    result = rw.render_for_design_loop("cube(20); union(sphere(r=5));", {}, renders_dir=tmp_path / "renders")
+
+    assert isinstance(result, rw.RenderResult)
+    assert result.ok is True
+    assert result.error_class == "ok"
+
+
+def test_zero_facet_ascii_stl_classifies_empty_model(
+    tmp_path: Path,
+) -> None:
+    """A zero-facet STL (``solid empty`` / ``endsolid empty``) loads as an
+    empty ``trimesh.Scene`` under the worker's pre-fix load call; through
+    the post-fix path (``force="mesh"``) it becomes a 0-vertex Trimesh that
+    classifies ``empty_model`` — never ``ok`` and never ``container_error``."""
+    zero = tmp_path / "zero_facet.stl"
+    zero.write_text("solid empty\nendsolid empty\n", encoding="ascii")
+
+    # Pre-fix shape: plain load returns a Scene.
+    plain = trimesh.load(str(zero), process=False)
+    assert isinstance(plain, trimesh.Scene)
+
+    # Post-fix load path: force="mesh" → 0 vertices, not watertight, vol 0.
+    mesh = trimesh.load(str(zero), process=False, force="mesh")
+    mesh.merge_vertices()
+    vertex_count = len(mesh.vertices)
+    watertight = bool(mesh.is_watertight)
+    volume = float(mesh.volume)
+    assert vertex_count == 0
+    assert watertight is False
+    assert volume == 0.0
+
+    result = rw.classify(
+        exit_code=0,
+        stl_path="model.stl",
+        csg_path="model.csg",
+        views=list(SIX_VIEW_NAMES),
+        stderr="",
+        vertex_count=vertex_count,
+        watertight=watertight,
+        volume=volume,
+    )
+    assert result == "empty_model"
