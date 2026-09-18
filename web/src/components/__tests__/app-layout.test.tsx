@@ -1071,17 +1071,53 @@ describe("App chat wiring", () => {
 describe("App photo upload wiring", () => {
   const mockFetch = vi.fn();
 
+  /**
+   * URL-keyed fetch stub (issue #168): returns the photo-upload response
+   * only when the request URL names the photos path. Any other URL (e.g.
+   * getDesignState hitting the global fetch when not stubbed at the
+   * client-method level) gets a well-formed empty-array response that
+   * resolves cleanly through the ApiClient's request() path — never
+   * `undefined`, which would make the caller read a property on an
+   * undefined value and crash.
+   *
+   * Keying on the URL makes the upload's reply impossible to steal by a
+   * stray mount-time call: no matter what order the fetches land in, the
+   * photos POST always receives the photo response and no other call can
+   * consume it.
+   */
+  function installUrlKeyedFetchStub(): void {
+    mockFetch.mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+        if (url.includes("/photos")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
+          });
+        }
+        // Non-photos URLs (e.g. /api/projects/{id}/design-state, called
+        // at mount via getDesignState which is not stubbed in makeClient)
+        // get a valid empty-array response — the shape every GET array
+        // endpoint expects. The App's design-state block renders empty;
+        // no crash, no fake value.
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => [],
+        });
+      },
+    );
+  }
+
   beforeEach(() => {
     vi.stubGlobal("fetch", mockFetch);
     mockFetch.mockReset();
+    installUrlKeyedFetchStub();
   });
 
   it("PhotoUpload receives the real project id (upload POSTs to the right URL)", async () => {
     const client = makeClient();
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
-    });
 
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
@@ -1100,10 +1136,6 @@ describe("App photo upload wiring", () => {
 
   it("mounts DimensionCanvas once a photo has been uploaded", async () => {
     const client = makeClient();
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
-    });
 
     render(<App client={client} />);
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
@@ -1129,10 +1161,6 @@ describe("App photo upload wiring", () => {
 
   it("does not mount DimensionCanvas (and shows a degraded notice instead) when the upload succeeds but client-side dimensions are unavailable", async () => {
     const client = makeClient();
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
-    });
 
     // Simulate a decode failure: Image fires onerror, so PhotoUpload falls
     // back to (0, 0) but still calls onUploaded — the upload itself
