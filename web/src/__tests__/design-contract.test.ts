@@ -44,6 +44,7 @@ import { render } from "@testing-library/react";
 import { createElement } from "react";
 
 import copy, { mm } from "../copy";
+import { Z_INDEX } from "../App";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
 import { Filmstrip } from "../components/versions/Filmstrip";
 import { BranchGraph } from "../components/versions/BranchGraph";
@@ -345,12 +346,17 @@ describe("design contract", () => {
     // W7: z-index is a closed set — canvas 0, panels 10, conversation 20,
     // pin+bar 30. Any other z-index value is a violation.
     //
-    // Both shapes are scanned: the CSS `z-index: N` in stylesheets, AND the
-    // React `zIndex: N` style props — every layer that actually matters
-    // (the conversation pane, filmstrip, history sheet, Brief, first-run,
-    // pin and bar) is an inline React style, which the CSS-only scan could
-    // never see (issue #184: this assertion was quoted as binding for a
-    // dozen tickets while covering none of the real values).
+    // What these scans cover, precisely:
+    //  - The CSS `z-index: N` scan catches stylesheet values.
+    //  - The React `zIndex: <literal>` scan catches INLINE LITERAL usages
+    //    (the four in FirstRun, Filmstrip, HistorySheet, Brief) — the
+    //    shape issue #184 proved the CSS-only scan could never see.
+    //  - The SIX `Z_INDEX.foo` usages in App.tsx are NOT visible to either
+    //    scan. They are safe by construction: Z_INDEX is a closed `as const`,
+    //    so `Z_INDEX.foo` can only be one of its members — and the next
+    //    assertion pins that closed set to exactly {canvas 0, panels 10,
+    //    conversation 20, pinAndBar 30}, so a fifth member or a mutated
+    //    value cannot sneak through unseen.
     const valid = new Set(["0", "10", "20", "30"]);
     for (const f of srcFiles()) {
       const content = readFileSync(f, "utf8");
@@ -371,6 +377,16 @@ describe("design contract", () => {
         expect(valid.has(val), `zIndex ${val} in ${relative(SRC, f)} is not in {0,10,20,30}`).toBe(true);
       }
     }
+  });
+
+  it("Z_INDEX pins the closed four-layer set: exactly canvas 0, panels 10, conversation 20, pinAndBar 30", () => {
+    // W7, level up: the six `Z_INDEX.foo` usages in App.tsx are invisible
+    // to the literal scans above. They are safe ONLY while Z_INDEX is
+    // exactly this closed object — so pin the constant itself. Reading
+    // the imported value (not a source regex) is the strong form: it
+    // checks what ships, so a fifth member OR a mutated value fails here.
+    expect(Z_INDEX).toEqual({ canvas: 0, panels: 10, conversation: 20, pinAndBar: 30 });
+    expect(Object.keys(Z_INDEX).sort()).toEqual(["canvas", "conversation", "panels", "pinAndBar"]);
   });
 
   /* --------------------------------------------------------------- W4 */

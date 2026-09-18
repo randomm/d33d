@@ -92,8 +92,10 @@ import { HistorySheet } from "./components/versions/HistorySheet";
 // canvas, each inset OVERLAY_INSET_PX from the stage edge. z-index is a
 // CLOSED set of four values (the design contract): canvas 0, panels 10,
 // conversation 20, pin+bar 30 — no other z-index may exist.
+// Z_INDEX is exported so the design-contract test reads the REAL values
+// (the closed set itself is the contract, not just its literal usages).
 const OVERLAY_INSET_PX = 24;
-const Z_INDEX = { canvas: 0, panels: 10, conversation: 20, pinAndBar: 30 } as const;
+export const Z_INDEX = { canvas: 0, panels: 10, conversation: 20, pinAndBar: 30 } as const;
 
 // Responsive rules (issue #119). The floor is measured against the
 // WINDOW (window.innerWidth/innerHeight — NOT the stage's own box): below
