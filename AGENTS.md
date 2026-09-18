@@ -132,6 +132,8 @@ Run these before pushing. All must pass locally:
 - **Frontend lint** — `cd web && npm run lint` — 0 errors, 1 known warning (inert `eslint-disable` in `ModelViewer.tsx`)
 - **Live e2e (NOT a PR gate)** — `uv run pytest -m live` — drives the real LLM + real Docker render worker (`tests/live_e2e/`, issue #108); needs Docker + `TRAIL_OPENERS_LLM_KEY`; not in CI (no repository secret); fails (never skips) when a prerequisite is missing; runtime is reported per case + total
 
+**The live suite is deliberately out of CI — an operator decision, not an omission.** CI (`pytest -m "not slow and not live"` in `.github/workflows/ci.yml`; `./scripts/test` defaults to the same exclusion) never exercises a real model: GitHub holds no `TRAIL_OPENERS_LLM_KEY` and no secret will be added. It runs on demand locally, via the `uv run pytest -m live` above. It FAILS rather than skips when a prerequisite is missing — that property is what makes excluding it safe: a silently-skipped live suite is indistinguishable from a passing one, so the suite refuses to pretend. Consequence: green CI says nothing about the real design loop; model-path coverage exists only from local live runs. Do not "helpfully" wire the suite into CI or add the key to GitHub.
+
 ## Code Style
 
 - All Docker images pin `--platform=linux/amd64` (target x86-64; any arm64 reference is stale).
