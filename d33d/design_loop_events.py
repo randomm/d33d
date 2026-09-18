@@ -31,7 +31,6 @@ import asyncio
 import base64
 import inspect
 import logging
-import queue
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -615,7 +614,12 @@ async def run_design_loop_with_events(
     than fabricates", which IS abstain semantics — the old hard-fail
     contradicted it.
     """
-    _frame_queue: "queue.Queue[tuple[str, dict[str, Any]] | None]" = queue.Queue()
+    #: The per-view progress frames (``render-view-*``) land on this queue
+    #: as the drain thread enqueues them. The generator is the sole
+    #: consumer, so an ``asyncio.Queue`` needs no locking; frames are
+    #: yielded while the render is still running (see the ``asyncio.wait``
+    #: below), not after it completes.
+    _frame_queue: "asyncio.Queue[tuple[str, dict[str, Any]] | None]" = asyncio.Queue()
 
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -649,9 +653,12 @@ async def run_design_loop_with_events(
         ``payload`` carries ``view`` (the view stem) and ``iteration``
         (the design-loop iteration index, 1-based).
 
-        The hook enqueues the frame onto ``_frame_queue`` (thread-safe);
-        the generator yields it after the render completes (see the
-        ``_drain_queue" below).
+        The hook schedules a ``put_nowait`` onto ``_frame_queue`` via
+        ``_loop.call_soon_threadsafe`` (the hook runs on the drain's
+        worker thread, so it must not touch the loop's queue from that
+        thread); the generator yields the frame while the render is STILL
+        running (see the ``await asyncio.wait`` below) — live, not
+        batched at render completion.
         """
         if kind not in ("view-start", "view-done"):
             return
@@ -662,8 +669,9 @@ async def run_design_loop_with_events(
         step_name = (
             "render-view-start" if kind == "view-start" else "render-view-done"
         )
-        _frame_queue.put(
-            ("progress", {"step": step_name, "view": view, "iteration": iteration})
+        _loop.call_soon_threadsafe(
+            _frame_queue.put_nowait,
+            ("progress", {"step": step_name, "view": view, "iteration": iteration}),
         )
 
     yield ("progress", {"step": "design-loop-start"})
@@ -694,6 +702,11 @@ async def run_design_loop_with_events(
     # ``user_message`` parameter is authoritative — the version row's
     # message field reads it directly); a blank ``user_message`` degrades
     # to ``request_text`` rather than rendering an empty request line.
+    # The app's event loop (this generator runs on it) — ``_on_progress``
+    # uses it to schedule the thread-safe ``put_nowait``. Captured before
+    # the loop starts: the design loop itself runs on a fresh loop on a
+    # worker thread and has no loop to capture from there.
+    _loop = asyncio.get_running_loop()
     kwargs: dict[str, Any] = {
         "photo": photo,
         "chat_history": chat_history,
@@ -750,9 +763,51 @@ async def run_design_loop_with_events(
             # ``_run_in_loop`` drives the coroutine with ``asyncio.run`` on
             # a fresh loop, in a worker thread, so the entire design loop —
             # the multi-minute sync render AND the LLM's awaits — runs off
-            # the app's event loop. The event loop's only role is the short
-            # ``await asyncio.to_thread(...)`` below.
-            result = await asyncio.to_thread(_run_in_loop, raw)
+            # the app's event loop. The event loop's role is to pump the
+            # frame queue while the render task runs: the ``to_thread``
+            # work is wrapped in a ``Task`` and the generator
+            # ``asyncio.wait``s it against a ``_frame_queue`` ``get``, so
+            # the per-view frames are yielded WHILE the render is still
+            # running (live progress — the old ``await
+            # asyncio.to_thread(...)`` hoarded them and delivered the whole
+            # batch in a single instant at render completion).
+            render_task = asyncio.ensure_future(asyncio.to_thread(_run_in_loop, raw))
+            while True:
+                if render_task.done():
+                    break
+                try:
+                    _f = _frame_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    _f = None
+                if _f is not None:
+                    yield _f
+                    continue
+                # Empty queue, render still running: sleep until the next
+                # frame is enqueued or the render task completes — the
+                # ``asyncio.wait`` is a real await (no busy-wait) that
+                # wakes on whichever happens first.
+                _get_task = asyncio.ensure_future(_frame_queue.get())
+                _done, _ = await asyncio.wait(
+                    {_get_task, render_task}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if _get_task in _done:
+                    yield _get_task.result()
+                else:
+                    _get_task.cancel()
+                    # The render task completed; the loop re-checks it and
+                    # the remainder is drained below.
+            # The render finished: yield every remaining frame in FIFO
+            # order (all frames were enqueued before the drain thread
+            # joined, so nothing is lost) and take the render's result
+            # (an exception here propagates to the wide catches below,
+            # unchanged).
+            while True:
+                try:
+                    _f = _frame_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                yield _f
+            result = render_task.result()
         else:
             result = raw
     except (LookupError, KeyError) as e:
@@ -771,18 +826,6 @@ async def run_design_loop_with_events(
         logger.exception("design loop unexpected error for project %s", project_id)
         yield ("error", {"message": f"design loop unexpected error: {e}"})
         return
-    # Issue #121: the render's per-view progress frames (``render-view-*``)
-    # were enqueued by the drain thread onto ``_frame_queue`` while the
-    # render was running. The render is now complete (the ``to_thread``
-    # await has resumed), so yield the accumulated frames NOW — they are
-    # a record of the render's actual progress, not an estimate. The
-    # drain thread joins before ``run_container`` returns, so the queue
-    # holds all frames in arrival order; no frame is lost.
-    while not _frame_queue.empty():
-        _f = _frame_queue.get_nowait()
-        if _f is not None:
-            yield _f
-
     if getattr(result, "status", None) == "pass":
         yield ("progress", {"step": "design-loop-pass"})
         best = getattr(result, "best", None)
