@@ -1270,6 +1270,7 @@ def _build_production_design_loop():
                 defines,
                 renders_dir=data_dir / "renders",
                 on_progress=kwargs.get("on_progress"),
+                on_progress_iteration="_current",
             )
 
         cat = load_catalogue(catalogue_path)

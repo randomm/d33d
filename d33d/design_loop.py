@@ -840,6 +840,7 @@ async def run_design_loop_async(
     state_bbox: dict[str, float] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
+    on_progress_iteration: Any = "_current",
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -860,8 +861,14 @@ async def run_design_loop_async(
     NOT passed to ``render_fn`` directly (the loop calls it with 2 args,
     the ``RenderFn`` contract); instead the production ``render_fn``
     closure (``app.py`` / ``versions_routes.py``) bakes it in when
-    calling ``render_for_design_loop``. A test stub that does not accept
-    it simply ignores it; the loop's contract is unchanged.
+    calling ``render_for_design_loop``. The loop OWNS the iteration
+    count (the render worker does not inherently know which pass it is
+    serving), so once per iteration it stamps the 1-based index onto the
+    hook (``_stamp_on_progress_iteration``) and the render worker's
+    marker closure forwards it into each marker payload as ``iteration``
+    — the documented payload contract actually honoured on the
+    production path. A test stub that does not accept the hook simply
+    ignores it; the loop's contract is unchanged.
     """
     # Normalize "no dimensions known" (None or a zero/absent axis) into the
     # triple itself: the prompt and the defines map must never carry a
@@ -878,6 +885,7 @@ async def run_design_loop_async(
     iterations: list[IterationRecord] = []
 
     for iteration in range(1, max_iterations + 1):
+        _stamp_on_progress_iteration(on_progress, iteration)
         scad = await _call(
             llm_fn,
             "design",
@@ -1008,6 +1016,30 @@ async def run_design_loop_async(
             return _exhausted(iterations, best, best_score)
 
     return _exhausted(iterations, best, best_score)
+
+
+def _stamp_on_progress_iteration(on_progress: Any, iteration: int) -> None:
+    """Stamp the current 1-based iteration index onto the render worker's
+    ``on_progress`` hook (issue #121's payload contract: every per-view
+    frame carries the 1-based design-loop iteration index).
+
+    The loop is the one component that knows which pass it is serving —
+    the render worker does not inherently know it. The render worker's
+    ``_on_marker`` closure reads the hook's ``_current`` attribute when
+    stamping each marker payload, so the production path stamps the index
+    here, once per iteration, and the worker forwards it verbatim. A
+    custom ``on_progress`` (a test stub) without the attribute is left
+    untouched — the stamp is only consumed by the worker.
+    """
+    if callable(on_progress):
+        try:
+            on_progress._current = iteration  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            # A function object that refuses attribute assignment: stamping
+            # degrades to the adapter's ``iteration: 0`` default (the
+            # client's reducer treats 0 as "unknown" and keeps its own
+            # count) — the loop's outcome is unaffected.
+            pass
 
 
 def run_design_loop(
