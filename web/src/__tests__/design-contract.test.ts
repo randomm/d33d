@@ -344,6 +344,13 @@ describe("design contract", () => {
   it("no component sets a z-index outside the four layers (0, 10, 20, 30)", () => {
     // W7: z-index is a closed set — canvas 0, panels 10, conversation 20,
     // pin+bar 30. Any other z-index value is a violation.
+    //
+    // Both shapes are scanned: the CSS `z-index: N` in stylesheets, AND the
+    // React `zIndex: N` style props — every layer that actually matters
+    // (the conversation pane, filmstrip, history sheet, Brief, first-run,
+    // pin and bar) is an inline React style, which the CSS-only scan could
+    // never see (issue #184: this assertion was quoted as binding for a
+    // dozen tickets while covering none of the real values).
     const valid = new Set(["0", "10", "20", "30"]);
     for (const f of srcFiles()) {
       const content = readFileSync(f, "utf8");
@@ -351,6 +358,17 @@ describe("design contract", () => {
       for (const m of matches) {
         const val = m[1];
         expect(valid.has(val), `z-index ${val} in ${relative(SRC, f)} is not in {0,10,20,30}`).toBe(true);
+      }
+    }
+    // The React style-prop shape: zIndex: 45 (bare number) or
+    // zIndex: "45" / '45' (string), anywhere in src.
+    const reactMatches =
+      /zIndex\s*:\s*["']?(\d+)["']?/g;
+    for (const f of srcFiles()) {
+      const content = readFileSync(f, "utf8");
+      for (const m of content.matchAll(reactMatches)) {
+        const val = m[1];
+        expect(valid.has(val), `zIndex ${val} in ${relative(SRC, f)} is not in {0,10,20,30}`).toBe(true);
       }
     }
   });

@@ -1311,7 +1311,16 @@ export default function App({ client }: AppProps) {
             top: OVERLAY_INSET_PX,
             left: OVERLAY_INSET_PX,
             width: conversationCollapsed ? 240 : 420,
-            height: `calc(100% - ${OVERLAY_INSET_PX * 2}px)`,
+            // The pane's bottom stops clear of the filmstrip's box: the
+            // filmstrip sits at the bottom inset with a 96px track, and the
+            // pane must not cover the filmstrip's expand mark — the history
+            // sheet's only entry point (issue #184). The calc reserves, in
+            // order: the top inset (24), the filmstrip's 96px track, the
+            // bottom inset (24), plus a 12px clear gap above the track and
+            // a 12px clear gap below the top inset. Total 168; at the 640
+            // floor the pane spans 24→496, leaving 24px above the track's
+            // top (520) and the full filmstrip box (520→616) unobstructed.
+            height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
             zIndex: Z_INDEX.conversation,
             display: "flex",
             flexDirection: "column",

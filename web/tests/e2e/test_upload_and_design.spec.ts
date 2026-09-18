@@ -1,9 +1,10 @@
 /**
  * E2E happy path (issue #49, spec 1 of 5):
+ * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_upload_and_design.spec.ts`
  *
  *   upload a photo via the reference-photo input
  *     → the photo-upload UI settles to the success state
- *     → the post-upload app state is stable (static validation placeholder,
+ *     → the post-upload app state is stable (export button visible,
  *       no upload error, no app-level error).
  *
  * Determinism notes:
@@ -65,7 +66,7 @@ test.beforeEach(async ({ request }) => {
 test("happy path: upload photo → settle", async ({ page }) => {
   // --- SPA boot: the app auto-creates a project on mount -----------------
   await page.goto("/");
-  await expect(page.getByTestId("app-shell")).toBeVisible();
+  await expect(page.getByTestId("app-stage")).toBeVisible();
 
   const project = await waitForAutoCreatedProject(page);
   expect(project.source_photo_path).toBeNull();
