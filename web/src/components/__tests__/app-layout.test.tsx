@@ -2737,7 +2737,7 @@ describe("App design-loop error display (issue #82)", () => {
     expect(detail.textContent).toContain("totally_unknown_code");
   });
 
-  it("shows no Retry button for a region-edit failure", async () => {
+  it("shows no envelope actions for a region-edit failure (generic retry action set)", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
