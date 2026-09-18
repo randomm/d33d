@@ -39,11 +39,15 @@
  *
  * Timeline visibility: the SPA fetches its version timeline once per
  * page load (the `listVersions` effect keyed on projectId). The spec
- * gates the SPA's first versions GET with a `page.route` handler that
- * holds the request until both versions exist, then releases it — so
- * the SPA's single timeline fetch of this page load returns both
- * versions. The gate is a one-shot latch: after release, all subsequent
- * versions GETs (e.g. the refetch after restore) pass through un-gated.
+ * gates the SPA's versions GET with a route handler that holds the
+ * request until both versions exist, then releases all held requests
+ * with the full timeline. The gate is scoped to THIS page's project id
+ * only — it never holds requests for other projects. After the gate
+ * releases, all subsequent versions GETs (e.g. the refetch after
+ * restore) pass through un-gated.
+ *
+ * All version ids in this spec come from the API response (the ids
+ * returned by createVersion / restoreVersion), never hardcoded.
  *
  * No LLM calls, no render worker, no SSE interception: the version
  * endpoints are plain REST and fully deterministic.
@@ -93,17 +97,37 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:8080";
 
-  // -- Gate the SPA's mount-time listVersions -------------------------------
-  // The SPA's timeline fetch (GET /api/projects/{pid}/versions) is the ONLY
-  // versions GET in flight on a fresh page load. Hold it until both
-  // versions exist, then let it through (one-shot latch).
+  // -- Navigate and discover the SPA's auto-created project -----------------
+  // The SPA POSTs /api/projects on mount; capture that response so the
+  // spec's direct-API calls target the SAME project the SPA is displaying.
+  const projectResp = page.waitForResponse(
+    (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
+  );
+  await page.goto("/");
+  const created = (await (await projectResp).json()) as { id: number };
+  const projectId = created.id;
+
+  // -- Gate the SPA's versions GET for THIS project only -------------------
+  // Hold all versions GETs for projectId until both versions exist, then
+  // release all held requests with the full timeline in one burst. Requests
+  // for other project ids are never intercepted. The gate releases exactly
+  // once; subsequent calls to releaseGate are no-ops.
+  let gateReleased = false;
   let releaseGate: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => {
     releaseGate = resolve;
   });
+  const release = () => {
+    if (gateReleased) return;
+    gateReleased = true;
+    releaseGate?.();
+  };
 
+  // Scope the route to this page's project id only — the regex captures the
+  // id at registration time, not a wildcard.
+  const versionsPath = `/api/projects/${projectId}/versions`;
   await page.route(
-    (url) => url.pathname.match(/^\/api\/projects\/\d+\/versions$/),
+    (url) => url.pathname === versionsPath,
     async (route) => {
       if (route.request().method() === "GET") {
         await gate;
@@ -112,17 +136,11 @@ test("version timeline: create, restore, compare", async ({ page }) => {
     },
   );
 
-  // -- Navigate and discover the SPA's auto-created project -----------------
-  const projectResp = page.waitForResponse(
-    (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
-  );
-  await page.goto("/");
-  const created = (await (await projectResp).json()) as { id: number };
-  const projectId = created.id;
-
   await page.getByTestId("app-stage").waitFor();
 
   // Create both versions on the SPA's own project in the gated window.
+  // The SPA's versions GET is held; after both exist, release lets it
+  // through with the full two-entry timeline.
   const v1 = await createVersion(
     baseURL,
     projectId,
@@ -139,7 +157,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   );
 
   // Release the gate — the SPA's timeline fetch proceeds and sees both.
-  releaseGate?.();
+  release();
   await gate;
 
   // -- Open the history sheet the way a user does ---------------------------
@@ -218,7 +236,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   // The timeline re-fetches after the restore (handleVersionRestore calls
   // listVersions) → now 3 entries, including the new restored entry.
-  // The gate is already released (one-shot latch), so the re-fetch passes.
+  // The gate is already released, so the re-fetch passes through un-gated.
   await page.getByTestId(`timeline-entry-${restored.id}`).waitFor();
   await expect(page.getByTestId("version-timeline-count")).toHaveText("3");
 
@@ -236,8 +254,9 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   // Click compare on v2: compareIds = [v1, v2] → compareVersions fetch.
   const compareResp: Promise<Response> = page.waitForResponse(
     (r) =>
-      r.url().includes(`/api/projects/${projectId}/versions/compare?a=${v1.id}&b=${v2.id}`) &&
-      r.status() === 200,
+      r.url().includes(
+        `/api/projects/${projectId}/versions/compare?a=${v1.id}&b=${v2.id}`,
+      ) && r.status() === 200,
   );
   await page.getByTestId(`timeline-compare-${v2.id}`).click();
   await compareResp;
