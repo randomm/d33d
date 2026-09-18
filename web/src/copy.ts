@@ -148,6 +148,13 @@ export const progress = {
   viewsProgress: (done: number, total: number): string =>
     `${done} of ${total} — each view is a separate render, they come in one at a time.`,
 
+  /** The first line of the design-loop stage: an attempt is announced as
+   *  it starts, never discovered (the repair attempt is announced, not
+   *  hidden — W11 rule 4). The first pass is the baseline; from the second
+   *  on the number is what makes the counter reset legible. */
+  attemptLine: (attempt: number, max: number): string =>
+    attempt <= 1 ? "Attempt 1 of up to 3" : `Attempt ${attempt} of up to ${max}`,
+
   expectation: "Usually 15–30\u202Fs. You will see it change.",
   stop: "Stop",
 
