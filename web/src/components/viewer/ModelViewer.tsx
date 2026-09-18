@@ -66,6 +66,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import copy from '../../copy';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -743,9 +744,14 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitS
         overflow: 'hidden',
       }}
     >
-      {/* Empty state overlay */}
+      {/* Empty state overlay (issue #107): shown only while no model data is
+          mounted — the "nothing yet" state. It is distinct from the working
+          state (the design-loop progress surface) and from a failure (the
+          selection notice), so none of the three reads as another. */}
       {!data && (
         <div
+          data-testid="viewer-empty"
+          role="status"
           style={{
             position: 'absolute',
             top: '50%',
@@ -757,7 +763,7 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitS
             textAlign: 'center',
           }}
         >
-          No model loaded
+          {copy.shell.viewerEmpty}
         </div>
       )}
     </div>

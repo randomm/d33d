@@ -59,7 +59,6 @@ import {
   type DesignStateEntry,
   type Envelope,
 } from "./lib/api";
-import { loadModuleFixtureArrayBuffer } from "./assets/moduleFixture";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
 import { Brief } from "./components/brief/Brief";
@@ -265,19 +264,19 @@ export default function App({ client }: AppProps) {
 
   // Region-selection (point pick) wiring (issue #98).
   const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
-  const [moduleFixtureData, setModuleFixtureData] = useState<ArrayBuffer | null>(null);
   // Stream-driven model (issue #69): once a design-loop pass streams its
   // best render's STL through the version-created progress frame
-  // (`stl_data_uri`), the viewer swaps from the static GLB fixture to the
-  // decoded STL ArrayBuffer (format "stl"). Stays null until the first
-  // stream-driven pass — the fixture is the pre-pass state.
+  // (`stl_data_uri`), the viewer mounts the decoded STL ArrayBuffer
+  // (format "stl"). Stays null until the first stream-driven pass —
+  // the pre-pass state is the EMPTY viewer (issue #107: no fixture model
+  // is ever shown; a fresh project starts from a clean slate).
   //
   // ONE-WAY LATCH: once set, it is never reset to null. A later pass whose
-  // frame omits stl_data_uri does not restore the fixture — the streamed
-  // model stays mounted for the session. This is intentional (a streamed
-  // pass is a terminal state for the viewer's source); a future ticket
-  // that needs the fixture back must add an explicit reset path here, not
-  // an implicit one.
+  // frame omits stl_data_uri does not restore a previous model — the
+  // streamed model stays mounted for the session. This is intentional
+  // (a streamed pass is a terminal state for the viewer's source); a
+  // future ticket that needs to unmount the model must add an explicit
+  // reset path here, not an implicit one.
   const [streamModelData, setStreamModelData] = useState<ArrayBuffer | null>(null);
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   // Camera-pose signature captured at onReady time (position + the
@@ -293,12 +292,16 @@ export default function App({ client }: AppProps) {
   // chat panel uses. Reset on every pick/cancel/submit so a stale draft
   // never leaks into a later selection's instruction.
   const [regionBarText, setRegionBarText] = useState("");
-  // The viewer's mounted data + format, derived ONCE from the source-of-
-  // truth pair (streamModelData / moduleFixtureData) so the "which source
-  // is mounted" decision lives in one place, not in JSX.
+  // The viewer's mounted data (issue #69 / #107), derived ONCE from the
+  // single source of truth (streamModelData): a streamed STL, or an
+  // EXPLICIT null when nothing has been streamed — the viewer's empty
+  // state, never a stand-in model. The format is "stl" in both branches
+  // (the only model that ever reaches the viewer is a streamed STL; the
+  // GLB loader remains available to ModelViewer and its tests, but no
+  // production source feeds it anymore).
   const viewerSource = streamModelData
     ? { data: streamModelData, format: "stl" as const }
-    : { data: moduleFixtureData, format: "glb" as const };
+    : { data: null, format: "stl" as const };
   // A point selection that has been picked (marked PNG) but not yet sent
   // — the instruction is the user's own free text, which the server
   // requires non-empty (`RegionEditRequest.instruction`,
@@ -447,28 +450,16 @@ export default function App({ client }: AppProps) {
     [],
   );
 
-  // Decode the named-module GLB fixture once on mount. Live module-registry
-  // wiring is deferred (issue #29 design decision) — this fixture is the
-  // viewer's pre-pass state (issue #69): a stream-driven pass replaces it
-  // with the design loop's rendered STL via streamModelData. Any named
-  // modules under the pick (the GLB fixture path) resolve as a bonus via
-  // resolvePointPick; unnamed streamed STL is still fully selectable.
-  // Inlined base64 (decoded synchronously, no network round-trip) so it
-  // never competes with `window.fetch` stubs other tests install for the
-  // backend API.
-  useEffect(() => {
-    setModuleFixtureData(loadModuleFixtureArrayBuffer());
-  }, []);
-
-  // Consume the design-loop frame fields (issue #69): the version-created
-  // progress frame carries `stl_data_uri` (the best iteration's STL as a
-  // base64 data URI) plus a `views` map of data URIs. Swap the viewer to
-  // the stream-derived STL. A streamed pass renders a single unnamed mesh,
-  // so picks on it resolve no module ids — selection still works, grounded
-  // by the marked PNG alone (issue #98). (SCAD ownership is untouched —
-  // onToken stays the sole SCAD carrier.) The streamed source is a one-way
-  // latch (see streamModelData): a later frame that omits stl_data_uri does
-  // not restore the fixture.
+  // Decode the streamed design-loop STL: the version-created progress frame
+  // carries `stl_data_uri` (the best iteration's STL as a base64 data URI)
+  // plus a `views` map of data URIs. Mount the stream-derived STL in the
+  // viewer (the pre-pass state is the empty viewer — issue #107, no
+  // fixture). A streamed pass renders a single unnamed mesh, so picks on it
+  // resolve no module ids — selection still works, grounded by the marked
+  // PNG alone (issue #98). (SCAD ownership is untouched — onToken stays the
+  // sole SCAD carrier.) The streamed source is a one-way latch (see
+  // streamModelData): a later frame that omits stl_data_uri does not
+  // restore a previous model.
   const handleStreamViewerData = useCallback(
     (data: Record<string, unknown>) => {
       const stlDataUri = typeof data.stl_data_uri === "string" ? data.stl_data_uri : null;
@@ -1241,7 +1232,9 @@ export default function App({ client }: AppProps) {
       {/* Layer 0 — the canvas fills the stage; the pick layer shares its
           exact box (both absolute inset:0). The viewer's size comes only
           from its ResizeObserver; the handle's renderer.getSize() is the
-          single source of the CSS-pixel viewport size (issue #119). */}
+          single source of the CSS-pixel viewport size (issue #119).
+          The pre-pass state is the EMPTY viewer (issue #107): no model
+          until a stream-driven pass delivers its STL. */}
       <div
         className="viewer-pane"
         data-testid="viewer-pane"
