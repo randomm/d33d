@@ -471,6 +471,37 @@ def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     return (bbox.x, bbox.y, bbox.z)
 
 
+def _version_render_artifact_dir(result: Any) -> str | None:
+    """The durable on-disk path of the render that produced the version
+    (issue #163), or ``None``.
+
+    The version OWNS its render reference: the render that becomes the
+    version is the BEST candidate (``result.best`` — the loop's
+    best-scoring candidate, whose ``model.stl`` is the version's geometry),
+    and the reference is that render's DECLARED
+    ``RenderResult.render_artifact_dir`` field (issue #72's durable
+    per-render directory, ``<renders_dir>/<uuid8>``) — the same value the
+    SSE adapter reads for the artifact bytes. Renders land under a fresh
+    per-render uuid unrelated to version ids, so the link is PERSISTED at
+    version-creation time and never re-derived (the 3MF download route
+    cannot infer it from mtime — a "probably right" directory is exactly
+    what issue #163's spec rejects). ``None`` (a stub loop result without
+    the field, or a render without a durable directory) stores a NULL:
+    an absent render record degrades honestly at the route (a clear
+    non-2xx), never a guess.
+    """
+    best = getattr(result, "best", None)
+    if best is None:
+        return None
+    render = getattr(best, "render", None)
+    if render is None:
+        return None
+    artifact_path = getattr(render, "render_artifact_dir", None)
+    if not isinstance(artifact_path, str) or not artifact_path:
+        return None
+    return artifact_path
+
+
 async def _resolve_version_create(
     app: Any, project_id: int, result: Any, user_message: str
 ) -> int | None:
@@ -535,6 +566,7 @@ async def _resolve_version_create(
         message=user_message[:200],
         scad_source=candidate_source,
         bbox=_version_bbox_extents(result),
+        render_artifact_dir=_version_render_artifact_dir(result),
     )
     return int(version["id"])
 
