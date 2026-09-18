@@ -53,21 +53,33 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: QIDI Plus 5 build envelope (X, Y, Z) in millimetres.
-#:
-#: ⚠️ UNVERIFIED — sources disagree. The real values must be confirmed
-#: against the machine before this ticket completes. Pinned here as a
-#: named constant so both the centring transform and the acceptance gate
-#: read the same value. 320×320×300 mm is the most commonly cited value
-#: for the QIDI Plus 5.
+#: Pinned as a named constant so both the centring transform and the
+#: acceptance gate read the same value. The 320×320×300 mm figure is
+#: stated on QIDI's official tech-spec page and declared by the shipped
+#: QIDIStudio/Orca machine profile (see QIDI_PLUS_5_ENVELOPE_VERIFIED).
 QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 
-#: Whether the build envelope values in ``QIDI_PLUS_5_ENVELOPE_MM`` have been
-#: confirmed against the physical machine. Currently ``False`` — the values
-#: (320×320×300 mm) are the most commonly cited for the QIDI Plus 5 but
-#: sources disagree and the machine identity (Plus 5 vs X-Plus 5) is
-#: unconfirmed. Flip to ``True`` and delete the ``⚠️ UNVERIFIED`` docstring
-#: above once the operator has confirmed both.
-QIDI_PLUS_5_ENVELOPE_VERIFIED: bool = False
+#: Whether the build envelope values in ``QIDI_PLUS_5_ENVELOPE_MM`` have
+#: been verified. ``True`` — verified per the operator's approval (issue
+#: #134). NOTE: this means verified against vendor documentation, NOT a
+#: physical measurement of the machine. Evidence:
+#:   - "QIDI Plus 5" and "QIDI X-Plus 5" are one machine, two names:
+#:     QIDI's retail store and its 2026-08-05 GlobeNewswire launch press
+#:     release use "Plus5"/"Plus 5"; QIDI's own wiki (wiki.qidi3d.com,
+#:     /Plus5 section) titles the intro page "Introduction to X-Plus 5".
+#:     No "X-Plus 5" SKU exists in any QIDI store.
+#:   - The shipped QIDIStudio slicer profile (the file that actually
+#:     constrains prints) has model_id "X-Plus 5" and declares a build
+#:     volume of 320×320×300 mm — matching QIDI's official tech-spec page
+#:     (us.qidi3d.com: "Print Size (W*D*H): 320×320×300 mm").
+#:   - Caveat: no vendor document publishes a usable-Z or hotend-
+#:     clearance figure, so "the full 300 mm Z is printable at the top
+#:     layer" is not confirmed by vendor documentation; the declaration
+#:     in the shipped slicer profile is the basis for this flag.
+#: The ``verified: False`` code path (SPA qualifier in PlateBackdrop)
+#: remains live — flip this flag back if a future machine change
+#: invalidates the profile.
+QIDI_PLUS_5_ENVELOPE_VERIFIED: bool = True
 
 #: QIDI Plus 5 bed keep-out zone (X, Y) in millimetres, measured from the
 #: lower-left corner of the build plate. Vendor-verified from the QIDI Plus
