@@ -1269,7 +1269,9 @@ def test_envelope_route_returns_values_matching_named_constant(app):
 
 def test_envelope_route_wire_shape_is_five_flat_keys(app):
     """Response has exactly ``{x, y, z, unit, verified}`` — no nesting,
-    no extra keys — with ``unit == "mm"`` and ``verified`` False."""
+    no extra keys — with ``unit == "mm"`` and ``verified`` True (the
+    QIDI Plus 5 envelope was verified per issue #134, so the flag's
+    current value is ``True``)."""
 
     async def _call(client):
         return await client.get("/api/config/envelope")
@@ -1279,7 +1281,24 @@ def test_envelope_route_wire_shape_is_five_flat_keys(app):
     body = r.json()
     assert set(body) == {"x", "y", "z", "unit", "verified"}
     assert body["unit"] == "mm"
-    assert body["verified"] is False
+    assert body["verified"] is True
+
+
+def test_envelope_route_returns_verified_true(app):
+    """The wire's ``verified`` is ``True`` after the issue #134 flag flip,
+    with the dimensions unchanged — the operator-approved verification of
+    the QIDI Plus 5 build envelope. The module-flag mirror test above
+    keeps the two in lock-step; this one pins the approved value itself
+    so a silent flip back to ``False`` fails loudly here."""
+
+    async def _call(client):
+        return await client.get("/api/config/envelope")
+
+    r = _run_async(app, _call)
+    assert r.status_code == 200
+    body = r.json()
+    assert (body["x"], body["y"], body["z"], body["unit"]) == (320, 320, 300, "mm")
+    assert body["verified"] is True
 
 
 def test_envelope_route_verified_reads_module_flag(app):
@@ -1309,9 +1328,15 @@ def test_envelope_route_source_reads_named_constant(app):
     assert "QIDI_PLUS_5_ENVELOPE_VERIFIED" in src
 
 
-def test_envelope_unverified_warning_still_in_module_source():
-    """The ``⚠️ UNVERIFIED`` warning lives in the module docstring, so read
-    it via the module file path — a later change cannot strip it while
-    the flag stays False."""
+def test_envelope_verification_basis_still_in_module_source():
+    """The ``True`` flag must carry its evidence: read the module source
+    and confirm the comment records (a) that verification rests on the
+    shipped slicer profile / vendor documentation, not a physical
+    measurement, and (b) the unpublished-usable-Z caveat. If a future
+    change strips or rewords the basis while the flag stays ``True``,
+    this fails."""
     src = Path(pv.__file__).read_text(encoding="utf-8")
-    assert "⚠️ UNVERIFIED" in src
+    assert "X-Plus 5" in src  # the shipped profile's model_id, per issue #134
+    assert "320×320×300" in src
+    assert "physical measurement" in src
+    assert "usable-Z" in src
