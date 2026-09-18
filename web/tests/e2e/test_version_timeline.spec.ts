@@ -1,29 +1,35 @@
 /**
  * Version-timeline E2E spec (issue #49, workstream `spec-versions`).
+ * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_version_timeline.spec.ts`
  *
  * Covers the version-timeline surface end-to-end against the locally
  * booted FastAPI app (web/playwright.config.ts webServer hook):
  *
  *   1. CREATE  — create two versions with DIFFERENT params via the API,
- *                then assert the SPA's version-timeline pane renders both
- *                entries with the correct names, the correct diff badges
- *                (0 for the parent-less first version, 2 for the child
- *                whose snapshot changes exactly two params), and the
- *                correct timeline count.
+ *                open the history sheet (the filmstrip's expand mark),
+ *                and assert the timeline inside the sheet renders both
+ *                entries with the correct names and diff badges.
  *   2. RESTORE — restore version 1 from the UI (the
- *                `timeline-restore-{id}` button), then assert a NEW
- *                forward version appears in the timeline carrying v1's
- *                full snapshot (the non-destructive restore contract),
- *                and the original latest's restore button is disabled.
+ *                `timeline-restore-{id}` button inside the sheet), then
+ *                assert a NEW forward version appears in the timeline
+ *                carrying v1's full snapshot (the non-destructive
+ *                restore contract), and the latest's restore button is
+ *                disabled.
  *   3. COMPARE — select versions 1 and 2 for compare via the UI (the
- *                `timeline-compare-{id}` buttons), then assert the
- *                compare pane shows the diff table with the expected
- *                changed/added rows and the shared-rotation contract.
+ *                `timeline-compare-{id}` buttons inside the sheet),
+ *                then assert the compare pane shows the diff table with
+ *                the expected changed/added rows and the shared-rotation
+ *                contract.
  *
  * The spec talks to the live API directly for version creation (the
  * ticket's stated design: "create, restore, compare via the API + UI
- * assertions") and drives the SPA's version-timeline pane for the UI
- * half.
+ * assertions") and drives the SPA's history sheet for the UI half.
+ *
+ * The history sheet (issue #127, W16) is an OVERLAY over the canvas —
+ * it is the home of the compare / restore / pin / timeline actions.
+ * It is reached ONLY from the filmstrip's expand mark
+ * (`filmstrip-expand-{id}`), which is a sibling of the filmstrip slot
+ * button. The spec opens it that way — the user path.
  *
  * Project discovery: App.tsx auto-creates exactly one project on mount
  * (`createProject("untitled project")`). The spec discovers that project
@@ -31,42 +37,13 @@
  * spec's direct-API work targets the SAME project the SPA is displaying,
  * and no orphan project is ever created.
  *
- * Timeline visibility (issue #52 fix): the SPA fetches its version
- * timeline exactly once per page load (the `listVersions` effect keyed
- * on projectId, which only runs after the mount-time `POST /api/projects`
- * resolves and `setProjectId` re-renders the pane). The spec gates the
- * SPA's first versions GET with a `page.route` handler that holds the
- * request until both versions exist, then releases it — so the SPA's
- * single timeline fetch of this page load returns both versions and the
- * pane renders them without any reload (a reload would POST a FRESH
- * project via App.tsx's unconditional mount-time `createProject` and
- * orphan the versions).
- *
- * The old gate (pre-#52) held the versions GET only when `projectId`
- * was already populated in the spec:
- *
- *   if (route.request().method() === "GET" && projectId !== null) {
- *     await gate;
- *   }
- *   await route.continue();
- *
- * That raced with the SPA's fetch ordering under parallel load (5
- * workers against one uvicorn server): the SPA's `setProjectId` and the
- * spec's `projectId = created.id` are both async continuations on the
- * same POST response, and the SPA's `listVersions` effect (and thus its
- * versions GET) could reach the route handler before the spec's
- * `projectId` assignment ran. With `projectId` still null the gate was
- * skipped, the fetch went through un-gated, and the SPA rendered "No
- * versions yet" for the rest of the test (60s timeout waiting for
- * `timeline-entry-{id}`).
- *
- * The fix drops the `projectId !== null` condition: the versions GET is
- * gated unconditionally (any matching project id). On a fresh page load
- * the SPA's only versions GET is its own timeline fetch — no compare,
- * restore, pin, or single-version GET is in flight at that point — so
- * gating every matching GET is safe and eliminates the race entirely.
- * The gate is released exactly once, after both versions are created via
- * the direct API.
+ * Timeline visibility: the SPA fetches its version timeline once per
+ * page load (the `listVersions` effect keyed on projectId). The spec
+ * gates the SPA's first versions GET with a `page.route` handler that
+ * holds the request until both versions exist, then releases it — so
+ * the SPA's single timeline fetch of this page load returns both
+ * versions. The gate is a one-shot latch: after release, all subsequent
+ * versions GETs (e.g. the refetch after restore) pass through un-gated.
  *
  * No LLM calls, no render worker, no SSE interception: the version
  * endpoints are plain REST and fully deterministic.
@@ -111,29 +88,15 @@ async function createVersion(
 
 test("version timeline: create, restore, compare", async ({ page }) => {
   // The restore + compare assertions need margin beyond the config's 30 s
-  // default (SPA boot, gated fetch, three network round-trips).
+  // default (SPA boot, gated fetch, sheet open, three network round-trips).
   test.setTimeout(60_000);
 
-  // The app base URL (config's use.baseURL — http://localhost:8080 or
-  // E2E_BASE_URL). page.goto("/") below uses it too; we need the absolute
-  // form for the direct-API fetches.
   const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:8080";
 
-  // -- Gate the SPA's mount-time listVersions --------------------------------
+  // -- Gate the SPA's mount-time listVersions -------------------------------
   // The SPA's timeline fetch (GET /api/projects/{pid}/versions) is the ONLY
-  // versions GET in flight on a fresh page load (compare/restore/pin/single
-  // are longer paths and don't match the bare-versions regex below). Hold it
-  // until both versions exist, then let it through.
-  //
-  // The gate is UNCONDITIONAL on the GET — it does NOT check whether the
-  // spec's `projectId` is populated yet. That check (pre-#52) was the race:
-  // the SPA's listVersions effect runs as soon as setProjectId fires, which
-  // is an async continuation on the same POST response the spec reads for
-  // projectId. Under parallel load the SPA's GET could reach this handler
-  // before the spec's `projectId = created.id` ran; with the check, the
-  // fetch went through un-gated and the SPA rendered an empty timeline for
-  // the rest of the test. Gating every matching GET removes the race because
-  // there is no other bare versions GET to block on a fresh page load.
+  // versions GET in flight on a fresh page load. Hold it until both
+  // versions exist, then let it through (one-shot latch).
   let releaseGate: (() => void) | null = null;
   const gate = new Promise<void>((resolve) => {
     releaseGate = resolve;
@@ -159,11 +122,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   await page.getByTestId("app-stage").waitFor();
 
-  // The SPA's listVersions is now hanging on the gate (its GET matched the
-  // route and is awaiting `gate`). Create both versions on the SPA's own
-  // project in this window — the gate is unconditional, so this works
-  // regardless of whether the SPA's GET arrived before or after the spec's
-  // projectId assignment above.
+  // Create both versions on the SPA's own project in the gated window.
   const v1 = await createVersion(
     baseURL,
     projectId,
@@ -183,14 +142,26 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   releaseGate?.();
   await gate;
 
+  // -- Open the history sheet the way a user does ---------------------------
+  // The filmstrip renders once the versions list is non-empty (the SPA's
+  // listVersions fetch just completed with both versions). The filmstrip's
+  // expand mark (`filmstrip-expand-{id}`) is the sheet's only entry point.
+  await page.getByTestId("version-filmstrip").waitFor();
+  await page.getByTestId(`filmstrip-expand-${v1.id}`).click();
+
+  // The sheet is open (issue #127, W16).
+  await page.getByTestId("history-sheet").waitFor();
+
   // -- 1. CREATE: assert the timeline renders both entries ------------------
+  // The timeline lives INSIDE the sheet (VersionTimeline is a child of
+  // HistorySheet). Both entries must be visible with correct names.
   await page.getByTestId(`timeline-entry-${v1.id}`).waitFor();
   await page.getByTestId(`timeline-entry-${v2.id}`).waitFor();
   await expect(page.getByTestId(`timeline-name-${v1.id}`)).toHaveText("base");
   await expect(page.getByTestId(`timeline-name-${v2.id}`)).toHaveText("taller");
 
-  // Diff badges: v1 has no parent → 0 (badge renders empty); v2's parent
-  // is v1 → 2 (H changed 40→50, D added — W unchanged).
+  // Diff badges: v1 has no parent → diff_count 0 (badge renders empty);
+  // v2's parent is v1 → diff_count 2 (H changed 40→50, D added).
   await expect(
     page.getByTestId(`timeline-diff-${v1.id}`).textContent(),
   ).resolves.toEqual("");
@@ -215,8 +186,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   await page.getByTestId(`timeline-restore-${v1.id}`).click();
 
-  const restored = (await restoreResp).json() as Promise<VersionEntry>;
-  const restoredBody = await restored;
+  const restoredBody = (await restoreResp).json() as VersionEntry;
 
   // The restored version is a NEW forward version carrying v1's snapshot
   // (parent = current latest = v2; restored_from = v1).
@@ -227,10 +197,7 @@ test("version timeline: create, restore, compare", async ({ page }) => {
 
   // The timeline re-fetches after the restore (handleVersionRestore calls
   // listVersions) → now 3 entries, including the new restored entry.
-  //
-  // NOTE: this re-fetch is a SECOND bare versions GET. The gate is already
-  // released (it fires once), so the re-fetch passes through un-gated — the
-  // gate is a one-shot latch, not a permanent hold.
+  // The gate is already released (one-shot latch), so the re-fetch passes.
   await page.getByTestId(`timeline-entry-${restoredBody.id}`).waitFor();
   await expect(page.getByTestId("version-timeline-count")).toHaveText("3");
 
@@ -254,18 +221,18 @@ test("version timeline: create, restore, compare", async ({ page }) => {
   await page.getByTestId(`timeline-compare-${v2.id}`).click();
   await compareResp;
 
-  // The compare pane appears with the diff table.
+  // The compare pane appears inside the sheet (compareIds + compareResult
+  // are both non-null → HistorySheet renders the compare-pane div).
   await page.getByTestId("compare-pane").waitFor();
   await page.getByTestId("compare-diff").waitFor();
 
-  // v1 = {W:60, H:40} vs v2 = {W:60, H=50, D:30}:
-  //   changed: H (40 → 50)   added: D (— → 30)   removed: (none)
+  // v1 = {W:60, H:40} vs v2 = {W:60, H:50, D:30}:
+  //   keys: W (unchanged), H (changed 40→50), D (added —→30)
+  //   → 3 data rows + 1 header row = 4 tr elements total.
   await expect(page.getByTestId("diff-changed-H")).toBeVisible();
   await expect(page.getByTestId("diff-added-D")).toBeVisible();
 
-  // The diff table has one header row + the two data rows (H, D) — no
-  // removed rows, so exactly 3 rows total.
-  await expect(page.getByTestId("compare-diff").locator("tr")).toHaveCount(3);
+  await expect(page.getByTestId("compare-diff").locator("tr")).toHaveCount(4);
 
   // The shared-rotation contract row.
   await expect(page.getByTestId("compare-shared-rotation")).toBeVisible();

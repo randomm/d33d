@@ -1,6 +1,7 @@
 /**
  * E2E: single-click region picking on the 3D viewport (issue #98,
  * repaired in issue #182).
+ * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_point_selection.spec.ts`
  *
  * Operator flow under test:
  *   1. The app auto-creates a project on mount and loads the version
