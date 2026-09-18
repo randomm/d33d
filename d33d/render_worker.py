@@ -1293,10 +1293,12 @@ def render_for_design_loop(
                     # force="mesh" (issue #86): trimesh.load returns a
                     # Trimesh for a single-body STL but a trimesh.Scene
                     # for a zero-facet STL (no solid block carries
-                    # geometry) and for an ASCII STL with more than one
-                    # ``solid``/``endsolid`` block (OpenSCAD's exporter
-                    # writes one such block per disjoint body, e.g. a
-                    # ``cube()`` plus a separate sphere). A Scene has no
+                    # geometry) and for a multi-solid ASCII STL (one
+                    # ``solid``/``endsolid`` block per body). Multi-solid
+                    # output can come from other producers; OpenSCAD
+                    # always merges top-level objects into a single solid
+                    # block, so this case is defensive rather than
+                    # OpenSCAD-specific. A Scene has no
                     # merge_vertices/vertices/is_watertight — reading them
                     # raises AttributeError, which escapes BOTH except
                     # tuples below (neither covers AttributeError) and
