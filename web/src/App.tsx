@@ -146,12 +146,6 @@ export default function App({ client }: AppProps) {
     null,
   );
   const [streamError, setStreamError] = useState<DisplayError | null>(null);
-  // The kind of error ("stream" = design-loop/chat stream, "other" = e.g.
-  // a region edit that failed before the stream opened, or a photo upload
-  // failure) — the Retry control only renders for "stream" errors (issue
-  // #82): a region-edit failure carries a consumed selection and must not
-  // be silently resent without it.
-  const [streamErrorKind, setStreamErrorKind] = useState<"stream" | "other">("other");
   // The last user message text, for the Retry control (issue #82).
   const lastUserMessageRef = useRef<string>("");
   const [designLoopInFlight, setDesignLoopInFlight] = useState(false);
@@ -1037,7 +1031,6 @@ export default function App({ client }: AppProps) {
               setMessages((prev) =>
                 prev.map((m) => (m.id === assistantId ? { ...m, streaming: false } : m)),
               );
-              setStreamErrorKind("stream");
               // The structured `reason` (when present) is mapped to plain
               // language; a missing reason is an infra failure (or a legacy
               // frame) — generic copy, never a gate mapping (issue #82).
@@ -1073,7 +1066,6 @@ export default function App({ client }: AppProps) {
               m.id === assistantId ? { ...m, streaming: false, content: `Error: ${detail}` } : m,
             ),
           );
-          setStreamErrorKind("stream");
           // W12: a stream failure is a TURN in the conversation — append
           // it to `messages` (ChatPanel renders it as a FailureTurn), not
           // a card beside the panel.
@@ -1112,13 +1104,6 @@ export default function App({ client }: AppProps) {
   // chat send (no duplicated request logic). handleSendMessage trims the
   // text; a whitespace-only draft therefore also cannot fire a request, and
   // an empty draft never even reaches it (guard below).
-  // Retry (issue #82): re-sends the LAST PLAIN CHAT message through the
-  // SAME handleSendMessage path the chat panel uses — no duplicated request
-  // logic, so the same empty/whitespace guard and (now-empty) pending-
-  // selection handling apply. A region edit failure is never retryable
-  // (streamErrorKind !== "stream" hides the control); a plain chat failure
-  // whose request carried no region selection is. Guarded by
-  // `!designLoopInFlight` so a retry cannot double-send.
   // The export's designed ending (issue #126). Fires ONLY on a successful
   // download (Export3MF calls it after the bytes are in the browser):
   //   1. the conversation gains its final assistant turn — the file is
@@ -1165,13 +1150,6 @@ export default function App({ client }: AppProps) {
     },
     [projectId, projectName, versions, apiClient],
   );
-
-  const handleRetry = useCallback(() => {
-    if (designLoopInFlight) return;
-    const text = lastUserMessageRef.current;
-    if (text.trim().length === 0) return;
-    handleSendMessage(text);
-  }, [designLoopInFlight, handleSendMessage]);
 
   // Elapsed-seconds timer for the design-loop stage indicator (issue
   // #82): runs only while a plain chat design loop is in flight, so the
@@ -1407,14 +1385,7 @@ export default function App({ client }: AppProps) {
                     viewProgress={viewProgress}
                   />
                 )}
-                {streamError && streamErrorKind !== "stream" && (
-                  <FailureCard
-                    error={streamError}
-                    kind={streamErrorKind}
-                    inFlight={designLoopInFlight}
-                    onRetry={handleRetry}
-                  />
-                )}
+                {streamError && <FailureCard error={streamError} />}
               </div>
             </>
           )}
