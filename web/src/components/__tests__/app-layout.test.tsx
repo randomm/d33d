@@ -54,6 +54,7 @@ vi.mock("../viewer/ModelViewer", async () => {
     format: string;
     onReady?: (handle: ModelViewerHandle) => void;
     onLoaded?: (result: LoadResult) => void;
+    hideEmptyState?: boolean;
   }) => {
     useEffect(() => {
       // The mock viewer publishes its handle (modelRoot set once data is
@@ -98,7 +99,16 @@ vi.mock("../viewer/ModelViewer", async () => {
         data-testid="model-viewer-mock"
         data-format={props.format}
         data-has-data={props.data !== null}
-      />
+        data-hide-empty={String(!!props.hideEmptyState)}
+      >
+        {/* Faithful proxy of the real viewer's empty-state overlay
+            (issue #208): present iff no data AND the App has not
+            suppressed it, so App-level tests can assert the mutual-
+            exclusion invariant through the mock. */}
+        {props.data === null && !props.hideEmptyState && (
+          <div data-testid="viewer-empty">{copy.shell.viewerEmpty}</div>
+        )}
+      </div>
     );
   };
 
@@ -3628,5 +3638,42 @@ describe("App first-run screen (issue #128, W14)", () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("first-run")).toBeNull();
+  });
+
+  it("suppresses the viewer's empty-state while FirstRun is shown, and re-exposes it once FirstRun is dismissed (issue #208)", async () => {
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    render(<App client={client} />);
+
+    // Fresh mount: FirstRun is up (no versions, no messages) — its
+    // headline/body occupy the same centred space the viewer-empty string
+    // would, so the string must be ABSENT while the viewer pane (and the
+    // mock viewer element) stay mounted. Suppression keys off isFirstRun
+    // only — never panelsHidden (the latter is an independent toggle that
+    // can hide FirstRun while isFirstRun is still true).
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    expect(screen.getByTestId("model-viewer-mock")).toBeTruthy();
+    expect(screen.queryByTestId("viewer-empty")).toBeNull();
+
+    // First explicit send: messages.length > 0, so isFirstRun is false.
+    // No version-created frame has been streamed — the viewer is still
+    // empty (data=null) — yet the overlay must RE-APPEAR now, because
+    // FirstRun is gone. This is the regression the invariant guards:
+    // a createProject-rejection re-exposure path where the empty viewer
+    // must not stay blank behind nothing.
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId("first-run")).toBeNull();
+    // The viewer pane remains mounted (suppression is a prop, never an
+    // unmount of the viewer element — onReady/onLoaded/onOrbitStart and
+    // pick-layer timing are unaffected).
+    const viewer = screen.getByTestId("model-viewer-mock");
+    expect(viewer.getAttribute("data-has-data")).toBe("false");
+    expect(viewer.getAttribute("data-hide-empty")).toBe("false");
+    const emptyOverlay = screen.getByTestId("viewer-empty");
+    expect(emptyOverlay).toBeTruthy();
+    expect(emptyOverlay.textContent).toBe(copy.shell.viewerEmpty);
   });
 });
