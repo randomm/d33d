@@ -38,19 +38,17 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { Vector2 } from "three";
 import { dataUriToArrayBuffer } from "./lib/dataUri";
 import {
-  ChatPanel,
   type ChatMessage,
   type ChatMessageSelection,
 } from "./components/chat/ChatPanel";
-import { PhotoUpload } from "./components/upload/PhotoUpload";
 import { ModelViewer, type ModelViewerHandle, type LoadResult } from "./components/viewer/ModelViewer";
 import { PickLayer } from "./components/viewer/PickLayer";
 import { resolvePointPick } from "./components/viewer/ModelViewer";
-import { DimensionCanvas } from "./components/canvas/DimensionCanvas";
 import { Export3MF } from "./components/export/Export3MF";
 import { compositeMarkedPng, stripDataUrlPrefix } from "./lib/markedPng";
-import { MARKER_COLOR } from "./lib/marker";
 import { displayDesignLoopError, type DisplayError } from "./lib/errorMapping";
+import { ConversationPane } from "./components/chat/ConversationPane";
+import { RegionEditBar } from "./components/region/RegionEditBar";
 import {
   ApiClient,
   type RegionEditViewId,
@@ -65,12 +63,14 @@ import { Brief } from "./components/brief/Brief";
 import { PassCard } from "./components/chat/PassCard";
 import { Composer } from "./components/chat/Composer";
 import { PassProgress } from "./components/progress/PassProgress";
+void PassProgress;
 import {
   INITIAL_VIEW_PROGRESS,
   reduceViewProgress,
   type ViewProgressState,
 } from "./lib/viewProgress";
 import { FailureCard } from "./components/failure/FailureCard";
+void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
@@ -1353,92 +1353,14 @@ export default function App({ client }: AppProps) {
       {/* Layer 20 — the conversation (chat + upload + errors). Floats over
           the canvas; costs no layout height. Collapses to a RAIL by
           choice (conversationCollapsed) — the last summary stays legible.
-          Hidden by backslash (panelsHidden). */}
+          Hidden by backslash (panelsHidden). The docked/floating pane shell
+          is the ConversationPane component (issue #195); the collapse
+          control stays in App.tsx — the W191 design-contripwire slices its
+          source here. */}
       {!panelsHidden && (
-        <div
-          className="app-left"
-          data-testid="app-left-pane"
-          style={
-            conversationDocked
-              ? {
-                  // Issue #194 docked layout: a full-width bar across the
-                  // bottom band. The canvas keeps 100% − 48vh above it, so
-                  // the pane (and the failure card inside it) can no longer
-                  // overlap the build plate; the filmstrip keeps its
-                  // bottom inset inside that band (its own box, unchanged).
-                  position: "absolute",
-                  left: 0,
-                  right: 0,
-                  bottom: 0,
-                  width: "100%",
-                  height: `${CONVERSATION_DOCK_HEIGHT_VH}vh`,
-                  zIndex: Z_INDEX.conversation,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 12,
-                  padding: 12,
-                  minWidth: 0,
-                  overflowY: "auto",
-                  boxSizing: "border-box",
-                  borderTop: "1px solid var(--color-hairline)",
-                  background:
-                    "color-mix(in srgb, var(--color-panel) 92%, transparent)",
-                }
-              : {
-                  position: "absolute",
-                  top: OVERLAY_INSET_PX,
-                  left: OVERLAY_INSET_PX,
-                  width: conversationCollapsed ? 240 : 420,
-                  // The pane's bottom stops clear of the filmstrip's box: the
-                  // filmstrip sits at the bottom inset with a 96px track, and
-                  // the pane must not cover the filmstrip's expand mark — the
-                  // history sheet's only entry point (issue #184). The calc
-                  // reserves, in order: the top inset (24), the filmstrip's
-                  // 96px track, the bottom inset (24), plus a 12px clear gap
-                  // above the track and a 12px clear gap below the top inset.
-                  // Total 168; at the 640 floor the pane spans 24→496,
-                  // leaving 24px above the track's top (520) and the full
-                  // filmstrip box (520→616) unobstructed.
-                  height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
-                  zIndex: Z_INDEX.conversation,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 12,
-                  minWidth: 0,
-                  overflowY: "auto",
-                  boxSizing: "border-box",
-                }
-          }
-        >
-          {conversationDocked && (
-            <div
-              data-testid="conversation-docked-notice"
-              style={{ flex: "0 0 auto", fontSize: 12, color: "var(--color-fg-2)" }}
-            >
-              {copy.shell.conversationDocked}
-            </div>
-          )}
-          {/* The conversation rail: collapsed keeps the last summary
-              legible (copy.shell.conversationCollapsed). */}
-          {conversationCollapsed ? (
-            <button
-              type="button"
-              data-testid="conversation-rail"
-              onClick={() => setConversationCollapsed(false)}
-              style={{
-                padding: "8px 12px",
-                border: "1px solid var(--color-hairline)",
-                borderRadius: 8,
-                background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
-                color: "var(--color-fg)",
-                cursor: "pointer",
-                textAlign: "left",
-              }}
-            >
-              {copy.shell.conversationCollapsed(messages.length)} · {copy.shell.openConversation}
-            </button>
-          ) : (
-            <>
+        <ConversationPane
+          header={
+            !conversationCollapsed ? (
               <div data-testid="conversation-header" style={{ display: "flex", justifyContent: "flex-end" }}>
                 <button
                   type="button"
@@ -1478,77 +1400,38 @@ export default function App({ client }: AppProps) {
                   </svg>
                 </button>
               </div>
-              <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
-                {/* Issue #194: the filmstrip lives INSIDE the docked bar —
-                    the same component and the same wiring as the floating
-                    instance (which is absent in the docked case, so exactly
-                    one strip renders), rendered in normal flow above the
-                    conversation content. The pane no longer covers the
-                    strip's box, so the expand marks stay reachable. */}
-                {conversationDocked && projectId !== null && (
-                  <Filmstrip
-                    versions={versions}
-                    passInFlight={designLoopInFlight}
-                    pendingName={lastUserMessageRef.current || null}
-                    inset={0}
-                    docked
-                    onCompareSelect={handleCompareSelect}
-                    onOpenSheet={(id) => setSheetOpenFor(id)}
-                    sheetOpenFor={sheetOpenFor}
-                  />
-                )}
-                <ChatPanel
-                  messages={messages}
-                  onSend={handleSendMessage}
-                  inFlight={designLoopInFlight}
-                  onBesidePhoto={handleBesidePhoto}
-                  envelope={envelope}
-                  keptVersion={
-                    versions.length > 0 ? versions[versions.length - 1].name : null
-                  }
-                  hideComposer={isFirstRun}
-                />
-                {designLoopInFlight && (
-                  <PassProgress
-                    step={designLoopStep}
-                    elapsed={designLoopElapsed}
-                    viewProgress={viewProgress}
-                  />
-                )}
-                {streamError && <FailureCard error={streamError} />}
-              </div>
-            </>
-          )}
-          <PhotoUpload
-            projectId={projectId ?? undefined}
-            onUploaded={handlePhotoUploaded}
-            onError={(msg) =>
-              setStreamError({
-                message: msg,
-                detail: undefined,
-                retryable: false,
-              })
-            }
-          />
-          {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
-            <DimensionCanvas
-              photoSrc={photoSrc}
-              photoWidth={photoDimensions.width}
-              photoHeight={photoDimensions.height}
-            />
-          )}
-          {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
-            <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
-              Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
-            </div>
-          )}
-          {/* The sheet is a STAGE-LEVEL sibling (see the stage-level render
-              site below): in the docked layout it occupies the canvas band
-              above this bar (top = the inset, bottom = band height +
-              inset), never a child of the bar — the bar is positioned, so
-              a child's top/bottom would resolve against the bar, not the
-              stage (the issue #194 adversarial-fix defect). */}
-        </div>
+            ) : null
+          }
+          docked={conversationDocked}
+          collapsed={conversationCollapsed}
+          onCollapsedChange={setConversationCollapsed}
+          projectId={projectId}
+          messages={messages}
+          onSend={handleSendMessage}
+          inFlight={designLoopInFlight}
+          onBesidePhoto={handleBesidePhoto}
+          envelope={envelope}
+          hideComposer={isFirstRun}
+          lastUserMessage={lastUserMessageRef.current}
+          versions={versions}
+          onCompareSelect={handleCompareSelect}
+          onOpenSheet={(id) => setSheetOpenFor(id)}
+          sheetOpenFor={sheetOpenFor}
+          designLoopStep={designLoopStep}
+          designLoopElapsed={designLoopElapsed}
+          viewProgress={viewProgress}
+          streamError={streamError}
+          photoSrc={photoSrc}
+          photoDimensions={photoDimensions}
+          onPhotoUploaded={handlePhotoUploaded}
+          onPhotoError={(msg) =>
+            setStreamError({
+              message: msg,
+              detail: undefined,
+              retryable: false,
+            })
+          }
+        />
       )}
 
       {/* Layer 10 — the Brief chip / full panel. The Brief renders as a
@@ -1630,240 +1513,20 @@ export default function App({ client }: AppProps) {
 
       {/* Layer 30 — the region-edit bar, anchored to the pin (issue #129).
           A STAGE-LEVEL SIBLING (not a child of .viewer-pane) at the pin+bar
-          z-index. The bar's position is computed from the pin's position in
-          the viewport and the viewport size — placed in the quadrant OPPOSITE
-          the pin relative to the viewport centre; if that placement overflows,
-          it is clamped to the viewport edge AND the leader line reverses
-          (flipped = true). The bar never intersects the pin. The leader line
-          connects the pin to the bar — a thin 1px line in the marker colour,
-          which is the only place the marker legitimately belongs in the bar.
-          The bar dims (opacity 0.5) while the pin is in orbiting state. */}
-      {pendingSelection && !panelsHidden && (() => {
-        const pin = pendingSelection.point;
-        const { width: vw, height: vh } = viewportSize;
-        // The bar's width is fixed at 320px (the spec's gap-gate answer: a
-        // fixed width, clamped against the viewport). Height is derived from
-        // the bar's content (thumbnail 32 + input + buttons + module chip +
-        // hint); the tests pin the width, so the height is a measurement —
-        // the clamp uses the viewport's available space, not a magic height.
-        const BAR_WIDTH = 320;
-        const BAR_GAP = 12; // gap between pin and bar edge
-        const cx = vw / 2;
-        const cy = vh / 2;
-        // Quadrant: opposite the pin relative to the viewport centre.
-        // pin above-centre-left → bar bottom-right, etc.
-        const pinLeft = pin.x < cx;
-        const pinUp = pin.y < cy;
-        // Default position: the quadrant opposite the pin.
-        // If pin is upper-left, bar goes lower-right, and vice versa.
-        let barLeft: number;
-        let barTop: number;
-        // The bar's box: width BAR_WIDTH, height estimated at 120px
-        // (32px thumbnail + 8px gap + 24px input row + 4px gap + 16px module
-        // chip + 4px gap + 20px hint ≈ 90px content + 16px padding + border).
-        const BAR_HEIGHT = 120;
-        if (pinUp) {
-          barTop = cy + BAR_GAP; // bar in lower half
-        } else {
-          barTop = cy - BAR_GAP - BAR_HEIGHT; // bar in upper half
-        }
-        if (pinLeft) {
-          barLeft = cx + BAR_GAP; // bar in right half
-        } else {
-          barLeft = cx - BAR_GAP - BAR_WIDTH; // bar in left half
-        }
-        // Clamp: the bar's box must stay within the viewport.
-        const clampedLeft = Math.max(4, Math.min(barLeft, vw - BAR_WIDTH - 4));
-        const clampedTop = Math.max(4, Math.min(barTop, vh - BAR_HEIGHT - 4));
-        const clamped = clampedLeft !== barLeft || clampedTop !== barTop;
-        // The leader line goes from the pin to the bar's nearest edge.
-        // When clamped, the leader reverses: it points FROM the bar TO the pin,
-        // not from the pin to the bar's default (uncropped) position.
-        const leaderStartX = pin.x;
-        const leaderStartY = pin.y;
-        const leaderEndX = clamped ? pin.x : (pinLeft ? clampedLeft : clampedLeft + BAR_WIDTH);
-        const leaderEndY = clamped ? pin.y : (pinUp ? clampedTop + BAR_HEIGHT : clampedTop);
-        const dimmed = orbitingPin || orbitClearedPin;
-        const moduleChip = pendingSelection.moduleIds.length > 0
-          ? pendingSelection.moduleIds[0]
-          : null;
-        return (
-          <>
-            {/* The leader line — a thin 1px line in the marker colour.
-                The bar is at z-index 30; the leader is part of the bar's
-                visual unit and sits at the same z-index. The line goes from
-                the pin to the bar's nearest edge (default) or from the bar
-                to the pin (flipped — the pin is the "source" the line points
-                back to). */}
-            <svg
-              data-testid="region-edit-leader"
-              style={{
-                position: "absolute",
-                left: 0,
-                top: 0,
-                width: vw,
-                height: vh,
-                pointerEvents: "none",
-                zIndex: Z_INDEX.pinAndBar,
-              }}
-              aria-hidden="true"
-            >
-              <line
-                x1={leaderStartX}
-                y1={leaderStartY}
-                x2={leaderEndX}
-                y2={leaderEndY}
-                stroke={MARKER_COLOR}
-                strokeWidth={1}
-                strokeOpacity={0.6}
-              />
-            </svg>
-            <form
-              className="region-edit-bar"
-              data-testid="region-edit-bar"
-              role="group"
-              data-flipped={clamped ? "true" : "false"}
-              style={{
-                position: "absolute",
-                left: clampedLeft,
-                top: clampedTop,
-                width: BAR_WIDTH,
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-                padding: "8px 12px",
-                backgroundColor: "rgba(0, 0, 0, 0.8)",
-                borderRadius: 8,
-                boxSizing: "border-box",
-                zIndex: Z_INDEX.pinAndBar,
-                opacity: dimmed ? 0.5 : 1,
-                transition: "opacity 120ms ease",
-              }}
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleRegionBarSubmit();
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <img
-                  src={pendingSelection.thumbnail}
-                  alt={`pending selection on ${pendingSelection.viewId}`}
-                  className="pending-selection-thumbnail"
-                  data-testid="pending-selection-thumbnail"
-                  style={{
-                    width: 32,
-                    height: 32,
-                    maxWidth: 200,
-                    objectFit: "cover",
-                    flex: "0 0 auto",
-                  }}
-                />
-                <input
-                  type="text"
-                  className="region-edit-input"
-                  data-testid="region-edit-input"
-                  placeholder={copy.region.placeholder}
-                  value={regionBarText}
-                  onChange={(e) => setRegionBarText(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") handleCancelPendingSelection();
-                  }}
-                  autoFocus
-                  style={{
-                    flex: "1 1 auto",
-                    minWidth: 0,
-                    padding: "4px 8px",
-                    border: "none",
-                    borderRadius: 4,
-                    backgroundColor: "rgba(255, 255, 255, 0.95)",
-                    color: "#1f2328",
-                  }}
-                />
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  type="submit"
-                  className="region-edit-apply-btn"
-                  data-testid="region-edit-apply-btn"
-                  aria-label={copy.region.apply}
-                  disabled={regionBarText.trim().length === 0}
-                  style={{
-                    flex: "0 0 auto",
-                    padding: "4px 12px",
-                    border: "none",
-                    borderRadius: 4,
-                    backgroundColor: "#0969da",
-                    color: "#ffffff",
-                    cursor: regionBarText.trim().length === 0 ? "not-allowed" : "pointer",
-                    opacity: regionBarText.trim().length === 0 ? 0.5 : 1,
-                  }}
-                >
-                  {copy.region.apply}
-                </button>
-                <button
-                  type="button"
-                  className="region-edit-cancel-btn"
-                  data-testid="pending-selection-cancel-btn"
-                  aria-label={copy.region.cancel}
-                  onClick={handleCancelPendingSelection}
-                  style={{
-                    flex: "0 0 auto",
-                    padding: "4px 12px",
-                    border: "none",
-                    borderRadius: 4,
-                    backgroundColor: "rgba(255, 255, 255, 0.2)",
-                    color: "#ffffff",
-                    cursor: "pointer",
-                  }}
-                >
-                  {copy.region.cancel}
-                </button>
-              </div>
-              {/* The resolved module chip + the pose hint. The module name
-                  is in mono (the raw detail); the sentence is in the UI face. */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                {moduleChip !== null && (
-                  <span
-                    data-testid="region-edit-module-chip"
-                    style={{
-                      fontFamily: "var(--font-mono)",
-                      fontSize: 11,
-                      color: "var(--color-fg-2)",
-                      padding: "2px 6px",
-                      background: "rgba(255,255,255,0.08)",
-                      borderRadius: 4,
-                      display: "inline-block",
-                      width: "fit-content",
-                    }}
-                  >
-                    {moduleChip}
-                    {" "}
-                    {copy.region.resolvedTo}
-                  </span>
-                )}
-                <span
-                  data-testid="region-edit-pose-hint"
-                  style={{ fontSize: 11, color: "var(--color-muted)" }}
-                >
-                  {copy.region.poseHint}
-                </span>
-                {orbitClearedPin && (
-                  <span
-                    data-testid="region-edit-cleared-hint"
-                    style={{
-                      fontSize: 11,
-                      color: "var(--color-muted)",
-                      marginTop: 2,
-                    }}
-                  >
-                    {copy.region.clearedHint}
-                  </span>
-                )}
-              </div>
-            </form>
-          </>
-        );
-      })()}
+          z-index. The quadrant flip, clamp and leader-flip branches live in
+          the RegionEditBar component (issue #195). */}
+      {pendingSelection && !panelsHidden && (
+        <RegionEditBar
+          selection={pendingSelection}
+          viewportSize={viewportSize}
+          text={regionBarText}
+          onTextChange={setRegionBarText}
+          onSubmit={handleRegionBarSubmit}
+          onCancel={handleCancelPendingSelection}
+          orbitingPin={orbitingPin}
+          orbitClearedPin={orbitClearedPin}
+        />
+      )}
 
       {/* Selection notice — a CONTENT surface inside the conversation
           layer, not a separate z-index tier. */}
