@@ -106,6 +106,13 @@ const FLOOR_WIDTH_PX = 1024;
 const FLOOR_HEIGHT_PX = 640;
 const BRIEF_CHIP_MAX_WIDTH_PX = 1200;
 const BRIEF_CHIP_MAX_HEIGHT_PX = 820;
+// The adaptive threshold (issue #194): below 900px of window height the
+// conversation pane can no longer clear the build plate as a top-left
+// float, so it docks to the bottom (full width, 48vh tall) where the
+// canvas stays above it. 900 leaves every viewport at or above the
+// 640px floor plenty of room to use either layout — the ticket's target
+// size (1024 × 640) takes the docked layout.
+const CONVERSATION_DOCK_MAX_HEIGHT_PX = 900;
 
 // RenderImage now lives in lib/renderImage.ts (issue #116 — the shared
 // shape App and the pass-card surface both need); re-exported here for
@@ -293,6 +300,16 @@ export default function App({ client }: AppProps) {
   const briefIsChip =
     windowSize.width < BRIEF_CHIP_MAX_WIDTH_PX ||
     windowSize.height < BRIEF_CHIP_MAX_HEIGHT_PX;
+  // Issue #194: at short viewports the conversation docks to the bottom
+  // (full width, 48vh) instead of floating top-left, where its box and
+  // the composer at its bottom edge sit over the build plate and the
+  // Send button lands on the cube. The dock is the layout, not a
+  // collapse: the pane, the composer and any failure card move to a
+  // band clear of the canvas (the canvas is 100% − 48vh at that point).
+  // The user-initiated rail (conversationCollapsed) is independent and
+  // still works inside the docked bar.
+  const conversationDocked =
+    windowSize.height < CONVERSATION_DOCK_MAX_HEIGHT_PX;
 
   // Region-selection (point pick) wiring (issue #98).
   const viewerHandleRef = useRef<ModelViewerHandle | null>(null);
@@ -1337,30 +1354,66 @@ export default function App({ client }: AppProps) {
         <div
           className="app-left"
           data-testid="app-left-pane"
-          style={{
-            position: "absolute",
-            top: OVERLAY_INSET_PX,
-            left: OVERLAY_INSET_PX,
-            width: conversationCollapsed ? 240 : 420,
-            // The pane's bottom stops clear of the filmstrip's box: the
-            // filmstrip sits at the bottom inset with a 96px track, and the
-            // pane must not cover the filmstrip's expand mark — the history
-            // sheet's only entry point (issue #184). The calc reserves, in
-            // order: the top inset (24), the filmstrip's 96px track, the
-            // bottom inset (24), plus a 12px clear gap above the track and
-            // a 12px clear gap below the top inset. Total 168; at the 640
-            // floor the pane spans 24→496, leaving 24px above the track's
-            // top (520) and the full filmstrip box (520→616) unobstructed.
-            height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
-            zIndex: Z_INDEX.conversation,
-            display: "flex",
-            flexDirection: "column",
-            gap: 12,
-            minWidth: 0,
-            overflowY: "auto",
-            boxSizing: "border-box",
-          }}
+          style={
+            conversationDocked
+              ? {
+                  // Issue #194 docked layout: a full-width bar across the
+                  // bottom band. The canvas keeps 100% − 48vh above it, so
+                  // the pane (and the failure card inside it) can no longer
+                  // overlap the build plate; the filmstrip keeps its
+                  // bottom inset inside that band (its own box, unchanged).
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  width: "100%",
+                  height: "48vh",
+                  zIndex: Z_INDEX.conversation,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                  padding: 12,
+                  minWidth: 0,
+                  overflowY: "auto",
+                  boxSizing: "border-box",
+                  borderTop: "1px solid var(--color-hairline)",
+                  background:
+                    "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+                }
+              : {
+                  position: "absolute",
+                  top: OVERLAY_INSET_PX,
+                  left: OVERLAY_INSET_PX,
+                  width: conversationCollapsed ? 240 : 420,
+                  // The pane's bottom stops clear of the filmstrip's box: the
+                  // filmstrip sits at the bottom inset with a 96px track, and
+                  // the pane must not cover the filmstrip's expand mark — the
+                  // history sheet's only entry point (issue #184). The calc
+                  // reserves, in order: the top inset (24), the filmstrip's
+                  // 96px track, the bottom inset (24), plus a 12px clear gap
+                  // above the track and a 12px clear gap below the top inset.
+                  // Total 168; at the 640 floor the pane spans 24→496,
+                  // leaving 24px above the track's top (520) and the full
+                  // filmstrip box (520→616) unobstructed.
+                  height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
+                  zIndex: Z_INDEX.conversation,
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 12,
+                  minWidth: 0,
+                  overflowY: "auto",
+                  boxSizing: "border-box",
+                }
+          }
         >
+          {conversationDocked && (
+            <div
+              data-testid="conversation-docked-notice"
+              style={{ flex: "0 0 auto", fontSize: 12, color: "var(--color-fg-2)" }}
+            >
+              {copy.shell.conversationDocked}
+            </div>
+          )}
           {/* The conversation rail: collapsed keeps the last summary
               legible (copy.shell.conversationCollapsed). */}
           {conversationCollapsed ? (
@@ -1422,6 +1475,24 @@ export default function App({ client }: AppProps) {
                 </button>
               </div>
               <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+                {/* Issue #194: the filmstrip lives INSIDE the docked bar —
+                    the same component and the same wiring as the floating
+                    instance (which is absent in the docked case, so exactly
+                    one strip renders), rendered in normal flow above the
+                    conversation content. The pane no longer covers the
+                    strip's box, so the expand marks stay reachable. */}
+                {conversationDocked && projectId !== null && (
+                  <Filmstrip
+                    versions={versions}
+                    passInFlight={designLoopInFlight}
+                    pendingName={lastUserMessageRef.current || null}
+                    inset={0}
+                    docked
+                    onCompareSelect={handleCompareSelect}
+                    onOpenSheet={(id) => setSheetOpenFor(id)}
+                    sheetOpenFor={sheetOpenFor}
+                  />
+                )}
                 <ChatPanel
                   messages={messages}
                   onSend={handleSendMessage}
@@ -1467,6 +1538,25 @@ export default function App({ client }: AppProps) {
               Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
             </div>
           )}
+          {/* Issue #194: in the docked case the strip's expand mark opens
+              the sheet OVER the docked bar (top = the band's height + the
+              inset) so the sheet is never hidden behind the pane. The
+              floating instance above keeps its default top position for
+              the non-docked case. */}
+          {conversationDocked && projectId !== null && sheetOpenFor !== null && (
+            <HistorySheet
+              versions={versions}
+              compareIds={compareIds}
+              compareResult={compareResult}
+              compareError={compareError}
+              inset={OVERLAY_INSET_PX}
+              sheetTopOffset={0.48 * windowSize.height + OVERLAY_INSET_PX}
+              onRestore={handleVersionRestore}
+              onPin={handleVersionPin}
+              onCompareSelect={handleCompareSelect}
+              onClose={() => setSheetOpenFor(null)}
+            />
+          )}
         </div>
       )}
 
@@ -1490,8 +1580,13 @@ export default function App({ client }: AppProps) {
           layer of its own. The strip is absent (not empty) until a version
           exists or a pass is in flight. The pass-in-flight flag drives the
           dashed pending slot so the strip is never behind the conversation.
-          The sheet (W16) is reached FROM the strip's expand mark. */}
-      {!panelsHidden && projectId !== null && (
+          The sheet (W16) is reached FROM the strip's expand mark. Issue
+          #194: while the conversation is docked, the strip moves INSIDE the
+          docked bar (a full-width row above the conversation content) —
+          otherwise the pane's full-width band would cover the strip's box
+          and its expand marks (the issue #184 hit-target class this
+          ticket fixes must not be reintroduced by the dock). */}
+      {!panelsHidden && projectId !== null && !conversationDocked && (
         <Filmstrip
           versions={versions}
           passInFlight={designLoopInFlight}

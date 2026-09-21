@@ -35,6 +35,11 @@ interface FilmstripProps {
   pendingName: string | null;
   /** The top/left inset from the stage edge (px). */
   inset: number;
+  /** Issue #194: docked inside the conversation bar instead of absolutely
+   *  positioned at the stage's bottom-left corner (the docked pane's own
+   *  full-width band would otherwise cover the strip's box). Renders in
+   *  normal flow of the bar's flex column. */
+  docked?: boolean;
   /** Called with the version id (compare-select). The strip selects only. */
   onCompareSelect: (versionId: number) => void;
   /** Called when a version's expand mark is clicked (opens the sheet). */
@@ -99,6 +104,7 @@ export function Filmstrip({
   passInFlight,
   pendingName,
   inset,
+  docked,
   onCompareSelect,
   onOpenSheet,
   sheetOpenFor,
@@ -117,12 +123,21 @@ export function Filmstrip({
     <div
       className="version-tail-pane filmstrip"
       data-testid="version-filmstrip"
-      style={{
-        position: "absolute",
-        bottom: inset,
-        left: inset,
-        zIndex: 10,
-      }}
+      style={
+        docked
+          ? {
+              position: "relative",
+              flex: "0 0 auto",
+              width: "100%",
+              zIndex: 10,
+            }
+          : {
+              position: "absolute",
+              bottom: inset,
+              left: inset,
+              zIndex: 10,
+            }
+      }
     >
       <div
         className="filmstrip-track"
