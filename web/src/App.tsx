@@ -1775,6 +1775,7 @@ export default function App({ client }: AppProps) {
             projectId={projectId}
             projectName={projectName}
             versionId={versions.length > 0 ? versions[versions.length - 1].id : undefined}
+            inFlight={designLoopInFlight}
             client={apiClient}
             onExported={(vid) => void handleExported(vid)}
           />
