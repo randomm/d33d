@@ -139,6 +139,33 @@ test("small viewport: the conversation docks and the Send button stays pointer-r
     );
   }
 
+  // -- The docked history sheet occupies the canvas band (issue #194
+  // adversarial fix) ----------------------------------------------
+  // Regression guard for the layout defect that made the docked sheet
+  // render with a NEGATIVE height: rendered as a child of the docked pane
+  // (a positioned element, the sheet's containing block), the sheet's
+  // top offset (band height + inset) resolved against the PANE, so at
+  // 1024 × 640 its top landed at 664px with its bottom at 616px — the
+  // sheet was off-screen, invisible, and non-interactable (a silent
+  // failure: click the expand mark, state flips, nothing appears). This
+  // is the check that catches the defect — jsdom cannot lay out and so
+  // cannot see a negative-height box; a real browser can.
+  await page.getByTestId("filmstrip-expand-1").click();
+  const sheet = page.getByTestId("history-sheet");
+  await expect(sheet).toBeVisible();
+  const sheetBox = await sheet.boundingBox();
+  expect(sheetBox, "the docked sheet must have a real bounding box").not.toBeNull();
+  if (sheetBox) {
+    // A positive height and an on-screen position: the sheet occupies the
+    // canvas band above the bar, not a zero/negative-height box below it.
+    expect(sheetBox.height, "the docked sheet must have height > 0").toBeGreaterThan(0);
+    expect(sheetBox.y, "the docked sheet must not start below the viewport").toBeGreaterThanOrEqual(0);
+    expect(sheetBox.y + sheetBox.height, "the docked sheet must fit in the canvas band")
+      .toBeLessThanOrEqual(pageBox.h);
+    expect(sheetBox.y + sheetBox.height, "the docked sheet must clear the bar")
+      .toBeLessThanOrEqual(barBox!.y + 2);
+  }
+
   // -- The acceptance criterion: a GENUINE pointer click at the centre of
   // chat-send-btn's bounding box is delivered to chat-send-btn (not the
   // plate/canvas behind it). Playwright's actionability check performs a
@@ -180,6 +207,17 @@ test("small viewport: the conversation docks and the Send button stays pointer-r
   // (24, 24); the docked bar and its caption are absent.
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(page.getByTestId("conversation-docked-notice")).toHaveCount(0);
+  // The floating sheet keeps both edges at the inset (the docked bar
+  // does not exist to clear, so no bottom offset is needed).
+  const floatSheet = page.getByTestId("history-sheet");
+  const floatSheetBox = await floatSheet.boundingBox();
+  expect(floatSheetBox, "the floating sheet must have a real bounding box").not.toBeNull();
+  if (floatSheetBox) {
+    expect(floatSheetBox.height, "the floating sheet must have height > 0").toBeGreaterThan(0);
+    expect(floatSheetBox.y, "the floating sheet's top must be at the inset").toBeGreaterThanOrEqual(22);
+    expect(floatSheetBox.y + floatSheetBox.height, "the floating sheet's bottom must clear the inset")
+      .toBeLessThanOrEqual(900 - 22);
+  }
   const floatBox = await page.getByTestId("app-left-pane").boundingBox();
   expect(floatBox).not.toBeNull();
   if (floatBox) {

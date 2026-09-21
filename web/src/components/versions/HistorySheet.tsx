@@ -50,11 +50,14 @@ interface HistorySheetProps {
   compareError: string | null;
   /** The inset from the stage edge (px). */
   inset: number;
-  /** Issue #194: the sheet's top offset (px from the stage top). The
-   *  default keeps the sheet at the top inset; when the conversation is
-   *  docked at the bottom the parent passes the docked band's height so
-   *  the sheet opens ABOVE the bar instead of behind it. */
-  sheetTopOffset?: number;
+  /** Issue #194: the sheet's BOTTOM offset from the stage edge (px). The
+   *  default keeps the sheet inset on both edges (the floating layout);
+   *  when the conversation is docked at the bottom the parent passes the
+   *  bar-clearing value (band height + inset) so the sheet occupies the
+   *  canvas band above the bar. The top always stays at the inset — the
+   *  sheet is a stage-level sibling, so its offsets resolve against the
+   *  stage, never against the docked pane. */
+  sheetBottomOffset?: number;
   /** Called with the version id to restore (a new forward version). */
   onRestore: (versionId: number) => void;
   /** Called with (versionId, shouldPin). */
@@ -71,7 +74,7 @@ export function HistorySheet({
   compareResult,
   compareError,
   inset,
-  sheetTopOffset,
+  sheetBottomOffset,
   onRestore,
   onPin,
   onCompareSelect,
@@ -84,9 +87,9 @@ export function HistorySheet({
       aria-label="History sheet"
       style={{
         position: "absolute",
-        top: sheetTopOffset ?? inset,
+        top: inset,
         right: inset,
-        bottom: inset,
+        bottom: sheetBottomOffset ?? inset,
         width: 360,
         zIndex: 10,
         overflowY: "auto",

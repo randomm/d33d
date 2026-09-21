@@ -1542,25 +1542,12 @@ export default function App({ client }: AppProps) {
               Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
             </div>
           )}
-          {/* Issue #194: in the docked case the strip's expand mark opens
-              the sheet OVER the docked bar (top = the band's height + the
-              inset) so the sheet is never hidden behind the pane. The
-              floating instance above keeps its default top position for
-              the non-docked case. */}
-          {conversationDocked && projectId !== null && sheetOpenFor !== null && (
-            <HistorySheet
-              versions={versions}
-              compareIds={compareIds}
-              compareResult={compareResult}
-              compareError={compareError}
-              inset={OVERLAY_INSET_PX}
-              sheetTopOffset={(CONVERSATION_DOCK_HEIGHT_VH / 100) * windowSize.height + OVERLAY_INSET_PX}
-              onRestore={handleVersionRestore}
-              onPin={handleVersionPin}
-              onCompareSelect={handleCompareSelect}
-              onClose={() => setSheetOpenFor(null)}
-            />
-          )}
+          {/* The sheet is a STAGE-LEVEL sibling (see the stage-level render
+              site below): in the docked layout it occupies the canvas band
+              above this bar (top = the inset, bottom = band height +
+              inset), never a child of the bar — the bar is positioned, so
+              a child's top/bottom would resolve against the bar, not the
+              stage (the issue #194 adversarial-fix defect). */}
         </div>
       )}
 
@@ -1608,14 +1595,32 @@ export default function App({ client }: AppProps) {
           actions. It is an overlay, not a route or a page, at the panels
           layer (10) — the same layer as the filmstrip it is opened from.
           It replaces the transitional VersionTail rail: compare, restore
-          and pin are all reachable here, so the rail retires. */}
-      {!panelsHidden && projectId !== null && !conversationDocked && sheetOpenFor !== null && (
+          and pin are all reachable here, so the rail retires.
+
+          ONE render site for both layouts (issue #194 adversarial fix):
+          the sheet is a stage-level sibling in both, so its top/bottom
+          resolve against the stage. When docked it sits in the canvas
+          band ABOVE the bar (top = the inset; bottom = the band's height
+          + the inset, derived from CONVERSATION_DOCK_HEIGHT_VH) — never
+          inside the bar, because the positioned bar would be its
+          containing block and the offsets would stack. The bar (20) is
+          below the canvas band, so no overlap can occur; the sheet
+          deliberately stays at the panels layer (10) — the closed
+          z-index set {0,10,20,30} admits no other value (W7), and the
+          sheet has no business outranking the conversation or the
+          region-edit bar in the first place. */}
+      {!panelsHidden && projectId !== null && sheetOpenFor !== null && (
         <HistorySheet
           versions={versions}
           compareIds={compareIds}
           compareResult={compareResult}
           compareError={compareError}
           inset={OVERLAY_INSET_PX}
+          sheetBottomOffset={
+            conversationDocked
+              ? (CONVERSATION_DOCK_HEIGHT_VH / 100) * windowSize.height + OVERLAY_INSET_PX
+              : undefined
+          }
           onRestore={handleVersionRestore}
           onPin={handleVersionPin}
           onCompareSelect={handleCompareSelect}

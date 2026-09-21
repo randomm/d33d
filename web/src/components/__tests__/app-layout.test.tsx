@@ -2758,6 +2758,50 @@ describe("App region-selection (point pick) wiring", () => {
       expect(screen.getAllByTestId("history-sheet")).toHaveLength(1);
     });
 
+    it("places the docked history sheet in the CANVAS BAND above the bar (issue #194 adversarial fix)", async () => {
+      // Regression: with the sheet rendered as a CHILD of the docked pane
+      // (a positioned element), the pane was the sheet's containing block,
+      // so the sheet's top offset (band height + inset) resolved AGAINST
+      // the pane, not the stage: at 1024 × 640 the sheet's top landed at
+      // 664px with its bottom at 616px — a negative height, an invisible,
+      // non-interactable sheet. The sheet is now a stage-level sibling whose
+      // inline box is the canvas band: top = the small inset, bottom = the
+      // bar-clearing offset (48vh + inset). jsdom cannot lay out, but it can
+      // read inline styles — the defect is arithmetic, not layout.
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      const sheets = await screen.findAllByTestId("history-sheet");
+      expect(sheets).toHaveLength(1);
+      // The sheet is a STAGE-level sibling — its containing block is the
+      // stage, not the docked pane (the defect made the pane the containing
+      // block, so the offsets below would be meaningless).
+      expect(sheets[0].parentElement).toBe(screen.getByTestId("app-stage"));
+      // top: the small inset (24px) — the sheet opens at the top of the
+      // canvas band, NOT 331.2px below the stage top.
+      expect(sheets[0].style.top).toBe("24px");
+      // bottom: the bar-clearing value — 0.48 × 640 + 24 = 331.2px, so the
+      // sheet's box is [24, 308.8] in the stage (height 284.8px > 0), fully
+      // above the bar which starts at 332.8px.
+      expect(sheets[0].style.bottom).toBe("331.2px");
+    });
+
+    it("keeps the floating history sheet inset on both edges when the conversation floats", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      const sheets = await screen.findAllByTestId("history-sheet");
+      expect(sheets).toHaveLength(1);
+      expect(sheets[0].parentElement).toBe(screen.getByTestId("app-stage"));
+      // The floating layout is unchanged: both edges at the small inset.
+      expect(sheets[0].style.top).toBe("24px");
+      expect(sheets[0].style.bottom).toBe("24px");
+    });
+
     it("the failure card renders inside the docked bar at 1024 × 640 (no plate overlap band above it)", async () => {
       defineWindow(1024, 640);
       const failingClient = new ApiClient();
