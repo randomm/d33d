@@ -45,6 +45,40 @@ describe("FirstRun", () => {
     expect(input.placeholder).toBe(copy.firstRun.placeholder);
   });
 
+  it("keeps the input's placeholder from truncating (issue #193)", () => {
+    render(<FirstRun {...baseProps()} />);
+    const input = screen.getByTestId("first-run-input") as HTMLInputElement;
+    // The placeholder is one long sentence (copy.firstRun.placeholder).
+    // Nothing may clip or ellipsize it: no overflow-hidden on the input, no
+    // text-overflow ellipsis, no fixed min/max width that could collapse it,
+    // and it fills the card's content width (width 100%, border-box).
+    // jsdom cannot measure the ellipsis itself, so this is the structural
+    // assertion the ticket commits to.
+    expect(input.style.overflow).not.toBe("hidden");
+    expect(input.style.textOverflow).not.toBe("ellipsis");
+    expect(input.style.minWidth).toBe("");
+    expect(input.style.maxWidth).toBe("");
+    expect(input.style.width).toBe("100%");
+    expect(input.style.boxSizing).toBe("border-box");
+  });
+
+  it("is not a clipped or scrolling box (issue #193)", () => {
+    render(<FirstRun {...baseProps()} />);
+    // The card is the inner div (the flex-column child), not the outer
+    // absolute-positioned "first-run" wrapper, which carries no background.
+    const card = screen.getByTestId("first-run").firstElementChild as HTMLElement;
+    expect(card).not.toBeNull();
+    // The card must never be a clipped/scrolling box: no auto/scroll
+    // overflow, no fixed max-height, and its width and box model keep the
+    // content inside the stage (width is bounded, box is border-box).
+    const overflow = card.style.overflowY ?? card.style.overflow;
+    expect(overflow).not.toBe("auto");
+    expect(overflow).not.toBe("scroll");
+    expect(card.style.maxHeight).not.toMatch(/^\d+(px|rem|vh)$/);
+    expect(card.style.width).toBe("min(560px, 92vw)");
+    expect(card.style.boxSizing).toBe("border-box");
+  });
+
   it("renders the photo button and the Start button", () => {
     render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-photo-btn")).toBeTruthy();

@@ -20,9 +20,15 @@ interface ComposerProps {
   onSend: (text: string) => void;
   /** True while a design loop is in flight — disables the Send button. */
   inFlight?: boolean;
+  /** True → the whole form is not rendered (issue #193 — the first-run
+   *  screen carries its own composer, so the chat's must be absent, not
+   *  hidden-with-CSS: the screen must hold exactly one composer). */
+  hidden?: boolean;
 }
 
-export function Composer({ value, onChange, onSend, inFlight }: ComposerProps) {
+export function Composer({ value, onChange, onSend, inFlight, hidden }: ComposerProps) {
+  if (hidden) return null;
+
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const trimmed = value.trim();

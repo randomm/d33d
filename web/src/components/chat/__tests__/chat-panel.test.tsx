@@ -9,9 +9,19 @@ import { ChatPanel, type ChatMessage, MARKER_COLOR } from "../ChatPanel";
 import type { RenderImage } from "../../../lib/renderImage";
 
 describe("ChatPanel", () => {
-  it("renders empty state with no messages", () => {
+  it("hides the composer while there are no messages (issue #193 — the first-run screen carries it)", () => {
+    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(screen.queryByTestId("chat-send-btn")).toBeNull();
+  });
+
+  it("renders empty state with no messages (panel present, composer hidden — issue #193)", () => {
     render(<ChatPanel messages={[]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-panel")).toBeTruthy();
+  });
+
+  it("shows the composer again once a message exists", () => {
+    render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-input")).toBeTruthy();
   });
 
@@ -29,7 +39,7 @@ describe("ChatPanel", () => {
 
   it("calls onSend with trimmed text when user submits", () => {
     const onSend = vi.fn();
-    render(<ChatPanel messages={[]} onSend={onSend} />);
+    render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={onSend} />);
     const input = screen.getByTestId("chat-input");
     fireEvent.change(input, { target: { value: "  hello  " } });
     fireEvent.submit(input.closest("form")!);
@@ -38,7 +48,7 @@ describe("ChatPanel", () => {
 
   it("does not send empty or whitespace-only messages", () => {
     const onSend = vi.fn();
-    render(<ChatPanel messages={[]} onSend={onSend} />);
+    render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={onSend} />);
     const input = screen.getByTestId("chat-input");
     fireEvent.change(input, { target: { value: "   " } });
     fireEvent.submit(input.closest("form")!);
@@ -107,7 +117,7 @@ describe("ChatPanel", () => {
   });
 
   it("disables send button when input is empty", () => {
-    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
+    render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-send-btn")).toBeDisabled();
   });
 

@@ -159,6 +159,7 @@ export function ChatPanel({
         onChange={setInput}
         onSend={handleSubmit}
         inFlight={inFlight}
+        hidden={messages.length === 0}
       />
     </section>
   );
