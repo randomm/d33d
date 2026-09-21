@@ -426,6 +426,11 @@ interface ModelViewerProps {
    *  announcing its clearance afterwards. Fires from OrbitControls'
    *  `start` event; the `end`/`changed` events are left alone. */
   onOrbitStart?: () => void;
+  /** Suppress the "nothing yet" empty-state overlay. The App sets this
+   *  from its isFirstRun boolean (issue #208) so the overlay and the
+   *  FirstRun card do not both centre themselves in the same viewport.
+   *  The viewer stays mounted regardless — only this overlay is gated. */
+  hideEmptyState?: boolean;
 }
 
 /**
@@ -447,7 +452,7 @@ interface ModelViewerProps {
  *    Vector2())` on the handle is THE single source of the CSS-pixel
  *    viewport size that the pick path reads.
  */
-export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitStart }: ModelViewerProps) {
+export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitStart, hideEmptyState }: ModelViewerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -748,7 +753,7 @@ export function ModelViewer({ data, format, onLoaded, onError, onReady, onOrbitS
           mounted — the "nothing yet" state. It is distinct from the working
           state (the design-loop progress surface) and from a failure (the
           selection notice), so none of the three reads as another. */}
-      {!data && (
+      {!data && !hideEmptyState && (
         <div
           data-testid="viewer-empty"
           role="status"

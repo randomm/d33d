@@ -1301,9 +1301,15 @@ export default function App({ client }: AppProps) {
          * REPLACED by the design loop's rendered STL (streamModelData,
          * from the version-created frame's stl_data_uri) so the browser
          * displays the model the loop actually produced. */}
+        {/* Issue #208: while FirstRun is shown its headline/body occupy
+         * the same centred space as the viewer's empty-state string —
+         * suppress the string (same isFirstRun boolean; never
+         * panelsHidden) so the two never overlap. The viewer element
+         * itself stays mounted. */}
         <ModelViewer
           data={viewerSource.data}
           format={viewerSource.format}
+          hideEmptyState={isFirstRun}
           onReady={handleViewerReady}
           onLoaded={handleViewerLoaded}
           onOrbitStart={handleOrbitStart}

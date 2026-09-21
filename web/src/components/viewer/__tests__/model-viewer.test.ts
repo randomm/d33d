@@ -16,7 +16,7 @@
  * under web/tests/fixtures/viewer/.
  */
 
-import { describe, it, expect, vi, beforeAll } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -48,7 +48,17 @@ vi.mock('three', async () => {
   const mockObject3D = class {
     children: unknown[] = [];
     parent: unknown = null;
-    position = { x: 0, y: 0, z: 0 };
+    position = {
+      x: 0,
+      y: 0,
+      z: 0,
+      set(x: number, y: number, z: number) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        return this;
+      },
+    };
     rotation = {
       x: 0,
       y: 0,
@@ -123,7 +133,9 @@ vi.mock('three', async () => {
     updateProjectionMatrix = vi.fn();
   };
   const mockWebGLRenderer = class {
-    domElement = { parentNode: null } as { parentNode: unknown };
+    domElement = (typeof document !== 'undefined'
+      ? document.createElement('canvas')
+      : { parentNode: null }) as unknown as { parentNode: unknown };
     size = { width: 0, height: 0 };
     setSize = vi.fn();
     setPixelRatio = vi.fn();
@@ -210,6 +222,8 @@ vi.mock('three/addons/controls/OrbitControls.js', () => ({
     maxDistance: Infinity,
     update: vi.fn(),
     dispose: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
   })),
 }));
 
@@ -297,7 +311,9 @@ import {
   disposeObject,
   applyZUpToYUp,
   resolvePointPick,
+  ModelViewer,
 } from '../ModelViewer';
+import copy from '../../../copy';
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -561,6 +577,63 @@ describe('ModelViewer module', () => {
       expect(source).toContain('data-testid="viewer-empty"');
     });
   });
+
+
+    // DOM presence/absence of the overlay (issue #208): the source-string
+    // assertion above could not detect the FirstRun/empty-state overlap —
+    // these render the real component under the three.js mocks and query
+    // the testid in the DOM (jsdom has no layout engine, so this is a
+    // presence/absence check, not a bounding-box overlap check).
+    //
+    // This suite lives in a .ts file (no JSX), so the render calls use
+    // createElement directly. The imports use require() (not top-level
+    // import) to avoid disturbing the vi.mock hoisting that this file
+    // depends on (the mock factories reference the top-level vi import,
+    // and adding a new top-level import shifts the __vi_import_N__ numbers
+    // that the hoisted factories capture).
+    describe('overlay DOM presence (issue #208 hideEmptyState)', () => {
+      const { createElement } = require('react');
+      const { render, screen, cleanup } = require('@testing-library/react');
+
+      afterEach(() => {
+        cleanup();
+      });
+
+      it('renders the overlay when data is null and hideEmptyState is unset', () => {
+        render(createElement(ModelViewer, { data: null, format: 'stl' }));
+        expect(screen.queryByTestId('viewer-empty')).not.toBeNull();
+        expect(screen.getByTestId('viewer-empty').textContent).toBe(
+          copy.shell.viewerEmpty,
+        );
+      });
+
+      it('renders the overlay when data is null and hideEmptyState is false', () => {
+        render(createElement(ModelViewer, { data: null, format: 'stl', hideEmptyState: false }));
+        expect(screen.queryByTestId('viewer-empty')).not.toBeNull();
+      });
+
+      it('suppresses the overlay when data is null and hideEmptyState is true', () => {
+        render(createElement(ModelViewer, { data: null, format: 'stl', hideEmptyState: true }));
+        expect(screen.queryByTestId('viewer-empty')).toBeNull();
+        // The viewer element itself stays mounted (issue #208: suppression
+        // is a render-branch on the overlay, never an unmount of the viewer).
+        expect(screen.getByRole('img', { name: '3D model viewer' })).not.toBeNull();
+      });
+
+      it('stays suppressed across re-renders and reappears when the flag flips back', () => {
+        const view = render(
+          createElement(ModelViewer, { data: null, format: 'stl', hideEmptyState: true }),
+        );
+        expect(screen.queryByTestId('viewer-empty')).toBeNull();
+        // No one-way latch: suppression is a live function of the prop, so
+        // it re-exposes the overlay the moment the flag clears (the
+        // createProject-rejection re-exposure path, issue #208).
+        view.rerender(
+          createElement(ModelViewer, { data: null, format: 'stl', hideEmptyState: false }),
+        );
+        expect(screen.queryByTestId('viewer-empty')).not.toBeNull();
+      });
+    });
 
   // --- OrbitControls ---
 
