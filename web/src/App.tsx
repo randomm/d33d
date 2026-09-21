@@ -185,9 +185,39 @@ export default function App({ client }: AppProps) {
   // expand mark opens it and its close button closes it.
   const [sheetOpenFor, setSheetOpenFor] = useState<number | null>(null);
   // The project's display name — the export filename's slug source
-  // (copy.shell.exportFilename reads it; the App creates the project on
-  // mount and knows it, so the filename is real, never a guess).
+  // (copy.shell.exportFilename reads it). "untitled project" is a PLACEHOLDER
+  // until the project exists (lazy creation, issue #192): the filename is
+  // real, never a guess, because Export3MF only renders once the project
+  // exists and its name has been set from the API's response.
   const [projectName, setProjectName] = useState("untitled project");
+
+  // Lazy project creation (issue #192): no POST /api/projects on mount —
+  // the project is created by the FIRST explicit user action (a chat send,
+  // or a photo upload) and never again for the lifetime of this mount. The
+  // single-flight promise ref is the dedup guard: rapid successive triggers
+  // (Start + Enter + click) share ONE in-flight POST, and every later action
+  // reuses the stored project id.
+  const projectPromiseRef = useRef<Promise<number> | null>(null);
+  const ensureProject = useCallback((): Promise<number> => {
+    if (projectId !== null) return Promise.resolve(projectId);
+    if (projectPromiseRef.current === null) {
+      projectPromiseRef.current = apiClient
+        .createProject({ name: "untitled project" })
+        .then((project) => {
+          setProjectId(project.id);
+          setProjectName(project.name);
+          return project.id;
+        })
+        .catch((e) => {
+          // A failed creation releases the latch so the next action can
+          // retry (one POST per attempt, still at most one per attempt);
+          // the error is surfaced by the caller.
+          projectPromiseRef.current = null;
+          throw e;
+        });
+    }
+    return projectPromiseRef.current;
+  }, [projectId, apiClient]);
 
   // The design-state block (issue #120 / #123) — the Brief's data. Fetched
   // once the project exists and re-fetched on every version-created frame
@@ -596,36 +626,6 @@ export default function App({ client }: AppProps) {
   // carries view geometry on the frame can do a real swap here.
   const handleBesidePhoto = useCallback(() => {}, []);
 
-  // Create the (single, default) project on mount. Once it resolves,
-  // load the version timeline (the side rail) — the project resumes at
-  // its latest version.
-  useEffect(() => {
-    let cancelled = false;
-    apiClient
-      .createProject({ name: "untitled project" })
-      .then((project) => {
-        if (!cancelled) {
-          setProjectId(project.id);
-          setProjectName(project.name);
-        }
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setStreamError({
-            message: `Failed to create project: ${
-              e instanceof Error ? e.message : "unknown error"
-            }`,
-            detail: e instanceof Error ? e.message : undefined,
-            retryable: false,
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
   // Load the version timeline once the project exists (the resume state).
   useEffect(() => {
     let cancelled = false;
@@ -757,8 +757,17 @@ export default function App({ client }: AppProps) {
     };
   }, [projectId, apiClient, compareIds]);
 
-  const handleSendMessage = useCallback(
-    (text: string) => {
+  // The actual send body (issue #192): extracted so the message fires only
+  // once the project id is settled. `projectIdOverride` carries the id the
+  // lazy creation just resolved — the closure's `projectId` is stale (the
+  // callback was built before the state update landed), so the override is
+  // authoritative when present. The request calls close over the settled id
+  // in every case, never a stale `null`.
+  const continueSend = useCallback(
+    (text: string, projectIdOverride?: number) => {
+      const effectiveProjectId = projectIdOverride ?? projectId;
+      if (effectiveProjectId === null) return;
+
       // Never call createRegionEdit with an empty or whitespace-only
       // instruction — the server rejects it (`Field(min_length=1)`), and
       // an all-whitespace string would pass a naive truthiness check but
@@ -767,21 +776,6 @@ export default function App({ client }: AppProps) {
 
       // Remember the last plain chat message for the Retry control (issue #82).
       lastUserMessageRef.current = text;
-
-      // Bail before constructing/appending anything if there's no project to
-      // send to — a message (and any attached selection) must never render
-      // as sent when the region-edit request that would justify it can
-      // never fire. Checked ahead of selectionToAttach/userMsg construction
-      // so a pending selection is never displayed as "submitted" while
-      // still sitting untouched in state.
-      if (projectId === null) {
-        setStreamError({
-          message: "No project selected",
-          detail: undefined,
-          retryable: false,
-        });
-        return;
-      }
 
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
@@ -821,7 +815,7 @@ export default function App({ client }: AppProps) {
         // any other stream failure — append it to messages, not a card.
         const turnId = `msg-${Date.now()}-failure`;
         void apiClient
-          .createRegionEdit(projectId, {
+          .createRegionEdit(effectiveProjectId, {
             module_ids: selectionToAttach.moduleIds,
             view_id: selectionToAttach.viewId,
             marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
@@ -914,14 +908,14 @@ export default function App({ client }: AppProps) {
         .map((m) => m.content);
 
       void apiClient
-        .postChat(projectId, {
+        .postChat(effectiveProjectId, {
           message: trimmed,
           chat_history: chatHistory,
         })
         .then(() => {
           // The event source is registered synchronously before the 202
           // response — the SSE stream will find it. Open the stream now.
-          return apiClient.streamEvents(projectId, {
+          return apiClient.streamEvents(effectiveProjectId, {
             onToken: (text, _data) => {
               // Issue #125 (W10): the token frame carries the generated
               // source. It is the pass card's DISCLOSURE content, not a
@@ -989,7 +983,7 @@ export default function App({ client }: AppProps) {
               // for refetching the timeline — not every progress frame
               // (that would hammer the endpoint).
               if (step === "version-created") {
-                void apiClient.listVersions(projectId).then(setVersions);
+                void apiClient.listVersions(effectiveProjectId).then(setVersions);
                 // Issue #123: a new version means the design-state block the
                 // Brief renders may have changed — refetch it on the same
                 // single trigger.
@@ -1088,6 +1082,36 @@ export default function App({ client }: AppProps) {
         });
     },
     [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState],
+  );
+
+  // The send entry point (issue #192): creates the project lazily on the
+  // first explicit send (single-flight — a concurrent trigger shares the
+  // in-flight POST) and routes the message through `continueSend` only once
+  // the project id is settled. The resolved id is passed as an override
+  // because `continueSend`'s closure captures the STALE `projectId` (the
+  // state update from the creation has not landed when the .then fires).
+  // A creation failure is surfaced via the app-level error card and nothing
+  // is appended — a message must never render as sent when the request that
+  // would justify it can never fire.
+  const handleSendMessage = useCallback(
+    (text: string) => {
+      if (projectId !== null) {
+        continueSend(text);
+        return;
+      }
+      void ensureProject()
+        .then((id) => continueSend(text, id))
+        .catch((e) => {
+          setStreamError({
+            message: `Failed to create project: ${
+              e instanceof Error ? e.message : "unknown error"
+            }`,
+            detail: e instanceof Error ? e.message : undefined,
+            retryable: false,
+          });
+        });
+    },
+    [projectId, continueSend, ensureProject],
   );
 
   // The inline bar's submit path — routes the typed instruction through the
