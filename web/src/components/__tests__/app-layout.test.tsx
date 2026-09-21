@@ -757,6 +757,50 @@ describe("App layout", () => {
   });
 });
 
+describe("App conversation rail (collapse control, issue #191)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it("renders the collapse control icon-only, with the aria-label as sole accessible name", async () => {
+    render(<App client={client} />);
+    const btn = screen.getByTestId("conversation-collapse-btn");
+    // Icon-only: no visible copy string — the defect was the label rendered
+    // as BOTH the aria-label and the visible text children.
+    expect(btn.textContent).not.toContain("Collapse the conversation");
+    expect(btn.textContent).toBe("");
+    // The accessible name comes solely from the aria-label (copy.ts key).
+    expect(btn.getAttribute("aria-label")).toBe(copy.shell.collapseConversation);
+    // The decorative icon is aria-hidden so the accessible name stays exactly
+    // the aria-label (a titled or labelled SVG would double-announce it).
+    const icon = screen.getByTestId("conversation-collapse-icon");
+    expect(icon.tagName).toBe("svg");
+    expect(icon.getAttribute("aria-hidden")).toBe("true");
+    // And the accessible-name query resolves to the copy string.
+    expect(screen.getByRole("button", { name: copy.shell.collapseConversation })).toBe(btn);
+  });
+
+  it("collapses to the rail and expands back (round trip)", async () => {
+    render(<App client={client} />);
+    const pane = screen.getByTestId("app-left-pane");
+    expect(pane.style.width).toBe("420px");
+
+    fireEvent.click(screen.getByTestId("conversation-collapse-btn"));
+    expect(screen.queryByTestId("conversation-collapse-btn")).toBeNull();
+    const rail = screen.getByTestId("conversation-rail");
+    expect(rail.textContent).toContain(copy.shell.conversationCollapsed(0));
+    expect(rail.textContent).toContain(copy.shell.openConversation);
+    expect(pane.style.width).toBe("240px");
+
+    fireEvent.click(rail);
+    expect(screen.queryByTestId("conversation-rail")).toBeNull();
+    expect(screen.getByTestId("conversation-collapse-btn")).toBeTruthy();
+    expect(pane.style.width).toBe("420px");
+  });
+});
+
 describe("App Brief wiring (issue #123)", () => {
   let client: ApiClient;
 

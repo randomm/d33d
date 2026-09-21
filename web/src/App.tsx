@@ -1394,10 +1394,31 @@ export default function App({ client }: AppProps) {
                     background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
                     color: "var(--color-fg)",
                     cursor: "pointer",
-                    padding: "4px 8px",
+                    padding: 6,
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    lineHeight: 0,
                   }}
                 >
-                  {copy.shell.collapseConversation}
+                  {/* Icon-only collapse control (issue #191): the visible
+                      label was a 171×25 text button sitting over the Brief
+                      panel; the icon is decorative, the accessible name comes
+                      solely from the aria-label. */}
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                    data-testid="conversation-collapse-icon"
+                  >
+                    <polyline points="18 15 12 9 6 15" />
+                  </svg>
                 </button>
               </div>
               <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
