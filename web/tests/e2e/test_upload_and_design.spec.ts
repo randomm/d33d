@@ -2,7 +2,10 @@
  * E2E happy path (issue #49, spec 1 of 5):
  * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_upload_and_design.spec.ts`
  *
- *   upload a photo via the reference-photo input
+ *   the app loads with NO project created (issue #192 — creation moved
+ *     off mount)
+ *     → the first explicit chat send creates the project lazily
+ *     → a reference photo is uploaded via the reference-photo input
  *     → the photo-upload UI settles to the success state
  *     → the post-upload app state is stable (export button visible,
  *       no upload error, no app-level error).
@@ -11,21 +14,20 @@
  *   - No LLM calls, no real Docker render worker. The SSE stream is NOT
  *     intercepted in this spec — the happy path exercises the upload path,
  *     and the app's SSE fetch only fires on chat send.
- *   - The SPA auto-creates a project on mount (App.tsx). Project creation
- *     and photo upload are both REAL (unintercepted) backend behaviour.
- *   - OWN-PROJECT OWNERSHIP (issue #186): the spec discovers the project
- *     THIS page load created from the mount-time `POST /api/projects`
- *     response and asserts against that project — never from
- *     `GET /api/projects` index 0. The SPA creates a fresh project on
- *     every page load against a long-lived backend whose id sequence is
- *     global, so under a dirty server (a prior spec or run left projects
- *     behind) index 0 is some other spec's project and the spec would
- *     assert against the wrong one. The SPA's POST always yields a
- *     source_photo_path=null project, so the toBeNull assertion stays
- *     meaningful regardless of what else the server holds. The settled
- *     state (source_photo_path populated) is then verified via the API —
- *     we assert the settled API state rather than racing a network
- *     response, which keeps the spec resilient to the mount-time race
+ *   - Project creation and photo upload are both REAL (unintercepted)
+ *     backend behaviour. Project creation is NOT on mount anymore
+ *     (issue #192): it is triggered by the spec's own first explicit chat
+ *     send through the real send path (chat input -> postChat to the real
+ *     backend -> SSE stream). The spec discovers the project id from THAT
+ *     POST /api/projects response and asserts against that project —
+ *     never from `GET /api/projects` index 0. On a shared backend whose
+ *     id sequence is global, index 0 is some other spec's project and the
+ *     spec would assert against the wrong one. The freshly created
+ *     project's source_photo_path is null, so the toBeNull assertion
+ *     stays meaningful regardless of what else the server holds. The
+ *     settled state (source_photo_path populated) is then verified via
+ *     the API — we assert the settled API state rather than racing a
+ *     network response, which keeps the spec resilient to the race
  *     where the SPA's POST lands before page.waitForResponse is armed.
  *
  * The 3MF download half of this spec was removed in issue #109: the
@@ -60,21 +62,41 @@ test.beforeEach(async ({ request }) => {
     .toBe(200);
 });
 
-test("happy path: upload photo → settle", async ({ page }) => {
-  // --- SPA boot: the app auto-creates a project on mount -----------------
-  // The SPA's own project for THIS page load — discovered from the
-  // mount-time POST response, never from the global projects list
-  // (issue #186: on a dirty backend projects[0] belongs to another spec).
-  const projectResp = page.waitForResponse(
+test("happy path: send a message → upload photo → settle", async ({ page }) => {
+  // --- SPA boot: NO project is created on mount (issue #192) --------------
+  // Arm the creation wait BEFORE navigating so the lazy POST (fired by the
+  // first explicit send below) cannot land before the wait. Count the
+  // project rows before and after boot to prove a fresh load created
+  // nothing — the "no project on mount" acceptance criterion, asserted as
+  // a count delta (a shared long-lived backend means absolute counts are
+  // never zero).
+  const before = (await page.request.get(`${BASE()}/api/projects`)).json() as Project[];
+  const createdResp = page.waitForResponse(
     (r) =>
       r.url().endsWith("/api/projects") && r.request().method() === "POST",
   );
   await page.goto("/");
-  const project = (await (await projectResp).json()) as Project;
   await expect(page.getByTestId("app-stage")).toBeVisible();
+
+  // The first-run screen is up (no versions, no messages) and NO mount-time
+  // POST /api/projects fired: the row count is unchanged since navigation.
+  await expect(page.getByTestId("first-run")).toBeVisible();
+  const after = (await page.request.get(`${BASE()}/api/projects`)).json() as Project[];
+  expect(after.length).toBe(before.length);
+
+  // --- First explicit send: the lazy project creation ---------------------
+  // The chat send is the project-creation trigger (issue #192): handleSendMessage
+  // creates the project single-flight, then posts the message and opens the
+  // SSE stream — all against the REAL backend.
+  const chatInput = page.getByTestId("chat-input");
+  await chatInput.fill("a small box");
+  await chatInput.press("Enter");
+
+  const project = (await (await createdResp).json()) as Project;
   expect(project.source_photo_path).toBeNull();
 
-  // The upload input is rendered once the project id exists.
+  // The upload input is rendered once the project id exists (PhotoUpload
+  // receives the id as a prop and renders the hidden input + label).
   const photoInput = page.getByTestId("photo-file-input");
   await expect(photoInput).toBeAttached();
 

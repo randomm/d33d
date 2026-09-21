@@ -1,10 +1,12 @@
 /**
  * App layout + wiring tests.
- *
+ * 
  * Verifies the two-pane layout (spec acceptance 5, NO auto-generated
  * slider/parameter panel) AND the project-lifecycle wiring added to close
  * the "components built but never mounted / never reach the backend" gap:
- *   - a project is created on mount and its id flows to PhotoUpload/Export3MF
+ *   - NO project is created on mount (issue #192 — the first explicit user
+ *     action creates it, single-flight); its id flows to PhotoUpload/Export3MF
+ *     once it exists
  *   - chat send calls ApiClient.streamEvents (not just local state)
  *   - ModelViewer and Export3MF are actually mounted (not placeholder divs)
  *
@@ -197,9 +199,10 @@ const STL_DATA_URI = `data:application/octet-stream;base64,${btoa(ASCII_STL)}`;
 function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   const client = new ApiClient();
   vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
-  // App mounts a version-timeline effect (issue #8) that fires
-  // listVersions(projectId) as soon as createProject resolves. That call
-  // must be stubbed here — left to the real client, it goes through the
+  // The version timeline effect (issue #8) fires listVersions(projectId) the
+  // moment the lazily-created project resolves (issue #192 moved creation
+  // off mount, but the timeline still loads on first explicit send). That
+  // call must be stubbed here — left to the real client, it goes through the
   // global fetch, and the photo-upload wiring block below replaces that
   // global fetch with a bare `vi.fn()` (default return `undefined`) for
   // the upload's own POST. When a vitest worker runs this file's upload
@@ -214,12 +217,28 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   // is why it stays latent until a worker reuses state across tests and
   // the once-only stub is in play — the same fire-once-race class as
   // issue #109's `waitForResponse(POST /api/projects)`.
-  // Settling the mount's listVersions here removes the stray fetch
+  // Settling the post-creation listVersions here removes the stray fetch
   // entirely: no retry, no sleep, no bumped timeout. The entry carries
   // the full VersionTimelineEntry shape (including exported_at, issue
   // #126) so any test that overrides this stub with fewer fields still
   // matches the timeline's declared type.
-  vi.spyOn(client, "listVersions").mockResolvedValue([]);
+  vi.spyOn(client, "listVersions").mockResolvedValue([
+    {
+      id: 1,
+      name: "v1",
+      params: {},
+      created_by_message: "",
+      parent: null,
+      restored_from: null,
+      forked_from: null,
+      pinned: false,
+      archived: false,
+      thumbnail: null,
+      created_at: "2026-01-01T00:00:00Z",
+      diff_count: 0,
+      exported_at: null,
+    },
+  ]);
   // The export's completion moment (issue #126) POSTs the mark to the
   // backend after a successful download. Stubbed here so the export tests
   // never reach the global fetch (which the upload-wiring block below
@@ -272,7 +291,9 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
  */
 async function settleModelMount(client: ApiClient): Promise<void> {
   render(<App client={client} />);
-  await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+  // Issue #192: no project is created on mount — the first explicit send
+  // creates it. Fire that send (the mocked stream resolves synchronously)
+  // and wait for the lazy creation to land before driving the stream.
   fireEvent.change(screen.getByTestId("chat-input"), {
     target: { value: "make a box" },
   });
@@ -280,6 +301,7 @@ async function settleModelMount(client: ApiClient): Promise<void> {
     fireEvent.click(screen.getByTestId("chat-send-btn"));
     await Promise.resolve();
   });
+  await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   // The version-created frame (with stl_data_uri) is dispatched on its OWN
   // act() tick — NOT inside the send's batch. The send's act() is where
   // postChat resolves and streamEvents is called; dispatching the frame
@@ -322,13 +344,16 @@ describe("App layout", () => {
     expect(screen.getByTestId("app-stage")).toBeTruthy();
     expect(screen.getByTestId("app-left-pane")).toBeTruthy();
     expect(screen.getByTestId("viewer-pane")).toBeTruthy();
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: mounting alone creates no project — the first run screen
+    // is up and the project-creation POST has not fired.
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("renders the chat panel in the left pane", async () => {
     render(<App client={client} />);
     expect(screen.getByTestId("chat-panel")).toBeTruthy();
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("renders a real ModelViewer (not a placeholder div) in the right pane", async () => {
@@ -336,20 +361,24 @@ describe("App layout", () => {
     expect(screen.getByTestId("viewer-pane")).toBeTruthy();
     expect(screen.getByTestId("model-viewer-mock")).toBeTruthy();
     expect(screen.queryByTestId("viewer-placeholder")).toBeNull();
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("renders the validation pane (Export3MF only — no static status) once the project loads", async () => {
     // The pane is absent until the project resolves (issue #114: the pane
     // shows the real validation state or nothing, and the export button is
-    // its only surviving content in the interim). Wait for the load, then
-    // assert the pane's contents.
+    // its only surviving content in the interim). Issue #192: the project
+    // only resolves after the first explicit send — fire it, then assert.
     render(<App client={client} />);
+    expect(screen.queryByTestId("export-3mf")).toBeNull();
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => {
       expect(screen.getByTestId("export-3mf")).toBeTruthy();
     });
     expect(screen.getByTestId("validation-pane")).toBeTruthy();
-    expect(screen.queryByTestId("export-3mf-btn")).toBeNull();
   });
 
   it("does NOT render an auto-generated slider/parameter panel", async () => {
@@ -358,12 +387,13 @@ describe("App layout", () => {
     // The opt-in pinned-parameter strip was deleted (issue #123) — the
     // Brief is the always-visible parameter surface instead.
     expect(screen.queryByTestId("pinned-strip")).toBeNull();
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("a successful export appends the completion turn naming the file and records the mark (issue #126)", async () => {
-    // The project resolves (PROJECT, name "untitled project") and one
-    // version exists (v1) — the export button targets the latest version.
+    // The project resolves (PROJECT, name "untitled project") after the
+    // first explicit send (issue #192: lazy creation) and one version
+    // exists (v1) — the export button targets the latest version.
     vi.spyOn(client, "listVersions").mockResolvedValue([
       {
         id: 1,
@@ -423,6 +453,11 @@ describe("App layout", () => {
       ]);
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(listVersions).toHaveBeenCalled());
 
@@ -462,6 +497,11 @@ describe("App layout", () => {
     );
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
 
@@ -503,8 +543,9 @@ describe("App layout", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the project is created lazily on the first explicit send
+    // — that same send drives the version-created frame through the mocked
+    // stream (the first user action is the only one that matters here).
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
@@ -514,7 +555,6 @@ describe("App layout", () => {
     const card = await screen.findByTestId("pass-card");
     expect(card.getAttribute("data-version")).toBe("3");
     expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(6);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
   });
 
   // Issue #119 — the stage layout replaces the #74 two-pane flex layout.
@@ -526,7 +566,7 @@ describe("App layout", () => {
     expect(stage.style.width).toBe("100vw");
     expect(stage.style.height).toBe("100vh");
     expect(stage.style.overflow).toBe("hidden");
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("fills the viewer pane to the stage with absolute inset:0 (issue #119)", async () => {
@@ -535,7 +575,7 @@ describe("App layout", () => {
     expect(pane.style.position).toBe("absolute");
     expect(pane.style.inset).toBe("0");
     expect(pane.style.zIndex).toBe("0");
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 
   it("floats the conversation pane above the canvas at z-index 20 (issue #119)", async () => {
@@ -545,7 +585,7 @@ describe("App layout", () => {
     expect(left.style.zIndex).toBe("20");
     expect(left.style.top).toBe("24px");
     expect(left.style.left).toBe("24px");
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
   });
 });
 
@@ -587,6 +627,12 @@ describe("App Brief wiring (issue #123)", () => {
     ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
+    // Issue #192: the design-state fetch only fires once the (lazily
+    // created) project exists — drive the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     const panel = await screen.findByTestId("brief-panel");
     expect(panel).toBeTruthy();
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledWith(7));
@@ -609,6 +655,11 @@ describe("App Brief wiring (issue #123)", () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
 
     render(<App client={client} />);
+    // Issue #192: the design-state fetch only fires once the project exists.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     const panel = await screen.findByTestId("brief-panel");
     expect(panel.getAttribute("data-mode")).toBe("full");
     // The rows render as individual rows in the full panel — this is the
@@ -625,9 +676,16 @@ describe("App Brief wiring (issue #123)", () => {
       handlers.onDone?.({});
     });
     render(<App client={client} />);
-    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(1));
+    // Issue #192: the initial design-state fetch fires once the first
+    // explicit send creates the project.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(1));
+    // The version-created frame above fired during the first send's stream —
+    // it already drove the refetch. A second send exercises the same
+    // refetch path on a subsequent frame.
     await act(async () => {
+      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make another box" } });
       fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
@@ -635,11 +693,28 @@ describe("App Brief wiring (issue #123)", () => {
   });
 });
 
-describe("App project lifecycle", () => {
-  it("creates a project on mount and passes its id to PhotoUpload", async () => {
+describe("App project lifecycle (lazy creation — issue #192)", () => {
+  it("does NOT create a project on mount — no POST until the first user action", async () => {
     const client = makeClient();
     render(<App client={client} />);
 
+    // Let any stray mount-time microtask flush: the first-run screen is up,
+    // the build plate has its numbers, and the creation POST has not fired.
+    await waitFor(() => {
+      expect(screen.getByTestId("first-run")).toBeTruthy();
+    });
+    await waitFor(() => {
+      expect(client.getEnvelope).toHaveBeenCalled();
+    });
+    // Give mount effects a few macrotasks to flush; still no creation.
+    await new Promise((r) => setTimeout(r, 20));
+    expect(client.createProject).not.toHaveBeenCalled();
+
+    // The user explicitly starts a design — NOW the creation fires.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => {
       expect(client.createProject).toHaveBeenCalledWith(
         expect.objectContaining({ name: expect.any(String) }),
@@ -647,15 +722,31 @@ describe("App project lifecycle", () => {
     });
 
     // PhotoUpload only becomes "usable" (no client-side "no project" error)
-    // once projectId is set — verify by uploading and confirming no
-    // "No project selected" error fires.
-    const onErrorSpy = vi.fn();
-    // PhotoUpload itself calls window.fetch directly (not the injected
-    // client) — assert indirectly via the absence of the guard error after
-    // the project resolves, by checking the upload input is present and
-    // interactive.
+    // once projectId is set — verify the upload input is present and the
+    // export pane now renders with the real project id.
     expect(screen.getByTestId("photo-upload")).toBeTruthy();
-    expect(onErrorSpy).not.toHaveBeenCalled();
+    expect(screen.getByTestId("export-3mf")).toBeTruthy();
+  });
+
+  it("creates at most one project for rapid successive sends (single-flight, issue #192)", async () => {
+    const client = makeClient();
+    render(<App client={client} />);
+
+    // Two sends back-to-back before the first POST resolves must share ONE
+    // in-flight createProject call.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "first message" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "second message" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
+    await waitFor(() => expect(client.createProject).toHaveBeenCalledTimes(1));
+    expect(client.createProject).toHaveBeenCalledWith(
+      expect.objectContaining({ name: expect.any(String) }),
+    );
   });
 
   it("surfaces a project-creation failure as an app-level error", async () => {
@@ -665,10 +756,61 @@ describe("App project lifecycle", () => {
 
     render(<App client={client} />);
 
+    // Issue #192: the failure now surfaces when the user starts a design,
+    // not on mount — drive the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+
     await waitFor(() => {
       expect(screen.getByTestId("app-error")).toBeTruthy();
     });
     expect(screen.getByTestId("app-error").textContent).toContain("boom");
+  });
+
+  it("a failed creation releases the latch so the next send retries", async () => {
+    const client = new ApiClient();
+    let resolveCreate: (p: { id: number; name: string }) => void = () => {};
+    let createAttempts = 0;
+    vi.spyOn(client, "createProject").mockImplementation(() => {
+      createAttempts += 1;
+      if (createAttempts === 1) return Promise.reject(new Error("boom"));
+      return new Promise((res) => {
+        resolveCreate = () => res(PROJECT);
+      });
+    });
+    vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+
+    render(<App client={client} />);
+
+    // First send fails — the error card surfaces and the latch releases.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "first attempt" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // The rejection propagates through ensureProject's catch chain — give
+    // the latch-release microtask time to settle before the second send.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    // Second send retries (the latch was released on failure).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "second attempt" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    await waitFor(() => expect(createAttempts).toBe(2));
+    await act(async () => {
+      resolveCreate(PROJECT);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    // The project settled — the timeline effect fires (the default mock
+    // resolves, proving the effect ran).
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
   });
 
   it("wires the filmstrip's compare-select through to App's compare fetch (issue #117)", async () => {
@@ -755,6 +897,12 @@ describe("App project lifecycle", () => {
     vi.spyOn(client, "restoreVersion");
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send
+    // — fire it so the timeline loads (two versions → the filmstrip renders).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
 
     // The sheet (W16) is reached FROM the strip: the expand mark opens it,
@@ -817,6 +965,12 @@ describe("App project lifecycle", () => {
         ]) as unknown as ApiClient["listVersions"],
     });
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send
+    // — fire it so the timeline loads (one version → the filmstrip renders).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
 
     // No route or page: the sheet is absent at mount (nothing opens it),
@@ -904,8 +1058,16 @@ describe("App project lifecycle", () => {
     });
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send
+    // — fire it so the timeline loads (two versions → the filmstrip renders).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     // The sheet opens from the strip's expand mark (W16's entry point).
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+    // Pre-send the timeline loads; the initial fetch already returned two
+    // versions (the override above) — the filmstrip is rendered.
     fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
     await waitFor(() => expect(screen.getByTestId("history-sheet")).toBeTruthy());
 
@@ -948,14 +1110,14 @@ describe("App chat wiring", () => {
     const client = makeClient();
     render(<App client={client} />);
 
-    await waitFor(() => {
-      expect(client.createProject).toHaveBeenCalled();
-    });
-
+    // Issue #192: the first explicit send creates the project and streams.
     const input = screen.getByTestId("chat-input");
     fireEvent.change(input, { target: { value: "hello" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
+    await waitFor(() => {
+      expect(client.createProject).toHaveBeenCalled();
+    });
     expect(screen.getByTestId("chat-msg-user").textContent).toContain("hello");
 
     await waitFor(() => {
@@ -991,8 +1153,8 @@ describe("App chat wiring", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the project is created lazily on the first explicit send
+    // — that same send drives the mock stream's token frames.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
@@ -1031,8 +1193,8 @@ describe("App chat wiring", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the project is created lazily on the first explicit send
+    // — that same send drives the version-created + done frames.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
@@ -1055,8 +1217,8 @@ describe("App chat wiring", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and drives
+    // the mock stream's error frame.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -1120,6 +1282,11 @@ describe("App photo upload wiring", () => {
     const client = makeClient();
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
@@ -1138,6 +1305,11 @@ describe("App photo upload wiring", () => {
     const client = makeClient();
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     expect(screen.queryByTestId("dimension-canvas-container")).toBeNull();
@@ -1182,6 +1354,11 @@ describe("App photo upload wiring", () => {
     vi.stubGlobal("Image", FailingImage);
 
     render(<App client={client} />);
+    // Issue #192: the project is created lazily on the first explicit send.
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "make a box" },
+    });
+    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
@@ -1213,26 +1390,31 @@ describe("App stream-driven model (issue #69)", () => {
     client: ApiClient,
   ): Promise<void> {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    // Pre-pass state is the EMPTY viewer (issue #107): no model until the
-    // stream fires — the fixture that used to settle here is gone.
+    // Issue #192: the project is created lazily on the first explicit send
+    // — that same send creates the project AND drives the version-created
+    // frame through the mocked stream. Pre-pass state is the EMPTY viewer (issue #107): no model
+    // until the stream fires.
     expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
       "false",
     );
-    // Send the chat message, then synchronously dispatch the version-created
-    // frame (the real stream delivers it mid-flight; act() keeps the
-    // setState batch deterministic in the unit environment).
+    // Send the chat message, then dispatch the version-created frame on a
+    // SEPARATE act() tick (the send's act() is where postChat + streamEvents
+    // resolve; dispatching the frame within the same batch lets the mock
+    // viewer's effect miss the update in jsdom).
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
-      await Promise.resolve();
-      // The mocked streamEvents has been called by now (postChat + the
-      // then-chain ran). Grab the last call's handlers and dispatch.
-      const spy = vi.mocked(client.streamEvents);
-      const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
-        undefined) as
-        | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
-        | undefined;
+      // Give the lazy-creation + postChat + streamEvents chain time to settle
+      // (the project is created on this send — issue #192 — so the stream
+      // starts one microtask later than in the mount-creation era).
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const spy = vi.mocked(client.streamEvents);
+    const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+      undefined) as
+      | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
+      | undefined;
+    await act(async () => {
       handlers?.onProgress?.("version-created", {
         step: "version-created",
         version_id: 1,
@@ -1309,33 +1491,34 @@ describe("App stream-driven model (issue #69)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
-    // The initial (mount-time) fetch settled on an empty timeline. W13 (issue
-    // #117) made the filmstrip ABSENT, not empty: with zero versions and no
-    // pass in flight the strip renders nothing at all (the old
-    // version-timeline-empty branch is gone).
-    expect(screen.queryByTestId("version-filmstrip")).toBeNull();
-
-    // Send a message and fire the version-created frame (the real wire shape:
-    // step + version_id — issue #114 verified against the recorded seam
-    // fixture tests/fixtures/e2e/D.json and the live emitter in
-    // d33d/design_loop_events.py).
+    // Issue #192: the initial timeline fetch fires once the first explicit
+    // send creates the project — that same send fires the version-created
+    // frame (the real wire shape: step + version_id — issue #114 verified
+    // against the recorded seam fixture tests/fixtures/e2e/D.json and the
+    // live emitter in d33d/design_loop_events.py).
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "make a box" },
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
-      await Promise.resolve();
-      const spy = vi.mocked(client.streamEvents);
-      const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
-        undefined) as
-        | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
-        | undefined;
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const spy = vi.mocked(client.streamEvents);
+    const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+      undefined) as
+      | { onProgress?: (s?: string, d?: Record<string, unknown>) => void }
+      | undefined;
+    await act(async () => {
       handlers?.onProgress?.("version-created", {
         step: "version-created",
         version_id: 1,
       });
     });
+
+    // The initial (project-settled) fetch resolved to the empty timeline;
+    // the frame's refetch returns the created version. W13 (issue #117) made
+    // the filmstrip ABSENT, not empty: the strip only renders once the
+    // refetched version lands.
 
     // The frame must have triggered a SECOND listVersions call — the strip
     // reflects the created version instead of staying on the stale (empty)
@@ -1360,10 +1543,21 @@ describe("App stream-driven model (issue #69)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
-
+    // Issue #192: the initial timeline fetch fires once the first explicit
+    // send creates the project.
     fireEvent.change(screen.getByTestId("chat-input"), {
       target: { value: "make a box" },
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
+
+    // A second send drives the two progress frames above (neither of which
+    // may trigger a refetch).
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "another box" },
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));
@@ -1383,8 +1577,9 @@ describe("App stream-driven model (issue #69)", () => {
       handlers.onDone?.({});
     });
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-    // The pre-pass state is the EMPTY viewer (issue #107).
+    // Issue #192: the project is created lazily on the first explicit send
+    // — that same send drives the progress frames. The pre-pass state is the
+    // EMPTY viewer (issue #107).
     expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("false");
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
     await act(async () => {
@@ -1429,8 +1624,8 @@ describe("App streamEvents rejection handling", () => {
 
     try {
       render(<App client={client} />);
-      await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+      // Issue #192: the first explicit send creates the project and drives
+      // the mock stream's rejection path.
       fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
       fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2087,19 +2282,19 @@ describe("App region-selection (point pick) wiring", () => {
     expect(screen.queryByTestId("region-edit-bar")).toBeNull();
   });
 
-  it("bails with no project selected BEFORE any message is appended (issue #107: no model without a project either)", async () => {
-    // The createProject round-trip never resolves, so projectId stays null.
-    // Issue #107 removed the GLB fixture, so the viewer stays EMPTY while
-    // there is no project (there is no model loaded independently of the
-    // project anymore) and a send must bail with the "No project selected"
-    // error before the message is appended.
+  it("a send while creation is pending appends NOTHING — the message waits for the project (issue #192)", async () => {
+    // The createProject round-trip never resolves, so projectId stays null
+    // and the send's continuation never fires. Issue #107 removed the GLB
+    // fixture, so the viewer stays EMPTY while there is no project (there is
+    // no model loaded independently of the project anymore) and a send must
+    // NOT append the message until the project exists.
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockReturnValue(new Promise(() => {}));
     vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
     vi.spyOn(client, "createRegionEdit");
 
     render(<App client={client} />);
-    // No project has resolved — the viewer stays on the empty state and
+    // No project exists — the viewer stays on the empty state and
     // the pick layer is not ready.
     expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe(
       "false",
@@ -2113,13 +2308,12 @@ describe("App region-selection (point pick) wiring", () => {
     });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
-    await waitFor(() => {
-      expect(screen.getByTestId("app-error").textContent).toContain("No project selected");
-    });
+    // The creation is in flight (never resolves) — the message must NOT be
+    // appended (it would render as sent when it went nowhere).
+    await new Promise((r) => setTimeout(r, 20));
     expect(client.createRegionEdit).not.toHaveBeenCalled();
-    // Bailing on "no project" must happen BEFORE the message (and any
-    // selection thumbnail) is ever appended to the transcript — a message
-    // that looks sent but never went anywhere would be misleading.
+    // The user's message is NOT in the transcript — the send is pending
+    // the project, not "submitted".
     expect(
       screen.queryAllByTestId(/^chat-msg-/).some((el) =>
         el.textContent?.includes("make the wing thinner"),
@@ -2538,7 +2732,9 @@ describe("App design-loop progress indicator (issue #82)", () => {
 
   it("is absent when designLoopInFlight is false (before send)", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: nothing is created on mount — and the indicator is
+    // absent before any send.
+    expect(client.createProject).not.toHaveBeenCalled();
     expect(screen.queryByTestId("design-loop-progress")).toBeNull();
   });
 
@@ -2548,8 +2744,8 @@ describe("App design-loop progress indicator (issue #82)", () => {
     vi.spyOn(client, "streamEvents").mockImplementation(() => new Promise(() => {}));
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and starts
+    // the (hanging) design loop — the indicator shows while in flight.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2575,8 +2771,8 @@ describe("App design-loop progress indicator (issue #82)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and starts
+    // the (hanging) design loop — the captured handlers drive the frames.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2625,8 +2821,8 @@ describe("App design-loop error display (issue #82)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and drives the
+    // mock stream's error frame.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2655,8 +2851,8 @@ describe("App design-loop error display (issue #82)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and drives the
+    // mock stream's error frame.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2746,8 +2942,8 @@ describe("App design-loop error display (issue #82)", () => {
     });
 
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
-
+    // Issue #192: the first explicit send creates the project and drives the
+    // mock stream's first (error) frame.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
 
@@ -2786,13 +2982,15 @@ describe("App first-run screen (issue #128, W14)", () => {
 
   it("is shown while the project has no versions and no message has been sent", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: the first-run screen is up BEFORE any project exists —
+    // it renders while no project, no versions, no messages.
+    expect(client.createProject).not.toHaveBeenCalled();
     expect(screen.getByTestId("first-run")).toBeTruthy();
   });
 
   it("renders four starters, each a complete sentence from the deck", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
     const starters = screen.getAllByTestId("first-run-starter");
     expect(starters).toHaveLength(4);
     starters.forEach((el, i) => {
@@ -2802,7 +3000,7 @@ describe("App first-run screen (issue #128, W14)", () => {
 
   it("states the millimetre contract exactly once", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    expect(client.createProject).not.toHaveBeenCalled();
     // The contract sentence ("Everything here is in millimetres…") lives in
     // copy.firstRun.body and must appear exactly once in the app DOM — this
     // surface is the only place it is not yet a constraint.
@@ -2814,7 +3012,9 @@ describe("App first-run screen (issue #128, W14)", () => {
 
   it("fetches the build envelope and draws the plate to scale with the API's numbers", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: the envelope is machine config, fetched on mount —
+    // independent of the (still-nonexistent) project.
+    expect(client.createProject).not.toHaveBeenCalled();
     await waitFor(() => expect(client.getEnvelope).toHaveBeenCalled());
     // The caption renders the fetched numbers (320 × 320 × 300) — and the
     // unconfirmed-envelope qualifier, since the stub returns verified: false.
@@ -2838,7 +3038,9 @@ describe("App first-run screen (issue #128, W14)", () => {
       verified: false,
     });
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: the envelope is machine config, fetched on mount — no
+    // project exists yet.
+    expect(client.createProject).not.toHaveBeenCalled();
     // The stub is verified: false, so the caption carries the qualifier.
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toBe(
@@ -2855,7 +3057,9 @@ describe("App first-run screen (issue #128, W14)", () => {
     // The default stub (makeClient) returns verified: false — the caption must
     // surface the uncertainty, in the deck's own words.
     const first = render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: the envelope is machine config, fetched on mount — no
+    // project exists yet.
+    expect(client.createProject).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toContain(
         copy.firstRun.plateCaptionUnverified,
@@ -2872,6 +3076,7 @@ describe("App first-run screen (issue #128, W14)", () => {
       verified: true,
     });
     const { unmount } = render(<App client={client} />);
+    expect(client.createProject).not.toHaveBeenCalled();
     await waitFor(() =>
       expect(screen.getByTestId("plate-caption").textContent).toBe("320 × 320 × 300\u202Fmm"),
     );
@@ -2883,9 +3088,12 @@ describe("App first-run screen (issue #128, W14)", () => {
 
   it("goes away once a message has been sent (the conversation takes the centre)", async () => {
     render(<App client={client} />);
-    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    // Issue #192: the first-run screen is up before any project exists.
+    expect(client.createProject).not.toHaveBeenCalled();
     expect(screen.getByTestId("first-run")).toBeTruthy();
 
+    // The first explicit send creates the project (lazily) AND dismisses
+    // the first-run screen in one action.
     fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a bracket" } });
     await act(async () => {
       fireEvent.click(screen.getByTestId("chat-send-btn"));

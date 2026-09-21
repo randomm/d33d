@@ -5,6 +5,9 @@
  * Covers the version-timeline surface end-to-end against the locally
  * booted FastAPI app (web/playwright.config.ts webServer hook):
  *
+ *   0. CREATE  — the project is created lazily by the spec's first explicit
+ *                chat send (issue #192 moved creation off mount); its id is
+ *                discovered from that POST /api/projects response.
  *   1. CREATE  — create two versions with DIFFERENT params via the API,
  *                open the history sheet (the filmstrip's expand mark),
  *                and assert the timeline inside the sheet renders both
@@ -31,11 +34,12 @@
  * (`filmstrip-expand-{id}`), which is a sibling of the filmstrip slot
  * button. The spec opens it that way — the user path.
  *
- * Project discovery: App.tsx auto-creates exactly one project on mount
- * (`createProject("untitled project")`). The spec discovers that project
- * id from the mount-time `POST /api/projects` response — so the
- * spec's direct-API work targets the SAME project the SPA is displaying,
- * and no orphan project is ever created.
+ * Project discovery: NO project is created on mount (issue #192 —
+ * creation moved off mount). The spec triggers the lazy creation the way
+ * a user does (the first explicit chat send), discovers the project id
+ * from that `POST /api/projects` response — so the spec's direct-API work
+ * targets the SAME project the SPA is displaying, and no orphan project
+ * is ever created.
  *
  * Timeline visibility: the SPA fetches its version timeline once per
  * page load (the `listVersions` effect keyed on projectId). The spec
@@ -92,18 +96,25 @@ async function createVersion(
 
 test("version timeline: create, restore, compare", async ({ page }) => {
   // The restore + compare assertions need margin beyond the config's 30 s
-  // default (SPA boot, gated fetch, sheet open, three network round-trips).
+  // default (SPA boot, lazy creation, gated fetch, sheet open, three
+  // network round-trips).
   test.setTimeout(60_000);
 
   const baseURL = process.env.E2E_BASE_URL ?? "http://localhost:8080";
 
-  // -- Navigate and discover the SPA's auto-created project -----------------
-  // The SPA POSTs /api/projects on mount; capture that response so the
-  // spec's direct-API calls target the SAME project the SPA is displaying.
+  // -- Navigate, then trigger the SPA's lazy project creation ---------------
+  // The SPA no longer POSTs /api/projects on mount (issue #192): the first
+  // explicit chat send creates the project. Arm the wait BEFORE navigating
+  // (the POST lands after navigation, on the send), drive the real send
+  // path, and capture the response so the spec's direct-API calls target
+  // the SAME project the SPA is displaying.
   const projectResp = page.waitForResponse(
     (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
   );
   await page.goto("/");
+  const chatInput = page.getByTestId("chat-input");
+  await chatInput.fill("a small box");
+  await chatInput.press("Enter");
   const created = (await (await projectResp).json()) as { id: number };
   const projectId = created.id;
 

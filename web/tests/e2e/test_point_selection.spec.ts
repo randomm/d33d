@@ -4,16 +4,17 @@
  * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_point_selection.spec.ts`
  *
  * Operator flow under test:
- *   1. The app auto-creates a project on mount and loads the version
- *      timeline. A fresh project mounts NO model (issue #107 removed the
- *      GLB fixture) — pick readiness (`data-ready` on
+ *   1. The app loads with NO project created on mount (issue #192). A
+ *      fresh project mounts NO model (issue #107 removed the GLB
+ *      fixture) — pick readiness (`data-ready` on
  *      data-testid="viewer-pick-layer") is the way a real user
  *      establishes it: a design-loop pass delivers the rendered STL
  *      through the version-created SSE progress frame's `stl_data_uri`.
  *      This spec drives that path honestly: it sends ONE message through
- *      the real send path (FirstRun input -> postChat to the real
- *      backend -> SSE stream) and intercepts ONLY the SSE transport
- *      (GET /api/stream/{id}), delivering a genuine rendered artifact —
+ *      the real send path (FirstRun input -> lazy project creation ->
+ *      postChat to the real backend -> SSE stream) and intercepts ONLY the
+ *      SSE transport (GET /api/stream/{id}), delivering a genuine rendered
+ *      artifact —
  *      web/tests/fixtures/viewer/mini-box.stl, the same real STL the
  *      render worker emits elsewhere in the test suite — as the
  *      version-created frame's `stl_data_uri`. The payload is a real
@@ -36,9 +37,10 @@
  * Determinism & WebGL policy:
  *   - No LLM calls, no Docker render worker. The only interception is
  *     the SSE transport (mode (b), per issue #182's operator decision);
- *     project creation, the postChat round-trip and the SPA's SSE
- *     handling are all real — what is faked is the bytes behind the
- *     stream, and those bytes are a genuine rendered STL fixture.
+ *     project creation (lazy, triggered by the spec's own first send —
+ *     issue #192), the postChat round-trip and the SPA's SSE handling are
+ *     all real — what is faked is the bytes behind the stream, and those
+ *     bytes are a genuine rendered STL fixture.
  *   - The pick layer only accepts clicks once the streamed model has
  *     loaded (`data-ready` flips to "true" at exactly that moment).
  *     Waiting on the attribute is a deterministic wait that does NOT
@@ -62,17 +64,26 @@
  *   - data-testid="region-edit-bar"          (pick hit geometry -> bar)
  *   - data-testid="selection-notice"         (pick missed -> notice)
  *
- * Project ownership: App.tsx auto-creates exactly one project on mount
- * (`createProject("untitled project")`); the SPA never lists projects, so
- * the project the SPA is displaying is ONLY the id in the mount-time
- * POST /api/projects response. The spec discovers that id there (armed
- * before navigation) and arms the SSE transport interception on that
- * exact id — so the intercepted stream (and, with it, the delivered
- * model) belongs to THIS load's project even when the shared backend
- * already holds projects from earlier specs in the same suite run. On a
- * shared-state server a wildcard /api/stream/{id} interception would
- * deliver the model to whichever stream the SPA opens — and the spec
- * would pass regardless of which project it was looking at.
+ * Project ownership: NO project is created on mount (issue #192 —
+ * creation is lazy, triggered by the first explicit user action). The SPA
+ * never lists projects, so the project the SPA is displaying is ONLY the
+ * id of the project ITS OWN first chat send created. The spec triggers
+ * that send (the real FirstRun input -> handleSendMessage ->
+ * ensureProject path), discovers the id from the POST /api/projects
+ * response (armed before the send so the POST cannot land before the
+ * wait), and arms the SSE transport interception on that exact id — so
+ * the intercepted stream (and, with it, the delivered model) belongs to
+ * THIS load's project even when the shared backend already holds projects
+ * from earlier specs in the same suite run. On a shared-state server a
+ * wildcard /api/stream/{id} interception would deliver the model to
+ * whichever stream the SPA opens — and the spec would pass regardless of
+ * which project it was looking at.
+ *
+ *   - The chat send POSTs the message to the real backend. Without a
+ *     model catalogue entry the design loop does not start and postChat
+ *     rejects; the SPA surfaces the failure as a chat turn, and the spec
+ *     does not assert on it (it asserts on the delivered model, the bar
+ *     or the selection notice — neither depends on the postChat outcome).
  */
 
 import { expect, test, type Page } from "@playwright/test";
@@ -125,36 +136,22 @@ test("single click on the model surfaces the region-edit bar or a selection noti
 }) => {
   test.setTimeout(90_000);
 
-  // Navigate to the SPA root — the app auto-creates a project on mount.
-  // A fresh project mounts NO model (issue #107); the first-run screen
-  // (issue #128) is what the operator sees instead.
-  //
-  // Project ownership (issue #186): the SPA never lists projects — the
-  // project it displays is ONLY the one its mount-time POST /api/projects
-  // created. Discover THAT id from the response (armed before navigation
-  // so the auto-create cannot land before the wait) and own the rest of
-  // the spec from it. On a backend that already holds projects from
-  // earlier specs in the same suite run, a spec that only looked at
-  // "some project" would not be testing the thing it names.
-  const projectResp = page.waitForResponse(
-    (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
-  );
+  // Navigate to the SPA root — NO project is created on mount (issue
+  // #192). A fresh load mounts NO model (issue #107); the first-run
+  // screen (issue #128) is what the operator sees instead.
   await page.goto("/");
-  const { id: projectId } = (await (await projectResp).json()) as {
-    id: number;
-  };
 
   // Interception point (issue #182 mode (b)): the ONLY thing this spec
   // intercepts is the SSE transport — GET /api/stream/{projectId} — and
   // it answers with the same frame shape d33d/streaming.py emits on a
   // passed design loop: a version-created progress frame carrying a
   // genuine rendered STL as `stl_data_uri`, then a terminal done frame.
-  // Project creation, the postChat round-trip and the SPA's own SSE
-  // demultiplexing all run for real; only the bytes behind the stream
-  // are delivered from the fixture (a real rendered artifact). The route
-  // is armed on the discovered id (not a wildcard), so the delivered
-  // model belongs to this load's project even when the shared backend
-  // already holds other projects' streams.
+  // Project creation (lazy, issue #192), the postChat round-trip and the
+  // SPA's own SSE demultiplexing all run for real; only the bytes behind
+  // the stream are delivered from the fixture (a real rendered artifact).
+  // The route is armed on the discovered id (not a wildcard), so the
+  // delivered model belongs to this load's project even when the shared
+  // backend already holds other projects' streams.
   const stlBytes = readFileSync(STL_FIXTURE_PATH);
   const stlDataUri = `data:model/stl;base64,${stlBytes.toString("base64")}`;
   const frames = [
@@ -168,6 +165,24 @@ test("single click on the model surfaces the region-edit bar or a selection noti
       message: "Design loop passed validation",
     })}\n\n`,
   ].join("");
+
+  // Drive the real send path. The first explicit send triggers the lazy
+  // project creation (issue #192): arm the creation wait BEFORE the send
+  // so the POST cannot land before the wait, then read the id from the
+  // response and own the rest of the spec from it. On a backend that
+  // already holds projects from earlier specs in the same suite run, a
+  // spec that only looked at "some project" would not be testing the
+  // thing it names — this id is THIS load's project.
+  const projectResp = page.waitForResponse(
+    (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
+  );
+  const firstRunInput = page.locator('[data-testid="first-run-input"]');
+  await expect(firstRunInput).toBeVisible();
+  await firstRunInput.fill("a small box");
+  await firstRunInput.press("Enter");
+  const { id: projectId } = (await (await projectResp).json()) as {
+    id: number;
+  };
 
   await page.route(
     (url) => url.pathname === `/api/stream/${projectId}`,
@@ -183,22 +198,17 @@ test("single click on the model surfaces the region-edit bar or a selection noti
     },
   );
 
-  // The app stage must mount (project creation + SPA build are both live).
+  // The app stage must mount (SPA build is live; project creation just
+  // resolved via the lazy path).
   await expect(page.locator('[data-testid="app-stage"]')).toBeVisible();
 
   // The 3D viewport pane is present (the pick layer lives inside it).
   await expect(page.locator('[data-testid="viewer-pane"]')).toBeVisible();
 
-  // Drive the model in the way a real user establishes pick readiness:
-  // send ONE message. The postChat call reaches the real backend (202 —
-  // the design loop does not start without a model catalogue entry, and
-  // that 202 response is what opens the stream); the SSE stream it
-  // opens is the intercepted transport delivering the fixture STL.
-  const firstRunInput = page.locator('[data-testid="first-run-input"]');
-  await expect(firstRunInput).toBeVisible();
-  await firstRunInput.fill("a small box");
-  await firstRunInput.press("Enter");
-
+  // Wait until the streamed model has loaded — the pick layer flips to
+  // data-ready=true at exactly that point (deterministic wait, no
+  // WebGL-raycast dependency).
+  //
   // The version-created frame appends the assistant turn and the
   // version-created trigger refetches the timeline — versions/messages
   // exist, so the first-run screen unmounts on its own. It must be gone
@@ -206,9 +216,6 @@ test("single click on the model surfaces the region-edit bar or a selection noti
   // centred column would intercept the click.
   await expect(page.locator('[data-testid="first-run"]')).toHaveCount(0);
 
-  // Wait until the streamed model has loaded — the pick layer flips to
-  // data-ready=true at exactly that point (deterministic wait, no
-  // WebGL-raycast dependency).
   await waitForPickLayerReady(page);
 
   // Make the single click.
