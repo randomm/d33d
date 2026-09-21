@@ -9,18 +9,18 @@ import { ChatPanel, type ChatMessage, MARKER_COLOR } from "../ChatPanel";
 import type { RenderImage } from "../../../lib/renderImage";
 
 describe("ChatPanel", () => {
-  it("hides the composer while there are no messages (issue #193 — the first-run screen carries it)", () => {
-    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
+  it("hides the composer when hideComposer is true (issue #193 — the first-run screen carries it)", () => {
+    render(<ChatPanel messages={[]} onSend={vi.fn()} hideComposer />);
     expect(screen.queryByTestId("chat-input")).toBeNull();
     expect(screen.queryByTestId("chat-send-btn")).toBeNull();
   });
 
   it("renders empty state with no messages (panel present, composer hidden — issue #193)", () => {
-    render(<ChatPanel messages={[]} onSend={vi.fn()} />);
+    render(<ChatPanel messages={[]} onSend={vi.fn()} hideComposer />);
     expect(screen.getByTestId("chat-panel")).toBeTruthy();
   });
 
-  it("shows the composer again once a message exists", () => {
+  it("shows the composer when hideComposer is false (default)", () => {
     render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-input")).toBeTruthy();
   });
