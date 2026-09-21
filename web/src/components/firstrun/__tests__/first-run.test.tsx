@@ -67,6 +67,33 @@ describe("FirstRun", () => {
     expect(screen.getByTestId("first-run-photo-hint").textContent).toBe(copy.firstRun.photoHint);
   });
 
+  it("renders the card as a faint panel — the background mixes the panel colour at 35-50% alpha (issue #190)", () => {
+    render(<FirstRun {...baseProps()} />);
+    // The card is the inner div (the flex-column child), not the outer
+    // absolute-positioned "first-run" wrapper, which carries no background.
+    const card = screen.getByTestId("first-run").firstElementChild as HTMLElement;
+    expect(card).not.toBeNull();
+    // jsdom does not resolve color-mix() or custom properties, so assert on
+    // the inline style string rather than a computed colour.
+    const background = card.style.background;
+    const match = /color-mix\(in srgb,\s*var\(--color-panel\)\s*(\d+(?:\.\d+)?)%/.exec(background);
+    expect(match).not.toBeNull();
+    const alpha = Number(match![1]);
+    expect(alpha).toBeGreaterThanOrEqual(35);
+    expect(alpha).toBeLessThanOrEqual(50);
+    expect(alpha).not.toBe(92);
+  });
+
+  it("keeps the input and starters on the recess background (issue #190)", () => {
+    render(<FirstRun {...baseProps()} />);
+    const input = screen.getByTestId("first-run-input") as HTMLInputElement;
+    expect(input.style.background).toBe("var(--color-recess)");
+    const starters = screen.getAllByTestId("first-run-starter");
+    starters.forEach((starter) => {
+      expect((starter as HTMLElement).style.background).toBe("var(--color-recess)");
+    });
+  });
+
   it("fires onSend with the trimmed text on submit", () => {
     const onSend = vi.fn();
     render(<FirstRun {...baseProps({ onSend })} />);
