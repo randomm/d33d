@@ -56,9 +56,13 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight }: FirstRunProps) {
         style={{
           display: "flex",
           flexDirection: "column",
-          alignItems: "center",
+          alignItems: "stretch",
           gap: 16,
           width: "min(560px, 92vw)",
+          maxWidth: "100%",
+          maxHeight: "100%",
+          overflow: "visible",
+          boxSizing: "border-box",
           padding: 24,
           borderRadius: "var(--radius)",
           background: "color-mix(in srgb, var(--color-panel) 40%, transparent)",
@@ -200,6 +204,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight }: FirstRunProps) {
             fontSize: "var(--font-size-xs)",
             textAlign: "center",
             maxWidth: 420,
+            alignSelf: "center",
           }}
         >
           {copy.firstRun.photoHint}

@@ -45,6 +45,34 @@ describe("FirstRun", () => {
     expect(input.placeholder).toBe(copy.firstRun.placeholder);
   });
 
+  it("fills the card's content width with a border-box model (issue #193)", () => {
+    render(<FirstRun {...baseProps()} />);
+    const input = screen.getByTestId("first-run-input") as HTMLInputElement;
+    // The input fills the card's content width (width 100%) under a border-box
+    // model so the placeholder text is not clipped by the card's padding.
+    // jsdom cannot measure text truncation; this pins the structural width
+    // and box-model properties that prevent it.
+    expect(input.style.width).toBe("100%");
+    expect(input.style.boxSizing).toBe("border-box");
+  });
+
+  it("is not a clipped or scrolling box (issue #193)", () => {
+    render(<FirstRun {...baseProps()} />);
+    // The card is the inner div (the flex-column child), not the outer
+    // absolute-positioned "first-run" wrapper, which carries no background.
+    const card = screen.getByTestId("first-run").firstElementChild as HTMLElement;
+    expect(card).not.toBeNull();
+    // The card must never be a clipped/scrolling box: no auto/scroll
+    // overflow, no fixed max-height, and its width and box model keep the
+    // content inside the stage (width is bounded, box is border-box).
+    const overflow = card.style.overflowY ?? card.style.overflow;
+    expect(overflow).not.toBe("auto");
+    expect(overflow).not.toBe("scroll");
+    expect(card.style.maxHeight).not.toMatch(/^\d+(px|rem|vh)$/);
+    expect(card.style.width).toBe("min(560px, 92vw)");
+    expect(card.style.boxSizing).toBe("border-box");
+  });
+
   it("renders the photo button and the Start button", () => {
     render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-photo-btn")).toBeTruthy();

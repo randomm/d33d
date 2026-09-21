@@ -1203,6 +1203,11 @@ export default function App({ client }: AppProps) {
     setPhotoDimensions({ width, height });
   }, []);
 
+  // Issue #193: the "exactly one composer" invariant. FirstRun carries the
+  // only composer while this is true; ChatPanel's is hidden. Both sites read
+  // THIS boolean so they cannot drift into a state with no composer at all.
+  const isFirstRun = versions.length === 0 && messages.length === 0;
+
 
   // Below the floor the app says so plainly rather than degrading (issue
   // #119): copy.shell.viewportTooSmall replaces the stage's content.
@@ -1297,7 +1302,7 @@ export default function App({ client }: AppProps) {
           moment the user has no idea what to type. The build plate is
           drawn to scale behind it; the screen goes away once the
           conversation starts. Hidden with the other panels on backslash. */}
-      {versions.length === 0 && messages.length === 0 && !panelsHidden && (
+      {isFirstRun && !panelsHidden && (
         <FirstRun
           onSend={handleSendMessage}
           onPhotoSelect={() => {
@@ -1405,6 +1410,7 @@ export default function App({ client }: AppProps) {
                   keptVersion={
                     versions.length > 0 ? versions[versions.length - 1].name : null
                   }
+                  hideComposer={isFirstRun}
                 />
                 {designLoopInFlight && (
                   <PassProgress

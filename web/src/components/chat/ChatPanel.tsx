@@ -77,6 +77,10 @@ interface ChatPanelProps {
   /** The version label the failure turn says survived (the latest
    *  version — the failure was never a version). */
   keptVersion?: string | null;
+  /** Issue #193: hide the composer while the first-run screen is up
+   *  (the first-run screen carries its own composer, so exactly one
+   *  must be visible). Defaults to false for direct-render tests. */
+  hideComposer?: boolean;
 }
 
 export function ChatPanel({
@@ -86,6 +90,7 @@ export function ChatPanel({
   onBesidePhoto,
   envelope,
   keptVersion,
+  hideComposer,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -159,6 +164,7 @@ export function ChatPanel({
         onChange={setInput}
         onSend={handleSubmit}
         inFlight={inFlight}
+        hidden={hideComposer}
       />
     </section>
   );

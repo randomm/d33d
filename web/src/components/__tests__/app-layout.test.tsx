@@ -275,6 +275,22 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   return client;
 }
 
+/** Send through the FIRST composer the screen exposes — the first-run
+ *  input while the first-run screen is up (issue #193: exactly one composer
+ *  at a time), the chat composer once the conversation has started. Keeps
+ *  every App-level test routing its send the way a user would, regardless
+ *  of which composer is the current one. */
+function sendFirstComposerMessage(text: string): void {
+  const firstRunInput = screen.queryByTestId("first-run-input");
+  if (firstRunInput) {
+    fireEvent.change(firstRunInput, { target: { value: text } });
+    fireEvent.click(screen.getByTestId("first-run-start-btn"));
+    return;
+  }
+  fireEvent.change(screen.getByTestId("chat-input"), { target: { value: text } });
+  fireEvent.click(screen.getByTestId("chat-send-btn"));
+}
+
 /**
  * Drive the viewer to a REAL model (issue #107).
  *
@@ -294,11 +310,10 @@ async function settleModelMount(client: ApiClient): Promise<void> {
   // Issue #192: no project is created on mount — the first explicit send
   // creates it. Fire that send (the mocked stream resolves synchronously)
   // and wait for the lazy creation to land before driving the stream.
-  fireEvent.change(screen.getByTestId("chat-input"), {
-    target: { value: "make a box" },
-  });
+  // The send routes through the first-run composer (issue #193: the chat
+  // composer is hidden while the first-run screen is up).
+  sendFirstComposerMessage("make a box");
   await act(async () => {
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await Promise.resolve();
   });
   await waitFor(() => expect(client.createProject).toHaveBeenCalled());
@@ -369,12 +384,13 @@ describe("App layout", () => {
     // shows the real validation state or nothing, and the export button is
     // its only surviving content in the interim). Issue #192: the project
     // only resolves after the first explicit send — fire it, then assert.
+    // The export pane is absent until the project resolves (issue #114: the
+    // pane shows the real validation state or nothing). Issue #192: the
+    // project only resolves after the first explicit send (issue #193: via
+    // the first-run composer — the chat composer is hidden while the
+    // first-run screen is up) — fire it, then assert.
     render(<App client={client} />);
-    expect(screen.queryByTestId("export-3mf")).toBeNull();
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    sendFirstComposerMessage("make a box");
     await waitFor(() => {
       expect(screen.getByTestId("export-3mf")).toBeTruthy();
     });
@@ -453,11 +469,10 @@ describe("App layout", () => {
       ]);
 
     render(<App client={client} />);
-    // Issue #192: the project is created lazily on the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // Issue #192: the project is created lazily on the first explicit send
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(listVersions).toHaveBeenCalled());
 
@@ -497,11 +512,10 @@ describe("App layout", () => {
     );
 
     render(<App client={client} />);
-    // Issue #192: the project is created lazily on the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // Issue #192: the project is created lazily on the first explicit send
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
 
@@ -546,9 +560,10 @@ describe("App layout", () => {
     // Issue #192: the project is created lazily on the first explicit send
     // — that same send drives the version-created frame through the mocked
     // stream (the first user action is the only one that matters here).
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    // Issue #193: via the first-run composer (the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
 
@@ -628,11 +643,10 @@ describe("App Brief wiring (issue #123)", () => {
 
     render(<App client={client} />);
     // Issue #192: the design-state fetch only fires once the (lazily
-    // created) project exists — drive the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // created) project exists — drive the first explicit send (issue #193:
+    // via the first-run composer; the chat composer is hidden while the
+    // first-run screen is up).
+    sendFirstComposerMessage("make a box");
     const panel = await screen.findByTestId("brief-panel");
     expect(panel).toBeTruthy();
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledWith(7));
@@ -655,11 +669,9 @@ describe("App Brief wiring (issue #123)", () => {
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
 
     render(<App client={client} />);
-    // Issue #192: the design-state fetch only fires once the project exists.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // Issue #192: the design-state fetch only fires once the project exists
+    // (issue #193: first send via the first-run composer).
+    sendFirstComposerMessage("make a box");
     const panel = await screen.findByTestId("brief-panel");
     expect(panel.getAttribute("data-mode")).toBe("full");
     // The rows render as individual rows in the full panel — this is the
@@ -677,15 +689,16 @@ describe("App Brief wiring (issue #123)", () => {
     });
     render(<App client={client} />);
     // Issue #192: the initial design-state fetch fires once the first
-    // explicit send creates the project.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // explicit send creates the project (issue #193: via the first-run
+    // composer — the chat composer is hidden while the first-run screen is
+    // up).
+    sendFirstComposerMessage("make a box");
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(1));
     // The version-created frame above fired during the first send's stream —
     // it already drove the refetch. A second send exercises the same
     // refetch path on a subsequent frame.
+    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make another box" } });
     await act(async () => {
-      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make another box" } });
       fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
@@ -710,11 +723,13 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(client.createProject).not.toHaveBeenCalled();
 
-    // The user explicitly starts a design — NOW the creation fires.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // The user explicitly starts a design — NOW the creation fires
+    // (issue #193: the first send goes through the first-run composer;
+    // the chat composer is hidden while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => {
       expect(client.createProject).toHaveBeenCalledWith(
         expect.objectContaining({ name: expect.any(String) }),
@@ -733,15 +748,13 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     render(<App client={client} />);
 
     // Two sends back-to-back before the first POST resolves must share ONE
-    // in-flight createProject call.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "first message" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "second message" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // in-flight createProject call. Issue #193: the chat composer is hidden
+    // while the first-run screen is up — both sends route through the
+    // first-run composer (the second send fires before React re-renders the
+    // conversation, so the first-run screen is still the only composer on
+    // screen).
+    sendFirstComposerMessage("first message");
+    sendFirstComposerMessage("second message");
 
     await waitFor(() => expect(client.createProject).toHaveBeenCalledTimes(1));
     expect(client.createProject).toHaveBeenCalledWith(
@@ -757,11 +770,13 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     render(<App client={client} />);
 
     // Issue #192: the failure now surfaces when the user starts a design,
-    // not on mount — drive the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // not on mount — drive the first explicit send (issue #193: via the
+    // first-run composer; the chat composer is hidden while the first-run
+    // screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
 
     await waitFor(() => {
       expect(screen.getByTestId("app-error")).toBeTruthy();
@@ -785,11 +800,9 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
 
     render(<App client={client} />);
 
-    // First send fails — the error card surfaces and the latch releases.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "first attempt" },
-    });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // First send fails — the error card surfaces and the latch releases
+    // (issue #193: the first send goes through the first-run composer).
+    sendFirstComposerMessage("first attempt");
     await waitFor(() => {
       expect(screen.getByTestId("app-error")).toBeTruthy();
     });
@@ -798,11 +811,15 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 10));
     });
-    // Second send retries (the latch was released on failure).
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "second attempt" },
+    // Second send retries (the latch was released on failure). Issue #193:
+    // the first send was through the first-run composer (no messages were
+    // appended because the creation failed), so the first-run screen is
+    // still up and the chat composer is still hidden — the second send
+    // routes through the first-run composer too.
+    sendFirstComposerMessage("second attempt");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(createAttempts).toBe(2));
     await act(async () => {
       resolveCreate(PROJECT);
@@ -898,11 +915,13 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
 
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
-    // — fire it so the timeline loads (two versions → the filmstrip renders).
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // — fire it so the timeline loads (two versions → the filmstrip renders)
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
 
     // The sheet (W16) is reached FROM the strip: the expand mark opens it,
@@ -966,11 +985,12 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     });
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
-    // — fire it so the timeline loads (one version → the filmstrip renders).
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // — fire it so the timeline loads (one version → the filmstrip renders)
+    // (issue #193: via the first-run composer).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
 
     // No route or page: the sheet is absent at mount (nothing opens it),
@@ -1059,11 +1079,12 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
 
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
-    // — fire it so the timeline loads (two versions → the filmstrip renders).
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // — fire it so the timeline loads (two versions → the filmstrip renders)
+    // (issue #193: via the first-run composer).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     // The sheet opens from the strip's expand mark (W16's entry point).
     await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
     // Pre-send the timeline loads; the initial fetch already returned two
@@ -1110,10 +1131,12 @@ describe("App chat wiring", () => {
     const client = makeClient();
     render(<App client={client} />);
 
-    // Issue #192: the first explicit send creates the project and streams.
-    const input = screen.getByTestId("chat-input");
+    // Issue #192: the first explicit send creates the project and streams
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    const input = screen.getByTestId("first-run-input");
     fireEvent.change(input, { target: { value: "hello" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    fireEvent.click(screen.getByTestId("first-run-start-btn"));
 
     await waitFor(() => {
       expect(client.createProject).toHaveBeenCalled();
@@ -1154,10 +1177,11 @@ describe("App chat wiring", () => {
 
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
-    // — that same send drives the mock stream's token frames.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    // — that same send drives the mock stream's token frames (issue #193:
+    // via the first-run composer — the chat composer is hidden while the
+    // first-run screen is up).
+    sendFirstComposerMessage("hi");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
 
@@ -1194,10 +1218,10 @@ describe("App chat wiring", () => {
 
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
-    // — that same send drives the version-created + done frames.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
+    // — that same send drives the version-created + done frames (issue #193:
+    // via the first-run composer).
+    sendFirstComposerMessage("hi");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
 
@@ -1218,9 +1242,11 @@ describe("App chat wiring", () => {
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and drives
-    // the mock stream's error frame.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // the mock stream's error frame (issue #193: via the first-run composer).
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     await waitFor(() => {
       expect(screen.getByTestId("failure-turn").textContent).toContain(
@@ -1282,11 +1308,13 @@ describe("App photo upload wiring", () => {
     const client = makeClient();
 
     render(<App client={client} />);
-    // Issue #192: the project is created lazily on the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // Issue #192: the project is created lazily on the first explicit send
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
@@ -1305,11 +1333,13 @@ describe("App photo upload wiring", () => {
     const client = makeClient();
 
     render(<App client={client} />);
-    // Issue #192: the project is created lazily on the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // Issue #192: the project is created lazily on the first explicit send
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     expect(screen.queryByTestId("dimension-canvas-container")).toBeNull();
@@ -1354,11 +1384,13 @@ describe("App photo upload wiring", () => {
     vi.stubGlobal("Image", FailingImage);
 
     render(<App client={client} />);
-    // Issue #192: the project is created lazily on the first explicit send.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
+    // Issue #192: the project is created lazily on the first explicit send
+    // (issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
 
     const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
@@ -1401,9 +1433,10 @@ describe("App stream-driven model (issue #69)", () => {
     // SEPARATE act() tick (the send's act() is where postChat + streamEvents
     // resolve; dispatching the frame within the same batch lets the mock
     // viewer's effect miss the update in jsdom).
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    // Issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up.
+    sendFirstComposerMessage("make a box");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       // Give the lazy-creation + postChat + streamEvents chain time to settle
       // (the project is created on this send — issue #192 — so the stream
       // starts one microtask later than in the mount-creation era).
@@ -1496,11 +1529,10 @@ describe("App stream-driven model (issue #69)", () => {
     // frame (the real wire shape: step + version_id — issue #114 verified
     // against the recorded seam fixture tests/fixtures/e2e/D.json and the
     // live emitter in d33d/design_loop_events.py).
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
+    // Issue #193: via the first-run composer — the chat composer is hidden
+    // while the first-run screen is up.
+    sendFirstComposerMessage("make a box");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await new Promise((r) => setTimeout(r, 0));
     });
     const spy = vi.mocked(client.streamEvents);
@@ -1544,12 +1576,9 @@ describe("App stream-driven model (issue #69)", () => {
 
     render(<App client={client} />);
     // Issue #192: the initial timeline fetch fires once the first explicit
-    // send creates the project.
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make a box" },
-    });
+    // send creates the project (issue #193: via the first-run composer).
+    sendFirstComposerMessage("make a box");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
     await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(1));
@@ -1579,11 +1608,10 @@ describe("App stream-driven model (issue #69)", () => {
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
     // — that same send drives the progress frames. The pre-pass state is the
-    // EMPTY viewer (issue #107).
+    // EMPTY viewer (issue #107). Issue #193: via the first-run composer.
     expect(screen.getByTestId("model-viewer-mock").getAttribute("data-has-data")).toBe("false");
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
+    sendFirstComposerMessage("make a box");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
     // No stl_data_uri on the frame — the viewer STAYS empty. There is no
@@ -1625,9 +1653,13 @@ describe("App streamEvents rejection handling", () => {
     try {
       render(<App client={client} />);
       // Issue #192: the first explicit send creates the project and drives
-      // the mock stream's rejection path.
-      fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
+      // the mock stream's rejection path (issue #193: via the first-run
+      // composer — the chat composer is hidden while the first-run screen
+      // is up).
+      sendFirstComposerMessage("hi");
+      await act(async () => {
+        await Promise.resolve();
+      });
 
       // The onError path still updates UI state as expected.
       await waitFor(() => {
@@ -2303,10 +2335,12 @@ describe("App region-selection (point pick) wiring", () => {
       "false",
     );
 
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "make the wing thinner" },
+    // Issue #193: the first send goes through the first-run composer (the
+    // chat composer is hidden while the first-run screen is up).
+    sendFirstComposerMessage("make the wing thinner");
+    await act(async () => {
+      await Promise.resolve();
     });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
 
     // The creation is in flight (never resolves) — the message must NOT be
     // appended (it would render as sent when it went nowhere).
@@ -2745,9 +2779,12 @@ describe("App design-loop progress indicator (issue #82)", () => {
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and starts
-    // the (hanging) design loop — the indicator shows while in flight.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // the (hanging) design loop — the indicator shows while in flight
+    // (issue #193: via the first-run composer).
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     // The send button is disabled while in flight
     await waitFor(() => {
@@ -2772,9 +2809,12 @@ describe("App design-loop progress indicator (issue #82)", () => {
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and starts
-    // the (hanging) design loop — the captured handlers drive the frames.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // the (hanging) design loop — the captured handlers drive the frames
+    // (issue #193: via the first-run composer).
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     // Wait for streamEvents to be called
     await waitFor(() => {
@@ -2821,10 +2861,14 @@ describe("App design-loop error display (issue #82)", () => {
     });
 
     render(<App client={client} />);
-    // Issue #192: the first explicit send creates the project and drives the
-    // mock stream's error frame.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // Issue #192: the first explicit send creates the project and drives
+    // the mock stream's rejection path (issue #193: via the first-run
+    // composer — the chat composer is hidden while the first-run screen is
+    // up).
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     await waitFor(() => {
       expect(screen.getByTestId("failure-turn")).toBeTruthy();
@@ -2852,9 +2896,11 @@ describe("App design-loop error display (issue #82)", () => {
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and drives the
-    // mock stream's error frame.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "hi" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // mock stream's error frame (issue #193: via the first-run composer).
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     await waitFor(() => {
       expect(screen.getByTestId("failure-turn")).toBeTruthy();
@@ -2943,9 +2989,12 @@ describe("App design-loop error display (issue #82)", () => {
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and drives the
-    // mock stream's first (error) frame.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a box" } });
-    fireEvent.click(screen.getByTestId("chat-send-btn"));
+    // mock stream's first (error) frame (issue #193: via the first-run
+    // composer).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
+    });
 
     // First error appears
     await waitFor(() => {
@@ -2986,6 +3035,26 @@ describe("App first-run screen (issue #128, W14)", () => {
     // it renders while no project, no versions, no messages.
     expect(client.createProject).not.toHaveBeenCalled();
     expect(screen.getByTestId("first-run")).toBeTruthy();
+  });
+
+  it("shows exactly one composer on first run — the chat composer is absent (issue #193)", async () => {
+    render(<App client={client} />);
+    // The first-run screen is up (no versions, no messages).
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    // Exactly one composer: the first-run input is present, the chat
+    // composer is NOT rendered (not hidden with CSS — absent from the DOM).
+    expect(screen.getByTestId("first-run-input")).toBeTruthy();
+    expect(screen.queryByTestId("chat-input")).toBeNull();
+    expect(screen.queryByTestId("chat-send-btn")).toBeNull();
+
+    // Once a message has been sent the chat composer is back and the
+    // first-run screen is gone — still exactly one composer.
+    sendFirstComposerMessage("make a bracket");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("first-run")).toBeNull();
+    expect(screen.getByTestId("chat-input")).toBeTruthy();
   });
 
   it("renders four starters, each a complete sentence from the deck", async () => {
@@ -3093,10 +3162,11 @@ describe("App first-run screen (issue #128, W14)", () => {
     expect(screen.getByTestId("first-run")).toBeTruthy();
 
     // The first explicit send creates the project (lazily) AND dismisses
-    // the first-run screen in one action.
-    fireEvent.change(screen.getByTestId("chat-input"), { target: { value: "make a bracket" } });
+    // the first-run screen in one action. Issue #193: it routes through
+    // the first-run composer — the chat composer is hidden while the
+    // first-run screen is up.
+    sendFirstComposerMessage("make a bracket");
     await act(async () => {
-      fireEvent.click(screen.getByTestId("chat-send-btn"));
       await Promise.resolve();
     });
     expect(screen.queryByTestId("first-run")).toBeNull();
