@@ -2723,6 +2723,41 @@ describe("App region-selection (point pick) wiring", () => {
       expect(screen.getByTestId("app-left-pane").contains(strip)).toBe(false);
     });
 
+    it("renders EXACTLY one history sheet when docked at 1024 × 640 (no duplicate stage-level sheet)", async () => {
+      // The docked bar carries its own filmstrip instance (and, from the
+      // sheet's entry point, its own sheet instance). If the stage-level
+      // HistorySheet lacks the !conversationDocked guard, BOTH sheets mount
+      // at the ticket's own target viewport — two overlapping overlays, and
+      // getByTestId("history-sheet") throws "Found multiple elements".
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      const strip = await screen.findByTestId("version-filmstrip");
+      expect(strip.parentElement?.parentElement).toBe(
+        screen.getByTestId("app-left-pane"),
+      );
+      // Open the sheet from the strip's expand mark (the sheet's only
+      // entry point, issue #184).
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      await waitFor(() =>
+        expect(screen.getAllByTestId("history-sheet").length).toBeGreaterThan(0),
+      );
+      // Exactly one — pin the count, not a presence check.
+      expect(screen.getAllByTestId("history-sheet")).toHaveLength(1);
+    });
+
+    it("renders EXACTLY one history sheet when floating at 1280 × 900 (mirror of the docked case)", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      await waitFor(() =>
+        expect(screen.getAllByTestId("history-sheet").length).toBeGreaterThan(0),
+      );
+      expect(screen.getAllByTestId("history-sheet")).toHaveLength(1);
+    });
+
     it("the failure card renders inside the docked bar at 1024 × 640 (no plate overlap band above it)", async () => {
       defineWindow(1024, 640);
       const failingClient = new ApiClient();

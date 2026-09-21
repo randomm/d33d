@@ -113,6 +113,10 @@ const BRIEF_CHIP_MAX_HEIGHT_PX = 820;
 // 640px floor plenty of room to use either layout — the ticket's target
 // size (1024 × 640) takes the docked layout.
 const CONVERSATION_DOCK_MAX_HEIGHT_PX = 900;
+// The docked band's height, as a percentage of the viewport. Both the
+// pane's CSS height and the history sheet's top offset derive from THIS
+// — they must never drift apart or the sheet opens over the bar.
+const CONVERSATION_DOCK_HEIGHT_VH = 48;
 
 // RenderImage now lives in lib/renderImage.ts (issue #116 — the shared
 // shape App and the pass-card surface both need); re-exported here for
@@ -1367,7 +1371,7 @@ export default function App({ client }: AppProps) {
                   right: 0,
                   bottom: 0,
                   width: "100%",
-                  height: "48vh",
+                  height: `${CONVERSATION_DOCK_HEIGHT_VH}vh`,
                   zIndex: Z_INDEX.conversation,
                   display: "flex",
                   flexDirection: "column",
@@ -1550,7 +1554,7 @@ export default function App({ client }: AppProps) {
               compareResult={compareResult}
               compareError={compareError}
               inset={OVERLAY_INSET_PX}
-              sheetTopOffset={0.48 * windowSize.height + OVERLAY_INSET_PX}
+              sheetTopOffset={(CONVERSATION_DOCK_HEIGHT_VH / 100) * windowSize.height + OVERLAY_INSET_PX}
               onRestore={handleVersionRestore}
               onPin={handleVersionPin}
               onCompareSelect={handleCompareSelect}
@@ -1605,7 +1609,7 @@ export default function App({ client }: AppProps) {
           layer (10) — the same layer as the filmstrip it is opened from.
           It replaces the transitional VersionTail rail: compare, restore
           and pin are all reachable here, so the rail retires. */}
-      {!panelsHidden && projectId !== null && sheetOpenFor !== null && (
+      {!panelsHidden && projectId !== null && !conversationDocked && sheetOpenFor !== null && (
         <HistorySheet
           versions={versions}
           compareIds={compareIds}
