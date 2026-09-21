@@ -660,7 +660,6 @@ def _finalize_loop_kwargs(
             defines,
             renders_dir=project_renders_dir(data_dir, project_id),
             on_progress=on_progress,
-            on_progress_iteration="_current",
         )
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:

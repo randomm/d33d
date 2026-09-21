@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -1703,6 +1704,90 @@ def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
     assert "error" in event_names, "no error frame for deleted project"
     assert event_names[-1] == "error"
     assert still_inflight is False, "flag not released after error"
+
+
+def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """(issue #213 regression) ``d33d.versions_routes._finalize_loop_kwargs``
+    is a plain sync function — this test calls it DIRECTLY (no DI
+    machinery), extracts ``kwargs["render_fn"]`` and invokes it with
+    ``(scad_source, defines)`` against a spy whose signature EXACTLY
+    matches ``render_for_design_loop``'s true 4-parameter contract
+    (``scad_source, defines, renders_dir=None, on_progress=None``).
+
+    The spy has no ``**kwargs`` catch-all and no ``on_progress_iteration``
+    parameter: with the buggy call site in place (passing
+    ``on_progress_iteration="_current"``), the invocation raises
+    ``TypeError: ... got an unexpected keyword argument
+    'on_progress_iteration'`` at call time — before any Docker/LLM work —
+    and the test fails. No Docker, no live LLM, no catalogue required.
+    """
+
+    import d33d.render_worker as rw_mod
+    import d33d.versions_routes as routes_mod
+
+    spy_calls: dict = {}
+    canned = _default_render()
+
+    def _spy(
+        scad_source: str,
+        defines: dict[str, str],
+        renders_dir=None,
+        on_progress=None,
+    ) -> RenderResult:
+        # Exact 4-parameter signature of render_for_design_loop — an extra
+        # keyword argument here is a genuine TypeError, not a swallowed
+        # **kwargs (a star-star stub would let the buggy call pass).
+        spy_calls["scad_source"] = scad_source
+        spy_calls["defines"] = defines
+        spy_calls["renders_dir"] = renders_dir
+        spy_calls["on_progress"] = on_progress
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+    class _VersionsSvc:
+        def get_project(self, project_id: int):
+            return {"id": project_id, "current_version": None}
+
+        def latest_version(self, project_id: int):
+            return None
+
+    class _State:
+        pass
+
+    state = _State()
+    state.db_path = str(tmp_path / "d33d.sqlite3")
+    state.versions = _VersionsSvc()
+    state.catalogue = None
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    body = routes_mod.FinalizeBody(
+        params=None, name=None, message="make a 20mm wide bracket"
+    )
+
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 7, body)
+    render_fn = kwargs["render_fn"]
+    assert callable(render_fn)
+
+    # The guard: invoking the production closure's render_fn with the real
+    # 2-arg call shape reaches the renderer without a TypeError (the
+    # buggy extra kwarg would have raised one at call time).
+    result = render_fn("W = 20; cube([W]);", {"W": "20"})
+    assert result is canned
+
+    # The spy was called with the exact 4-parameter contract — no stray
+    # kwargs (a **kwargs-tolerant spy would hide them; this one is not).
+    assert spy_calls["scad_source"] == "W = 20; cube([W]);"
+    assert spy_calls["defines"] == {"W": "20"}
+    # on_progress flows via the (absent-by-default) hook parameter — the
+    # stamped-attribute mechanism's carrier, not a call-site kwarg.
+    assert spy_calls["on_progress"] is None
+    # The project-scoped renders_dir is still bound (issue #72).
+    assert spy_calls["renders_dir"] is not None
 
 
 def test_sse_wide_catch_emits_terminal_error():
