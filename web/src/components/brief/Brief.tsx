@@ -1,5 +1,7 @@
 /**
- * Brief — the "what are we building" overlay (top-left).
+ * Brief — the "what are we building" overlay (top-right in full mode,
+ * top-left as the chip — issue #209: the full panel mirrors the
+ * conversation pane on the right so the two overlays never overlap).
  *
  * The always-visible answer to "what do you think we're building?": one row
  * per declared parameter with its provenance (issue #123 / W9). The data
@@ -375,7 +377,9 @@ export function Brief({
       style={{
         position: "absolute",
         top: inset,
-        left: inset,
+        // Full panel: right-anchored (issue #209); chip: left-anchored as
+        // before — the conversation pane keeps the top-left corner.
+        ...(chip ? { left: inset } : { right: inset }),
         ...(conversationCollapsed ? {} : { marginTop: 0 }),
         zIndex: 10,
         padding: chip ? "8px 12px" : "16px",

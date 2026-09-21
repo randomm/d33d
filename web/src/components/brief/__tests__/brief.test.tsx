@@ -1,5 +1,6 @@
 /**
- * Brief tests — the "what are we building" overlay (top-left).
+ * Brief tests — the "what are we building" overlay (top-right full panel,
+ * top-left chip — issue #209).
  */
 
 import { render, screen } from "@testing-library/react";
@@ -31,9 +32,19 @@ describe("Brief", () => {
     render(<Brief isChip={false} inset={24} conversationCollapsed={false} />);
     const el = screen.getByTestId("brief-panel");
     expect(el.style.top).toBe("24px");
-    expect(el.style.left).toBe("24px");
+    // Full panel is right-anchored (issue #209): no left offset.
+    expect(el.style.right).toBe("24px");
+    expect(el.style.left).toBe("");
     expect(el.style.position).toBe("absolute");
     expect(el.style.zIndex).toBe("10");
+  });
+
+  it("keeps the chip left-anchored (issue #209)", () => {
+    render(<Brief isChip inset={24} conversationCollapsed={false} />);
+    const el = screen.getByTestId("brief-panel");
+    expect(el.style.top).toBe("24px");
+    expect(el.style.left).toBe("24px");
+    expect(el.style.right).toBe("");
   });
 
   it("overrides margin-top only when the conversation is not collapsed (byte-identical to the pre-extraction inline style)", () => {
