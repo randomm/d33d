@@ -32,6 +32,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { defineConfig } from "@playwright/test";
+import { shouldGuardE2eSkipServer } from "./src/e2e-guard";
 
 /**
  * Throwaway data dir for the webServer hook (suite lifetime).
@@ -45,6 +46,31 @@ let suiteDataDir: string | null = null;
 if (!process.env.E2E_SKIP_SERVER) {
   const stamp = `${process.pid}-${Date.now()}`;
   suiteDataDir = fs.mkdtempSync(path.join(os.tmpdir(), `d33d-e2e-${stamp}`));
+}
+
+// Issue #207 — operator footgun guard.
+//
+// In E2E_SKIP_SERVER mode the webServer hook below is `undefined`, so the
+// `D33D_DATA_DIR: <throwaway dir>` env override never applies: the specs
+// talk to the operator's already-running server, which resolved its data
+// dir from ITS OWN environment — defaulting to ~/.d33d when the variable
+// was unset. Repeated runs in that mode have written test-fixture project
+// and version rows into the operator's live database. Fail fast at
+// config-module load (before any Playwright worker starts) unless the
+// operator declared a non-blank D33D_DATA_DIR. We check intent, not the
+// value — a declared path that happens to resolve to ~/.d33d is the
+// operator's explicit choice.
+if (
+  process.env.E2E_SKIP_SERVER &&
+  shouldGuardE2eSkipServer(process.env.D33D_DATA_DIR)
+) {
+  throw new Error(
+    "D33D_E2E_GUARD: E2E_SKIP_SERVER is set but D33D_DATA_DIR is not set (or is blank). " +
+      "Export D33D_DATA_DIR before STARTING your dev server — the guard cannot change " +
+      "an already-running server's resolved data dir — then re-run the suite. " +
+      "Note: `npm run build` has already run as part of test:e2e; the failure is the " +
+      "guard, not the build.",
+  );
 }
 
 const webServerEntry = process.env.E2E_SKIP_SERVER
