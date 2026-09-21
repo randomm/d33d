@@ -747,6 +747,11 @@ describe("App layout", () => {
   });
 
   it("floats the conversation pane above the canvas at z-index 20 (issue #119)", async () => {
+    // jsdom's window is 1024×768 (below the 900px issue #194 dock threshold):
+    // these assertions pin the FLOATING layout, so they run at a size above
+    // the threshold where the top-left placement is the live one.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
     render(<App client={client} />);
     const left = screen.getByTestId("app-left-pane");
     expect(left.style.position).toBe("absolute");
@@ -754,6 +759,8 @@ describe("App layout", () => {
     expect(left.style.top).toBe("24px");
     expect(left.style.left).toBe("24px");
     expect(client.createProject).not.toHaveBeenCalled();
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
   });
 });
 
@@ -783,6 +790,10 @@ describe("App conversation rail (collapse control, issue #191)", () => {
   });
 
   it("collapses to the rail and expands back (round trip)", async () => {
+    // jsdom's window is 1024×768 (docked per issue #194); the rail round trip
+    // pins the FLOATING pane's widths, so run it above the dock threshold.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
     render(<App client={client} />);
     const pane = screen.getByTestId("app-left-pane");
     expect(pane.style.width).toBe("420px");
@@ -798,6 +809,8 @@ describe("App conversation rail (collapse control, issue #191)", () => {
     expect(screen.queryByTestId("conversation-rail")).toBeNull();
     expect(screen.getByTestId("conversation-collapse-btn")).toBeTruthy();
     expect(pane.style.width).toBe("420px");
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
   });
 });
 
@@ -2581,6 +2594,244 @@ describe("App region-selection (point pick) wiring", () => {
   });
 
   // -----------------------------------------------------------------------
+  // Issue #194 — responsive floor: the conversation docks to the bottom
+  // -----------------------------------------------------------------------
+
+  describe("App responsive floor (issue #194)", () => {
+    let client: ApiClient;
+
+    const defineWindow = (width: number, height: number) => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: width });
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: height });
+    };
+    const restoreWindow = () => {
+      defineWindow(1024, 768);
+    };
+
+    beforeEach(() => {
+      client = makeClient();
+      resolvePointPickMock.mockReset();
+    });
+
+    afterEach(() => {
+      restoreWindow();
+    });
+
+    it("at the exact floor (1024 × 640) the app does NOT show the viewport-too-small notice", async () => {
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      // The floor is strict-less-than: 1024 × 640 is exactly the floor, so
+      // the full stage renders — the adaptive (docked) layout applies, not
+      // the too-small gate. The pane is the docked bar.
+      expect(screen.queryByTestId("viewport-too-small")).toBeNull();
+      expect(screen.getByTestId("app-stage")).toBeTruthy();
+      expect(screen.getByTestId("app-left-pane")).toBeTruthy();
+      expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
+    });
+
+    it("at 1024 × 639 the viewport-too-small gate shows (strict below the floor)", async () => {
+      defineWindow(1024, 639);
+      render(<App client={client} />);
+      expect(screen.getByTestId("viewport-too-small")).toBeTruthy();
+      expect(screen.queryByTestId("app-left-pane")).toBeNull();
+    });
+
+    it("docks the conversation to the bottom band at 1024 × 640", async () => {
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      const pane = screen.getByTestId("app-left-pane");
+      expect(pane.style.position).toBe("absolute");
+      expect(pane.style.left).toBe("0px");
+      expect(pane.style.width).toBe("100%");
+      expect(pane.style.height).toBe("48vh");
+      expect(pane.style.bottom).toBe("0px");
+      expect(pane.style.top).toBe("");
+      // The docked caption is present (all strings in copy.ts, #194).
+      expect(screen.getByTestId("conversation-docked-notice").textContent).toBe(
+        copy.shell.conversationDocked,
+      );
+    });
+
+    it("keeps the conversation floating at the top-left at 1280 × 900 (above the threshold)", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      const pane = screen.getByTestId("app-left-pane");
+      expect(pane.style.top).toBe("24px");
+      expect(pane.style.left).toBe("24px");
+      expect(pane.style.height).toBe("calc(100% - 168px)");
+      expect(screen.queryByTestId("conversation-docked-notice")).toBeNull();
+    });
+
+    it("docks the conversation at 899px and floats it at exactly 900px (threshold is strict)", async () => {
+      defineWindow(1280, 899);
+      const { unmount } = render(<App client={client} />);
+      expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
+      expect(screen.getByTestId("app-left-pane").style.height).toBe("48vh");
+      unmount();
+
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      expect(screen.queryByTestId("conversation-docked-notice")).toBeNull();
+      expect(screen.getByTestId("app-left-pane").style.height).toBe("calc(100% - 168px)");
+    });
+
+    it("recomputes the dock on a genuine resize event (listener, not mount-time state)", async () => {
+      defineWindow(1280, 900);
+      const { unmount } = render(<App client={client} />);
+      expect(screen.queryByTestId("conversation-docked-notice")).toBeNull();
+      // Shrink below the threshold and fire a real resize: the dock must
+      // appear without a remount (windowSize is state, not a constant).
+      defineWindow(1024, 640);
+      fireEvent(window, new Event("resize"));
+      expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
+      expect(screen.getByTestId("app-left-pane").style.height).toBe("48vh");
+      // And back: grow above the threshold, the dock leaves.
+      defineWindow(1280, 900);
+      fireEvent(window, new Event("resize"));
+      expect(screen.queryByTestId("conversation-docked-notice")).toBeNull();
+      unmount();
+    });
+
+    it("moves the filmstrip inside the docked bar at 1024 × 640 (the floating strip is absent)", async () => {
+      // A version must exist for the strip to render at all: the strip is
+      // ABSENT (not empty) until a version exists or a pass is in flight
+      // (Filmstrip's contract), and the initial listVersions only fires
+      // once the (lazily created) project resolves.
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      const strips = await screen.findAllByTestId("version-filmstrip");
+      expect(strips).toHaveLength(1);
+      // The docked instance is inside the bar: in normal flow (relative),
+      // not absolutely positioned at the stage's bottom-left corner.
+      const strip = strips[0];
+      expect(strip.style.position).toBe("relative");
+      expect(strip.parentElement?.parentElement).toBe(
+        screen.getByTestId("app-left-pane"),
+      );
+    });
+
+    it("keeps the filmstrip floating at the bottom-left when the conversation floats (1280 × 900)", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      const strip = await screen.findByTestId("version-filmstrip");
+      expect(strip.style.position).toBe("absolute");
+      expect(strip.style.bottom).toBe("24px");
+      expect(strip.style.left).toBe("24px");
+      // And it is NOT inside the pane.
+      expect(screen.getByTestId("app-left-pane").contains(strip)).toBe(false);
+    });
+
+    it("renders EXACTLY one history sheet when docked at 1024 × 640 (no duplicate stage-level sheet)", async () => {
+      // The docked bar carries its own filmstrip instance (and, from the
+      // sheet's entry point, its own sheet instance). If the stage-level
+      // HistorySheet lacks the !conversationDocked guard, BOTH sheets mount
+      // at the ticket's own target viewport — two overlapping overlays, and
+      // getByTestId("history-sheet") throws "Found multiple elements".
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      const strip = await screen.findByTestId("version-filmstrip");
+      expect(strip.parentElement?.parentElement).toBe(
+        screen.getByTestId("app-left-pane"),
+      );
+      // Open the sheet from the strip's expand mark (the sheet's only
+      // entry point, issue #184).
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      await waitFor(() =>
+        expect(screen.getAllByTestId("history-sheet").length).toBeGreaterThan(0),
+      );
+      // Exactly one — pin the count, not a presence check.
+      expect(screen.getAllByTestId("history-sheet")).toHaveLength(1);
+    });
+
+    it("renders EXACTLY one history sheet when floating at 1280 × 900 (mirror of the docked case)", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      await waitFor(() =>
+        expect(screen.getAllByTestId("history-sheet").length).toBeGreaterThan(0),
+      );
+      expect(screen.getAllByTestId("history-sheet")).toHaveLength(1);
+    });
+
+    it("places the docked history sheet in the CANVAS BAND above the bar (issue #194 adversarial fix)", async () => {
+      // Regression: with the sheet rendered as a CHILD of the docked pane
+      // (a positioned element), the pane was the sheet's containing block,
+      // so the sheet's top offset (band height + inset) resolved AGAINST
+      // the pane, not the stage: at 1024 × 640 the sheet's top landed at
+      // 664px with its bottom at 616px — a negative height, an invisible,
+      // non-interactable sheet. The sheet is now a stage-level sibling whose
+      // inline box is the canvas band: top = the small inset, bottom = the
+      // bar-clearing offset (48vh + inset). jsdom cannot lay out, but it can
+      // read inline styles — the defect is arithmetic, not layout.
+      defineWindow(1024, 640);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      const sheets = await screen.findAllByTestId("history-sheet");
+      expect(sheets).toHaveLength(1);
+      // The sheet is a STAGE-level sibling — its containing block is the
+      // stage, not the docked pane (the defect made the pane the containing
+      // block, so the offsets below would be meaningless).
+      expect(sheets[0].parentElement).toBe(screen.getByTestId("app-stage"));
+      // top: the small inset (24px) — the sheet opens at the top of the
+      // canvas band, NOT 331.2px below the stage top.
+      expect(sheets[0].style.top).toBe("24px");
+      // bottom: the bar-clearing value — 0.48 × 640 + 24 = 331.2px, so the
+      // sheet's box is [24, 308.8] in the stage (height 284.8px > 0), fully
+      // above the bar which starts at 332.8px.
+      expect(sheets[0].style.bottom).toBe("331.2px");
+    });
+
+    it("keeps the floating history sheet inset on both edges when the conversation floats", async () => {
+      defineWindow(1280, 900);
+      render(<App client={client} />);
+      sendFirstComposerMessage("make a box");
+      await screen.findByTestId("version-filmstrip");
+      fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+      const sheets = await screen.findAllByTestId("history-sheet");
+      expect(sheets).toHaveLength(1);
+      expect(sheets[0].parentElement).toBe(screen.getByTestId("app-stage"));
+      // The floating layout is unchanged: both edges at the small inset.
+      expect(sheets[0].style.top).toBe("24px");
+      expect(sheets[0].style.bottom).toBe("24px");
+    });
+
+    it("the failure card renders inside the docked bar at 1024 × 640 (no plate overlap band above it)", async () => {
+      defineWindow(1024, 640);
+      const failingClient = new ApiClient();
+      vi.spyOn(failingClient, "createProject").mockResolvedValue(PROJECT);
+      vi.spyOn(failingClient, "listVersions").mockResolvedValue([]);
+      vi.spyOn(failingClient, "postChat").mockResolvedValue({ status: "accepted" });
+      vi.spyOn(failingClient, "streamEvents").mockImplementation(
+        async (_id, handlers) => {
+          handlers.onError?.({ message: "stream interrupted: boom" });
+        },
+      );
+      render(<App client={failingClient} />);
+      sendFirstComposerMessage("hi");
+      await act(async () => {
+        await Promise.resolve();
+      });
+      // The failure is a turn in the conversation (issue #124, W12): it
+      // renders inside the pane. In the docked layout that means it sits in
+      // the bottom band, with the plate's canvas band (100% − 48vh) above
+      // it — the jsdom check is that the failure turn is a descendant of the
+      // docked bar, so it can no longer sit on top of the plate's area.
+      await waitFor(() => {
+        const turn = screen.getByTestId("failure-turn");
+        expect(screen.getByTestId("app-left-pane").contains(turn)).toBe(true);
+      });
+      expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
+    });
+  });
+
+  // -----------------------------------------------------------------------
   // W15 — region bar anchored to the pin (issue #129)
   // -----------------------------------------------------------------------
 
@@ -2677,11 +2928,21 @@ describe("App region-selection (point pick) wiring", () => {
     ]);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
+    // The Brief has hasLivePin=true, so it renders as a chip — the chip
+    // does NOT render individual rows (it renders a summary). To test the
+    // highlight we need the full panel: run the whole test at a size above
+    // BOTH the 820px Brief-chip threshold and the 900px issue #194 dock
+    // threshold, so the Brief is a full panel with its per-row elements.
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1280 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
+
     await settleModelMount(client);
     // Wait for the design-state to be fetched and the Brief to render rows.
     await waitFor(() => {
       expect(screen.getByTestId("brief-row-wing_left")).toBeTruthy();
     });
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
 
     // Before the pick: no highlight.
     const row = screen.getByTestId("brief-row-wing_left");

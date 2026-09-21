@@ -362,6 +362,11 @@ export const shell = {
   openConversation: "Open the conversation",
   collapseConversation: "Collapse the conversation",
   hideAllPanels: "Hide every panel",
+  /** Below the adaptive threshold the conversation docks to the bottom
+   *  of the window so it can no longer sit over the build plate (issue
+   *  #194): the caption is a status line in the docked bar's header. */
+  conversationDocked:
+    "Conversation docked to the bottom — the build plate stays clear.",
   /** Below the floor we say so plainly rather than degrading. */
   viewportTooSmall:
     "This needs a window at least 1024 × 640 to show the model and the conversation at once.",
