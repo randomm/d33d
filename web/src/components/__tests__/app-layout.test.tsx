@@ -531,6 +531,159 @@ describe("App layout", () => {
     expect(client.recordExport).not.toHaveBeenCalled();
   });
 
+  it("disables the export button on first run — the project resolved but no version exists yet (issue #197)", async () => {
+    // The first send creates the project (the pane renders) while the
+    // timeline resolves to an empty list — versionId is undefined and the
+    // button must be DISABLED, not a clickable 404.
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+
+    render(<App client={client} />);
+    // The pane (and therefore the button) renders once the project resolves
+    // — the first explicit send creates it (issue #192: lazy creation).
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+
+  it("enables the export button when a version exists and nothing is in flight (issue #197)", async () => {
+    // The enabled case of the acceptance criteria, at the App level: the
+    // default stub resolves one entry (v1) and no loop is running.
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+    ]);
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+  });
+
+  it("disables the export button while a design loop is in flight, even with a version (issue #197)", async () => {
+    // A version exists (v1) but the loop is mid-run: the button must stay
+    // disabled — exporting a possibly-stale version mid-loop is the 409
+    // case. The stream never resolves, so the flag never releases.
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+    ]);
+    vi.spyOn(client, "streamEvents").mockImplementation(
+      async (_id, _handlers) => new Promise<void>(() => {}),
+    );
+
+    render(<App client={client} />);
+    // The first send both creates the project and starts the (never-ending)
+    // loop — the flag is set before postChat and the mocked stream never
+    // resolves, so it is never released.
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+  });
+
+  it("a completed design loop flips the export button from disabled to enabled (issue #197)", async () => {
+    // The full loop: first send starts the loop with no version (button
+    // disabled), the version-created frame triggers the timeline refetch
+    // that returns v1, and the done frame releases the in-flight flag —
+    // after which the button is enabled for the newly created version.
+    const versionEntry = {
+      id: 1,
+      name: "v1",
+      params: {},
+      created_by_message: "make a box",
+      parent: null,
+      restored_from: null,
+      forked_from: null,
+      pinned: false,
+      archived: false,
+      thumbnail: null,
+      created_at: "2026-01-01T00:00:00Z",
+      diff_count: 0,
+      exported_at: null,
+    };
+    // The design loop is driven the same way the other stream tests do:
+    // capture the handler object streamEvents receives and dispatch the
+    // frames in separate act() ticks — mirroring the existing
+    // "refetches the version timeline when a version-created frame arrives"
+    // pattern.
+    const listVersions = vi
+      .fn()
+      .mockResolvedValueOnce([]) // initial timeline fetch: no version yet
+      .mockResolvedValue([versionEntry]); // the frame's refetch: v1 exists
+    const client = makeClient({ listVersions });
+
+    render(<App client={client} />);
+    // The first send both creates the project and starts the loop (the
+    // default mocked stream resolves immediately, so the flag is released
+    // — the version created below then re-disables it via the refetch).
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+
+    // The pane is up (project resolved) with no version yet — the button
+    // exists and is DISABLED (no version, and the loop is in flight).
+    const button = await screen.findByTestId("export-3mf-button");
+    expect((button as HTMLButtonElement).disabled).toBe(true);
+
+    // The design loop completes: the version-created frame triggers the
+    // timeline refetch (which lands v1 — the loop created the version)
+    // and the done frame releases the in-flight flag. After both settle,
+    // the button flips to enabled for the newly created version.
+    const spy = vi.mocked(client.streamEvents);
+    const handlers = (spy.mock.calls[spy.mock.calls.length - 1]?.[1] ??
+      undefined) as
+      | { onProgress?: (s?: string, d?: Record<string, unknown>) => void; onDone?: (d?: Record<string, unknown>) => void }
+      | undefined;
+    await act(async () => {
+      handlers?.onProgress?.("version-created", { step: "version-created", version_id: 1 });
+    });
+    await act(async () => {
+      handlers?.onDone?.({});
+    });
+    // The frame's refetch has landed and the flag has released — the
+    // button is enabled for the newly created version.
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect((screen.getByTestId("export-3mf-button") as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
+
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
     // W10: the views map is on the wire in the version-created frame; the
     // pass card (via ChatPanel) is what displays it. The App-level `renders`

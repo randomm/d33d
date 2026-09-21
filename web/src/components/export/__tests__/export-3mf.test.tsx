@@ -38,13 +38,20 @@ describe("Export3MF", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders the export button in idle state", () => {
+  it("renders a DISABLED export button when no version is targeted (first run)", () => {
     const client = new ApiClient();
     render(<Export3MF projectId={projectId} client={client} />);
     expect(screen.getByTestId("export-3mf")).toBeTruthy();
-    const button = screen.getByTestId("export-3mf-button");
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
     expect(button.textContent).toBe("Export 3MF");
-    expect((button as HTMLButtonElement).disabled).toBe(false);
+    expect(button.disabled).toBe(true);
+  });
+
+  it("enables the export button when a versionId is present and no failure is pending", () => {
+    const client = new ApiClient();
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
   });
 
   it("names the download by the deck's slug contract (exportFilename), not a default", async () => {
@@ -110,10 +117,11 @@ describe("Export3MF", () => {
       }),
     );
 
-    render(<Export3MF projectId={projectId} client={client} />);
+    render(<Export3MF projectId={projectId} versionId={3} client={client} />);
     const button = screen.getByTestId(
       "export-3mf-button",
     ) as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
     fireEvent.click(button);
 
     await waitFor(() => {
@@ -125,16 +133,19 @@ describe("Export3MF", () => {
     await waitFor(() => {
       expect(button.textContent).toBe("Export 3MF");
     });
+    expect(button.disabled).toBe(false);
   });
 
-  it("surfaces a 404 (no backend route yet) as an error state, not a crash", async () => {
+  it("surfaces a 404 as an error state AND returns the button to disabled (failed attempt is not retryable by re-click)", async () => {
     const client = new ApiClient();
-    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+    const spy = vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
       new ApiError(404, "Not Found"),
     );
 
-    render(<Export3MF projectId={projectId} client={client} />);
-    fireEvent.click(screen.getByTestId("export-3mf-button"));
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    expect(button.disabled).toBe(false);
+    fireEvent.click(button);
 
     await waitFor(() => {
       expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
@@ -143,6 +154,13 @@ describe("Export3MF", () => {
       "404",
     );
     expect(createObjectURLSpy).not.toHaveBeenCalled();
+    // The failed attempt must leave the button DISABLED — a re-click is not
+    // a valid retry in the same target state.
+    expect(button.disabled).toBe(true);
+    // A second click does not re-issue the download.
+    const callsBefore = spy.mock.calls.length;
+    fireEvent.click(button);
+    expect(spy.mock.calls.length).toBe(callsBefore);
   });
 
   it("calls onExported exactly once, with the version id, AFTER a successful download", async () => {
@@ -166,6 +184,32 @@ describe("Export3MF", () => {
       expect(onExported).toHaveBeenCalledTimes(1);
     });
     expect(onExported).toHaveBeenCalledWith(7);
+  });
+
+  it("a new versionId arriving clears the failed-download flag and re-enables the button", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(404, "Not Found"),
+    );
+
+    const { rerender } = render(
+      <Export3MF projectId={projectId} versionId={4} client={client} />,
+    );
+    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(button.disabled).toBe(true);
+    });
+
+    // A new version is targeted (the parent's listVersions refetch replaced
+    // the list). The failed flag from the old target must clear.
+    rerender(
+      <Export3MF projectId={projectId} versionId={5} client={client} />,
+    );
+    await waitFor(() => {
+      expect(button.disabled).toBe(false);
+    });
   });
 
   it("a failed export calls onExported NEVER (no turn, no mark)", async () => {

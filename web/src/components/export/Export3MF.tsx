@@ -17,7 +17,7 @@
  * → "curtain-rod-bracket-v4.3mf"), never an invented `model-{id}.3mf`.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiClient } from "../../lib/api";
 import copy from "../../copy";
 
@@ -30,6 +30,10 @@ interface Export3MFProps {
   versionId?: number;
   /** The version's display name (the filename's suffix, `vN`). */
   versionName?: string;
+  /** True while a design loop is in flight — the backend would 409 a
+   *  download mid-loop (the version being created is not yet exportable),
+   *  so the button is disabled until the loop completes. */
+  inFlight?: boolean;
   /** Injectable API client (test seam). Defaults to a same-origin ApiClient. */
   client?: ApiClient;
   /** Fires exactly once, AFTER a successful download. Failed/cancelled
@@ -44,13 +48,36 @@ export function Export3MF({
   projectName = "",
   versionId,
   versionName,
+  inFlight = false,
   client,
   onExported,
 }: Export3MFProps) {
   const [state, setState] = useState<ExportState>("idle");
   const [error, setError] = useState<string | null>(null);
+  // A failed download (404/502 from GET model.3mf) disables the button
+  // until the versions list changes — a new versionId arriving clears the
+  // failed flag (the parent re-targets, so the stale failure no longer
+  // applies). A failed attempt is never retried by clicking the same
+  // button in the same target state.
+  const [lastDownloadFailed, setLastDownloadFailed] = useState(false);
 
   const apiClient = client ?? new ApiClient();
+
+  // A new version targeted clears any pending failed-download state: the
+  // old failure referred to a version that no longer is the target.
+  const prevVersionIdRef = useRef(versionId);
+  useEffect(() => {
+    if (versionId !== prevVersionIdRef.current) {
+      prevVersionIdRef.current = versionId;
+      if (versionId !== undefined) {
+        setLastDownloadFailed(false);
+        if (state === "error") {
+          setState("idle");
+          setError(null);
+        }
+      }
+    }
+  }, [versionId, state]);
   // The filename is the deck's slug contract. `vN` — the version's ordinal,
   // which is its name (`v${id}`) by the timeline's own labelling.
   const downloadName = copy.shell.exportFilename(
@@ -63,6 +90,7 @@ export function Export3MF({
     setError(null);
     try {
       const blob = await apiClient.downloadModel3MF(projectId);
+      setLastDownloadFailed(false);
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");
       anchor.href = url;
@@ -80,6 +108,7 @@ export function Export3MF({
       const message = e instanceof Error ? e.message : "3MF export failed";
       setState("error");
       setError(message);
+      setLastDownloadFailed(true);
       // A failed export appends no completion turn and sets no mark —
       // onExported is never called on this path.
     }
@@ -91,7 +120,9 @@ export function Export3MF({
         type="button"
         data-testid="export-3mf-button"
         onClick={() => void handleExport()}
-        disabled={state === "downloading"}
+        disabled={
+          versionId === undefined || inFlight || lastDownloadFailed || state === "downloading"
+        }
         aria-label={copy.shell.export}
       >
         {state === "downloading" ? "Exporting…" : copy.shell.export}
