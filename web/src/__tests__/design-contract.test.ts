@@ -885,6 +885,61 @@ describe("design contract", () => {
     expect(stylesheet()).not.toMatch(/\.failure-turn[\s\S]*?#FF3300/i);
   });
 
+  /* --------------------------------------------------------------- W191 */
+
+  it("the collapse button renders no visible copy string (icon-only)", () => {
+    // W191 / issue #191: the expand-state conversation-collapse-btn is
+    // icon-only — its accessible name comes solely from the aria-label
+    // binding to copy.shell.collapseConversation, not from a visible text
+    // child. The defect (171×25 text button over the Brief panel) was the
+    // same string rendered as BOTH the aria-label and the visible children;
+    // the icon-only fix removes the text child. The collapsed-state rail
+    // button (data-testid="conversation-rail") is a separate control and is
+    // intentionally NOT constrained here.
+    //
+    // This is a source-level tripwire in the W-series style: it slices
+    // App.tsx from the conversation-collapse-btn opening tag to its closing
+    // tag and asserts the slice binds aria-label to the copy key but does
+    // NOT interpolate the copy key as JSX text. It reads App.tsx by path
+    // (never edits it); if the slice markers are not stable after the fix,
+    // the slice assertion below reports it.
+    const app = readFileSync(join(SRC, "App.tsx"), "utf8");
+
+    // Locate the button element: the data-testid anchors the slice start
+    // (walk back to the enclosing opening tag) and the first closing tag
+    // after it ends the slice — the button is the smallest element carrying
+    // the testid, so its own closing tag is the right boundary.
+    const testidIdx = app.indexOf('data-testid="conversation-collapse-btn"');
+    expect(
+      testidIdx,
+      'App.tsx must contain the collapse button (data-testid="conversation-collapse-btn")',
+    ).toBeGreaterThanOrEqual(0);
+    const tagStart = app.lastIndexOf("<button", testidIdx);
+    expect(tagStart, "the collapse button must open with a <button tag").toBeGreaterThanOrEqual(0);
+    const closeIdx = app.indexOf("</button>", testidIdx);
+    expect(closeIdx, "the collapse button must close").toBeGreaterThan(tagStart);
+    const slice = app.slice(tagStart, closeIdx + "</button>".length);
+
+    // The accessible name must come from the aria-label binding to the
+    // copy key — dropping it would make the icon invisible to assistive
+    // tech.
+    expect(
+      /aria-label=\{copy\.shell\.collapseConversation\}/.test(slice),
+      `the collapse button must keep its aria-label bound to copy.shell.collapseConversation:\n${slice}`,
+    ).toBe(true);
+
+    // The copy key must NOT appear anywhere else in the button element — in
+    // particular not as a JSX text child (the {copy.shell.collapseConversation}
+    // interpolation the defect shipped). Strip the attested aria-label
+    // binding first so the "does not appear" check targets only the
+    // visible-content shapes.
+    const withoutAriaLabel = slice.replace(/aria-label=\{copy\.shell\.collapseConversation\}/g, "");
+    expect(
+      withoutAriaLabel.includes("copy.shell.collapseConversation"),
+      `the collapse button must render no copy string as visible content (icon-only); the string must come solely from the aria-label:\n${slice}`,
+    ).toBe(false);
+  });
+
   /* --------------------------------------------------------------- W9b */
 
   it("every Brief list item carries a unique, stable key (no React key warning)", () => {
