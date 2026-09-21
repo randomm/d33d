@@ -61,7 +61,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight }: FirstRunProps) {
           width: "min(560px, 92vw)",
           padding: 24,
           borderRadius: "var(--radius)",
-          background: "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+          background: "color-mix(in srgb, var(--color-panel) 40%, transparent)",
           border: "1px solid var(--color-hairline)",
           color: "var(--color-fg)",
           pointerEvents: "auto",
