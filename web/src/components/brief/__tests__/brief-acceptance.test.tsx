@@ -164,7 +164,17 @@ describe("Brief — the list that does not grow", () => {
       unknown("screw_length"),
     ];
     // 9 resolved (> 7 → grouped), 2 unknowns (promoted).
+    // The 11 entries exercise BOTH list maps (the promoted unknowns and the
+    // group-collapsed resolved list) — the console spy asserts neither emits
+    // a React key warning (issue #196 regression tripwire).
+    const consoleErrorSpy = vi.spyOn(console, "error");
     render(<Brief {...baseProps} entries={entries} />);
+    expect(
+      consoleErrorSpy.mock.calls.filter((c) =>
+        String(c[0]).includes('Each child in a list should have a unique "key" prop'),
+      ),
+    ).toEqual([]);
+    consoleErrorSpy.mockRestore();
     // The unknowns render OUTSIDE the group, in their own block.
     const unknownsBlock = screen.getByTestId("brief-unknowns");
     expect(unknownsBlock.textContent).toContain("backplate_width");
@@ -189,6 +199,39 @@ describe("Brief — the list that does not grow", () => {
     expect(screen.getByTestId("brief-row-W")).toBeTruthy();
     expect(screen.getByTestId("brief-row-D")).toBeTruthy();
     expect(screen.getByTestId("brief-unknowns")).toBeTruthy();
+  });
+
+  it("rows carry unique, stable keys — no key warning when entries reorder or refetch (issue #196)", () => {
+    // The key must be the stable entry name, not the index: an index key
+    // would silence the warning but re-attach row state to the wrong row on
+    // reorder. Render with several entries, then re-render reordered and
+    // spy console.error across the whole cycle.
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    const entries: DesignStateEntry[] = [
+      stated("W", 60),
+      stated("D", 45),
+      stated("H", 80),
+      unknown("backplate_width"),
+      unknown("screw_length"),
+    ];
+    const { rerender } = render(<Brief {...baseProps} entries={entries} />);
+    // Reorder + a new entry arriving (the refetch shape): rows must keep
+    // their identity, no warning may fire.
+    rerender(
+      <Brief
+        {...baseProps}
+        entries={[unknown("screw_length"), stated("H", 80), stated("D", 45), stated("W", 60), stated("new_param", 5)]}
+      />,
+    );
+    const keyWarnings = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Each child in a list should have a unique "key" prop'),
+    );
+    expect(keyWarnings).toEqual([]);
+    consoleErrorSpy.mockRestore();
+    // Identity held: the re-rendered rows are still found by their name testids
+    // (which are keyed off the same identity as the list key).
+    expect(screen.getByTestId("brief-row-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-new_param")).toBeTruthy();
   });
 });
 

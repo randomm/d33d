@@ -313,6 +313,11 @@ export function Brief({
     return (
       <div
         className="brief-row"
+        // Stable identity across re-renders and refetches: the row's
+        // data-testid (brief-row-${name}) and the expanded state are both
+        // keyed off name — the list key must be the same stable identity
+        // (issue #196: the unkeyed lists were the "unique key" warning).
+        key={name}
         data-testid={`brief-row-${name}`}
         data-provenance={entry.provenance}
         // The resolved module id from a pending pick is outlined in the

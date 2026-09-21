@@ -36,7 +36,7 @@
  * team decided against, which is exactly the failure mode a unit test misses.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
@@ -883,5 +883,75 @@ describe("design contract", () => {
     // marker hex.
     expect(stylesheet()).toMatch(/\.failure-turn-bar--failing[\s\S]*?var\(--color-blocked\)/);
     expect(stylesheet()).not.toMatch(/\.failure-turn[\s\S]*?#FF3300/i);
+  });
+
+  /* --------------------------------------------------------------- W9b */
+
+  it("every Brief list item carries a unique, stable key (no React key warning)", () => {
+    // W9 (issue #196): the Brief renders two lists (the promoted unknowns
+    // and the resolved rows, group-collapsed above MAX_LIST_ROWS). Both
+    // must be keyed by the stable entry name — the same identity the rows'
+    // data-testid and the expanded state are keyed off. An index key would
+    // silence the warning but re-attach row state to the wrong row on
+    // reorder; no key at all is the shipped defect this pins.
+    // The >7 resolved entries hit the group-collapsed branch; the unknowns
+    // hit their own list — both maps must be warning-free.
+    const entries = [
+      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+      { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" as const },
+      { name: "H", label: "Height", value: 80, unit: "mm", provenance: "stated" as const },
+      { name: "p4", label: "p4", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p5", label: "p5", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p6", label: "p6", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p7", label: "p7", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p8", label: "p8", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "u1", label: "u1", value: null, unit: null, provenance: "unknown" as const },
+      { name: "u2", label: "u2", value: null, unit: null, provenance: "unknown" as const },
+    ];
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    const first = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries,
+      }),
+    );
+    // Re-render reordered: the refetch shape, where an index key would
+    // mis-attach row state and a missing key would re-warn.
+    const reordered = [...entries].reverse();
+    const second = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: reordered,
+      }),
+    );
+    const keyWarnings = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Each child in a list should have a unique "key" prop'),
+    );
+    expect(keyWarnings).toEqual([]);
+    consoleErrorSpy.mockRestore();
+    // The stable identity is the row's own testid. Above MAX_LIST_ROWS the
+    // resolved rows hide behind the group count (they render in neither list),
+    // so the rows asserted here are the two promoted unknowns — always
+    // rendered, in both orders, in both containers.
+    for (const name of ["u1", "u2"]) {
+      expect(
+        first.container.querySelector(`[data-testid='brief-row-${name}']`),
+        `row ${name} must resolve by its stable name identity in the first render`,
+      ).not.toBeNull();
+      expect(
+        second.container.querySelector(`[data-testid='brief-row-${name}']`),
+        `row ${name} must resolve by its stable name identity in the reordered render`,
+      ).not.toBeNull();
+    }
+    // The group-collapsed branch was exercised (8 resolved > 7) in both
+    // renders — the resolved rows are behind the count, not unkeyed.
+    expect(first.container.querySelector("[data-testid='brief-groups-count']")).not.toBeNull();
+    expect(second.container.querySelector("[data-testid='brief-groups-count']")).not.toBeNull();
+    expect(first.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
+    expect(second.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
   });
 });
