@@ -71,13 +71,22 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: dist]`` — translate, rotate about the origin (post-``--autocenter``),
 #: then distance, all in mm, orthographic 800x800. Single source of truth
 #: for the entrypoint, the caller and the tests.
-#:
-#: The first six elements (translate + rotate) are fixed constants:
+#
+#: The first three elements (translate, ``0.0``) and the seventh element
+#: (``dist``, ``0.0``) are **placeholders** — the entrypoint substitutes
+#: both at render time: the translate with the model's bounding-box
+#: centre in world coordinates (issue #223: with translate hard-coded at
+#: ``(0,0,0)`` the camera looked at the world origin while
+#: ``--autocenter`` recentred the scene at the bbox centre, so the two
+#: shifts did not cancel and an asymmetric-bbox model rendered displaced
+#: from the frame centre by exactly its bbox centre, rotated per view)
+#: and the distance with the per-model fit computed by :func:`cam_dist`
+#: (issue #111). The middle four elements (rotate) are fixed constants:
 #: they pin *which* face each view sees, verified empirically. The
-#: seventh element (``dist``) is a **placeholder** (``0.0``) — the
-#: entrypoint substitutes the actual per-model distance computed by
-#: :func:`cam_dist` from the harvested STL bounding box (issue #111).
-#: The entrypoint never reads these ``0.0`` values at render time.
+#: entrypoint never reads the placeholder ``0.0`` values at render time.
+#: The sync test ``test_entrypoint_view_cameras_match_views_tuples``
+#: compares only the four rotation elements (indices 3–5) between the
+#: two files — the translate and dist are both substituted.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
     ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
     ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 0.0)),
