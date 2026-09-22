@@ -145,6 +145,27 @@ describe("FirstRun", () => {
 });
 
 describe("PlateBackdrop", () => {
+  it("caps the plate SVG's width below 52vh — the width cap's vh term stays reduced (issue #214)", () => {
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    const svg = container.querySelector("svg.plate-backdrop");
+    expect(svg).not.toBeNull();
+    // The SVG's width cap is min(Nvh, 46vw); the vh term pins how tall the
+    // whole centred column (SVG + caption + note) can grow, which sets the
+    // caption's vertical position against the FirstRun card's photo hint.
+    // jsdom cannot lay out — this tripwire only pins the string so a silent
+    // reversion of the vh term back to 52 or above is caught here; the real
+    // geometric clearance gate is the manual-only Playwright spec.
+    const width = (svg as unknown as { style: CSSStyleDeclaration }).style.width;
+    const match = /min\((\d+(?:\.\d+)?)vh,\s*46vw\)/.exec(width);
+    expect(match).not.toBeNull();
+    const vhTerm = Number(match![1]);
+    expect(vhTerm).toBeLessThan(52);
+    // Lower bound: the cap must still be a real plate — a degenerate value
+    // (0vh, 0.5vh) would be a non-sensical reversion this tripwire should not
+    // silently pass. 40 is the floor of the "reduced but meaningful" band.
+    expect(vhTerm).toBeGreaterThanOrEqual(40);
+  });
+
   it("draws the plate to scale — the SVG viewBox matches the envelope dimensions", () => {
     const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={false} />);
     const svg = container.querySelector("svg.plate-backdrop");
