@@ -454,7 +454,11 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
     assert len(timeline) == 1, (
         f"expected exactly ONE version, got {len(timeline)}: {timeline}"
     )
-    assert timeline[0]["name"] == "design"
+    # The name is derived from the user message via derive_auto_name
+    # (issue #222: the hardcoded "design" literal was removed).
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name("Create a 20mm cube")
     # The params equal the expected converted map — numeric W/D/H, the
     # exact stored JSON shape (a future coercion change fails loudly).
     assert timeline[0]["params"] == {"W": 20.0, "D": 20.0, "H": 20.0}
@@ -478,8 +482,157 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
 
     assert set(view_map.keys()) == {name for name, _cam in VIEWS}
 
+    # The version row carries a non-NULL thumbnail: the iso view
+    # (view_05_iso.png) from the durable artifact dir, encoded as a data
+    # URI (issue #222: the thumbnail is persisted at version-creation
+    # time, not only on the SSE frame).
+    thumb = timeline[0]["thumbnail"]
+    assert thumb is not None, "thumbnail must be non-NULL with a full view set"
+    assert thumb.startswith("data:image/png;base64,"), (
+        f"thumbnail must be a PNG data URI, got: {thumb[:50]!r}"
+    )
     # The terminal frame is a done (not an error).
     assert frames[-1][0] == "done"
+
+
+def test_chat_pass_partial_views_version_thumbnail_is_null(
+    app_with_versions, tmp_path
+):
+    """A passing chat turn with a PARTIAL view set (5 of 6 PNGs present,
+    missing view_05_iso.png) produces a version row whose thumbnail is
+    NULL — never a placeholder, never a different view substituted
+    (issue #222: ``_artifact_bytes_from_path`` degrades to an empty dict
+    when fewer than all 6 view PNGs are present, and the thumbnail pick
+    must degrade to None in that case)."""
+    from pathlib import Path
+
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
+
+    def _loop_impl(scad_text, bbox_, render_fn):
+        async def _loop(app, **kwargs):
+            return await run_design_loop_async(
+                photo=kwargs["photo"],
+                chat_history=kwargs["chat_history"],
+                stated_dims=kwargs["stated_dims"],
+                render_fn=render_fn,
+                llm_fn=_stub_llm(scad_text),
+                bbox_fn=lambda r: bbox_,
+            )
+
+        return _loop
+
+    def _render_with_artifacts(artifact_dir):
+        async def _render(scad_source, defines):
+            return RenderResult(
+                ok=True,
+                exit_code=0,
+                duration_ms=1,
+                error_class="ok",
+                stderr="",
+                stl=str(Path(artifact_dir) / "model.stl"),
+                csg=None,
+                views=("v1", "v2", "v3", "v4", "v5", "v6"),
+                render_artifact_dir=artifact_dir,
+            )
+
+        return _render
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # 5 of 6 view PNGs — view_05_iso.png is missing.
+        artifact_dir = _write_durable_artifacts(tmp_path, partial_views=True)
+        app_with_versions.state.run_design_loop = _loop_impl(
+            scad, bbox, _render_with_artifacts(artifact_dir)
+        )
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "Create a 20mm cube", "chat_history": []},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        assert source is not None
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return r, frames, timeline
+
+    r, frames, timeline = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert len(timeline) == 1, "pass must still create a version with partial views"
+    # The thumbnail is NULL — the iso view is missing, so the pick
+    # degrades to None (never a different view substituted).
+    assert timeline[0]["thumbnail"] is None, (
+        f"thumbnail must be NULL with a partial view set, got: {timeline[0]['thumbnail']!r}"
+    )
+    # The version is still created with the correct name.
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name("Create a 20mm cube")
+
+
+def test_chat_pass_no_render_dir_version_thumbnail_is_null(
+    app_with_versions,
+):
+    """A passing chat turn with NO durable render (``render_artifact_dir``
+    is None — the default stub render) produces a version row whose
+    thumbnail is NULL — ``_artifact_bytes_from_path`` returns an empty
+    dict, so the thumbnail pick degrades to None without crashing or
+    fabricating a placeholder (issue #222)."""
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    scad = "x = 20; cube([x, x, x]);"
+    bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
+
+    def _loop_impl(scad_text, bbox_):
+        async def _render(scad_source, defines):
+            return _ok_render(scad_source)
+
+        async def _loop(app, **kwargs):
+            return await run_design_loop_async(
+                photo=kwargs["photo"],
+                chat_history=kwargs["chat_history"],
+                stated_dims=kwargs["stated_dims"],
+                render_fn=_render,
+                llm_fn=_stub_llm(scad_text),
+                bbox_fn=lambda r: bbox_,
+            )
+
+        return _loop
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop_impl(scad, bbox)
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make a cube", "chat_history": []},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        assert source is not None
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return r, frames, timeline
+
+    r, frames, timeline = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert len(timeline) == 1, "pass must create a version even without a render dir"
+    # The thumbnail is NULL — no render_artifact_dir means no view bytes.
+    assert timeline[0]["thumbnail"] is None, (
+        f"thumbnail must be NULL without a render dir, got: {timeline[0]['thumbnail']!r}"
+    )
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name("make a cube")
 
 
 # ---------------------------------------------------------------------------
@@ -859,7 +1012,15 @@ def test_region_edit_pass_creates_version_unchanged(app_with_versions, tmp_path)
     assert r.status_code == 202, r.text
     # A version WAS created (the region-edit pass path is unchanged).
     assert len(timeline) == 1, f"region-edit pass must create a version, got {len(timeline)}"
-    assert timeline[0]["name"] == "design"
+    # The name is derived from the composed region-edit request text via
+    # derive_auto_name (issue #222: the hardcoded "design" literal was
+    # removed).
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name(
+        "Region edit on modules curl_3 at the marked point "
+        "(view: front): open up this spiral"
+    )
     # The version's params are the render's defines map (empty for a fresh
     # project — the abstained case: W/D/H were unknown, so they are
     # omitted, never stored as zeros). The version IS still created (a

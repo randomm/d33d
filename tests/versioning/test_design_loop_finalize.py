@@ -703,7 +703,15 @@ def test_region_edit_pass_creates_version_visible_in_get_versions(
     frames, timeline = run_async(app_with_versions, _call)
     # A version was created and is visible in GET /versions.
     assert len(timeline) == 1, "no version created on pass"
-    assert timeline[0]["name"] == "design"
+    # The name is derived from the region-edit request text via
+    # derive_auto_name (issue #222: the hardcoded "design" literal was
+    # removed) — lowercased, [a-z0-9 -] sanitized, 40-char truncated.
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name(
+        "Region edit on modules curl_3, curl_4 at the marked point "
+        "(view: front): open up this spiral, it's too tight to print"
+    )
     assert timeline[0]["params"] == {"W": 11, "H": 22}
     # The version-created progress frame carries the version id.
     vc = [
@@ -1083,7 +1091,11 @@ def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
         data_by_event.setdefault(event, []).append(data)
     # A version was created.
     assert len(timeline) == 1, "no version created on pass"
-    assert timeline[0]["name"] == "design"
+    # The name is derived from the user message via derive_auto_name
+    # (issue #222: the hardcoded "design" literal was removed).
+    from d33d.versions import derive_auto_name
+
+    assert timeline[0]["name"] == derive_auto_name("make a box 10 wide and 20 high")
     assert timeline[0]["params"] == {"W": 10, "H": 20}
     # The version-created progress frame carries the version id.
     version_created = data_by_event.get("progress", [])
