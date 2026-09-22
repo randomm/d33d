@@ -558,12 +558,27 @@ async def _resolve_version_create(
     candidate_source = getattr(best, "scad_source", None)
     if not isinstance(candidate_source, str) or not candidate_source.strip():
         candidate_source = None
+    # The thumbnail is the best render's iso view (the only view guaranteed
+    # to frame the whole object — side views can be cropped per the
+    # separately-tracked camera-fit issue). ``_artifact_bytes_from_path``
+    # returns an empty dict for ``view_bytes`` when fewer than the full
+    # 6-view set is present, so the pick degrades to ``None`` (a NULL row)
+    # rather than substituting a different view or a placeholder. The name
+    # is NOT passed: ``create_version``/``_run_create`` derive it from
+    # ``message`` via ``derive_auto_name`` whenever name is falsy.
+    render = getattr(best, "render", None)
+    thumbnail = None
+    if render is not None:
+        _stl, view_bytes = _artifact_bytes_from_path(render)
+        iso = view_bytes.get("view_05_iso.png")
+        if iso is not None:
+            thumbnail = _data_uri_from_bytes(iso, "image/png")
     version = await app.state.versions.create_version(
         project_id,
         dict(named),
-        name="design",
         message=user_message[:200],
         scad_source=candidate_source,
+        thumbnail=thumbnail,
         bbox=_version_bbox_extents(result),
         render_artifact_dir=_version_render_artifact_dir(result),
     )
