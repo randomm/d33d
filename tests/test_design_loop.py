@@ -51,6 +51,7 @@ from d33d.design_loop import (
     DesignResult,
     Score,
     _scad_from_result,
+    extract_named_params,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -490,6 +491,97 @@ def test_golden_scad_fixtures_carry_named_params_or_fail_gate():
     assert s_param.named_params is True
 
 
+def test_extract_named_params_golden_fixtures_match_gate_bit():
+    """Issue #219: the shared extraction returns EXACTLY the declared
+    name/value pairs of a golden fixture (box-param.scad declares W=20,
+    H=25, D=30 → {"W": 20.0, "H": 25.0, "D": 30.0} as floats; box-magic
+    declares nothing → {}), and the extraction is consistent with the
+    gate bit the same regex feeds: named_params False ⇒ empty dict, and a
+    non-empty extraction ⇒ the gate's declaration leg passes (the
+    magic-numbers leg is orthogonal and unchanged)."""
+    fixtures = Path(__file__).parent / "fixtures" / "scad"
+    magic = (fixtures / "box-magic.scad").read_text()
+    param = (fixtures / "box-param.scad").read_text()
+
+    extracted_param = dict(extract_named_params(param))
+    assert extracted_param == {"W": 20.0, "H": 25.0, "D": 30.0}
+    assert all(isinstance(v, float) for v in extracted_param.values())
+    # The empty-dict case: no declaration lines in the magic sample.
+    assert dict(extract_named_params(magic)) == {}
+
+    # Consistency with the gate bit: named_params False ⇒ empty dict.
+    s_magic = score(
+        _render(), (20, 25, 30), bbox=BboxInfo(20, 25, 30, 1.0), scad_source=magic
+    )
+    assert s_magic.named_params is False
+    assert dict(extract_named_params(magic)) == {}
+    # A non-empty extraction means the gate's declaration leg passed; the
+    # magic-numbers leg on box-param is clean too, so the full gate is True.
+    s_param = score(
+        _render(), (20, 25, 30), bbox=BboxInfo(20, 25, 30, 1.0), scad_source=param
+    )
+    assert s_param.named_params is True
+
+
+def test_extract_named_params_boundary_cases():
+    """Issue #219: the extraction handles exactly the shapes the gate's
+    regex already tolerates — and nothing more: decimal values, multiple
+    assignments per line, non-W/D/H names; comments containing ``=`` and
+    non-numeric right-hand sides (expressions) never match (the shared
+    regex is deliberately not "improved" beyond the gate)."""
+    # Decimal and multi-digit values, one declaration per line (the shape
+    # the shared regex has always validated against — a declaration is a
+    # LINE, and multiple assignments on one line are a one-per-line
+    # convention the gate's regex does not (and must not start to) match).
+    pairs = extract_named_params("W = 60.5;\nD = 40;\nH = 25;\n")
+    assert pairs == (("W", 60.5), ("D", 40.0), ("H", 25.0))
+    # A comment line containing '=' must not match (the '//' prefix puts
+    # the first token where the regex's leading \w+ cannot bind).
+    assert extract_named_params("// W = 20;\n") == ()
+    # A non-numeric right-hand side (an expression) does not match.
+    assert extract_named_params("W = W2 * 2;\n") == ()
+    # Non-W/D/H names are captured (a superset of W/D/H — the persisted
+    # dict is every identifier the SCAD declares as a number), one line
+    # per declaration.
+    pairs = extract_named_params("slot_width = 12.5;\nx = 7;\n")
+    assert pairs == (("slot_width", 12.5), ("x", 7.0))
+    # A declaration is not required to look like a dimension at all.
+    assert dict(extract_named_params("a = 1;")) == {"a": 1.0}
+
+
+def test_extract_named_params_zero_is_declared_and_captured():
+    """Issue #219 (gap-gate): ``W = 0;`` is "declared" by the shared regex
+    and is captured honestly as 0.0 — the gate's declaration leg passes on
+    it, and the persisted record carries the declared zero (never a
+    fabricated absence, and never a dropped declaration)."""
+    assert dict(extract_named_params("W = 0;\n")) == {"W": 0.0}
+    s = score(_render(), (0.0, 0.0, 0.0), scad_source="W = 0;\ncube([W]);\n")
+    assert s.named_params is True
+
+
+def test_extract_named_params_malformed_numeric_rhs_is_skipped_not_crash():
+    """Issue #219 regression: the shared regex's numeric RHS is ``[\\d.]+``,
+    which admits ambiguous shapes like ``20.5.0`` that ``float()`` rejects.
+    The helper SKIPS the malformed line (mirroring ``detect_magic_numbers``'
+    guarded parse), never raising — a model-emitted malformed literal must
+    not crash the loop's persistence path, and the gate stays consistent
+    (``detect_magic_numbers`` treats the same line's value as unparseable
+    and skips it, so the extraction cannot diverge from the gate's
+    declared set)."""
+    # No crash, malformed line skipped, valid declarations still captured.
+    assert dict(extract_named_params("W = 20.5.0;\nD = 40;\n")) == {"D": 40.0}
+    # A source containing ONLY the malformed line is an honest absence.
+    assert extract_named_params("W = 20.5.0;\n") == ()
+    # Gate consistency: the magic-number gate does not crash either, and
+    # the malformed value exempts nothing (40 is still flagged as magic).
+    from d33d.failure_classes import detect_magic_numbers
+
+    flagged = detect_magic_numbers(
+        "W = 20.5.0;\ncube([40]);\n", stated_dimensions={"W": 20.0}
+    )
+    assert flagged is True
+
+
 # ---------------------------------------------------------------------------
 # T1 end-to-end: fenced-JSON protocol completes the loop
 # ---------------------------------------------------------------------------
@@ -825,11 +917,18 @@ def test_stated_dims_and_extra_defines_travel_as_named_params_to_render():
         bbox_fn=bbox_fn,
     )
     assert result.status == "pass"
-    # W/D/H set from stated dims, extra define preserved.
+    # W/D/H set from stated dims, extra define preserved (the render's
+    # defines channel stays caller-sourced — issue #219 did not change
+    # this channel).
     assert captured[0]["W"] == "10.0"
     assert captured[0]["D"] == "12.0"
     assert captured[0]["H"] == "14.0"
     assert captured[0]["clearance_slip"] == "0.3"
+    # The contrast (issue #219): the persisted record.params come from the
+    # SCAD source, not from the caller's defines — two different channels
+    # that must never be conflated. The stub SCAD declares W=20/D=25/H=30,
+    # so the record carries those, not the render's caller-stated 10/12/14.
+    assert result.best.params == {"W": 20.0, "D": 25.0, "H": 30.0}
 
 
 def test_async_and_sync_entry_points_produce_identical_result():

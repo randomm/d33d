@@ -53,6 +53,7 @@ owns the request_logs write (this module does no DB I/O).
 from __future__ import annotations
 
 import asyncio
+import functools
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -77,6 +78,7 @@ __all__ = [
     "DesignResult",
     "IterationRecord",
     "Score",
+    "extract_named_params",
     "is_best",
     "make_llm_fn",
     "no_improvement",
@@ -228,22 +230,20 @@ class IterationRecord:
     #: result without it simply carries ``None`` (a missing field is not
     #: a fabricated measurement).
     bbox: "BboxInfo | None" = None
-    #: The named parameters THIS candidate's render was made with — the
-    #: ``_dim_params`` defines map passed to ``render_fn``, converted for
-    #: the versions table's scalar-param representation (issue #93):
-    #: values that parse as numbers are stored as ``float`` (W/D/H must be
-    #: numeric — ``latest_version_stated_dims`` and the region-edit route
-    #: ``float()`` them on read), other values keep their string form.
-    #: An axis the user never stated is OMITTED entirely, never stored as
-    #: ``0`` (a stored zero is a false fact — "this part is 0 mm wide" —
-    #: whereas absent correctly means "unknown", and the downstream
-    #: readers already treat a missing/``<= 0`` axis as unknown). Caller-
-    #: supplied non-dimension defines (e.g. FDM clearances) are carried
-    #: through as-is — they are real parameters of the render. May be
-    #: empty (a dimensionless pass still materialises a version with an
-    #: empty param set; the loop's ``_dim_params`` is the source of
-    #: truth, and a caller that supplies extra defines plus no known
-    #: dimensions still produces a non-empty map from them alone).
+    #: The named dimension assignments THIS candidate's generated SCAD
+    #: actually declares (issue #219): the ``name -> float`` dict from the
+    #: shared extraction helper :func:`extract_named_params`, computed over
+    #: the record's own ``scad_source``. This is a RECORD of what was built,
+    #: not a restatement of the caller's input — when a name appears in
+    #: both the SCAD and the caller-stated dimensions, the SCAD value WINS
+    #: (the persisted dict is the SCAD extraction, not a merge with
+    #: ``_dim_params``). Values are always ``float`` (the downstream
+    #: readers ``float(params.get(axis, 0.0))``). A SCAD that declares no
+    #: matching ``name = number;`` line persists ``{}`` — honest reporting
+    #: of an actual absence. (Issue #93's caller-stated-params semantics —
+    #: the render's ``_dim_params`` defines map — are superseded for the
+    #: persisted record by this SCAD extraction; the render's ``defines``
+    #: channel itself is unchanged and stays caller-sourced.)
     params: dict[str, Any] = field(default_factory=dict)
 
 
@@ -383,6 +383,46 @@ def _views_non_blank(render: RenderResult) -> bool:
     )
 
 
+#: The declaration scanner shared by the named-parameter gate and the
+#: record persistence path (issue #219). Matches one ``name = number;``
+#: declaration per line (leading whitespace tolerated). The same regex the
+#: gate has always validated against — deliberately NOT broader: a comment
+#: prefix, and non-numeric right-hand sides (expressions), do not match,
+#: and forcing them to would create a silent scoring/persistence mismatch.
+#: ``detect_magic_numbers`` (``d33d.failure_classes``) uses the identical
+#: line shape for its declared set, so the extraction and the magic-number
+#: gate can never disagree on what counts as a declaration.
+_DECLARATION_RE = re.compile(r"^\s*(\w+)\s*=\s*([\d.]+)\s*;", re.MULTILINE)
+
+
+@functools.lru_cache(maxsize=256)
+def extract_named_params(scad_source: str) -> tuple[tuple[str, float], ...]:
+    r"""The named dimension assignments the SCAD source actually declares.
+
+    One pass of :data:`_DECLARATION_RE` over the source, collecting every
+    ``name = number;`` declaration as ``(name, float)`` pairs (values are
+    stored as ``float`` — the downstream readers ``float()`` them on read,
+    never a raw string). ``W = 0;`` matches (the regex requires a
+    non-empty numeric RHS, not a positive one) and is captured as
+    ``0.0``: an honest declaration is recorded, never dropped. The
+    result is a tuple of pairs (hashable, so this helper is memoised
+    across the loop's repeated gate + persistence calls over the same
+    candidate source). An empty source — or one with no declaration line
+    — yields ``()``: an honest absence, not a fabricated default. The
+    regex's numeric RHS is ``[\d.]+`` and ``float()`` rejects ambiguous
+    shapes like ``20.5.0`` (plausible model output): those are SKIPPED
+    (mirroring the guarded parse in ``detect_magic_numbers``), never a
+    crash — a malformed numeric literal is an honest absence.
+    """
+    out = []
+    for name, value in _DECLARATION_RE.findall(scad_source):
+        try:
+            out.append((name, float(value)))
+        except ValueError:
+            continue  # malformed numeric RHS (e.g. 20.5.0) — never a crash
+    return tuple(out)
+
+
 def _named_params_present(
     scad_source: str, stated_dims: tuple[float, float, float]
 ) -> bool:
@@ -396,6 +436,12 @@ def _named_params_present(
     (``<= 0``) are omitted: ``0``/absent is "dimension unknown" (the gate
     abstains on it elsewhere), never a stated value — a ``cube([0, 25,
     30])`` must not be exempted by an unknown axis.
+
+    The declaration leg is the SHARED extraction (issue #219): ``re.search``
+    for "a declaration exists" and :func:`extract_named_params` for "which
+    declarations" are one regex now, so the gate bit and the persisted
+    ``IterationRecord.params`` can never silently diverge (gate False
+    implies an empty extraction; gate True implies a non-empty one).
     """
     stated_dimensions: dict[str, float] | None = {
         axis: value for axis, value in zip(("W", "D", "H"), stated_dims) if value > 0
@@ -404,8 +450,7 @@ def _named_params_present(
         scad_source, stated_dimensions=stated_dimensions
     ):
         return False
-    declared = re.search(r"^\s*\w+\s*=\s*[\d.]+\s*;", scad_source, re.MULTILINE)
-    return declared is not None
+    return bool(extract_named_params(scad_source))
 
 
 def score(
@@ -502,33 +547,20 @@ def _dim_params(
     return out
 
 
-def _params_for_record(defines_map: dict[str, str]) -> dict[str, Any]:
-    """The ``IterationRecord.params`` conversion of the loop's defines map
-    (issue #93): numeric values are stored as ``float`` (the versions table
-    stores scalar JSON params and ``latest_version_stated_dims`` / the
-    region-edit route read W/D/H via ``float(params.get(axis, 0.0))``),
-    non-numeric values keep their string form, and axes the caller never
-    stated are OMITTED (the loop's ``_dim_params`` stringifies a zero
-    triple to ``"0"`` for unknown axes — a stored ``0`` would be a false
-    fact; absent means "unknown", which the readers already honour).
-    Non-dimension caller defines (e.g. FDM clearances) pass through as-is.
+def _scad_params(scad_source: str) -> dict[str, float]:
+    """The ``IterationRecord.params`` of one candidate (issue #219): the
+    SHARED extraction of the named assignments the candidate's own SCAD
+    declares — a record of what was actually built, not a restatement of
+    the caller's stated dimensions. A name the SCAD declares over any
+    caller-stated value of the same name (replace, not merge); a name the
+    SCAD does not declare is absent from the persisted dict even if the
+    user stated it. ``{}`` when the SCAD declares nothing (honest
+    absence). Values are ``float`` throughout (downstream ``float()``
+    readers); ``W = 0;`` is recorded honestly as ``0.0`` (the #93
+    never-store-a-zero invariant pertained to the caller-stated path,
+    which no longer feeds the record).
     """
-    out: dict[str, Any] = {}
-    for key, raw in defines_map.items():
-        if key in ("W", "D", "H"):
-            try:
-                value: Any = float(raw)
-            except ValueError:
-                continue  # unparseable dimension — never a fabricated value
-            if value <= 0:
-                continue  # abstained axis: unknown, never a stored zero
-            out[key] = value
-        else:
-            try:
-                out[key] = float(raw)
-            except ValueError:
-                out[key] = raw
-    return out
+    return dict(extract_named_params(scad_source))
 
 
 def _dim_axis(value: float) -> str:
@@ -932,7 +964,7 @@ async def run_design_loop_async(
                 repair=None,
                 prompt_hashes={"design": design_hash},
                 bbox=None,
-                params=_params_for_record(defines_map),
+                params=_scad_params(scad_source),
             )
             iterations.append(record)
             if best is None or is_best(candidate_score, best_score):
@@ -988,7 +1020,7 @@ async def run_design_loop_async(
             repair=next_repair,
             prompt_hashes={"design": design_hash},
             bbox=bbox,
-            params=_params_for_record(defines_map),
+            params=_scad_params(scad_source),
         )
         iterations.append(record)
 
