@@ -197,6 +197,112 @@ def test_entrypoint_bbox_parse_is_translation_invariant() -> None:
     )
 
 
+def _camera_loop_source(src: str) -> str:
+    """Extract the per-view camera-substitution loop from the entrypoint.
+
+    The loop body is the text between the ``if [ "${i}" -eq 5 ]`` branch
+    (which picks CAM_DIST_ISO for the iso view) and the ``png_file=``
+    assignment that closes the camera computation. It must contain the
+    explicit ``IFS=, read -r`` field parsing (issue #227) — a regression
+    to the old prefix/suffix string-strip is the bug this guard pins.
+    """
+    m = re.search(
+        r'if \[ "\$\{i\}" -eq 5 \]; then\n'
+        r".*?fi\n"  # skip the dist-selection if/else (the harness sets dist itself)
+        r"(.*?)\n    png_file=",
+        src,
+        re.DOTALL,
+    )
+    assert m is not None, "camera substitution loop not found in entrypoint.sh"
+    return m.group(1)
+
+
+def test_entrypoint_camera_reassembly_is_byte_identical() -> None:
+    """The camera loop's ``IFS=, read -r`` reassembly must produce camera
+    strings byte-identical to the legacy prefix/suffix string-strip
+    (``${VIEW_CAMERAS[i]}#0,0,0,`` + ``${...,0}``) for all six views,
+    including negative bbox centres (issue #223's fixtures sit in
+    negative coordinate space).
+
+    The entrypoint cannot be executed directly (it calls ``openscad``),
+    so the guard extracts the *actual* loop body from ``entrypoint.sh``
+    and executes it in a sandbox bash where every ``openscad`` call is
+    stubbed to record its ``--camera`` argument — the exact string the
+    production loop feeds to openscad is then compared to the legacy
+    form, view by view, for a positive-centre and a negative-centre
+    model.
+
+    A regression to the string-strip form, or a ``read -r`` that drops or
+    shifts a field (e.g. a placeholder-format drift in ``VIEW_CAMERAS``),
+    breaks byte-identity and fails CI.
+    """
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    view_cameras = _parse_bash_string_array(src, "VIEW_CAMERAS")
+    loop_body = _camera_loop_source(src)
+    assert "IFS=, read -r" in loop_body, (
+        "camera loop no longer uses explicit IFS=, read -r field "
+        "parsing (issue #227)"
+    )
+
+    harness = (
+        "\n"
+        "set -euo pipefail\n"
+        "dist_aa=\"90.0000000000\"\n"
+        "dist_iso=\"127.2792206130\"\n"
+        "declare -a VIEW_CAMERAS=("
+        + chr(10)
+        + chr(10).join('    "' + c + '"' for c in view_cameras)
+        + chr(10)
+        + ")\n"
+        "declare -a CAMS=()\n"
+        "declare -a VIEWS=(0 1 2 3 4 5)\n"
+        "openscad() { local a; for a in \"$@\"; do :; done; return 0; }\n"
+        "for i in 0 1 2 3 4 5; do\n"
+        '    if [ "$i" -eq 5 ]; then\n'
+        '        dist="$dist_iso"\n'
+        "    else\n"
+        '        dist="$dist_aa"\n'
+        "    fi\n"
+        '    cam="PENDING"\n'
+        + chr(10)
+        + loop_body
+        + chr(10)
+        + '    CAMS+=("$cam")\n'
+        "done\n"
+        'for c in "${CAMS[@]}"; do\n'
+        '    printf "%s\\n" "$c" >&2\n'
+        "done\n"
+    )
+
+    for bbox_t in ("5.0000000000,10.0000000000,15.0000000000",
+                   "11.2550000000,10.0500000000,15.0050000000",
+                   "-12.5000000000,-5.0000000000,2.5000000000"):
+        # BBOX_T is passed as an env var to the bash subprocess (the entrypoint
+        # itself always sets it before the loop); the stub openscad in the
+        # harness keeps the loop body executable without Docker.
+        proc = subprocess.run(
+            ["bash", "-c", "BBOX_T=" + bbox_t + " bash -s"],
+            input=harness.encode("utf-8"),
+            capture_output=True,
+            check=False,
+        )
+        assert proc.returncode == 0, (
+            f"harness failed for BBOX_T={bbox_t}: {proc.stderr.decode()}"
+        )
+        got = [ln for ln in proc.stderr.decode().splitlines() if ln]
+        assert len(got) == 6, f"expected 6 camera strings, got {got!r}"
+        expected = []
+        for i, cam_str in enumerate(view_cameras):
+            rot_part = cam_str.removeprefix("0,0,0,")
+            rot_part = rot_part.removesuffix(",0")
+            d = "127.2792206130" if i == 5 else "90.0000000000"
+            expected.append(f"{bbox_t},{rot_part},{d}")
+        assert got == expected, (
+            f"camera reassembly diverged from the legacy string-strip for "
+            f"BBOX_T={bbox_t}:\n  new={got!r}\n  legacy={expected!r}"
+        )
+
+
 def _parse_top_level_bash_assignment(src: str, var_name: str) -> str:
     """Extract a simple top-level ``VAR="value"`` scalar assignment.
 

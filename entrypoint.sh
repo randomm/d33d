@@ -318,13 +318,34 @@ END {
     cy = (miny + maxy) / 2
     cz = (minz + maxz) / 2
     printf "%.10f %.10f %.10f %.10f", m, cx, cy, cz
-}' "${STL_FILE}")
-    if [ -z "${bbox_out}" ]; then
+}' "${STL_FILE}") || bbox_rc=$?
+    # A non-zero awk exit must abort, not just empty output: a failed awk
+    # invocation (e.g. a vanished or unreadable STL) would otherwise fall
+    # through with an empty bbox_out and only the empty-check would catch it.
+    if [ "${bbox_rc:-0}" -ne 0 ]; then
+        bbox_status=1
+        bbox_detail="awk bbox parse exited non-zero (exit ${bbox_rc})"
+    elif [ -z "${bbox_out}" ]; then
         bbox_status=1
         bbox_detail="awk bbox parse produced no output (truncated STL)"
     else
         read -r max_extent BBOX_CX BBOX_CY BBOX_CZ <<< "${bbox_out}"
-        if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ] || [ "${max_extent}" = "0.0000000000" ]; then
+        # Validate ALL FOUR fields as well-formed numerics, not just
+        # max_extent. The committed awk always emits numeric %.10f fields, so
+        # this is defence-in-depth (matching this file's existing malformed-ASCII
+        # and zero-vertex aborts): if the awk parse ever emits a non-numeric or
+        # missing field, abort here rather than shipping an unframeable render.
+        # The pattern is sign-aware - a valid bbox centre can be negative
+        # (issue #223) - and treats "0" as well-formed so the empty-model's
+        # "0 0 0 0" line still aborts via the max_extent check below, not
+        # here (that path says "no vertex lines parsed", the true cause).
+        for bbox_field in "${max_extent}" "${BBOX_CX}" "${BBOX_CY}" "${BBOX_CZ}"; do
+            if [ -z "${bbox_field}" ] || ! printf '%s' "${bbox_field}" | grep -Eq '^-?[0-9]+([.][0-9]+)?$'; then
+                bbox_status=1
+                bbox_detail="malformed bbox field from awk parse: ${bbox_field}"
+            fi
+        done
+        if [ "${bbox_status}" -eq 0 ] && { [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ] || [ "${max_extent}" = "0.0000000000" ]; }; then
             bbox_status=1
             bbox_detail="no vertex lines parsed (empty or truncated STL)"
         fi
@@ -408,13 +429,14 @@ for i in 0 1 2 3 4 5; do
     else
         dist="${CAM_DIST_AA}"
     fi
-    # Strip the placeholder translate (first three fields) and the
-    # placeholder dist (last field), then re-assemble as:
-    # <BBOX_T>,<rotation>,<dist> — the bbox-centre translate is the
-    # issue #223 fix.
-    rot_part="${VIEW_CAMERAS[$i]#0,0,0,}"
-    rot_part="${rot_part%,0}"
-    cam="${BBOX_T},${rot_part},${dist}"
+    # Explicit field parsing of the 7-tuple (tx,ty,tz,rx,ry,rz,dist):
+    # discard the placeholder translate (fields 1-3) and the placeholder
+    # dist (field 7), and re-assemble as <BBOX_T>,<rotation>,<dist> -
+    # the bbox-centre translate is the issue #223 fix. This replaces the
+    # fragile prefix/suffix string-strip, which would silently produce a
+    # malformed camera string if the placeholder format ever changed.
+    IFS=, read -r _tx _ty _tz rx ry rz _dist <<< "${VIEW_CAMERAS[$i]}"
+    cam="${BBOX_T},${rx},${ry},${rz},${dist}"
     png_file="${WORKDIR}/${name}.png"
 
     echo "[entrypoint] Step ${step}/8: PNG ${name}" >&2
