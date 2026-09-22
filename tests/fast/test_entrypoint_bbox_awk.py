@@ -25,16 +25,16 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stl"
 def _extract_awk_bbox_program(src: str) -> str:
     """Extract the awk bbox program body from ``entrypoint.sh``.
 
-    The program sits inside ``max_extent=$(awk ' ... ' "${STL_FILE}")``.
+    The program sits inside ``bbox_out=$(awk ' ... ' "${STL_FILE}")``.
     The body (between the opening and closing single-quotes) contains no
     single-quote characters of its own (the only ``'`` in the body would
     break the bash quoting — the entrypoint authors must keep it that
-    way). Capture from the first ``'`` after ``max_extent=$(awk`` to the
+    way). Capture from the first ``'`` after ``bbox_out=$(awk`` to the
     next ``'`` (which closes the awk program, immediately followed by the
     double-quoted ``"${STL_FILE}"`` argument).
     """
     m = re.search(
-        r"max_extent=\$\(awk '([^']*)'\s*\"\$\{STL_FILE\}\"", src, re.DOTALL
+        r"bbox_out=\$\(awk '([^']*)'\s*\"\$\{STL_FILE\}\"", src, re.DOTALL
     )
     assert m is not None, "awk bbox program not found in entrypoint.sh"
     return m.group(1)
@@ -43,7 +43,10 @@ def _extract_awk_bbox_program(src: str) -> str:
 def _run_awk(program: str, stl_path: Path) -> float:
     """Run the awk program against an ASCII STL and return the parsed
     ``max_extent`` (a float). The program is executed via ``awk`` (mawk or
-    gawk both accepted; the CI base image ships mawk)."""
+    gawk both accepted; the CI base image ships mawk). The program emits
+    ``"<max_extent> <cx> <cy> <cz>"`` (the bbox centre fields are the
+    issue #223 camera-translate substitution); this test only needs the
+    max_extent, so the first field is taken and the rest discarded."""
     proc = subprocess.run(
         ["awk", program, str(stl_path)],
         capture_output=True,
@@ -54,7 +57,8 @@ def _run_awk(program: str, stl_path: Path) -> float:
         f"{proc.stderr.decode()}"
     )
     out = proc.stdout.decode().strip()
-    return float(out)
+    max_extent_field = out.split()[0]
+    return float(max_extent_field)
 
 
 def test_awk_bbox_knows_each_golden_fixture_extent() -> None:
