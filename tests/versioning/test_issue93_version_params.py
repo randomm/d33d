@@ -38,8 +38,7 @@ import uuid
 from d33d.design_loop import (
     IterationRecord,
     Score,
-    _dim_params,
-    _params_for_record,
+    extract_named_params,
 )
 from d33d.design_loop_events import (
     _resolve_version_create,
@@ -92,7 +91,7 @@ def test_loop_pass_record_carries_numeric_stated_dims() -> None:
 
     from d33d.design_loop import run_design_loop_async
 
-    scad = "W = 20; D = 15; H = 10; cube([W, D, H]);"
+    scad = "W = 20;\nD = 15;\nH = 10;\ncube([W, D, H]);"
 
     from d33d.design_loop import BboxInfo
 
@@ -128,7 +127,7 @@ def test_loop_pass_record_carries_caller_defines_as_numeric() -> None:
     """Caller-supplied non-dimension defines (e.g. FDM clearances) are
     carried through as-is — numeric ones as floats, stringly ones as
     strings — they are real parameters of the render."""
-    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
     import asyncio
 
     from d33d.design_loop import BboxInfo, run_design_loop_async
@@ -149,25 +148,24 @@ def test_loop_pass_record_carries_caller_defines_as_numeric() -> None:
     )
     result = asyncio.run(coro)
     assert result.status == "pass"
-    assert result.best.params == {
-        "W": 20.0,
-        "D": 20.0,
-        "H": 20.0,
-        "clearance": 0.4,
-        "layer": "PLA",
-    }
+    # Issue #219: the persisted record is the SCAD extraction — the
+    # caller's non-dimension defines (clearance/layer) are the render
+    # channel's parameters, never inputs to the record's params source.
+    assert result.best.params == {"W": 20.0, "D": 20.0, "H": 20.0}
 
 
-def test_loop_abstained_pass_record_omits_zero_axes() -> None:
-    """A dimensionless (abstained) pass: the record's params OMIT W/D/H
-    entirely — never a stored ``0`` (a stored zero is a false fact;
-    absent correctly means "unknown")."""
+def test_loop_abstained_pass_record_carries_scad_declared_params() -> None:
+    """Issue #219: a dimensionless (abstained) pass persists the named
+    assignments the SCAD ITSELF declares — the stub SCAD here declares
+    ``x = 20``, so the record's params are ``{"x": 20.0}`` (the SCAD is
+    the record of what was built), never the caller-stated W/D/H (none
+    were stated) and never a stored zero (no zero values anywhere).
+    The gate abstains on the (0,0,0) triple, so any extent passes."""
     scad = "x = 20; cube([x, x, x]);"
     import asyncio
 
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
-    # The bbox gate abstains on the (0,0,0) triple, so any extent passes.
     bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
 
     async def _render(scad_source, defines):
@@ -185,10 +183,150 @@ def test_loop_abstained_pass_record_omits_zero_axes() -> None:
     result = asyncio.run(coro)
     assert result.status == "pass"
     assert result.best.score.bbox_abstained is True
-    # No W/D/H at all — and no zero values anywhere.
-    assert result.best.params == {}
+    # The SCAD-declared parameter is persisted (SCAD wins — replace, not
+    # merge); W/D/H are absent (never stated) and no zero values anywhere.
+    assert result.best.params == {"x": 20.0}
     for value in result.best.params.values():
         assert value != 0
+
+
+def test_loop_pass_record_params_are_scad_declared_not_caller_stated() -> None:
+    """Issue #219 headline: ``stated_dims`` carries (20, 15, 10) and the
+    SCAD declares DIFFERENT values (W=60, D=40, H=25). The persisted
+    record is the SCAD extraction — the caller-stated dimensions are the
+    prompt's input, not the record of what was built."""
+    scad = "W = 60;\nD = 40;\nH = 25;\ncube([W, D, H]);"
+    import asyncio
+
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    bbox = BboxInfo(x=20.0, y=15.0, z=10.0, volume=3000.0)
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    coro = run_design_loop_async(
+        photo="data:image/png;base64,x",
+        chat_history=(),
+        stated_dims=(20.0, 15.0, 10.0),
+        render_fn=_render,
+        llm_fn=_stub_llm(scad),
+        bbox_fn=lambda r: bbox,
+        defines={},
+    )
+    result = asyncio.run(coro)
+    assert result.status == "pass"
+    assert result.best.params == {"W": 60.0, "D": 40.0, "H": 25.0}
+
+
+def test_loop_pass_record_params_replace_not_merge() -> None:
+    """Issue #219 replace-not-merge: stated W/D/H=(20,25,30) but the SCAD
+    declares W=60, D=40, H=25 → the record is EXACTLY the SCAD-extracted
+    dict (no caller-stated value leaks in). Complementary case: the SCAD
+    declares only W → the persisted dict is the pure SCAD dict (D/H are
+    absent even though the user stated them)."""
+    import asyncio
+
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    scad = "W = 60;\nD = 40;\nH = 25;\ncube([W, D, H]);"
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo="data:image/png;base64,x",
+            chat_history=(),
+            stated_dims=(20.0, 25.0, 30.0),
+            render_fn=_render,
+            llm_fn=_stub_llm(scad),
+            bbox_fn=lambda r: BboxInfo(x=20.0, y=25.0, z=30.0, volume=1.0),
+            defines={},
+        )
+    )
+    assert result.status == "pass"
+    assert result.best.params == {"W": 60.0, "D": 40.0, "H": 25.0}
+
+    # Complementary: the SCAD omits axes the user stated — the persisted
+    # dict is the pure SCAD dict (D/H absent, never backfilled from the
+    # caller's triple).
+    scad_w_only = "W = 60;\ncube([W, 10, 10]);"
+    result2 = asyncio.run(
+        run_design_loop_async(
+            photo="data:image/png;base64,x",
+            chat_history=(),
+            stated_dims=(20.0, 25.0, 30.0),
+            render_fn=_render,
+            llm_fn=_stub_llm(scad_w_only),
+            bbox_fn=lambda r: BboxInfo(x=20.0, y=25.0, z=30.0, volume=1.0),
+            defines={},
+        )
+    )
+    assert result2.status == "pass"
+    assert result2.best.params == {"W": 60.0}
+
+
+def test_loop_pass_stated_absent_scad_declared_params_headline() -> None:
+    """Issue #219 core acceptance: the user typed NO numbers
+    (``stated_dims=None``) but the SCAD declares W=60, D=40, H=25 — the
+    persisted params are exactly the SCAD-extracted dict, not ``{}``."""
+    scad = "W = 60;\nD = 40;\nH = 25;\ncube([W, D, H]);"
+    import asyncio
+
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    bbox = BboxInfo(x=60.0, y=40.0, z=25.0, volume=60000.0)
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    coro = run_design_loop_async(
+        photo="data:image/png;base64,x",
+        chat_history=(),
+        stated_dims=None,  # the user typed no numbers
+        render_fn=_render,
+        llm_fn=_stub_llm(scad),
+        bbox_fn=lambda r: bbox,
+        defines={},
+    )
+    result = asyncio.run(coro)
+    assert result.status == "pass"
+    assert result.best.params == {"W": 60.0, "D": 40.0, "H": 25.0}
+
+
+def test_loop_pass_scad_declares_nothing_params_stay_empty() -> None:
+    """Issue #219 honest empty: a SCAD that declares no named parameters
+    (pure magic numbers) persists ``params == {}`` — an honest reporting
+    of an actual absence, not a regression (and not a fabricated default).
+    The named-parameter gate (declaration leg) is legitimately False for
+    a declaration-less SCAD, so the loop EXHAUSTS on
+    ``stated_dims_not_named_parameters``; the best candidate's record
+    still carries the honest empty dict (the persistence path writes
+    ``{}``, never None and never a fabricated default)."""
+    scad = "cube([20, 20, 20]);"
+    import asyncio
+
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
+
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    coro = run_design_loop_async(
+        photo="data:image/png;base64,x",
+        chat_history=(),
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=_render,
+        llm_fn=_stub_llm(scad),
+        bbox_fn=lambda r: bbox,
+        defines={},
+    )
+    result = asyncio.run(coro)
+    assert result.status == "exhausted"
+    assert result.failure_reason == "stated_dims_not_named_parameters"
+    assert result.best.params == {}
 
 
 def _resolve_version_create_test(
@@ -379,7 +517,7 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
 
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
-    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
     bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
 
     def _render_with_artifacts(artifact_dir):
@@ -508,7 +646,7 @@ def test_chat_pass_partial_views_version_thumbnail_is_null(
 
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
-    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
     bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
 
     def _loop_impl(scad_text, bbox_, render_fn):
@@ -633,6 +771,18 @@ def test_chat_pass_no_render_dir_version_thumbnail_is_null(
     from d33d.versions import derive_auto_name
 
     assert timeline[0]["name"] == derive_auto_name("make a cube")
+    # Issue #219: the version's params are the SCAD-declared "x = 20"
+    # (the extraction replaces the old caller-stated source), carried
+    # through the version row to the wire.
+    assert timeline[0]["params"] == {"x": 20.0}
+    assert isinstance(timeline[0]["params"]["x"], float)
+    vc = [
+        d for e, d in frames if e == "progress" and d.get("step") == "version-created"
+    ]
+    assert vc, "no version-created progress frame"
+    # The version-created frame carries the version id; the params live
+    # on the version row (the frame itself never carried a params field).
+    assert vc[0]["version_id"] == timeline[0]["id"]
 
 
 # ---------------------------------------------------------------------------
@@ -775,7 +925,7 @@ def test_chat_follow_up_latest_version_fallback_supplies_dims(
     fallback actually supplies the dims (currently a no-op because no
     version ever exists). The loop seam captures the stated_dims it
     receives."""
-    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
     bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
@@ -932,12 +1082,15 @@ def test_region_edit_pass_creates_version_unchanged(app_with_versions, tmp_path)
     not change this behaviour.
 
     Note: the region-edits route passes (0,0,0) for a fresh project (the
-    bbox gate then abstains). The version's params are the render's defines
-    map (W/D/H from the stated dims) — which is empty for a fresh project
-    (the abstained case). This test asserts the version IS created (the
-    region-edit pass path is unchanged) and the version-created frame IS
-    emitted (the adapter's version-creation behaviour is preserved)."""
-    scad = "W = 11; D = 22; H = 33; cube([W, D, H]);"
+    bbox gate then abstains). Under issue #219 the version's params are
+    the SCAD-declared parameters (the stub SCAD declares W=11, D=22,
+    H=33, and the stated triple was (0,0,0) so nothing caller-sourced
+    exists to replace) — the params flip from the old caller-stated
+    ``{}`` to the extracted ``{"W": 11.0, "D": 22.0, "H": 33.0}``. This
+    test asserts the version IS created (the region-edit pass path is
+    unchanged) and the version-created frame IS emitted (the adapter's
+    version-creation behaviour is preserved)."""
+    scad = "W = 11;\nD = 22;\nH = 33;\ncube([W, D, H]);"
     from pathlib import Path
 
     from d33d.design_loop import BboxInfo, run_design_loop_async
@@ -1021,11 +1174,13 @@ def test_region_edit_pass_creates_version_unchanged(app_with_versions, tmp_path)
         "Region edit on modules curl_3 at the marked point "
         "(view: front): open up this spiral"
     )
-    # The version's params are the render's defines map (empty for a fresh
-    # project — the abstained case: W/D/H were unknown, so they are
-    # omitted, never stored as zeros). The version IS still created (a
-    # passing loop always materialises a version).
-    assert timeline[0]["params"] == {}
+    # Issue #219: the version's params are the SCAD-declared parameters
+    # (the stub SCAD declares W=11; D=22; H=33; and the fresh project's
+    # stated triple is (0,0,0) — so the persisted dict is the pure SCAD
+    # extraction, which flips from the old caller-stated ``{}``). The
+    # version IS still created (a passing loop always materialises a
+    # version).
+    assert timeline[0]["params"] == {"W": 11.0, "D": 22.0, "H": 33.0}
     # The version-created frame carries the version id.
     vc = [
         d for e, d in frames if e == "progress" and d.get("step") == "version-created"
@@ -1046,7 +1201,7 @@ def test_finalize_real_iteration_record_precedes_seed(app_with_versions):
     (carrying a populated ``params`` field), the best candidate's params
     WIN over the body's params (the loop's result is authoritative).
     This pins the new precedence that the dead getattr never exercised."""
-    scad = "W = 50; D = 40; H = 30; cube([W, D, H]);"
+    scad = "W = 50;\nD = 40;\nH = 30;\ncube([W, D, H]);"
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
     bbox = BboxInfo(x=50.0, y=40.0, z=30.0, volume=60000.0)
@@ -1104,7 +1259,7 @@ def test_finalize_semantic_flip_fresh_project_pass_now_201(app_with_versions):
     instead of the 502 ("design loop passed but produced no parameter
     set") that the dead getattr produced.
     """
-    scad = "W = 20; D = 20; H = 20; cube([W, D, H]);"
+    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
     bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
@@ -1268,40 +1423,48 @@ def test_resolve_version_create_no_dead_getattr(app_with_versions):
 
 
 # ---------------------------------------------------------------------------
-# The conversion helper: _params_for_record
+# The shared extraction helper (issue #219 superseded _params_for_record
+# as the record's params source — the caller-stated defines no longer feed
+# the persisted IterationRecord.params; the SCAD source does).
 # ---------------------------------------------------------------------------
 
 
-def test_params_for_record_numeric_conversion():
-    """The conversion: numeric strings → float, non-numeric → string."""
-    m = _dim_params((20.0, 15.0, 10.0), {"clearance": "0.4", "layer": "PLA"})
-    out = _params_for_record(m)
-    assert out == {"W": 20.0, "D": 15.0, "H": 10.0, "clearance": 0.4, "layer": "PLA"}
+def test_extract_named_params_numeric_conversion():
+    """The extraction: declared values are stored as ``float`` (the
+    versions table stores scalar JSON params and the downstream readers
+    ``float()`` them on read) — the exact stored JSON shape is asserted."""
+    out = dict(extract_named_params("W = 20;\nD = 15.5;\nH = 10;"))
+    assert out == {"W": 20.0, "D": 15.5, "H": 10.0}
     assert isinstance(out["W"], float)
-    assert isinstance(out["clearance"], float)
-    assert isinstance(out["layer"], str)
+    assert isinstance(out["D"], float)
+    assert isinstance(out["H"], float)
 
 
-def test_params_for_record_abstained_omits_zero_axes():
-    """A zero triple (the abstained case) → empty dict (no stored zeros)."""
-    m = _dim_params((0.0, 0.0, 0.0), {})
-    out = _params_for_record(m)
-    assert out == {}
+def test_extract_named_params_no_declarations_yields_empty():
+    """A SCAD with no ``name = number;`` declarations → ``{}`` (an honest
+    absence, never None, never a fabricated default)."""
+    assert dict(extract_named_params("cube([20, 25, 30]);")) == {}
+    assert dict(extract_named_params("")) == {}
 
 
-def test_params_for_record_partial_triple_omits_only_unknown_axes():
-    """A partial triple: known axes are stored, unknown axes are omitted."""
-    m = _dim_params((20.0, 0.0, 10.0), {})
-    out = _params_for_record(m)
-    assert out == {"W": 20.0, "H": 10.0}
-    assert "D" not in out
-
-
-def test_params_for_record_caller_defines_override():
-    """A caller-supplied W (via defines) is respected (setdefault
-    semantics in _dim_params) and converted to a float."""
-    m = _dim_params((0.0, 0.0, 0.0), {"W": "50"})
-    out = _params_for_record(m)
-    assert out == {"W": 50.0}
+def test_extract_named_params_only_declared_names_appear():
+    """Only what the SCAD declares appears: a caller-stated axis the SCAD
+    never declares is ABSENT from the extraction (the replace-not-merge
+    semantics at the record level reduce to the pure SCAD dict here)."""
+    out = dict(extract_named_params("W = 60;"))
+    assert out == {"W": 60.0}
     assert "D" not in out
     assert "H" not in out
+
+
+def test_extract_named_params_caller_defines_never_leak():
+    """Caller-supplied defines (e.g. FDM clearances) are the render
+    channel's concern — they are never inputs to the extraction, which
+    sees only the SCAD source."""
+    scad = "W = 50;"
+    out = dict(extract_named_params(scad))
+    assert out == {"W": 50.0}
+    # The same SCAD text with a clearance define threaded through the
+    # render path still yields the same extraction (the helper's input is
+    # the source alone).
+    assert dict(extract_named_params(scad)) == {"W": 50.0}
