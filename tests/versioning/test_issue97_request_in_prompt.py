@@ -330,6 +330,141 @@ def test_production_closure_forwards_request_past_the_hook(app_with_versions, mo
 
 
 # ---------------------------------------------------------------------------
+# Issue #213 regression: the REAL ``render_fn`` closure built INSIDE
+# ``_build_production_design_loop`` must call ``render_for_design_loop``
+# with exactly its 4-parameter contract. Commit cbe629e (issue #118) added
+# a stray ``on_progress_iteration="_current"`` kwarg to the call site; with
+# the real worker signature, every design loop crashed with
+# ``TypeError: render_for_design_loop() got an unexpected keyword
+# argument 'on_progress_iteration'`` before any render could run. The
+# iteration index flows via the ``on_progress._current`` attribute stamp
+# (``d33d.design_loop._stamp_on_progress_iteration``), never as a kwarg.
+# ---------------------------------------------------------------------------
+
+
+def test_production_closure_render_fn_matches_worker_signature(
+    app_with_versions, monkeypatch
+):
+    """Drive the REAL ``_build_production_design_loop`` closure (catalogue /
+    probe / llm monkeypatched) with the REAL ``run_design_loop_async``
+    intact; only ``d33d.app.render_for_design_loop`` is swapped for a
+    signature-exact spy. The closure-internal ``render_fn`` is NOT stubbed
+    (stubbing it — or the loop — would defeat the regression): the real
+    loop calls it and the spy's exact 4-parameter signature raises
+    ``TypeError`` at the call site if the closure passes any extra kwarg.
+    """
+    import types
+
+    from d33d import app as _app
+    from d33d.config import catalogue as _cat
+    from d33d.config import probes as _probes
+    from d33d.config import resolve as _res
+    from d33d.render_worker import RenderResult
+
+    calls: list[dict[str, Any]] = []
+
+    # Signature EXACTLY matches ``render_for_design_loop`` — no
+    # ``**kwargs`` catch-all: a stray kwarg from the buggy closure is a
+    # ``TypeError`` at call time, which is the guard.
+    def _spy(
+        scad_source: str,
+        defines: dict[str, str],
+        renders_dir=None,
+        on_progress=None,
+    ) -> RenderResult:
+        calls.append({"renders_dir": renders_dir, "on_progress": on_progress})
+        return RenderResult(
+            ok=True,
+            exit_code=0,
+            duration_ms=1,
+            error_class="ok",
+            stderr="",
+            stl="model.stl",
+            csg="model.csg",
+            views=("v0.png", "v1.png", "v2.png", "v3.png", "v4.png", "v5.png"),
+        )
+
+    monkeypatch.setattr(_app, "render_for_design_loop", _spy)
+    monkeypatch.setattr(
+        _cat,
+        "load_catalogue",
+        lambda p: types.SimpleNamespace(
+            providers={"p": types.SimpleNamespace(key="stub")}
+        ),
+    )
+    monkeypatch.setattr(
+        _res,
+        "resolve_model",
+        lambda cat, role: types.SimpleNamespace(
+            entry=types.SimpleNamespace(model="stub"),
+            provider=types.SimpleNamespace(base="http://stub"),
+        ),
+    )
+
+    async def _fake_probe(base_url, model_id, api_key, request_factory):
+        return None
+
+    monkeypatch.setattr(_probes, "probe_capabilities", _fake_probe)
+
+    # ``stated_dims=(20.0, 25.0, 30.0)`` so the loop's defines map carries
+    # ``W/D/H`` as the values the emitted SCAD names — the named-params
+    # gate (bit 4) passes on iteration 1 and the loop returns a clean
+    # result without needing further iterations.
+    scad = "W = 20;\nD = 25;\nH = 30;\ncube([W, D, H]);\n"
+
+    # The bbox gate's declared path: the loop receives the production
+    # ``bbox_fn`` (``bbox_from_render`` — the issue #54 chat-route wiring).
+    # With the spy's ``RenderResult.stl`` pointing at a dead path, every
+    # axis is None and ``_bbox_within_tolerance`` abstains (``target <= 0``
+    # never fires — the stated dims are real), so the loop exhausts on
+    # iteration 3 (``NO_IMPROVEMENT_LIMIT`` consecutive no-improvement
+    # steps) instead of burning the 3-iteration cap. That is the intended
+    # shape for a kwarg-contract guard: the loop's stopping reason is
+    # irrelevant, only the render_fn call contract matters.
+    from d33d.design_loop_events import bbox_from_render
+
+    async def _llm_fn(role, messages, system):
+        return _llm_result(
+            ({"tool": "emit_design", "arguments": {"scad": scad}},)
+        )
+
+    from d33d import design_loop as _dl
+
+    monkeypatch.setattr(_dl, "make_llm_fn", lambda cat, f, c: _llm_fn)
+
+    async def _call(client):
+        app_with_versions.state.failures_jsonl_path = str(
+            app_with_versions.state.catalogue_path.parent / "failures.jsonl"
+        )
+        closure = _app._build_production_design_loop()
+        return await closure(
+            app=app_with_versions,
+            photo="data:image/png;base64,x",
+            chat_history=(),
+            stated_dims=(20.0, 25.0, 30.0),
+            render_fn=None,
+            llm_fn=None,
+            bbox_fn=bbox_from_render,
+            request=f"Please create {TOKEN}",
+        )
+
+    from tests.versioning.helpers import run_async
+
+    result = run_async(app_with_versions, _call)
+    # The loop completed through the REAL render_fn into the spy — no
+    # ``TypeError`` from an unexpected kwarg (the issue #213 defect). The
+    # loop makes up to ``max_iterations`` render calls (it exhausts here
+    # because the bbox gate abstains on the spy's dead STL path — that is
+    # the intended shape for a kwarg-contract guard; the stopping reason
+    # is irrelevant, only the render_fn call contract matters).
+    assert len(calls) >= 1, "the loop never reached the render_fn"
+    assert all(
+        set(call) == {"renders_dir", "on_progress"} for call in calls
+    )
+    assert result.status in ("pass", "exhausted")
+
+
+# ---------------------------------------------------------------------------
 # failures.jsonl: the archive ``request`` equals the CURRENT request (not
 # a prior-turn chat_history fallback) for a fresh-project exhaustion.
 # ---------------------------------------------------------------------------
