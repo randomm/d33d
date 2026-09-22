@@ -1,0 +1,58 @@
+solid golden
+  facet normal 0 0 0
+    outer loop
+      vertex -22.5 0.0 0.0
+      vertex -22.49 0.0 0.0
+      vertex -22.5 0.0 0.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex 45.0 0.0 0.0
+      vertex 45.01 0.0 0.0
+      vertex 45.0 0.0 0.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex 45.0 20.1 0.0
+      vertex 45.01 20.1 0.0
+      vertex 45.0 20.1 0.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex -22.5 20.1 0.0
+      vertex -22.49 20.1 0.0
+      vertex -22.5 20.1 0.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex -22.5 0.0 30.0
+      vertex -22.49 0.0 30.0
+      vertex -22.5 0.0 30.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex 45.0 0.0 30.0
+      vertex 45.01 0.0 30.0
+      vertex 45.0 0.0 30.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex 45.0 20.1 30.0
+      vertex 45.01 20.1 30.0
+      vertex 45.0 20.1 30.01
+    endloop
+  endfacet
+  facet normal 0 0 0
+    outer loop
+      vertex -22.5 20.1 30.0
+      vertex -22.49 20.1 30.0
+      vertex -22.5 20.1 30.01
+    endloop
+  endfacet
+endsolid golden

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -65,11 +66,13 @@ def test_entrypoint_view_names_match_views_filenames() -> None:
 
 def test_entrypoint_view_cameras_match_views_tuples() -> None:
     """``VIEW_CAMERAS[i]`` (comma-separated 7-float string) must match
-    the stringified ``VIEWS[i][1]`` camera tuple in the first six
-    elements (translate + rotate). The 7th element (dist) is a
-    placeholder in ``VIEW_CAMERAS`` (the entrypoint substitutes the
-    per-model bounding-box distance at render time, issue #111), so
-    only the rotation semantics are compared here."""
+    the stringified ``VIEWS[i][1]`` camera tuple in the rotation
+    elements (indices 3–5: rx, ry, rz). The first three elements
+    (translate) and the seventh (dist) are **placeholders** in both
+    files — the entrypoint substitutes the translate with the per-model
+    bbox centre (issue #223) and the dist with the per-model
+    bounding-box fit (issue #111) at render time — so only the
+    rotation semantics are compared here."""
     src = ENTRYPOINT.read_text(encoding="utf-8")
     view_cameras = _parse_bash_string_array(src, "VIEW_CAMERAS")
     assert len(view_cameras) == 6, (
@@ -82,13 +85,116 @@ def test_entrypoint_view_cameras_match_views_tuples() -> None:
         assert len(parsed) == 7, (
             f"VIEW_CAMERAS[{i}] {cam_str!r} does not have 7 elements"
         )
-        # Compare the first six elements (translate + rotate).
-        # The 7th (dist) is substituted at render time from the
-        # per-model bounding box — see issue #111.
-        assert parsed[:6] == tuple(float(v) for v in cam_tuple[:6]), (
+        # Compare the rotation elements (indices 3–5).
+        # The translate (0–2) is substituted with the per-model bbox centre
+        # (issue #223) and the dist (6) with the per-model bounding-box fit
+        # (issue #111) at render time — both are placeholders in both files.
+        assert parsed[3:6] == tuple(float(v) for v in cam_tuple[3:6]), (
             f"VIEW_CAMERAS[{i}] {cam_str!r} rotation != "
-            f"VIEWS[{i}] camera tuple rotation {cam_tuple[:6]!r}"
+            f"VIEWS[{i}] camera tuple rotation {cam_tuple[3:6]!r}"
         )
+
+
+def _awk_bbox_program(src: str) -> str:
+    """Extract the awk bbox-parse program from the entrypoint source.
+
+    The program is the single-quoted body of the ``awk '... '`` call that
+    follows ``bbox_out=$( `` — it is the authoritative parser whose output
+    (``max_extent cx cy cz``) drives both the camera-distance substitution
+    (issue #111) and the bbox-centre translate substitution (issue #223).
+    """
+    suffix = ' "${STL_FILE}")'
+    pat = r"bbox_out=\$\(awk '(.*?)'" + re.escape(suffix)
+    m = re.search(pat, src, re.DOTALL)
+    assert m is not None, "bbox awk program not found in entrypoint.sh"
+    return m.group(1)
+
+
+def test_entrypoint_bbox_parse_is_translation_invariant() -> None:
+    """The awk bbox parser's output must be invariant to translating the
+    model in world space.
+
+    Two ASCII STLs of identical shape (a 10×20×30 box) at different
+    positions must yield the same ``max_extent`` and a bbox centre that
+    translates by exactly the same vector as the shape did.
+
+    This is the regression guard for the issue #223 fix: the camera
+    tuple's translate is substituted with the bbox centre in world
+    coordinates, and if that substitution ever regressed to a
+    min/max-vs-origin computation (e.g. using only ``maxx`` instead of
+    ``(minx+maxx)/2``), two identical shapes at different positions would
+    produce different bbox centres and the fix would silently ship the
+    off-center framing bug back. Running the awk program (no Docker)
+    against two translated fixtures catches it at CI time."""
+    src = ENTRYPOINT.read_text(encoding="utf-8")
+    program = _awk_bbox_program(src)
+    # A 10×20×30 box with its min-corner at the origin (8 corners, all three
+    # axes spanned so max_extent = 30).
+    stl_a = (
+        "solid box\n"
+        "  vertex 0 0 0\n"
+        "  vertex 10 0 0\n"
+        "  vertex 10 20 0\n"
+        "  vertex 0 20 0\n"
+        "  vertex 0 0 30\n"
+        "  vertex 10 0 30\n"
+        "  vertex 10 20 30\n"
+        "  vertex 0 20 30\n"
+        "endsolid box\n"
+    )
+    # Same shape translated by (25, -15, 7) in world space.
+    stl_b = (
+        "solid box\n"
+        "  vertex 25 -15 7\n"
+        "  vertex 35 -15 7\n"
+        "  vertex 35 5 7\n"
+        "  vertex 25 5 7\n"
+        "  vertex 25 -15 37\n"
+        "  vertex 35 -15 37\n"
+        "  vertex 35 5 37\n"
+        "  vertex 25 5 37\n"
+        "endsolid box\n"
+    )
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".stl", delete=False) as f:
+        f.write(stl_a)
+        path_a = f.name
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".stl", delete=False) as f:
+        f.write(stl_b)
+        path_b = f.name
+    out_a = subprocess.run(["awk", program, path_a], capture_output=True, check=False)
+    out_b = subprocess.run(["awk", program, path_b], capture_output=True, check=False)
+    for p in (path_a, path_b):
+        Path(p).unlink(missing_ok=True)
+    assert out_a.returncode == 0, f"awk failed on fixture a: {out_a.stderr.decode()}"
+    assert out_b.returncode == 0, f"awk failed on fixture b: {out_b.stderr.decode()}"
+    max_a, cx_a, cy_a, cz_a = (float(x) for x in out_a.stdout.decode().split())
+    max_b, cx_b, cy_b, cz_b = (float(x) for x in out_b.stdout.decode().split())
+    # max_extent must be identical (translation-invariant by construction).
+    assert max_a == max_b == 30.0, (
+        f"max_extent differs between translated fixtures: a={max_a}, b={max_b}"
+    )
+    # The bbox centre must translate by exactly the same vector as the shape.
+    assert cx_b - cx_a == pytest.approx(25.0, rel=1e-9), (
+        f"bbox cx did not translate by 25.0: a={cx_a}, b={cx_b}"
+    )
+    assert cy_b - cy_a == pytest.approx(-15.0, rel=1e-9), (
+        f"bbox cy did not translate by -15.0: a={cy_a}, b={cy_b}"
+    )
+    assert cz_b - cz_a == pytest.approx(7.0, rel=1e-9), (
+        f"bbox cz did not translate by 7.0: a={cz_a}, b={cz_b}"
+    )
+    # And the absolute centres must be the bbox centres, not origin-relative
+    # max-corner values — a min/max-vs-origin bug would make cx_a = 10
+    # (the maxx) instead of 5.0 (the true centre).
+    assert cx_a == pytest.approx(5.0, rel=1e-9), (
+        f"bbox cx_a is not the true centre: {cx_a} (expected 5.0)"
+    )
+    assert cy_a == pytest.approx(10.0, rel=1e-9), (
+        f"bbox cy_a is not the true centre: {cy_a} (expected 10.0)"
+    )
+    assert cz_a == pytest.approx(15.0, rel=1e-9), (
+        f"bbox cz_a is not the true centre: {cz_a} (expected 15.0)"
+    )
 
 
 def _parse_top_level_bash_assignment(src: str, var_name: str) -> str:

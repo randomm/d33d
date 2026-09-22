@@ -24,15 +24,29 @@
 #   With --autocenter, the origin is shifted to the object's bounding-box centre
 #   before the rotation is applied.
 #
-#   The first six tuple elements (translate + rotate) are fixed constants that
-#   pin *which* face each view sees:
+#   The first three tuple elements (translate) are **substituted at render
+#   time** with the model's bounding-box centre in world coordinates
+#   (issue #223) — see the derivation below. The last four (rotate) are
+#   fixed constants that pin *which* face each view sees:
 #
-#   View 0 (front): 0,0,0,0,0,0,<dist>    — camera on -Z axis, no rotation
-#   View 1 (back):  0,0,0,0,180,0,<dist>  — 180° about Y
-#   View 2 (left):  0,0,0,0,90,0,<dist>   — 90° about Y  (red slab x=0 appears on the left of image)
-#   View 3 (right): 0,0,0,0,-90,0,<dist>  — -90° about Y (red slab x=0 appears on the right of image)
-#   View 4 (top):   0,0,0,90,0,0,<dist>   — 90° about X  (looking down from +Z)
-#   View 5 (iso):   0,0,0,0,45,45,<dist>  — 45° about Y then 45° about Z (isometric corner view)
+#   View 0 (front): <cx,cy,cz>,0,0,0,<dist>    — camera on -Z axis, no rotation
+#   View 1 (back):  <cx,cy,cz>,0,180,0,<dist>  — 180° about Y
+#   View 2 (left):  <cx,cy,cz>,0,90,0,<dist>   — 90° about Y  (red slab x=0 appears on the left of image)
+#   View 3 (right): <cx,cy,cz>,0,-90,0,<dist>  — -90° about Y (red slab x=0 appears on the right of image)
+#   View 4 (top):   <cx,cy,cz>,90,0,0,<dist>   — 90° about X  (looking down from +Z)
+#   View 5 (iso):   <cx,cy,cz>,0,45,45,<dist>  — 45° about Y then 45° about Z (isometric corner view)
+#
+#   The <cx,cy,cz> substitution is the bbox-centre fix: with the camera
+#   tuple's translate hard-coded at (0,0,0), the camera looks at the
+#   world origin, but `--autocenter` recenters the SCENE around the
+#   bbox centre — the two shifts do not compose to cancel, so a model
+#   whose bbox is offset from the origin (e.g. x[0,40], y[-18,20]) renders
+#   displaced from the frame centre by exactly its bbox centre, rotated
+#   per view (issue #223: v15 offset +88px, v16 +200px, both proportional
+#   to the model's own bbox centre). Setting the camera's translate to the
+#   bbox centre moves the camera to the bbox centre in world coordinates,
+#   so after `--autocenter` the bbox centre sits at the scene origin and
+#   the model renders centred in the frame for every view.
 #
 #   The 7th element (dist) is **not** a fixed constant. After the STL export
 #   (step 1) the entrypoint parses the ASCII STL's bounding box with
@@ -269,9 +283,13 @@ if [ "${stl_first_line}" != "" ] && ! printf '%s' "${stl_first_line}" | grep -q 
     bbox_status=1
     bbox_detail="STL is not ASCII (first line is not 'solid')"
 else
-    max_extent=$(awk '
+    bbox_out=$(awk '
 # Each "vertex" line carries one model coordinate. The "facet normal" lines
 # carry unit vectors (not model coords) and must be excluded.
+# Emits one line: "<max_extent> <cx> <cy> <cz>" — the bbox max extent in mm
+# and the bbox centre in world coordinates (issue #223: the camera-tuple
+# translate is substituted with <cx,cy,cz> so the bbox centre sits at
+# the scene origin after --autocenter shifts the scene there).
 /^ *vertex[[:space:]]/ {
     x = $2 + 0
     y = $3 + 0
@@ -290,17 +308,26 @@ BEGIN {
     found=0
 }
 END {
-    if (!found) { print "0"; exit }
+    if (!found) { print "0 0 0 0"; exit }
     ex = maxx - minx
     ey = maxy - miny
     ez = maxz - minz
     m = ex; if (ey > m) m = ey; if (ez > m) m = ez
     if (m < 0) m = 0
-    printf "%.10f", m
+    cx = (minx + maxx) / 2
+    cy = (miny + maxy) / 2
+    cz = (minz + maxz) / 2
+    printf "%.10f %.10f %.10f %.10f", m, cx, cy, cz
 }' "${STL_FILE}")
-    if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ] || [ "${max_extent}" = "0.0000000000" ]; then
+    if [ -z "${bbox_out}" ]; then
         bbox_status=1
-        bbox_detail="no vertex lines parsed (empty or truncated STL)"
+        bbox_detail="awk bbox parse produced no output (truncated STL)"
+    else
+        read -r max_extent BBOX_CX BBOX_CY BBOX_CZ <<< "${bbox_out}"
+        if [ -z "${max_extent}" ] || [ "${max_extent}" = "0" ] || [ "${max_extent}" = "0.0000000000" ]; then
+            bbox_status=1
+            bbox_detail="no vertex lines parsed (empty or truncated STL)"
+        fi
     fi
 fi
 
@@ -312,7 +339,11 @@ fi
 
 CAM_DIST_AA=$(awk -v m="${max_extent}" -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
 CAM_DIST_ISO=$(awk -v m="${max_extent}" -v f="${CAM_DIST_ISO_FACTOR}" 'BEGIN { printf "%.10f", m * f }')
-echo "[entrypoint] max_extent=${max_extent}mm  dist_aa=${CAM_DIST_AA}  dist_iso=${CAM_DIST_ISO}" >&2
+# BBOX_T is the per-model bbox centre in world coordinates, substituted into
+# each camera tuple's translate (issue #223) — see the derivation comment at
+# the top of this file.
+BBOX_T="${BBOX_CX},${BBOX_CY},${BBOX_CZ}"
+echo "[entrypoint] max_extent=${max_extent}mm  bbox_centre=(${BBOX_T})  dist_aa=${CAM_DIST_AA}  dist_iso=${CAM_DIST_ISO}" >&2
 
 # ── Step 2: CSG export (non-aborting) ───────────────────────────────────────
 echo "[entrypoint] Step 2/8: CSG export" >&2
@@ -351,11 +382,12 @@ declare -a VIEW_NAMES=(
 )
 
 # Camera tuples: (tx, ty, tz, rx, ry, rz, dist).
-# The first six elements are fixed (they pin which face each view sees);
-# the dist element is substituted from the per-model bounding box computed
-# above (issue #111). The values below use a placeholder "0" for dist —
-# the loop at the bottom of the file substitutes CAM_DIST_AA / CAM_DIST_ISO
-# before each openscad invocation.
+# The first three elements (translate) are a placeholder "0,0,0" that the
+# substitution loop at the bottom of the file replaces with BBOX_T — the
+# per-model bbox centre in world coordinates (issue #223). The rotation
+# elements (4–6) are fixed (they pin which face each view sees); the dist
+# element (7) is substituted from the per-model bounding box computed above
+# (issue #111).
 declare -a VIEW_CAMERAS=(
     "0,0,0,0,0,0,0"     # front:  camera on -Z, no rotation
     "0,0,0,0,180,0,0"   # back:   180° about Y
@@ -376,9 +408,13 @@ for i in 0 1 2 3 4 5; do
     else
         dist="${CAM_DIST_AA}"
     fi
-    # Strip the placeholder ",0" (last two chars) from the camera tuple
-    # and append the computed per-model distance.
-    cam="${VIEW_CAMERAS[$i]%,0},${dist}"
+    # Strip the placeholder translate (first three fields) and the
+    # placeholder dist (last field), then re-assemble as:
+    # <BBOX_T>,<rotation>,<dist> — the bbox-centre translate is the
+    # issue #223 fix.
+    rot_part="${VIEW_CAMERAS[$i]#0,0,0,}"
+    rot_part="${rot_part%,0}"
+    cam="${BBOX_T},${rot_part},${dist}"
     png_file="${WORKDIR}/${name}.png"
 
     echo "[entrypoint] Step ${step}/8: PNG ${name}" >&2

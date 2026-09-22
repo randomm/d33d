@@ -1,20 +1,33 @@
 """Slow-layer test: byte-stability and framing under real OpenSCAD renders.
 
-Two acceptance gates from issue #111 that require Docker (the ``slow``
-marker):
+Three acceptance gates from issues #111 and #223 that require Docker (the
+``slow`` marker):
 
-1. **Byte-stability** — rendering the same source twice must produce
+1. **Byte-stability (cube)** — rendering the same source twice must produce
    byte-identical view PNGs. The camera-distance fit is a pure function
    of the bounding box (no timestamps, no randomised seeds, no
    wall-clock), so two renders of the same ``.scad`` must yield
    identical PNG bytes.
 
-2. **Framing** — a 20 mm, 60 mm and 300 mm part must ALL be fully
-   framed with the same margin rule: the model's pixel bounding box
-   must be strictly inside the 800×800 frame (the corners must be the
-   background colour, not the model colour).
+2. **Byte-stability (asymmetric)** — the same gate, but exercising the
+   golden-a asymmetric-bbox fixture from issue #223. The cube-only
+   gate is blind to the #223 defect class (a cube is symmetric about
+   the origin, so the corner-only framing check passes whether or not
+   the model is off-center); this gate uses an asymmetric geometry so
+   a future regression in the camera fit will break byte-stability
+   the moment it changes the framing.
 
-Both tests skip (not fail) when Docker is unreachable, matching the
+3. **Framing (edge-bbox containment)** — the model's non-background
+   pixel bounding box must lie strictly inside the 800×800 frame with
+   a visible margin on all four edges, for both the cube sizes from
+   #111 (20/60/300 mm) AND the two golden asymmetric-bbox fixtures
+   from #223 (the exact geometries of the real v15/v16 renders that
+   exhibited the off-center defect). The old corner-only check was
+   provably blind to the #223 defect (an off-center model that fits
+   inside the frame still passes the corner check); the edge-bbox
+   check is the acceptance criterion.
+
+All tests skip (not fail) when Docker is unreachable, matching the
 slow-layer convention in ``tests/slow/test_module_registry_docker.py``.
 """
 
@@ -22,8 +35,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import subprocess
 import uuid
+import zlib
 from pathlib import Path
 
 import pytest
@@ -34,6 +49,16 @@ pytestmark = pytest.mark.slow
 
 # The six view filenames the entrypoint produces.
 VIEW_FILES = [name for name, _ in rw.VIEWS]
+
+# The "Tomorrow Night" background colour (r, g, b) of the pinned image.
+BG = (29, 31, 33)
+
+# A pixel within this Euclidean-ish tolerance of BG counts as background
+# (antialiased edges on the model silhouette must not register as model
+# pixels). A strict == BG comparison (as the old corner check used) is
+# flaky on edge-adjacent pixels and a centroid computed over
+# hard-thresholded pixels shifts with the threshold.
+BG_TOL = 40
 
 
 def _docker_available() -> bool:
@@ -163,72 +188,18 @@ def _render(scad_source: str, workdir: Path) -> None:
         shutil.rmtree(host_out, ignore_errors=True)
 
 
-def test_byte_stability_two_renders_produce_identical_view_bytes(
-    tmp_path: Path,
-) -> None:
-    """Rendering the same source twice must produce byte-identical view
-    PNGs. The camera-distance fit is a pure function of the bounding
-    box — no timestamps, no randomised seeds, no wall-clock, no
-    dict-iteration-order dependence — so two renders of the same
-    ``.scad`` must yield identical PNG bytes (issue #111 acceptance
-    gate)."""
-    _skip_if_no_docker()
-    scad = "cube([30,30,30], center=true);\n"
-    workdir1 = tmp_path / "run1"
-    workdir2 = tmp_path / "run2"
-    _render(scad, workdir1)
-    _render(scad, workdir2)
-    for view in VIEW_FILES:
-        png1 = workdir1 / "out" / view
-        png2 = workdir2 / "out" / view
-        assert png1.is_file(), f"run 1 missing {view}"
-        assert png2.is_file(), f"run 2 missing {view}"
-        bytes1 = png1.read_bytes()
-        bytes2 = png2.read_bytes()
-        assert bytes1 == bytes2, (
-            f"{view}: two renders of the same source produced different "
-            f"PNG bytes ({len(bytes1)} vs {len(bytes2)} bytes)"
-        )
+# ── PNG decoding (hand-rolled, no Pillow/numpy dependency) ──────────────────
 
 
-def test_views_frame_the_whole_model_with_margin(
-    tmp_path: Path,
-) -> None:
-    """A part at 20 mm, 60 mm and 300 mm must ALL be fully framed with
-    the same margin rule: the model's pixel bounding box must be
-    strictly inside the 800×800 frame (the four corners must be the
-    background colour, not the model colour).
+def _decode_png(path: Path) -> tuple[int, int, int, bytearray]:
+    """Minimal PNG decoder (struct + zlib) — the slow-layer baseline for
+    any pixel-asserting test in this file. Avoids a Pillow/numpy
+    dependency (neither is in the environment).
 
-    The background colour of the pinned image's "Tomorrow Night"
-    scheme is (29, 31, 33). If the model overflows the frame, the
-    corners will be the model colour instead — the exact bug issue #111
-    fixes.
+    Returns ``(width, height, bytes_per_pixel, raw_pixels)`` where
+    ``raw_pixels`` is the un-filtered pixel buffer in row-major order.
     """
-    _skip_if_no_docker()
-    BG = (29, 31, 33)
-    for extent in (20, 60, 300):
-        scad = f"cube([{extent},{extent},{extent}], center=true);\n"
-        workdir = tmp_path / f"framing_{extent}"
-        _render(scad, workdir)
-        for view in VIEW_FILES:
-            png = workdir / "out" / view
-            assert png.is_file(), f"{extent} mm: missing {view}"
-            # Decode the PNG and check that the four corners are the
-            # background colour (not the model colour). If the model
-            # overflows, at least one corner will be model colour.
-            _check_corners_are_background(png, BG, extent, view)
-
-
-def _check_corners_are_background(
-    png_path: Path, bg: tuple[int, int, int], extent: int, view: str
-) -> None:
-    """Decode a PNG and assert the four corners are the background
-    colour. Uses a minimal PNG decoder (struct + zlib) to avoid a
-    Pillow dependency in the slow-layer test."""
-    import struct
-    import zlib
-
-    data = png_path.read_bytes()
+    data = path.read_bytes()
     pos = 8
     idat = b""
     w = h = 0
@@ -275,19 +246,282 @@ def _check_corners_are_background(
                 pr = a if (pa <= pb and pa <= pc) else (b if pb <= pc else c)
                 cur[i] = (x + pr) & 255
         out[y * stride : (y + 1) * stride] = cur
+    return w, h, bpp, out
 
-    def _px(x: int, y: int) -> tuple[int, int, int]:
-        i = (y * w + x) * bpp
-        return (out[i], out[i + 1], out[i + 2])
 
-    corners = [
-        _px(0, 0),
-        _px(w - 1, 0),
-        _px(0, h - 1),
-        _px(w - 1, h - 1),
-    ]
-    for ci, corner in enumerate(corners):
-        assert corner == bg, (
-            f"{extent} mm {view}: corner {ci} is {corner}, expected "
-            f"background {bg} — the model overflows the 800×800 frame"
+def _is_bg(rgb: tuple[int, int, int], tol: int = BG_TOL) -> bool:
+    """True if ``rgb`` is within ``tol`` of the background colour on
+    every channel (a generous tolerance for antialiased edges)."""
+    return (
+        abs(rgb[0] - BG[0]) <= tol
+        and abs(rgb[1] - BG[1]) <= tol
+        and abs(rgb[2] - BG[2]) <= tol
+    )
+
+
+def _pixel_bbox(
+    png_path: Path,
+) -> tuple[list[int], list[int], dict[str, int]]:
+    """Compute the non-background pixel bounding box and centroid of a
+    view PNG.
+
+    Returns ``(bbox, centroid, edge_px_3band)`` where:
+      - ``bbox`` = [x_min, y_min, x_max, y_max] in pixel coordinates
+      - ``centroid`` = [cx, cy] (weighted by pixel count)
+      - ``edge_px_3band`` = {left, right, top, bottom} counts of
+        non-background pixels within a 3-px band of each frame edge
+        (the "touches or exceeds an edge" signal for the framing gate)
+    """
+    w, h, bpp, out = _decode_png(png_path)
+    minx = miny = 10**9
+    maxx = maxy = -1
+    sx = sy = n = 0
+    for y in range(h):
+        base = y * w * bpp
+        for x in range(w):
+            i = base + x * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                n += 1
+                sx += x
+                sy += y
+                if x < minx:
+                    minx = x
+                if x > maxx:
+                    maxx = x
+                if y < miny:
+                    miny = y
+                if y > maxy:
+                    maxy = y
+    if n == 0:
+        return [0, 0, 0, 0], [0.0, 0.0], {
+            "left": 0,
+            "right": 0,
+            "top": 0,
+            "bottom": 0,
+        }
+    edge_px = {"left": 0, "right": 0, "top": 0, "bottom": 0}
+    for x in range(3):
+        for y in range(h):
+            i = (y * w + x) * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                edge_px["left"] += 1
+            i = (y * w + (w - 1 - x)) * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                edge_px["right"] += 1
+    for y in range(3):
+        for x in range(w):
+            i = (y * w + x) * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                edge_px["top"] += 1
+            i = ((h - 1 - y) * w + x) * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                edge_px["bottom"] += 1
+    return [minx, miny, maxx, maxy], [sx / n, sy / n], edge_px
+
+
+# ── Fixture .scad sources ────────────────────────────────────────────────────
+
+
+def _golden_a_scad() -> str:
+    """The golden-a asymmetric fixture (issue #223): bbox x[-22.5, 45],
+    y[0, 20.1], z[0, 30] — the silhouette is NOT symmetric about the
+    origin, and the front view (camera -Z) clips the right frame edge
+    unless the per-model fit is correct."""
+    return (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "scad"
+        / "issue-223-asymmetric-a.scad"
+    ).read_text(encoding="utf-8")
+
+
+def _golden_b_scad() -> str:
+    """The golden-b asymmetric fixture (issue #223): bbox x[0, 40.09],
+    y[-18.15, 20], z[0, 30] — the silhouette is NOT symmetric about the
+    origin, the x range is entirely positive, and the y range is skewed
+    negative. The front view (camera -Z) clips the right frame edge and
+    the top view (camera +Z) clips the right and top edges unless the
+    per-model fit is correct."""
+    return (
+        Path(__file__).resolve().parents[1]
+        / "fixtures"
+        / "scad"
+        / "issue-223-asymmetric-b.scad"
+    ).read_text(encoding="utf-8")
+
+
+# ── Gate 1: byte-stability (cube) ────────────────────────────────────────────
+
+
+def test_byte_stability_two_renders_produce_identical_view_bytes(
+    tmp_path: Path,
+) -> None:
+    """Rendering the same source twice must produce byte-identical view
+    PNGs. The camera-distance fit is a pure function of the bounding
+    box — no timestamps, no randomised seeds, no wall-clock, no
+    dict-iteration-order dependence — so two renders of the same
+    ``.scad`` must yield identical PNG bytes (issue #111 acceptance
+    gate)."""
+    _skip_if_no_docker()
+    scad = "cube([30,30,30], center=true);\n"
+    workdir1 = tmp_path / "run1"
+    workdir2 = tmp_path / "run2"
+    _render(scad, workdir1)
+    _render(scad, workdir2)
+    for view in VIEW_FILES:
+        png1 = workdir1 / "out" / view
+        png2 = workdir2 / "out" / view
+        assert png1.is_file(), f"run 1 missing {view}"
+        assert png2.is_file(), f"run 2 missing {view}"
+        bytes1 = png1.read_bytes()
+        bytes2 = png2.read_bytes()
+        assert bytes1 == bytes2, (
+            f"{view}: two renders of the same source produced different "
+            f"PNG bytes ({len(bytes1)} vs {len(bytes2)} bytes)"
         )
+
+
+# ── Gate 2: byte-stability (asymmetric) ─────────────────────────────────────
+
+
+def test_byte_stability_asymmetric_fixture(
+    tmp_path: Path,
+) -> None:
+    """The byte-stability gate, but exercised on the golden-a asymmetric
+    fixture (issue #223) — the exact geometry of the real v15 model
+    (project 32) that exhibited the off-center defect.
+
+    A cube with ``center=true`` is symmetric about the origin, so the
+    corner-only framing check passes whether or not the model is
+    off-center. The asymmetric fixture is NOT symmetric: a regression
+    in the camera fit (e.g. a position-dependent fit) will change the
+    framing and break byte-stability on the first render.
+    """
+    _skip_if_no_docker()
+    scad = _golden_a_scad()
+    workdir1 = tmp_path / "asym1"
+    workdir2 = tmp_path / "asym2"
+    _render(scad, workdir1)
+    _render(scad, workdir2)
+    for view in VIEW_FILES:
+        png1 = workdir1 / "out" / view
+        png2 = workdir2 / "out" / view
+        assert png1.is_file(), f"asym run 1 missing {view}"
+        assert png2.is_file(), f"asym run 2 missing {view}"
+        bytes1 = png1.read_bytes()
+        bytes2 = png2.read_bytes()
+        assert bytes1 == bytes2, (
+            f"{view}: two renders of the asymmetric fixture produced "
+            f"different PNG bytes ({len(bytes1)} vs {len(bytes2)} bytes) "
+            f"— the camera fit is not a pure function of the bounding box"
+        )
+
+
+# ── Gate 3: framing (edge-bbox containment) ────────────────────────────────
+
+
+def test_views_frame_the_whole_model_with_margin(
+    tmp_path: Path,
+) -> None:
+    """A part at 20 mm, 60 mm and 300 mm must ALL be fully framed with
+    the same margin rule: the model's non-background pixel bounding box
+    must lie strictly inside the 800×800 frame with a visible margin on
+    all four edges (the four corners must be the background colour, and
+    no frame edge may be touched by the silhouette).
+
+    The old corner-only check was provably blind to the #223 defect: an
+    off-center model that fits inside the frame still has background
+    corners. The edge-bbox check (the "touches or exceeds an edge"
+    signal) is the acceptance criterion.
+
+    The background colour of the pinned image's "Tomorrow Night" scheme
+    is (29, 31, 33); a pixel within BG_TOL of that colour on every
+    channel counts as background (antialiased edges).
+    """
+    _skip_if_no_docker()
+    for extent in (20, 60, 300):
+        scad = f"cube([{extent},{extent},{extent}], center=true);\n"
+        workdir = tmp_path / f"framing_{extent}"
+        _render(scad, workdir)
+        for view in VIEW_FILES:
+            png = workdir / "out" / view
+            assert png.is_file(), f"{extent} mm: missing {view}"
+            _check_framing(png, extent, view)
+
+
+def test_views_frame_the_asymmetric_golden_fixtures(
+    tmp_path: Path,
+) -> None:
+    """The two golden asymmetric-bbox fixtures (issue #223 — the exact
+    geometries of the real v15/v16 renders that exhibited the off-center
+    defect) must ALL be fully framed with the same margin rule: the
+    model's non-background pixel bounding box must lie strictly inside
+    the 800×800 frame with a visible margin on all four edges.
+
+    This is the regression guard for the #223 defect: the golden-a
+    fixture's front view clips the right frame edge unless the per-model
+    fit is correct, and the golden-b fixture's front/top views clip the
+    right edge and the top edge respectively.
+    """
+    _skip_if_no_docker()
+    for name, scad_fn in [
+        ("golden-a", _golden_a_scad),
+        ("golden-b", _golden_b_scad),
+    ]:
+        workdir = tmp_path / f"asym_{name}"
+        _render(scad_fn(), workdir)
+        for view in VIEW_FILES:
+            png = workdir / "out" / view
+            assert png.is_file(), f"{name}: missing {view}"
+            _check_framing(png, name, view)
+
+
+def _check_framing(png: Path, label: object, view: str) -> None:
+    """Assert the non-background pixel bounding box lies strictly inside
+    the 800×800 frame with a visible margin on all four edges.
+
+    Two independent checks:
+      1. The four corners are the background colour (the #111 check —
+         the model overflows the frame).
+      2. No frame edge is touched by the silhouette: the edge-bbox
+         band (3 px on each side) contains only background pixels. An
+         off-center model that fits inside the frame still has
+         background corners but touches an edge — the old corner check
+         is blind to this, the edge-bbox check catches it (the #223
+         acceptance criterion).
+    """
+    bbox, _centroid, edge_px = _pixel_bbox(png)
+    assert all(v >= 0 for v in bbox), f"{label} {view}: no model pixels found"
+
+    # Edge-bbox check (the #223 gate): no model pixel may appear within
+    # a 3-px band of any frame edge. An off-center model that fits
+    # inside the frame still has background corners but touches an edge
+    # — the old corner-only check is blind to this, the edge-bbox check
+    # catches it (the #223 acceptance criterion).
+    for side, count in edge_px.items():
+        assert count == 0, (
+            f"{label} {view}: {count} non-background pixels in the 3-px "
+            f"band of the {side} frame edge — the model touches or "
+            f"exceeds the frame edge (issue #223 defect)"
+        )
+
+    # Margin check: the bounding box must lie strictly inside the frame
+    # (a visible background margin on all four edges).
+    margin = 1
+    x_min, y_min, x_max, y_max = bbox
+    assert x_min >= margin, (
+        f"{label} {view}: bbox left edge {x_min} is within {margin}px of "
+        f"the frame left edge — no visible margin"
+    )
+    assert x_max <= 799 - margin, (
+        f"{label} {view}: bbox right edge {x_max} is within {margin}px of "
+        f"the frame right edge — no visible margin"
+    )
+    assert y_min >= margin, (
+        f"{label} {view}: bbox top edge {y_min} is within {margin}px of "
+        f"the frame top edge — no visible margin"
+    )
+    assert y_max <= 799 - margin, (
+        f"{label} {view}: bbox bottom edge {y_max} is within {margin}px of "
+        f"the frame bottom edge — no visible margin"
+    )
