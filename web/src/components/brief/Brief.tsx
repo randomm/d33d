@@ -98,6 +98,11 @@ interface BriefProps {
   /** When set (the pass just failed), the Brief gains the ochre footer —
    *  and nothing else. The failed candidate was never accepted. */
   failedPass?: string;
+  /** True when the design-state refetch failed twice in a row (issue #237):
+   *  the last-known block stays visible (never wiped) and this line
+   *  surfaces the failure — the stale-empty "Nothing yet" state must not
+   *  persist silently. Clears on the next successful fetch. */
+  refreshFailed?: boolean;
   /** A live region pin (the region bar owns the task) — the Brief
    *  collapses to its chip whatever the window size says. */
   hasLivePin?: boolean;
@@ -145,6 +150,7 @@ export function Brief({
   inFlight,
   reMeasuring,
   failedPass,
+  refreshFailed,
   hasLivePin,
   highlightModuleId,
   onAsk,
@@ -457,6 +463,23 @@ export function Brief({
               {resolved.map((e) => renderRow(e))}
             </div>
           )}
+        </div>
+      )}
+
+      {refreshFailed === true && (
+        <div
+          className="brief-refresh-failed"
+          data-testid="brief-refresh-failed"
+          style={{
+            marginTop: 8,
+            padding: "4px 8px",
+            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+            color: "var(--color-blocked)",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          {copy.brief.refreshFailed}
         </div>
       )}
 
