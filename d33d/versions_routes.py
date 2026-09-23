@@ -65,6 +65,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
+from d33d.design_loop_events import (
+    _version_bbox_extents,
+    _version_render_artifact_dir,
+)
 from d33d.design_state import state_block_for_version
 
 logger = logging.getLogger(__name__)
@@ -594,6 +598,8 @@ def create_versions_router() -> APIRouter:
                 name=body.name,
                 message=body.message or "design finalize",
                 scad_source=(candidate_source or None),
+                bbox=_version_bbox_extents(result),
+                render_artifact_dir=_version_render_artifact_dir(result),
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
