@@ -23,6 +23,8 @@ from typing import Any
 
 import pytest
 
+import logging
+
 import d33d.render_worker as rw
 
 
@@ -538,6 +540,37 @@ def test_render_for_design_loop_fails_loudly_when_label_missing(
     # No render argv was issued.
     render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
     assert render_runs == [], f"render run issued on missing label: {render_runs}"
+
+
+def test_render_for_design_loop_docker_query_failure_logs_and_proceeds(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A docker-query failure (daemon down / missing docker binary —
+    ``OSError`` from the guard) is NOT staleness: the render proceeds
+    (no early container_error return) and the skip is logged via the
+    module logger rather than silently swallowed (issue #236 follow-up).
+    """
+
+    def _stub(argv: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["docker", "image"]:
+            raise OSError("simulated docker daemon outage")
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _stub)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000c5")
+    with caplog.at_level(logging.WARNING, logger=rw.__name__):
+        result = rw.render_for_design_loop("cube(10);", {})
+
+    # The render proceeded: the failure is a pipeline docker error, never
+    # the guard's staleness container_error (which names the doc).
+    assert result.ok is False
+    assert "docs/bosl2-pinning.md" not in result.stderr
+    # The skip was logged, not silently swallowed.
+    assert any(
+        "render-worker staleness check skipped" in r.message for r in caplog.records
+    ), f"expected staleness-skip warning, got: {[r.message for r in caplog.records]}"
 
 
 def test_render_for_design_loop_fails_loudly_when_image_absent(

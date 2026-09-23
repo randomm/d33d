@@ -282,3 +282,63 @@ def test_doc_build_command_tag_matches_render_worker_image() -> None:
         f"canonical build command in docs/bosl2-pinning.md tags a different "
         f"image than rw.RENDER_WORKER_IMAGE ({rw.RENDER_WORKER_IMAGE!r})"
     )
+
+
+def _canonicalize(cmd: str) -> str:
+    """Collapse a build command's backslash-newline continuations and all
+    whitespace runs so doc code and code are comparable token-by-token.
+    """
+    return " ".join(cmd.replace("\\\n", " ").split())
+
+
+def test_doc_build_command_matches_canonical_build_command() -> None:
+    """Doc == code == error message, one checked source (issue #236
+    follow-up): the doc's canonical build command, after collapsing
+    backslash-newline continuations and whitespace, must equal
+    ``canonical_build_command()`` — which itself derives the command from
+    ``_HASHED_BUILD_ARGS`` and ``RENDER_WORKER_IMAGE`` and is what
+    ``_verify_render_worker_image``'s error message quotes.
+    """
+    src = DOCS_BUILD_CMD.read_text(encoding="utf-8")
+    block = _extract_build_command_block(src)
+    assert _canonicalize(block) == _canonicalize(rw.canonical_build_command()), (
+        "canonical build command in docs/bosl2-pinning.md drifted from "
+        f"rw.canonical_build_command() — doc: {_canonicalize(block)!r}"
+    )
+
+
+def test_doc_build_arg_values_match_hashed_build_args() -> None:
+    """The doc's ``--build-arg BOSL2_TAG=`` / ``--build-arg BOSL2_COMMIT=``
+    values must equal ``_HASHED_BUILD_ARGS`` — a drift here would change
+    what the documented build vendors without changing ``build_hash``'s
+    input, silently diverging doc from code.
+    """
+    src = DOCS_BUILD_CMD.read_text(encoding="utf-8")
+    block = _extract_build_command_block(src)
+    tag_m = re.search(r"--build-arg BOSL2_TAG=([^\s]+)", block)
+    commit_m = re.search(r"--build-arg BOSL2_COMMIT=([^\s]+)", block)
+    assert tag_m is not None, "doc's canonical build command missing BOSL2_TAG"
+    assert commit_m is not None, "doc's canonical build command missing BOSL2_COMMIT"
+    assert tag_m.group(1) == rw._HASHED_BUILD_ARGS["BOSL2_TAG"], (
+        f"doc BOSL2_TAG {tag_m.group(1)!r} != _HASHED_BUILD_ARGS "
+        f"{rw._HASHED_BUILD_ARGS['BOSL2_TAG']!r}"
+    )
+    assert commit_m.group(1) == rw._HASHED_BUILD_ARGS["BOSL2_COMMIT"], (
+        f"doc BOSL2_COMMIT {commit_m.group(1)!r} != _HASHED_BUILD_ARGS "
+        f"{rw._HASHED_BUILD_ARGS['BOSL2_COMMIT']!r}"
+    )
+
+
+def test_canonical_build_command_derives_from_constants() -> None:
+    """The rebuild command must be built from the module constants, not a
+    second hard-coded copy: the values of every ``_HASHED_BUILD_ARGS``
+    entry and ``RENDER_WORKER_IMAGE`` must appear in
+    ``canonical_build_command()``.
+    """
+    cmd = rw.canonical_build_command()
+    assert f"--build-arg BOSL2_TAG={rw._HASHED_BUILD_ARGS['BOSL2_TAG']}" in cmd
+    assert (
+        f"--build-arg BOSL2_COMMIT={rw._HASHED_BUILD_ARGS['BOSL2_COMMIT']}"
+        in cmd
+    )
+    assert f"-t {rw.RENDER_WORKER_IMAGE} ." in cmd

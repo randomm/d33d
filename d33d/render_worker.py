@@ -32,6 +32,7 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -44,6 +45,8 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 ErrorClass = Literal[
     "ok",
@@ -399,7 +402,14 @@ def _docker_image_labels(image: str) -> dict[str, str] | None:
     )  # subprocess.run, not check=True: absent image is the normal path
     if proc.returncode != 0:
         return None
-    return json.loads(proc.stdout.decode("utf-8") or "null") or {}
+    parsed = json.loads(proc.stdout.decode("utf-8") or "null")
+    # Docker emits `{}` for a present-but-unlabeled image and `null` for an
+    # unlabeled one; a JSON value that is not a dict is malformed output —
+    # treat it as no labels so the caller's missing-label path handles it
+    # instead of crashing on an unexpected shape.
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed or {}
 
 
 def _verify_render_worker_image(
@@ -428,11 +438,7 @@ def _verify_render_worker_image(
         "render-worker image staleness check failed: the image does not "
         "carry a build-hash matching the working tree (image absent, label "
         f"{BUILD_HASH_LABEL!r} missing, or label != working-tree hash). Rebuild "
-        "with the canonical command from docs/bosl2-pinning.md: "
-        "docker build --platform=linux/amd64 --build-arg BOSL2_TAG=v2.0.755 "
-        "--build-arg BOSL2_COMMIT=4e031aafe189efcf4eb0250c24d3216b6a429458 "
-        "--build-arg D33D_BUILD_HASH=\"$(uv run python -c 'from d33d.render_worker "
-        "import build_hash; print(build_hash())')\" -t d33d/render-worker:local ."
+        f"with the canonical command from docs/bosl2-pinning.md: {canonical_build_command()}"
     )
     try:
         labels = _docker_image_labels(image)
@@ -452,6 +458,29 @@ def _verify_render_worker_image(
     label_value = labels.get(BUILD_HASH_LABEL)
     if not isinstance(label_value, str) or label_value != expected_hash:
         raise RuntimeError(rebuild_msg + " (label mismatch/missing)")
+
+
+def canonical_build_command() -> str:
+    """The canonical render-worker rebuild command, derived from the
+    module's own constants (``_HASHED_BUILD_ARGS`` values and
+    :data:`RENDER_WORKER_IMAGE`) — the single source of truth for the
+    command the doc and the :func:`_verify_render_worker_image` error
+    message both quote. ``D33D_BUILD_HASH`` is computed at build time via
+    ``uv run python`` so the working tree's :func:`build_hash` stamps the
+    image label (the doc-drift guard in
+    ``tests/fast/test_image_staleness.py`` keeps doc, code and error
+    message in sync).
+    """
+    bosl2_tag = _HASHED_BUILD_ARGS["BOSL2_TAG"]
+    bosl2_commit = _HASHED_BUILD_ARGS["BOSL2_COMMIT"]
+    return (
+        "docker build --platform=linux/amd64 "
+        f"--build-arg BOSL2_TAG={bosl2_tag} "
+        f"--build-arg BOSL2_COMMIT={bosl2_commit} "
+        "--build-arg D33D_BUILD_HASH=\"$(uv run python -c 'from d33d.render_worker "
+        "import build_hash; print(build_hash())')\" "
+        f"-t {RENDER_WORKER_IMAGE} ."
+    )
 
 
 def _render_host_tmp_base() -> Path:
@@ -1276,13 +1305,16 @@ def render_for_design_loop(
         # stub subprocess.run without a docker-image-inspect branch.
         try:
             _verify_render_worker_image(RENDER_WORKER_IMAGE, repo_root=repo_root)
-        except FileNotFoundError:
-            pass  # missing build input is a repo-state problem, not image staleness
-        except OSError:
+        except FileNotFoundError as exc:
+            # Missing build input is a repo-state problem, not image
+            # staleness — log and let the render proceed; it will fail with
+            # its own error if the tree is truly broken.
+            logger.warning("render-worker staleness check skipped: %s", exc)
+        except OSError as exc:
             # Docker-query failure (daemon down, docker binary missing) is
             # not staleness — let the render proceed; it will fail with its
             # own docker error if docker is actually unavailable.
-            pass
+            logger.warning("render-worker staleness check skipped: %s", exc)
         except RuntimeError as staleness_exc:
             # Verified mismatch or absent label: fail LOUDLY before any
             # expensive work — no docker volume create, no seed helper, no
