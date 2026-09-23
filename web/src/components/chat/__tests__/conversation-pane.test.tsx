@@ -144,6 +144,41 @@ describe("ConversationPane", () => {
     expect(screen.getByTestId("app-left-pane").contains(strip)).toBe(true);
   });
 
+  // Issue #220: the photo-attach button must sit in the pane's scroll flow
+  // (a descendant of app-left-pane) with no pinned positioning of its own —
+  // the scroll-position-dependent overlap with the transcript only occurs
+  // when the label is fixed/sticky/absolute or detached from the flow. The
+  // real acceptance gate is the Playwright spec (jsdom performs no layout),
+  // but this structural guard catches the regression cheaply. The ancestor
+  // walk checks inline position styles (including absolute) — the strict
+  // form of the guard, applied to every element between the upload block
+  // and the pane root in both layout branches.
+  it.each([false, true])(
+    "keeps photo-upload in the pane's scroll flow with no pinned positioning (docked: %s)",
+    (docked) => {
+      const view = renderPane({ docked, projectId: 7 });
+      const pane = screen.getByTestId("app-left-pane");
+      const upload = screen.getByTestId("photo-upload");
+      // In flow: a descendant of the pane, never detached from it.
+      expect(pane.contains(upload)).toBe(true);
+      // No fixed/sticky/absolute inline positioning on the upload block or
+      // any ancestor up to the pane root (the pane itself is
+      // position:absolute — expected, it is the positioned scroll
+      // container; everything below it must be static flow content).
+      let el: Element | null = upload;
+      while (el && el !== pane) {
+        const position = (el as HTMLElement).style.position;
+        expect(
+          position,
+          `${el.className} is pinned (position:${position})`,
+        ).not.toMatch(/^fixed|sticky|absolute$/);
+        el = el.parentElement;
+      }
+      expect(el, "the ancestor walk must end at the pane root").toBe(pane);
+      view.unmount();
+    },
+  );
+
   it("does NOT render the in-bar filmstrip when docked but the project is not created yet", () => {
     renderPane({ docked: true, projectId: null, versions: [] });
     expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
