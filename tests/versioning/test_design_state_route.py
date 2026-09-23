@@ -227,3 +227,137 @@ def test_design_state_route_uses_the_latest_version(app_with_versions) -> None:
     by_name = {e["name"]: e for e in body}
     assert by_name["W"]["value"] == 30.0  # the latest, not the first
     assert "bore_diameter" in by_name
+
+
+# ---------------------------------------------------------------------------
+# Issue #235: the FINALIZE route persists the measurement (the measured
+# provenance, reachable end-to-end through the finalize seam)
+#
+# A version created through ``POST /api/projects/{id}/finalize`` must
+# persist the loop result's measured bbox (and render_artifact_dir) into
+# the version row — the same helper the chat path already uses — so the
+# design-state GET for that version can yield ``measured``. The fixture's
+# ``best`` is a REAL ``IterationRecord`` whose declared ``bbox`` field is
+# what the route reads.
+# ---------------------------------------------------------------------------
+
+
+def _measured_stub_status_result(params: dict):
+    """A finalize-stub result whose ``best`` is a real ``IterationRecord``
+    carrying a measured bbox (x=30.4 - within tolerance of the stated 30,
+    so the block's provenance is ``measured``, never ``disagrees``) and a
+    render declaring a ``render_artifact_dir``."""
+    from d33d.design_loop import BboxInfo, IterationRecord, Score
+    from d33d.render_worker import RenderResult
+
+    record = IterationRecord(
+        iteration=0,
+        scad_source="W = 30; D = 30; H = 30;\ncube([W, D, H]);",
+        render=RenderResult(
+            ok=True,
+            exit_code=0,
+            duration_ms=1,
+            error_class="ok",
+            stderr="",
+            stl="model.stl",
+            csg="model.csg",
+            views=("v0.png",) * 6,
+            render_artifact_dir="/tmp/render-artifacts/a1b2c3d4",
+        ),
+        score=Score(bits=(True,) * 4, rank=4, tiebreak=(True,) * 4),
+        params=dict(params),
+        bbox=BboxInfo(x=30.4, y=30.0, z=30.0, volume=28350.0),
+    )
+
+    class _Result:
+        status = "pass"
+        best = record
+        iterations = (record,)
+        failure_reason = None
+        iterations_used = 1
+
+    return _Result()
+
+
+def test_finalize_route_persists_measured_bbox(app_with_versions) -> None:
+    """A finalize pass whose loop result carries a measured bbox persists
+    the measurement into the version row (bbox == {x, y, z}, never NULL,
+    and render_artifact_dir is the render's declared path) - the same
+    helpers the chat path uses (``_version_bbox_extents`` /
+    ``_version_render_artifact_dir``), so the finalize seam can no longer
+    ship a version whose row is forever NULL and can never be
+    ``measured``."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _measured_stub_status_result(
+            {"W": 30.0, "D": 30.0, "H": 30.0}
+        )
+        r = await client.post(f"/api/projects/{pid}/finalize", json={})
+        assert r.status_code == 201, r.text
+        latest = app_with_versions.state.versions.latest_version(pid)
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # The persisted bbox is the loop result's measurement — non-NULL,
+    # equal to the BboxInfo's extents (a NULL row could never be
+    # measured; this is the regression the ticket closes).
+    assert latest["bbox"] == {"x": 30.4, "y": 30.0, "z": 30.0}
+    # The render's declared artifact dir is persisted alongside (the
+    # version-to-render link — never re-derived).
+    assert latest["render_artifact_dir"] == "/tmp/render-artifacts/a1b2c3d4"
+
+
+def test_design_state_for_finalize_version_yields_measured(app_with_versions) -> None:
+    """A finalize pass with a measured bbox → the design-state GET for
+    that version returns W/D/H entries with ``provenance == "measured"``
+    (the GET reads the persisted row only — ``state_block_for_version``
+    receives a non-NULL bbox from the version row). The displayed W is
+    the MEASURED 30.4 (what will print), not the stated 30."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _measured_stub_status_result(
+            {"W": 30.0, "D": 30.0, "H": 30.0}
+        )
+        r = await client.post(f"/api/projects/{pid}/finalize", json={})
+        assert r.status_code == 201, r.text
+        return await client.get(f"/api/projects/{pid}/design-state")
+
+    resp = run_async(app_with_versions, _call)
+    assert resp.status_code == 200, resp.text
+    by_name = {e["name"]: e for e in resp.json()}
+    for axis in ("W", "D", "H"):
+        assert by_name[axis]["provenance"] == "measured", f"{axis} not measured: {by_name[axis]}"
+    # The displayed value is the measurement (30.4), not the stated 30.
+    assert by_name["W"]["value"] == 30.4
+
+
+def test_design_state_for_finalize_version_without_bbox_stays_stated(app_with_versions) -> None:
+    """A finalize pass whose loop result carries NO measurement (bbox
+    ``None`` - the existing stub shape) persists a NULL bbox and the
+    design-state GET stays ``stated`` (never a fabricated
+    ``measured``, never a zero triple) - the NULL path is an honest
+    abstain, exactly as the chat path degrades."""
+    from tests.versioning.test_design_loop_finalize import _StubResult
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _StubResult(
+            "pass", {"W": 30.0, "D": 30.0, "H": 30.0}
+        )
+        r = await client.post(f"/api/projects/{pid}/finalize", json={})
+        assert r.status_code == 201, r.text
+        latest = app_with_versions.state.versions.latest_version(pid)
+        resp = await client.get(f"/api/projects/{pid}/design-state")
+        return latest, resp
+
+    latest, resp = run_async(app_with_versions, _call)
+    assert latest is not None
+    assert latest["bbox"] is None, "absent measurement must persist NULL, never (0,0,0)"
+    assert resp.status_code == 200, resp.text
+    by_name = {e["name"]: e for e in resp.json()}
+    for axis in ("W", "D", "H"):
+        assert by_name[axis]["provenance"] == "stated", f"{axis}: {by_name[axis]}"

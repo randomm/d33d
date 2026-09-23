@@ -591,6 +591,22 @@ def create_versions_router() -> APIRouter:
         candidate_source = getattr(best_record, "scad_source", None)
         if not isinstance(candidate_source, str):
             candidate_source = None
+        # The measurement comes from the loop RESULT (shared by both seam
+        # shapes) via the SAME helpers the chat path uses
+        # (``_resolve_version_create`` in ``d33d.design_loop_events``): the
+        # best candidate's measured extents (the matched component for a
+        # multi-part model — ``None`` when the measurement is absent or
+        # the component is not identifiable; ``None`` persists a NULL, a
+        # never-coerced honest abstain) and the render's declared
+        # ``render_artifact_dir`` (``None`` when the render did not record
+        # one). Computing them on the pass path only (never on the
+        # 422/502 early returns above) — the early-returning results are
+        # never persisted anyway.
+        from d33d.design_loop_events import (
+            _version_bbox_extents,
+            _version_render_artifact_dir,
+        )
+
         try:
             v = await svc.create_version(
                 project_id,
