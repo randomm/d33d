@@ -1,4 +1,4 @@
-"""3MF validation pipeline for the QIDI Plus 5 (ticket #4).
+"""3MF validation pipeline for the QIDI X-Plus 5 (ticket #4).
 
 Host-side Python pipeline that takes the STL produced by the render worker
 (ticket #2), repairs it with trimesh and pymeshfix into a watertight,
@@ -52,11 +52,15 @@ logger = logging.getLogger(__name__)
 # Named constants
 # ---------------------------------------------------------------------------
 
-#: QIDI Plus 5 build envelope (X, Y, Z) in millimetres.
+#: QIDI X-Plus 5 build envelope (X, Y, Z) in millimetres.
 #: Pinned as a named constant so both the centring transform and the
 #: acceptance gate read the same value. The 320×320×300 mm figure is
 #: stated on QIDI's official tech-spec page and declared by the shipped
 #: QIDIStudio/Orca machine profile (see QIDI_PLUS_5_ENVELOPE_VERIFIED).
+#:
+#: "Plus 5" / "X-Plus 5" naming note (stated once here, ticket #238):
+#: QIDI's retail store uses "Plus5"/"Plus 5"; the shipped slicer profile's
+#: model_id is "X-Plus 5". They are the same machine (320×320×300 mm).
 QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 
 #: Whether the build envelope values in ``QIDI_PLUS_5_ENVELOPE_MM`` have
@@ -81,15 +85,15 @@ QIDI_PLUS_5_ENVELOPE_MM: tuple[float, float, float] = (320.0, 320.0, 300.0)
 #: invalidates the profile.
 QIDI_PLUS_5_ENVELOPE_VERIFIED: bool = True
 
-#: QIDI Plus 5 bed keep-out zone (X, Y) in millimetres, measured from the
-#: lower-left corner of the build plate. Vendor-verified from the QIDI Plus
+#: QIDI X-Plus 5 bed keep-out zone (X, Y) in millimetres, measured from the
+#: lower-left corner of the build plate. Vendor-verified from the QIDI X-Plus
 #: 5 tech-spec: "Lower-left 9x13 mm area is non-printable by default".
 #: A centred part overlapping this rectangle (post-centre X-min <= 9.0 AND
 #: Y-min <= 13.0) cannot be printed. Enforced in gate 7 only; centring and
 #: the Z envelope are unconstrained by this zone.
 QIDI_PLUS_5_KEEP_OUT_MM: tuple[float, float] = (9.0, 13.0)
 
-# Single lower-left notch (0,0)-(9,13). Vendor-verified (QIDI Plus 5
+# Single lower-left notch (0,0)-(9,13). Vendor-verified (QIDI X-Plus 5
 # tech-spec: 'Lower-left 9x13 mm area is non-printable by default'). No other
 # non-printable regions verified — if additional notches exist at other
 # corners, extend this constant to a list of rectangles.
@@ -615,7 +619,7 @@ def validate_stl(
 
 
 def _centre_mesh(mesh: trimesh.Trimesh) -> None:
-    """Centre the mesh within the QIDI Plus 5 build envelope.
+    """Centre the mesh within the QIDI X-Plus 5 build envelope.
 
     The envelope constant is read by both this centring transform and
     the acceptance gate (gate 7).

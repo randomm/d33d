@@ -22,5 +22,6 @@ below is one deliverable; the dependency order is the build order:
 
 ## Status
 
-Pre-first-commit of the real project: the shell (AGENTS.md, CI, package
-skeleton) is being built in issue #1. Nothing else exists yet.
+The project is built and running. 3MF export requires a slicer binary —
+see [Slicer setup](docs/slicer-setup.md) for the binary, profile files,
+and env-var pins.

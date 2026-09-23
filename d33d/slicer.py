@@ -1,4 +1,4 @@
-"""Headless slice dry-run driver for the QIDI Plus 5 (ticket #4, gate 6).
+"""Headless slice dry-run driver for the QIDI X-Plus 5 (ticket #4, gate 6).
 
 The slice dry run is gate 6 of the seven-gate order in
 ``d33d/print_validation.py`` — its own gate, never folded into the
@@ -43,6 +43,7 @@ signal.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -51,6 +52,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+logger = logging.getLogger("d33d.slicer")
 
 # ---------------------------------------------------------------------------
 # Binary discovery
@@ -179,16 +182,16 @@ _RESULT_JSON_NAME = "result.json"
 _GCODE_RE = re.compile(r"plate_\d+\.gcode$")
 
 # QIDI X-Plus 5 machine preset constants (ticket #43).
-# These are bare profile names that each Orca-family slicer (QIDI Studio,
-# OrcaSlicer) resolves from its own bundled profiles directory. The driver
-# does NOT resolve paths or fail-closed on absence — the slicer reports
-# its own error if the profile is missing.
+# Bare profile names resolved to absolute paths inside the slicer's own
+# app bundle (ticket #238 override: bare names do NOT resolve headlessly —
+# the slicer's profile search does not cover the bundle Resources dir).
+# See ``_resolve_orca_family_profiles`` for the resolution logic.
 QIDI_XPLUS5_MACHINE_PRESET = "Qidi X-Plus 5 0.4 nozzle.json"
 QIDI_XPLUS5_PROCESS_PRESET = "0.20mm Standard @X-Plus 5.json"
 
-# The --load-settings flag value: both presets joined by ";" as a single
-# argv element. Each slicer parses the pair and applies the machine + process
-# profile to the dry-run slice.
+# Fallback --load-settings value (bare names, ticket #43 contract) used when
+# the profile files cannot be resolved to absolute paths. The slicer reports
+# its own "can not find setting file" error in that case.
 _LOAD_SETTINGS_VALUE = (
     f"{QIDI_XPLUS5_MACHINE_PRESET};{QIDI_XPLUS5_PROCESS_PRESET}"
 )
@@ -251,6 +254,87 @@ def _count_gcode_lines(path: Path) -> int:
         return 0
 
 
+def _resolve_orca_family_profiles(
+    binary: str,
+) -> tuple[str | None, str | None]:
+    """Resolve machine + process preset names to absolute paths inside
+    the slicer binary's own app bundle (ticket #238).
+
+    Bare profile names do not resolve headlessly — the Orca-family CLI's
+    profile search does not cover the macOS app-bundle Resources directory
+    (``<App>.app/Contents/Resources/profiles/...``).  This function walks
+    the bundle's profile tree to find the two files and returns their
+    absolute paths, or ``None`` for either if not found.
+
+    Returns ``(machine_path, process_path)`` where each is an absolute
+    string path or ``None``.
+    """
+    binary_path = Path(binary)
+    # For /Applications/Foo.app/Contents/MacOS/Bin, the bundle root is
+    # /Applications/Foo.app
+    # For a bare binary path (not in an .app bundle), there is no bundle.
+    # Walk up looking for a path component ending in ".app". Resolve once
+    # (and guard OSError — a broken symlink would otherwise escape the
+    # function's documented "None for not found" contract).
+    app_bundle: Path | None = None
+    try:
+        parts = binary_path.resolve().parts
+    except OSError:
+        return None, None
+    for idx, part in enumerate(parts):
+        if part.endswith(".app"):
+            app_bundle = Path(*parts[: idx + 1])
+            break
+
+    if app_bundle is None:
+        return None, None
+
+    profiles_root = app_bundle / "Contents" / "Resources" / "profiles"
+    if not profiles_root.is_dir():
+        return None, None
+
+    machine_path: str | None = None
+    process_path: str | None = None
+
+    # Walk the profiles tree looking for the two specific files. The profile
+    # directory structure varies by vendor (QIDI uses "X 5 Series/machine/",
+    # Orca uses vendor-name subdirs). A recursive search finds them
+    # regardless of nesting — filename identity is the contract; the
+    # subdirectory a file sits in is not validated (a crossed machine/process
+    # pair still resolves, degrading to the slicer's own error if it matters).
+    def _walk_error(err: OSError) -> None:
+        logger.warning(
+            "_resolve_orca_family_profiles: cannot walk profile dir %s: %s",
+            err.filename,
+            err,
+        )
+
+    for dirpath, _dirnames, filenames in os.walk(
+        profiles_root, onerror=_walk_error
+    ):
+        for fname in filenames:
+            if fname == QIDI_XPLUS5_MACHINE_PRESET:
+                machine_path = str(Path(dirpath) / fname)
+            elif fname == QIDI_XPLUS5_PROCESS_PRESET:
+                process_path = str(Path(dirpath) / fname)
+            if machine_path and process_path:
+                break
+        # Stop walking once both files are found (exit os.walk loop)
+        if machine_path and process_path:
+            break
+
+    if (machine_path is None) != (process_path is None):
+        logger.warning(
+            "_resolve_orca_family_profiles: partial resolution for binary %s: "
+            "machine=%s process=%s (missing profile degrades to bare-name fallback)",
+            binary,
+            machine_path,
+            process_path,
+        )
+
+    return machine_path, process_path
+
+
 def slice_orca_family(
     binary: str,
     model_path: str,
@@ -262,12 +346,20 @@ def slice_orca_family(
     The QIDI X-Plus 5 machine profile is pinned via ``--load-settings`` so
     the slice is validated against the correct machine preset (0.4mm
     nozzle, 320×320×300mm envelope).  Both the QIDI Studio and OrcaSlicer
-    branches use this builder (ticket #43).
+    branches use this builder (ticket #43, refined by #238: profile names
+    are resolved to absolute paths inside the app bundle because bare names
+    do not resolve in the headless CLI's profile search).
 
     Returns (process_exit_code, stderr_tail, gcode_path_or_None).  On
     success the gcode path is non-None.
     """
     outdir = _prepare_outdir(output_dir, "d33d_slice_")
+    machine_abs, process_abs = _resolve_orca_family_profiles(binary)
+    if machine_abs and process_abs:
+        load_settings = f"{machine_abs};{process_abs}"
+    else:
+        load_settings = _LOAD_SETTINGS_VALUE
+
     cmd = [
         binary,
         str(model_path),
@@ -277,8 +369,9 @@ def slice_orca_family(
         "--outputdir",
         str(outdir),
         "--load-settings",
-        _LOAD_SETTINGS_VALUE,
+        load_settings,
     ]
+    logger.info("slice_orca_family: binary=%s argv=%r", binary, cmd)
     try:
         proc = subprocess.run(
             cmd,
@@ -369,6 +462,9 @@ def slice_dry_run(
     # QIDI Studio first (target printer).
     qidi_bin = find_slicer("qidi")
     if qidi_bin:
+        logger.info(
+            "slice_dry_run: using qidi binary at %s", qidi_bin
+        )
         process_rc, stderr_tail, gcode = slice_orca_family(
             qidi_bin, model, output_dir, timeout_s
         )
@@ -410,6 +506,9 @@ def slice_dry_run(
     # OrcaSlicer (same family; intermediate fallback).
     orca_bin = find_slicer("orca")
     if orca_bin:
+        logger.info(
+            "slice_dry_run: using orca binary at %s", orca_bin
+        )
         process_rc, stderr_tail, gcode = slice_orca_family(
             orca_bin, model, output_dir, timeout_s
         )
@@ -448,6 +547,9 @@ def slice_dry_run(
     # PrusaSlicer — the explicit spec fallback.
     prusa_bin = find_slicer("prusa")
     if prusa_bin:
+        logger.info(
+            "slice_dry_run: using prusa binary at %s", prusa_bin
+        )
         rc, stderr_tail, gcode = slice_prusa(prusa_bin, model, output_dir, timeout_s)
         if gcode is not None:
             gcode_lines = _count_gcode_lines(gcode)

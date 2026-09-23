@@ -7,6 +7,10 @@ FAILURE, not a default pass — the same stricter semantics as the
 PrusaSlicer path (process exit code only). The old behaviour
 (``ok = json_rc == 0 if json_rc != -1 else True``) treated an unreadable
 verdict as success, which is backwards.
+
+Also covers ticket #238: profile path resolution inside the app bundle,
+resolved-binary logging, discovery precedence, and the missing-profile
+failure mode.
 """
 
 from __future__ import annotations
@@ -16,7 +20,11 @@ import subprocess
 from pathlib import Path
 
 from d33d import slicer
-from d33d.slicer import SliceDryRunResult, _parse_orca_result_json
+from d33d.slicer import (
+    SliceDryRunResult,
+    _parse_orca_result_json,
+    _resolve_orca_family_profiles,
+)
 
 
 def _stub_ok() -> SliceDryRunResult:
@@ -364,3 +372,247 @@ def test_prusa_branch_has_no_load_settings(tmp_path, monkeypatch):
     assert captured_argv[2] == "-export-slicedata"
     # 4th element is the output dir
     assert len(captured_argv) == 4
+
+
+# ---------------------------------------------------------------------------
+# Ticket #238 — profile path resolution, logging, discovery precedence
+# ---------------------------------------------------------------------------
+
+
+def _make_fake_app_bundle(tmp_path: Path, app_name: str, include_profiles: bool = True) -> Path:
+    """Create a minimal macOS .app bundle structure with an executable.
+
+    Returns the path to the fake binary inside the bundle.
+    """
+    app_dir = tmp_path / f"{app_name}.app"
+    bin_dir = app_dir / "Contents" / "MacOS"
+    bin_dir.mkdir(parents=True)
+    bin_path = bin_dir / app_name
+    bin_path.write_text("#!/bin/sh\nexit 0\n")
+    bin_path.chmod(0o755)
+
+    if include_profiles:
+        profiles_root = app_dir / "Contents" / "Resources" / "profiles"
+        machine_dir = profiles_root / "X 5 Series" / "machine"
+        process_dir = profiles_root / "X 5 Series" / "process"
+        machine_dir.mkdir(parents=True)
+        process_dir.mkdir(parents=True)
+        (machine_dir / slicer.QIDI_XPLUS5_MACHINE_PRESET).write_text("{}")
+        (process_dir / slicer.QIDI_XPLUS5_PROCESS_PRESET).write_text("{}")
+
+    return bin_path
+
+
+def test_resolve_profiles_in_app_bundle(tmp_path):
+    """_resolve_orca_family_profiles finds both profile files inside a
+    properly structured .app bundle and returns absolute paths."""
+    bin_path = _make_fake_app_bundle(tmp_path, "FakeQIDI")
+    machine, process = _resolve_orca_family_profiles(str(bin_path))
+    assert machine is not None
+    assert process is not None
+    # Both paths exist on disk
+    assert Path(machine).is_file()
+    assert Path(process).is_file()
+    # They are absolute paths
+    assert Path(machine).is_absolute()
+    assert Path(process).is_absolute()
+    # They are inside the bundle
+    assert str(tmp_path) in machine
+    assert str(tmp_path) in process
+
+
+def test_resolve_profiles_no_bundle_returns_none(tmp_path):
+    """A binary not inside a .app bundle → both paths are None (bare-name
+    fallback)."""
+    bare_bin = tmp_path / "bare-slicer"
+    bare_bin.write_text("#!/bin/sh\nexit 0\n")
+    bare_bin.chmod(0o755)
+    machine, process = _resolve_orca_family_profiles(str(bare_bin))
+    assert machine is None
+    assert process is None
+
+
+def test_resolve_profiles_bundle_missing_profiles_returns_none(tmp_path):
+    """A .app bundle that has no profile files → both None."""
+    bin_path = _make_fake_app_bundle(tmp_path, "NoProfiles", include_profiles=False)
+    machine, process = _resolve_orca_family_profiles(str(bin_path))
+    assert machine is None
+    assert process is None
+
+
+def test_resolve_profiles_only_machine_missing(tmp_path):
+    """Bundle has only the machine profile, missing process → process is None."""
+    app_dir = tmp_path / "Partial.app"
+    machine_dir = app_dir / "Contents" / "Resources" / "profiles" / "X 5 Series" / "machine"
+    machine_dir.mkdir(parents=True)
+    (machine_dir / slicer.QIDI_XPLUS5_MACHINE_PRESET).write_text("{}")
+    # No process dir
+    bin_dir = app_dir / "Contents" / "MacOS"
+    bin_dir.mkdir(parents=True)
+    bin_path = bin_dir / "Partial"
+    bin_path.write_text("#!/bin/sh\nexit 0\n")
+    bin_path.chmod(0o755)
+
+    machine, process = _resolve_orca_family_profiles(str(bin_path))
+    assert machine is not None
+    assert process is None
+
+
+def test_slice_orca_family_uses_resolved_paths_in_app_bundle(tmp_path, monkeypatch):
+    """When the binary is in a .app bundle with profiles, --load-settings
+    contains the resolved absolute paths (not bare names)."""
+    # Create a fake bundle with a binary that dumps argv
+    app_dir = tmp_path / "TestQIDI.app"
+    bin_dir = app_dir / "Contents" / "MacOS"
+    bin_dir.mkdir(parents=True)
+    fake_bin = bin_dir / "TestQIDI"
+    fake_bin.write_text(
+        "#!/bin/sh\n"
+        'prev=""\n'
+        'outdir=""\n'
+        'for a in "$@"; do\n'
+        '  if [ "$prev" = "--outputdir" ]; then outdir="$a"; fi\n'
+        '  prev="$a"\n'
+        "done\n"
+        'touch "$outdir/plate_1.gcode"\n'
+        'echo \'{"return_code": 0, "error_string": "", "sliced_plates": [{"objects": [1]}]}\' > "$outdir/result.json"\n'
+        'for a in "$@"; do\n'
+        '  printf "%s\\0" "$a"\n'
+        'done > "${0}.argv"\n'
+    )
+    fake_bin.chmod(0o755)
+
+    # Add profiles to the bundle
+    profiles_root = app_dir / "Contents" / "Resources" / "profiles" / "X 5 Series"
+    (profiles_root / "machine").mkdir(parents=True)
+    (profiles_root / "process").mkdir(parents=True)
+    (profiles_root / "machine" / slicer.QIDI_XPLUS5_MACHINE_PRESET).write_text("{}")
+    (profiles_root / "process" / slicer.QIDI_XPLUS5_PROCESS_PRESET).write_text("{}")
+
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "qidi" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+    assert result.ok is True
+
+    argv_path = Path(str(fake_bin) + ".argv")
+    argv = _read_nul_separated(argv_path)
+    idx = argv.index("--load-settings")
+    load_settings_value = argv[idx + 1]
+
+    # The value must contain absolute paths (containing ".app"), not bare names
+    assert ".app" in load_settings_value
+    assert str(tmp_path) in load_settings_value
+    # Both profiles are present (joined by ;)
+    parts = load_settings_value.split(";")
+    assert len(parts) == 2
+    assert Path(parts[0]).is_file()
+    assert Path(parts[1]).is_file()
+
+
+def test_slice_orca_family_falls_back_to_bare_names_no_bundle(tmp_path, monkeypatch):
+    """When the binary is NOT in a .app bundle, --load-settings uses the
+    bare profile names (the #43 fallback)."""
+    fake_bin = _fake_orca_family_bin(tmp_path, "bare-slicer")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "qidi" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+    assert result.ok is True
+
+    argv_path = Path(str(fake_bin) + ".argv")
+    argv = _read_nul_separated(argv_path)
+    idx = argv.index("--load-settings")
+    load_settings_value = argv[idx + 1]
+
+    # Should be the bare names (the _LOAD_SETTINGS_VALUE fallback)
+    assert load_settings_value == slicer._LOAD_SETTINGS_VALUE
+
+
+def test_missing_profile_failure_mode(tmp_path, monkeypatch):
+    """A fake binary that exits non-zero and writes neither gcode nor
+    result.json (the 'can not find setting file' failure mode from the
+    502 bug) → ok=False, slicer reports the error."""
+    fake_bin = tmp_path / "failing-slicer"
+    fake_bin.write_text(
+        "#!/bin/sh\n"
+        'echo "can not find setting file: Qidi X-Plus 5 0.4 nozzle.json" >&2\n'
+        "exit 253\n"
+    )
+    fake_bin.chmod(0o755)
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "qidi" else None
+    )
+
+    result = slicer.slice_dry_run(str(tmp_path / "model.stl"))
+    assert result.ok is False
+    assert result.slicer == "qidi"
+    assert "can not find setting file" in result.error_string
+
+
+def test_discovery_env_pin_wins_over_path(tmp_path, monkeypatch):
+    """An env var pin pointing at a valid file wins over PATH/app-dir
+    discovery. A pin to a non-existent file is silently ignored."""
+    # Create a real file to pin to
+    pinned_bin = tmp_path / "my-qidi"
+    pinned_bin.write_text("#!/bin/sh\nexit 0\n")
+    pinned_bin.chmod(0o755)
+
+    monkeypatch.setenv("QIDI_SLICER_BIN", str(pinned_bin))
+    found = slicer.find_slicer("qidi")
+    assert found == str(pinned_bin)
+
+    # Now point the pin at a non-existent file → falls through to other search
+    monkeypatch.setenv("QIDI_SLICER_BIN", str(tmp_path / "does-not-exist"))
+    # Also remove from PATH to ensure no fallback finds it
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    # The _APP_BIN_DIRS check might still find it on a Mac, so we only
+    # verify it doesn't return the non-existent pin path
+    found = slicer.find_slicer("qidi")
+    if found is not None:
+        assert found != str(tmp_path / "does-not-exist")
+
+
+def test_slice_dry_run_logs_resolved_binary(tmp_path, monkeypatch, caplog):
+    """slice_dry_run emits an INFO log line naming the resolved binary path."""
+    fake_bin = _fake_orca_family_bin(tmp_path, "log-slicer")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "qidi" else None
+    )
+
+    with caplog.at_level("INFO", logger="d33d.slicer"):
+        slicer.slice_dry_run(str(tmp_path / "model.stl"))
+
+    # The resolved binary path must appear in the log
+    assert any(str(fake_bin) in r.message for r in caplog.records), (
+        f"Expected binary path in log, got: {[r.message for r in caplog.records]}"
+    )
+    # The --load-settings value must also be logged
+    all_messages = "\n".join(r.message for r in caplog.records)
+    assert "--load-settings" in all_messages
+
+
+def test_slice_dry_run_logs_orca_binary(tmp_path, monkeypatch, caplog):
+    """The orca branch also logs its resolved binary."""
+    fake_bin = _fake_orca_family_bin(tmp_path, "log-orca")
+    (tmp_path / "model.stl").write_text("stl solid x\nendsolid x\n")
+
+    monkeypatch.setattr(
+        slicer, "find_slicer", lambda kind: str(fake_bin) if kind == "orca" else None
+    )
+
+    with caplog.at_level("INFO", logger="d33d.slicer"):
+        slicer.slice_dry_run(str(tmp_path / "model.stl"))
+
+    assert any(str(fake_bin) in r.message for r in caplog.records)
+

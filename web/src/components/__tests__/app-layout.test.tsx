@@ -277,7 +277,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
   // App fetches the build envelope on mount (issue #128) for the first-run
   // plate backdrop's caption. Stubbed here so the call never reaches the
   // global fetch (which the upload-wiring block below replaces with a bare
-  // vi.fn()). The value matches the backend's QIDI Plus 5 constant.
+  // vi.fn()). The value matches the backend's QIDI X-Plus 5 constant.
   vi.spyOn(client, "getEnvelope").mockResolvedValue({
     x: 320,
     y: 320,
