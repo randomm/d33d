@@ -1015,22 +1015,29 @@ export default function App({ client }: AppProps) {
               setMessages((prev) =>
                 prev.map((m) => {
                   if (m.id !== assistantId) return m;
-                  // The done frame's `message` is the loop's result prose
-                  // ("Design loop passed validation") — the pass card's
-                  // summary line. The message's content was seeded "" on
-                  // send, so a REAL done message is always the summary:
-                  // an error/infra frame travels the error path (onError),
-                  // and the only thing that could land in content first is
-                  // the postChat rejection's "Error: …" text, which this
-                  // guard refuses to overwrite. Nothing else (token text
-                  // arrives on `source` only) can reach content, so no
-                  // guard is needed to keep source out of the summary.
+                  // A real done message means the design was produced and
+                  // validated — the pass card's summary line is the
+                  // passCard copy string, NOT the wire message forwarded
+                  // verbatim (issue #218: the backend's "Design loop
+                  // passed validation" is system language, not what we
+                  // say to the user). The wire contract is intact —
+                  // `data.message` is still received and gated by the
+                  // isReal check below; only what we do with it changes.
+                  // The message's content was seeded "" on send, and an
+                  // error/infra frame travels the error path (onError), so
+                  // the only thing that could land in content first is the
+                  // postChat rejection's "Error: …" text, which this guard
+                  // refuses to overwrite. Nothing else (token text arrives
+                  // on `source` only) can reach content, so no guard is
+                  // needed to keep source out of the summary.
                   const msg = typeof data.message === "string" ? data.message : "";
                   const isReal = msg.length > 0 && !msg.startsWith("Error:");
                   return {
                     ...m,
                     streaming: false,
-                    ...(isReal && m.content === "" ? { content: msg } : {}),
+                    ...(isReal && m.content === ""
+                      ? { content: copy.passCard.summary }
+                      : {}),
                   };
                 }),
               );

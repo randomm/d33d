@@ -51,6 +51,19 @@ describe("PassCard", () => {
     expect(screen.queryByTestId("pass-card-partial")).toBeNull();
   });
 
+  it("renders the real pass-summary string from the copy deck exactly (issue #218)", () => {
+    // Regression lock: the pass card's summary line is the copy.ts string,
+    // not an ad-hoc literal. Both sides bind to the same export — a rename of
+    // either side or a string drift breaks this test.
+    render(<PassCard versionId={4} views={SIX_VIEWS} summary={copy.passCard.summary} />);
+    expect(screen.getByTestId("pass-card-summary").textContent).toBe(copy.passCard.summary);
+    // The rendered node is present and non-empty — PassCard renders the
+    // summary span only when truthy, so a missing/empty export would leave
+    // the testid absent and this would fail.
+    expect(screen.getByTestId("pass-card-summary")).toBeTruthy();
+    expect(copy.passCard.summary.length).toBeGreaterThan(0);
+  });
+
   it("renders the version label when a version id is present", () => {
     render(<PassCard versionId={4} views={SIX_VIEWS} />);
     expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");

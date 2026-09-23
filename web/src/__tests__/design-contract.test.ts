@@ -129,6 +129,24 @@ describe("design contract", () => {
     ]);
   });
 
+  it("the pass card summary is a plain user-facing sentence, never system language or fabricated values", () => {
+    // Issue #218: the pass card's summary line must be a copy.ts string —
+    // an honest generic fallback confirming a design was produced and
+    // validated — not the backend's internal "Design loop passed validation"
+    // wire string, and not a sentence that fabricates dimensions the done
+    // frame does not carry.
+    const summary = copy.passCard.summary;
+    expect(typeof summary).toBe("string");
+    expect(summary.length).toBeGreaterThan(0);
+    // No digits: a number in the summary is the house anti-pattern (a
+    // confident value the component has not established).
+    expect(summary).not.toMatch(/\d/);
+    // No internal system language: the backend wire string must never
+    // surface verbatim to the user.
+    expect(summary.toLowerCase()).not.toContain("design loop");
+    expect(summary.toLowerCase()).not.toContain("passed validation");
+  });
+
   it("an unestablished value is a phrase, never a number or a dash", () => {
     // Never-stated and not-yet-measured are both real states. A blank is honest;
     // a plausible-looking number is the house anti-pattern.
