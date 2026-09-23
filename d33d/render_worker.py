@@ -1272,13 +1272,29 @@ def render_for_design_loop(
             _verify_render_worker_image(RENDER_WORKER_IMAGE)
         except FileNotFoundError:
             pass  # missing build input is a repo-state problem, not image staleness
-        except (OSError, RuntimeError):
-            # OSError: docker-query failure (not staleness) — let the render
-            # proceed; it will fail with its own docker error if docker is
-            # actually unavailable. RuntimeError: label mismatch/absent — in
-            # production this is the loud failure; the test harnesses that
-            # need to bypass it monkeypatch this function directly.
+        except OSError:
+            # Docker-query failure (daemon down, docker binary missing) is
+            # not staleness — let the render proceed; it will fail with its
+            # own docker error if docker is actually unavailable.
             pass
+        except RuntimeError as staleness_exc:
+            # Verified mismatch or absent label: fail LOUDLY before any
+            # expensive work — no docker volume create, no seed helper, no
+            # render. The resolved gate decision (option b, issue #236)
+            # maps this to the existing closed enum: error_class
+            # "container_error" with the actionable rebuild command in
+            # stderr, which the design-loop SSE adapter surfaces as a
+            # user-visible failure.
+            return RenderResult(
+                ok=False,
+                exit_code=1,
+                duration_ms=0,
+                error_class="container_error",
+                stderr=str(staleness_exc),
+                stl=None,
+                csg=None,
+                views=(),
+            )
         subprocess.run(
             ["docker", "volume", "create", volume],
             capture_output=True,

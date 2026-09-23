@@ -130,6 +130,7 @@ def test_render_for_design_loop_stl_survives_tempdir_teardown(
     must be the real 20x20x20 box fixture the worker persisted."""
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000087")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
 
     # The run happens (and its tempdir is torn down) inside the call; all
@@ -173,6 +174,7 @@ def test_render_for_design_loop_no_persistence_keeps_temp_path_shape(
     path exactly as today — never None, never the absent durable path."""
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000088")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
     # Make _render_persist_base return None (no base → no persistence).
     monkeypatch.setattr(rw, "_render_persist_base", lambda: None)

@@ -287,6 +287,7 @@ def test_view_events_arrive_in_order_with_index(
     monkeypatch.setenv("D33D_RENDER_TMP", tmp_base)
     monkeypatch.setattr(rw.subprocess, "run", fake_run)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-121ord01")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     class _FakeTrimesh:
         @staticmethod
@@ -371,6 +372,7 @@ def test_stl_failure_stops_view_event_stream(
     monkeypatch.setenv("D33D_RENDER_TMP", tmp_base)
     monkeypatch.setattr(rw.subprocess, "run", fake_run)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-121stlfail")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     class _FakeTrimesh:
         @staticmethod

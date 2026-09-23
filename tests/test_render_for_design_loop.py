@@ -114,6 +114,7 @@ def test_render_for_design_loop_runs_local_render_worker_image(
 
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000002")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     rw.render_for_design_loop("cube(10);", {})
 
@@ -143,6 +144,7 @@ def test_render_for_design_loop_helper_chowns_work_volume(
 
     monkeypatch.setattr(rw.subprocess, "run", _record_and_stop)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000003")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     with pytest.raises(ValueError, match="stop after helper argv recorded"):
         rw.render_for_design_loop("cube(10);", {})
@@ -172,6 +174,7 @@ def test_render_for_design_loop_harvests_view_glob(
 
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-0000000a")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     orig_glob = Path.glob
 
@@ -222,6 +225,7 @@ def test_render_for_design_loop_pipeline_exception_returns_container_error(
         )
 
     monkeypatch.setattr(rw.subprocess, "run", _explode)
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     result = rw.render_for_design_loop("cube(10);", {})
 
@@ -274,6 +278,7 @@ def _run_ok_render(
 
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000b1")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     # The with-block's tempdir lives under ``_render_host_tmp_base()``
     # (``D33D_RENDER_TMP``, default ``~/d33d/render-tmp``); point it at
     # the test's own tmp dir so the run is hermetic regardless of the
@@ -342,6 +347,7 @@ def test_render_for_design_loop_failed_render_persists_nothing(
 
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000b2")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
 
     result = rw.render_for_design_loop("cube(10);", {}, renders_dir=persist_dir)
 
@@ -372,3 +378,197 @@ def test_render_for_design_loop_renders_dir_kwarg_overrides_base(
         assert sorted(e.name for e in env_base.iterdir()) == [], (
             f"env base {env_base} must not receive the artifacts"
         )
+
+
+# --- Pre-render staleness guard integration tests (issue #236) -------------
+
+
+def _stub_docker_run_with_label(
+    labels: dict[str, str] | None,
+) -> "subprocess.CompletedProcess[str] | None":
+    """Return a ``subprocess.run`` stub that handles both the
+    ``docker image inspect`` call (returns the label JSON or non-zero
+    for an absent image) and all other docker calls (returns success).
+
+    ``labels=None`` → image absent (inspect exit 1).
+    ``labels={}``  → present but unlabeled.
+    """
+    import json as _json
+
+    def _stub(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if argv[:2] == ["docker", "image"]:
+            if labels is None:
+                return subprocess.CompletedProcess(
+                    args=argv, returncode=1, stdout=b"", stderr=b"Error: No such image"
+                )
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=_json.dumps(labels).encode(),
+                stderr=b"",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    return _stub
+
+
+def test_render_for_design_loop_proceeds_when_label_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the image label equals the working-tree hash, the staleness
+    guard passes and the render proceeds normally (no early return).
+    The guard's ``docker image inspect`` call is recorded before any
+    render argv."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        import json as _json
+
+        calls.append(argv)
+        if argv[:2] == ["docker", "image"]:
+            # The guard: return a matching label (the real working-tree hash).
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=_json.dumps({rw.BUILD_HASH_LABEL: rw.build_hash()}).encode(),
+                stderr=b"",
+            )
+        # The render run: fail it so we can confirm the render was attempted.
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b""
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000c1")
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    # The guard ran (docker image inspect was called before the render run).
+    inspect_calls = [c for c in calls if c[:2] == ["docker", "image"]]
+    assert inspect_calls, "no docker image inspect call recorded"
+
+    # The render run was attempted (the guard did not short-circuit).
+    render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
+    assert render_runs, "render run not attempted — guard should have passed"
+
+    # The render failed (as stubbed), so the result is a container_error
+    # from the render itself, not the guard.
+    assert result.ok is False
+    assert "docs/bosl2-pinning.md" not in result.stderr or "staleness" not in result.stderr
+
+
+def test_render_for_design_loop_fails_loudly_on_label_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the image label does NOT match the working-tree hash, the
+    guard returns a ``container_error`` RenderResult with the actionable
+    rebuild command in ``stderr`` — before any ``docker volume create``
+    or render argv is issued. No render runs."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        import json as _json
+
+        calls.append(argv)
+        if argv[:2] == ["docker", "image"]:
+            # Return a stale label that does not match the working tree.
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=_json.dumps({rw.BUILD_HASH_LABEL: "stale-hash-000"}).encode(),
+                stderr=b"",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000c2")
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    assert isinstance(result, rw.RenderResult)
+    assert result.ok is False
+    assert result.error_class == "container_error"
+    assert "docs/bosl2-pinning.md" in result.stderr
+    assert "docker build" in result.stderr
+    assert "d33d/render-worker:local" in result.stderr
+
+    # No docker volume create or render argv was issued.
+    volume_creates = [c for c in calls if c[:3] == ["docker", "volume", "create"]]
+    assert volume_creates == [], f"volume create issued on mismatch: {volume_creates}"
+    render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
+    assert render_runs == [], f"render run issued on mismatch: {render_runs}"
+
+
+def test_render_for_design_loop_fails_loudly_when_label_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the image is present but carries no build-hash label (built
+    before the label step existed — the #226/#228 incident), the guard
+    returns a ``container_error`` RenderResult with the actionable rebuild
+    command in ``stderr`` before any render."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:2] == ["docker", "image"]:
+            # Image present but unlabeled (null → {} in the guard).
+            return subprocess.CompletedProcess(
+                args=argv, returncode=0, stdout=b"null", stderr=b""
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000c3")
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    assert isinstance(result, rw.RenderResult)
+    assert result.ok is False
+    assert result.error_class == "container_error"
+    assert "docs/bosl2-pinning.md" in result.stderr
+
+    # No render argv was issued.
+    render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
+    assert render_runs == [], f"render run issued on missing label: {render_runs}"
+
+
+def test_render_for_design_loop_fails_loudly_when_image_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the image is absent (``docker image inspect`` returns
+    non-zero), the guard returns a ``container_error`` RenderResult with
+    the actionable rebuild command in ``stderr`` before any render."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *args: Any, **kwargs: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:2] == ["docker", "image"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b"Error: No such image"
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000c4")
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    assert isinstance(result, rw.RenderResult)
+    assert result.ok is False
+    assert result.error_class == "container_error"
+    assert "image not found" in result.stderr
+    assert "docs/bosl2-pinning.md" in result.stderr
+
+    # No render argv was issued.
+    render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
+    assert render_runs == [], f"render run issued on absent image: {render_runs}"

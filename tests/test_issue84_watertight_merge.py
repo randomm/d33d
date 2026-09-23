@@ -141,6 +141,7 @@ def test_real_render_pipeline_classifies_box_fixture_ok(
     ``empty_model`` here."""
     monkeypatch.setattr(rw.subprocess, "run", _record)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000084")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
 
     result = rw.render_for_design_loop("cube(20);", {}, renders_dir=tmp_path / "renders")
@@ -206,6 +207,7 @@ def test_worker_load_path_catches_indexerror_from_volume(
     ``(OSError, ValueError)`` and the IndexError escaped, crashing
     ``render_for_design_loop`` instead of classifying."""
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000085")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
     monkeypatch.setattr(rw.subprocess, "run", _record)
 
@@ -308,6 +310,7 @@ def test_multisolid_render_classifies_ok_end_to_end(
     classified."""
     monkeypatch.setattr(rw.subprocess, "run", _record_stl(MULTISOLID_FIXTURE.read_bytes()))
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-00000086")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
 
     result = rw.render_for_design_loop("cube(20); union(sphere(r=5));", {}, renders_dir=tmp_path / "renders")

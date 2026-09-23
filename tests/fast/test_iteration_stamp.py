@@ -122,6 +122,7 @@ def _patch_ok_render(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         rw.subprocess, "Popen", _fake_container_factory(subprocess.Popen)
     )
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
     monkeypatch.setattr(rw, "new_render_name", lambda: "render-118stamp")
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
 
