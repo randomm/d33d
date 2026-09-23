@@ -610,6 +610,11 @@ def build_registry_glb(
     removed before moving to the next call-site (best-effort, mirrors the
     render worker's ``_cleanup_container`` convention).
 
+    Image staleness (issue #236) does not apply here: this function runs the
+    stock upstream OpenSCAD image (``DEFAULT_OPENSCAD_IMAGE``), not the
+    locally built ``d33d/render-worker:local`` whose baked entrypoint.sh the
+    staleness guard in ``d33d.render_worker`` protects.
+
     A call-site whose isolated render does not classify ``ok`` is
     recorded in ``failures`` and excluded from the assembled scene —
     every OTHER call-site's isolated render still contributes (a single

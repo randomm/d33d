@@ -18,11 +18,22 @@ FROM --platform=linux/amd64 docker.io/openscad/openscad:trixie
 ARG BOSL2_TAG
 ARG BOSL2_COMMIT
 
+# D33D_BUILD_HASH is the sha256 (hex) of the repo-root entrypoint.sh +
+# Dockerfile + the two BOSL2 build-arg values, computed host-side by the
+# canonical build command (docs/bosl2-pinning.md) and stamped into the
+# image below as the ``d33d/build-hash`` label. The server recomputes the
+# same hash from the working tree before every render and refuses to run a
+# render-worker image whose label is missing or disagrees (issue #236).
+# No default: a build without it fails loudly below, exactly like the
+# BOSL2 args — an unlabeled image is precisely the stale-image failure mode
+# this guard exists to catch.
+ARG D33D_BUILD_HASH
+
 # Fail loudly if BOSL2_TAG or BOSL2_COMMIT was not supplied.
 # The test -n check is a shell builtin that works in both /bin/sh and /bin/bash.
 # (Bash-only syntax like ${VAR:?msg} would fail under /bin/sh which is the default
 #  shell for Dockerfile RUN instructions.)
-RUN test -n "${BOSL2_TAG}" && test -n "${BOSL2_COMMIT}"
+RUN test -n "${BOSL2_TAG}" && test -n "${BOSL2_COMMIT}" && test -n "${D33D_BUILD_HASH}"
 
 # git is not in the base image; install it to fetch BOSL2 at build time.
 RUN apt-get update && \
@@ -66,5 +77,13 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 USER openscad
+
+# Stamp the content hash of the render-affecting build inputs (see the
+# D33D_BUILD_HASH ARG above) as the ``d33d/build-hash`` image label. The
+# server recomputes the same hash from its working tree and compares it to
+# this label before every render (issue #236): a missing or stale label
+# fails loudly instead of rendering with baked-in code that no longer
+# matches the source.
+LABEL d33d/build-hash="${D33D_BUILD_HASH}"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

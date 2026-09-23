@@ -1,8 +1,11 @@
 """Render worker: VIEWS contract, docker argv builder, classification, result.json.
 
 Host-side core module for ticket #2. Nothing in this module touches
-Docker or the filesystem — the ``render()`` caller API (``d33d/render.py``)
-and the container entrypoint read this module's constants as their single
+Docker or the filesystem except the pre-render image staleness guard
+(:func:`build_hash` / :func:`_verify_render_worker_image`, issue #236)
+which reads two repo files and one `docker image inspect` before any
+render; the ``render()`` caller API (``d33d/render.py``) and the
+container entrypoint read this module's constants as their single
 source of truth.
 
 Empirical CLI verification (run 2026-09-11 inside the pinned image
@@ -29,6 +32,7 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -38,8 +42,11 @@ import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
+
+logger = logging.getLogger(__name__)
 
 ErrorClass = Literal[
     "ok",
@@ -311,6 +318,169 @@ NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
 #: The locally built render-worker image (Dockerfile + entrypoint.sh, run
 #: as uid 1000). Override in tests via monkeypatch on this module attribute.
 RENDER_WORKER_IMAGE = "d33d/render-worker:local"
+
+#: The image label the canonical build command stamps with the working
+#: tree's :func:`build_hash` (issue #236). The pre-render staleness check
+#: compares :func:`build_hash` against ``docker image inspect``'s value for
+#: this label; a missing or mismatched label means the image was not built
+#: from the current tree and must not render.
+BUILD_HASH_LABEL = "d33d/build-hash"
+
+#: The repo files whose content, plus the two BOSL2 build-arg values
+#: resolved from the canonical build command in ``docs/bosl2-pinning.md``,
+#: feed :func:`build_hash`. entrypoint.sh is COPY'd into the image at
+#: build time; the Dockerfile itself is a build input (base pin, USER,
+#: build-arg wiring). Both are render-affecting, so both are hashed.
+#: Files outside this set (e.g. ``README.md``) are deliberately excluded —
+#: they do not change the rendered output.
+_HASHED_BUILD_INPUTS: tuple[Path, ...] = (
+    Path("entrypoint.sh"),
+    Path("Dockerfile"),
+)
+
+#: The two build-arg values from the canonical build command (the single
+#: source of truth is ``docs/bosl2-pinning.md``), keyed by arg name. The
+#: hash includes them because a rebuild under a different BOSL2 tag would
+#: change the rendered geometry without touching either hashed file.
+_HASHED_BUILD_ARGS: dict[str, str] = {
+    "BOSL2_TAG": "v2.0.755",
+    "BOSL2_COMMIT": "4e031aafe189efcf4eb0250c24d3216b6a429458",
+}
+
+
+def build_hash(repo_root: Path | None = None) -> str:
+    """Content hash of the render-affecting build inputs (issue #236).
+
+    Returns the hex sha256 of, in a fixed order: each file in
+    ``_HASHED_BUILD_INPUTS`` (read from the working tree, not git — a
+    dirty/modified entrypoint.sh that was never committed must still
+    register as a mismatch) and each ``key=value`` pair in
+    ``_HASHED_BUILD_ARGS`` sorted by key. Pure and deterministic: the same
+    tree yields the same hash on every call; any change to a hashed file or
+    arg changes the hash; files outside the hashed set do not.
+
+    The canonical build command (``docs/bosl2-pinning.md``) stamps this
+    value into the image as ``LABEL d33d/build-hash="${D33D_BUILD_HASH}"``;
+    :func:`_verify_render_worker_image` compares the image's label against
+    this hash before any render.
+    """
+    root = repo_root if repo_root is not None else Path(__file__).resolve().parents[1]
+    h = sha256()
+    for rel in _HASHED_BUILD_INPUTS:
+        path = root / rel
+        if not path.is_file():
+            raise FileNotFoundError(
+                f"build input {rel} missing from {root} — cannot compute the "
+                "render-worker build hash; run from a complete checkout"
+            )
+        h.update(rel.as_posix().encode("utf-8"))
+        h.update(b"\0")
+        h.update(path.read_bytes())
+        h.update(b"\0")
+    for key in sorted(_HASHED_BUILD_ARGS):
+        h.update(f"{key}={_HASHED_BUILD_ARGS[key]}".encode("utf-8"))
+        h.update(b"\0")
+    return h.hexdigest()
+
+
+def _docker_image_labels(image: str) -> dict[str, str] | None:
+    """``docker image inspect --format '{{json .Config.Labels}}' <image>``
+
+    Returns the image's label dict, or ``None`` when the image is absent
+    (inspect non-zero exit). A present-but-unlabeled image yields an empty
+    dict — the caller's missing-label path handles it. A docker daemon
+    outage or missing docker binary raises :class:`OSError` (or
+    :class:`subprocess.SubprocessError`) so the caller can distinguish
+    "cannot query docker" from "image absent/stale" and not claim
+    staleness it cannot have verified.
+    """
+    proc = subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )  # subprocess.run, not check=True: absent image is the normal path
+    if proc.returncode != 0:
+        return None
+    parsed = json.loads(proc.stdout.decode("utf-8") or "null")
+    # Docker emits `{}` for a present-but-unlabeled image and `null` for an
+    # unlabeled one; a JSON value that is not a dict is malformed output —
+    # treat it as no labels so the caller's missing-label path handles it
+    # instead of crashing on an unexpected shape.
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed or {}
+
+
+def _verify_render_worker_image(
+    image: str,
+    repo_root: Path | None = None,
+    expected_hash: str | None = None,
+) -> None:
+    """Pre-render staleness guard (issue #236): the image must carry
+    ``BUILD_HASH_LABEL`` equal to the working tree's :func:`build_hash`.
+
+    Raises :class:`RuntimeError` naming the canonical rebuild command on:
+    image absent (no labels), label missing, label not a string, or label
+    != computed hash. A docker-query failure (daemon down, docker binary
+    missing, a hung daemon — the inspect call's ``subprocess.TimeoutExpired``
+    — or ``subprocess.run`` itself raising for any other
+    :class:`subprocess.SubprocessError`; the design-loop test harnesses stub
+    ``subprocess.run`` without an inspect branch and let it raise) is NOT
+    staleness and propagates as an :class:`OSError` so the caller can
+    distinguish it from a verified mismatch. Raises
+    :class:`FileNotFoundError` when a hashed build input is missing (the
+    caller maps that to its own loud failure).
+    """
+    if expected_hash is None:
+        expected_hash = build_hash(repo_root)
+    rebuild_msg = (
+        "render-worker image staleness check failed: the image does not "
+        "carry a build-hash matching the working tree (image absent, label "
+        f"{BUILD_HASH_LABEL!r} missing, or label != working-tree hash). Rebuild "
+        f"with the canonical command from docs/bosl2-pinning.md: {canonical_build_command()}"
+    )
+    try:
+        labels = _docker_image_labels(image)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # Docker-query failure (including the inspect call's
+        # subprocess.TimeoutExpired — a hung daemon is "cannot query
+        # docker", never a verified mismatch): not staleness. The caller
+        # maps this to its own loud failure (the design-loop harnesses
+        # stub subprocess.run without an inspect branch and let it raise —
+        # that path must not be mistaken for a verified mismatch).
+        raise OSError(
+            "render-worker staleness check could not query docker: "
+            f"{exc}"
+        ) from exc
+    if labels is None:
+        raise RuntimeError(rebuild_msg + " (image not found)")
+    label_value = labels.get(BUILD_HASH_LABEL)
+    if not isinstance(label_value, str) or label_value != expected_hash:
+        raise RuntimeError(rebuild_msg + " (label mismatch/missing)")
+
+
+def canonical_build_command() -> str:
+    """The canonical render-worker rebuild command, derived from the
+    module's own constants (``_HASHED_BUILD_ARGS`` values and
+    :data:`RENDER_WORKER_IMAGE`) — the single source of truth for the
+    command the doc and the :func:`_verify_render_worker_image` error
+    message both quote. ``D33D_BUILD_HASH`` is computed at build time via
+    ``uv run python`` so the working tree's :func:`build_hash` stamps the
+    image label (the doc-drift guard in
+    ``tests/fast/test_image_staleness.py`` keeps doc, code and error
+    message in sync).
+    """
+    bosl2_tag = _HASHED_BUILD_ARGS["BOSL2_TAG"]
+    bosl2_commit = _HASHED_BUILD_ARGS["BOSL2_COMMIT"]
+    return (
+        "docker build --platform=linux/amd64 "
+        f"--build-arg BOSL2_TAG={bosl2_tag} "
+        f"--build-arg BOSL2_COMMIT={bosl2_commit} "
+        "--build-arg D33D_BUILD_HASH=\"$(uv run python -c 'from d33d.render_worker "
+        "import build_hash; print(build_hash())')\" "
+        f"-t {RENDER_WORKER_IMAGE} ."
+    )
 
 
 def _render_host_tmp_base() -> Path:
@@ -1078,6 +1248,7 @@ def render_for_design_loop(
     defines: dict[str, str],
     renders_dir: str | Path | None = None,
     on_progress: Any = None,
+    repo_root: Path | None = None,
 ) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
@@ -1122,6 +1293,46 @@ def render_for_design_loop(
     persist_base = Path(renders_dir) if renders_dir is not None else _render_persist_base()
     render_key = uuid.uuid4().hex[:8]
     try:
+        # Pre-render staleness guard (issue #236): the render-worker image
+        # must carry BUILD_HASH_LABEL == build_hash() before any expensive
+        # work — a stale image (entrypoint.sh / Dockerfile changed since the
+        # build) fails loudly with the canonical rebuild command instead of
+        # rendering with baked-in code that no longer matches the source.
+        # A docker-query failure (daemon down, docker binary missing) is NOT
+        # staleness — the render proceeds and fails with its own docker
+        # error. The guard is also monkeypatched by the design-loop test
+        # harnesses (test_iteration_stamp, test_per_view_progress) which
+        # stub subprocess.run without a docker-image-inspect branch.
+        try:
+            _verify_render_worker_image(RENDER_WORKER_IMAGE, repo_root=repo_root)
+        except FileNotFoundError as exc:
+            # Missing build input is a repo-state problem, not image
+            # staleness — log and let the render proceed; it will fail with
+            # its own error if the tree is truly broken.
+            logger.warning("render-worker staleness check skipped: %s", exc)
+        except OSError as exc:
+            # Docker-query failure (daemon down, docker binary missing) is
+            # not staleness — let the render proceed; it will fail with its
+            # own docker error if docker is actually unavailable.
+            logger.warning("render-worker staleness check skipped: %s", exc)
+        except RuntimeError as staleness_exc:
+            # Verified mismatch or absent label: fail LOUDLY before any
+            # expensive work — no docker volume create, no seed helper, no
+            # render. The resolved gate decision (option b, issue #236)
+            # maps this to the existing closed enum: error_class
+            # "container_error" with the actionable rebuild command in
+            # stderr, which the design-loop SSE adapter surfaces as a
+            # user-visible failure.
+            return RenderResult(
+                ok=False,
+                exit_code=1,
+                duration_ms=0,
+                error_class="container_error",
+                stderr=str(staleness_exc),
+                stl=None,
+                csg=None,
+                views=(),
+            )
         subprocess.run(
             ["docker", "volume", "create", volume],
             capture_output=True,
