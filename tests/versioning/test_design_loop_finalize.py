@@ -1297,6 +1297,54 @@ def test_chat_pass_creates_version_and_emits_token_and_done(app_with_versions):
     assert event_names[-1] == "done"
 
 
+def test_design_state_committed_before_version_created_frame(app_with_versions):
+    """(issue #237 d3) By the moment the version-created frame is yielded,
+    ``GET /api/projects/{pid}/design-state`` already returns the new
+    version's rows — the version row is committed BEFORE the frame, so the
+    SPA's refetch on the frame cannot read an empty block for a version
+    that already exists. Frame-before-commit ordering is ruled out."""
+
+    async def _loop(app, **kwargs):
+        return _StubResult(
+            "pass", {"W": 10, "H": 20}, scad="W = 10; H = 20; cube([W, H, 1]);"
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make a box 10 wide and 20 high"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        ds_at_frame = None
+        async for event, data in source:
+            frames.append((event, data))
+            if event == "progress" and data.get("step") == "version-created":
+                # The frame is on the wire: read design-state the same way
+                # the SPA does, from inside the consuming loop, AT THAT
+                # MOMENT.
+                ds = await client.get(f"/api/projects/{pid}/design-state")
+                ds_at_frame = (ds.status_code, ds.json())
+            if event in ("done", "error"):
+                break
+        return frames, ds_at_frame
+
+    frames, ds_at_frame = run_async(app_with_versions, _call)
+    event_names = [f[0] for f in frames]
+    assert "done" in event_names, "no done frame"
+    assert ds_at_frame is not None, "no version-created frame seen"
+    status, body = ds_at_frame
+    assert status == 200, status
+    # The new version's rows are already visible at the frame moment — the
+    # row is committed before the frame is yielded.
+    by_name = {e["name"]: e for e in body}
+    assert "W" in by_name, f"design-state at frame moment: {body}"
+    assert by_name["W"]["value"] == 10, by_name
+
+
 def test_chat_pass_real_render_result_frame_carries_stl_and_views(
     app_with_versions, tmp_path
 ):

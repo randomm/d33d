@@ -306,6 +306,92 @@ describe("region-scoped edit request", () => {
 // Model config + credentials
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Design state (issue #237, task-b)
+// ---------------------------------------------------------------------------
+
+describe("getDesignState", () => {
+  it("GETs /api/projects/{id}/design-state and resolves the entry rows", async () => {
+    const rows = [
+      {
+        name: "outer_diameter",
+        label: "Outer diameter",
+        value: 20,
+        unit: "mm",
+        provenance: "stated",
+      },
+      {
+        name: "wire_gauge",
+        label: "Wire gauge",
+        value: null,
+        unit: null,
+        provenance: "unknown",
+      },
+    ];
+    fake.enqueue(json(200, rows));
+    const list = await client.getDesignState(1);
+    expect(list).toHaveLength(2);
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/design-state");
+    expect(init.method).toBe("GET");
+  });
+
+  it("preserves a null value on unknown entries — never 0 (issue #91 contract)", async () => {
+    fake.enqueue(
+      json(200, [
+        {
+          name: "hole_diameter",
+          label: "Hole diameter",
+          value: null,
+          unit: "mm",
+          provenance: "unknown",
+        },
+      ]),
+    );
+    const [row] = await client.getDesignState(1);
+    expect(row?.value).toBeNull();
+    expect(row?.value).not.toBe(0);
+  });
+
+  it("carries stated_value only on disagrees entries", async () => {
+    fake.enqueue(
+      json(200, [
+        {
+          name: "width",
+          label: "Width",
+          value: 18,
+          unit: "mm",
+          provenance: "disagrees",
+          stated_value: 20,
+        },
+      ]),
+    );
+    const [row] = await client.getDesignState(1);
+    expect(row).toMatchObject({ value: 18, stated_value: 20 });
+  });
+
+  it("resolves an empty array when the project has no version yet", async () => {
+    fake.enqueue(json(200, []));
+    await expect(client.getDesignState(1)).resolves.toEqual([]);
+  });
+
+  it("surfaces a 404 for an unknown project", async () => {
+    fake.enqueue(json(404, { detail: "project not found" }));
+    await expect(client.getDesignState(99)).rejects.toMatchObject({
+      status: 404,
+      detail: "project not found",
+    });
+  });
+
+  it("surfaces a 500 with the non-JSON raw-text fallback", async () => {
+    fake.enqueue(new Response("Internal Server Error", { status: 500 }));
+    await expect(client.getDesignState(1)).rejects.toMatchObject({
+      status: 500,
+      detail: "Internal Server Error",
+    });
+  });
+});
+
 describe("model config", () => {
   it("getModelConfig GETs /api/config/models", async () => {
     fake.enqueue(json(200, CATALOGUE));

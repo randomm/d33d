@@ -82,6 +82,12 @@ export const brief = {
   failedFooter: (what: string): string =>
     `${what} didn't pass. Nothing above changed.`,
 
+  /** The design-state refetch failed twice in a row (issue #237): the
+   *  last-known block stays visible and this line says it may be stale.
+   *  The marker clears on the next successful fetch. */
+  refreshFailed:
+    "Couldn't refresh — these values may be out of date.",
+
   /** Above ~7 rows the Brief groups by part. Unknowns are never grouped away —
    *  they are the thing to act on, so they surface out of the list. */
   unresolvedHeading: (count: number): string => `Unresolved · ${count}`,
