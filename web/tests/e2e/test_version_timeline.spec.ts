@@ -112,9 +112,13 @@ test("version timeline: create, restore, compare", async ({ page }) => {
     (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
   );
   await page.goto("/");
-  const chatInput = page.getByTestId("chat-input");
-  await chatInput.fill("a small box");
-  await chatInput.press("Enter");
+  // Fresh mount (no versions, no messages): the chat Composer is hidden by
+  // the isFirstRun gate, so chat-input does not exist in the DOM — the first
+  // send must target the FirstRun surface (the pattern test_point_selection
+  // uses for the same lazy creation path).
+  const firstRunInput = page.getByTestId("first-run-input");
+  await firstRunInput.fill("a small box");
+  await firstRunInput.press("Enter");
   const created = (await (await projectResp).json()) as { id: number };
   const projectId = created.id;
 

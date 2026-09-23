@@ -39,6 +39,22 @@ describe("Composer", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("regression guard: the form the input submits to triggers onSend via native submission", () => {
+    // jsdom does not bridge a keyDown(Enter) to native form submission, so this
+    // guard submits the form element directly — proving the input sits inside
+    // a real <form onSubmit> (the structure a browser uses for Enter-to-submit)
+    // with a type=submit button, rather than relying on any keydown handler.
+    const onSend = vi.fn();
+    render(<Composer value="regression check" onChange={vi.fn()} onSend={onSend} />);
+    const input = screen.getByTestId("chat-input");
+    const form = input.closest("form");
+    expect(form).toBeTruthy();
+    const submitButton = form!.querySelector("button[type=submit]");
+    expect(submitButton).toBeTruthy();
+    fireEvent.submit(form!);
+    expect(onSend).toHaveBeenCalledWith("regression check");
+  });
+
   it("disables the send button when the input is empty", () => {
     render(<Composer value="" onChange={vi.fn()} onSend={vi.fn()} />);
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(true);

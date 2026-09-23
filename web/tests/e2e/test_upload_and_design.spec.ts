@@ -88,9 +88,13 @@ test("happy path: send a message → upload photo → settle", async ({ page }) 
   // The chat send is the project-creation trigger (issue #192): handleSendMessage
   // creates the project single-flight, then posts the message and opens the
   // SSE stream — all against the REAL backend.
-  const chatInput = page.getByTestId("chat-input");
-  await chatInput.fill("a small box");
-  await chatInput.press("Enter");
+  // The fresh mount shows the first-run screen (isFirstRun gates the chat
+  // Composer, so chat-input is not in the DOM yet) — the first send goes
+  // through first-run-input.
+  const firstRunInput = page.getByTestId("first-run-input");
+  await expect(firstRunInput).toBeVisible();
+  await firstRunInput.fill("a small box");
+  await firstRunInput.press("Enter");
 
   const project = (await (await createdResp).json()) as Project;
   expect(project.source_photo_path).toBeNull();
