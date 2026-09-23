@@ -395,6 +395,7 @@ def _docker_image_labels(image: str) -> dict[str, str] | None:
         ["docker", "image", "inspect", "--format", "{{json .Config.Labels}}", image],
         capture_output=True,
         check=False,
+        timeout=15,
     )  # subprocess.run, not check=True: absent image is the normal path
     if proc.returncode != 0:
         return None
@@ -412,10 +413,12 @@ def _verify_render_worker_image(
     Raises :class:`RuntimeError` naming the canonical rebuild command on:
     image absent (no labels), label missing, label not a string, or label
     != computed hash. A docker-query failure (daemon down, docker binary
-    missing, or ``subprocess.run`` itself raising — the design-loop test
-    harnesses stub ``subprocess.run`` without an inspect branch and let it
-    raise) is NOT staleness and propagates as an :class:`OSError` so the
-    caller can distinguish it from a verified mismatch. Raises
+    missing, a hung daemon — the inspect call's ``subprocess.TimeoutExpired``
+    — or ``subprocess.run`` itself raising for any other
+    :class:`subprocess.SubprocessError`; the design-loop test harnesses stub
+    ``subprocess.run`` without an inspect branch and let it raise) is NOT
+    staleness and propagates as an :class:`OSError` so the caller can
+    distinguish it from a verified mismatch. Raises
     :class:`FileNotFoundError` when a hashed build input is missing (the
     caller maps that to its own loud failure).
     """
@@ -428,16 +431,18 @@ def _verify_render_worker_image(
         "with the canonical command from docs/bosl2-pinning.md: "
         "docker build --platform=linux/amd64 --build-arg BOSL2_TAG=v2.0.755 "
         "--build-arg BOSL2_COMMIT=4e031aafe189efcf4eb0250c24d3216b6a429458 "
-        "--label d33d/build-hash=\"$(python -c 'from d33d.render_worker "
+        "--build-arg D33D_BUILD_HASH=\"$(uv run python -c 'from d33d.render_worker "
         "import build_hash; print(build_hash())')\" -t d33d/render-worker:local ."
     )
     try:
         labels = _docker_image_labels(image)
-    except (OSError, ValueError) as exc:
-        # Docker-query failure: not staleness. The caller maps this to its
-        # own loud failure (the design-loop harnesses stub subprocess.run
-        # without an inspect branch and let it raise — that path must not
-        # be mistaken for a verified mismatch).
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # Docker-query failure (including the inspect call's
+        # subprocess.TimeoutExpired — a hung daemon is "cannot query
+        # docker", never a verified mismatch): not staleness. The caller
+        # maps this to its own loud failure (the design-loop harnesses
+        # stub subprocess.run without an inspect branch and let it raise —
+        # that path must not be mistaken for a verified mismatch).
         raise OSError(
             "render-worker staleness check could not query docker: "
             f"{exc}"
@@ -1214,6 +1219,7 @@ def render_for_design_loop(
     defines: dict[str, str],
     renders_dir: str | Path | None = None,
     on_progress: Any = None,
+    repo_root: Path | None = None,
 ) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
@@ -1269,7 +1275,7 @@ def render_for_design_loop(
         # harnesses (test_iteration_stamp, test_per_view_progress) which
         # stub subprocess.run without a docker-image-inspect branch.
         try:
-            _verify_render_worker_image(RENDER_WORKER_IMAGE)
+            _verify_render_worker_image(RENDER_WORKER_IMAGE, repo_root=repo_root)
         except FileNotFoundError:
             pass  # missing build input is a repo-state problem, not image staleness
         except OSError:
