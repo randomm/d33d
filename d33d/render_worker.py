@@ -114,24 +114,27 @@ VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] 
 #: sides for every size from 20 mm to 300 mm.
 CAM_DIST_FACTOR: float = 3.0
 
-#: Additional multiplier for the isometric view (45° about Y then 45°
-#: about Z). The 45° rotation projects a larger silhouette than any
-#: single axis (a cube of side *S* projects to *S*·√2), so the iso
-#: distance is ``CAM_DIST_FACTOR * sqrt(2) * max_extent`` to keep the
-#: same relative margin.
+#: Camera-distance multiplier for the isometric view (45° about Y then 45°
+#: about Z), derived from the worst-case projection geometry (issue #234):
 #:
-#: This factor is calibrated for cube-shaped models: a cube's 45°-rotated
-#: silhouette is 2D-diagonal-limited (projected width *S*·√2, zero
-#: projected z-extent). A genuine iso corner view of a full-extent box of
-#: side *S* projects *S*·√3 instead. At ``CAM_DIST_FACTOR`` = 3.0 the
-#: exact-fit distance for a cube is 2.52·S·√2 ≈ 3.56·S (fitted: 3.0·√2·S
-#: ≈ 4.24·S → ~19% margin, same as the axis-aligned views) while a
-#: worst-case box needs 2.52·S·√3 ≈ 4.36·S (fitted: 4.24·S → ~3% margin).
-#: The iso case is therefore the tightest in the design: it holds with a
-#: positive margin for cube-shaped models and for a full-extent box — the
-#: only documented tight case is a box whose three extents are all
-#: simultaneously near the max.
-CAM_DIST_ISO_FACTOR: float = CAM_DIST_FACTOR * 2.0**0.5
+#:   - A full-extent box (all three extents equal to ``max_extent`` *S*)
+#:     projects to *S*·√3 in the iso view (the box's space diagonal).
+#:   - The exact-fit ratio for the orthographic 800×800 frame is 2.52:
+#:     a model of extent *S* fills the frame when ``d = 2.52 × S``
+#:     (``projected_px = extent_mm × 2016 / d``; setting
+#:     ``projected_px = 800`` and ``extent_mm = S`` gives
+#:     ``d = S × 2016/800 = 2.52 × S``).
+#:   - The minimum visible margin requirement is 3% of the frame on each
+#:     edge (≥ 24 px of 800), so the model may occupy at most 94% of the
+#:     frame: ``d ≥ 2.52 × S·√3 / 0.94``.
+#:
+#: ``CAM_DIST_ISO_FACTOR = 2.52 × √3 / 0.94 ≈ 4.6434``
+#:
+#: This replaces the previous ``CAM_DIST_FACTOR × √2`` (≈ 4.2426), which
+#: was calibrated for a cube's 2D-diagonal silhouette (S·√2) and did not
+#: cover the √3 worst case with the required 3% margin (it left the 20 mm
+#: cube's left edge within the 3-px test band — issue #234).
+CAM_DIST_ISO_FACTOR: float = 2.52 * 3.0**0.5 / (1 - 2 * 0.03)
 
 #: Views whose camera tuple carries the isometric rotation (the last
 #: element of ``VIEWS``). Used by :func:`cam_dist` to pick the iso

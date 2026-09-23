@@ -221,12 +221,21 @@ def test_cam_dist_scales_linearly_with_extent() -> None:
 
 def test_cam_dist_uses_different_factor_for_iso() -> None:
     """The isometric view (45° rotation) projects a larger silhouette
-    than any single axis, so it needs a larger distance: the iso factor
-    must be √2 × the axis-aligned factor."""
+    than any single axis. The worst case is a full-extent box whose
+    three extents all equal ``max_extent`` — it projects to
+    ``max_extent``·√3 (the space diagonal). The iso factor must cover
+    that with the required minimum margin:
+    ``CAM_DIST_ISO_FACTOR = 2.52 × √3 / 0.94``
+    (exact-fit ratio 2.52, √3 worst-case projection, 3% margin per
+    edge → 0.94 usable fraction; issue #234)."""
     extent = 60.0
     d_aa = rw.cam_dist(extent, "view_00_front.png")
     d_iso = rw.cam_dist(extent, "view_05_iso.png")
-    assert d_iso == pytest.approx(d_aa * 2.0**0.5)
+    # The iso distance is larger than the axis-aligned distance.
+    assert d_iso > d_aa
+    # The iso factor pins the √3 worst case with 3% margin.
+    assert rw.CAM_DIST_ISO_FACTOR == pytest.approx(2.52 * 3.0**0.5 / 0.94, rel=1e-12)
+    assert d_iso == pytest.approx(rw.CAM_DIST_ISO_FACTOR * extent, rel=1e-12)
 
 
 def test_cam_dist_zero_extent_returns_zero() -> None:

@@ -50,6 +50,12 @@ pytestmark = pytest.mark.slow
 # The six view filenames the entrypoint produces.
 VIEW_FILES = [name for name, _ in rw.VIEWS]
 
+# Minimum background margin on every frame edge of the iso view for the
+# worst-case full-extent box: at least 3% of the 800 px frame (≥ 24 px)
+# on each side (issue #234 operator decision — "at least 3% of the frame
+# of background on every edge of view_05_iso").
+ISO_MIN_MARGIN_PX = 0.03 * 800
+
 # The "Tomorrow Night" background colour (r, g, b) of the pinned image.
 BG = (29, 31, 33)
 
@@ -449,6 +455,88 @@ def test_views_frame_the_whole_model_with_margin(
             _check_framing(png, extent, view)
 
 
+def test_views_frame_worst_case_full_extent_box_with_margin(
+    tmp_path: Path,
+) -> None:
+    """Worst-case regression gate (issue #234): a near-cubic full-extent
+    box at 20, 60 and 300 mm must keep the minimum visible margin on
+    ``view_05_iso``.
+
+    The existing cube-only gate is blind to the √3 worst case: a centred
+    cube projects only *S*·√2 in the iso view (2D diagonal, zero projected
+    z-extent), while a full-extent box (all three extents equal to
+    ``max_extent`` *S*) projects the *S*·√3 space diagonal. A regression of
+    ``CAM_DIST_ISO_FACTOR`` back toward the old ``CAM_DIST_FACTOR × √2``
+    (≈ 4.2426) — or anywhere above ~3.55·√2 — still passes the cube gate
+    because the cube's √2 projection leaves ~12 % slack against the new
+    2.52·√3/0.94 ≈ 4.6434 factor. This test exercises the true √3 lower
+    bound with a real render.
+
+    Two worst-case geometries per size, both off-centre (so the fit is
+    also exercised away from the origin):
+      - a full-extent cube ``cube([s, s, s])`` — the √3 corner projection;
+      - one elongated box ``cube([s, s*0.9, s*0.95])`` — a near-cubic
+        box whose extents are all near ``max_extent``.
+
+    On ``view_05_iso`` each render must pass the existing edge-band check
+    (zero non-background pixels in the 3-px band of any edge) AND the
+    minimum margin (≥ 3 % of the frame, i.e. ≥ 24 px of 800, of background
+    on every edge), measured by ``_pixel_bbox``.
+    """
+    _skip_if_no_docker()
+    iso_view = "view_05_iso.png"
+    min_margin = 24  # 3 % of the 800-px frame
+    for extent in (20, 60, 300):
+        for name, scad in [
+            (
+                "full-extent-cube",
+                (
+                    f"cube([{extent},{extent},{extent}], "
+                    f"v=[{extent},{extent},{extent}]);\n"
+                ),
+            ),
+            (
+                "elongated-box",
+                (
+                    f"cube([{extent},{extent * 0.9:.2f},{extent * 0.95:.2f}], "
+                    f"v=[0,{extent},{extent * 0.95:.2f}]);\n"
+                ),
+            ),
+        ]:
+            workdir = tmp_path / f"worst_case_{extent}_{name}"
+            _render(scad, workdir)
+            for view in VIEW_FILES:
+                png = workdir / "out" / view
+                assert png.is_file(), f"{extent} mm {name}: missing {view}"
+                _check_framing(png, f"{extent} {name}", view)
+            # The minimum-margin assertion on view_05_iso specifically:
+            # the √3 worst case must leave ≥ 24 px of background on
+            # every edge of the iso frame, not merely a non-zero 1-px
+            # bbox margin.
+            png = workdir / "out" / iso_view
+            bbox, _centroid, edge_px = _pixel_bbox(png)
+            for side, count in edge_px.items():
+                assert count == 0, (
+                    f"{extent} mm {name} {iso_view}: {count} non-background "
+                    f"pixels in the 3-px band of the {side} frame edge — "
+                    f"the worst-case box touches or exceeds the frame edge"
+                )
+            x_min, y_min, x_max, y_max = bbox
+            margins = {
+                "left": x_min,
+                "right": 799 - x_max,
+                "top": y_min,
+                "bottom": 799 - y_max,
+            }
+            for side, margin in margins.items():
+                assert margin >= min_margin, (
+                    f"{extent} mm {name} {iso_view}: {side} margin {margin}px "
+                    f"< {min_margin}px (3% of the 800-px frame) — the "
+                    f"√3 worst-case box does not keep the minimum visible "
+                    f"margin (issue #234)"
+                )
+
+
 def test_views_frame_the_asymmetric_golden_fixtures(
     tmp_path: Path,
 ) -> None:
@@ -474,6 +562,95 @@ def test_views_frame_the_asymmetric_golden_fixtures(
             png = workdir / "out" / view
             assert png.is_file(), f"{name}: missing {view}"
             _check_framing(png, name, view)
+
+
+def test_views_frame_the_worst_case_full_extent_box(
+    tmp_path: Path,
+) -> None:
+    """Worst-case iso framing guard (issue #234): a box whose bounding
+    box spans all three axes at or near ``max_extent`` projects up to
+    ``max_extent``·√3 in the iso view — the case the √2-calibrated iso
+    distance (``CAM_DIST_FACTOR × √2``) was blind to and that shipped
+    the 52-pixel left-edge clip on the 20 mm cube.
+
+    Two shapes, at 20/60/300 mm, in all six views:
+
+    - an uncentred ``cube([s, s, s])`` — the bbox is not symmetric about
+      the origin, so this also exercises the #223 bbox-centre translate
+      on the √3 worst-case geometry (the existing 20/60/300 mm gate
+      uses ``center=true`` and cannot see a centre-dependent defect);
+    - an elongated near-cubic box ``cube([s, s*0.9, s*0.95])`` — all
+      three extents are near ``max_extent``, so the iso projection is
+      near the ``S·√3`` bound without being exactly cubic.
+
+    Every view passes the standard edge-bbox + 1-px margin gate
+    (``_check_framing``), and the iso view additionally keeps the
+    minimum 3%-of-frame (≥ 24 px) background margin on every edge
+    (``_check_iso_margin``).
+    """
+    _skip_if_no_docker()
+    iso_view = "view_05_iso.png"
+    for extent in (20, 60, 300):
+        for shape, scad in [
+            ("full-extent-cube", f"cube([{extent},{extent},{extent}]);\n"),
+            (
+                "elongated-box",
+                f"cube([{extent}, {extent}*0.9, {extent}*0.95]);\n",
+            ),
+        ]:
+            workdir = tmp_path / f"worstcase_{extent}_{shape}"
+            _render(scad, workdir)
+            for view in VIEW_FILES:
+                png = workdir / "out" / view
+                assert png.is_file(), f"{extent} mm {shape}: missing {view}"
+                _check_framing(png, f"{extent} {shape}", view)
+            # The iso view is the √3 worst case: assert the minimum 3%
+            # background margin on every edge (``_check_framing`` only
+            # requires 1 px; the operator decision requires ≥ 24 px).
+            _check_iso_margin(
+                workdir / "out" / iso_view, f"{extent} {shape}"
+            )
+
+
+def _check_iso_margin(png: Path, label: object) -> None:
+    """Assert the iso view keeps at least the minimum visible background
+    margin (3% of the 800×800 frame) on every edge for the worst-case
+    full-extent box (issue #234 operator decision).
+
+    ``_check_framing`` only requires a 1-px margin — a constant factor
+    trivially satisfies it at every size. This check is what makes the
+    "≥ 3% margin on every edge of view_05_iso" requirement measurable
+    rather than "non-zero edge band": the bounding box must leave at
+    least ``ISO_MIN_MARGIN_PX`` (24 px) of background on all four edges.
+    """
+    bbox, _centroid, edge_px = _pixel_bbox(png)
+    assert all(v >= 0 for v in bbox), f"{label} iso: no model pixels found"
+
+    # The 3-px edge band must still be background (inherited from
+    # ``_check_framing``; re-asserted so a margin failure points here).
+    for side, count in edge_px.items():
+        assert count == 0, (
+            f"{label} iso: {count} non-background pixels in the 3-px "
+            f"band of the {side} frame edge"
+        )
+
+    x_min, y_min, x_max, y_max = bbox
+    assert x_min >= ISO_MIN_MARGIN_PX, (
+        f"{label} iso: left margin {x_min}px is below the "
+        f"{ISO_MIN_MARGIN_PX}px (3% of frame) minimum"
+    )
+    assert 799 - x_max >= ISO_MIN_MARGIN_PX, (
+        f"{label} iso: right margin {799 - x_max}px is below the "
+        f"{ISO_MIN_MARGIN_PX}px (3% of frame) minimum"
+    )
+    assert y_min >= ISO_MIN_MARGIN_PX, (
+        f"{label} iso: top margin {y_min}px is below the "
+        f"{ISO_MIN_MARGIN_PX}px (3% of frame) minimum"
+    )
+    assert 799 - y_max >= ISO_MIN_MARGIN_PX, (
+        f"{label} iso: bottom margin {799 - y_max}px is below the "
+        f"{ISO_MIN_MARGIN_PX}px (3% of frame) minimum"
+    )
 
 
 def _check_framing(png: Path, label: object, view: str) -> None:
