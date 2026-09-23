@@ -610,16 +610,10 @@ def build_registry_glb(
     removed before moving to the next call-site (best-effort, mirrors the
     render worker's ``_cleanup_container`` convention).
 
-    Image staleness (issue #236): the render-worker image's pre-launch
-    ``_verify_render_worker_image`` guard is NOT applied here yet — this
-    function takes ``image`` as a caller parameter (default
-    ``DEFAULT_OPENSCAD_IMAGE``, not ``RENDER_WORKER_IMAGE``) and launches
-    N sequential containers per call-site, so there is no single clean
-    pre-launch gate point whose failure maps onto the per-site
-    ``ModuleRenderFailure`` path. Follow-up: gate the loop entry with the
-    same semantics (verified-mismatch RuntimeError -> loud failure with
-    the canonical rebuild command; docker-query failure -> warn and
-    proceed).
+    Image staleness (issue #236) does not apply here: this function runs the
+    stock upstream OpenSCAD image (``DEFAULT_OPENSCAD_IMAGE``), not the
+    locally built ``d33d/render-worker:local`` whose baked entrypoint.sh the
+    staleness guard in ``d33d.render_worker`` protects.
 
     A call-site whose isolated render does not classify ``ok`` is
     recorded in ``failures`` and excluded from the assembled scene —
