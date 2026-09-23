@@ -4,7 +4,9 @@
  * The terminal `error` frame carries a STRUCTURED `reason` (from
  * `d33d/design_loop_events.py`) whose value is closed: the four
  * `GATE_REASON_BITS` from `d33d/design_loop.py` plus the seven render-worker
- * `ErrorClass` values. `displayDesignLoopError` maps that closed set to the
+ * `ErrorClass` values plus the design-loop-level timeout reason
+ * (`design_loop_timed_out`, emitted by the server-side loop deadline —
+ * distinct from the render-worker `timeout` ErrorClass). `displayDesignLoopError` maps that closed set to the
  * failure turn's part 1 — a sentence a person would say — plus the raw
  * detail for the turn's part 4.
  *
@@ -21,9 +23,10 @@
 import { copy } from "../copy";
 
 /** The four GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
- *  ErrorClass values — the closed set the terminal error frame's `reason`
- *  field can hold. `copy.failure.reasons` holds the sentences; this is the
- *  key set totality is asserted against. */
+ *  ErrorClass values + the design-loop-level timeout reason — the closed set
+ *  the terminal error frame's `reason` field can hold.
+ *  `copy.failure.reasons` holds the sentences; this is the key set totality
+ *  is asserted against. */
 export const FAILURE_REASONS: readonly string[] = [
   // GATE_REASON_BITS (d33d/design_loop.py, bit order)
   "error_class_not_ok",
@@ -38,6 +41,10 @@ export const FAILURE_REASONS: readonly string[] = [
   "timeout",
   "oom",
   "container_error",
+  // design-loop-level timeout (d33d/design_loop_events.py, issue #221) —
+  // the overall loop's wall-clock deadline fired; distinct from the
+  // render-worker "timeout" ErrorClass above.
+  "design_loop_timed_out",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */

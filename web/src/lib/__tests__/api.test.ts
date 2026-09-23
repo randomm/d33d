@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClient,
   ApiError,
+  STREAM_TOTAL_TIMEOUT_MS,
   type Credential,
   type ModelCatalogue,
   type PhotoUploadResult,
@@ -591,6 +592,96 @@ describe("SSE stream demux", () => {
     expect(onErrorSpy).toHaveBeenCalledWith(
       expect.objectContaining({ message: expect.stringContaining("stream interrupted") }),
     );
+  });
+
+  it("client total deadline: a stream that hangs after one token frame aborts and calls onError with 'stream interrupted'", async () => {
+    // Monkeypatch the deadline to a small value (100 ms) so the test is fast.
+    const shortClient = new ApiClient({
+      baseUrl: "http://api.test",
+      fetch: fake.handler,
+      streamTotalTimeoutMs: 100,
+    });
+
+    // A stream that emits one token frame, then never yields again
+    // (pull returns a never-resolving promise — simulates a hung SSE stream).
+    const encoder = new TextEncoder();
+    const firstChunk = encoder.encode(sseFrame("token", { text: "partial " }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(firstChunk);
+      },
+      pull() {
+        return new Promise<never>(() => {}); // never resolves
+      },
+    });
+    const res = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+    fake.enqueue(res);
+
+    let tokenText = "";
+    const onErrorSpy = vi.fn();
+    const p = shortClient.streamEvents(1, {
+      onToken: (t) => { tokenText += t; },
+      onProgress: () => {},
+      onError: onErrorSpy,
+    });
+
+    // The deadline fires at ~100 ms and the stream is aborted.
+    await expect(p).rejects.toThrow();
+    expect(tokenText).toBe("partial ");
+    expect(onErrorSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("stream interrupted") }),
+    );
+  });
+
+  it("client total deadline: a stream that completes before the deadline is NOT aborted", async () => {
+    // Deadline is 200 ms; the stream delivers a done frame after ~50 ms.
+    const shortClient = new ApiClient({
+      baseUrl: "http://api.test",
+      fetch: fake.handler,
+      streamTotalTimeoutMs: 200,
+    });
+
+    const encoder = new TextEncoder();
+    const doneChunk = encoder.encode(sseFrame("done", { message: "ok" }));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        // Enqueue the done frame after a short delay (simulates a slow but
+        // legitimate server response).
+        setTimeout(() => {
+          controller.enqueue(doneChunk);
+          controller.close();
+        }, 50);
+      },
+    });
+    const res = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+    fake.enqueue(res);
+
+    const onDoneSpy = vi.fn();
+    const onErrorSpy = vi.fn();
+    await shortClient.streamEvents(1, {
+      onToken: () => {},
+      onProgress: () => {},
+      onDone: onDoneSpy,
+      onError: onErrorSpy,
+    });
+
+    expect(onDoneSpy).toHaveBeenCalled();
+    expect(onErrorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("STREAM_TOTAL_TIMEOUT_MS constant", () => {
+  it("is strictly greater than the server-side 180 s deadline with margin", () => {
+    // Server deadline: 180 s. Client must exceed with real margin.
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThan(180_000);
+    // Must have at least 60 s of margin (not just 1 ms more).
+    expect(STREAM_TOTAL_TIMEOUT_MS).toBeGreaterThanOrEqual(240_000);
   });
 });
 

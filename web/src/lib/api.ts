@@ -282,6 +282,22 @@ export interface Envelope {
  *  accepts (matches `MAX_REGION_EDIT_MODULE_IDS` in `d33d/app.py`, enforced
  *  server-side via `Field(max_length=...)`). Callers must slice the
  *  ranked list to this length client-side or the request 422s. */
+/**
+ * Client-side TOTAL wall-clock deadline for the SSE stream, in milliseconds
+ * (issue #221, last-resort catch-all).
+ *
+ * Measured from the start of `streamEvents` (the fetch call) — NOT an
+ * idle/per-frame timer. Must EXCEED the server-side `DESIGN_LOOP_TIMEOUT_SECONDS`
+ * (d33d/design_loop_events.py, 180 s) with real margin so the server's clean,
+ * structured "design_loop_timed_out" error frame normally arrives first;
+ * this deadline fires only if the server deadline never reached the client
+ * (e.g. a half-open connection or the server process died).
+ *
+ * Overridable via `ApiClientOptions.streamTotalTimeoutMs` for tests
+ * (the 240 s production value is untestable as-is).
+ */
+export const STREAM_TOTAL_TIMEOUT_MS = 240_000;
+
 export const MAX_REGION_EDIT_MODULE_IDS = 10;
 
 /** Which of the six render-worker views a region pick was drawn on
@@ -370,6 +386,9 @@ export interface ApiClientOptions {
   /** Injectable fetch (test seam). Defaults to globalThis.fetch. */
   fetch?: typeof fetch;
   /** Injectable AbortSignal source — callers can still pass per-call signals. */
+  /** Override `STREAM_TOTAL_TIMEOUT_MS` (test seam; production uses the
+   *  module constant). Must exceed the server-side deadline with margin. */
+  streamTotalTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,11 +398,14 @@ export interface ApiClientOptions {
 export class ApiClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
+  private readonly streamTotalTimeoutMs: number;
 
   constructor(options: ApiClientOptions = {}) {
     const base = options.baseUrl ?? "";
     this.baseUrl = base.endsWith("/") ? base.slice(0, -1) : base;
     this.fetchImpl = options.fetch ?? fetch.bind(globalThis);
+    this.streamTotalTimeoutMs =
+      options.streamTotalTimeoutMs ?? STREAM_TOTAL_TIMEOUT_MS;
   }
 
   // -- project CRUD ---------------------------------------------------------
@@ -850,6 +872,10 @@ export class ApiClient {
     },
     signal?: AbortSignal,
   ): Promise<void> {
+    // Internal total-deadline: if no terminal frame arrives within
+    // `streamTotalTimeoutMs` (wall-clock from here), the reader is
+    // cancelled (tearing down the fetch/stream) and the existing "stream
+    // interrupted" onError path fires via the reader.read() rejection.
     const res = await this.fetchImpl(`${this.baseUrl}/api/stream/${id}`, {
       headers: { Accept: "text/event-stream" },
       signal,
@@ -860,6 +886,18 @@ export class ApiClient {
     }
 
     const reader = res.body.getReader();
+    // Internal total-deadline: if no terminal frame arrives within
+    // `streamTotalTimeoutMs` (wall-clock from here), the reader is
+    // cancelled (tearing down the fetch/stream) and the existing "stream
+    // interrupted" onError path fires via the loop exit detection.
+    let deadlineFired = false;
+    const deadlineTimer: ReturnType<typeof setTimeout> = setTimeout(() => {
+      deadlineFired = true;
+      // Cancel the reader — this causes the next read() to resolve with
+      // done=true (the stream closes cleanly) and tears down the
+      // underlying fetch connection.
+      void reader.cancel();
+    }, this.streamTotalTimeoutMs);
     const decoder = new TextDecoder();
     let buf = "";
     // Unflushed current frame lines (event + data lines).
@@ -881,6 +919,9 @@ export class ApiClient {
         // silently lost.
         payload = { message: "malformed SSE data" };
         eventKind = "error";
+      }
+      if (eventKind === "done" || eventKind === "error") {
+        clearTimeout(deadlineTimer);
       }
       dispatch(eventKind, payload, handlers);
       eventKind = null;
@@ -916,6 +957,16 @@ export class ApiClient {
       handlers.onError?.({ message: `stream interrupted: ${message}` });
       throw e;
     }
+
+    // Deadline fired: the stream was cancelled (reader.read() resolved
+    // with done=true via reader.cancel()). Route through the same
+    // "stream interrupted" onError path.
+    if (deadlineFired) {
+      const err = new Error("stream total deadline exceeded");
+      handlers.onError?.({ message: `stream interrupted: ${err.message}` });
+      throw err;
+    }
+    clearTimeout(deadlineTimer);
     // Terminal flush: if the stream closed without a blank line, dispatch
     // whatever is pending — but only if it is a terminal event, otherwise
     // the frame is incomplete (mid-stream drop) and must not render a

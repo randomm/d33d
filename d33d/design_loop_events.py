@@ -52,6 +52,31 @@ EMPTY_PHOTO_DATA_URI = (
     "SUVORK5CYII="
 )
 
+#: Total wall-clock deadline for ONE design-loop run, in seconds
+#: (issue #221). Measured from the start of the adapter generator (the
+#: start of the ``to_thread`` task), NOT per-frame or idle time: the
+#: guarantee is "the loop does not complete within a bounded time",
+#: matching the render worker's own bounded-subprocess model (``
+#: render_worker.run_container``'s 120s timeout) one level up. A stream
+#: that keeps emitting liveness frames (per-view progress, LLM tokens)
+#: while the loop itself never terminates MUST still be cut off, so the
+#: deadline is total, not idle. Must be read as a module-level constant
+#: inside the wait loop (so tests can ``monkeypatch.setattr`` it to a
+#: small value — the same pattern as ``versions_routes
+#: ._DRAIN_TIMEOUT_SECONDS``), never inlined.
+#: The client-side ``STREAM_TOTAL_TIMEOUT_MS`` (``web/src/lib/api.ts``)
+#: must exceed this with margin (240s > 180s) so the server's structured
+#: ``design_loop_timed_out`` frame normally arrives first.
+DESIGN_LOOP_TIMEOUT_SECONDS = 180.0
+
+#: The distinct structured reason code for a deadline-triggered terminal
+#: error frame. Deliberately NOT the render-worker's ``"timeout"``
+#: ``ErrorClass`` (``render_worker.py``'s 120s subprocess timeout) — the
+#: SPA maps each to its own ``copy.failure.reasons`` entry, and reusing
+#: ``"timeout"`` would show render-worker copy for a whole-loop stall
+#: (issue #221).
+DESIGN_LOOP_TIMED_OUT_REASON = "design_loop_timed_out"
+
 #: MIME by file extension — the upload route (``d33d.projects.upload_photo``)
 #: constrains photos to image/png and image/jpeg, so the mapping is total.
 _PHOTO_MIME_BY_SUFFIX: dict[str, str] = {
@@ -353,6 +378,55 @@ def _read_artifact_bytes(path: Any) -> bytes | None:
         return None
 
 
+def _suppress_cancellation(task: Any) -> None:
+    """Best-effort cancel of a background task, swallowing the outcome.
+
+    Deadline-triggered teardown (issue #221) cancels the ``to_thread``
+    render task and the frame-queue consumer task; neither may leak an
+    unhandled cancellation (a ``CancelledError`` that escapes ``.cancel()``
+    would surface as an ``Exception ignored in Task`` warning — the client
+    has already received the terminal frame, so the background work is
+    unobservable by design: asyncio CANNOT kill a ``to_thread`` worker
+    thread mid-flight, the terminal frame is the user-facing guarantee).
+    """
+    task.cancel()
+
+    def _swallow_outcome(_t: Any) -> None:
+        # ``to_thread`` tasks cannot be cancelled mid-flight — the worker
+        # thread runs to completion (or until its own ``Event`` is
+        # released). Swallow the eventual outcome so no unhandled
+        # exception surfaces on the (closing) loop.
+        #
+        # On a task that was ``cancel()``-ed and has since reported
+        # ``cancelled()`` True, ``.exception()`` is never reached — there
+        # is no outcome to swallow. ``.exception()`` is only called when
+        # ``cancelled()`` is False, i.e. the task RAN and raised: a
+        # deadline-cancelled ``to_thread`` task that had already begun
+        # propagating its cancellation can report ``cancelled()`` False
+        # while still carrying a pending exception, and ``.exception()``
+        # then RE-RAISES that exception from the done callback. That is
+        # the only path that can raise here, so it is caught and logged
+        # at debug level (the client already received the terminal frame;
+        # the background outcome is unobservable by design — asyncio
+        # CANNOT kill a ``to_thread`` worker thread mid-flight). Catching
+        # the base exception type is deliberate: a ``CancelledError`` that
+        # escapes a done callback would surface as an "Exception in
+        # callback" traceback against a half-closed loop (measured: the
+        # reproduction hangs the interpreter for the full ``asyncio.run``
+        # shutdown timeout), so every outcome class must be swallowed.
+        try:
+            if not _t.cancelled():
+                _t.exception()
+        except BaseException:  # noqa: BLE001 — documented above
+            logger.debug(
+                "design-loop deadline teardown: swallowed a background "
+                "task outcome that must not surface post-terminal-frame: %r",
+                _t,
+            )
+
+    task.add_done_callback(_swallow_outcome)
+
+
 def _result_message(result: Any) -> str:
     """The terminal ``done``/``error`` frame text for a loop result."""
     if getattr(result, "status", None) == "pass":
@@ -379,7 +453,11 @@ def _structured_reason(result: Any) -> str | None:
 def _loop_takes_app(run_loop: Any) -> bool:
     """The injected design-loop seam's signature check (production
     ``_build_production_design_loop`` takes ``(app, **kwargs)``; test
-    stubs may take none or a subset)."""
+    stubs may take a subset — but the kwargs are ALWAYS forwarded,
+    so a stub that consumes any of them (``on_progress`` in particular)
+    must accept ``**kwargs`` or an ``app`` parameter; the
+    app-parameter check only selects WHICH calling convention — see the
+    call site in :func:`run_design_loop_with_events`)."""
     try:
         sig = inspect.signature(run_loop)
     except (TypeError, ValueError):
@@ -733,11 +811,15 @@ async def run_design_loop_with_events(
         "on_progress": _on_progress,
     }
 
-    # The production closure (``_build_production_design_loop``) builds its
-    # own ``render_fn`` / ``llm_fn`` from the live catalogue and pops the
-    # hook's ``model``/``prompt_version``/``request`` kwargs before
-    # forwarding to the real loop; a test stub (no ``app`` kwarg) is called
-    # with none.
+    # The production closure (``_build_production_design_loop``) takes
+    # ``(app, **kwargs)`` and forwards everything through the hook; the
+    # kwargs (including ``on_progress``) are ALWAYS forwarded — a stub
+    # that consumes any of them must take ``app`` / ``**kwargs`` like the
+    # production closure (the app-parameter check only selects the
+    # calling convention, never whether the kwargs arrive — issue #221
+    # adversarial round 1: the conditional ``run_loop()`` call silently
+    # dropped ``on_progress`` from no-``app`` stubs, breaking the
+    # liveness-frame test's acceptance criterion).
     # The carried source (issue #105) is captured here — BEFORE the loop
     # runs — so the loop's prompt renders the current design (turn 1
     # renders the explicit clean-slate wording instead) and the value is
@@ -760,7 +842,7 @@ async def run_design_loop_with_events(
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)
         else:
-            raw = run_loop()
+            raw = run_loop(**kwargs)
         if inspect.isawaitable(raw):
             # The real loop is async: ``raw`` is a coroutine. The spec's
             # acceptance criterion — "the background task wraps the sync
@@ -787,6 +869,14 @@ async def run_design_loop_with_events(
             # asyncio.to_thread(...)`` hoarded them and delivered the whole
             # batch in a single instant at render completion).
             render_task = asyncio.ensure_future(asyncio.to_thread(_run_in_loop, raw))
+            # The total wall-clock deadline (issue #221) — measured from
+            # HERE (generator start, before the first drain), never
+            # reset by incoming frames. The deadline must race against
+            # BOTH the ``to_thread`` render task AND the frame-queue
+            # consumer: a loop that keeps emitting liveness frames
+            # (per-view progress, LLM tokens) while it never terminates
+            # would evade a timeout placed only around ``render_task``.
+            _deadline = _loop.time() + DESIGN_LOOP_TIMEOUT_SECONDS
             while True:
                 if render_task.done():
                     break
@@ -797,20 +887,73 @@ async def run_design_loop_with_events(
                 if _f is not None:
                     yield _f
                     continue
+                _remaining = _deadline - _loop.time()
+                if _remaining <= 0:
+                    # Deadline fired: cut off the stream with a terminal
+                    # structured error frame. No further frames may be
+                    # yielded after this one (the deadline frame is
+                    # terminal by contract).
+                    logger.warning(
+                        "design loop for project %s exceeded the %ss "
+                        "total deadline — emitting terminal "
+                        "design_loop_timed_out frame",
+                        project_id,
+                        DESIGN_LOOP_TIMEOUT_SECONDS,
+                    )
+                    yield (
+                        "error",
+                        {
+                            "message": (
+                                "Design loop timed out after "
+                                f"{int(DESIGN_LOOP_TIMEOUT_SECONDS)}s"
+                            ),
+                            "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+                        },
+                    )
+                    # Cancel the ``to_thread`` render task AFTER the frame
+                    # has been yielded. CANCELLING IT BEFORE the yield
+                    # deadlocks the executor thread-pool: the ``to_thread
+                    # `` future's cancellation hooks run on the loop and
+                    # wait for the executor's future to report the
+                    # cancellation, but the executor thread is still
+                    # running the (stalled) loop — a ``CancelledError``
+                    # raised in that future blocks the pool's thread
+                    # (measured: the test executor hangs for the full
+                    # 300s shutdown join). Yielding first means the
+                    # generator (and any caller's ``break``) has already
+                    # completed the user-visible guarantee; the cancel
+                    # then runs on a free loop. The ``to_thread`` worker
+                    # thread cannot be killed mid-flight regardless (the
+                    # terminal frame is the user-facing guarantee, not
+                    # the thread's death), and the best-effort cancel
+                    # suppresses the ``CancelledError`` so it does not
+                    # surface as an unhandled exception when the loop
+                    # closes.
+                    _suppress_cancellation(render_task)
+                    return
                 # Empty queue, render still running: sleep until the next
-                # frame is enqueued or the render task completes — the
-                # ``asyncio.wait`` is a real await (no busy-wait) that
-                # wakes on whichever happens first.
+                # frame is enqueued, the render task completes, or the
+                # deadline fires — the ``asyncio.wait`` is a real await
+                # (no busy-wait) that wakes on whichever happens first.
                 _get_task = asyncio.ensure_future(_frame_queue.get())
                 _done, _ = await asyncio.wait(
-                    {_get_task, render_task}, return_when=asyncio.FIRST_COMPLETED
+                    {_get_task, render_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                    timeout=_remaining,
                 )
                 if _get_task in _done:
-                    yield _get_task.result()
-                else:
-                    _get_task.cancel()
-                    # The render task completed; the loop re-checks it and
-                    # the remainder is drained below.
+                    _f = _get_task.result()
+                    if _f is None:
+                        # Sentinel: the render finished (the drain thread
+                        # enqueued the ``None`` before the loop exited).
+                        break
+                    yield _f
+                    continue
+                _get_task.cancel()
+                # Render task completed, or the deadline fired (timeout).
+                # The deadline check at the top of the loop handles the
+                # timeout; otherwise the loop re-checks ``render_task``
+                # and the remainder is drained below.
             # The render finished: yield every remaining frame in FIFO
             # order (all frames were enqueued before the drain thread
             # joined, so nothing is lost) and take the render's result
@@ -820,6 +963,9 @@ async def run_design_loop_with_events(
                 try:
                     _f = _frame_queue.get_nowait()
                 except asyncio.QueueEmpty:
+                    break
+                if _f is None:
+                    # Sentinel: stop the drain, take the result.
                     break
                 yield _f
             result = render_task.result()
