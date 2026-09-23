@@ -60,13 +60,17 @@ test("small viewport: the conversation docks and the Send button stays pointer-r
   await page.goto("/");
 
   // -- Drive the real send path (lazy project creation, issue #192) ----
+  // On a fresh mount the first-run screen is the input surface (the chat
+  // composer is hidden while versions.length === 0 && messages.length ===
+  // 0), so the first Enter press targets first-run-input, not chat-input
+  // (same pattern as test_point_selection.spec.ts; issue #217).
   const projectResp = page.waitForResponse(
     (r) => r.url().endsWith("/api/projects") && r.request().method() === "POST",
   );
-  const chatInput = page.getByTestId("chat-input");
-  await expect(chatInput).toBeVisible();
-  await chatInput.fill("a small box");
-  await chatInput.press("Enter");
+  const firstRunInput = page.getByTestId("first-run-input");
+  await expect(firstRunInput).toBeVisible();
+  await firstRunInput.fill("a small box");
+  await firstRunInput.press("Enter");
   const { id: projectId } = (await (await projectResp).json()) as { id: number };
 
   // -- Intercept the SSE transport (issue #182 mode (b)) -----------------
