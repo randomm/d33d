@@ -1588,12 +1588,16 @@ describe("App chat wiring", () => {
     expect(screen.queryByTestId("streaming-cursor")).toBeNull();
   });
 
-  it("writes the done frame's message into the pass card's summary line (issue #125)", async () => {
-    // The done frame carries the loop's result prose ("Design loop
-    // passed validation"). It must land in the assistant message's
-    // content — the field PassCard renders as its summary line — and
-    // therefore in pass-card-summary through the real frame path.
-    // Without this the summary rendered blank on every real pass.
+  it("substitutes the copy.ts pass summary for the done frame's wire message (issue #218)", async () => {
+    // The done frame carries the backend's wire string ("Design loop passed
+    // validation") — unchanged, the wire contract to the SSE adapter is intact.
+    // App.tsx's onDone now substitutes copy.passCard.summary for that string
+    // (the wire prose is internal system language; the pass card's summary
+    // line is a plain, honest sentence from the copy deck) — proving the
+    // substitution is real and the wire contract is not what renders.
+    // Two-sided lock: the test imports the copy.ts export and asserts it
+    // renders exactly, so a rename or rewording of either side breaks the
+    // lock.
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
@@ -1604,6 +1608,7 @@ describe("App chat wiring", () => {
         version_id: 3,
         views: { "view_00_front.png": "data:image/png;base64,AAA" },
       });
+      // The wire string is unchanged — the backend still emits this.
       handlers.onDone?.({ message: "Design loop passed validation" });
     });
 
@@ -1616,11 +1621,19 @@ describe("App chat wiring", () => {
       await Promise.resolve();
     });
 
+    // Two-sided lock: the rendered summary equals the copy.ts export exactly.
+    // The wire string ("Design loop passed validation") must NOT be the
+    // rendered value — that is the regression this ticket fixes.
     await waitFor(() => {
       expect(screen.getByTestId("pass-card-summary").textContent).toBe(
-        "Design loop passed validation",
+        copy.passCard.summary,
       );
     });
+    // Prove the wire string is NOT what rendered (the substitution actually
+    // happened, the wire contract was received but not forwarded verbatim).
+    expect(screen.getByTestId("pass-card-summary").textContent).not.toBe(
+      "Design loop passed validation",
+    );
   });
 
   it("surfaces a stream error via onError without crashing", async () => {
