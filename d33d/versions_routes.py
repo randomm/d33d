@@ -65,6 +65,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
+from d33d.design_loop_events import (
+    _version_bbox_extents,
+    _version_render_artifact_dir,
+)
 from d33d.design_state import state_block_for_version
 
 logger = logging.getLogger(__name__)
@@ -587,6 +591,22 @@ def create_versions_router() -> APIRouter:
         candidate_source = getattr(best_record, "scad_source", None)
         if not isinstance(candidate_source, str):
             candidate_source = None
+        # The measurement comes from the loop RESULT (shared by both seam
+        # shapes) via the SAME helpers the chat path uses
+        # (``_resolve_version_create`` in ``d33d.design_loop_events``): the
+        # best candidate's measured extents (the matched component for a
+        # multi-part model — ``None`` when the measurement is absent or
+        # the component is not identifiable; ``None`` persists a NULL, a
+        # never-coerced honest abstain) and the render's declared
+        # ``render_artifact_dir`` (``None`` when the render did not record
+        # one). Computing them on the pass path only (never on the
+        # 422/502 early returns above) — the early-returning results are
+        # never persisted anyway.
+        from d33d.design_loop_events import (
+            _version_bbox_extents,
+            _version_render_artifact_dir,
+        )
+
         try:
             v = await svc.create_version(
                 project_id,
@@ -594,6 +614,8 @@ def create_versions_router() -> APIRouter:
                 name=body.name,
                 message=body.message or "design finalize",
                 scad_source=(candidate_source or None),
+                bbox=_version_bbox_extents(result),
+                render_artifact_dir=_version_render_artifact_dir(result),
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from d33d.design_loop import IterationRecord, Score
+from d33d.design_loop import BboxInfo, IterationRecord, Score
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
@@ -98,6 +98,188 @@ def test_finalize_pass_creates_version_with_named_params(app_with_versions):
     # It's in the timeline (the accepted change is versioned).
     assert len(timeline) == 1
     assert timeline[0]["id"] == version["id"]
+
+
+# ---------------------------------------------------------------------------
+# (1b) The finalize route persists the loop's measurement (issue #235)
+#
+# The chat path (`_resolve_version_create`) has always threaded the best
+# candidate's measurement to `create_version` via the shared
+# `_version_bbox_extents` / `_version_render_artifact_dir` helpers; the
+# finalize route used to call `create_version` with neither kwarg, so a
+# version created through `POST /finalize` persisted a NULL bbox and no
+# design-state row could ever read 'measured'. These tests drive the
+# FINALIZE seam with a stubbed loop result carrying a `BboxInfo` on the
+# best record's DECLARED `bbox` field (the issue #93/#137 precedent —
+# never duck-typed) and pin the persisted row through the HTTP route.
+# ---------------------------------------------------------------------------
+
+
+def _measured_render(artifact_dir: str) -> RenderResult:
+    """A clean render that declares a durable artifact directory (the
+    ``RenderResult.render_artifact_dir`` seam issue #163's persistence
+    reads from the best record's render)."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl=None,
+        csg=None,
+        views=("v",) * 6,
+        render_artifact_dir=artifact_dir,
+    )
+
+
+def _pass_result_with_bbox(
+    bbox: BboxInfo | None, *, render: RenderResult | None = None, scad: str = ""
+) -> object:
+    """A pass result whose ``best`` is a REAL ``IterationRecord`` carrying
+    ``bbox`` on its DECLARED field (``None`` = no measurement obtained —
+    the honest abstain that must persist a NULL, never a zero triple)."""
+    record = IterationRecord(
+        iteration=0,
+        scad_source=scad,
+        render=render if render is not None else _default_render(),
+        score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+        params={"W": 30.0, "D": 30.0, "H": 30.0},
+        bbox=bbox,
+    )
+
+    class _Result:
+        status = "pass"
+        best = record
+        failure_reason = None
+
+    return _Result()
+
+
+def test_finalize_pass_persists_measured_bbox_and_render_artifact_dir(
+    app_with_versions, tmp_path: Path
+) -> None:
+    """(issue #235 regression) A finalize pass whose best candidate carries
+    a ``BboxInfo`` (30.4/30.0/30.0 — deliberately off-nominal so a fix
+    that persisted the previous version's bbox, or nothing, would fail)
+    and a render declaring a durable artifact directory persists BOTH:
+    ``versions.bbox`` is the measurement's extents (a non-NULL dict) and
+    ``versions.render_artifact_dir`` is the render's declared path — read
+    back through the route's own row reader (``latest_version``), not the
+    201 response."""
+
+    async def _loop(app, **kwargs):
+        return _pass_result_with_bbox(
+            BboxInfo(x=30.4, y=30.0, z=30.0, volume=28350.0),
+            render=_measured_render(str(tmp_path / "durable-235")),
+            scad="W = 30; cube([W, W, W]);",
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the cube", "message": "make a 30mm cube"},
+        )
+        # The persisted row (the route's own reader — the write path is
+        # the only thing between the stub's measurement and this dict).
+        row = app_with_versions.state.versions.latest_version(pid)
+        return r, row
+
+    r, row = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert row is not None, "no version persisted for a passing finalize"
+    # The persisted bbox IS the loop's measurement (non-NULL, exact).
+    assert row["bbox"] == {"x": 30.4, "y": 30.0, "z": 30.0}, row["bbox"]
+    # The render reference is the best render's declared durable dir.
+    assert row["render_artifact_dir"] == str(tmp_path / "durable-235")
+
+
+def test_finalize_pass_without_measurement_persists_null_bbox(
+    app_with_versions,
+) -> None:
+    """(issue #235 degrade) A finalize pass whose best candidate carries NO
+    measurement (``bbox=None`` — the honest abstain) persists a NULL
+    bbox: the row reads back ``None``, never a zero triple — the finalize
+    seam's analogue of ``test_absent_measurement_persists_null_not_zero``
+    through the chat path. The ``render_artifact_dir`` kwarg is still
+    forwarded (the render here declares one) so a fix that dropped BOTH
+    kwargs — or dropped only the dir — is caught here, and a fix that
+    forwarded only the bbox kwarg fails the measurement test above.
+    """
+    artifact_dir = str(Path("__durable__") / "235")  # placeholder path
+
+    async def _loop(app, **kwargs):
+        return _pass_result_with_bbox(
+            None, render=_measured_render(artifact_dir)
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the cube", "message": "make a 30mm cube"},
+        )
+        row = app_with_versions.state.versions.latest_version(pid)
+        return r, row
+
+    r, row = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert row is not None, "no version persisted for a passing finalize"
+    # NULL, never (0, 0, 0) — an absent measurement abstains.
+    assert row["bbox"] is None, f"expected NULL bbox, got {row['bbox']}"
+    # The render reference is persisted even when the measurement is
+    # absent (independent kwarg, forwarded regardless).
+    assert row["render_artifact_dir"] == artifact_dir
+
+
+def test_finalize_pass_yields_measured_design_state(app_with_versions) -> None:
+    """(issue #235 acceptance) After a finalize pass that persisted a
+    measurement, ``GET /api/projects/{id}/design-state`` yields
+    ``provenance == 'measured'`` for every W/D/H axis whose stated value
+    the measurement is within tolerance of — the 'measured' row becomes
+    reachable through the finalize seam (a NULL-bbox row can only ever be
+    ``stated``/``unknown``). The route reads the persisted row only — it
+    does not re-render."""
+    from d33d.design_state import state_block_for_version
+
+    async def _loop(app, **kwargs):
+        return _pass_result_with_bbox(
+            BboxInfo(x=30.4, y=30.0, z=30.0, volume=28350.0)
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the cube", "message": "make a 30mm cube"},
+        )
+        assert r.status_code == 201, r.text
+        # The persisted row carries the measurement (the precondition the
+        # design-state route reads).
+        row = app_with_versions.state.versions.latest_version(pid)
+        assert row is not None and row["bbox"] == {"x": 30.4, "y": 30.0, "z": 30.0}
+        # The GET the SPA reads, through the HTTP route.
+        ds = await client.get(f"/api/projects/{pid}/design-state")
+        assert ds.status_code == 200, ds.text
+        # Identity guard: the route's block is built by the SAME shared
+        # callable on the row's params + persisted bbox.
+        expected = state_block_for_version(row["params"], row["bbox"])
+        return ds.json(), {e["name"]: e for e in expected}
+
+    body, expected = run_async(app_with_versions, _call)
+    by_name = {e["name"]: e for e in body}
+    for name in ("W", "D", "H"):
+        # W is off-nominal (30.4 vs 30.0, within tolerance) and STILL
+        # 'measured' — display carries the measured value.
+        assert by_name[name]["provenance"] == "measured", (name, by_name[name])
+        assert by_name[name] == expected[name]
+    assert by_name["W"]["value"] == 30.4
 
 
 # ---------------------------------------------------------------------------
