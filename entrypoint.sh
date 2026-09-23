@@ -54,15 +54,17 @@
 #
 #     max_extent = max(x_max−x_min, y_max−y_min, z_max−z_min)
 #     dist       = CAM_DIST_FACTOR × max_extent          (5 axis-aligned views)
-#     dist_iso   = CAM_DIST_FACTOR × √2 × max_extent     (isometric view)
+#     dist_iso   = CAM_DIST_ISO_FACTOR × max_extent      (isometric view)
 #
 #   CAM_DIST_FACTOR is 3.0 (mirrored from d33d.render_worker.CAM_DIST_FACTOR).
-#   The √2 iso multiplier is calibrated for cube-shaped models (a cube's
-#   45°-rotated silhouette is 2D-diagonal-limited: S·√2, zero z-extent).
-#   For a genuine iso corner view of a full-extent box the projected
-#   width is S·√3, which at CAM_DIST_FACTOR=3.0 still fits the 800×800
-#   frame with ~5% margin (3.0/√3 ≈ 1.732 > 2.52 exact-fit ratio) —
-#   the iso factor is the tightest case in the design.
+#   CAM_DIST_ISO_FACTOR = 2.52 × √3 / 0.94 ≈ 4.6434, derived from the
+#   worst-case iso projection (issue #234): a full-extent box (all three
+#   extents = max_extent *S*) projects to S·√3 (the space diagonal); the
+#   exact-fit ratio for the 800×800 frame is 2.52 (S fills the frame at
+#   d = 2.52·S); the 3% minimum margin per edge (≥ 24 px of 800) limits
+#   the model to 94% of the frame: d ≥ 2.52·S·√3 / 0.94. Mirrored in
+#   d33d/render_worker.py's CAM_DIST_ISO_FACTOR (kept in sync by
+#   tests/fast/test_entrypoint_views_sync.py).
 #
 #   The fit is a pure function of the bounding box — no timestamps, no
 #   randomised seeds, no wall-clock — so two renders of the same source
@@ -273,7 +275,7 @@ flush 2>/dev/null || true
 # caller's empty_model row still covers the normal "all eight artifacts
 # present, STL degenerate" shape.
 CAM_DIST_FACTOR=3.0
-CAM_DIST_ISO_FACTOR=$(awk -v f="${CAM_DIST_FACTOR}" 'BEGIN { printf "%.10f", f * 2.0^0.5 }')
+CAM_DIST_ISO_FACTOR=$(awk 'BEGIN { printf "%.10f", 2.52 * 3^0.5 / 0.94 }')
 
 stl_first_line=$(awk 'NR == 1 { print; exit }' "${STL_FILE}")
 
