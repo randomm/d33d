@@ -2,15 +2,15 @@
  * DOM fixture test for the scroll-container and intersection helpers
  * (issue #220, adversarial review round 1 — HIGH finding #1).
  *
- * The commit message for the e2e spec claims "DOM fixture test confirms
- * zero overlap at all three positions for an in-flow label." This is that
- * test: it builds a jsdom fixture matching the real app-left-pane /
- * pass-card / photo-upload-label geometry and verifies:
+ * Builds a jsdom fixture matching the real app-left-pane / pass-card /
+ * photo-upload-label geometry and verifies:
  *
  *   1. findScrollContainer() correctly identifies the scroll container
  *   2. maxScroll() / parkAt() position the scroll container correctly
- *   3. maxIntersection() returns zero overlap for an in-flow label at
- *      all three sweep positions (top / mid / max scrollTop)
+ *   3. maxIntersection() returns zero overlap for a PINNED label (the
+ *      label is a flex: 0 0 auto sibling below the transcript, not
+ *      inside the scroll content) at all three sweep positions
+ *      (top / mid / max scrollTop)
  *   4. maxIntersection() correctly detects non-zero overlap when a
  *      floating label DOES overlap a card (regression guard for the
  *      original bug)
@@ -194,7 +194,7 @@ describe("maxIntersection — true 2D intersection (issue #220)", () => {
   });
 });
 
-// ── DOM fixture: in-flow label vs cards at 3 scroll positions ──────────
+// ── DOM fixture: pinned label vs cards at 3 scroll positions ──────────
 
 describe("DOM fixture: zero overlap at all three scroll positions (issue #220)", () => {
   /**
@@ -207,14 +207,15 @@ describe("DOM fixture: zero overlap at all three scroll positions (issue #220)",
    *     card 2: content y=180..330
    *     card 3: content y=340..490
    *     card 4: content y=500..650
-   *   - photo-upload-label: in-flow sibling BELOW the scroll content
-   *     (content y=1200..1240). In the real app, the label sits in the
-   *     flex column after the transcript, so its viewport position
-   *     shifts with scrollTop: viewport y = content y - scrollTop.
+   *   - photo-upload-label: PINNED sibling below the scroll content
+   *     (content y=1200..1240). In the real app, the label is a
+   *     flex: 0 0 auto sibling below the transcript — its viewport
+   *     position shifts with scrollTop: viewport y = content y -
+   *     scrollTop.
    *
    * Since both the label and cards shift by the same amount (-scrollTop),
    * their relative positions are invariant — the intersection is the
-   * same at every scroll position. An in-flow label below the cards
+   * same at every scroll position. A pinned label below the cards
    * cannot overlap them regardless of scroll.
    */
   function buildFixture(): { pane: HTMLElement; cards: HTMLElement[]; label: HTMLElement } {
@@ -250,7 +251,7 @@ describe("DOM fixture: zero overlap at all three scroll positions (issue #220)",
       return c;
     });
 
-    // In-flow label below the scroll content (content y = 1200).
+    // Pinned label below the scroll content (content y = 1200).
     const LABEL_Y = 1200;
     const LABEL_H = 40;
     const label = el("photo-upload-label");
@@ -281,7 +282,7 @@ describe("DOM fixture: zero overlap at all three scroll positions (issue #220)",
   });
 
   it.each([0, 0.5, 1])(
-    "zero overlap at scroll fraction %f (in-flow label below in-flow cards)",
+    "zero overlap at scroll fraction %f (pinned label below transcript content)",
     (frac) => {
       const { pane, cards, label } = buildFixture();
       parkAt(pane, frac);

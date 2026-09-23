@@ -4,17 +4,20 @@
  * `cd web && npx playwright test test_photo_upload_scroll.spec.ts`
  *
  * The ticket's acceptance criterion: the "Attach reference photo" label
- * (photo-upload-label, the in-flow sibling of the transcript at the bottom
- * of the conversation pane) does not overlap or obscure any
- * conversation/pass-card content at any scroll position, in BOTH layout
- * branches — the docked bar (window height < 900px: 1024 × 640 and
- * 1280 × 720) and the floating 420px column (window height ≥ 900px:
- * 1280 × 900, the 900px threshold itself — App.tsx uses strict
- * less-than, so exactly 900 is floating). The original bug: the label
- * sat pinned over the scrolling column (measured 143px of horizontal
- * overlap with the pass-card column in the docked layout), and the
- * collision was scroll-position-dependent — which is why the spec
- * sweeps THREE scroll positions (top, mid, max) per viewport and asserts
+ * (photo-upload-label, the PINNED flex: 0 0 auto sibling below the
+ * transcript) does not overlap or obscure any conversation/pass-card
+ * content at any scroll position, in BOTH layout branches — the docked
+ * bar (window height < 900px: 1024 × 640 and 1280 × 720) and the
+ * floating 420px column (window height ≥ 900px: 1280 × 900, the 900px
+ * threshold itself — App.tsx uses strict less-than, so exactly 900 is
+ * floating). The original bug: the label sat pinned over the scrolling
+ * column (measured 143px of horizontal overlap with the pass-card column
+ * in the docked layout), and the collision was scroll-position-dependent.
+ * The fix (adversarial round 1): the transcript is the delivered sole
+ * scroll container (the pane's overflowY:auto is intentionally left
+ * inert); the label is a pinned sibling below it, so the overlap is
+ * structurally impossible. The spec sweeps THREE scroll positions
+ * (top, mid, max) per viewport to guard against regression, and asserts
  * ZERO rectangle intersection with every pass card box at each.
  *
  * Per-branch geometry: in the docked layout the bar is full-width and the
@@ -48,12 +51,12 @@
  *   - Project creation (lazy, issue #192) and every postChat round-trip
  *     run for real; only the bytes behind the stream are the fixture.
  *
- * Scroll-settle race: ChatPanel's scrollIntoView({behavior: "smooth"})
- * fires on every message change and — with the pane as the sole scroll
- * container — animates the pane's scrollTop. Before each measurement the
- * spec parks the pane at the target scroll position and then polls until
- * the scrollTop is stable across consecutive frames, so the assertion
- * never races an in-flight auto-scroll.
+ * Scroll-settle race: ChatPanel's smooth scrollTo (on the transcript, its
+ * sole scroll container) fires on every message change and animates the
+ * scrollTop. Before each measurement the spec parks the scroll container
+ * (resolved via the shared findScrollContainer) at the target position and
+ * then polls until the scrollTop is stable across consecutive frames, so
+ * the assertion never races an in-flight auto-scroll.
  *
  * The intersection math and scroll-container logic live in
  * web/src/lib/scroll-container.ts and are verified by a passing DOM
@@ -164,18 +167,19 @@ function readAt(fraction: number) {
 }
 
 /** Wait until the scroll container's scrollTop is stable across
- *  consecutive frames (the smooth auto-scroll has settled). Uses
- *  findScrollContainer() consistently with readAt/parkAndSettle. */
+ *  consecutive frames (the smooth auto-scroll has settled). The
+ *  previous-frame scrollTop is kept in the evaluate closure's scope
+ *  (not stashed on the DOM node). Uses findScrollContainer() consistently
+ *  with readAt/parkAndSettle. */
 async function settleScroll(page: Page): Promise<void> {
   await page.waitForFunction(
     () => {
       const pane = document.querySelector<HTMLElement>('[data-testid="app-left-pane"]');
       if (!pane) return true;
       const sc = findScrollContainer(pane);
-      const s = sc as unknown as { scrollTop: number; __lastScroll?: number };
-      const prev = s.__lastScroll;
-      s.__lastScroll = s.scrollTop;
-      return prev !== undefined && Math.abs(prev - s.scrollTop) < 0.5;
+      const prev = (globalThis as { __lastScroll?: number }).__lastScroll;
+      (globalThis as { __lastScroll?: number }).__lastScroll = sc.scrollTop;
+      return prev !== undefined && Math.abs(prev - sc.scrollTop) < 0.5;
     },
     null,
     { timeout: 10_000, polling: 50 },
@@ -277,30 +281,64 @@ for (const { w, h, branch } of VIEWPORTS) {
 
     // The pane must actually overflow (the defect is only measurable in a
     // scrollable transcript — a non-overflowing pane would make the sweep
-    // vacuous).
+    // vacuous). The overflow precondition is on the resolved scroll
+    // container (the transcript, per findScrollContainer), not the pane
+    // itself — the pane's own overflowY:auto is intentionally left inert
+    // (the transcript is the active scroller, issue #220 adversarial
+    // round 1).
     const overflow = await page.evaluate(() => {
       const pane = document.querySelector<HTMLElement>('[data-testid="app-left-pane"]');
       if (!pane) return { overflows: false, scrollHeight: 0, clientHeight: 0 };
+      const sc = findScrollContainer(pane);
       return {
-        overflows: pane.scrollHeight > pane.clientHeight,
-        scrollHeight: pane.scrollHeight,
-        clientHeight: pane.clientHeight,
+        overflows: sc.scrollHeight > sc.clientHeight,
+        scrollHeight: sc.scrollHeight,
+        clientHeight: sc.clientHeight,
       };
     });
     expect(
       overflow,
-      `PRECONDITION (issue #220, ${w}x${h}/${branch}): the pane must genuinely overflow and scroll (scrollHeight ${overflow.scrollHeight} vs clientHeight ${overflow.clientHeight}) — without overflow the scroll sweep below is vacuous`,
+      `PRECONDITION (issue #220, ${w}x${h}/${branch}): the transcript must genuinely overflow and scroll (scrollHeight ${overflow.scrollHeight} vs clientHeight ${overflow.clientHeight}) — without overflow the scroll sweep below is vacuous`,
     ).toMatchObject({ overflows: true });
 
-    // Let the last auto-scroll (smooth scrollIntoView on the final
-    // message change) finish before the sweep begins.
+    // Sole-active-scroller precondition (adversarial round 1 finding 2):
+    // the transcript is the only ACTIVE scroll container in the pane.
+    // The `.pass-card-source` disclosure has overflow:auto in CSS but is
+    // collapsed (not rendered) in this spec, so no nested scroller can be
+    // active here. If a future change makes the transcript unbounded
+    // (the pane's overflowY:auto becomes the effective scroller again),
+    // this fails with a distinct message naming the nested scroller.
+    const nested = await page.evaluate(() => {
+      const pane = document.querySelector<HTMLElement>('[data-testid="app-left-pane"]');
+      if (!pane) return [] as Array<{ cls: string; sh: number; ch: number }>;
+      const sc = findScrollContainer(pane);
+      const out: Array<{ cls: string; sh: number; ch: number }> = [];
+      for (const el of sc.querySelectorAll<HTMLElement>("*")) {
+        const oy = getComputedStyle(el).overflowY;
+        if ((oy === "auto" || oy === "scroll") && el.scrollHeight > el.clientHeight) {
+          out.push({ cls: el.className || el.tagName.toLowerCase(), sh: el.scrollHeight, ch: el.clientHeight });
+        }
+      }
+      return out;
+    });
+    expect(
+      nested,
+      `PRECONDITION (issue #220, ${w}x${h}/${branch}): the transcript must be the SOLE ACTIVE scroll container in the pane — found nested active scrollers: ${nested.map((n) => `${n.cls} (scroll ${n.sh} > client ${n.ch})`).join(", ") || "none"}`,
+    ).toHaveLength(0);
+
+    // Let the last auto-scroll (smooth scrollTo on the final message
+    // change) finish before the sweep begins.
     await settleScroll(page);
 
     // -- The sweep: zero intersection at three scroll positions -----------
-    // top (the label at the pane bottom edge), mid (cards mid-scroll),
-    // max (cards scrolled to the bottom — the original bug's collision
-    // position). At each, the label must have ZERO overlap on BOTH axes
-    // with every pass card box.
+    // The label is a PINNED sibling below the transcript (flex: 0 0 auto,
+    // never scrolled), so the label's position relative to the pane is
+    // invariant across scroll offsets — the overlap at any position is
+    // by construction zero when the transcript is bounded. The sweep
+    // asserts the invariant at three positions (top, mid, max) so that a
+    // regression that re-introduces a pinned/fixed label or an unbounded
+    // transcript (the pre-fix geometry) fails at the position where the
+    // overlap first appears, not at a single max-scrollTop check.
     const positions: ReadonlyArray<{ frac: number; name: string }> = [
       { frac: 0, name: "top" },
       { frac: 0.5, name: "mid" },

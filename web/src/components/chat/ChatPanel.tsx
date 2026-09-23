@@ -21,6 +21,7 @@ import type { RegionEditViewId } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
 import { Composer } from "./Composer";
 import { PassCard } from "./PassCard";
+import { FLEX_FILL } from "./flexFill";
 import type { DisplayError } from "../../lib/errorMapping";
 import { FailureTurn } from "../failure/FailureTurn";
 
@@ -95,15 +96,24 @@ export function ChatPanel({
   const [input, setInput] = useState("");
   const messagesRef = useRef<HTMLDivElement>(null);
 
-  // The transcript is the pane's sole scroll container (issue #220): the
-  // pane's overflowY:auto was inert because the transcript had no bounded
-  // height of its own. Scrolling the transcript directly (instead of
-  // scrollIntoView, which walks up to the nearest scrollable ancestor) keeps
-  // auto-scroll deterministic and independent of the composer/upload that
-  // now sit as pinned siblings below it.
+  // The transcript is the DELIVERED sole scroll container (issue #220,
+  // adversarial round 1): the ticket's text names the pane, but the pane's
+  // overflowY:auto is intentionally left inert (never overflow — the
+  // transcript below is the element that actually scrolls). Scrolling the
+  // transcript directly (instead of scrollIntoView, which walks up to the
+  // nearest scrollable ancestor) keeps auto-scroll deterministic and
+  // independent of the composer/upload that now sit as pinned siblings
+  // below it.
+  // Invariant relied on: every App.tsx mutation that GROWS the transcript
+  // (token / progress / done frames) must produce a NEW messages array
+  // reference so this effect re-fires on content growth, not just on
+  // array-identity change. Batching token updates into a single final
+  // setMessages would silently stop the scroll-to-bottom behaviour.
   useEffect(() => {
     const el = messagesRef.current;
-    // jsdom does not implement scrollTo — guard for test environments.
+    // Null-ref guard: the ref can be null before the first commit, and the
+    // method is absent in minimal DOM stubs (this is a null/method guard,
+    // not a jsdom guard — jsdom implements scrollTo as a no-op).
     if (el && typeof el.scrollTo === "function") {
       el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     }
@@ -118,14 +128,14 @@ export function ChatPanel({
     <section
       className="chat-panel"
       data-testid="chat-panel"
-      style={{ flex: "1 1 auto", minHeight: 0 }}
+      style={FLEX_FILL}
     >
       <div
         ref={messagesRef}
         className="chat-messages"
         role="log"
         aria-label="Conversation"
-        style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
+        style={{ ...FLEX_FILL, overflowY: "auto" }}
       >
         {messages.map((msg) => {
           // An assistant turn that produced a version is a PassCard;

@@ -18,6 +18,7 @@ import {
   ChatPanel,
   type ChatMessage,
 } from "./ChatPanel";
+import { FLEX_FILL } from "./flexFill";
 import { PhotoUpload } from "../upload/PhotoUpload";
 import { DimensionCanvas } from "../canvas/DimensionCanvas";
 import { PassProgress } from "../progress/PassProgress";
@@ -191,7 +192,15 @@ export function ConversationPane({
       ) : (
         <>
           {header}
-          <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+          {/* FLEX_FILL keeps this wrapper bounded so the transcript
+              (div.chat-messages) is the DELIVERED sole scroll container
+              (issue #220, adversarial round 1 — the ticket's mechanism
+              text names the pane, but the pane's own overflowY:auto is
+              intentionally left inert and the transcript does the
+              scrolling). If this wrapper ever stops bounding, the pane's
+              overflowY:auto becomes the effective scroller again and the
+              photo block re-enters the scroll flow (the pre-fix overlap). */}
+          <div style={{ ...FLEX_FILL, display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Issue #194: the filmstrip lives INSIDE the docked bar —
                 the same component and the same wiring as the floating
                 instance (which is absent in the docked case, so exactly

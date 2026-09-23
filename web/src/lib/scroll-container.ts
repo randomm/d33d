@@ -49,10 +49,9 @@ export interface IntersectionResult {
 
 /** Compute the maximum true 2D rectangle intersection between `label`
  *  and every rect in `cards`. A card only counts if it overlaps on
- *  BOTH axes simultaneously (x > 0 AND y > 0). Among qualifying cards,
- *  the one with the largest overlap area (x * y) is reported; ties
- *  break on larger x, then larger y. Returns zero for no true
- *  intersection. */
+ *  BOTH axes simultaneously (x > 0 AND y > 0). The qualifying card with
+ *  the largest overlap area (x * y) is reported; on an exact area tie
+ *  the first card wins. Returns zero for no true intersection. */
 export function maxIntersection(
   label: Rect,
   cards: ReadonlyArray<Rect>,
@@ -66,7 +65,7 @@ export function maxIntersection(
     const y = Math.min(label.bottom, c.bottom) - Math.max(label.top, c.top);
     if (x > 0 && y > 0) {
       const area = x * y;
-      if (area > bestArea || (area === bestArea && (x > bestX || (x === bestX && y > bestY)))) {
+      if (area > bestArea) {
         bestX = x;
         bestY = y;
         bestArea = area;
