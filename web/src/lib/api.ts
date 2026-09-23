@@ -29,16 +29,24 @@
 // ---------------------------------------------------------------------------
 
 /** A non-2xx response from the backend. Carries the status and the
- *  server-provided error detail (parsed where the shape allows). */
+ *  server-provided error detail (parsed where the shape allows).
+ *
+ *  `errorClass` preserves the response's `error_class` (the closed
+ *  `d33d/print_validation.py` enum, sent by the 3MF download route's
+ *  502/409 bodies) so callers can map it to plain-language copy
+ *  (issue #233). `undefined` whenever the body did not carry one —
+ *  the `API ${status}: …` message shape is unchanged for every caller. */
 export class ApiError extends Error {
   readonly status: number;
   readonly detail: unknown;
+  readonly errorClass?: string;
 
-  constructor(status: number, detail: unknown) {
+  constructor(status: number, detail: unknown, errorClass?: string) {
     super(`API ${status}: ${stringifyDetail(detail)}`);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.errorClass = errorClass;
   }
 }
 
@@ -1046,11 +1054,17 @@ async function throwFor(res: Response): Promise<never> {
       detail = text;
     }
   }
-  // FastAPI error shape: {"detail": "..."} or {"error": "..."} or a string
+  // FastAPI error shape: {"detail": "..."} or {"error": "..."} or a string.
+  // The 3MF download route (issue #233) adds "error_class" to these bodies
+  // (d33d/print_validation.py's closed enum) — preserve it on the ApiError
+  // before the detail is collapsed to a string; `undefined` for every body
+  // shape without the key, so other callers see no change.
+  let errorClass: string | undefined;
   if (detail && typeof detail === "object") {
     const d = detail as Record<string, unknown>;
+    if (typeof d.error_class === "string") errorClass = d.error_class;
     if (typeof d.detail === "string") detail = d.detail;
     else if (typeof d.error === "string") detail = d.error;
   }
-  throw new ApiError(res.status, detail ?? `HTTP ${res.status}`);
+  throw new ApiError(res.status, detail ?? `HTTP ${res.status}`, errorClass);
 }

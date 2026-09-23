@@ -118,6 +118,7 @@ describe("design contract", () => {
   it("the copy deck exports every documented surface", () => {
     expect(Object.keys(copy).sort()).toEqual([
       "brief",
+      "export3mf",
       "failure",
       "firstPass",
       "firstRun",

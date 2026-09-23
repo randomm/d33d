@@ -395,6 +395,22 @@ export const shell = {
   showPhoto: "Show the reference photo",
 } as const;
 
+/**
+ * 3MF export failure copy (issue #233). The export failure surface maps
+ * the download's `error_class` to a sentence — validation-gate classes
+ * reuse `failure.reasons`; these two cover the classes that have no entry
+ * there (no new keys go into that map — it belongs to the design loop).
+ */
+export const export3mf = {
+  /** `error_class: "conflict"` (the 409: a design pass is still in
+   *  flight — the version being created is not yet exportable). */
+  conflict:
+    "A design is still being made — export it once that finishes.",
+  /** The generic fallback: an unlisted/`unknown` class, no `error_class`
+   *  (the 404 bodies), or a network failure with no class at all. */
+  failed: "The 3MF couldn't be exported.",
+} as const;
+
 export const copy = {
   brief,
   passCard,
@@ -405,6 +421,7 @@ export const copy = {
   history,
   firstRun,
   shell,
+  export3mf,
 } as const;
 
 export default copy;
