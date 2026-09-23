@@ -91,6 +91,12 @@ export const brief = {
 } as const;
 
 export const passCard = {
+  /** The pass card's summary line for a pass that produced and validated a
+   *  design. An honest generic fallback: no dimensions, no fabricated
+   *  description — nothing the done frame cannot establish (issue #218). */
+  summary:
+    "Your design is ready — it was built and checked against the print limits.",
+
   viewLabels: ["Front", "Back", "Left", "Right", "Top", "Iso"] as const,
 
   /** When fewer than six views arrived. Never pretend all six are there. */
