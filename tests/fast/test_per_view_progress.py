@@ -263,6 +263,10 @@ def test_view_events_arrive_in_order_with_index(
     _patch_popen(monkeypatch, script)
 
     def fake_run(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        if argv[:2] == ["docker", "image"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b""
+            )
         if "cp /work/model.stl /host/" in " ".join(argv):
             from pathlib import Path
 
@@ -349,6 +353,10 @@ def test_stl_failure_stops_view_event_stream(
     _patch_popen(monkeypatch, script)
 
     def fake_run(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        if argv[:2] == ["docker", "image"]:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b""
+            )
         if any(tok.endswith("render-worker:local") for tok in argv):
             return subprocess.CompletedProcess(
                 args=argv, returncode=1, stdout=b"", stderr=b"ERROR: syntax"

@@ -28,8 +28,16 @@ Build command:
 docker build --platform=linux/amd64 \
   --build-arg BOSL2_TAG=v2.0.755 \
   --build-arg BOSL2_COMMIT=4e031aafe189efcf4eb0250c24d3216b6a429458 \
-  -t d33d-render-worker:latest .
+  --label d33d/build-hash="$(python -c 'from d33d.render_worker import build_hash; print(build_hash())')" \
+  -t d33d/render-worker:local .
 ```
+
+This is the single canonical build command — the tag (`-t d33d/render-worker:local`)
+must match `d33d.render_worker.RENDER_WORKER_IMAGE` and the `--label`
+argument must stamp `d33d/build-hash` with the working tree's
+`build_hash()`, so the server's pre-render staleness check (issue #236)
+finds a matching label. A build without the label, or with a stale label,
+refuses to render until rebuilt with this command.
 
 ## Why pin to a tag (not `main` or a rolling ref)
 
