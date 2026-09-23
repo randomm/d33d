@@ -93,10 +93,20 @@ export function ChatPanel({
   hideComposer,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
 
+  // The transcript is the pane's sole scroll container (issue #220): the
+  // pane's overflowY:auto was inert because the transcript had no bounded
+  // height of its own. Scrolling the transcript directly (instead of
+  // scrollIntoView, which walks up to the nearest scrollable ancestor) keeps
+  // auto-scroll deterministic and independent of the composer/upload that
+  // now sit as pinned siblings below it.
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = messagesRef.current;
+    // jsdom does not implement scrollTo — guard for test environments.
+    if (el && typeof el.scrollTo === "function") {
+      el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    }
   }, [messages]);
 
   const handleSubmit = (text: string) => {
@@ -105,8 +115,18 @@ export function ChatPanel({
   };
 
   return (
-    <section className="chat-panel" data-testid="chat-panel">
-      <div className="chat-messages" role="log" aria-label="Conversation">
+    <section
+      className="chat-panel"
+      data-testid="chat-panel"
+      style={{ flex: "1 1 auto", minHeight: 0 }}
+    >
+      <div
+        ref={messagesRef}
+        className="chat-messages"
+        role="log"
+        aria-label="Conversation"
+        style={{ flex: "1 1 auto", minHeight: 0, overflowY: "auto" }}
+      >
         {messages.map((msg) => {
           // An assistant turn that produced a version is a PassCard;
           // everything else (user turns, clarifying questions, the
@@ -156,7 +176,6 @@ export function ChatPanel({
           );
         })}
 
-        <div ref={bottomRef} />
       </div>
 
       <Composer

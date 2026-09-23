@@ -191,7 +191,7 @@ export function ConversationPane({
       ) : (
         <>
           {header}
-          <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: "1 1 auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 12 }}>
             {/* Issue #194: the filmstrip lives INSIDE the docked bar —
                 the same component and the same wiring as the floating
                 instance (which is absent in the docked case, so exactly
@@ -210,6 +210,12 @@ export function ConversationPane({
                 sheetOpenFor={sheetOpenFor}
               />
             )}
+            {/* Issue #220: the transcript is the pane's sole scroll
+                container (ChatPanel's div.chat-messages now bounds and
+                scrolls itself). The photo surface and the dimension
+                canvas sit as pinned flex: 0 0 auto siblings below it —
+                always visible, never scrolled with the transcript, and
+                never overlapping it at any scroll position. */}
             <ChatPanel
               messages={messages}
               onSend={onSend}
@@ -229,25 +235,27 @@ export function ConversationPane({
               />
             )}
             {streamError && <FailureCard error={streamError} />}
+            <div style={{ flex: "0 0 auto" }}>
+              <PhotoUpload
+                projectId={projectId ?? undefined}
+                onUploaded={onPhotoUploaded}
+                onError={onPhotoError}
+              />
+              {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
+                <DimensionCanvas
+                  photoSrc={photoSrc}
+                  photoWidth={photoDimensions.width}
+                  photoHeight={photoDimensions.height}
+                />
+              )}
+              {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
+                <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
+                  Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
+                </div>
+              )}
+            </div>
           </div>
         </>
-      )}
-      <PhotoUpload
-        projectId={projectId ?? undefined}
-        onUploaded={onPhotoUploaded}
-        onError={onPhotoError}
-      />
-      {photoSrc && photoDimensions && photoDimensions.width > 0 && photoDimensions.height > 0 && (
-        <DimensionCanvas
-          photoSrc={photoSrc}
-          photoWidth={photoDimensions.width}
-          photoHeight={photoDimensions.height}
-        />
-      )}
-      {photoSrc && photoDimensions && (photoDimensions.width === 0 || photoDimensions.height === 0) && (
-        <div className="dimension-canvas-unavailable" data-testid="dimension-canvas-unavailable" role="status">
-          Photo uploaded, but its dimensions could not be read — dimension drawing is unavailable for this photo.
-        </div>
       )}
       {/* The sheet is a STAGE-LEVEL sibling (see the stage-level render
           site in App.tsx): in the docked layout it occupies the canvas

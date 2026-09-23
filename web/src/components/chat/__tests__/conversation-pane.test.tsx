@@ -144,6 +144,33 @@ describe("ConversationPane", () => {
     expect(screen.getByTestId("app-left-pane").contains(strip)).toBe(true);
   });
 
+  // Issue #220: the photo-attach button must sit in the pane's scroll flow
+  // (a descendant of app-left-pane) with no pinned positioning of its own —
+  // the scroll-position-dependent overlap with the transcript only occurs
+  // when the label is fixed/sticky or detached from the flow. The real
+  // acceptance gate is the Playwright spec (jsdom performs no layout), but
+  // this structural guard catches the regression cheaply.
+  it.each([false, true])(
+    "keeps photo-upload in the pane's scroll flow with no pinned positioning (docked: %s)",
+    (docked) => {
+      renderPane({ docked, projectId: 7 });
+      const pane = screen.getByTestId("app-left-pane");
+      const upload = screen.getByTestId("photo-upload");
+      // In flow: a descendant of the pane, never detached from it.
+      expect(pane.contains(upload)).toBe(true);
+      // No fixed/sticky positioning on photo-upload or any ancestor up to
+      // the pane root (the pane itself is position:absolute — expected,
+      // it is the positioned scroll container; everything below it must be
+      // static/relative flow content).
+      let el: HTMLElement | null = upload;
+      while (el && el !== pane) {
+        const position = window.getComputedStyle(el).position;
+        expect(position, `${el.className} is pinned (position:${position})`).not.toMatch(/^fixed|sticky$/);
+        el = el.parentElement;
+      }
+    },
+  );
+
   it("does NOT render the in-bar filmstrip when docked but the project is not created yet", () => {
     renderPane({ docked: true, projectId: null, versions: [] });
     expect(screen.getByTestId("conversation-docked-notice")).toBeTruthy();
@@ -211,5 +238,57 @@ describe("ConversationPane", () => {
     renderPane();
     expect(screen.queryByTestId("dimension-canvas-container")).toBeNull();
     expect(screen.queryByTestId("dimension-canvas-unavailable")).toBeNull();
+  });
+
+  // Issue #220 structural guard (the secondary jsdom guard — the real
+  // acceptance gate is the Playwright spec, which measures scroll-position
+  // overlap in a real browser). In both the docked and the floating branch
+  // the photo surface must be in flow INSIDE the pane (a descendant of
+  // app-left-pane, so it shares the pane's column and cannot overlap the
+  // transcript), and neither the upload block nor any element between it
+  // and the pane root may carry a positioning scheme (fixed/sticky/absolute)
+  // that would lift it out of the scroll flow and pin it over the content.
+  it("keeps the photo surface in flow inside the pane with no pinned positioning (issue #220)", () => {
+    for (const docked of [true, false]) {
+      const view = renderPane({ docked });
+      const pane = screen.getByTestId("app-left-pane");
+      const upload = screen.getByTestId("photo-upload");
+      // In flow inside the pane, in both layout branches.
+      expect(pane.contains(upload), `photo-upload must be inside app-left-pane (docked=${docked})`).toBe(true);
+      // The upload block itself is unpositioned.
+      expect(
+        (upload as HTMLElement).style.position,
+        `photo-upload must not be positioned (docked=${docked})`,
+      ).not.toBe("fixed");
+      expect(
+        (upload as HTMLElement).style.position,
+        `photo-upload must not be positioned (docked=${docked})`,
+      ).not.toBe("sticky");
+      expect(
+        (upload as HTMLElement).style.position,
+        `photo-upload must not be positioned (docked=${docked})`,
+      ).not.toBe("absolute");
+      // No element between the upload and the pane root is positioned:
+      // a positioned ancestor would re-anchor the surface out of the
+      // pane's scroll flow (the pre-fix overlap mechanism).
+      let el: Element | null = upload.parentElement;
+      while (el && el !== pane) {
+        expect(
+          (el as HTMLElement).style.position,
+          `no ancestor between photo-upload and app-left-pane may be positioned (docked=${docked})`,
+        ).not.toBe("fixed");
+        expect(
+          (el as HTMLElement).style.position,
+          `no ancestor between photo-upload and app-left-pane may be positioned (docked=${docked})`,
+        ).not.toBe("sticky");
+        expect(
+          (el as HTMLElement).style.position,
+          `no ancestor between photo-upload and app-left-pane may be positioned (docked=${docked})`,
+        ).not.toBe("absolute");
+        el = el.parentElement;
+      }
+      expect(el, "the ancestor walk must end at the pane root").toBe(pane);
+      view.unmount();
+    }
   });
 });
