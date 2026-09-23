@@ -9,6 +9,8 @@
  * against an injected ApiClient/fetch fake — they do not depend on (or
  * assert) real backend behaviour.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Export3MF } from "../Export3MF";
@@ -342,5 +344,24 @@ describe("Export3MF", () => {
     // No `client` prop passed — the component must not throw at render time.
     render(<Export3MF projectId={projectId} />);
     expect(screen.getByTestId("export-3mf")).toBeTruthy();
+  });
+
+  it("the export failure's primary sentence uses the blocked colour token (not the marker)", () => {
+    // jsdom does not load web/src/styles.css, so the blocked colour cannot
+    // be computed from the stylesheet here. This source-level tripwire
+    // (mirroring the design-contract test's failure-turn-bar assertion) pins
+    // the rule: `.export-3mf-error-message` must reference var(--color-blocked)
+    // and no rule in the export-error scope may reference #FF3300 — the
+    // marker colour is reserved for the region marker and nothing else.
+    const css = readFileSync(
+      join(__dirname, "..", "..", "..", "styles.css"),
+      "utf8",
+    );
+    expect(css).toMatch(
+      /\.export-3mf-error-message[\s\S]*?var\(--color-blocked\)/,
+    );
+    const exportBlock = css.match(/\.export-3mf-error[\s\S]*?\n\}\n/);
+    expect(exportBlock, "export-3mf-error rule block must exist in styles.css").toBeTruthy();
+    expect(exportBlock?.[0]).not.toMatch(/#FF3300/i);
   });
 });
