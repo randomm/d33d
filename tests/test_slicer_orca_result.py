@@ -19,10 +19,12 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from d33d import slicer
-from d33d.slicer import SliceDryRunResult, _parse_orca_result_json, _resolve_orca_family_profiles
+from d33d.slicer import (
+    SliceDryRunResult,
+    _parse_orca_result_json,
+    _resolve_orca_family_profiles,
+)
 
 
 def _stub_ok() -> SliceDryRunResult:

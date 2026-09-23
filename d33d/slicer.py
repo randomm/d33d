@@ -273,12 +273,17 @@ def _resolve_orca_family_profiles(
     # For /Applications/Foo.app/Contents/MacOS/Bin, the bundle root is
     # /Applications/Foo.app
     # For a bare binary path (not in an .app bundle), there is no bundle.
-    # Walk up looking for a path component ending in ".app".
+    # Walk up looking for a path component ending in ".app". Resolve once
+    # (and guard OSError — a broken symlink would otherwise escape the
+    # function's documented "None for not found" contract).
     app_bundle: Path | None = None
-    for part in binary_path.resolve().parts:
+    try:
+        parts = binary_path.resolve().parts
+    except OSError:
+        return None, None
+    for idx, part in enumerate(parts):
         if part.endswith(".app"):
-            idx = list(binary_path.resolve().parts).index(part)
-            app_bundle = Path(*binary_path.resolve().parts[: idx + 1])
+            app_bundle = Path(*parts[: idx + 1])
             break
 
     if app_bundle is None:
@@ -294,16 +299,38 @@ def _resolve_orca_family_profiles(
     # Walk the profiles tree looking for the two specific files. The profile
     # directory structure varies by vendor (QIDI uses "X 5 Series/machine/",
     # Orca uses vendor-name subdirs). A recursive search finds them
-    # regardless of nesting.
-    for dirpath, _dirnames, filenames in os.walk(profiles_root):
+    # regardless of nesting — filename identity is the contract; the
+    # subdirectory a file sits in is not validated (a crossed machine/process
+    # pair still resolves, degrading to the slicer's own error if it matters).
+    def _walk_error(err: OSError) -> None:
+        logger.warning(
+            "_resolve_orca_family_profiles: cannot walk profile dir %s: %s",
+            err.filename,
+            err,
+        )
+
+    for dirpath, _dirnames, filenames in os.walk(
+        profiles_root, onerror=_walk_error
+    ):
         for fname in filenames:
             if fname == QIDI_XPLUS5_MACHINE_PRESET:
                 machine_path = str(Path(dirpath) / fname)
             elif fname == QIDI_XPLUS5_PROCESS_PRESET:
                 process_path = str(Path(dirpath) / fname)
-        # Short-circuit if both found
+            if machine_path and process_path:
+                break
+        # Stop walking once both files are found (exit os.walk loop)
         if machine_path and process_path:
             break
+
+    if (machine_path is None) != (process_path is None):
+        logger.warning(
+            "_resolve_orca_family_profiles: partial resolution for binary %s: "
+            "machine=%s process=%s (missing profile degrades to bare-name fallback)",
+            binary,
+            machine_path,
+            process_path,
+        )
 
     return machine_path, process_path
 
@@ -344,7 +371,7 @@ def slice_orca_family(
         "--load-settings",
         load_settings,
     ]
-    logger.info("slice_orca_family: binary=%s argv=%s", binary, " ".join(cmd))
+    logger.info("slice_orca_family: binary=%s argv=%r", binary, cmd)
     try:
         proc = subprocess.run(
             cmd,

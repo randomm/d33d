@@ -91,12 +91,13 @@ The driver logs one INFO line per `slice_dry_run` call via
 
 ```
 slice_dry_run: using qidi binary at /Applications/QIDIStudio.app/Contents/MacOS/QIDIStudio
-slice_orca_family: binary=... argv=... --load-settings /abs/path/machine.json;/abs/path/process.json
+slice_orca_family: binary=... argv=['...', '--load-settings', '/abs/path/machine.json;/abs/path/process.json']
 ```
 
 When running `python -m d33d.main`, Python's logging default (WARNING
-level on the root logger) suppresses INFO lines. To see them, set
-`LOG_LEVEL=INFO` in the environment or add a `logging.basicConfig(level=logging.INFO)`
-call before the server starts. The FastAPI app (`d33d/app.py`) already
+level on the root logger) suppresses INFO lines. To see them, pass
+`--log-level info` to uvicorn (e.g. run the module under `uvicorn d33d.main:app
+--log-level info`) or add a `logging.basicConfig(level=logging.INFO)` call
+before the server starts. The FastAPI app (`d33d/app.py`) already
 configures its own logger; the slicer logger is independent and follows
 the root logger's level.
