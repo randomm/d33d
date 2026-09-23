@@ -754,4 +754,11 @@ button.chat-send-btn:disabled {
   color: var(--color-muted);
 }
 
+/* 3MF export failure (issue #233): the primary sentence renders in the
+   blocked colour token (never the marker). The collapsed raw detail stays
+   muted — the plain-language mapping is what the operator reads. */
+.export-3mf-error-message {
+  color: var(--color-blocked);
+}
+
 

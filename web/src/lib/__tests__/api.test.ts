@@ -787,3 +787,83 @@ describe("type-level invariants", () => {
     expect(e.detail).toEqual({ detail: "teapot" });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Error-class preservation (issue #233)
+// ---------------------------------------------------------------------------
+
+describe("ApiError error_class preservation", () => {
+  it("constructor preserves errorClass without changing the message shape", () => {
+    const e = new ApiError(
+      502,
+      "validation failed — no 3MF produced: Slice dry run failed",
+      "slice",
+    );
+    expect(e.status).toBe(502);
+    expect(e.errorClass).toBe("slice");
+    // The message format is unchanged for every existing consumer.
+    expect(e.message).toBe(
+      "API 502: validation failed — no 3MF produced: Slice dry run failed",
+    );
+  });
+
+  it("constructor leaves errorClass undefined when not supplied", () => {
+    const e = new ApiError(404, "project not found");
+    expect(e.errorClass).toBeUndefined();
+    expect(e.message).toBe("API 404: project not found");
+  });
+
+  it("throwFor on a 502 body with error_class preserves it (the 3MF download shape)", async () => {
+    fake.enqueue(
+      json(502, {
+        error: "validation failed — no 3MF produced: Slice dry run failed: can not find setting file: qidi",
+        error_class: "slice",
+      }),
+    );
+    await expect(client.getProject(1)).rejects.toMatchObject({
+      status: 502,
+      errorClass: "slice",
+      detail: "validation failed — no 3MF produced: Slice dry run failed: can not find setting file: qidi",
+    });
+  });
+
+  it("throwFor on a 409 body with error_class 'conflict' preserves it", async () => {
+    fake.enqueue(json(409, { error: "validation in progress", error_class: "conflict" }));
+    await expect(client.getProject(1)).rejects.toMatchObject({
+      status: 409,
+      errorClass: "conflict",
+    });
+  });
+
+  it("a body without error_class (FastAPI {detail}, 404) yields undefined — no message change", async () => {
+    fake.enqueue(json(404, { detail: "project not found" }));
+    await expect(client.getProject(99)).rejects.toMatchObject({
+      status: 404,
+      errorClass: undefined,
+      detail: "project not found",
+    });
+  });
+
+  it("a non-JSON body yields no errorClass and the raw text as detail", async () => {
+    fake.enqueue(new Response("Internal Server Error", { status: 500 }));
+    const err = await client.getProject(1).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).errorClass).toBeUndefined();
+    expect((err as ApiError).detail).toBe("Internal Server Error");
+    expect((err as ApiError).message).toBe("API 500: Internal Server Error");
+  });
+
+  it("downloadModel3MF on a 502 carries the error_class", async () => {
+    fake.enqueue(
+      json(502, {
+        error: "validation failed — no 3MF produced: no 3MF in render dir",
+        error_class: "export_error",
+      }),
+    );
+    await expect(client.downloadModel3MF(1)).rejects.toMatchObject({
+      status: 502,
+      errorClass: "export_error",
+      detail: "validation failed — no 3MF produced: no 3MF in render dir",
+    });
+  });
+});

@@ -9,10 +9,13 @@
  * against an injected ApiClient/fetch fake — they do not depend on (or
  * assert) real backend behaviour.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Export3MF } from "../Export3MF";
 import { ApiClient, ApiError } from "../../../lib/api";
+import { copy } from "../../../copy";
 
 const projectId = 42;
 
@@ -151,7 +154,12 @@ describe("Export3MF", () => {
       expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
     });
     expect(screen.getByTestId("export-3mf-error").textContent).toContain(
-      "404",
+      copy.export3mf.failed,
+    );
+    // The 404 body carries no error_class — the generic export sentence is
+    // the primary text, never the raw "API 404: …" message.
+    expect(screen.getByTestId("export-3mf-error").textContent).not.toContain(
+      "API 404",
     );
     expect(createObjectURLSpy).not.toHaveBeenCalled();
     // The failed attempt must leave the button DISABLED — a re-click is not
@@ -235,9 +243,125 @@ describe("Export3MF", () => {
     expect(onExported).not.toHaveBeenCalled();
   });
 
+  it("a 502 with error_class 'slice' renders the copy.ts slice sentence, not the raw API message", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(
+        502,
+        "validation failed — no 3MF produced: Slice dry run failed: can not find setting file: qidi-q2-plus-2",
+        "slice",
+      ),
+    );
+
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    // The primary sentence is the copy.ts mapping — never the raw text.
+    expect(screen.getByTestId("export-3mf-error").textContent).toContain(
+      copy.failure.reasons.slice,
+    );
+    expect(screen.getByTestId("export-3mf-error").textContent).not.toContain(
+      "API 502",
+    );
+    // The raw backend detail stays reachable in the collapsed disclosure.
+    expect(
+      screen.getByTestId("export-3mf-error-raw-code").textContent,
+    ).toContain("can not find setting file");
+  });
+
+  it("a 409 with error_class 'conflict' renders the conflict sentence", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(
+        409,
+        "validation in progress",
+        "conflict",
+      ),
+    );
+
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("export-3mf-error").textContent).toContain(
+      copy.export3mf.conflict,
+    );
+    expect(screen.getByTestId("export-3mf-error").textContent).not.toContain(
+      "API 409",
+    );
+  });
+
+  it("a 502 with an unmapped error_class ('unknown') renders the generic sentence", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new ApiError(
+        502,
+        "validation failed — no 3MF produced: something odd",
+        "unknown",
+      ),
+    );
+
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("export-3mf-error").textContent).toContain(
+      copy.export3mf.failed,
+    );
+    expect(screen.getByTestId("export-3mf-error").textContent).not.toContain(
+      "API 502",
+    );
+  });
+
+  it("a network failure (non-ApiError rejection) renders the generic sentence, not the stack", async () => {
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
+      new TypeError("Failed to fetch"),
+    );
+
+    render(<Export3MF projectId={projectId} versionId={4} client={client} />);
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("export-3mf-error")).toBeTruthy();
+    });
+    expect(screen.getByTestId("export-3mf-error").textContent).toContain(
+      copy.export3mf.failed,
+    );
+    expect(screen.getByTestId("export-3mf-error").textContent).not.toContain(
+      "Failed to fetch",
+    );
+  });
+
   it("uses a default same-origin ApiClient when none is injected", () => {
     // No `client` prop passed — the component must not throw at render time.
     render(<Export3MF projectId={projectId} />);
     expect(screen.getByTestId("export-3mf")).toBeTruthy();
+  });
+
+  it("the export failure's primary sentence uses the blocked colour token (not the marker)", () => {
+    // jsdom does not load web/src/styles.css, so the blocked colour cannot
+    // be computed from the stylesheet here. This source-level tripwire
+    // (mirroring the design-contract test's failure-turn-bar assertion) pins
+    // the rule: `.export-3mf-error-message` must reference var(--color-blocked)
+    // and no rule in the export-error scope may reference #FF3300 — the
+    // marker colour is reserved for the region marker and nothing else.
+    const css = readFileSync(
+      join(__dirname, "..", "..", "..", "styles.css"),
+      "utf8",
+    );
+    expect(css).toMatch(
+      /\.export-3mf-error-message[\s\S]*?var\(--color-blocked\)/,
+    );
+    const exportBlock = css.match(/\.export-3mf-error[\s\S]*?\n\}\n/);
+    expect(exportBlock, "export-3mf-error rule block must exist in styles.css").toBeTruthy();
+    expect(exportBlock?.[0]).not.toMatch(/#FF3300/i);
   });
 });
