@@ -38,6 +38,15 @@ export interface ExportErrorDisplay {
   detail?: string;
 }
 
+/** The closed error-class → sentence lookup, built as OWN properties once:
+ *  the read is guarded with `Object.hasOwn` so an error_class like
+ *  "constructor" / "toString" / "__proto__" can never resolve an inherited
+ *  `Object.prototype` member and leak it into the rendered message. */
+const EXPORT_REASONS: Record<string, string> = {
+  ...copy.failure.reasons,
+  conflict: copy.export3mf.conflict,
+};
+
 function rawDetail(e: unknown): string | undefined {
   return e instanceof ApiError && typeof e.detail === "string"
     ? e.detail
@@ -48,14 +57,11 @@ function rawDetail(e: unknown): string | undefined {
  *  for the mapping rule). */
 export function displayExportError(e: unknown): ExportErrorDisplay {
   if (e instanceof ApiError) {
-    const mapped = e.errorClass
-      ? (copy.failure.reasons as Record<string, string>)[e.errorClass]
-      : undefined;
-    const message =
-      mapped ??
-      (e.errorClass === "conflict"
-        ? copy.export3mf.conflict
-        : copy.export3mf.failed);
+    const hit =
+      e.errorClass && Object.hasOwn(EXPORT_REASONS, e.errorClass)
+        ? EXPORT_REASONS[e.errorClass]
+        : undefined;
+    const message = typeof hit === "string" ? hit : copy.export3mf.failed;
     const detail = rawDetail(e);
     return { message, ...(detail !== undefined ? { detail } : {}) };
   }
