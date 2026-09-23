@@ -230,6 +230,8 @@ export const failure = {
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",
+    design_loop_timed_out:
+      "The design loop stopped responding — it ran past its time limit.",
     oom: "The model was too heavy to render. A simpler shape will get through.",
     container_error:
       "The render environment failed. That is temporary — try again.",

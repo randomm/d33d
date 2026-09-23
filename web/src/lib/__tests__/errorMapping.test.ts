@@ -37,7 +37,11 @@ const ERROR_CLASSES = [
   "container_error",
 ];
 
-const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES];
+/** The design-loop-level timeout reason (d33d/design_loop_events.py, issue
+ *  #221) — distinct from the render-worker "timeout" ErrorClass. */
+const LOOP_FAILURE_REASONS = ["design_loop_timed_out"];
+
+const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];
 
 describe("errorMapping", () => {
   it("every GATE_REASON_BITS value and every ErrorClass value maps to copy (totality)", () => {
@@ -62,7 +66,7 @@ describe("errorMapping", () => {
     }
   });
 
-  it("the closed set is exactly the four bits plus the seven classes", () => {
+  it("the closed set is exactly the four bits plus the seven classes plus the loop timeout", () => {
     expect([...CLOSED_SET].sort()).toEqual([...FAILURE_REASONS].sort());
   });
 

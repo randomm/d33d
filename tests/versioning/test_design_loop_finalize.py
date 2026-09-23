@@ -112,7 +112,7 @@ def test_finalize_exhausted_does_not_create_version(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        app_with_versions.state.run_design_loop = lambda: _StubResult(
+        app_with_versions.state.run_design_loop = lambda **kw: _StubResult(
             "exhausted", {"W": 20}
         )
         r = await client.post(
@@ -1971,6 +1971,323 @@ def test_chat_render_runs_off_the_event_loop(app_with_versions):
     assert llm_tid["id"] != event_loop_tid, (
         f"LLM ran on the event-loop thread: llm={llm_tid['id']} "
         f"event loop={event_loop_tid}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (issue #221) Total wall-clock deadline on the design loop
+# ---------------------------------------------------------------------------
+
+
+def test_design_loop_total_timeout_yields_terminal_error_frame(app_with_versions, monkeypatch):
+    """A loop that never terminates is cut off by the TOTAL wall-clock
+    deadline (``design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS``), which
+    fires within the monkeypatched 0.5s window and yields a terminal
+    ``error`` frame with the NEW structured reason
+    ``design_loop_timed_out`` (distinct from the render-worker ``"timeout"
+    ``ErrorClass``). The timeout frame is the LAST frame — nothing is
+    yielded after it, and the generator ends cleanly (no hang, no
+    unhandled cancellation warning).
+    """
+    import asyncio
+    import time
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+    )
+
+    class _StallLoop:
+        """Production-seam-shaped stub: takes ``app`` (like the real
+        closure), so the adapter calls it as ``run_loop(app=app, **kwargs)``
+        and it runs under ``to_thread(_run_in_loop, ...)`` — the same path
+        as the real loop. The stub returns a GENUINE coroutine that sleeps
+        for 10s (well beyond the 0.5s deadline) — the real production loop
+        can take minutes, so a multi-second stub is realistic. The
+        deadline fires at 0.5s and cuts off the stream; the worker thread
+        keeps running until the coroutine returns at 10s, but the test's
+        ``asyncio.run`` teardown joins the executor thread, so the stub
+        must return for the test to complete. 10s is a generous margin
+        over the 0.5s deadline; the test's 2.0s assertion bound is
+        comfortably below it."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                await asyncio.sleep(10)  # well beyond the 0.5s deadline
+                return _StubResult("pass", {"W": 10})
+
+            return _stall()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _StallLoop()
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        started = time.monotonic()
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        elapsed = time.monotonic() - started
+        return frames, elapsed
+
+    frames, elapsed = run_async(app_with_versions, _call)
+    assert frames, "no frames emitted at all"
+    # The terminal frame arrived within the (0.5s) deadline — plus a
+    # small scheduling margin — proving the deadline fired, not a
+    # stall. The loop never terminates within the deadline, so any
+    # longer bound would imply the timeout did not work.
+    assert elapsed < 2.0, f"deadline did not fire promptly: {elapsed:.2f}s"
+    # The error frame is present, carries the new structured reason,
+    # and is the LAST frame yielded.
+    events = [f[0] for f in frames]
+    assert "error" in events, f"no error frame: {frames}"
+    assert frames[-1][0] == "error", f"error is not the last frame: {frames}"
+    error_data = frames[-1][1]
+    assert error_data.get("reason") == DESIGN_LOOP_TIMED_OUT_REASON, (
+        f"wrong reason: {error_data}"
+    )
+    assert "message" in error_data
+
+
+def test_design_loop_deadline_does_not_false_abort_slow_run(app_with_versions, monkeypatch):
+    """A legitimately slow run that COMPLETES just under the deadline is
+    not aborted: with the deadline monkeypatched to 2.0s, a stub that
+    sleeps ~0.6s (well under) still yields its normal ``done`` frame and
+    NO timeout error frame. The deadline is total wall-clock (not
+    idle/per-frame), but it must not fire for runs that finish in time.
+    """
+    import asyncio
+
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 2.0
+    )
+
+    async def _slow_loop():
+        await asyncio.sleep(0.6)  # comfortably under the 2.0s deadline
+        return _StubResult("pass", {"W": 10}, scad="W = 10; cube([W]);")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _slow_loop()
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    events = [f[0] for f in frames]
+    assert "done" in events, f"expected a done frame, got: {frames}"
+    assert frames[-1][0] == "done", f"done is not the last frame: {frames}"
+    assert not any(
+        f[0] == "error" and f[1].get("reason") == "design_loop_timed_out"
+        for f in frames
+    ), f"false timeout abort: {frames}"
+
+
+def test_design_loop_deadline_fires_among_liveness_frames(app_with_versions, monkeypatch):
+    """The deadline races the FRAME-QUEUE consumer, not just the
+    ``to_thread`` render task: a stub that keeps enqueuing liveness frames
+    (``on_progress`` every 50ms) but never terminates must STILL be cut
+    off by the 0.5s deadline with the ``design_loop_timed_out`` frame.
+    A timeout placed only around ``render_task.done()`` would let this
+    stream run forever.
+    """
+    import asyncio
+    import time
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+    )
+
+    class _LivenessLoop:
+        """Production-seam-shaped stub: takes ``app`` (like the real
+        closure), so the adapter calls it as ``run_loop(app=app, **kwargs)``
+        and it runs under ``to_thread(_run_in_loop, ...)`` — the same path
+        as the real loop. The stub returns a GENUINE coroutine that emits
+        liveness frames (``on_progress`` every 50ms) for 10s (well beyond
+        the 0.5s deadline) then returns — the real production loop can
+        take minutes, so a multi-second stub is realistic. The deadline
+        fires at 0.5s and cuts off the stream; the worker thread keeps
+        running until the coroutine returns at 10s, but the test's
+        ``asyncio.run`` teardown joins the executor thread, so the stub
+        must return for the test to complete. 10s is a generous margin
+        over the 0.5s deadline; the test's 2.0s assertion bound is
+        comfortably below it."""
+
+        def __call__(self, app=None, **kwargs):
+            on_progress = kwargs["on_progress"]  # the adapter's live hook
+
+            async def _liveness():
+                deadline = time.monotonic() + 10  # well beyond the 0.5s deadline
+                i = 0
+                while time.monotonic() < deadline:
+                    on_progress(
+                        "view-done", {"view": "view_01_iso", "iteration": i}
+                    )
+                    i += 1
+                    await asyncio.sleep(0.05)  # liveness frames every 50ms
+                return _StubResult("pass", {"W": 10})
+
+            return _liveness()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _LivenessLoop()
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        started = time.monotonic()
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        elapsed = time.monotonic() - started
+        return frames, elapsed
+
+    frames, elapsed = run_async(app_with_versions, _call)
+    assert frames, "no frames emitted at all"
+    # The liveness frames are drained live (proof the deadline raced
+    # the frame queue, not just the render task), and the deadline
+    # fired within the 0.5s window (+ margin) despite them.
+    progress_frames = [
+        f
+        for f in frames
+        if f[0] == "progress" and f[1].get("step", "").startswith("render-view")
+    ]
+    assert progress_frames, f"expected liveness frames before the cut-off: {frames}"
+    assert elapsed < 2.0, f"deadline did not fire promptly: {elapsed:.2f}s"
+    # The terminal timeout frame is LAST, with the new reason.
+    assert frames[-1][0] == "error", f"error is not the last frame: {frames}"
+    assert frames[-1][1].get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+
+
+def test_design_loop_deadline_cancels_render_task(app_with_versions, monkeypatch):
+    """When the deadline fires, the abandoned ``to_thread`` render task is
+    cancelled (best-effort — ``to_thread`` threads cannot be killed
+    mid-flight, but the asyncio task must not be left pending and must
+    not surface an unhandled ``CancelledError``) and the frame-queue
+    consumer task is not left behind: the generator ends cleanly and the
+    render task is no longer pending after the terminal frame.
+    """
+    import asyncio
+
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+    )
+    task_state: dict[str, object] = {}
+
+    class _StallLoop:
+        """Production-seam-shaped stub: takes ``app`` (like the real
+        closure), so the adapter calls it as ``run_loop(app=app, **kwargs)``
+        and it runs under ``to_thread(_run_in_loop, ...)`` — the same path
+        as the real loop. The stub returns a GENUINE coroutine that sleeps
+        for 10s (well beyond the 0.5s deadline) then returns — the real
+        production loop can take minutes, so a multi-second stub is
+        realistic. The deadline fires at 0.5s and cuts off the stream;
+        the worker thread keeps running until the coroutine returns at 10s,
+        but the test's ``asyncio.run`` teardown joins the executor thread,
+        so the stub must return for the test to complete."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                await asyncio.sleep(10)  # well beyond the 0.5s deadline
+                return _StubResult("pass", {"W": 10})
+
+            return _stall()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+
+        # Capture the adapter's render task so the test can assert it is
+        # not left pending after the deadline fires. The adapter builds
+        # it via ``asyncio.ensure_future(asyncio.to_thread(_run_in_loop,
+        # raw))`` — ``ensure_future`` is a stable seam to wrap.
+        orig_ensure_future = asyncio.ensure_future
+
+        def _tracking_ensure_future(coro, loop=None):
+            task = orig_ensure_future(coro, loop=loop) if loop else orig_ensure_future(coro)
+            # The adapter's render task is the only task wrapping a
+            # ``to_thread`` coroutine in this generator (the frame-queue
+            # ``get`` task is a bare coroutine).
+            if "to_thread" in repr(coro):
+                task_state["render_task"] = task
+            return task
+
+        monkeypatch.setattr(asyncio, "ensure_future", _tracking_ensure_future)
+        app_with_versions.state.run_design_loop = _StallLoop()
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        # Let the cancellation settle on the loop before returning.
+        await asyncio.sleep(0.05)
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    assert frames[-1][0] == "error", f"error is not the last frame: {frames}"
+    render_task = task_state.get("render_task")
+    assert render_task is not None, "render task not captured by the seam"
+    # The render task was cancelled by the deadline path (the
+    # ``to_thread`` thread keeps running until the stub returns at 10s,
+    # but the asyncio task must not be left pending — that state leaks as
+    # an unhandled-task warning when the loop closes).
+    assert render_task.cancelled(), (
+        f"render task was not cancelled after the deadline fired: "
+        f"state={render_task!r}"
     )
 
 
