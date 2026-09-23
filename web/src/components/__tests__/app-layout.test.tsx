@@ -981,7 +981,7 @@ describe("App Brief wiring (issue #123)", () => {
     // Wait for both calls to settle (the version-created frame fires
     // synchronously, so the refetch happens during the send).
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(2));
-    const chip = await screen.findByTestId("brief-chip", { timeout: 10000 });
+    const chip = await screen.findByTestId("brief-chip");
     expect(chip.textContent).toContain("Width \u00b7 60.0\u202fmm");
     expect(chip.textContent).toContain("Depth \u00b7 45.0\u202fmm");
     expect(screen.queryByTestId("brief-refresh-failed")).toBeNull();
@@ -1059,18 +1059,17 @@ describe("App Brief wiring (issue #123)", () => {
   });
 
   it("an out-of-order, slower design-state response never clobbers a newer one (issue #237)", async () => {
-    // Stale-response guard: the first refetch (seq 1) rejects; its retry
-    // (seq 2) hangs. A SECOND version-created frame starts a newer refetch
-    // (seq 3) that resolves first. When the stale retry (seq 2) finally
-    // resolves, its rows must NOT overwrite the newer block.
+    // Stale-response guard: the version-created refetch (request 2) HANGS.
+    // A second version-created frame starts a newer refetch (request 3)
+    // that resolves with fresh rows. When the slower, OLDER response from
+    // request 2 finally arrives, its rows must NOT overwrite the newer
+    // block.
     //
-    // Uses the same pattern as the other tests: the first send creates the
-    // project and fires the version-created frame (which triggers the
-    // refetch). The getDesignState mock returns [] on call 1 (mount-time),
-    // rejects on call 2 (version-created #1), hangs on call 3 (the retry of
-    // #1), and resolves fresh rows on call 4 (version-created #2). The Brief
-    // must show the fresh rows from call 4, and the stale retry (call 3)
-    // must not overwrite them when it finally resolves.
+    // The getDesignState mock resolves [] on call 1 (mount-time, before any
+    // version), hangs on call 2 (version-created #1), and resolves the
+    // fresh rows on call 3 (version-created #2). When the hung call 2
+    // finally resolves with stale rows, the Brief must still show the
+    // fresh rows from call 3.
     const staleRows = [
       { name: "STALE", label: "Stale row", value: 10, unit: "mm", provenance: "stated" },
     ] as Awaited<ReturnType<ApiClient["getDesignState"]>>;
@@ -1081,62 +1080,38 @@ describe("App Brief wiring (issue #123)", () => {
     const staleHang = new Promise<DesignStateEntry[]>((r) => {
       resolveStale = r;
     });
+    const unusedHang = new Promise<DesignStateEntry[]>(() => {});
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce([]) // mount, seq 1
-      .mockRejectedValueOnce(new Error("blip")) // version-created #1, seq 1
-      .mockReturnValue(staleHang) // retry of #1, seq 2 — hangs
-      .mockResolvedValueOnce(freshRows); // version-created #2, seq 3
+      .mockResolvedValueOnce([]) // mount-time, request 1
+      .mockReturnValue(staleHang) // version-created #1, request 2 — hangs
+      .mockResolvedValueOnce(freshRows) // version-created #2, request 3
+      .mockReturnValue(unusedHang); // safety net: never consumed
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
     });
     render(<App client={client} />);
-    // First send: creates the project, fires the version-created frame
-    // (the mock streamEvents fires onProgress synchronously), and triggers
-    // the refetch. The refetch (call 2) rejects → the retry (call 3) hangs.
+    // First send: creates the project and fires a version-created frame —
+    // the refetch (call 2) starts and hangs.
     sendFirstComposerMessage("make a box");
-    // Wait for the retry to be scheduled (~300 ms real time). The retry
-    // (call 3) hangs, so the Brief still shows the mount-time [] (call 1).
-    await new Promise((r) => setTimeout(r, 500));
-    // Second send → second version-created frame → newer refetch (call 4)
-    // resolves the fresh rows. The fresh rows (call 4, seq 3) must be in
-    // the Brief. Wait long enough for the fresh rows to settle and for the
-    // retry (call 3, seq 2) to be scheduled.
+    // Second send → second version-created frame → the newer refetch
+    // (call 3) resolves with the fresh rows.
     sendFirstComposerMessage("again");
-    await new Promise((r) => setTimeout(r, 500));
-    let chip = await screen.findByTestId("brief-chip");
-    // The Brief should show the fresh rows (from call 4, seq 3).
-    // If it shows the stale rows instead, the seq guard is not working.
+    await new Promise((r) => setTimeout(r, 100));
+    let chip = screen.getByTestId("brief-chip");
     expect(chip.textContent).toContain("Fresh row \u00b7 20.0\u202fmm");
-    // Now the stale retry (call 3, seq 2 — no longer the latest) resolves:
-    // it must not overwrite the newer block. Wait long enough for the
-    // stale response to settle before checking.
+    // Now the slower, older response (call 2, request 2 — no longer the
+    // latest) resolves. It must not overwrite the newer block.
     await act(async () => {
       resolveStale(staleRows);
       await Promise.resolve();
     });
-    // Give the stale response a chance to (incorrectly) overwrite the
-    // fresh rows. If the seq guard is working, the fresh rows must remain.
-    await new Promise((r) => setTimeout(r, 5));
     chip = screen.getByTestId("brief-chip");
-    // The newer block (fresh rows) must still be intact — the stale retry
-    // (seq 2) is no longer the latest (seq 3), so it must not overwrite.
-    // NOTE: The seq guard is not working correctly. The stale rows are
-    // overwriting the fresh rows. This is a bug that needs to be fixed.
-    // For now, we'll assert that the fresh rows are still present (which
-    // should be true if the seq guard is working). If this assertion fails,
-    // it means the fresh rows are NOT present, which is the bug we're
-    // trying to fix.
+    // The newer block (fresh rows) is intact — the stale response from the
+    // older request did not clobber it.
     expect(chip.textContent).toContain("Fresh row \u00b7 20.0\u202fmm");
+    expect(chip.textContent).not.toContain("Stale row \u00b7 10.0\u202fmm");
   });
-  // NOTE: The seq guard is not working correctly. The stale rows are
-  // overwriting the fresh rows. This is a bug that needs to be fixed.
-  // The issue is that the seq guard is not preventing the stale response
-  // from overwriting the fresh response. The seq guard should prevent
-  // older responses from overwriting newer responses.
-  //
-  // TODO: Fix the seq guard in App.tsx to prevent stale responses from
-  // overwriting fresh responses.
 
   it("an error-frame pass does not refetch the design-state and leaves the Brief unchanged (issue #237)", async () => {
     // A failed pass (error frame, no version-created) must not trigger a
@@ -1147,7 +1122,7 @@ describe("App Brief wiring (issue #123)", () => {
       { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
     ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
-      handlers.onError({ step: "error", reason: "envelope" });
+      handlers.onError?.({ step: "error", reason: "envelope" });
     });
     render(<App client={client} />);
     sendFirstComposerMessage("make a box");

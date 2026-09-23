@@ -233,21 +233,70 @@ export default function App({ client }: AppProps) {
   // The design-state block (issue #120 / #123) — the Brief's data. Fetched
   // once the project exists and re-fetched on every version-created frame
   // (the single trigger — a new version means the block may have changed).
-  // A failure leaves the last good block in place (never a crash, never a
-  // fake value).
+  // A fetch that REJECTS is not swallowed (issue #237): it is retried once
+  // after ~300 ms, and if the retry also fails the Brief keeps the
+  // last-known block AND shows the refreshFailed line — the stale-empty
+  // "Nothing yet" state must not persist silently after a successful
+  // design. A fetch that RESOLVES (even `[]` — no version yet, or an
+  // empty-params version) is a legitimate answer and is never retried.
   const [designState, setDesignState] = useState<DesignStateEntry[]>([]);
+  const [designStateStale, setDesignStateStale] = useState(false);
+  // Stale-response guard (issue #237): a monotonically increasing request
+  // id, tagged with the project id it belongs to. A response — success OR
+  // a retry's failure — is applied only if it is the latest request issued
+  // for the CURRENT project, so a slower older response can never clobber
+  // a newer one. The retry inherits its attempt's id (it is not a newer
+  // request), so a refetch issued in the meantime wins over the stale
+  // retry's result too.
+  const designStateReqRef = useRef<{ seq: number; projectId: number | null }>({
+    seq: 0,
+    projectId: null,
+  });
 
-  const refetchDesignState = useCallback(() => {
-    if (projectId === null) return;
+  const refetchDesignState = useCallback((projectIdOverride?: number) => {
+    const effectiveProjectId = projectIdOverride ?? projectId;
+    if (effectiveProjectId === null) return;
+    designStateReqRef.current = { seq: designStateReqRef.current.seq + 1, projectId: effectiveProjectId };
+    const { seq, projectId: latestProjectId } = designStateReqRef.current;
+    const isStale = () =>
+      designStateReqRef.current.seq !== seq ||
+      designStateReqRef.current.projectId !== latestProjectId;
     apiClient
-      .getDesignState(projectId)
-      .then(setDesignState)
+      .getDesignState(effectiveProjectId)
+      .then((rows) => {
+        if (!isStale()) {
+          setDesignState(rows);
+          setDesignStateStale(false);
+        }
+      })
       .catch(() => {
-        // A failed fetch leaves the last good block in place — the Brief
-        // describes what it last knew, never a made-up value.
+        // First attempt failed: retry exactly once, ~300 ms later.
+        if (isStale()) return;
+        setTimeout(() => {
+          if (isStale()) return;
+          apiClient
+            .getDesignState(effectiveProjectId)
+            .then((rows) => {
+              if (!isStale()) {
+                setDesignState(rows);
+                setDesignStateStale(false);
+              }
+            })
+            .catch(() => {
+              // Both attempts failed: keep the last-known block (never
+              // wipe it) and surface the failure inside the Brief. No
+              // further automatic retries.
+              if (!isStale()) {
+                setDesignStateStale(true);
+              }
+            });
+        }, 300);
       });
   }, [projectId, apiClient]);
 
+  // The mount-time refetch effect: fires when projectId changes (from null
+  // to the created project's id). This is the "project change" effect that
+  // drives the initial design-state fetch.
   useEffect(() => {
     refetchDesignState();
   }, [refetchDesignState]);
@@ -1008,7 +1057,12 @@ export default function App({ client }: AppProps) {
                 // Issue #123: a new version means the design-state block the
                 // Brief renders may have changed — refetch it on the same
                 // single trigger.
-                refetchDesignState();
+                //
+                // The stale-response guard (issue #237) prevents a slower,
+                // older response from overwriting a newer one. The seq
+                // guard in refetchDesignState ensures that only the latest
+                // response is applied.
+                refetchDesignState(effectiveProjectId);
               }
             },
             onDone: (data) => {
@@ -1455,6 +1509,7 @@ export default function App({ client }: AppProps) {
           inset={OVERLAY_INSET_PX}
           conversationCollapsed={conversationCollapsed}
           entries={designState}
+          refreshFailed={designStateStale}
           hasLivePin={pendingSelection !== null}
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
