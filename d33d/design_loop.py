@@ -629,6 +629,7 @@ def _design_state_lines(
     stated: tuple[float, float, float],
     state_params: dict[str, Any] | None,
     state_bbox: dict[str, float] | None = None,
+    state_stated: dict[str, float] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -674,7 +675,7 @@ def _design_state_lines(
     )
 
     block = build_design_state_block(
-        state_block_for_version(state_params, state_bbox)
+        state_block_for_version(state_params, state_bbox, state_stated)
     )
     # ``format_design_state_block`` renders the header + the entries. The
     # header (``Current design state (mm):``) and the entry lines are
@@ -719,6 +720,7 @@ def _design_messages(
     request: str = "",
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
+    state_stated: dict[str, float] | None = None,
     design_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
@@ -748,7 +750,7 @@ def _design_messages(
     # reads calls (asserted by the tests — not two functions that happen
     # to agree). Empty when no version exists yet (an honest empty state,
     # never a fabricated dimension).
-    lines.extend(_design_state_lines(stated, state_params, state_bbox))
+    lines.extend(_design_state_lines(stated, state_params, state_bbox, state_stated))
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,
@@ -905,6 +907,7 @@ async def run_design_loop_async(
     request: str = "",
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
+    state_stated: dict[str, float] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     on_progress_iteration: Any = "_current",
@@ -964,6 +967,7 @@ async def run_design_loop_async(
                 request=request,
                 state_params=state_params,
                 state_bbox=state_bbox,
+                state_stated=state_stated,
                 design_source=design_source,
             ),
             _design_system(stated_dims),
@@ -1123,6 +1127,7 @@ def run_design_loop(
     request: str = "",
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
+    state_stated: dict[str, float] | None = None,
     design_source: str | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
@@ -1145,6 +1150,7 @@ def run_design_loop(
             request=request,
             state_params=state_params,
             state_bbox=state_bbox,
+            state_stated=state_stated,
             design_source=design_source,
         )
     )

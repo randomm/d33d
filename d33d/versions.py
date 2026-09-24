@@ -418,6 +418,7 @@ class VersionService:
         scad_source: str | None = None,
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
+        stated_dims: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -465,6 +466,7 @@ class VersionService:
                 scad_source=scad_source,
                 bbox=bbox,
                 render_artifact_dir=render_artifact_dir,
+                stated_dims=stated_dims,
             ),
         )
 
@@ -481,6 +483,7 @@ class VersionService:
         scad_source: str | None = None,
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
+        stated_dims: dict[str, float] | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -525,6 +528,7 @@ class VersionService:
             thumbnail=thumbnail,
             bbox=bbox,
             render_artifact_dir=render_artifact_dir,
+            stated_dims=stated_dims,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -851,6 +855,7 @@ class VersionService:
         thumbnail: str | None,
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
+        stated_dims: dict[str, float] | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -860,6 +865,18 @@ class VersionService:
         # persists a NULL — an absent measurement ABSTAINS (issue #91's
         # precedent), it is never encoded as (0,0,0).
         bbox_json = json.dumps({"x": bbox[0], "y": bbox[1], "z": bbox[2]}) if bbox else None
+        # ``stated_dims`` (issue #246): the dimension protocol's per-axis
+        # confirmed set for the run that produced this version (e.g.
+        # ``{"W": 60.0, "H": 80.0}`` — a partial statement counts for the
+        # axes it states). Persisted at creation so the design-state
+        # block can render stated axis rows without re-deriving from live
+        # chat; ``None`` persists a NULL (an absent statement abstains —
+        # never a fabricated axis row), exactly the bbox pattern above.
+        stated_dims_json = (
+            json.dumps({k: float(v) for k, v in stated_dims.items()})
+            if stated_dims
+            else None
+        )
         # ``render_artifact_dir``: the on-disk path of the per-render
         # directory whose model.stl produced this version (issue #163).
         # Stored as a plain path string (no JSON wrapping — it is a single
@@ -869,8 +886,9 @@ class VersionService:
         cur = self.conn.raw.execute(
             "INSERT INTO versions"
             " (project_id, params, name, created_by_message, parent,"
-            "  restored_from, forked_from, thumbnail, bbox, render_artifact_dir)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  restored_from, forked_from, thumbnail, bbox,"
+            "  render_artifact_dir, stated_dims)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -882,6 +900,7 @@ class VersionService:
                 thumbnail,
                 bbox_json,
                 render_artifact_dir,
+                stated_dims_json,
             ),
         )
         self.conn.commit()
@@ -901,6 +920,12 @@ class VersionService:
         # gate unsatisfiable — an absent measurement abstains).
         raw_bbox = out.get("bbox")
         out["bbox"] = json.loads(raw_bbox) if raw_bbox else None
+        # ``stated_dims`` (issue #246): NULL (pre-change rows, or a run
+        # where the user stated no axes) maps to ``None`` — never a
+        # fabricated ``{}`` that a consumer could misread (an absent
+        # statement abstains).
+        raw_stated = out.get("stated_dims")
+        out["stated_dims"] = json.loads(raw_stated) if raw_stated else None
         # ``render_artifact_dir``: NULL (pre-#163 rows, or a version
         # created without a recorded render) maps to ``None``, NEVER to a
         # sentinel or empty string (issue #163: an absent render record
@@ -1006,6 +1031,7 @@ def migrate(conn: db_mod.Connection) -> None:
             bbox        TEXT,
             exported_at TEXT,
             render_artifact_dir TEXT,
+            stated_dims TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -1046,6 +1072,13 @@ def migrate(conn: db_mod.Connection) -> None:
     # rows read back as ``None`` (an absent render record degrades
     # honestly — never a guessed directory, never mtime inference).
     _ensure_column(conn, "versions", "render_artifact_dir", "TEXT")
+    # ``versions.stated_dims``: the dimension protocol's per-axis
+    # confirmed set (JSON) for the run that produced the version
+    # (issue #246 — the design-state block's axis rows render ``stated``
+    # from this persisted evidence, never from live chat). Nullable with
+    # no default; pre-existing rows read back as ``None`` (an absent
+    # statement abstains — never a fabricated axis row).
+    _ensure_column(conn, "versions", "stated_dims", "TEXT")
 
 
 __all__ = [

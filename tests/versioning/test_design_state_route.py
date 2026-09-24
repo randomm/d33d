@@ -150,7 +150,7 @@ def test_design_state_route_returns_entries_for_latest_version(app_with_versions
         for key in ("name", "label", "value", "unit", "provenance"):
             assert key in entry, f"entry for {name} missing {key}"
         # ``stated_value`` is present ONLY for ``disagrees`` (none here —
-        # no measurement is persisted yet, so the route emits stated /
+        # no measurement is persisted yet, so the route emits assumed /
         # unknown only).
         assert "stated_value" not in entry
         # The label IS the parameter name (no invented prose).
@@ -158,10 +158,12 @@ def test_design_state_route_returns_entries_for_latest_version(app_with_versions
     # The non-numeric param carries ``unit: null`` (a string is not mm).
     assert by_name["note"]["value"] == "left-handed"
     assert by_name["note"]["unit"] is None
-    assert by_name["note"]["provenance"] == "stated"
+    # Issue #246: model-emitted params are ``assumed`` (the user's words
+    # are not visible at this seam) — never ``stated``.
+    assert by_name["note"]["provenance"] == "assumed"
     # The numeric param carries ``unit: "mm"``.
     assert by_name["W"]["unit"] == "mm"
-    assert by_name["W"]["provenance"] == "stated"
+    assert by_name["W"]["provenance"] == "assumed"
 
 
 def test_design_state_route_no_version_yet_returns_empty_array(app_with_versions) -> None:
@@ -334,12 +336,15 @@ def test_design_state_for_finalize_version_yields_measured(app_with_versions) ->
     assert by_name["W"]["value"] == 30.4
 
 
-def test_design_state_for_finalize_version_without_bbox_stays_stated(app_with_versions) -> None:
+def test_design_state_for_finalize_version_without_bbox_stays_assumed(
+    app_with_versions,
+) -> None:
     """A finalize pass whose loop result carries NO measurement (bbox
     ``None`` - the existing stub shape) persists a NULL bbox and the
-    design-state GET stays ``stated`` (never a fabricated
-    ``measured``, never a zero triple) - the NULL path is an honest
-    abstain, exactly as the chat path degrades."""
+    design-state GET stays ``assumed`` (issue #246: a model-emitted param
+    is never ``stated`` without persisted axis evidence — never a
+    fabricated ``measured``, never a zero triple) - the NULL path is an
+    honest abstain, exactly as the chat path degrades."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     async def _call(client):
@@ -360,4 +365,4 @@ def test_design_state_for_finalize_version_without_bbox_stays_stated(app_with_ve
     assert resp.status_code == 200, resp.text
     by_name = {e["name"]: e for e in resp.json()}
     for axis in ("W", "D", "H"):
-        assert by_name[axis]["provenance"] == "stated", f"{axis}: {by_name[axis]}"
+        assert by_name[axis]["provenance"] == "assumed", f"{axis}: {by_name[axis]}"

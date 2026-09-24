@@ -11,6 +11,8 @@
  *
  *   stated     filled dot, --color-live        the number
  *   measured   hollow ring, --color-faint      the number
+ *   assumed    half-filled dot, faint          the number (the model picked
+ *                                              it — nobody said it, issue #246)
  *   unknown    dashed ring                     the "not established" control,
  *                                              NEVER a number, never 0, never a dash
  *   disagrees  filled dot, --color-blocked     the MEASURED number (that is
@@ -61,6 +63,17 @@ const MARKS = {
     borderRadius: "50%",
     border: "1px solid var(--color-faint)",
     backgroundColor: "transparent",
+  },
+  /** Half-filled dot, faint (issue #246): the top half is filled in the
+   *  faint token, the bottom half is transparent — a dot with a value in
+   *  it, but a value nobody said. Rendered with a linear-gradient so the
+   *  "half" is exact and the whole mark stays one element. */
+  assumed: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    border: "1px solid var(--color-faint)",
+    background: "linear-gradient(to bottom, var(--color-faint) 0%, var(--color-faint) 50%, transparent 50%, transparent 100%)",
   },
   unknown: {
     width: 8,
@@ -163,6 +176,7 @@ export function Brief({
   const chip = isChip || hasLivePin === true;
 
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
+  const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
   const showGroups = !chip && resolved.length > MAX_LIST_ROWS;
 
@@ -267,14 +281,21 @@ export function Brief({
     // The expanded row: the provenance in a sentence + the two actions.
     // The sentence names WHAT the value is; the value cell above it names
     // the value itself — the sentence is never the value.
+    // The assumed row: "Nobody said this. I picked {value}." — no reason
+    // clause yet (issue #246 adds the "because {reason}" clause with the
+    // later labels ticket when a reason exists).
     const expandedSentence =
       entry.provenance === "stated"
         ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.stated}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
         : entry.provenance === "measured"
           ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.measured}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
-          : entry.provenance === "unknown"
-            ? copy.brief.legend.unknown
-            : copy.brief.legend.disagrees;
+          : entry.provenance === "assumed"
+            ? copy.brief.provenanceAssumed(
+                formatValue(entry.value) ?? copy.brief.unknownValue,
+              )
+            : entry.provenance === "unknown"
+              ? copy.brief.legend.unknown
+              : copy.brief.legend.disagrees;
 
     const expandedNode = isExpanded ? (
       <div className="brief-row-expanded" data-testid="brief-row-expanded">
@@ -426,6 +447,15 @@ export function Brief({
           {unknowns.length > 0 && (
             <span className="brief-chip-unknowns" data-testid="brief-chip-unknowns">
               {copy.brief.collapsedUnknowns(unknowns.length)}
+            </span>
+          )}
+          {/* Assumed values are counted SEPARATELY from unknowns (issue
+              #246): an assumed value IS established (the model picked it),
+              an unknown one is not. The chip only — full mode shows the
+              per-row half-dot marks instead. */}
+          {assumed.length > 0 && (
+            <span className="brief-chip-assumed" data-testid="brief-chip-assumed">
+              {copy.brief.collapsedAssumed(assumed.length)}
             </span>
           )}
         </div>

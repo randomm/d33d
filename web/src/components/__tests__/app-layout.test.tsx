@@ -1171,7 +1171,13 @@ describe("Brief vs conversation pane non-overlap guard (issue #209)", () => {
 
   /** Derive the Brief's x-interval [left, right] from its inline style.
    *  Full mode: right-anchored → left = vw − right − maxWidth, right edge = vw − right.
-   *  Chip mode: left-anchored → left = left value, right = ∞ (out of scope for the guard). */
+   *  Chip mode: left-anchored → left = left value, right = ∞ (out of scope for the guard).
+   *
+   *  The `|| 420` fallback mirrors the full-mode Brief's `maxWidth: 420` in
+   *  Brief.tsx (issue #209 non-overlap guard): the inline style carries
+   *  `maxWidth: 420` when in full mode, and the fallback only fires if the
+   *  component ever drops the width — a tripwire, not a duplicate source of
+   *  truth. If Brief.tsx's width changes, this fallback must change too. */
   function briefXInterval(el: HTMLElement, vw: number): [number, number] {
     const rightPx = parseFloat(el.style.right);
     const maxW = parseFloat(el.style.maxWidth) || 420;

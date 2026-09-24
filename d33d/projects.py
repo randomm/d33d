@@ -35,7 +35,7 @@ from d33d.design_loop_events import (
     photo_data_uri,
     run_design_loop_with_events,
 )
-from d33d.dimension_protocol import stated_dims_from_message
+from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -310,6 +310,30 @@ def create_projects_router() -> APIRouter:
         #      (0.0, 0.0, 0.0) from this route.
         chat_history = tuple(body.chat_history or ())
 
+        # The per-axis stated evidence persisted on the version the loop
+        # pass creates (issue #246): the protocol's per-axis extraction of
+        # the user's own words (``stated_axes_from_message`` reuses the
+        # same ``_extract_stated`` pipeline as the full-triple extraction
+        # above — partial statements count for the axes they state; the
+        # body's explicit stated_dims, when a client sends one, is the
+        # protocol's highest-priority source and ranks identically). The
+        # design-state block reads this PERSISTED set on the version row
+        # (never re-derives from live chat), so the loop adapter hands it
+        # to ``create_version`` alongside the measured bbox. A statement
+        # that names no axis persists ``{}`` → NULL (abstain, never a
+        # fabricated axis row).
+        per_axis_stated: dict[str, float] = {}
+        if body.stated_dims is not None:
+            _w, _d, _h = body.stated_dims
+            if _w:
+                per_axis_stated["W"] = float(_w)
+            if _d:
+                per_axis_stated["D"] = float(_d)
+            if _h:
+                per_axis_stated["H"] = float(_h)
+        else:
+            per_axis_stated = stated_axes_from_message(body.message, chat_history)
+
         if body.stated_dims is not None:
             stated: tuple[float, float, float] | None = tuple(
                 float(d) for d in body.stated_dims
@@ -348,6 +372,7 @@ def create_projects_router() -> APIRouter:
             project_id,
             user_message=body.message,
             stated_dims=stated,
+            stated_axes=per_axis_stated,
             chat_history=chat_history,
             photo=photo,
             request_text=body.message,

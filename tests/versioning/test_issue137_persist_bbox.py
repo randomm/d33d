@@ -222,7 +222,9 @@ def test_absent_measurement_persists_null_not_zero(app_with_versions) -> None:
     from d33d.design_state import state_block_for_version
 
     entries = state_block_for_version(latest["params"], latest["bbox"])
-    assert all(e["provenance"] in ("stated", "unknown") for e in entries)
+    # Issue #246: model-emitted params are assumed (no persisted stated
+    # evidence, no measurement), never stated.
+    assert all(e["provenance"] in ("assumed", "unknown") for e in entries)
 
 
 # ---------------------------------------------------------------------------
@@ -258,11 +260,13 @@ def _pre_change_versions_table(raw: sqlite3.Connection) -> None:
     )
 
 
-def test_pre_change_row_reads_cleanly_and_yields_stated(app_with_versions, tmp_path: Path) -> None:
+def test_pre_change_row_reads_cleanly_and_yields_assumed(app_with_versions, tmp_path: Path) -> None:
     """A version row created before the ``bbox`` column existed (simulated
     by dropping the column post-creation) reads cleanly after the app's
     ``migrate()`` runs: ``bbox`` is ``None`` (never a fabricated
-    ``(0,0,0)``) and the block yields ``stated``."""
+    ``(0,0,0)``) and the block yields ``assumed`` (issue #246: model-
+    emitted params are assumed, never stated without persisted axis
+    evidence)."""
     from d33d.versions import migrate
 
     async def _call(client):
@@ -297,7 +301,7 @@ def test_pre_change_row_reads_cleanly_and_yields_stated(app_with_versions, tmp_p
 
     bbox_val, provs = run_async(app_with_versions, _call)
     assert bbox_val is None, "a pre-change row must read bbox=None, never a zero triple"
-    assert provs == {"stated"}
+    assert provs == {"assumed"}
 
 
 # ---------------------------------------------------------------------------

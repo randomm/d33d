@@ -43,6 +43,13 @@ const disagrees = (name: string, measuredMm: number, statedMm: number): DesignSt
   provenance: "disagrees",
   stated_value: statedMm,
 });
+const assumed = (name: string, value: number): DesignStateEntry => ({
+  name,
+  label: name,
+  value,
+  unit: "mm",
+  provenance: "assumed",
+});
 
 const baseProps = { isChip: false, inset: 24, conversationCollapsed: false } as const;
 
@@ -100,6 +107,36 @@ describe("Brief — provenance states", () => {
       .getByTestId("brief-row-wall_gap")
       .querySelector("[data-testid='brief-value']");
     expect(valueCell?.textContent).toContain("45.0");
+  });
+
+  it("an assumed parameter renders its number in the value cell with the half-dot mark (issue #246)", () => {
+    render(<Brief {...baseProps} entries={[assumed("spacer_height", 12)]} />);
+    const row = screen.getByTestId("brief-row-spacer_height");
+    // The row carries the new provenance and renders the number in the mono face.
+    expect(row.getAttribute("data-provenance")).toBe("assumed");
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toContain("12.0");
+    expect(valueCell?.textContent).toContain("mm");
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
+    // The mark is the half-filled faint dot (issue #246): a linear-gradient
+    // in the faint token, not the stated/measured/unknown/disagrees shapes.
+    const mark = screen.getByTestId("brief-mark");
+    expect(mark.style.background).toContain("var(--color-faint)");
+    expect(mark.style.background.toLowerCase()).toContain("gradient");
+  });
+
+  it("the expanded assumed row reads 'Nobody said this. I picked {value}.' plus the Change-it action (issue #246)", () => {
+    render(<Brief {...baseProps} entries={[assumed("spacer_height", 12)]} onChange={vi.fn()} />);
+    const row = screen.getByTestId("brief-row-spacer_height");
+    const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const expanded = screen.getByTestId("brief-row-expanded");
+    // The sentence: no reason clause (issue #246 does not invent one).
+    expect(expanded.textContent).toContain("Nobody said this. I picked 12.0\u202Fmm.");
+    // The existing Change-it action is present on the expanded assumed row.
+    expect(screen.getByTestId("brief-action-change").textContent).toBe(
+      copy.brief.rowActions.change,
+    );
   });
 });
 

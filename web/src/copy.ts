@@ -43,9 +43,25 @@ export const brief = {
   legend: {
     stated: "you said",
     measured: "measured off the model",
+    /** The model picked this value — nobody said it (issue #246). */
+    assumed: "I assumed",
     unknown: "unknown",
     disagrees: "disagrees",
   },
+
+  /** The expanded assumed row: nobody stated this value, the model picked
+   *  it. No "because {reason}" clause — the reason arrives with the
+   *  labels-from-model ticket (issue #246 keeps it out). */
+  provenanceAssumed: (quoted: string): string =>
+    `Nobody said this. I picked ${quoted}.`,
+
+  /** The collapsed chip: how many values the model assumed on its own
+   *  (issue #246) — counted separately from unknowns, which are values
+   *  nobody has established at all. */
+  /** The chip's assumed-value count. "Assumed" is already plural-sounding,
+   *  so the count is the only thing that varies: "4 assumed", "1 assumed". */
+  collapsedAssumed: (count: number): string =>
+    `${count} assumed`,
 
   /** Shown when a row is expanded and the value came from the user. */
   provenanceStated: (quoted: string, at: string): string =>
@@ -56,6 +72,7 @@ export const brief = {
     `Measured off ${version} after it passed validation. Nobody stated this — it is what the model came out as.`,
 
   /** Shown on a row where the measured value is outside tolerance of the stated one. */
+
   disagreement: (statedMm: number, measuredMm: number): string => {
     const delta = Math.abs(measuredMm - statedMm);
     const direction = measuredMm < statedMm ? "short" : "over";
@@ -66,6 +83,7 @@ export const brief = {
    *  value with no measurement to compare it against. */
   provenanceNoMeasurement: (quoted: string): string =>
     `You asked for ${quoted}. Nothing has measured it yet, so this is held as stated until a render comes back.`,
+
 
   rowActions: { change: "Change it", locate: "Show it on the model" },
 

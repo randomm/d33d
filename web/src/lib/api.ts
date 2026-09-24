@@ -103,14 +103,17 @@ export interface GalleryCard extends VersionTimelineEntry {
 /**
  * The closed provenance set (issue #120) — a literal, never a bare `string`
  * (the backend's `error_class` enum is the precedent): the user said this
- * value (`stated`), a render produced it (`measured`), there is no value
- * (`unknown` — `value` is `null`), or a measured value differs from the
- * stated one (`disagrees` — both numbers are carried; the displayed one is
- * the MEASURED, because that is what will print).
+ * value (`stated`), a render produced it (`measured`), the model picked it
+ * with no user evidence (`assumed` — issue #246: model-emitted parameters
+ * are assumed, never stated), there is no value (`unknown` — `value` is
+ * `null`), or a measured value differs from the stated one (`disagrees` —
+ * both numbers are carried; the displayed one is the MEASURED, because
+ * that is what will print).
  */
 export type DesignStateProvenance =
   | "stated"
   | "measured"
+  | "assumed"
   | "unknown"
   | "disagrees";
 

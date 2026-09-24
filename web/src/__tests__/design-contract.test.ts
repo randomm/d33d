@@ -1028,4 +1028,95 @@ describe("design contract", () => {
     expect(first.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
     expect(second.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
   });
+
+  /* --------------------------------------------------------------- W246 */
+
+  it("the Brief renders a fifth 'assumed' provenance: half-dot mark, legend entry, separate chip count (issue #246)", () => {
+    // Issue #246: model-emitted parameters are 'assumed', never 'stated'.
+    // The Brief gains a fifth provenance state:
+    //   - a half-filled dot mark (faint, not the stated/measured/unknown/
+    //     disagrees shapes),
+    //   - a legend entry "I assumed" (copy.brief.legend.assumed),
+    //   - an expanded-row sentence "Nobody said this. I picked {value}."
+    //     (no reason clause — the labels ticket adds it later),
+    //   - a chip count SEPARATE from unknowns ("N assumed").
+    // #FF3300 stays reserved for the region marker — the assumed mark uses
+    // the faint token, so no marker colour leaks in here.
+
+    // (1) The copy deck carries the new strings — the closed-set check in
+    //     the W2 key-set test above already pins the deck's top-level
+    //     surfaces; this pins the NEW keys inside the brief surface.
+    expect(copy.brief.legend.assumed).toBe("I assumed");
+    expect(copy.brief.collapsedAssumed(4)).toBe("4 assumed");
+    expect(copy.brief.collapsedAssumed(1)).toBe("1 assumed");
+    expect(copy.brief.provenanceAssumed("12.0\u202Fmm")).toBe(
+      "Nobody said this. I picked 12.0\u202Fmm.",
+    );
+
+    // (2) The assumed row renders the half-dot mark and the value — never
+    //     a marker-coloured mark, never a fabricated provenance prose.
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "spacer_height", label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" as const },
+          { name: "H", label: "Height", value: null, unit: null, provenance: "unknown" as const },
+        ],
+      }),
+    );
+    const row = container.querySelector("[data-testid='brief-row-spacer_height']");
+    expect(row, "the assumed row must be present").not.toBeNull();
+    expect(row?.getAttribute("data-provenance")).toBe("assumed");
+    // The value renders (an assumed value IS a real value — unlike unknown,
+    // it is never the not-established control).
+    expect(row?.textContent).toContain("12.0");
+    // The half-dot mark: a faint-token gradient, not the filled/hollow/
+    // dashed shapes of the other four states, and NOT the marker colour.
+    const mark = row?.querySelector("[data-testid='brief-mark']");
+    const markBg = (mark?.getAttribute("style") ?? "").toLowerCase();
+    expect(markBg).toContain("gradient");
+    expect(markBg).not.toContain("255, 51, 0");
+    expect(markBg).not.toContain("#ff3300");
+
+    // (3) The collapsed chip counts assumed SEPARATELY from unknowns —
+    //     both spans present, each with its own count, values in the mono
+    //     face per AGENTS.md (the chip line carries the raw values; the
+    //     mono-face rule for values is the Brief's own invariant).
+    const chipRender = render(
+      createElement(Brief, {
+        isChip: true,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
+          { name: "H", label: "Height", value: 80, unit: "mm", provenance: "assumed" as const },
+          { name: "u1", label: "u1", value: null, unit: null, provenance: "unknown" as const },
+        ],
+      }),
+    );
+    expect(chipRender.container.querySelector("[data-testid='brief-chip-assumed']")?.textContent).toBe(
+      copy.brief.collapsedAssumed(2),
+    );
+    expect(chipRender.container.querySelector("[data-testid='brief-chip-unknowns']")?.textContent).toBe(
+      copy.brief.collapsedUnknowns(1),
+    );
+    // Full mode does NOT show the assumed count (operator decision: the
+    // chip-only count; full mode shows the per-row half-dots instead).
+    const fullRender = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
+        ],
+      }),
+    );
+    expect(fullRender.container.querySelector("[data-testid='brief-chip-assumed']")).toBeNull();
+  });
 });
