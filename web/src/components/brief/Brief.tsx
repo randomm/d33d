@@ -11,6 +11,8 @@
  *
  *   stated     filled dot, --color-live        the number
  *   measured   hollow ring, --color-faint      the number
+ *   assumed    half-filled dot, faint          the number (the model picked
+ *                                              it — nobody said it, issue #246)
  *   unknown    dashed ring                     the "not established" control,
  *                                              NEVER a number, never 0, never a dash
  *   disagrees  filled dot, --color-blocked     the MEASURED number (that is
@@ -61,6 +63,17 @@ const MARKS = {
     borderRadius: "50%",
     border: "1px solid var(--color-faint)",
     backgroundColor: "transparent",
+  },
+  /** Half-filled dot, faint (issue #246): the top half is filled in the
+   *  faint token, the bottom half is transparent — a dot with a value in
+   *  it, but a value nobody said. Rendered with a linear-gradient so the
+   *  "half" is exact and the whole mark stays one element. */
+  assumed: {
+    width: 8,
+    height: 8,
+    borderRadius: "50%",
+    border: "1px solid var(--color-faint)",
+    background: "linear-gradient(to bottom, var(--color-faint) 0%, var(--color-faint) 50%, transparent 50%, transparent 100%)",
   },
   unknown: {
     width: 8,
@@ -137,9 +150,29 @@ function primaryValue(entry: DesignStateEntry): number | string | boolean | null
 
 /** The row label — a parameter with no human label uses its NAME as the
  *  label. The block always carries one, but a defensive fallback keeps the
- *  contract honest. */
+ *  contract honest. An AXIS row (`kind: "axis"` — the dimension protocol's
+ *  own W/D/H axis, never a parameter) renders its axis word from
+ *  `copy.brief.axisLabel`, not the bare letter: the row the user stated.
+ *  The `label || name` fallback stays for defensive honesty (a missing
+ *  label falls back to the name, never an invented string). */
 function rowLabel(entry: DesignStateEntry): string {
+  if (entry.kind === "axis") return copy.brief.axisLabel[entry.name] ?? entry.name;
   return entry.label || entry.name;
+}
+
+/** The row's stable identity: `kind`+`name` — `name` alone is NOT unique
+ *  within a block (a param row and an axis row can both be named `W`), so
+ *  the key, the testid, and the expanded state are all keyed off
+ *  `kind:name` (issue #246 review: duplicate identity for W/D/H rows). */
+function rowIdentity(entry: DesignStateEntry): string {
+  return `${entry.kind}:${entry.name}`;
+}
+
+/** The row's `data-testid`: param rows keep `brief-row-<name>` (existing
+ *  tests and consumers), axis rows use `brief-row-axis-<name>` — the two
+ *  can never collide, even for the same letter. */
+function rowTestId(entry: DesignStateEntry): string {
+  return entry.kind === "axis" ? `brief-row-axis-${entry.name}` : `brief-row-${entry.name}`;
 }
 
 export function Brief({
@@ -163,13 +196,15 @@ export function Brief({
   const chip = isChip || hasLivePin === true;
 
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
+  const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
   const showGroups = !chip && resolved.length > MAX_LIST_ROWS;
 
   const renderRow = (entry: DesignStateEntry) => {
     const label = rowLabel(entry);
     const name = entry.name;
-    const isExpanded = expanded === name;
+    const identity = rowIdentity(entry);
+    const isExpanded = expanded === identity;
 
     const inFlightEntry = inFlight?.[name];
     const isReMeasuring = reMeasuring?.includes(name) === true;
@@ -267,14 +302,21 @@ export function Brief({
     // The expanded row: the provenance in a sentence + the two actions.
     // The sentence names WHAT the value is; the value cell above it names
     // the value itself — the sentence is never the value.
+    // The assumed row: "Nobody said this. I picked {value}." — no reason
+    // clause yet (issue #246 adds the "because {reason}" clause with the
+    // later labels ticket when a reason exists).
     const expandedSentence =
       entry.provenance === "stated"
         ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.stated}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
         : entry.provenance === "measured"
           ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.measured}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
-          : entry.provenance === "unknown"
-            ? copy.brief.legend.unknown
-            : copy.brief.legend.disagrees;
+          : entry.provenance === "assumed"
+            ? copy.brief.provenanceAssumed(
+                formatValue(entry.value) ?? copy.brief.unknownValue,
+              )
+            : entry.provenance === "unknown"
+              ? copy.brief.legend.unknown
+              : copy.brief.legend.disagrees;
 
     const expandedNode = isExpanded ? (
       <div className="brief-row-expanded" data-testid="brief-row-expanded">
@@ -322,11 +364,14 @@ export function Brief({
       <div
         className="brief-row"
         // Stable identity across re-renders and refetches: the row's
-        // data-testid (brief-row-${name}) and the expanded state are both
-        // keyed off name — the list key must be the same stable identity
-        // (issue #196: the unkeyed lists were the "unique key" warning).
-        key={name}
-        data-testid={`brief-row-${name}`}
+        // data-testid and the expanded state are both keyed off
+        // kind:name — `name` alone is NOT unique within a block (a param
+        // row and an axis row can both be `W`), so `kind`+`name` is the
+        // row identity the list key, the testid, and the expanded state
+        // all share (issue #246 review: duplicate identity for W/D/H
+        // rows; issue #196: the unkeyed lists were the "unique key" warning).
+        key={identity}
+        data-testid={rowTestId(entry)}
         data-provenance={entry.provenance}
         // The resolved module id from a pending pick is outlined in the
         // marker colour (MARKER_COLOR, inline style — no CSS token by design).
@@ -345,7 +390,7 @@ export function Brief({
       >
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-          onClick={() => setExpanded(isExpanded ? null : name)}
+          onClick={() => setExpanded(isExpanded ? null : identity)}
         >
           <span
             data-testid="brief-mark"
@@ -426,6 +471,15 @@ export function Brief({
           {unknowns.length > 0 && (
             <span className="brief-chip-unknowns" data-testid="brief-chip-unknowns">
               {copy.brief.collapsedUnknowns(unknowns.length)}
+            </span>
+          )}
+          {/* Assumed values are counted SEPARATELY from unknowns (issue
+              #246): an assumed value IS established (the model picked it),
+              an unknown one is not. The chip only — full mode shows the
+              per-row half-dot marks instead. */}
+          {assumed.length > 0 && (
+            <span className="brief-chip-assumed" data-testid="brief-chip-assumed">
+              {copy.brief.collapsedAssumed(assumed.length)}
             </span>
           )}
         </div>

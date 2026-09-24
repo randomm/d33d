@@ -40,12 +40,34 @@ export const brief = {
    *  so is the honest form. Never a number, never a guess from the request. */
   awaitingFirstMeasure: "measured when it lands",
 
+  /** The user-facing axis label for an axis row (`kind: "axis"`) — the
+   *  dimension protocol's own axes (W/D/H), not a prettified parameter
+   *  name. Mirrors the backend's `AXIS_LABELS` in `d33d/design_state.py`,
+   *  which the prompt uses for its own rendering. */
+  axisLabel: { W: "Width", D: "Depth", H: "Height" } as Record<string, string>,
+
   legend: {
     stated: "you said",
     measured: "measured off the model",
+    /** The model picked this value — nobody said it (issue #246). */
+    assumed: "I assumed",
     unknown: "unknown",
     disagrees: "disagrees",
   },
+
+  /** The expanded assumed row: nobody stated this value, the model picked
+   *  it. No "because {reason}" clause — the reason arrives with the
+   *  labels-from-model ticket (issue #246 keeps it out). */
+  provenanceAssumed: (quoted: string): string =>
+    `Nobody said this. I picked ${quoted}.`,
+
+  /** The chip's assumed-value count (issue #246): how many values the
+   *  model assumed on its own — counted separately from unknowns, which
+   *  are values nobody has established at all. "Assumed" is already
+   *  plural-sounding, so the count is the only thing that varies:
+   *  "4 assumed", "1 assumed". */
+  collapsedAssumed: (count: number): string =>
+    `${count} assumed`,
 
   /** Shown when a row is expanded and the value came from the user. */
   provenanceStated: (quoted: string, at: string): string =>

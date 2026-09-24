@@ -10,13 +10,46 @@ and the API route the SPA reads (``d33d.versions_routes``) call — the same
 callable, asserted by the tests, not two functions that happen to agree.
 
 Entry shape (the contract the SPA's Brief renders and the prompt renders):
-``name`` (the parameter key), ``label`` (the human label — for a parameter
+``name`` (the parameter key), ``kind`` (``"param" | "axis"`` — the
+discriminator, below), ``label`` (the human label — for a parameter
 with no label the label IS the parameter name, never invented prose),
 ``value`` (nullable), ``unit`` (``"mm"`` for numeric params, else ``None``),
 and ``provenance`` — a ``Literal`` (closed set, never a bare ``str``;
 the project's ``error_class`` enum is the precedent) of
-``"stated" | "measured" | "unknown" | "disagrees"``, plus ``stated_value``
-when ``provenance == "disagrees"``.
+``"stated" | "measured" | "assumed" | "unknown" | "disagrees"``, plus
+``stated_value`` when ``provenance == "disagrees"``.
+
+``kind`` (issue #246 review): ``"param"`` — a row built from the version's
+params snapshot (the model emitted the value), ``"axis"`` — a row built
+from the persisted per-axis stated set (the dimension protocol's W/D/H
+axes). ``name`` is NOT unique within a block: a param row and an axis row
+can both be named ``W`` (the model emits a ``W`` param AND the user stated
+``W``) — ``kind``+``name`` is the row identity, and nothing in this module
+dedupes, drops, or matches rows by name.
+
+Provenance semantics (issue #246 — default to ``assumed``, promote to
+``stated`` on evidence, NEVER the reverse):
+
+- ``assumed`` — the model emitted this parameter; the user never said it.
+  EVERY model-emitted parameter is ``assumed``: ``state_block_from_params``
+  only ever sees the params snapshot, it never sees the user's words, so
+  it cannot grant ``stated``. (Before #246 every non-zero param was
+  labelled ``stated`` — the Brief told users they specified values the
+  model invented.)
+- ``stated`` — evidence from the dimension protocol: an axis (W/D/H) whose
+  value the user actually said for the run that produced the version,
+  carried on the version row as the persisted per-axis stated set
+  (``versions.stated_dims``). ONLY the separate axis rows built from that
+  set are ever ``stated``. No model-emitted parameter is ``stated`` in
+  this ticket — not even one literally named W/D/H (DECISIONS.md: "key it
+  on the protocol's confirmed set, not on parameter names"); the value
+  the user said is never a license for a name match. The promotion seam
+  (:func:`_maybe_promote_param`) is the single, clearly-marked place a
+  later axis-binding ticket will extend to grant a model-emitted
+  parameter evidence.
+- ``measured`` / ``disagrees`` — a stated axis value compared against the
+  persisted measurement (below).
+- ``unknown`` — no value (never 0, never an omitted key).
 
 ``unknown`` is a REAL state and must survive serialisation as
 ``value: null`` — never ``0``, never an omitted key a consumer can
@@ -37,31 +70,48 @@ silently).
 the versions table persists the measured bounding box of the render that
 produced each version (issue #137 — the best candidate's bbox, the
 matched component for multi-part models, NULL when no measurement was
-obtainable). The shared callable :func:`state_block_for_version`
-compares the latest version's params snapshot against that persisted
-measurement: a stated value that matches the measurement within the
-tolerance renders as ``measured`` (the displayed value is the MEASURED
-one — what will actually print), a stated value outside the tolerance
-renders as ``disagrees`` carrying BOTH numbers (``stated_value`` rides
-alongside), and a stated value with no persisted measurement keeps
-``stated``. Only parameters mapped to the bbox's axes (``W``/``D``/``H``)
-are compared — a non-axis parameter such as ``rod_bore`` has no axis and
-MUST stay ``stated``; it never silently becomes ``measured``. The live
-consumers read the persisted measurement only; they do NOT re-render to
-obtain one.
+obtainable). The shared callable :func:`state_block_for_version` compares
+a STATED axis value (an axis row backed by persisted evidence) against
+that measurement: within the tolerance the axis renders as ``measured``
+(the displayed value is the MEASURED one — what will actually print),
+outside it the axis renders as ``disagrees`` carrying BOTH numbers
+(``stated_value`` rides alongside). An axis with no persisted stated
+evidence and no measurement is OMITTED entirely — never rendered as a
+fabricated value; the model's own W/D/H-named parameters still render as
+``assumed`` param rows, so the number is never lost.
+
+The prompt rendering marks provenance (``format_design_state_block`` /
+``format_design_state_line``): an ``assumed`` value renders
+``label = value (assumed — the user never set this)`` and a ``stated``
+value renders ``label = value (stated by the user)`` — the model must be
+able to tell user-set values from its own guesses.
 """
 
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
+#: The row-kind discriminator: ``"param"`` (a row built from the version's
+#: params snapshot — the model emitted the value) vs ``"axis"`` (a row
+#: built from the persisted per-axis stated set — the dimension
+#: protocol's W/D/H axes). ``name`` alone is NOT the row identity — a
+#: param row and an axis row can share the name ``W``.
+RowKind = Literal["param", "axis"]
+
+#: The dimension protocol's axis words, used to render an axis row's
+#: prompt line (``Width (W) = 60 (stated by the user)``) so the model can
+#: tell an axis row from its own ``W`` parameter. Defined ONCE here for
+#: the prompt; the SPA carries the same words in ``copy.ts``
+#: (``copy.brief.axisLabel``) for its own display.
+AXIS_LABELS: dict[str, str] = {"W": "Width", "D": "Depth", "H": "Height"}
+
 from d33d.design_loop import (
     BBOX_TOLERANCE_MIN_MM,
     BBOX_TOLERANCE_REL,
-    best_match_component,
 )
 
 __all__ = [
+    "AXIS_PARAM_NAMES",
     "MAX_STATE_BLOCK_ENTRIES",
     "Provenance",
     "StateEntry",
@@ -82,11 +132,14 @@ MAX_STATE_BLOCK_ENTRIES = 12
 
 #: The closed provenance set (the project's ``error_class`` enum is the
 #: precedent — a ``Literal``, never a bare ``str``). ``stated`` (the user
-#: said this value), ``measured`` (a render produced this value),
-#: ``unknown`` (no value — value serialises to ``null``), ``disagrees``
-#: (a measured value exists that differs from the stated one — both
-#: numbers are carried).
-Provenance = Literal["stated", "measured", "unknown", "disagrees"]
+#: said this value — evidence from the dimension protocol, persisted on
+#: the version row), ``measured`` (a stated value a render confirmed,
+#: within tolerance), ``assumed`` (the model emitted this value — the
+#: user never set it; issue #246's default for every model-emitted
+#: parameter), ``unknown`` (no value — value serialises to ``null``),
+#: ``disagrees`` (a measured value exists that differs from the stated
+#: one — both numbers are carried).
+Provenance = Literal["stated", "measured", "assumed", "unknown", "disagrees"]
 
 
 class StateEntry(TypedDict):
@@ -96,11 +149,12 @@ class StateEntry(TypedDict):
     ``stated_value`` is present ONLY when ``provenance == "disagrees"``
     (the displayed value is the MEASURED one — what will print — and the
     stated value rides alongside; they are never collapsed), so it is
-    ``NotRequired``: the common (``stated``/``unknown``) case carries no
-    ``stated_value`` key at all.
+    ``NotRequired``: the common case carries no ``stated_value`` key at
+    all.
     """
 
     name: str
+    kind: RowKind
     label: str
     value: float | str | bool | None
     unit: str | None
@@ -118,10 +172,12 @@ def _entry(
     value: Any,
     provenance: Provenance,
     stated_value: Any = None,
+    kind: RowKind = "param",
 ) -> dict[str, Any]:
     """One entry from a (name, value) pair (provenance supplied)."""
     out: dict[str, Any] = {
         "name": name,
+        "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
         "value": value,
         "unit": "mm" if _is_number(value) else None,
@@ -141,9 +197,12 @@ def state_block_from_params(
     This is the LIVE route's data source. Every declared parameter
     (never a fixed {W, D, H} triple) becomes an entry:
 
-    - a known numeric/bool value → provenance ``"stated"``, ``unit``
-      ``"mm"`` for numeric, ``None`` for non-numeric (a string/bool
-      parameter has no mm meaning);
+    - a known numeric/bool value → provenance ``"assumed"`` (issue #246:
+      the model emitted the value; the user's words are never visible
+      here, so no parameter — axis-named or not, numeric or not — is
+      ever ``"stated"`` from a params snapshot alone), ``unit`` ``"mm"``
+      for numeric, ``None`` for non-numeric (a string/bool parameter has
+      no mm meaning);
     - a missing/null/zero/absent value → provenance ``"unknown"`` with
       ``value: None`` (``null`` — never ``0``, never an omitted key).
 
@@ -157,21 +216,22 @@ def state_block_from_params(
             if value == 0:
                 out.append(_entry(name, None, "unknown"))
             else:
-                out.append(_entry(name, value, "stated"))
+                out.append(_entry(name, value, "assumed"))
         elif value is None:
             out.append(_entry(name, None, "unknown"))
         else:
-            # string/bool — a real parameter, stated, no mm unit.
-            out.append(_entry(name, value, "stated"))
+            # string/bool — a real parameter, model-emitted, no mm unit.
+            out.append(_entry(name, value, "assumed"))
     return out
 
 
 #: The parameter names that map onto the bbox's axes (``W`` → x,
 #: ``D`` → y, ``H`` → z — the ``_dim_params`` convention ``d33d.design_loop``
-#: threads to the render as ``defines``). A bbox gives W/D/H and ONLY
-#: those parameters may be compared against it: a parameter with no axis
-#: (``rod_bore``, ``wall_thickness``) is never a measurement target —
-#: it stays ``stated``, never silently becomes ``measured``.
+#: threads to the render as ``defines``). An axis name is the ONLY
+#: evidence a parameter can carry in this module: a parameter with no
+#: axis name (``rod_bore``, ``wall_thickness``) is never compared against
+#: a measurement and never promoted — it stays ``assumed`` (or
+#: ``unknown``), never silently becomes ``stated``/``measured``.
 AXIS_PARAM_NAMES: tuple[str, str, str] = ("W", "D", "H")
 
 
@@ -201,79 +261,181 @@ def persisted_bbox_extents(measurement: Any) -> tuple[float, float, float] | Non
     return extents
 
 
+def _axis_row(
+    axis: str,
+    value: float,
+    provenance: Provenance,
+    stated_value: Any = None,
+) -> dict[str, Any]:
+    """An axis row (name = W/D/H) for the design-state block."""
+    return _entry(axis, value, provenance, stated_value, kind="axis")
+
+
+def _axis_stated_evidence(
+    stated: dict[str, Any] | None,
+) -> dict[str, float]:
+    """The per-axis stated set as positive floats, or ``{}``.
+
+    ``stated`` is the version row's persisted ``stated_dims`` (the
+    dimension protocol's per-axis confirmed set for the run that produced
+    the version — ``{"W": 60.0, "H": 80.0}`` for a partial statement,
+    ``None`` when the user stated nothing). A zero/missing/non-numeric
+    axis is dropped (issue #91's abstain semantics: a zero is the encoded
+    absence, never a target).
+    """
+    if not stated:
+        return {}
+    out: dict[str, float] = {}
+    for axis in AXIS_PARAM_NAMES:
+        v = stated.get(axis)
+        if _is_number(v) and v > 0:
+            out[axis] = float(v)
+    return out
+
+
 def state_block_for_version(
     params: dict[str, Any] | None,
     measurement: Any = None,
+    stated: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-state block for ONE version: the version's params
-    snapshot (``state_block_from_params``) upgraded with the version's
-    PERSISTED measurement (issue #137).
+    snapshot (``state_block_from_params`` — every model-emitted parameter
+    ``assumed``/``unknown``) merged with the version's PERSISTED per-axis
+    stated set and PERSISTED measurement (issue #246 + #137).
 
     This is THE shared callable — the live prompt builder
     (``d33d.design_loop``) and the GET route the SPA reads
     (``d33d.versions_routes``) both call it (identity pinned by the
-    tests, not output equality). ``measurement`` is the version row's
-    ``bbox`` field as the write path stored it (issue #137: the best
-    candidate's render bbox — the MATCHED COMPONENT for a multi-part
-    model, ``None`` when the component was not identifiable or no
-    measurement was obtained). ``None`` measurement → the pure
-    params-only substrate's output, verbatim (``stated``/``unknown``).
+    tests, not output equality).
 
-    Comparison rule (stated explicitly): a parameter is compared against
-    the measurement ONLY when its name maps onto a bbox axis —
-    :data:`AXIS_PARAM_NAMES` (``W`` → x, ``D`` → y, ``H`` → z). A
-    parameter with no axis (``rod_bore``) is never compared: it keeps
-    ``stated`` (or ``unknown``) and never silently becomes ``measured``.
+    ``measurement`` is the version row's ``bbox`` field as the write path
+    stored it (issue #137: the best candidate's render bbox — the MATCHED
+    COMPONENT for a multi-part model, ``None`` when the component was not
+    identifiable or no measurement was obtained). ``stated`` is the
+    version row's persisted ``stated_dims`` (issue #246: the dimension
+    protocol's per-axis confirmed set for the run that produced the
+    version — a partial statement counts for the axes it states, ``None``
+    when nothing was stated). Both ``None`` → the pure params-only
+    substrate's output, verbatim (``assumed``/``unknown``).
 
-    For a comparable parameter whose stated value is known (a positive
-    number):
+    Axis rows are driven by the PERSISTED per-axis stated set, never by
+    param names: for each axis in ``stated`` the block carries a W/D/H
+    row, and that row's provenance comes from the measurement:
 
+    - no measurement (or no persisted bbox) → ``stated`` (the user said
+      it, no render yet to confirm it);
     - the measured axis is within the named tolerance (``max(
       BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)`` — the same
       rule the bbox gate applies, ``d33d.design_loop``'s constants) →
-      provenance ``"measured"``, and the DISPLAYED value is the measured
-      one (what will actually print), not the stated one;
-    - the measured axis is outside the tolerance → provenance
-      ``"disagrees"`` carrying BOTH numbers: ``value`` is the measured
-      one (the display), ``stated_value`` the stated one (the ride-
-      along).
+      ``measured``, and the DISPLAYED value is the measured one (what
+      will actually print), not the stated one;
+    - outside the tolerance → ``disagrees`` carrying BOTH numbers:
+      ``value`` is the measured one (the display), ``stated_value`` the
+      stated one (the ride-along).
 
-    A stated value that is unknown/absent/zero, and every non-axis
-    parameter, is untouched by the measurement. ``None`` params (no
-    version yet) → an empty block.
+    An axis with NO persisted stated value and NO measurement is OMITTED
+    entirely — never rendered as a fabricated value (a bare
+    ``stated = {}`` yields no axis rows at all; the model's own W/D/H-
+    named parameters still appear as ``assumed`` param rows, so the
+    number is never lost). An axis with a persisted stated value but no
+    measurement keeps its row as ``stated``.
+
+    No model-emitted parameter is promoted to ``stated`` in this ticket —
+    not even one literally named W/D/H (DECISIONS.md: "key it on the
+    protocol's confirmed set, not on parameter names"). The single, clearly
+    marked seam :func:`_maybe_promote_params` is a no-op; the later
+    axis-binding ticket (labels from the model) fills it, at that one
+    call site, with real evidence.
+
+    The MEASUREMENT comparison (issue #137) still applies to a param
+    literally named W/D/H that the snapshot carries — regardless of the
+    persisted stated set (within the named tolerance the param row renders
+    ``measured`` with the measured value displayed; outside it ``disagrees``
+    with the stated value riding along). The persisted stated set only
+    drives the SEPARATE axis rows (appended after the param rows); the
+    two surfaces are independent and never name-matched.
     """
     entries = state_block_from_params(params)
-    if measurement is None:
-        return entries
+    evidence = _axis_stated_evidence(stated)
+    # SEAM (#248: axis binding from model-supplied labels) — the ONE place
+    # a model-emitted param may be promoted from ``assumed`` to ``stated``.
+    # No-op for now: no evidence mechanism exists yet, and name-based
+    # promotion is explicitly forbidden. Do not scatter promotion logic;
+    # extend this seam only.
+    entries = _maybe_promote_params(entries, evidence)
     extents = persisted_bbox_extents(measurement)
-    if extents is None:
+    if not evidence and extents is None:
+        # No stated evidence and no measurement: the params-only
+        # substrate, verbatim (no axis rows — an axis with no stated
+        # value and no measurement is omitted entirely).
         return entries
+
     out: list[dict[str, Any]] = []
     for entry in entries:
-        axis = entry["name"] if entry["name"] in AXIS_PARAM_NAMES else None
-        if axis is None:
-            out.append(entry)
+        # The measurement comparison applies to the snapshot's own
+        # W/D/H-named params (issue #137 — the stated value the version
+        # was built with is the param's own value when the user stated
+        # nothing per axis; the model's number is the best available
+        # reference and is what the #137 gate compares against).
+        name = entry["name"]
+        if extents is not None and name in AXIS_PARAM_NAMES:
+            stated_value = entry["value"]
+            if _is_number(stated_value) and stated_value > 0:
+                extent = extents[AXIS_PARAM_NAMES.index(name)]
+                tol = max(BBOX_TOLERANCE_REL * stated_value, BBOX_TOLERANCE_MIN_MM)
+                e = dict(entry)
+                if abs(extent - stated_value) <= tol:
+                    e["value"] = extent
+                    e["provenance"] = "measured"
+                else:
+                    e["value"] = extent
+                    e["provenance"] = "disagrees"
+                    e["stated_value"] = stated_value
+                out.append(e)
+                continue
+        out.append(entry)
+
+    # Axis rows from the persisted per-axis stated set (declaration order
+    # W/D/H — the protocol's axis order), appended AFTER the param rows.
+    # A param row and an axis row for the same letter can coexist (e.g.
+    # the model emits an ``H`` param and the user stated ``H`` too): the
+    # param row keeps its ``assumed`` value, the axis row carries the
+    # user's stated evidence — both render, never collapsed, never
+    # guessed, never name-matched.
+    for axis in AXIS_PARAM_NAMES:
+        if axis not in evidence:
             continue
-        stated = entry["value"]
-        if not _is_number(stated) or stated <= 0:
-            # unknown/zero stated value: no comparison possible (the
-            # gate's ticket #91 abstain semantics, mirrored here).
-            out.append(entry)
+        axis_value = evidence[axis]
+        if extents is None:
+            out.append(_axis_row(axis, axis_value, "stated"))
             continue
         extent = extents[AXIS_PARAM_NAMES.index(axis)]
-        tol = max(BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)
-        if abs(extent - stated) <= tol:
-            e = dict(entry)
-            e["value"] = extent
-            e["provenance"] = "measured"
-            out.append(e)
+        tol = max(BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)
+        if abs(extent - axis_value) <= tol:
+            out.append(_axis_row(axis, extent, "measured"))
         else:
-            e = dict(entry)
-            e["value"] = extent
-            e["provenance"] = "disagrees"
-            e["stated_value"] = stated
-            out.append(e)
+            out.append(_axis_row(axis, extent, "disagrees", axis_value))
     return out
+
+
+def _maybe_promote_params(
+    entries: list[dict[str, Any]],
+    stated_evidence: dict[str, float],
+) -> list[dict[str, Any]]:
+    """SEAM (#248: axis binding from model-supplied labels).
+
+    The single, clearly-marked place a model-emitted parameter may be
+    promoted from ``assumed`` to ``stated``. This ticket does NOT promote
+    on any basis — not on name (a param literally named ``W``/``D``/``H``
+    stays ``assumed`` even when the persisted axis evidence matches it),
+    not on value — DECISIONS.md: "key it on the protocol's confirmed set,
+    not on parameter names"; #246: "No model-emitted param is stated in
+    this ticket". The later axis-binding ticket (which will let the model
+    declare which axis each parameter realises) fills this seam, at this
+    one call site, with real per-parameter evidence. Do not add
+    promotion anywhere else.
+    """
+    return entries
 
 
 def build_design_state_block(
@@ -298,11 +460,59 @@ def build_design_state_block(
     }
 
 
+def _provenance_suffix(provenance: Any) -> str:
+    """The prompt's provenance mark (issue #246): the model must be able
+    to tell user-set values from its own guesses. ``stated`` and
+    ``assumed`` carry a mark; ``measured``/``disagrees``/``unknown`` keep
+    their existing rendering."""
+    if provenance == "stated":
+        return " (stated by the user)"
+    if provenance == "assumed":
+        return " (assumed — the user never set this)"
+    return ""
+
+
+def _axis_prefix(entry: dict[str, Any]) -> str:
+    """The line prefix for one entry: an axis row (``kind == "axis"``)
+    renders its axis word first — ``Width (W)`` — so the model can tell
+    the protocol's axis row from its own ``W`` parameter; a param row
+    keeps its bare name."""
+    if entry.get("kind") == "axis":
+        name = entry.get("name")
+        word = AXIS_LABELS.get(name, name)  # type: ignore[arg-type]
+        return f"{word} ({name})"  # type: ignore[index]
+    return entry.get("name") or entry.get("label")
+
+
+def _render_value_line(name: str, value: Any, provenance: Any) -> str:
+    """One entry as ``label = value`` + the provenance mark (if any)."""
+    if _is_number(value):
+        value_str = f"{value:g}"
+    elif value is None:
+        value_str = "not specified"
+    else:
+        value_str = str(value)
+    return f"{name} = {value_str}{_provenance_suffix(provenance)}"
+
+
+def _render_value_inline(name: str, value: Any, provenance: Any) -> str:
+    """One entry as ``label=value`` + the provenance mark (if any)."""
+    if _is_number(value):
+        value_str = f"{value:g}"
+    elif value is None:
+        value_str = "not specified"
+    else:
+        value_str = str(value)
+    return f"{name}={value_str}{_provenance_suffix(provenance)}"
+
+
 def format_design_state_block(block: dict[str, Any]) -> str:
     """The block as prompt text (the live prompt's rendering of the block).
 
     One line per entry (``label = value`` — ``not specified`` for a
-    ``null`` value), then a final ``… N more parameter(s)`` count line
+    ``null`` value, plus the provenance mark: ``stated`` renders
+    ``(stated by the user)``, ``assumed`` renders ``(assumed — the user
+    never set this)``), then a final ``… N more parameter(s)`` count line
     when ``dropped_count > 0``. An empty block (no version yet) renders a
     single ``not specified`` line so the section is never silently absent
     (the 30/60 bug is a prompt that carries no description of the
@@ -310,15 +520,11 @@ def format_design_state_block(block: dict[str, Any]) -> str:
     """
     lines: list[str] = []
     for entry in block.get("entries", []):  # type: ignore[union-attr]
-        value = entry.get("value")
-        if _is_number(value):
-            value_str = f"{value:g}"
-        elif value is None:
-            value_str = "not specified"
-        else:
-            value_str = str(value)
-        label = entry.get("label") or entry.get("name")
-        lines.append(f"{label} = {value_str}")
+        lines.append(
+            _render_value_line(
+                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
+            )
+        )
     if block.get("dropped_count", 0) > 0:
         n = block["dropped_count"]
         lines.append(f"… {n} more parameter{'s' if n != 1 else ''}")
@@ -337,13 +543,9 @@ def format_design_state_line(entries: list[dict[str, Any]]) -> str:
         return "not specified"
     parts: list[str] = []
     for entry in entries:
-        value = entry.get("value")
-        if _is_number(value):
-            value_str = f"{value:g}"
-        elif value is None:
-            value_str = "not specified"
-        else:
-            value_str = str(value)
-        label = entry.get("label") or entry.get("name")
-        parts.append(f"{label}={value_str}")
+        parts.append(
+            _render_value_inline(
+                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
+            )
+        )
     return ", ".join(parts)

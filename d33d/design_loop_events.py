@@ -580,7 +580,11 @@ def _version_render_artifact_dir(result: Any) -> str | None:
 
 
 async def _resolve_version_create(
-    app: Any, project_id: int, result: Any, user_message: str
+    app: Any,
+    project_id: int,
+    result: Any,
+    user_message: str,
+    stated_axes: dict[str, float] | None = None,
 ) -> int | None:
     """On a ``pass``: create the version and return its id — a passing
     loop ALWAYS materialises a version (issue #93), with whatever params
@@ -627,6 +631,13 @@ async def _resolve_version_create(
        "First design" / "<name> <old> → <new>" / "<n> parameters
        changed" / "Revised geometry".
 
+    BOTH name sources are cleaned through ``clean_name`` with the project's
+    existing version names as the collision baseline (the #245 follow-up):
+    ``VersionService`` passes an explicit name through verbatim, so without
+    the suffix here, two passes that yield the same title or diff phrase
+    would create two identically named versions — the second gets
+    "<name>-2".
+
     The raw user message is still passed as the ``message`` field
     (provenance — the "triggering message excerpt" the timeline renders)
     and NEVER becomes the name. ``None`` is returned only when ``best``
@@ -665,14 +676,36 @@ async def _resolve_version_create(
     # this module), so the name helpers are pulled in at call time.
     from d33d.versions import clean_name, param_diff_name
 
+    # The collision-suffix baseline (#245 follow-up): the set of names the
+    # project already carries — ``VersionService`` passes an explicit name
+    # through verbatim, so the suffix must be applied HERE, on BOTH the
+    # title and the param-diff phrase, or two passes with the same diff
+    # phrase ("2 parameters changed") would create two identically named
+    # versions. A failure here must NEVER kill the version: the name may
+    # lack its suffix, but the version is still created.
+    try:
+        existing_names = {v["name"] for v in app.state.versions.list_versions(project_id)}
+    except Exception:  # noqa: BLE001 — resilience: name may lack suffix, version still created
+        logger.warning(
+            "list_versions failed for project %s; creating the version "
+            "without a collision baseline (the name may lack a suffix)",
+            project_id,
+            exc_info=True,
+        )
+        existing_names = set()
+
     if candidate_source is not None:
         title = scad_title(candidate_source)
         if title is not None:
-            version_name = clean_name(title)
+            version_name = clean_name(title, existing_names)
         else:
-            version_name = param_diff_name(prev_params, dict(named))
+            version_name = clean_name(
+                param_diff_name(prev_params, dict(named)), existing_names
+            )
     else:
-        version_name = param_diff_name(prev_params, dict(named))
+        version_name = clean_name(
+            param_diff_name(prev_params, dict(named)), existing_names
+        )
     # The thumbnail is the best render's iso view (the only view guaranteed
     # to frame the whole object — side views can be cropped per the
     # separately-tracked camera-fit issue). ``_artifact_bytes_from_path``
@@ -697,6 +730,7 @@ async def _resolve_version_create(
         thumbnail=thumbnail,
         bbox=_version_bbox_extents(result),
         render_artifact_dir=_version_render_artifact_dir(result),
+        stated_dims=stated_axes,
     )
     return int(version["id"])
 
@@ -710,6 +744,7 @@ async def run_design_loop_with_events(
     chat_history: tuple[str, ...],
     photo: str,
     request_text: str,
+    stated_axes: dict[str, float] | None = None,
 ) -> AsyncIterator[tuple[str, dict[str, Any]]]:
     """Run the injected design loop (``app.state.run_design_loop``) for
     one chat message and yield the SSE frame contract.
@@ -876,6 +911,19 @@ async def run_design_loop_with_events(
         design_source = current_version_source(row, app.state.versions)
     if design_source is not None:
         kwargs["design_source"] = design_source
+
+    # The design-state block's inputs (issue #120/#137/#246 — the SAME
+    # values ``_finalize_loop_kwargs`` passes on the finalize path): the
+    # latest version's full params snapshot, persisted measured bbox, and
+    # persisted per-axis stated set, read ONCE here so the live chat
+    # prompt, the finalize prompt and the GET the SPA reads all render
+    # the SAME block via ``state_block_for_version``. All ``None`` when
+    # no version exists yet (the block then renders its honest empty
+    # state — never a fabricated dimension).
+    latest = app.state.versions.latest_version(project_id)
+    kwargs["state_params"] = dict(latest["params"]) if latest is not None else None
+    kwargs["state_bbox"] = latest["bbox"] if latest is not None else None
+    kwargs["state_stated"] = latest["stated_dims"] if latest is not None else None
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)
@@ -1063,7 +1111,11 @@ async def run_design_loop_with_events(
         score = getattr(best, "score", None)
         abstained = bool(getattr(score, "bbox_abstained", False))
         version_id = await _resolve_version_create(
-            app, project_id, result, user_message
+            app,
+            project_id,
+            result,
+            user_message,
+            stated_axes=stated_axes,
         )
         if version_id is not None:
             vc_frame: dict[str, Any] = {

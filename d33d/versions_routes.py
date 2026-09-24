@@ -423,7 +423,12 @@ def create_versions_router() -> APIRouter:
         latest = svc.latest_version(project_id)
         params = dict(latest["params"]) if latest is not None else None
         measurement = latest["bbox"] if latest is not None else None
-        return state_block_for_version(params, measurement)
+        # The persisted per-axis stated set (issue #246): the design-state
+        # block's axis rows render ``stated`` from this evidence (and are
+        # omitted when it is absent) — read from the persisted row, never
+        # re-derived from live chat.
+        stated = latest["stated_dims"] if latest is not None else None
+        return state_block_for_version(params, measurement, stated)
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
@@ -607,7 +612,34 @@ def create_versions_router() -> APIRouter:
             _version_render_artifact_dir,
         )
 
+        # The per-axis stated evidence for the run (issue #246): the
+        # dimension protocol's per-axis extraction of the user's own
+        # words (``stated_axes_from_message`` — the same ``_extract_stated``
+        # pipeline, partial statements count for the axes they state),
+        # else the body's explicit ``stated_dims`` (a client's structured
+        # declaration, the protocol's highest-priority source). Computed
+        # INSIDE the try below, alongside ``create_version``, so an
+        # unexpected error (e.g. a non-numeric ``stated_dims`` component
+        # or a protocol failure) goes through ``_raise_mapped`` like every
+        # other failure — never a raw 500. Persisted on the version row
+        # so the design-state block can render stated axis rows without
+        # re-deriving from live chat. No stated axes (empty result)
+        # persist a NULL — an absent statement abstains, never a
+        # fabricated axis row.
+        from d33d.dimension_protocol import stated_axes_from_message
+
         try:
+            if body.stated_dims is not None:
+                _w, _d, _h = body.stated_dims
+                per_axis_stated = {
+                    axis: float(value)
+                    for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
+                    if value
+                }
+            else:
+                per_axis_stated = stated_axes_from_message(
+                    body.request or body.message or "", chat_history=()
+                )
             v = await svc.create_version(
                 project_id,
                 params,
@@ -616,6 +648,7 @@ def create_versions_router() -> APIRouter:
                 scad_source=(candidate_source or None),
                 bbox=_version_bbox_extents(result),
                 render_artifact_dir=_version_render_artifact_dir(result),
+                stated_dims=per_axis_stated or None,
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
@@ -720,6 +753,12 @@ def _finalize_loop_kwargs(
     # block the GET the SPA reads serves. ``None`` when no version exists
     # yet or the version has no persisted measurement.
     state_bbox = latest["bbox"] if latest is not None else None
+    # The design-state block's per-axis stated set (issue #246): the
+    # latest version's persisted per-axis confirmed set, forwarded so the
+    # prompt's block is the SAME block the GET the SPA reads serves (axis
+    # rows render stated/omitted identically in both consumers). ``None``
+    # when no version exists yet or the run stated no axes.
+    state_stated = latest["stated_dims"] if latest is not None else None
 
     # The current design source (issue #105): the project's current
     # version's per-version source, captured BEFORE the loop runs (the
@@ -759,6 +798,7 @@ def _finalize_loop_kwargs(
         "request": request_text,
         "state_params": state_params,
         "state_bbox": state_bbox,
+        "state_stated": state_stated,
         "design_source": design_source,
     }
 

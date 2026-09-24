@@ -41,7 +41,7 @@ from d33d.design_loop import (
     score,
 )
 from d33d.design_loop_events import latest_version_stated_dims
-from d33d.dimension_protocol import stated_dims_from_message
+from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
@@ -471,6 +471,56 @@ def test_axis_prefixed_turn_shorthand_does_not_complete_triple() -> None:
     assert (
         stated_dims_from_message("W: 30, make it a 20mm cube") is None
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #246: the per-axis variant (stated_axes_from_message)
+# ---------------------------------------------------------------------------
+
+
+def test_stated_axes_partial_counts_per_axis() -> None:
+    """A message stating only one axis yields a PARTIAL dict for that
+    axis (issue #246: partial statements count for the axes they state) —
+    while the full-triple ``stated_dims_from_message`` returns None for
+    the same message (its contract is unchanged for existing callers)."""
+    axes = stated_axes_from_message("make it 40 mm wide, W: 40")
+    assert axes == {"W": 40.0}
+    # The full-triple contract is intact: partial → None.
+    assert stated_dims_from_message("make it 40 mm wide, W: 40") is None
+
+
+def test_stated_axes_no_statement_yields_empty_dict() -> None:
+    """No statement at all → an EMPTY dict (never a fabricated axis, never
+    None) — the design-state seam persists this as NULL (abstain)."""
+    assert stated_axes_from_message("a spacer to lift a shelf 12 mm") == {}
+    assert stated_axes_from_message("make it rounder") == {}
+
+
+def test_stated_axes_equal_shape_shorthand_fills_all_three() -> None:
+    """An equal-axis shape ("a 20mm cube") names a part with three equal
+    20 mm edges — all three axes are stated (honest: the text names all
+    three). The bare single-number case ("a 5mm fillet") fills NOTHING —
+    it is a feature size, never an envelope."""
+    assert stated_axes_from_message("a 20mm cube") == {"W": 20.0, "D": 20.0, "H": 20.0}
+    assert stated_axes_from_message("a 5mm fillet") == {}
+
+
+def test_stated_axes_matches_full_triple_when_complete() -> None:
+    """A complete statement yields the same three values both functions
+    report (the per-axis dict is the full-triple's per-axis view)."""
+    msg = "W: 30, D: 20, H: 10"
+    axes = stated_axes_from_message(msg)
+    triple = stated_dims_from_message(msg)
+    assert axes == {"W": 30.0, "D": 20.0, "H": 10.0}
+    assert triple == (30.0, 20.0, 10.0)
+
+
+def test_stated_axes_explicit_partial_ranks_highest() -> None:
+    """A caller-supplied partial ``explicit`` map (the body's
+    ``stated_dims`` per-axis view) is the protocol's highest-priority
+    source — the per-axis variant surfaces it as-is."""
+    axes = stated_axes_from_message("make it", explicit={"W": 60.0, "H": 80.0})
+    assert axes == {"W": 60.0, "H": 80.0}
 
 
 def test_explicit_body_partial_bypass_yields_flagged_abstained_pass() -> None:

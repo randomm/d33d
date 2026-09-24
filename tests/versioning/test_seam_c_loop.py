@@ -167,15 +167,31 @@ def seam_c_live(tmp_path: Path):
 
 
 class _StubVersions:
-    """A stub ``app.state.versions`` that returns a fixed version id."""
+    """A stub ``app.state.versions`` that returns a fixed version id.
+
+    ``list_versions`` starts EMPTY (fresh-project stub) so the #245
+    collision-suffix baseline the resolver reads (``list_versions``) sees
+    an empty set even though ``latest_version`` has a baseline for the
+    param-diff name — the two calls answer two different questions.
+    """
 
     def __init__(self) -> None:
         self._next = 1
+        self._versions: list[dict] = []
 
     def latest_version(self, project_id):
         # Fresh-project stub: no previous version (the adapter reads this
         # unconditionally for the param-diff name baseline, issue #245).
-        return None
+        return self._versions[-1] if self._versions else None
+
+    def list_versions(self, project_id):
+        return list(self._versions)
+
+    async def create_version(self, project_id, params, name=None, message="", **kwargs):
+        v = self._next
+        self._next += 1
+        self._versions.append({"id": v, "params": params, "name": name})
+        return {"id": v, "params": params, "name": name, "message": message}
 
     async def create_version(self, project_id, params, name=None, message="", **kwargs):
         v = self._next
@@ -264,3 +280,131 @@ def test_seam_c_replay_version_frame_omit_policy_dead_path(tmp_path: Path, app_w
     # The record's params are still the declared field (the #93
     # invariant holds even with a dead render).
     assert isinstance(dead_record.params, dict)
+
+
+def test_two_consecutive_passes_same_diff_phrase_get_collision_suffix(
+    tmp_path: Path, app_with_versions
+) -> None:
+    """#245 follow-up (in scope for #246): two consecutive chat passes
+    that produce the SAME param-diff phrase get "X" and "X-2" (via
+    ``clean_name(name, existing)`` — the resolver's collision baseline is
+    ``list_versions``), and the same holds for the model's ``// title:``
+    path: two passes with the same title get "T" and "T-2"."""
+    import asyncio
+    from dataclasses import replace
+
+    from d33d.design_loop import scad_title
+    from d33d.design_loop_events import _resolve_version_create
+
+    fixture = load_fixture("C")
+    record = _record_from_payload(fixture.payload["best"])
+    # Strip the title so the NAME comes from the param-diff phrase; the
+    # two passes change the SAME param (H) by the same amount, so both
+    # yield the same deterministic phrase ("H 20 → 21").
+    first = replace(
+        record,
+        scad_source="W = 20;\ncube([W]);",
+        params={"W": 20.0, "D": 20.0, "H": 20.0},
+    )
+    second = replace(
+        first,
+        params={"W": 20.0, "D": 20.0, "H": 21.0},
+    )
+
+    class _Names:
+        def __init__(self) -> None:
+            self._versions: list[dict] = []
+            self._next = 1
+
+        def latest_version(self, project_id):
+            return self._versions[-1] if self._versions else None
+
+        def list_versions(self, project_id):
+            return list(self._versions)
+
+        async def create_version(self, pid, params, *, name=None, message="", **kwargs):
+            v = self._next
+            self._next += 1
+            self._versions.append({"id": v, "params": params, "name": name})
+            return {"id": v, "params": params, "name": name, "message": message}
+
+    names = _Names()
+    app = app_with_versions
+    app.state.versions = names
+
+    r1 = asyncio.run(_resolve_version_create(app, 1, _StubResult(first), "make a cube"))
+    r2 = asyncio.run(_resolve_version_create(app, 1, _StubResult(second), "again, same"))
+    assert r1 == 1 and r2 == 2
+    v1, v2 = names._versions
+    # Pass 1 (no prior version) → "First design"; pass 2 yields "H 20 →
+    # 21". The "same phrase twice → -2" case is pinned exactly below.
+    assert v1["name"] == "First design"
+    assert v2["name"] == "H 20 → 21"
+
+    # Same diff phrase twice, pinned exactly: pre-seed ONE version named
+    # "H 20 → 21" (params W=20, D=20, H=20), then drive the resolver with
+    # a pass whose diff vs the latest yields the SAME phrase (H 20 → 21)
+    # → the second version is named "H 20 → 21-2" (clean_name against
+    # list_versions).
+    seeded = _Names()
+    seeded._versions.append(
+        {"id": 1, "params": {"W": 20.0, "D": 20.0, "H": 20.0}, "name": "H 20 → 21"}
+    )
+    seeded._next = 2
+    app.state.versions = seeded
+    asyncio.run(_resolve_version_create(app, 1, _StubResult(second), "again"))
+    assert seeded._versions[1]["name"] == "H 20 → 21-2"
+
+    # The title path: two passes with the SAME // title: get "T" / "T-2".
+    titled = replace(first, scad_source="// title: Bore to 38 mm\nW = 20;\ncube([W]);")
+    assert scad_title(titled.scad_source) == "Bore to 38 mm"
+    names2 = _Names()
+    app.state.versions = names2
+    asyncio.run(_resolve_version_create(app, 1, _StubResult(titled), "one"))
+    asyncio.run(_resolve_version_create(app, 1, _StubResult(titled), "two"))
+    t1, t2 = names2._versions
+    assert t1["name"] == "Bore to 38 mm"
+    assert t2["name"] == "Bore to 38 mm-2"
+
+
+def test_list_versions_failure_degrades_to_empty_baseline(app_with_versions) -> None:
+    """Resilience (PR #254 review): a ``list_versions`` call that raises
+    on the collision baseline must NOT kill the version — the resolver
+    logs a WARNING and creates the version with an EMPTY baseline (the
+    name may then lack its ``-2`` suffix; the version is still made).
+    A stub whose ``list_versions`` raises is the tripwire."""
+    import asyncio
+    from dataclasses import replace
+
+    from d33d.design_loop_events import _resolve_version_create
+
+    fixture = load_fixture("C")
+    record = _record_from_payload(fixture.payload["best"])
+
+    class _BrokenList(_StubVersions):
+        def list_versions(self, project_id):
+            raise RuntimeError("db blew up")
+
+    broken = _BrokenList()
+    app = app_with_versions
+    app.state.versions = broken
+
+    created_name: list = []
+
+    async def _capturing_create(project_id, params, name=None, message="", **kwargs):
+        created_name.append(name)
+        v = broken._next
+        broken._next += 1
+        return {"id": v, "params": params, "name": name, "message": message}
+
+    broken.create_version = _capturing_create
+
+    version_id = asyncio.run(
+        _resolve_version_create(app, 1, _StubResult(record), "make a cube")
+    )
+    assert version_id is not None
+    assert isinstance(version_id, int)
+    # A version WAS created with a non-None name (degraded to the empty
+    # baseline, not a crash).
+    assert len(created_name) == 1
+    assert created_name[0] is not None

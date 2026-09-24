@@ -52,6 +52,7 @@ __all__ = [
     "require_dimensions_confirmed",
     "resolution_questions",
     "resolve_tolerance_mm",
+    "stated_axes_from_message",
     "stated_dims_from_message",
 ]
 
@@ -259,6 +260,40 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
     return out
+
+
+def stated_axes_from_message(
+    message: str,
+    chat_history: list[str] | tuple[str, ...] | None = (),
+    explicit: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """The PER-AXIS set of axes the user stated (issue #246) — a PARTIAL
+    statement counts for the axes it states.
+
+    The per-axis variant of :func:`stated_dims_from_message`: the SAME
+    ``_extract_stated`` pipeline (never a new parser), returning whatever
+    of W/D/H was stated — an empty dict when nothing was stated — instead
+    of ``None`` for a partial statement. ``stated_dims_from_message``'s
+    full-triple-or-``None`` contract is left intact for existing callers
+    (the ``/chat`` route's bbox-gate target, the finalize seam's fallback);
+    this function is the design-state seam's source of per-axis
+    *evidence*: the persisted set names the axes the user actually said,
+    and is what the design-state block's axis rows mark ``stated``.
+
+    Note the deliberate asymmetry with the shorthand: an equal-axis shape
+    ("a 20 mm cube") fills ALL THREE axes in ``_extract_stated`` — all
+    three are then stated, which is honest (the text names a part with
+    three equal 20 mm edges). A bare single number with no equal-axis
+    shape fills NO axis — it is a feature size, not an envelope, and
+    never becomes a stated axis row.
+    """
+    turns = [str(t) for t in (chat_history or ())] + [str(message)]
+    stated = _extract_stated(turns, explicit, None)
+    return {
+        axis: float(stated[axis])
+        for axis in DIMENSION_AXES
+        if axis in stated
+    }
 
 
 def stated_dims_from_message(

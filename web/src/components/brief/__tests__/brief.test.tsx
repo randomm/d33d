@@ -28,6 +28,41 @@ describe("Brief", () => {
     expect(screen.getByTestId("brief-panel").getAttribute("data-mode")).toBe("full");
   });
 
+  it("the collapsed chip counts assumed separately from unknowns (issue #246)", () => {
+    const entries: DesignStateEntry[] = [
+      { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "spacer_height", kind: "param" as const, label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" },
+      { name: "wall_thickness", kind: "param" as const, label: "wall_thickness", value: 3, unit: "mm", provenance: "assumed" },
+      { name: "hole_clearance", kind: "param" as const, label: "hole_clearance", value: 0.3, unit: "mm", provenance: "assumed" },
+      { name: "H", kind: "param" as const, label: "Height", value: null, unit: null, provenance: "unknown" },
+    ];
+    render(<Brief isChip inset={24} conversationCollapsed={false} entries={entries} />);
+    const chip = screen.getByTestId("brief-chip");
+    // Assumed count is separate from unknowns — "3 assumed" next to
+    // "1 unknown", not folded into either.
+    expect(screen.getByTestId("brief-chip-assumed").textContent).toBe(
+      copy.brief.collapsedAssumed(3),
+    );
+    expect(screen.getByTestId("brief-chip-unknowns").textContent).toBe(
+      copy.brief.collapsedUnknowns(1),
+    );
+    // The resolved rows (assumed values included) stay in the chip.
+    expect(chip.textContent).toContain("Width · 60.0\u202Fmm");
+    expect(chip.textContent).toContain("spacer_height · 12.0\u202Fmm");
+  });
+
+  it("the chip shows no assumed span when no entry is assumed (issue #246)", () => {
+    render(
+      <Brief
+        isChip
+        inset={24}
+        conversationCollapsed={false}
+        entries={[{ name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" }]}
+      />,
+    );
+    expect(screen.queryByTestId("brief-chip-assumed")).toBeNull();
+  });
+
   it("positions with the given inset", () => {
     render(<Brief isChip={false} inset={24} conversationCollapsed={false} />);
     const el = screen.getByTestId("brief-panel");
@@ -59,23 +94,31 @@ describe("Brief", () => {
 
   it("renders multiple entries without duplicate-key console warnings (issue #196)", () => {
     // The existing tests render ≤1 entry, so they never hit the multi-row
-    // .map() path that emits the key warning. This one renders three entries
-    // mixing provenances so both list maps (unknowns + resolved) fire.
+    // .map() path that emits the key warning. This one renders four entries
+    // mixing provenances (including "assumed", issue #246) so both list
+    // maps (unknowns + resolved) fire.
     const entries: DesignStateEntry[] = [
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" },
       {
-        name: "H",
+        name: "H", kind: "param" as const,
         label: "Height",
         value: null,
         unit: null,
         provenance: "unknown",
       },
       {
-        name: "D",
+        name: "D", kind: "param" as const,
         label: "Depth",
         value: 45,
         unit: "mm",
         provenance: "measured",
+      },
+      {
+        name: "wall_thickness", kind: "param" as const,
+        label: "wall_thickness",
+        value: 3,
+        unit: "mm",
+        provenance: "assumed",
       },
     ];
     const consoleErrorSpy = vi.spyOn(console, "error");

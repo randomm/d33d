@@ -16,6 +16,7 @@ import type { DesignStateEntry } from "../../../lib/api";
 
 const stated = (name: string, value: number): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value,
   unit: "mm",
@@ -23,6 +24,7 @@ const stated = (name: string, value: number): DesignStateEntry => ({
 });
 const measured = (name: string, value: number | null): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value,
   unit: value === null ? null : "mm",
@@ -30,6 +32,7 @@ const measured = (name: string, value: number | null): DesignStateEntry => ({
 });
 const unknown = (name: string): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value: null,
   unit: null,
@@ -37,11 +40,31 @@ const unknown = (name: string): DesignStateEntry => ({
 });
 const disagrees = (name: string, measuredMm: number, statedMm: number): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value: measuredMm,
   unit: "mm",
   provenance: "disagrees",
   stated_value: statedMm,
+});
+const assumed = (name: string, value: number): DesignStateEntry => ({
+  name,
+  kind: "param",
+  label: name,
+  value,
+  unit: "mm",
+  provenance: "assumed",
+});
+/** An AXIS row — the dimension protocol's own W/D/H axis (the user's
+ *  stated evidence), never a parameter. Renders the axis word (Width/
+ *  Depth/Height) and the `brief-row-axis-<name>` testid. */
+const axisStated = (axis: "W" | "D" | "H", value: number): DesignStateEntry => ({
+  name: axis,
+  kind: "axis",
+  label: axis,
+  value,
+  unit: "mm",
+  provenance: "stated",
 });
 
 const baseProps = { isChip: false, inset: 24, conversationCollapsed: false } as const;
@@ -100,6 +123,36 @@ describe("Brief — provenance states", () => {
       .getByTestId("brief-row-wall_gap")
       .querySelector("[data-testid='brief-value']");
     expect(valueCell?.textContent).toContain("45.0");
+  });
+
+  it("an assumed parameter renders its number in the value cell with the half-dot mark (issue #246)", () => {
+    render(<Brief {...baseProps} entries={[assumed("spacer_height", 12)]} />);
+    const row = screen.getByTestId("brief-row-spacer_height");
+    // The row carries the new provenance and renders the number in the mono face.
+    expect(row.getAttribute("data-provenance")).toBe("assumed");
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toContain("12.0");
+    expect(valueCell?.textContent).toContain("mm");
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
+    // The mark is the half-filled faint dot (issue #246): a linear-gradient
+    // in the faint token, not the stated/measured/unknown/disagrees shapes.
+    const mark = screen.getByTestId("brief-mark");
+    expect(mark.style.background).toContain("var(--color-faint)");
+    expect(mark.style.background.toLowerCase()).toContain("gradient");
+  });
+
+  it("the expanded assumed row reads 'Nobody said this. I picked {value}.' plus the Change-it action (issue #246)", () => {
+    render(<Brief {...baseProps} entries={[assumed("spacer_height", 12)]} onChange={vi.fn()} />);
+    const row = screen.getByTestId("brief-row-spacer_height");
+    const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const expanded = screen.getByTestId("brief-row-expanded");
+    // The sentence: no reason clause (issue #246 does not invent one).
+    expect(expanded.textContent).toContain("Nobody said this. I picked 12.0\u202Fmm.");
+    // The existing Change-it action is present on the expanded assumed row.
+    expect(screen.getByTestId("brief-action-change").textContent).toBe(
+      copy.brief.rowActions.change,
+    );
   });
 });
 
@@ -184,8 +237,51 @@ describe("Brief — the list that does not grow", () => {
       copy.brief.allParameters(9),
     );
     // The individual resolved rows are NOT rendered in the list (they sit
-    // behind the count).
+    // behind the count) — param row `W` and axis row `W` both hidden.
     expect(screen.queryByTestId("brief-row-W")).toBeNull();
+    expect(screen.queryByTestId("brief-row-axis-W")).toBeNull();
+  });
+
+  it("coexistence: a param W row and an axis W row render as TWO rows with distinct identities (issue #246 review)", () => {
+    // The HIGH finding: the model emits a `W` param (assumed) AND the user
+    // stated `W` (the axis row) — the block carries BOTH, `name` alone is
+    // not unique, and `kind`+`name` is the identity. Rendered through the
+    // real Brief: two rows, distinct testids, no React key warning, and
+    // expanding one row does not expand the other.
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    render(
+      <Brief
+        {...baseProps}
+        entries={[assumed("W", 60), axisStated("W", 60)]}
+      />,
+    );
+    // No key warning across the coexistence block.
+    const keyWarnings = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Each child in a list should have a unique "key" prop'),
+    );
+    expect(keyWarnings).toEqual([]);
+    consoleErrorSpy.mockRestore();
+    // Both rows are visible, with distinct testids (param W vs axis W).
+    const paramRow = screen.getByTestId("brief-row-W");
+    const axisRow = screen.getByTestId("brief-row-axis-W");
+    expect(paramRow).toBeTruthy();
+    expect(axisRow).toBeTruthy();
+    expect(paramRow.getAttribute("data-provenance")).toBe("assumed");
+    expect(axisRow.getAttribute("data-provenance")).toBe("stated");
+    // The axis row renders its axis word (Width), the param row its name.
+    expect(axisRow.textContent).toContain(copy.brief.axisLabel.W);
+    expect(axisRow.textContent).toContain("Width");
+    expect(paramRow.textContent).toContain("W");
+    // Expanding the param row does not expand the axis row (identity is
+    // per row, not per name).
+    const paramInner = paramRow.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(paramInner);
+    const expanded = screen.getByTestId("brief-row-expanded");
+    expect(paramRow.contains(expanded)).toBe(true);
+    expect(axisRow.contains(expanded)).toBe(false);
+    // The param row's expand sentence is the assumed one; the axis row
+    // still carries no expanded node.
+    expect(expanded.textContent).toContain("Nobody said this");
   });
 
   it("below the group threshold the resolved rows render individually", () => {
