@@ -58,6 +58,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -680,9 +681,13 @@ def _finalize_loop_kwargs(
     - ``photo`` — the body's photo, else the project's stored
       ``source_photo_path`` (the uploaded reference photo); ``None`` when
       neither exists (text-only finalize — the hook's photo is optional).
-    - ``stated_dims`` — the body's dims, else the named W/D/H parameters
-      from the latest version's snapshot (0.0 for any unset axis — the
-      dimension gate then measures, never fabricates).
+    - ``stated_dims`` — the current run's per-axis confirmed set (the
+      body's ``stated_dims`` axes, else the per-axis extraction of the
+      message). There is NO persisted fallback (issue #247's per-axis
+      decision — issue #247 removed the dead W/D/H param-key read): a
+      statement that confirms nothing abstains the gate (``None``), a
+      partial confirmed set is a zero-filled triple (per-axis
+      abstention).
     - ``render_fn`` — the production render worker (``d33d.render_worker.
       render_for_design_loop``). ``llm_fn`` — a no-op async edge: the
       production closure builds its OWN ``llm_fn`` from the live catalogue
@@ -698,6 +703,8 @@ def _finalize_loop_kwargs(
       failures.jsonl line is un-archivable without it).
     """
     from d33d.config.catalogue import CatalogueError, ResolutionError
+    from d33d.design_loop_events import axes_to_gate_triple
+    from d33d.dimension_protocol import stated_axes_from_message
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
@@ -728,14 +735,26 @@ def _finalize_loop_kwargs(
 
     photo = body.photo or row.get("source_photo_path")
     latest = app.state.versions.latest_version(project_id)
-    stated_dims = body.stated_dims
-    if stated_dims is None:
-        p = latest["params"] if latest is not None else {}
-        stated_dims = (
-            float(p.get("W", 0.0)),
-            float(p.get("D", 0.0)),
-            float(p.get("H", 0.0)),
-        )
+    # The gate's target (ticket #91; issue #247's per-axis decision): the
+    # CURRENT run's per-axis confirmed set — the body's explicit
+    # ``stated_dims`` axes when a client sends one, else the protocol's
+    # per-axis extraction of the finalize message. NO persisted fallback:
+    # a statement that confirms nothing abstains the gate (``None``) —
+    # it must not enforce an axis confirmed on an earlier turn against a
+    # candidate the user just asked to change. A PARTIAL confirmed set
+    # is a zero-filled (W, D, H) triple (per-axis abstention in the gate,
+    # ``not specified`` in the prompt), never (0.0, 0.0, 0.0) and never
+    # re-derived from W/D/H param keys (the dead read issue #247 removed).
+    if body.stated_dims is not None:
+        _w, _d, _h = body.stated_dims
+        current_axes: dict[str, float] = {
+            axis: float(value)
+            for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
+            if value > 0  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
+        }
+    else:
+        current_axes = stated_axes_from_message(body.request or body.message or "")
+    stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest
     # version's full params snapshot, passed INTO the loop (the loop's
     # prompt builder renders it). The GET the SPA reads
@@ -941,11 +960,21 @@ async def _parse_finalize_body(request: Request):
                 status_code=422, detail="'stated_dims' must be a 3-element array"
             )
         try:
-            stated_dims = tuple(float(d) for d in stated_dims)
+            parsed = tuple(float(d) for d in stated_dims)
         except (TypeError, ValueError):
             raise HTTPException(
                 status_code=422, detail="'stated_dims' must be numeric"
             ) from None
+        if not all(math.isfinite(v) for v in parsed):
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' elements must be finite numbers"
+            )
+        if any(v < 0 for v in parsed):
+            # Negative is malformed input; 0 stays legal = unconfirmed axis.
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' elements must be >= 0"
+            )
+        stated_dims = parsed
     return FinalizeBody(
         params=params,
         name=name,

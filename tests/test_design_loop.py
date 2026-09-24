@@ -300,6 +300,107 @@ def test_exhaustion_returns_best_not_last_when_last_scores_lower():
     assert result.failure_reason == GATE_REASON_BITS[2]  # bbox_out_of_tolerance
 
 
+def test_partial_triple_single_axis_gate_fail_exhausts_at_three():
+    """Issue #247 ACCEPTANCE CRITERION: a message confirming only H=12
+    with a candidate whose z=19.3 → bbox bit False, failure_reason
+    ``bbox_out_of_tolerance``, exhaustion at 3 iterations. Today no test
+    can express a single-axis gate failure because the gate only accepts
+    full triples; the new per-axis rule makes this expressible.
+    """
+    # SCAD that declares H (the confirmed axis) as a named param — the
+    # named-params gate passes. The render's z=19.3 is OUT of tolerance
+    # of H=12 (|19.3-12| = 7.3 > max(0.12, 0.5) = 0.5) → bbox gate FAILS.
+    scad = "W = 20;\nD = 20;\nH = 12;\ncube([W, D, H]);\n"
+    llm = [_scad_llm(scad)]
+    renders = [_render()] * 3  # all iterations produce the same render
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        return BboxInfo(x=20.0, y=20.0, z=19.3, volume=1.0)  # z way off H=12
+
+    result = _run_loop(
+        llm_script=llm,
+        render_script=renders,
+        stated=(0.0, 0.0, 12.0),  # only H confirmed
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    assert result.failure_reason == GATE_REASON_BITS[2]  # bbox_out_of_tolerance
+    # Every iteration's bbox bit is False (the 7 mm error is caught).
+    for iteration in result.iterations:
+        assert iteration.score.bits[2] is False
+
+
+def test_partial_triple_single_axis_gate_pass_reaches_pass():
+    """Issue #247: a message confirming only H=12 with a candidate whose
+    z=12.2 (within tolerance) → the loop reaches PASS (the confirmed axis
+    is within tolerance, unconfirmed axes are skipped)."""
+    scad = "W = 20;\nD = 20;\nH = 12;\ncube([W, D, H]);\n"
+    llm = [_scad_llm(scad)]
+    renders = [_render()]
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        return BboxInfo(x=20.0, y=20.0, z=12.2, volume=1.0)  # z within tol of H=12
+
+    result = _run_loop(
+        llm_script=llm,
+        render_script=renders,
+        stated=(0.0, 0.0, 12.0),  # only H confirmed
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    # The bbox bit is True (H is within tolerance), and the flag is True
+    # (not every axis was checked — per-axis reality).
+    assert result.best.score.bits[2] is True
+    assert result.best.score.bbox_abstained is True
+
+
+def test_partial_confirmed_set_does_not_flag_unconfirmed_literals_through_loop():
+    """Issue #247 operator decision (``_named_params_present`` coupling):
+    a run that confirms only H=12 must not fail the loop because the
+    unconfirmed 20 mm dimension is declared as ``spacer_width = 20`` —
+    the exemption/requirement applies only to the confirmed axes, so
+    the named-params bit stays True and the loop passes (every confirmed
+    axis measured within tolerance, unconfirmed axes skipped). The
+    declared shape is the model's actual v24 output: free-named params,
+    no W/D/H keys."""
+    scad = (
+        "spacer_width = 20;\n"
+        "spacer_height = 12;\n"
+        "cube([spacer_width, spacer_width, spacer_height]);\n"
+    )
+    llm = [_scad_llm(scad)]
+    renders = [_render()]
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        # z=12.2 is within tolerance of H=12; x/y (20) unconfirmed —
+        # skipped, never a target.
+        return BboxInfo(x=20.0, y=20.0, z=12.2, volume=1.0)
+
+    result = _run_loop(
+        llm_script=llm,
+        render_script=renders,
+        stated=(0.0, 0.0, 12.0),  # only H confirmed
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    # The named-params bit is True — the unconfirmed ``spacer_width = 20``
+    # is NOT flagged as a magic number (if it were, the loop would
+    # exhaust on ``stated_dims_not_named_parameters``).
+    assert result.best.score.bits[3] is True
+    # The partial pass still carries the abstention flag (W/D were never
+    # checked) — per-axis reality.
+    assert result.best.score.bbox_abstained is True
+
+
 def test_early_stop_after_two_consecutive_no_improvements():
     # A DECLINING rank sequence proves the no-improvement stop is active
     # (not just the cap): 2 → 0 → 0 hits two consecutive non-improvements

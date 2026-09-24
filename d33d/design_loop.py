@@ -146,11 +146,15 @@ class BboxInfo:
     "a 20mm cube with a 10mm sphere beside it" renders one STL holding
     several disjoint bodies, and comparing the whole-assembly bbox against
     the single stated triple made the gate unsatisfiable by construction).
-    The bbox gate compares the stated triple against the BEST-MATCHING
-    component when ``components`` is non-empty; when it is empty the gate
-    takes the whole-part path exactly as before, so every existing caller
-    that builds ``BboxInfo(x, y, z, volume)`` sees byte-for-byte the old
-    behaviour (an empty breakdown means "no component data", never "one
+    The bbox gate compares the confirmed set against the BEST-MATCHING
+    component only for a FULL positive (W, D, H) triple and a non-empty
+    ``components`` breakdown (issue #247: with a PARTIAL confirmed set
+    there is no well-defined component selection, so a partial triple
+    compares its confirmed axes against the whole-mesh extents instead);
+    when ``components`` is empty the gate takes the whole-part path
+    exactly as before, so every existing caller that builds
+    ``BboxInfo(x, y, z, volume)`` sees byte-for-byte the old behaviour
+    (an empty breakdown means "no component data", never "one
     component").
     """
 
@@ -183,6 +187,10 @@ class Score:
     #: partial triples where the known axes happen to match: an unknown
     #: axis was never measured, so the pass must carry the flag even when
     #: every measured axis passed. Never True on an all-known triple.
+    #: Per-axis (issue #247): a partially confirmed run (e.g. only H
+    #: confirmed, H passing) carries the flag — it means "not every axis
+    #: was checked", and is False only for a fully confirmed, fully
+    #: measured pass.
     bbox_abstained: bool = False
 
     @property
@@ -283,16 +291,6 @@ GATE_REASON_BITS: tuple[str, ...] = (
 # ---------------------------------------------------------------------------
 
 
-def _component_per_axis_difference(
-    extents: tuple[float, float, float], stated: tuple[float, float, float]
-) -> float:
-    """Sum of the absolute per-axis differences between a component's
-    extents and the stated triple — the best-match metric (issue #100).
-    Every stated axis is known here (the caller abstains first), so no
-    axis is skipped."""
-    return sum(abs(extent - target) for extent, target in zip(extents, stated))
-
-
 def best_match_component(
     bbox: BboxInfo, stated: tuple[float, float, float]
 ) -> tuple[float, float, float] | None:
@@ -308,6 +306,13 @@ def best_match_component(
     between merged/unmerged loads of the same bodies), so the selection is
     deterministic across repeated runs and across component orderings.
 
+    The per-axis difference sums over ALL THREE axes — the caller is
+    contractually passed only a FULL POSITIVE (W, D, H) triple (issue
+    #247: :func:`_bbox_within_tolerance` compares a PARTIAL confirmed set
+    against the whole-mesh extents instead, so a component match is only
+    ever asked for when every axis is confirmed). ``None`` is never returned
+    for a non-empty breakdown, so no ``continue`` sentinel is needed.
+
     Volume here is only a TIE-BREAKER, never a conformance signal: for
     intersecting/contained shells ``split()`` double-counts the overlap in
     component volumes, so a volume comparison is not a size comparison.
@@ -317,7 +322,7 @@ def best_match_component(
     ranked = sorted(
         bbox.components,
         key=lambda c: (
-            _component_per_axis_difference(c[:3], stated),
+            sum(abs(e - t) for e, t in zip(c[:3], stated)),
             -(c[3] if len(c) > 3 else 0.0),
             c[4] if len(c) > 4 else 0.0,
             c[5] if len(c) > 5 else 0.0,
@@ -328,49 +333,94 @@ def best_match_component(
 
 
 def _bbox_within_tolerance(
-    bbox: BboxInfo, stated: tuple[float, float, float]
+    bbox: BboxInfo, stated: tuple[float, ...]
 ) -> bool:
-    """True iff every rendered axis is within max(1%, 0.5 mm) of the
-    corresponding stated dimension (order x, y, z).
+    """True iff every rendered axis the user CONFIRMED is within
+    max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).
 
-    A stated axis of ``<= 0`` means that dimension is UNKNOWN (the caller
-    normalizes absent/zero dimensions into the triple — ticket #91), so
-    the gate ABSTAINS (True): an unmeasurable gate must not hard-fail
-    every candidate. The abstention is recorded DISTINCTLY by
-    :func:`score`'s ``bbox_abstained`` field — it is never a vacuous,
-    unmarked pass.
+    ``stated`` is the per-axis confirmed set normalized into the triple
+    (issue #247): an axis the user did NOT confirm is ``<= 0`` in the
+    triple and is SKIPPED (per-axis abstention) — an unconfirmed axis is
+    not a measurement target, so it neither fails nor passes the gate.
+    The gate ABSTAINS entirely (returns True without measuring) only when
+    NO axis is confirmed; it is the caller (:func:`score`) that records
+    the abstention DISTINCTLY in ``Score.bbox_abstained`` — an abstained
+    pass is never a vacuous, unmarked one.
 
     Issue #100 — multi-part meshes: when ``bbox.components`` is non-empty
-    the stated triple is compared against the BEST-MATCHING component
-    (the component whose extents are closest to the triple — see
+    the confirmed set is compared against the BEST-MATCHING component
+    (the component whose extents are closest to the confirmed axes — see
     :func:`best_match_component`) instead of the whole-assembly extents:
     a stated single-body triple can never match a whole-assembly bbox that
     contains additional bodies, so the whole-assembly comparison made any
-    multi-part request unsatisfiable by construction. The abstain check
-    runs BEFORE any component work (ticket #91 semantics preserved exactly).
+    multi-part request unsatisfiable by construction.
 
-    Degradation is explicit (issue #100): when the mesh splits to exactly
-    one watertight component the gate compares that component against the
-    triple — which is byte-for-byte what the whole-part comparison is for
-    a single body (the single component IS the assembly). Fused/
-    intersecting geometry that OpenSCAD's CSG merged into one shell also
-    yields one component and therefore behaves as today: the gate measures
-    the union extents, not a per-feature decomposition. A mesh that splits
-    to ZERO components (a genuinely broken/non-watertight mesh) fails the
-    gate — a vacuous pass here would repeat the exact defect class issue
-    #84 removed, so a zero-component split is never treated as "no bodies,
+    Documented choice (issue #247): :func:`best_match_component` needs a
+    FULL (W, D, H) confirmed triple to rank components — with a PARTIAL
+    confirmed set there is no well-defined "best-matching component" (the
+    ranking would compare against axes the user never confirmed), so a
+    partial set compares its confirmed axes against the WHOLE-MESH extents
+    instead. Consequence: a user who confirms only H on a two-body design
+    gets the gate measured against the union bbox's z — a component whose
+    own z fits can still fail when the assembly's z does not. That is the
+    conservative (fail-safe) direction: the assembly can only be LARGER
+    than the part, so a whole-mesh comparison cannot under-report a
+    confirmed-axis error.
+
+    Degradation is explicit (issue #100): a mesh that splits to exactly
+    one watertight component compares that component against the confirmed
+    axes — which is byte-for-byte the whole-part comparison for a single
+    body (the single component IS the assembly). Fused/intersecting
+    geometry that OpenSCAD's CSG merged into one shell also yields one
+    component and therefore behaves the same: the gate measures the union
+    extents, not a per-feature decomposition. A mesh that splits to ZERO
+    components (a genuinely broken/non-watertight mesh) fails the gate —
+    a vacuous pass here would repeat the exact defect class issue #84
+    removed, so a zero-component split is never treated as "no bodies,
     nothing to measure". That case is reachable only through the
     production ``bbox_from_render`` seam (which sets ``components``);
-    test-built ``BboxInfo``s without a breakdown keep the legacy
-    whole-part comparison.
+    test-built ``BboxInfo``s without a breakdown keep the legacy whole-part
+    comparison.
     """
-    for target in stated:
-        if target <= 0:
-            return True
-    extents = best_match_component(bbox, stated)
-    if extents is None:
+    # Normalize to a 3-tuple with ``0.0`` for any absent axis (per-axis
+    # semantics — issue #247): callers pass the per-axis confirmed set as
+    # either a full 3-tuple (legacy) or a shorter tuple naming only the
+    # CONFIRMED axes in W→x, D→y, H→z order (a partial set — the rest are
+    # unconfirmed). Zero-filling makes the zip below always 3-wide, so
+    # each unconfirmed axis maps to target ``<= 0`` (skipped) and the
+    # branch test below sees the true confirmed shape.
+    stated = tuple(stated) + (0.0,) * (3 - len(stated))
+    if not any(t > 0 for t in stated):
+        # No axis confirmed: the gate abstains (True) — an unmeasurable
+        # gate must not hard-fail every candidate (ticket #91). The
+        # abstention is recorded DISTINCTLY by :func:`score`'s
+        # ``bbox_abstained`` field, never a vacuous unmarked pass.
+        return True
+    if len(stated) > 3:
+        # A widened input over the (W, D, H) envelope: the gate measures
+        # three axes only — longer input is a caller contract violation,
+        # not a fourth measurement target (fail loudly, never silently
+        # ignore). ``_dim_params`` and the loop's normalization never
+        # produce this; it guards the seam.
+        raise ValueError(
+            f"stated dimensions must be at most 3 axes (W, D, H), got {len(stated)}"
+        )
+    if len(stated) == 3 and all(t > 0 for t in stated):
+        # Full confirmed triple + component breakdown: rank the components
+        # and compare against the best match (issue #100). Without a
+        # breakdown (``best_match_component`` returns ``None``) fall
+        # through to the whole-mesh extents (the legacy path).
+        extents = best_match_component(bbox, stated)
+        if extents is None:
+            extents = (bbox.x, bbox.y, bbox.z)
+    else:
+        # A PARTIAL confirmed set (no well-defined component selection —
+        # documented choice above): compare the confirmed axes against the
+        # whole-mesh extents.
         extents = (bbox.x, bbox.y, bbox.z)
     for extent, target in zip(extents, stated):
+        if target <= 0:
+            continue  # axis not confirmed: per-axis abstention, skip
         tol = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
         if abs(extent - target) > tol:
             return False
@@ -514,16 +564,26 @@ def score(
     Ranked by popcount; ties break on the raw bitvector tuple
     (deterministic, earlier bits first).
 
-    ``Score.bbox_abstained`` (ticket #91) marks a bbox bit that is True
-    while any stated dimension is unknown (a zero/absent axis —
-    :func:`_bbox_within_tolerance` abstains on an unknown target). The flag
-    is raised whenever ANY stated axis is unknown and the bit is True (not
-    only when the bit is true merely because of the abstention): a partial
-    triple whose known axes happen to match still leaves an unmeasured
-    axis, and that pass must be distinguishable from a fully measured one.
-    It is a SEPARATE field, not a fifth bit, so the bit ordering, the
-    ``tiebreak`` tuple, and ``GATE_REASON_BITS`` names are all unchanged
-    while the abstention stays distinguishable from a measured pass.
+    ``Score.bbox_abstained`` (ticket #91, issue #247) marks a bbox bit
+    that is True while any stated axis is unconfirmed (a zero axis —
+    :func:`_bbox_within_tolerance` skips it). The flag is True whenever
+    the bit is True and any axis is unconfirmed, INCLUDING a partial
+    pass — ``bbox_abstained`` therefore means "not every axis was
+    checked" (per-axis reality), and it is False only for a fully
+    confirmed, fully measured pass. A partial triple whose confirmed axes
+    happen to match still leaves an unmeasured axis, and that pass must
+    be distinguishable from a fully measured one. It is a SEPARATE field,
+    not a fifth bit, so the bit ordering, the ``tiebreak`` tuple, and
+    ``GATE_REASON_BITS`` names are all unchanged while the abstention
+    stays distinguishable from a measured pass.
+
+    Per-axis semantics (issue #247): ``stated_dims`` is the per-axis
+    confirmed set normalized into the triple — a partially confirmed run
+    (e.g. only H) checks ONLY H and abstains on W/D. The frame contract
+    that reads the flag (``d33d.design_loop_events``: the ``done`` /
+    version-created frames) is unchanged: the flag is always present, and
+    the old all-or-nothing meaning ("all axes unknown") is a strict
+    subset of the new one.
     """
     bits = (
         render.error_class == "ok",
@@ -571,11 +631,15 @@ def _dim_params(
     stated: tuple[float, float, float], dims: dict[str, str]
 ) -> dict[str, str]:
     """The stated dimensions as a NAMED parameter map — extra entries from
-    ``dims`` (e.g. FDM clearances) plus the stated triple as W/D/H when not
-    already named."""
+    ``dims`` (e.g. FDM clearances) plus each CONFIRMED stated axis as
+    W/D/H when not already named. An unconfirmed axis (``<= 0``) becomes
+    no define at all (issue #247: ``-DW=0`` would inject a fabricated
+    zero into the render's named-parameter channel) — only positive axes
+    are injected."""
     out = {str(k): str(v) for k, v in dims.items()}
     for name, value in zip(("W", "D", "H"), stated):
-        out.setdefault(name, str(value))
+        if value > 0:
+            out.setdefault(name, str(value))
     return out
 
 
@@ -916,10 +980,13 @@ async def run_design_loop_async(
 
     ``photo`` is the reference image (data URI / URL). ``stated_dims`` is
     the ground-truth (W, D, H) triple in mm — never estimated. ``None``
-    (or a zero/absent axis inside the triple) means "no dimensions known":
-    the bbox gate ABSTAINS (``Score.bbox_abstained``) instead of hard-
-    failing on a ``target <= 0`` target — an unmeasurable gate must not
-    fail every candidate (ticket #91). ``render_fn(scad, defines)
+    means "no axis confirmed this run": the whole gate abstains (``Score.
+    bbox_abstained``). A zero axis inside the triple means that single
+    axis is unconfirmed: it is SKIPPED per-axis (never a measurement
+    target) while the positive axes are measured — a partially confirmed
+    run (e.g. only H) checks only H, and the pass is recorded as
+    abstained unless every axis is confirmed (ticket #91 / issue #247)
+    — a gate with no confirmed target must not hard-fail every candidate. ``render_fn(scad, defines)
     -> RenderResult`` and ``llm_fn(role, messages, system) -> LLMResult``
     are injected (dependency injection, the same testable pattern as
     ``d33d.render_worker``); ``defines`` carries extra named parameters

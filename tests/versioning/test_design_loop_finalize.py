@@ -133,17 +133,23 @@ def _measured_render(artifact_dir: str) -> RenderResult:
 
 
 def _pass_result_with_bbox(
-    bbox: BboxInfo | None, *, render: RenderResult | None = None, scad: str = ""
+    bbox: BboxInfo | None,
+    *,
+    render: RenderResult | None = None,
+    scad: str = "",
+    params: dict | None = None,
 ) -> object:
     """A pass result whose ``best`` is a REAL ``IterationRecord`` carrying
     ``bbox`` on its DECLARED field (``None`` = no measurement obtained —
-    the honest abstain that must persist a NULL, never a zero triple)."""
+    the honest abstain that must persist a NULL, never a zero triple).
+    ``params`` overrides the default ``{"W": 30.0, "D": 30.0, "H": 30.0}``
+    when the test needs free-named params (issue #247: the v24 shape)."""
     record = IterationRecord(
         iteration=0,
         scad_source=scad,
         render=render if render is not None else _default_render(),
         score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
-        params={"W": 30.0, "D": 30.0, "H": 30.0},
+        params=params if params is not None else {"W": 30.0, "D": 30.0, "H": 30.0},
         bbox=bbox,
     )
 
@@ -194,6 +200,56 @@ def test_finalize_pass_persists_measured_bbox_and_render_artifact_dir(
     assert row["bbox"] == {"x": 30.4, "y": 30.0, "z": 30.0}, row["bbox"]
     # The render reference is the best render's declared durable dir.
     assert row["render_artifact_dir"] == str(tmp_path / "durable-235")
+
+
+def test_finalize_pass_persists_whole_mesh_bbox_with_free_named_params(
+    app_with_versions,
+) -> None:
+    """Issue #247: a finalize pass whose best candidate carries a v24-shaped
+    BboxInfo (1 component, free-named params — no W/D/H) still persists the
+    WHOLE-MESH bbox (non-NULL). The old ``_version_bbox_extents`` would
+    return None for this shape (no W/D/H keys to match against), so the
+    version row's bbox was NULL on the finalize path too. The new rule is
+    independent of stated dims, param names, or component count."""
+
+    async def _loop(app, **kwargs):
+        return _pass_result_with_bbox(
+            BboxInfo(
+                x=21.21,
+                y=21.43,
+                z=19.30,
+                volume=6369.8,
+                components=((21.21, 21.43, 19.30, 6369.8, 0.0, 0.0, 0.0),),
+            ),
+            scad="spacer_width = 20;\nspacer_height = 12;\ncube([spacer_width, spacer_width, spacer_height]);",
+            params={
+                "fillet_radius": 1.5,
+                "hole_clearance": 0.3,
+                "hole_diameter": 3.3,
+                "spacer_depth": 20.0,
+                "spacer_height": 12.0,
+                "spacer_width": 20.0,
+                "wall_thickness": 3.0,
+            },
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the spacer", "message": "make a spacer"},
+        )
+        row = app_with_versions.state.versions.latest_version(pid)
+        return r, row
+
+    r, row = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert row is not None, "no version persisted for a passing finalize"
+    # The persisted bbox is the whole-mesh extents — NOT None (the old
+    # code's bug: NULL bbox for this shape).
+    assert row["bbox"] == {"x": 21.21, "y": 21.43, "z": 19.30}
 
 
 def test_finalize_pass_without_measurement_persists_null_bbox(
@@ -388,7 +444,11 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         "prompt_version",
     ):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # No confirmed axis anywhere (no stated_dims in the body, no dims in
+    # the message, no version yet) → None — the abstaining state (issue
+    # #247: the dead W/D/H param-key fallback that produced (0,0,0) is
+    # gone; the gate abstains and records it as Score.bbox_abstained).
+    assert captured["stated_dims"] is None
     assert callable(captured["render_fn"])
     assert callable(captured["llm_fn"])
     assert isinstance(captured["prompt_version"], str) and captured["prompt_version"]
@@ -759,8 +819,10 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     the composed request text (instruction prefixed with the view_id and,
     when named modules resolve, with module_ids + "at the marked point",
     non-empty), the marked PNG as a data URI (NOT the stored photo),
-    stated_dims from the latest version's W/D/H ((0,0,0) for a fresh
-    project), an EMPTY chat_history (a scoped directive, not a chat turn —
+    stated_dims from the latest version row's persisted per-axis
+    confirmed set (None for a fresh project — the gate abstains;
+    issue #247 removed the (0,0,0) zero-triple fallback), an EMPTY
+    chat_history (a scoped directive, not a chat turn —
     even when the project has prior transcripts), and a callable bbox_fn."""
     captured: dict = {}
 
@@ -803,10 +865,12 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # photo: the marked PNG from the body as a data URI (the vision model
     # sees the marked-up render, not the stored reference photo).
     assert captured["photo"] == f"data:image/png;base64,{_REGION_EDIT_PNG_BASE64}"
-    # stated_dims: fresh project (no versions) → (0, 0, 0), passed verbatim;
-    # the bbox gate ABSTAINS on the unknown target (recorded as
-    # Score.bbox_abstained, ticket #91) instead of hard-failing it.
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # stated_dims: fresh project (no confirmed axis anywhere) → None;
+    # the bbox gate ABSTAINS entirely (recorded as Score.bbox_abstained,
+    # ticket #91) instead of hard-failing every candidate. Issue #247
+    # removed the (0,0,0) zero-triple hand-off and the dead W/D/H
+    # param-key read behind it.
+    assert captured["stated_dims"] is None
     # chat_history: the EMPTY tuple — a region edit is a scoped directive,
     # not a chat turn (the project's transcript is never auto-included).
     assert captured["chat_history"] == ()
@@ -821,10 +885,17 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # ``Request:`` line is removed from _design_messages.
     from d33d.design_loop import _design_messages
 
+    # ``None`` (no confirmed axis) is the abstaining state — the loop
+    # normalizes it to the zero triple before the prompt renders
+    # (``not specified`` per axis, never "0 mm"); test the same shape
+    # the loop core hands the prompt builder.
+    stated = captured["stated_dims"]
+    if stated is None:
+        stated = (0.0, 0.0, 0.0)
     rendered = _design_messages(
         photo=captured["photo"],
         chat_history=captured["chat_history"],
-        stated=captured["stated_dims"],
+        stated=stated,
         repair=None,
         request=captured["request"],
     )
@@ -835,10 +906,12 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     )
 
 
-def test_region_edit_stated_dims_from_latest_version(app_with_versions):
-    """stated_dims is ALWAYS derived from the latest version's W/D/H
-    (no client override for region edits) — a project with an existing
-    version passes that version's W/D/H, not (0,0,0)."""
+def test_region_edit_stated_dims_none_gate_abstains(app_with_versions):
+    """A region edit carries NO dimension statement, so the loop
+    receives ``None`` — the gate abstains, as before issue #247 (there
+    is no persisted fallback for the gate; the 3MF export route's
+    ``latest_version_stated_dims`` is the only reader of the column on
+    the loop side)."""
     captured: dict = {}
 
     async def _loop(app, **kwargs):
@@ -848,7 +921,14 @@ def test_region_edit_stated_dims_from_latest_version(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        # Free-named params + the persisted per-axis confirmed set (the
+        # production shape — the model never emits W/D/H keys, so the
+        # dead param-key read could never see these dimensions).
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_depth": 8.0, "spacer_height": 5.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
         app_with_versions.state.run_design_loop = _loop
         r = await client.post(
             f"/api/projects/{pid}/region-edits", json=_region_edit_body()
@@ -861,7 +941,7 @@ def test_region_edit_stated_dims_from_latest_version(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_region_edit_pass_creates_version_visible_in_get_versions(

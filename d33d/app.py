@@ -94,7 +94,10 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
-from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, latest_version_stated_dims
+from d33d.design_loop_events import (
+    EMPTY_PHOTO_DATA_URI,
+    latest_version_stated_dims,
+)
 from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
@@ -970,11 +973,12 @@ def create_app(
             )
 
         # ``stated_mm`` ABSTAINS, it does not compare against zero: the
-        # latest version's W/D/H via ``latest_version_stated_dims`` — a
-        # fully-positive triple, or ``None`` when any axis is missing,
-        # null, or <= 0 (so ``validate_stl``'s dimension gate skips rather
-        # than measuring a perfectly good model against 0.0 and failing
-        # it — the #91 bug). A bbox-gate abstention is still ``ok=True``
+        # latest version's confirmed W/D/H via ``latest_version_stated_dims``
+        # — a fully-positive triple, or ``None`` when any axis is missing
+        # from (or <= 0 in) that version's persisted ``stated_dims`` column
+        # (issue #247 — the helper no longer reads W/D/H param keys), so
+        # ``validate_stl``'s dimension gate skips rather than measuring a
+        # perfectly good model against 0.0 and failing it (the #91 bug). A bbox-gate abstention is still ``ok=True``
         # (issue #91); the route carries no metadata claiming otherwise —
         # a 3MF served under an abstention is a valid millimetre artefact.
         stated = latest_version_stated_dims(versions, project_id)
@@ -1068,11 +1072,12 @@ def create_app(
           the stored reference photo); the fixed transparent-PNG constant
           is the fallback only if the (schema-required) field were ever
           absent.
-        - ``stated_dims`` = the latest version's W/D/H (a fresh project
-          yields ``(0.0, 0.0, 0.0)`` — the gate then ABSTAINS on the
-          unknown target rather than measuring it, recorded distinctly as
-          ``Score.bbox_abstained``; ticket #91); there is no client
-          override for region edits.
+        - ``stated_dims`` = always ``None`` — a region edit carries NO
+          dimension statement, so the gate ABSTAINS entirely, recorded
+          distinctly as ``Score.bbox_abstained`` (ticket #91 / issue
+          #247). There is deliberately no persisted fallback and no
+          client override: the gate enforces only the axes the current
+          run's input confirmed, and a region edit confirms nothing.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
         - ``request`` = the instruction prefixed with the ``view_id`` and,
@@ -1119,20 +1124,15 @@ def create_app(
             if image_bytes
             else EMPTY_PHOTO_DATA_URI
         )
-        # Stated dims: the latest version's W/D/H (no client override —
-        # a region edit is a scoped directive). Fresh project (or a version
-        # with missing/zero W/D/H) → (0,0,0): the bbox gate ABSTAINS on the
-        # unknown target (the design loop records it as
-        # Score.bbox_abstained, ticket #91) — the gate measures rather than
+        # Stated dims: a region edit carries NO dimension statement, so
+        # the gate ABSTAINS (``None``). Pre-#247 the route passed a zero
+        # triple; #247 replaced it with the abstaining ``None`` (the gate
+        # enforces only the axes the current run's input confirmed, and a
+        # region edit confirms nothing — no persisted fallback, issue
+        # #247's operator decision). The gate measures rather than
         # fabricates, and an unmeasurable gate must not hard-fail every
         # candidate.
-        latest = app.state.versions.latest_version(project_id)
-        p = latest["params"] if latest is not None else {}
-        stated_dims = (
-            float(p.get("W", 0.0)),
-            float(p.get("D", 0.0)),
-            float(p.get("H", 0.0)),
-        )
+        stated_dims: tuple[float, float, float] | None = None
 
         # The composed request text: the instruction prefixed with the view
         # id, and with the resolved module_ids only when the pick resolved

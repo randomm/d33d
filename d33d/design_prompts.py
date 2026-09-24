@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d.config.catalogue import Catalogue, resolve_call_params
+from d33d.design_loop import _dim_axis_list
 
 __all__ = [
     "BOSL2_CHEATSHEET_PATH",
@@ -196,7 +197,7 @@ def design_prompt(
 
     lines: list[str] = [
         DESIGN_ROLE_CORE,
-        f"Ground-truth dimensions (mm): W={stated_dims[0]:g}, D={stated_dims[1]:g}, H={stated_dims[2]:g}.",
+        f"Ground-truth dimensions (mm): {_dim_axis_list(stated_dims)}.",
         "",
         "FDM tolerance table (emit as named parameters, never hard-coded):",
     ]

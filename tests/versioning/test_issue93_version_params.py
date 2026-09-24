@@ -934,57 +934,31 @@ def test_latest_version_stated_dims_omitted_axes_yields_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chat_follow_up_latest_version_fallback_supplies_dims(
-    app_with_versions,
-):
-    """FOLLOW-UP TURN (issue #93 cascade): a project that NOW HAS a
-    version (created by a passing first turn) — the latest-version
-    fallback actually supplies the dims (currently a no-op because no
-    version ever exists). The loop seam captures the stated_dims it
-    receives."""
-    scad = "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);"
-    from d33d.design_loop import BboxInfo, run_design_loop_async
-
-    bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
-
-    def _loop_impl(scad_text, bbox_):
-        async def _render(scad_source, defines):
-            return _ok_render(scad_source)
-
-        async def _loop(app, **kwargs):
-            return await run_design_loop_async(
-                photo=kwargs["photo"],
-                chat_history=kwargs["chat_history"],
-                stated_dims=kwargs["stated_dims"],
-                render_fn=_render,
-                llm_fn=_stub_llm(scad_text),
-                bbox_fn=lambda r: bbox_,
-            )
-
-        return _loop
-
-    captured_turn2: dict = {}
+def test_chat_follow_up_cueless_message_abstains(app_with_versions):
+    """FOLLOW-UP TURN (issue #247): a project that HAS a version whose
+    persisted ``stated_dims`` column carries a full W/D/H triple — a
+    follow-up message that states no dimensions confirms nothing, so the
+    gate ABSTAINS: the loop seam captures ``None`` (no carry-forward of
+    confirmed dimensions across turns — the operator decision that
+    superseded the persisted-set fallback; carry-forward is a separate
+    product decision)."""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-
-        # Turn 1: a passing turn with KNOWN dimensions creates a version.
-        app_with_versions.state.run_design_loop = _loop_impl(scad, bbox)
-        r1 = await client.post(
-            f"/api/projects/{pid}/chat",
-            json={"message": "Create a 20mm cube", "chat_history": []},
+        # A version whose PERSISTED per-axis confirmed set is a full triple
+        # (the stated_dims column — issue #246), written by the design-loop
+        # adapter, not by W/D/H param keys.
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 20.0, "spacer_height": 20.0, "spacer_depth": 20.0},
+            stated_dims={"W": 20.0, "D": 20.0, "H": 20.0},
         )
-        source1 = app_with_versions.state.event_sources.get(pid)
-        assert source1 is not None
-        async for event, data in source1:
-            if event in ("done", "error"):
-                break
-        timeline1 = (await client.get(f"/api/projects/{pid}/versions")).json()
 
-        # Turn 2: a follow-up message with NO stated dimensions — the
-        # latest version's W/D/H must supply the triple (the fallback
-        # that was a no-op before the fix because no version ever existed).
+        # A follow-up message with NO stated dimensions — the current
+        # turn confirms nothing, so the gate abstains (None); there is no
+        # persisted fallback to carry the previous turn's dimensions
+        # forward (issue #247's operator decision).
         def _capture_loop(app, **kwargs):
             captured_turn2.update(kwargs)
 
@@ -996,10 +970,6 @@ def test_chat_follow_up_latest_version_fallback_supplies_dims(
             return _R()
 
         app_with_versions.state.run_design_loop = _capture_loop
-        # Release the in-flight flag (the SSE endpoint's finally would do
-        # this in production, but we drove the generator directly — the
-        # flag is not cleared when the consumer stops early).
-        app_with_versions.state.design_loop_inflight.discard(pid)
         r2 = await client.post(
             f"/api/projects/{pid}/chat",
             json={"message": "make it a bit rounder", "chat_history": []},
@@ -1009,14 +979,14 @@ def test_chat_follow_up_latest_version_fallback_supplies_dims(
         async for event, data in source2:
             if event in ("done", "error"):
                 break
-        return r1, r2, timeline1
+        return r2
 
-    r1, r2, timeline1 = run_async(app_with_versions, _call)
-    assert r1.status_code == 202, r1.text
-    assert len(timeline1) == 1, "turn 1 must have created a version"
-    # The fallback supplies the dims — not None, not (0,0,0).
+    captured_turn2: dict = {}
+    r2 = run_async(app_with_versions, _call)
+    # The cueless follow-up confirms nothing — None (abstain), not the
+    # stale persisted triple and never (0,0,0).
     assert r2.status_code == 202, r2.text
-    assert captured_turn2["stated_dims"] == (20.0, 20.0, 20.0)
+    assert captured_turn2["stated_dims"] is None
     assert captured_turn2["stated_dims"] != (0.0, 0.0, 0.0)
 
 

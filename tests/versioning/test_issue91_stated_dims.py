@@ -4,15 +4,17 @@ an unsatisfiable ``target <= 0`` bbox target to EVERY browser-driven turn
 (the gate hard-failed, the loop exhausted, and the design prompt carried
 "W=0, D=0, H=0").
 
-The fix (per the PM's settled decisions):
+The fix (per the PM's settled decisions, refined by issue #247's per-axis
+operator decision):
 
-* Dimension source, strict precedence —
-  (a) the user's own message, via the EXISTING
-  ``d33d.dimension_protocol`` extraction (``stated_dims_from_message``
-  reuses ``_extract_stated`` — never a new parser);
-  (b) else the latest version's W/D/H (``latest_version_stated_dims``,
-  the same fallback the finalize seam uses);
-  (c) else ``None`` — never a zero triple.
+* Dimension source — ONLY the current turn's input: the user's own
+  message, via the EXISTING ``d33d.dimension_protocol`` extraction
+  (``stated_dims_from_message`` reuses ``_extract_stated`` — never a new
+  parser); else ``None`` — never a zero triple. There is NO fallback to
+  the latest version's persisted W/D/H (the ``latest_version_stated_dims``
+  helper survives for the 3MF export seam, not the loop-facing chat
+  route): a cueless follow-up confirms nothing, so the gate abstains
+  rather than enforcing an axis confirmed on an earlier turn.
 * Abstain semantics — with no known dimensions the bbox gate ABSTAINS
   (``_bbox_within_tolerance`` returns True on an unknown axis) and the
   abstention is recorded DISTINCTLY in ``Score.bbox_abstained`` — an
@@ -40,7 +42,9 @@ from d33d.design_loop import (
     run_design_loop,
     score,
 )
-from d33d.design_loop_events import latest_version_stated_dims
+from d33d.design_loop_events import (
+    latest_version_stated_dims,
+)
 from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
@@ -88,7 +92,6 @@ def test_chat_spa_shape_message_with_dims_extracts_stated_dims(app_with_versions
     only ``message`` + ``chat_history``, no ``stated_dims`` — with the
     message stating a dimension. The loop receives the usable (non-zero)
     triple extracted from the message itself, never (0, 0, 0)."""
-
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
@@ -105,6 +108,10 @@ def test_chat_spa_shape_message_with_dims_extracts_stated_dims(app_with_versions
     assert captured["stated_dims"] == (20.0, 20.0, 20.0)
     assert captured["stated_dims"] != (0.0, 0.0, 0.0)
     assert frames[-1][0] == "done"
+    # NOTE: the drive stub in this test returns a pass result without a
+    # best record, so no version row is created — the adapter's version
+    # persistence is covered by the dedicated capture tests below (the
+    # gate-triple assertions above are the point of this test).
 
 
 def test_chat_spa_shape_message_without_dims_abstains_not_zero(app_with_versions):
@@ -129,15 +136,25 @@ def test_chat_spa_shape_message_without_dims_abstains_not_zero(app_with_versions
     assert captured["stated_dims"] != (0.0, 0.0, 0.0)
 
 
-def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
-    """Follow-up turn: a project WITH a latest version and a message that
-    states no dimensions — the latest version's W/D/H supplies the triple
-    (the fallback the finalize seam uses), not (0, 0, 0) and not None."""
+def test_chat_follow_up_cueless_message_abstains_no_persisted_fallback(app_with_versions):
+    """Follow-up turn: a project WITH a latest version whose persisted
+    ``stated_dims`` column carries a full W/D/H triple and a message that
+    states no dimensions — the loop receives ``None`` (the gate
+    abstains): the gate enforces only the axes the current turn's input
+    confirmed, and a cueless follow-up confirms nothing (issue #247's
+    operator decision — no carry-forward of a stale persisted triple
+    into the gate), never the stale persisted set and never (0, 0, 0)."""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        # A version whose PERSISTED per-axis confirmed set is a full triple
+        # (the stated_dims column — issue #246), not W/D/H param keys.
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_height": 5.0, "spacer_depth": 8.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
         return await _drive_chat(
             app_with_versions,
             client,
@@ -147,7 +164,7 @@ def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
 
     r, captured, _frames = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_chat_latest_version_zero_dims_abstains_not_zero(app_with_versions):
@@ -220,12 +237,13 @@ def test_chat_body_stated_dims_passed_verbatim(app_with_versions):
 
 
 def test_latest_version_stated_dims_helper_partial_version_yields_none() -> None:
-    """A version with only SOME of W/D/H stated → None (abstain), not a
-    partially-zero triple that would still hard-fail the gate."""
+    """A version whose persisted ``stated_dims`` column has only SOME of
+    W/D/H → None (abstain), not a partially-zero triple that would still
+    hard-fail the gate."""
 
     class _Svc:
         def latest_version(self, project_id):
-            return {"params": {"W": 10.0}}
+            return {"params": {"W": 10.0}, "stated_dims": {"W": 10.0}}
 
     assert latest_version_stated_dims(_Svc(), 1) is None
 
@@ -239,11 +257,30 @@ def test_latest_version_stated_dims_helper_no_version_yields_none() -> None:
 
 
 def test_latest_version_stated_dims_helper_complete_version() -> None:
+    """A version whose persisted ``stated_dims`` column has all three
+    axes → the full triple (W, D, H)."""
+
     class _Svc:
         def latest_version(self, project_id):
-            return {"params": {"W": 10.0, "D": 8.0, "H": 6.0}}
+            return {
+                "params": {"spacer_width": 10.0},
+                "stated_dims": {"W": 10.0, "D": 8.0, "H": 6.0},
+            }
 
     assert latest_version_stated_dims(_Svc(), 1) == (10.0, 8.0, 6.0)
+
+
+def test_latest_version_stated_dims_helper_null_stated_dims_yields_none() -> None:
+    """Issue #247: a version with W/D/H param keys but a NULL
+    ``stated_dims`` column (a pre-#246 row) → None (abstain), NOT a
+    triple re-derived from the param keys. The dead W/D/H param-key
+    read is gone."""
+
+    class _Svc:
+        def latest_version(self, project_id):
+            return {"params": {"W": 12.0, "D": 8.0, "H": 5.0}, "stated_dims": None}
+
+    assert latest_version_stated_dims(_Svc(), 1) is None
 
 
 # ---------------------------------------------------------------------------
@@ -628,12 +665,13 @@ def _region_edit_body() -> dict:
     }
 
 
-def test_region_edit_fresh_project_still_passes_zero_triple(app_with_versions):
-    """REGRESSION GUARD: ``create_region_edit``'s deliberate fresh-project
-    ``(0.0, 0.0, 0.0)`` triple is passed to the loop VERBATIM (ticket #91
-    did not change what that route hands the loop — it changed what the
-    gate does with a zero triple: it now ABSTAINS instead of hard-failing
-    it, recorded as ``Score.bbox_abstained``)."""
+def test_region_edit_fresh_project_passes_none_not_zero_triple(app_with_versions):
+    """A region edit on a fresh project (no confirmed axis anywhere) hands
+    the loop ``None`` — the gate abstains ENTIRELY (ticket #91's
+    ``Score.bbox_abstained``). Issue #247 removed the deliberate
+    ``(0.0, 0.0, 0.0)`` zero-triple hand-off (and the dead W/D/H param-key
+    read behind it): ``None`` is the abstaining state, and a zero triple
+    is never a gate target."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict = {}
@@ -657,13 +695,18 @@ def test_region_edit_fresh_project_still_passes_zero_triple(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    assert captured["stated_dims"] is None
 
 
-def test_region_edit_latest_version_still_uses_version_dims(app_with_versions):
-    """REGRESSION GUARD: a region edit with an existing version still
-    passes that version's W/D/H verbatim (the region-edits fallback is
-    untouched)."""
+def test_region_edit_latest_version_abstains_no_persisted_fallback(
+    app_with_versions,
+):
+    """A region edit with an existing version hands the loop ``None`` —
+    a region edit carries NO dimension statement, so the gate abstains,
+    as before issue #247: there is no persisted fallback for the gate
+    (the 3MF export route still reads the column via
+    ``latest_version_stated_dims``; the loop-facing region-edit route
+    does not)."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict = {}
@@ -675,7 +718,13 @@ def test_region_edit_latest_version_still_uses_version_dims(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        # Free-named params + the persisted per-axis confirmed set (the
+        # production shape — the model never emits W/D/H keys).
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_depth": 8.0, "spacer_height": 5.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
         app_with_versions.state.run_design_loop = _loop
         r = await client.post(
             f"/api/projects/{pid}/region-edits", json=_region_edit_body()
@@ -688,15 +737,15 @@ def test_region_edit_latest_version_still_uses_version_dims(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
     app_with_versions,
 ) -> None:
-    """PINNED NEW BEHAVIOUR (ticket #91): a region edit on a FRESH project
-    (no versions, so ``create_region_edit`` deliberately passes
-    ``(0.0, 0.0, 0.0)``) drives the loop so that the bbox bit is True via
+    """PINNED NEW BEHAVIOUR (ticket #91 / issue #247): a region edit on a
+    FRESH project (no confirmed axis anywhere, so the route hands the
+    loop ``None``) drives the loop so that the bbox bit is True via
     ABSTENTION — ``Score.bbox_abstained`` is True — not via a measurement.
 
     Before ticket #91 this same candidate scored the bbox bit False
@@ -763,10 +812,9 @@ def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
     assert frames[-1][0] == "done", f"expected done frame, got {frames[-1]}"
     # The pass creates a version via the loop result's best iteration
     # (the stubbed render has no durable artifacts — the frame omits them).
-    # The route still passes its deliberate fresh-project (0,0,0) triple
-    # verbatim — ticket #91 changed what the gate does with it, not what
-    # the route hands over.
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # The route hands over None — no confirmed axis anywhere abstains
+    # entirely (issue #247 removed the deliberate (0,0,0) hand-off).
+    assert captured["stated_dims"] is None
     # The REAL loop's own score: the bbox bit is True AND the pass is
     # recorded distinctly as an abstention (before #91 this same candidate
     # scored the bbox bit False — target <= 0 hard-failed — and the loop
@@ -775,8 +823,8 @@ def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
     assert results[0].status == "pass"
     assert results[0].best.score.bits == (True, True, True, True)
     assert results[0].best.score.bbox_abstained is True, (
-        "the bbox bit is True ONLY because the (0,0,0) target is unknown "
-        "— the abstention must be recorded distinctly"
+        "the bbox bit is True ONLY because no axis is confirmed "
+        "(the target is unknown) — the abstention must be recorded distinctly"
     )
 
 
