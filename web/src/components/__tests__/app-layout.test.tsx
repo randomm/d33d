@@ -698,6 +698,49 @@ describe("App layout", () => {
     });
   });
 
+  it("pass + offer in one done frame → distinct message ids, both rendered (issue #250)", async () => {
+    // A done frame carrying BOTH a pass (version-created) and an offer
+    // (confirm_offer + confirm_sentence) in a single frame: the App must
+    // create TWO distinct messages (the pass card's turn + the offer's
+    // plain turn) with DIFFERENT ids — a `Date.now()`-based id would
+    // collide on the same-millisecond pair (duplicate React keys, one
+    // message clobbering the other's render).
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onProgress("version-created", {
+        step: "version-created",
+        version_id: 3,
+      });
+      // The done frame carries BOTH the pass and the offer in one frame.
+      handlers.onDone?.({
+        message: "Design loop passed validation",
+        confirm_offer: "wall_thickness",
+        confirm_sentence: "I assumed 3 for wall thickness. Want it different?",
+      });
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make a box");
+    // Wait for the send to fully settle (postChat resolves, streamEvents
+    // fires, the version-created + done frames are processed, the timeline
+    // refetch completes).
+    // Wait for the version-created frame's timeline refetch to land.
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The offer message (a plain assistant turn after the pass card).
+    const offerText = "I assumed 3 for wall thickness. Want it different?";
+    const offerTurn = await screen.findByText(offerText);
+    expect(offerTurn).toBeTruthy();
+    // Two distinct assistant messages: the pass card's turn + the offer.
+    const assistantMsgs = screen.getAllByTestId("chat-msg-assistant");
+    expect(assistantMsgs.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
     // W10: the views map is on the wire in the version-created frame; the
     // pass card (via ChatPanel) is what displays it. The App-level `renders`

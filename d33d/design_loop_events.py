@@ -614,31 +614,39 @@ def _version_confirm_hints(result: Any) -> tuple[str | None, str | None]:
 
 
 async def _resolve_offer(
-    app: Any, project_id: int, version_id: int | None, result: Any, prev_version: Any
+    app: Any,
+    project_id: int,
+    version_id: int | None,
+    result: Any,
+    prev_version: Any,
+    prev_confirmed: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve the pending offer for a passing design pass (issue #250).
 
     On a pass (``version_id`` set): pick AT MOST ONE assumed param of the
-    NEW version (``d33d.confirm_offer.select_offer_candidate`` — a
-    declared-axis assumed param first, else the model's validated
-    ``confirm_first``; a param already confirmed or changed by the user is
-    never re-offered), build the sentence (the model's
+    NEW version, EXCLUDING any param the caller passes in
+    ``prev_confirmed`` (the pre-pass latest version's ``confirmed_params``
+    — the CALLER reads it and passes it explicitly, per project, so
+    interleaved passes on different projects can never read each other's
+    confirmed set) and any param the user changed (the diff vs
+    ``prev_version``'s params — a param already confirmed or user-changed
+    is never re-offered), then build the sentence (the model's
     ``confirm_sentence`` only when it names the chosen value AND passes
-    the issue #249 number guard against the new version's design-state
-    block, else the deterministic template), and persist the offer
-    server-side (``versions.set_pending_offer`` — the acceptance check in
+    the issue #249 number guard against the NEW version's own design-state
+    block — the new row's ``confirmed_params``, never the pre-pass set —
+    else the deterministic template), and persist the offer server-side
+    (``versions.set_pending_offer`` — the acceptance check in
     ``post_chat`` reads it, never the client). Returns the done frame's
     additive ``offer`` field ``{"param", "sentence"}``.
 
     No confirmed-set carry-forward is written: the NEW version row's
     ``confirmed_params`` stays NULL until the user accepts THAT
     version's offer — a confirmation the user made on a PREVIOUS version
-    is still honoured on the new row by the selection (the previous
-    version's confirmed set, stashed in ``app.state`` by the adapter, is
-    what excludes a carried param from being re-offered) and by rule (b)
-    (the design-state block re-checks the value against the row's own
-    set, which is empty until the user accepts this version's offer — a
-    value change in this version breaks the chain by construction).
+    is still honoured on the new row by the selection (``prev_confirmed``
+    excludes a carried param from being re-offered) and by rule (b) (the
+    design-state block re-checks the value against the row's own set, which
+    is empty until the user accepts this version's offer — a value change
+    in this version breaks the chain by construction).
 
     ``None`` in every no-offer case (no new version, no eligible param,
     offer state write failed — logged, never fatal).
@@ -658,12 +666,14 @@ async def _resolve_offer(
         return None
     params: dict[str, Any] = dict(new_version["params"] or {})
     meta = new_version["param_meta"]
-    # The confirmed set for selection is the PREVIOUS version's
-    # ``confirmed_params`` (the stashed pre-pass value): a param the
+    # The confirmed set for SELECTION is the pre-pass latest version's
+    # ``confirmed_params`` (the caller's ``prev_confirmed`` — read and
+    # passed explicitly, never stashed in ``app.state`` where an
+    # interleaved pass on another project could read it): a param the
     # user confirmed ON A PREVIOUS version is confirmed evidence, not an
     # assumption to re-confirm — a carried forward confirmed param
     # (identical value) is excluded from the new version's offer.
-    confirmed = getattr(app.state, "_offer_prev_confirmed", None)
+    confirmed = prev_confirmed
     # The user's changed set vs the previous version (issue #250: a param
     # the user changed via the design loop — a param the user asked for
     # and whose value now differs from the previous version — is never
@@ -1108,7 +1118,13 @@ async def run_design_loop_with_events(
     kwargs["state_confirmed"] = (
         latest["confirmed_params"] if latest is not None else None
     )
-    app.state._offer_prev_confirmed = kwargs["state_confirmed"]
+    # The pre-pass confirmed set is kept in the local ``kwargs`` (issue
+    # #250's cross-project race): it feeds ONLY this pass's offer
+    # selection (``_resolve_offer(prev_confirmed=...)`` below). It is
+    # deliberately NOT stashed in ``app.state`` — with two projects'
+    # passes interleaved on the shared app, an ``app.state`` stash is
+    # project-global and a pass on project B would read project A's
+    # pre-pass set.
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)
@@ -1325,7 +1341,12 @@ async def run_design_loop_with_events(
         offer_field: dict[str, Any] | None = None
         try:
             offer_field = await _resolve_offer(
-                app, project_id, version_id, result, prev_version
+                app,
+                project_id,
+                version_id,
+                result,
+                prev_version,
+                prev_confirmed=kwargs["state_confirmed"],
             )
         except Exception:  # noqa: BLE001 — the offer must never kill the pass
             logger.exception(

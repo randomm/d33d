@@ -52,7 +52,10 @@ import of ``d33d.design_state`` or ``d33d.question_answer`` here.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: The value-equality tolerance for rule (b) promotion and the offer's
 #: "still current" checks (issue #250's operator decision: 1e-6 — a
@@ -65,6 +68,8 @@ CONFIRMED_VALUE_TOLERANCE = 1e-6
 __all__ = [
     "CONFIRMED_VALUE_TOLERANCE",
     "ack_sentence",
+    "format_param_value",
+    "is_pending_offer_acceptance",
     "offer_entry",
     "offer_sentence",
     "select_offer_candidate",
@@ -76,9 +81,14 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _format_value(value: Any) -> str:
+def format_param_value(value: Any) -> str:
     """A param value rendered for copy (``12.0`` → ``"12"``, non-numeric
-    verbatim — never a fabricated unit)."""
+    verbatim — never a fabricated unit).
+
+    The SHARED value formatter (public — ``d33d.projects``'s offer-ack
+    field uses it instead of its own copy of the same bool/number/other
+    ternary), used by :func:`offer_sentence` and :func:`ack_sentence`.
+    """
     if isinstance(value, bool):
         return str(value)
     if isinstance(value, (int, float)):
@@ -220,6 +230,10 @@ def offer_sentence(
     value_str = _format_value(entry.get("value"))
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"I assumed {value_str} for {label}. Want it different?"
+
+
+def _format_value(value: Any) -> str:  # alias — the private name predates the public one
+    return format_param_value(value)
 
 
 def ack_sentence(entry: dict[str, Any]) -> str:

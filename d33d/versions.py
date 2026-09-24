@@ -736,7 +736,26 @@ class VersionService:
         ``offer`` is ``{"version_id": int, "param": str}`` — the caller
         validates the param is a real assumed param of that version
         (``d33d.confirm_offer``); the writer stores the JSON as-is
-        (``None`` → NULL, the cleared state)."""
+        (``None`` → NULL, the cleared state).
+
+        Shape guard (input validation at the boundary): a non-``None``
+        offer must carry an ``int`` ``version_id`` (``bool`` excluded —
+        ``isinstance(True, int)`` is true and a bool is never a version
+        id) and a NON-EMPTY ``str`` ``param``; anything else is a
+        contract violation and raises ``ValueError`` (never silently
+        persisted — a malformed row would degrade to no offer on read
+        anyway, but the raise is the early, loud failure)."""
+        if offer is not None:
+            version_id = offer.get("version_id")
+            param = offer.get("param")
+            if not isinstance(version_id, int) or isinstance(version_id, bool):
+                raise ValueError(
+                    f"pending offer's version_id must be an int, got {version_id!r}"
+                )
+            if not isinstance(param, str) or not param:
+                raise ValueError(
+                    f"pending offer's param must be a non-empty str, got {param!r}"
+                )
         raw = json.dumps(offer) if offer else None
         self.conn.raw.execute(
             "UPDATE projects SET pending_offer = ? WHERE id = ?",
@@ -761,7 +780,23 @@ class VersionService:
         version = self.get_version(project_id, version_id)
         if version is None:
             raise LookupError(f"version {version_id} not found")
-        confirmed = dict(version["confirmed_params"] or {})
+        raw_confirmed = version["confirmed_params"]
+        # Shape guard: a malformed stored row (non-dict — a corrupted
+        # JSON load or a hand-edited row) must never 500 the acceptance
+        # flow: log a WARNING and start from ``{}`` (the new write then
+        # overwrites the row with a well-formed set).
+        if raw_confirmed is None:
+            confirmed: dict[str, Any] = {}
+        elif isinstance(raw_confirmed, dict):
+            confirmed = dict(raw_confirmed)
+        else:
+            logger.warning(
+                "confirmed_params on version %s is not a dict (%r) — "
+                "starting from an empty set",
+                version_id,
+                raw_confirmed,
+            )
+            confirmed = {}
         confirmed[name] = value
         self.conn.raw.execute(
             "UPDATE versions SET confirmed_params = ?,"

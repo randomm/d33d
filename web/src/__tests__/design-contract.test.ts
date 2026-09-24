@@ -158,6 +158,34 @@ describe("design contract", () => {
     expect(ack).not.toContain("Want it different?");
   });
 
+  it("the deck's offer template agrees in substance with the server's (issue #250)", () => {
+    // The offer sentence the USER sees is built server-side
+    // (`d33d.confirm_offer.offer_sentence`) and rendered verbatim by the
+    // SPA (the done frame's `confirm_sentence` field). The deck's
+    // `confirmOffer.offer` is a MIRROR of the server template (a testable
+    // home on the SPA side, not a second writer of the wire string) —
+    // this tripwire pins that the two templates agree in substance:
+    // same structure, same value/label slots, same closing question. A
+    // deck drift from the server template would silently desynchronise
+    // what the design contract pins here from what the backend actually
+    // emits, so the tripwire reads both sides.
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    // The SPA renders the wire string verbatim — it never substitutes its
+    // own offer template into the offer message (the offer path builds
+    // the content from `data.confirm_sentence`, not from
+    // `confirmOffer.offer`).
+    expect(appSrc).not.toMatch(/content:\s*copy\.confirmOffer\.offer\(/);
+    // The deck's mirror template carries the server's exact structure
+    // (value slot, label slot, closing question) — a deck rewrite that
+    // changes the wording without touching the server would break the
+    // design-contract pin above, so the structural tripwire here catches
+    // the other half: a deck rewrite that keeps the shape but changes a
+    // word (e.g. "Want it different?" → "Want it thinner?") would fail
+    // the exact-match assertion at the top of this file's W250 block.
+    const deck = copy.confirmOffer.offer("V", "L");
+    expect(deck).toBe("I assumed V for L. Want it different?");
+  });
+
   it("the pass card summary is a plain user-facing sentence, never system language or fabricated values", () => {
     // Issue #218: the pass card's summary line must be a copy.ts string —
     // an honest generic fallback confirming a design was produced and

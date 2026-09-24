@@ -16,6 +16,26 @@ from tests.versioning.helpers import (
 )
 
 
+def _reopen_conn(app):
+    """Reopen the app's DB connection if it was closed by a previous
+    test's lifespan teardown (the same pattern as the carried-forward
+    test above)."""
+    closed = False
+    try:
+        app.state.conn.raw.execute("SELECT 1")
+    except Exception:
+        closed = True
+    if app.state.conn is None or closed:
+        import d33d.db as _db
+        from d33d import versions as _versions_mod
+
+        fresh = _db.connect(app.state.db_path)
+        _versions_mod.migrate(fresh)
+        app.state.conn = fresh
+        app.state.versions = _versions_mod.VersionService(fresh)
+
+
+
 # ---------------------------------------------------------------------------
 # Offer selection precedence (pure — d33d.confirm_offer)
 # ---------------------------------------------------------------------------
@@ -823,3 +843,268 @@ def test_carried_forward_confirmed_param_not_re_offered(app_with_versions):
     done = [d for e, d in frames2 if e == "done"]
     assert "confirm_offer" not in done[-1], done
     assert row_offer is None
+
+
+# ---------------------------------------------------------------------------
+# Item 1: cross-project race — the pre-pass confirmed set is LOCAL, not
+# stashed in ``app.state``
+# ---------------------------------------------------------------------------
+
+
+def test_interleaved_passes_use_own_projects_confirmed_set(app_with_versions):
+    """TWO projects' passes interleaved on the shared app: each pass's
+    offer selection uses ITS OWN project's pre-pass confirmed set, never
+    the other project's. Before the fix, ``app.state._offer_prev_confirmed``
+    was a single global attribute — a pass on project B that started after
+    project A's pass would read project A's confirmed set (a param B never
+    confirmed would be excluded from B's offer, or a confirmed param would
+    be re-offered)."""
+
+    async def _loop_a(app, **kwargs):
+        # Project A: pass 1 creates a version with wall_thickness assumed.
+        return _OfferStubResult(
+            {"wall_thickness": 3.0},
+            confirm_first="wall_thickness",
+        )
+
+    async def _loop_b(app, **kwargs):
+        # Project B: pass 1 creates a version with wall_thickness assumed.
+        return _OfferStubResult(
+            {"wall_thickness": 3.0},
+            confirm_first="wall_thickness",
+        )
+
+    async def _loop_a2(app, **kwargs):
+        # Project A: pass 2 keeps wall_thickness (carried forward) and adds
+        # a new param the model flags.
+        return _OfferStubResult(
+            {"wall_thickness": 3.0, "fillet_radius": 1.5},
+            confirm_first="wall_thickness",  # the CARRIED param — must be rejected
+        )
+
+    async def _loop_b2(app, **kwargs):
+        # Project B: pass 2 keeps wall_thickness (carried forward) and adds
+        # a new param the model flags.
+        return _OfferStubResult(
+            {"wall_thickness": 3.0, "groove_depth": 2.0},
+            confirm_first="wall_thickness",  # the CARRIED param — must be rejected
+        )
+
+    async def _call(client):
+        _reopen_conn(app_with_versions)
+        svc = app_with_versions.state.versions
+
+        # Project A: pass 1 → v1_a (wall_thickness assumed, offer set).
+        proj_a = await create_project(client, "project A")
+        pid_a = proj_a["id"]
+        app_with_versions.state.run_design_loop = _loop_a
+        r_a1, _ = await _drive_chat(app_with_versions, client, pid_a, {"message": "make a part"})
+        assert r_a1.status_code == 202
+
+        # Project A: user accepts the offer (wall_thickness confirmed on v1_a).
+        inflight = app_with_versions.state.design_loop_inflight
+        if inflight is not None:
+            inflight.discard(pid_a)
+        r_a1yes, _ = await _drive_chat(app_with_versions, client, pid_a, {"message": "yes"})
+        assert r_a1yes.status_code == 202
+
+        # Project B: pass 1 → v1_b (wall_thickness assumed, offer set).
+        # This runs AFTER project A's acceptance — if the pre-pass set were
+        # stashed in app.state, project B's adapter would read project A's
+        # confirmed set (the cross-project race).
+        proj_b = await create_project(client, "project B")
+        pid_b = proj_b["id"]
+        app_with_versions.state.run_design_loop = _loop_b
+        r_b1, _ = await _drive_chat(app_with_versions, client, pid_b, {"message": "make a part"})
+        assert r_b1.status_code == 202
+
+        # Project B: user accepts the offer (wall_thickness confirmed on v1_b).
+        if inflight is not None:
+            inflight.discard(pid_b)
+        r_b1yes, _ = await _drive_chat(app_with_versions, client, pid_b, {"message": "yes"})
+        assert r_b1yes.status_code == 202
+
+        # Project A: pass 2 → v2_a. The adapter must read v1_a's confirmed
+        # set (wall_thickness confirmed) — NOT project B's set (which also
+        # confirms wall_thickness, but via project B's own acceptance). The
+        # flag names the CARRIED param → rejected → no offer.
+        if inflight is not None:
+            inflight.discard(pid_a)
+        app_with_versions.state.run_design_loop = _loop_a2
+        r_a2, frames_a2 = await _drive_chat(app_with_versions, client, pid_a, {"message": "add a fillet"})
+        assert r_a2.status_code == 202
+        v2_a = svc.get_version(pid_a, (await client.get(f"/api/projects/{pid_a}/versions")).json()[-1]["id"])
+
+        # Project B: pass 2 → v2_b. Same expectation — the adapter must
+        # read v1_b's confirmed set, not project A's.
+        if inflight is not None:
+            inflight.discard(pid_b)
+        app_with_versions.state.run_design_loop = _loop_b2
+        r_b2, frames_b2 = await _drive_chat(app_with_versions, client, pid_b, {"message": "add a groove"})
+        assert r_b2.status_code == 202
+        v2_b = svc.get_version(pid_b, (await client.get(f"/api/projects/{pid_b}/versions")).json()[-1]["id"])
+
+        done_a2 = [d for e, d in frames_a2 if e == "done"]
+        done_b2 = [d for e, d in frames_b2 if e == "done"]
+        return (
+            v2_a, v2_b,
+            done_a2[-1] if done_a2 else {},
+            done_b2[-1] if done_b2 else {},
+            svc.get_pending_offer(pid_a),
+            svc.get_pending_offer(pid_b),
+        )
+
+    v2_a, v2_b, done_a2, done_b2, offer_a, offer_b = run_async(
+        app_with_versions, _call
+    )
+    # Both projects: v2's confirmed set is its own (NULL — no carry-forward
+    # write). The carried param (wall_thickness, confirmed on v1) is
+    # EXCLUDED from the offer by the pre-pass confirmed set → the flag
+    # naming it is rejected → no offer (a new param is introduced but not
+    # flagged, so no fallback).
+    assert v2_a["confirmed_params"] is None, v2_a
+    assert v2_b["confirmed_params"] is None, v2_b
+    assert "confirm_offer" not in done_a2, done_a2
+    assert "confirm_offer" not in done_b2, done_b2
+    assert offer_a is None
+    assert offer_b is None
+
+
+# ---------------------------------------------------------------------------
+# Item 3: malformed confirmed_params row + set_pending_offer shape guard
+# ---------------------------------------------------------------------------
+
+
+def test_record_confirmation_malformed_confirmed_params_starts_from_empty(app_with_versions):
+    """A version row whose ``confirmed_params`` is NOT a dict (corrupted
+    JSON or hand-edited row): ``record_confirmation`` logs a WARNING and
+    starts from ``{}`` — never a 500, never a crash."""
+
+    async def _call(client):
+        _reopen_conn(app_with_versions)
+        svc = app_with_versions.state.versions
+        proj = await create_project(client, "malformed test")
+        pid = proj["id"]
+        v = await svc.create_version(pid, {"wall_thickness": 3.0})
+        vid = v["id"]
+        # Corrupt the confirmed_params column: store a JSON list (valid
+        # JSON, not a dict — simulates a corrupted row that was written
+        # by a buggy writer). get_version's json.loads parses it to a
+        # list; record_confirmation must handle the non-dict gracefully.
+        svc.conn.raw.execute(
+            "UPDATE versions SET confirmed_params = ? WHERE id = ?",
+            ("[1, 2, 3]", vid),
+        )
+        svc.conn.commit()
+        # record_confirmation must NOT raise — it starts from {}.
+        svc.record_confirmation(pid, vid, "wall_thickness", 3.0)
+        row = svc.get_version(pid, vid)
+        return row
+
+    row = run_async(app_with_versions, _call)
+    # The write overwrote the malformed value with a well-formed set.
+    assert row["confirmed_params"] == {"wall_thickness": 3.0}, row
+
+
+def test_set_pending_offer_shape_guard_rejects_bad_input(app_with_versions):
+    """``set_pending_offer`` with a malformed offer dict raises ValueError
+    (never silently persists a bad row that would degrade to no offer on
+    read anyway — the raise is the early, loud failure)."""
+
+    async def _call(client):
+        _reopen_conn(app_with_versions)
+        svc = app_with_versions.state.versions
+        proj = await create_project(client, "shape guard test")
+        pid = proj["id"]
+        results = {}
+        # version_id is a bool (not a real int).
+        try:
+            svc.set_pending_offer(pid, {"version_id": True, "param": "x"})
+            results["bool_version"] = "no raise"
+        except ValueError as e:
+            results["bool_version"] = str(e)
+        # version_id is a string.
+        try:
+            svc.set_pending_offer(pid, {"version_id": "1", "param": "x"})
+            results["str_version"] = "no raise"
+        except ValueError as e:
+            results["str_version"] = str(e)
+        # param is empty.
+        try:
+            svc.set_pending_offer(pid, {"version_id": 1, "param": ""})
+            results["empty_param"] = "no raise"
+        except ValueError as e:
+            results["empty_param"] = str(e)
+        # param is not a string.
+        try:
+            svc.set_pending_offer(pid, {"version_id": 1, "param": 42})
+            results["non_str_param"] = "no raise"
+        except ValueError as e:
+            results["non_str_param"] = str(e)
+        # version_id missing.
+        try:
+            svc.set_pending_offer(pid, {"param": "x"})
+            results["missing_version"] = "no raise"
+        except ValueError as e:
+            results["missing_version"] = str(e)
+        # A well-formed offer still works (the guard doesn't reject valid
+        # input).
+        v = await svc.create_version(pid, {"wall_thickness": 3.0})
+        svc.set_pending_offer(pid, {"version_id": v["id"], "param": "wall_thickness"})
+        results["valid"] = svc.get_pending_offer(pid)
+        # None (clear) still works.
+        svc.set_pending_offer(pid, None)
+        results["clear"] = svc.get_pending_offer(pid)
+        return results
+
+    results = run_async(app_with_versions, _call)
+    # All bad inputs raised ValueError.
+    assert "no raise" not in results["bool_version"]
+    assert "no raise" not in results["str_version"]
+    assert "no raise" not in results["empty_param"]
+    assert "no raise" not in results["non_str_param"]
+    assert "no raise" not in results["missing_version"]
+    # Valid offer was persisted.
+    assert results["valid"] is not None
+    assert results["valid"]["param"] == "wall_thickness"
+    # Clear worked.
+    assert results["clear"] is None
+
+
+# ---------------------------------------------------------------------------
+# Item 5: ack label is always non-empty
+# ---------------------------------------------------------------------------
+
+
+def test_ack_label_falls_back_to_param_name(app_with_versions):
+    """The ack's ``confirm_ack_label`` is ALWAYS non-empty: when the
+    param has no user-facing label (``param_meta`` is absent or the label
+    key is missing), the label falls back to the param's identifier —
+    never an empty string."""
+
+    async def _call(client):
+        _reopen_conn(app_with_versions)
+        svc = app_with_versions.state.versions
+        proj = await create_project(client, "ack label test")
+        pid = proj["id"]
+        # A version with NO param_meta (no label — the identifier fallback
+        # must fire).
+        v = await svc.create_version(pid, {"wall_thickness": 3.0})
+        # No param_meta → the design-state entry has no "label" key →
+        # the ack label falls back to the param name.
+        svc.set_pending_offer(pid, {"version_id": v["id"], "param": "wall_thickness"})
+        app_with_versions.state.run_design_loop = None
+        r, frames = await _drive_chat(app_with_versions, client, pid, {"message": "yes"})
+        done = [d for e, d in frames if e == "done"]
+        return r.status_code, done
+
+    status, done = run_async(app_with_versions, _call)
+    assert status == 202, status
+    assert len(done) == 1, done
+    # The ack label is the param's identifier (non-empty, never "").
+    assert done[0].get("confirm_ack_label") == "wall_thickness", done
+    assert done[0]["confirm_ack_label"] != ""
+    # The ack value is still correct.
+    assert done[0].get("confirm_ack_value") == "3", done
+    # The message uses the identifier as the label.
+    assert done[0]["message"] == "Got it — wall_thickness stays 3.", done

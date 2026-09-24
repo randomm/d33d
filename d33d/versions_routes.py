@@ -675,13 +675,26 @@ def create_versions_router() -> APIRouter:
         # version's params (the model's ``confirm_first`` hint, the
         # declared-axis preference, the user's changed set vs the
         # previous version — read BEFORE the create above, since the
-        # create IS the "previous version" baseline). Best-effort: an
-        # offer-path failure must never fail the 201.
+        # create IS the "previous version" baseline). The pre-pass
+        # confirmed set (the same ``prev_version`` row's
+        # ``confirmed_params``) is passed EXPLICITLY — never read from
+        # ``app.state`` (the cross-project race, issue #250). Best-effort:
+        # an offer-path failure must never fail the 201.
         try:
             from d33d.design_loop_events import _resolve_offer
 
             await _resolve_offer(
-                app, project_id, int(v["id"]), result, prev_version
+                app,
+                project_id,
+                int(v["id"]),
+                result,
+                prev_version,
+                prev_confirmed=(
+                    dict(prev_version["confirmed_params"])
+                    if prev_version is not None
+                    and prev_version["confirmed_params"]
+                    else None
+                ),
             )
         except Exception:  # noqa: BLE001 — the offer must never kill the 201
             logger.debug(

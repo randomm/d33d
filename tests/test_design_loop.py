@@ -53,6 +53,7 @@ from d33d.design_loop import (
     _scad_from_result,
     extract_named_params,
     extract_param_meta,
+    extract_confirm_hints,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -753,6 +754,86 @@ def test_extract_param_meta_malformed_degrades_to_empty_never_raises() -> None:
         request_body={},
     )
     assert extract_param_meta(bare) == {}
+
+
+def _llm_result_confirm_hints(
+    confirm_first: Any = None, confirm_sentence: Any = None
+) -> Any:
+    """A design-role LLMResult whose FIRST tool call carries the confirm
+    hint fields (the T0/T1 hint channel)."""
+    args: dict[str, Any] = {"scad": GOOD_SCAD}
+    if confirm_first is not None:
+        args["confirm_first"] = confirm_first
+    if confirm_sentence is not None:
+        args["confirm_sentence"] = confirm_sentence
+    return LLMResult(
+        content=GOOD_SCAD,
+        tool_calls=({"name": "emit_design", "arguments": args},),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def test_extract_confirm_hints_paired_from_same_tool_call() -> None:
+    """Two tool calls with DIFFERENT confirm_first / confirm_sentence:
+    the pair comes from the FIRST call carrying either (never mixed
+    across calls — a second call's flag is ignored, not re-paired)."""
+    result = LLMResult(
+        content=GOOD_SCAD,
+        tool_calls=(
+            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_first": "wall_thickness"}},
+            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_sentence": "I assumed 4 mm walls."}},
+        ),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+    first, sentence = extract_confirm_hints(result)
+    assert first == "wall_thickness"
+    assert sentence is None  # the SECOND call's sentence is never mixed in
+
+
+def test_extract_confirm_hints_second_call_ignored_even_when_first_blank() -> None:
+    """A first call that carries confirm_first but a blank confirm_sentence
+    still owns the pair — the second call's non-blank sentence does not
+    leak in (pairing is per-call, not field-by-field across calls)."""
+    result = LLMResult(
+        content=GOOD_SCAD,
+        tool_calls=(
+            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_first": "fillet", "confirm_sentence": "  "}},
+            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_sentence": "I assumed 2 grooves."}},
+        ),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+    first, sentence = extract_confirm_hints(result)
+    assert first == "fillet"
+    assert sentence is None
+
+
+def test_extract_confirm_hints_both_fields_from_first_call() -> None:
+    """Both fields present on the first call → both returned (the common
+    single-call shape, unchanged)."""
+    result = _llm_result_confirm_hints("wall_thickness", "I assumed 3 mm walls.")
+    first, sentence = extract_confirm_hints(result)
+    assert first == "wall_thickness"
+    assert sentence == "I assumed 3 mm walls."
+
+
+def test_extract_confirm_hints_degrades_to_none() -> None:
+    """No hints anywhere → (None, None); a non-string/blank field degrades
+    to None for that field only (lenient contract, never a raise)."""
+    assert extract_confirm_hints(_llm_result_confirm_hints()) == (None, None)
+    first, sentence = extract_confirm_hints(
+        _llm_result_confirm_hints(confirm_first=123, confirm_sentence="I assumed 3.")
+    )
+    assert first is None
+    assert sentence == "I assumed 3."
 
 
 def test_extract_param_meta_duplicate_name_first_wins() -> None:

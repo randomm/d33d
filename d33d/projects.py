@@ -219,6 +219,7 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     """
     from d33d.confirm_offer import (
         ack_sentence,
+        format_param_value,
         is_pending_offer_acceptance,
         offer_entry,
     )
@@ -271,16 +272,19 @@ async def _answered_frames(
         done_data["confirm_ack_label"] = confirm_ack["label"]
         done_data["confirm_ack_value"] = confirm_ack["value"]
     yield ("done", done_data)
-    # The answer path is terminal immediately: the flag is released as
-    # SOON AS the source is exhausted (whether by the SSE endpoint's
-    # ``finally`` in production or by a direct ``async for`` in tests),
-    # so a follow-up chat is not stuck behind a stale in-flight claim.
-    # (The design-loop path keeps the flag until the SSE stream drains —
-    # its source may live for minutes; the answer source is one frame.)
-    if app is not None and project_id is not None:
-        inflight = getattr(app.state, "design_loop_inflight", None)
-        if inflight is not None:
-            inflight.discard(project_id)
+    # The in-flight flag is released by the STREAM's ``finally``
+    # (``d33d.streaming._stream_events`` — the single release point for
+    # every event source, on every exit path: the SSE endpoint drains in
+    # production; tests that drive the source directly exhaust the same
+    # generator via the SSE endpoint's ``_stream_events``). There is
+    # deliberately no post-yield discard here: a release would have to
+    # happen in generator ``finally`` code (not after the last ``yield`` —
+    # that runs only if the consumer exhausts the generator), and
+    # ``_stream_events``'s ``finally`` already covers every drain path.
+    # A bare ``async for`` over the raw source (bypassing the SSE
+    # endpoint) leaves the flag set by design — the contract is that the
+    # stream endpoint is the sole driver of event sources (its
+    # ``finally`` is the single release point).
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -442,20 +446,28 @@ def create_projects_router() -> APIRouter:
             # as the question-answer path. The acknowledgement's label /
             # value ride the done frame as ADDITIVE ``confirm_ack_*``
             # fields (the SPA renders the value in the mono face).
+            from d33d.confirm_offer import format_param_value as _fmt_pv
+
             ack_entry = offer_route["entry"]
-            ack_value = (
-                str(ack_entry["value"]) if isinstance(ack_entry["value"], bool)
-                else f"{ack_entry['value']:g}"
-                if isinstance(ack_entry["value"], (int, float))
-                else str(ack_entry["value"])
-            )
             app.state.event_sources[project_id] = _answered_frames(
                 offer_route["answer"],
                 project_id,
                 app,
                 confirm_ack={
-                    "label": ack_entry.get("label") or ack_entry.get("name") or "",
-                    "value": ack_value,
+                    # The label is ALWAYS non-empty (the wire contract — the
+                    # SPA's ``confirm_ack`` render gate keys off it): fall
+                    # back to the param's identifier, never an empty
+                    # string (the identifier is present by construction —
+                    # ``offer_entry`` returns an entry whose ``name`` is
+                    # the pending offer's param).
+                    "label": (
+                        ack_entry.get("label")
+                        or ack_entry.get("name")
+                        or offer["param"]
+                    ),
+                    # The shared value formatter (``confirm_offer`` — the
+                    # same bool/number/other rule, one implementation).
+                    "value": _fmt_pv(ack_entry["value"]),
                 },
             )
             return {"status": "accepted"}

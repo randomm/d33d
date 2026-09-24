@@ -987,6 +987,20 @@ occurrence wins (declaration order — later entries never overwrite).
 """
 
 
+def _first_tool_call_args_containing(
+    result: LLMResult, key: str
+) -> dict[str, Any] | None:
+    """The arguments dict of the FIRST tool call whose dict-typed
+    ``arguments`` carry ``key`` (the shared T0-tool-call / T1-fenced walk
+    behind :func:`extract_param_meta` and :func:`extract_confirm_hints`),
+    or ``None`` when no tool call carries it."""
+    for call in result.tool_calls:
+        args = call.get("arguments")
+        if isinstance(args, dict) and key in args:
+            return args
+    return None
+
+
 def extract_param_meta(result: LLMResult) -> dict[str, Any]:
     """The model's per-parameter metadata from a design-role ``LLMResult``.
 
@@ -996,14 +1010,10 @@ def extract_param_meta(result: LLMResult) -> dict[str, Any]:
     tool call carries the field (the T1 fenced path without metadata, or
     a reply that emitted no array) — the loop never raises here.
     """
-    raw: Any = None
-    for call in result.tool_calls:
-        args = call.get("arguments")
-        if not isinstance(args, dict):
-            continue
-        if "parameters" in args:
-            raw = args["parameters"]
-            break
+    args = _first_tool_call_args_containing(result, "parameters")
+    if args is None:
+        return {}
+    raw: Any = args["parameters"]
     if raw is None:
         return {}
     if not isinstance(raw, list):
@@ -1037,28 +1047,33 @@ def extract_confirm_hints(result: LLMResult) -> tuple[str | None, str | None]:
     ``arguments.confirm_sentence`` — the same T0-tool-call or T1-fenced
     shape as ``scad`` / ``parameters``).
 
+    BOTH fields are PAIRED from the SAME tool call — the first tool call
+    (in order) whose arguments carry either field supplies the pair
+    (``_first_tool_call_args_containing`` — the shared walk); a second
+    tool call's ``confirm_first`` is never mixed with the first one's
+    ``confirm_sentence`` (or vice versa) — an unprompted second call is
+    an out-of-contract shape and its fields are ignored, not a
+    re-pairing opportunity.
+
     Returns ``(name_or_None, sentence_or_None)``. Lenient by contract
     (like :func:`extract_param_meta`): a non-dict ``arguments``, a
     missing field, a non-string field, or a blank string all degrade to
     ``None`` for that field — a malformed hint NEVER fails the design
     pass, and ``None`` simply means "the model offered no flag" (the
     selection rule's declared-axis branch still runs)."""
+    args = _first_tool_call_args_containing(result, "confirm_first")
+    if args is None:
+        args = _first_tool_call_args_containing(result, "confirm_sentence")
+    if args is None:
+        return None, None
     first: str | None = None
+    raw_first = args.get("confirm_first")
+    if isinstance(raw_first, str) and raw_first.strip():
+        first = raw_first.strip()
     sentence: str | None = None
-    for call in result.tool_calls:
-        args = call.get("arguments")
-        if not isinstance(args, dict):
-            continue
-        if first is None and isinstance(args.get("confirm_first"), str) and args[
-            "confirm_first"
-        ].strip():
-            first = args["confirm_first"].strip()
-        if sentence is None and isinstance(args.get("confirm_sentence"), str) and args[
-            "confirm_sentence"
-        ].strip():
-            sentence = args["confirm_sentence"].strip()
-        if first is not None and sentence is not None:
-            break
+    raw_sentence = args.get("confirm_sentence")
+    if isinstance(raw_sentence, str) and raw_sentence.strip():
+        sentence = raw_sentence.strip()
     return first, sentence
 
 
