@@ -521,6 +521,50 @@ describe("SSE stream demux", () => {
     expect(lastCall().url).toBe("http://api.test/api/stream/1");
   });
 
+  it("answer path: a stream with only a done frame carrying kind:'answer' demuxes to onDone with the full payload (issue #249)", async () => {
+    // The answer path emits NO token frames and NO progress frames — just
+    // a single terminal done frame with kind:"answer" and the answer text
+    // in `message`. The demux must deliver the full done payload (including
+    // the `kind` field) to onDone so the App layer can distinguish answer
+    // from design-loop frames.
+    const payload = sseFrame("done", { message: "It is 12 mm tall — you said that.", kind: "answer" });
+    fake.enqueue(makeSseResponse(payload));
+
+    let tokenText = "";
+    const progressSteps: string[] = [];
+    let doneData: Record<string, unknown> | null = null;
+    await client.streamEvents(1, {
+      onToken: (t) => { tokenText += t; },
+      onProgress: (step) => { progressSteps.push(step ?? ""); },
+      onDone: (d) => { doneData = d; },
+    });
+
+    // No token or progress frames were emitted on the answer path.
+    expect(tokenText).toBe("");
+    expect(progressSteps).toEqual([]);
+    // The done frame carried the full payload including kind.
+    expect(doneData).toEqual({ message: "It is 12 mm tall — you said that.", kind: "answer" });
+  });
+
+  it("design-loop path: a done frame without kind demuxes to onDone with the message only (existing behaviour, issue #249)", async () => {
+    // The standard design-loop done frame has no `kind` field (absent =
+    // design). The demux must deliver the message so the App layer applies
+    // the passCard summary (not the verbatim message).
+    const payload = sseFrame("done", { message: "Design loop passed validation" });
+    fake.enqueue(makeSseResponse(payload));
+
+    let doneData: Record<string, unknown> | null = null;
+    await client.streamEvents(1, {
+      onToken: () => {},
+      onProgress: () => {},
+      onDone: (d) => { doneData = d; },
+    });
+
+    expect(doneData).toEqual({ message: "Design loop passed validation" });
+    const d = doneData as Record<string, unknown> | null;
+    expect(d?.kind).toBeUndefined();
+  });
+
   it("handles multi-line SSE data (server splits JSON across data: lines)", async () => {
     const data = { message: "line\nbreak", step: "a" };
     const raw = JSON.stringify(data);

@@ -116,6 +116,93 @@ def test_seam_d_derived_field_set_includes_step_and_bbox():
 
 
 # ---------------------------------------------------------------------------
+# SEAM D replay: the answer-path fixture (E.json, issue #249)
+#
+# E.json is the answer-path counterpart to D.json: a full recorded frame
+# stream for the question-answer done path (the ticket #249 pre-route
+# "the Brief can answer it" branch). It is a SINGLE terminal done frame
+# carrying the answer text as ``message`` plus the additive ``kind: "answer"
+# `` discriminator — NO token frames, NO version-created progress frame,
+# NO version. D.json (the pass-with-version stream) stays the design-loop
+# reference; E.json pins the answer-path wire shape against the same
+# schema.
+# ---------------------------------------------------------------------------
+
+
+def test_seam_d_schema_passes_for_answer_path_fixture():
+    """The recorded SEAM E fixture (the answer-path frame stream) passes
+    the schema — the additive ``kind: "answer"`` field on the done frame
+    does not break the wire contract, and the single-frame stream
+    terminates with a terminal ``done`` frame (the client resolves on it).
+    """
+    fixture = load_fixture("E")
+    frames = [(f["kind"], f["data"]) for f in fixture.payload["frames"]]
+    validated = validate_frames_stream(frames)
+    # A single terminal done frame (the answer path emits nothing else).
+    assert len(validated) == 1, f"expected 1 frame, got {len(validated)}"
+    assert validated[0][0] == "done"
+    assert fixture.expected["terminal"] == "done"
+
+
+def test_seam_d_answer_path_fixture_has_no_token_or_version_created():
+    """The answer-path stream carries NO ``token`` frame and NO
+    ``version-created`` progress frame (the ticket's invariants: the
+    answer text travels in the done frame's ``message``, not via tokens;
+    no render, no version)."""
+    fixture = load_fixture("E")
+    frames = [(f["kind"], f["data"]) for f in fixture.payload["frames"]]
+    validate_frames_stream(frames)  # schema-valid precondition
+    kinds = [k for k, _ in frames]
+    assert "token" not in kinds, "the answer path emits no token frames"
+    assert all(
+        not (k == "progress" and d.get("step") == "version-created")
+        for k, d in frames
+    ), "the answer path emits no version-created progress frame"
+    assert fixture.expected["version_created"] is False
+    assert fixture.expected["token_frames"] == 0
+
+
+def test_seam_d_answer_path_done_frame_carries_kind_and_message():
+    """The recorded answer-path done frame carries the answer text as
+    ``message`` (a non-empty string — the schema's required field) AND
+    the additive ``kind: "answer"`` discriminator (the SPA's
+    verbatim-render branch — a design-loop done frame has no ``kind``
+    at all)."""
+    fixture = load_fixture("E")
+    frames = [(f["kind"], f["data"]) for f in fixture.payload["frames"]]
+    validated = validate_frames_stream(frames)
+    _kind, data = validated[-1]
+    assert data["message"], "the answer text is the done frame's message"
+    assert data["kind"] == "answer"
+    assert fixture.expected["done_kind"] == "answer"
+    # The state block the stubbed answer call was driven against (the
+    # guard's source of truth): H is the STATED 12.0 (the ticket's
+    # example — "you said that"), W/D are the assumed 20.0.
+    block = fixture.payload["state_block"]
+    by_name = {e["name"]: e for e in block}
+    assert by_name["H"]["value"] == 12.0
+    assert by_name["H"]["provenance"] == "stated"
+    assert by_name["W"]["provenance"] == "assumed"
+    assert by_name["D"]["provenance"] == "assumed"
+
+
+def test_seam_d_answer_path_message_passes_number_guard():
+    """The recorded answer's numbers all appear in the recorded state
+    block (the deterministic guard's presence-only check — the fixture
+    is self-consistent: nothing the recorded model said is invented)."""
+    from d33d.question_answer import guard_answer_numbers
+
+    fixture = load_fixture("E")
+    frames = [(f["kind"], f["data"]) for f in fixture.payload["frames"]]
+    _kind, data = validate_frames_stream(frames)[-1]
+    block = fixture.payload["state_block"]
+    assert guard_answer_numbers(data["message"], block), (
+        "the recorded answer contains a number absent from the recorded "
+        "state block — the guard would have vetoed this wire payload"
+    )
+
+
+# ---------------------------------------------------------------------------
 # SEAM D replay: the recorded fixture through the schema
 # ---------------------------------------------------------------------------
 
@@ -134,6 +221,12 @@ def test_seam_d_replay_frame_stream_shape():
     validates the ADAPTER's frame construction (the frame shape, the
     omit-not-null policy, the data-URI encoding) regardless of the loop
     outcome.
+
+    The answer-path fixture (``E.json``) is the counterpart of this
+    test's design-loop stream: a SINGLE terminal done frame with
+    ``kind: "answer"`` and no version-created frame — its own replay
+    tests (``test_seam_d_schema_passes_for_answer_path_fixture`` and
+    siblings above) validate it.
     """
     fixture = load_fixture("D")
     frames = [(f["kind"], f["data"]) for f in fixture.payload["frames"]]

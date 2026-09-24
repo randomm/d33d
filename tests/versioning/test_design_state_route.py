@@ -229,6 +229,50 @@ def test_design_state_route_carries_model_labels_and_promotion(
     assert axis_rows[0]["provenance"] == "stated"
 
 
+def test_design_state_route_block_can_cite_stated_height_and_assumed_footprint(
+    app_with_versions,
+) -> None:
+    """Issue #249 (the answer-path fixture builder, per the ticket's
+    "EXTEND ... as the fixture builder" note): a version created via the
+    DIRECT ``svc.create_version(stated_dims=...)`` call (the stated-dims
+    fixture builder — the POST versions route does not take stated_dims,
+    so the direct service call is the honest seam, per the ticket) whose
+    state block carries a STATED (user-said) H PLUS at least one ASSUMED
+    axis, so the provenance-citing answer ("you said that" for H vs
+    "I assumed" for the footprint) is verifiable from the block the
+    answer path and the SPA share.
+
+    The direct call mirrors ``test_design_state_route_carries_model_labels_and_promotion``'s
+    pattern (the write path's full contract — stated_dims persists on
+    the row; no helper edits needed, per the ticket)."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # The write path's full contract: stated_dims persists on the row
+        # (the POST versions route does not take stated_dims, so the
+        # direct service call is the honest seam — the stated-dims fixture
+        # builder, per the ticket).
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {"H": 12.0, "W": 20.0, "D": 20.0},
+            stated_dims={"H": 12.0},
+        )
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 200, r.text
+    by_name = {e["name"]: e for e in r.json()}
+    # H is STATED (the user said 12 — the ticket's example), W/D are
+    # ASSUMED (the model emitted them; no axis evidence yet).
+    assert by_name["H"]["value"] == 12.0
+    assert by_name["H"]["provenance"] == "stated", "H must be stated for the provenance-citing answer"
+    assert by_name["W"]["value"] == 20.0
+    assert by_name["W"]["provenance"] == "assumed", "the footprint axis must be assumed (the 'I assumed' citation)"
+    assert by_name["D"]["provenance"] == "assumed"
+
+
 def test_design_state_route_missing_project_is_404(app_with_versions) -> None:
     """A missing project is a 404 (consistent with the other routes)."""
 

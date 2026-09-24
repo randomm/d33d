@@ -1,0 +1,57 @@
+{
+  "seam": "E",
+  "provenance": {
+    "commit": "2b1b9c62864a599f1b5eb78caee3fe58d7c7570e",
+    "date": "2026-09-24",
+    "model": "adapter (question-answer done frame, issue #249 answer path)",
+    "endpoint": "stubbed answer edge (route_chat_message -> _answered_frames, no live LLM)",
+    "normalised": [
+      "the stage-2 answer call was stubbed to return the recorded JSON reply ({\"answerable\": true, \"answer\": \"It is 12 mm tall - you said that.\"}); the design-state block it was driven against is recorded in payload.state_block (H stated 12.0, W/D assumed 20.0 - the ticket's example); no render artifacts exist (the answer path renders nothing) and there is no version_id (no version is created - the frame carries none)"
+    ],
+    "recorded": "stubbed",
+    "recorded_at": "2026-09-24T15:14:33+00:00"
+  },
+  "payload": {
+    "frames": [
+      {
+        "kind": "done",
+        "data": {
+          "message": "It is 12 mm tall - you said that.",
+          "kind": "answer"
+        }
+      }
+    ],
+    "state_block": [
+      {
+        "name": "H",
+        "kind": "param",
+        "label": "H",
+        "value": 12.0,
+        "unit": "mm",
+        "provenance": "stated"
+      },
+      {
+        "name": "W",
+        "kind": "param",
+        "label": "W",
+        "value": 20.0,
+        "unit": "mm",
+        "provenance": "assumed"
+      },
+      {
+        "name": "D",
+        "kind": "param",
+        "label": "D",
+        "value": 20.0,
+        "unit": "mm",
+        "provenance": "assumed"
+      }
+    ]
+  },
+  "expected": {
+    "terminal": "done",
+    "version_created": false,
+    "token_frames": 0,
+    "done_kind": "answer"
+  }
+}

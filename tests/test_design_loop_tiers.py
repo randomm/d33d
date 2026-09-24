@@ -203,12 +203,15 @@ def test_t0_sends_native_tools_and_passes_through_tool_calls():
             request_factory=factory,
             capability=_t0(),
             system="You are a CAD engine.",
-            tools=DESIGN_TOOLS,
             call_params={"temperature": 0.2},
         )
     )
 
-    # One native request: tools attached, model + call params in the body.
+    # One native request: the role's OWN tool attached (the request body
+    # carries ``role_tools(role)`` — the sender resolves the schema from
+    # the role, it is never caller-supplied — so the wire schema matches
+    # the name the response-side allowlist enforces), model + call params
+    # in the body.
     assert len(sent) == 1
     body = sent[0]
     assert body["model"] == "RedHatAI/Qwen3.8-27B-INT4"
@@ -278,7 +281,13 @@ def test_t1_fenced_json_without_tools_in_body():
     assert body["model"] == "local-model"
     sys_text = body["messages"][0]["content"]
     assert "fenced JSON" in sys_text
+    # The T1 fragment advertises the called role's OWN tool name (the
+    # per-role allowlist — the question role's T1 path advertises
+    # "emit_answer", never the design loop's emit_design). For the design
+    # role, the fragment names emit_design.
     assert "emit_design" in sys_text
+    assert "emit_critique" not in sys_text
+    assert "emit_classification" not in sys_text
 
     # The parsed block is synthesized into tool_calls (same shape as T0).
     assert result.tier == "T1"
@@ -1052,7 +1061,6 @@ def test_t0_fenced_json_in_content_synthesizes_tool_call():
             request_factory=factory,
             capability=_t0(),
             system="You are a CAD engine.",
-            tools=DESIGN_TOOLS,
         )
     )
     assert result.tier == "T0"
@@ -1376,3 +1384,200 @@ def test_t0_reverted_normalisation_schema_catches_seam_a_drift():
             validate_llm_result_seam_a(result)
         assert "SEAM A" in str(exc.value)
         assert "arguments" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# The question role's tool channel (issue #249, stage-2 answer pre-route)
+#
+# The question role is registered in ROLE_TOOL_NAMES / ROLE_TOOL_SCHEMAS
+# (emit_answer) — the adversarial reviewer's finding: an unregistered role
+# has an undefined channel in send (no tool at T0, the loop's allowlist at
+# T1), so a T0 model that emits a NATIVE tool call against the stage-2
+# prompt would raise SenderError inside send and silently degrade to the
+# design loop. These tests pin the channel: at T0 the question role's
+# request carries the emit_answer tool and a native emit_answer call
+# passes through; a wrong tool name (a tool the role may not emit) fails
+# LOUDLY (SenderError, not a silent degrade); at T1 the fragment
+# advertises emit_answer and a fenced emit_answer reply synthesizes the
+# call.
+# ---------------------------------------------------------------------------
+
+QUESTION_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "emit_answer",
+            "description": (
+                "Emit the answer to the user's question about the current "
+                "design. ``answerable`` is true ONLY if the design-state "
+                "block contains every value you need; ``answer`` is the "
+                "plain-words answer (each cited value names its provenance) "
+                "or empty when not answerable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answerable": {"type": "boolean"},
+                    "answer": {"type": "string"},
+                },
+                "required": ["answerable", "answer"],
+            },
+        },
+    }
+]
+
+
+def _question_messages() -> list[dict[str, Any]]:
+    return [{"role": "user", "content": "How tall is it now?"}]
+
+
+def test_t0_question_role_attaches_its_own_tool_and_passes_through():
+    """A T0-tiered model asked the stage-2 question: the request carries
+    the question role's OWN tool (emit_answer — the registry, not the
+    loop's allowlist), and a native emit_answer tool call passes through
+    as a valid LLMResult (no SenderError — the channel is defined)."""
+    sent: list[dict[str, Any]] = []
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        return _ok_response(
+            "It is 12 mm tall - you said that.",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_answer",
+                        "arguments": (
+                            '{"answerable": true, "answer": "It is 12 mm tall"}'
+                        ),
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="question",
+            model_id="m",
+            messages=_question_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    assert len(sent) == 1
+    body = sent[0]
+    # The wire body carries the question role's tool — emit_answer, not
+    # the design loop's emit_design (the role registry drives the tools
+    # array now, caller-supplied values no longer exist).
+    assert body["tools"] == QUESTION_TOOLS
+    assert body["tools"][0]["function"]["name"] == "emit_answer"
+    # The native tool call passes through (the channel is defined).
+    assert result.status == "ok"
+    assert result.tier == "T0"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0]["name"] == "emit_answer"
+    args = result.tool_calls[0]["arguments"]
+    assert args == {"answerable": True, "answer": "It is 12 mm tall"}
+
+
+def test_t0_question_role_wrong_tool_name_fails_loudly():
+    """A T0 question-role reply with a tool name the role may NOT emit
+    (emit_design — the design loop's tool) is REJECTED at the sender
+    boundary: SenderError(status='error') with a tool_name_mismatch
+    reason — the failure is loud (the caller's degrade-to-loop is an
+    explicit decision on a classified error), never a silent
+    tool-name-less degrade."""
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_design",
+                        "arguments": '{"scad": "cube(1);"}',
+                    },
+                }
+            ],
+        )
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="question",
+                model_id="m",
+                messages=_question_messages(),
+                request_factory=factory,
+                capability=_t0(),
+            )
+        )
+    assert exc.value.status == "error"
+    assert "tool_name_mismatch" in str(exc.value)
+
+
+def test_t1_question_role_advertises_emit_answer_and_synthesizes_call():
+    """The T1 branch advertises the role's OWN name (emit_answer — not
+    the loop's three) in the fenced-JSON fragment, and a fenced
+    emit_answer reply synthesizes the tool call (the T1 channel for the
+    question role is defined, the same way as the loop roles)."""
+    sent: list[dict[str, Any]] = []
+    fenced = (
+        '```json\n{"tool": "emit_answer", '
+        '"arguments": {"answerable": true, "answer": "It is 12 mm tall"}}\n```'
+    )
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        return _ok_response(fenced)
+
+    result = _run(
+        send(
+            role="question",
+            model_id="local-model",
+            messages=_question_messages(),
+            request_factory=factory,
+            capability=_t1(),
+        )
+    )
+    # The T1 fragment advertises emit_answer and NOT the loop's tools
+    # (the per-role allowlist — the pre-#249 hardcoded list).
+    sys_text = sent[0]["messages"][0]["content"]
+    assert "emit_answer" in sys_text
+    assert "emit_design" not in sys_text
+    assert "emit_critique" not in sys_text
+    assert "emit_classification" not in sys_text
+    # No tools array on the T1 wire (the T1 protocol is fenced-JSON).
+    assert "tools" not in sent[0]
+    # The fenced reply synthesizes the call.
+    assert result.tier == "T1"
+    assert result.status == "ok"
+    assert result.tool_calls[0]["name"] == "emit_answer"
+    assert result.tool_calls[0]["arguments"] == {
+        "answerable": True,
+        "answer": "It is 12 mm tall",
+    }
+
+
+def test_t1_question_role_wrong_tool_name_fails_loudly():
+    """A T1 question-role reply carrying the WRONG tool name (a loop tool)
+    is rejected by the response-side allowlist (SenderError, not a
+    silent degrade) — the same allowlist that enforces the loop roles."""
+    fenced = '```json\n{"tool": "emit_design", "arguments": {"scad": "cube(1);"}}\n```'
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(fenced)
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="question",
+                model_id="local-model",
+                messages=_question_messages(),
+                request_factory=factory,
+                capability=_t1(),
+            )
+        )
+    assert exc.value.status == "error"
+    assert "tool_name_mismatch" in str(exc.value)

@@ -66,6 +66,10 @@ RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 
 #: Tool names the T1 protocol advertises to the model — the design loop's
 #: logical tools (one per role) — the fence carries the payload regardless.
+#: This is the design loop's historical allowlist; ``send`` resolves the
+#: called role's own allowlist via ``ROLE_TOOL_NAMES`` (:func:`_tool_names
+#: for_role`) so a non-loop role (``question``) is never constrained to the
+#: loop's names and never able to emit one.
 T1_TOOL_NAMES: tuple[str, ...] = ("emit_design", "emit_critique", "emit_classification")
 
 #: The SINGLE tool name a given role is allowed to emit.  ``send`` enforces
@@ -78,6 +82,7 @@ ROLE_TOOL_NAMES: dict[str, str] = {
     "design": "emit_design",
     "critique": "emit_critique",
     "classification": "emit_classification",
+    "question": "emit_answer",
 }
 
 #: The OpenAI function-calling tool definition per role — the native ``tools``
@@ -154,6 +159,27 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "emit_answer": {
+        "type": "function",
+        "function": {
+            "name": "emit_answer",
+            "description": (
+                "Emit the answer to the user's question about the current "
+                "design. ``answerable`` is true ONLY if the design-state "
+                "block contains every value you need; ``answer`` is the "
+                "plain-words answer (each cited value names its provenance) "
+                "or empty when not answerable."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "answerable": {"type": "boolean"},
+                    "answer": {"type": "string"},
+                },
+                "required": ["answerable", "answer"],
+            },
+        },
+    },
 }
 
 
@@ -168,6 +194,24 @@ def role_tools(role: str) -> list[dict[str, Any]] | None:
     tool_name = ROLE_TOOL_NAMES.get(role)
     schema = ROLE_TOOL_SCHEMAS.get(tool_name) if tool_name else None
     return [schema] if schema is not None else None
+
+
+def _tool_names_for_role(role: str) -> list[str]:
+    """The tool names the T1 protocol advertises for the role.
+
+    The role's own single name from :data:`ROLE_TOOL_NAMES` — so the T1
+    fragment (``available tools: …``) and the response-side allowlist
+    (``_validate_tool_name``) always agree, for EVERY registered role, not
+    just the design loop's three. An unknown role (no entry in the
+    registry) falls back to the loop's historical :data:`T1_TOOL_NAMES`
+    tuple: ``send`` only raises for unknown roles on the T2/T3 branch, and
+    ``make_llm_fn`` never calls an unregistered role, so this is a
+    non-escalating defensive default rather than a bypass (the response
+    side rejects the call either way — a bare T1 reply fails the codec,
+    and a fenced reply can never carry an unregistered name).
+    """
+    name = ROLE_TOOL_NAMES.get(role)
+    return [name] if name else list(T1_TOOL_NAMES)
 
 
 class SenderError(RuntimeError):
@@ -384,7 +428,6 @@ async def send(
     capability: CapabilityResult,
     dialect: Dialect = "openai",
     system: str | None = None,
-    tools: list[dict[str, Any]] | None = None,
     call_params: dict[str, Any] | None = None,
 ) -> LLMResult:
     """One logical LLM call, dispatched by tier.
@@ -395,8 +438,10 @@ async def send(
     what makes "model A vs model B on the same prompt" diffable from
     ``request_logs``.
 
-    * **T0** — one native request with ``tools`` attached when provided; the
-      model's ``tool_calls`` pass through (name + arguments).  Some T0-tiered
+    * **T0** — one native request with the role's own tool attached
+      (``role_tools(role)``, attached only when the role is registered in
+      :data:`ROLE_TOOL_NAMES` — ``None`` otherwise); the model's
+      ``tool_calls`` pass through (name + arguments).  Some T0-tiered
       models still reply with a fenced-JSON block in ``content`` (tool_calls
       empty) instead of native calls; the T0 branch parses that block with
       the same :func:`parse_t1_tool_call` codec the T1 path uses and
@@ -439,7 +484,7 @@ async def send(
                 request_factory=envelope_factory,
                 system_prompt=system or "",
                 user_message=_last_user_text(messages),
-                tool_names=list(T1_TOOL_NAMES),
+                tool_names=_tool_names_for_role(role),
             )
         except (RuntimeError, KeyError, TypeError, ValueError) as exc:
             # RuntimeError is t1_invoke's own documented failure; KeyError /
@@ -495,12 +540,15 @@ async def send(
         )
 
     # --- T0: native tool calling --------------------------------------------
+    # The role's own tool schema (``role_tools(role)``) — not a caller-
+    # supplied array — so the request's ``tools`` always matches the name
+    # the response-side allowlist enforces below, for every role.
     body = llm_request_body(
         model=model_id,
         messages=messages,
         dialect=dialect,
         supports_vision=capability.vision,
-        tools=tools if tier == "T0" else None,
+        tools=role_tools(role),
         **params,
     )
     prompt_hash = canonical_hash(role=role, messages=body["messages"], system=system)

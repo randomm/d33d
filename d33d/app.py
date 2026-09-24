@@ -82,9 +82,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
-from d33d import db
+from d33d import db, slicer
 from d33d import print_validation as _print_validation
-from d33d import slicer
 from d33d import versions as versions_mod
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
@@ -93,6 +92,7 @@ from d33d.config.catalogue import (
     ResolutionError,
     load_catalogue,
 )
+from d33d.config.probes import CapabilityCache
 from d33d.config.resolve import resolve_model
 from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,
@@ -594,6 +594,31 @@ def create_app(
     # d33d/evals/failure_capture.py). The wrapper is lazily built on first
     # call so an empty catalogue at startup is not a wiring error.
     app.state.run_design_loop = _build_production_design_loop()
+    # The stage-2 question-answer call (issue #249): one cheap single LLM
+    # completion, resolved through the SAME live catalogue as the design
+    # role (the model is configured, never hardcoded). The question
+    # pre-route (``d33d.projects.post_chat`` →
+    # ``d33d.question_answer.route_chat_message``) awaits this under its
+    # own 10 s hard timeout; any failure degrades to the design loop
+    # exactly as today. A catalogue without a ``question`` role (a
+    # pre-#249 models.yaml) degrades the pre-route to the design loop
+    # with zero added failure modes (the role is ADDITIVE — no new
+    # catalogue entry is required, and none is hard-coded here).
+    # The stage-2 edge is app-scoped (it reads ``app.state`` for the
+    # capability cache and the ``request_logs`` connection): the state
+    # object is bound at build time (the ``app`` instance is the same
+    # object for the app's lifetime — ``app.state`` is its attribute),
+    # so the route's ``AnswerEdge`` seam is the 2-arg
+    # ``async (question, entries)`` shape the closure already has.
+    app.state.answer_question = _build_question_answer_call(
+        state_catalogue_path, app
+    )
+    # The question-role capability probe cache (issue #249 review): keyed
+    # by (base_url, model id hash) — the stage-2 probe (2-3 real LLM
+    # requests) runs once per model pair, not per question. A models.yaml
+    # hot-reload that changes the question role's model or base re-probes
+    # exactly once (a new key), like the design role's probe semantics.
+    app.state.question_capability_cache = CapabilityCache()
     # The failures.jsonl path the production design-loop hook appends to
     # (issue #9, workstream task-failures). Defaults to the repo-relative
     # ``evals/failures.jsonl``; overridable via env var for tests / runs
@@ -1192,13 +1217,25 @@ def create_app(
     return app
 
 
-def _http_request_factory(base_url: str, api_key: str):
+def _http_request_factory(
+    base_url: str, api_key: str, timeout: float | None = None
+):
     """The production HTTP edge for one provider endpoint.
 
     ``request(body) -> response`` (httpx-shaped: ``.ok`` / ``.json()``);
     the key stays in the ``Authorization: Bearer`` header, never in a
-    request body or message (the key never reaches the browser)."""
+    request body or message (the key never reaches the browser).
+
+    ``timeout`` (seconds) is the PER-REQUEST bound for the httpx client.
+    The design-loop closure uses the default 120 s (a render-loop LLM
+    call can legitimately be slow); the stage-2 question-answer closure
+    uses a short per-request bound (issue #249's latency decision — the
+    10 s operator bound must cover the catalogue load + capability probe
+    + the completion itself, not just the completion). ``None`` keeps
+    the historical 120 s."""
     import httpx
+
+    effective_timeout = 120.0 if timeout is None else timeout
 
     async def _factory(body: dict[str, Any]) -> httpx.Response:
         # ``probe_capabilities`` hands over an envelope
@@ -1217,10 +1254,172 @@ def _http_request_factory(base_url: str, api_key: str):
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=effective_timeout) as client:
             return await client.post(url, json=payload, headers=headers)
 
     return _factory
+
+
+def _build_question_answer_call(
+    catalogue_path: Path, app_state: Any
+) -> Any:
+    """The production stage-2 question-answer edge (issue #249).
+
+    ``app_state`` is bound at build time (``create_app`` passes the
+    ``app`` instance — the closure reads ``app.state.question_capability
+    _cache`` and ``app.state.conn`` through it): the returned callable is
+    ``async (question_text, entries) -> reply_text`` — the ``AnswerEdge``
+    seam the route expects, no per-call state lookup.
+
+    Returns the bound ``async (question_text, entries) -> reply_text``
+    edge for ``d33d.question_answer.ask_answer_call`` — which enforces the 10 s
+    hard timeout (``ANSWER_CALL_TIMEOUT_SECONDS``) and the number guard
+    around the raw call. One cheap single-shot completion, resolved
+    lazily through the SAME live catalogue as the design role (the model
+    is configured, never hardcoded; the catalogue hot-reloads — a
+    ``models.yaml`` edited while the app is running is picked up on the
+    next call, like the design role).
+
+    The ``question`` role is ADDITIVE: a catalogue without a ``question``
+    entry (a pre-#249 models.yaml) degrades the whole pre-route to the
+    design loop exactly as today — zero added failure modes, zero added
+    latency on the common case. A probe failure degrades the role to
+    ``None`` (the ``send`` sender then raises a T2/T3 ``SenderError``,
+    caught by ``ask_answer_call`` → design loop).
+
+    **One 10 s enforcement point.** The operator's 10 s bound is enforced
+    exactly once — by ``ask_answer_call``'s ``asyncio.wait_for`` around
+    this edge. There is NO second ``wait_for`` here (the earlier
+    ``_wrapper`` bound is removed: two nested bounds of the same value is
+    redundant, and the inner one masked which layer actually fired). The
+    per-request httpx ``timeout`` (the factory below) stays — it bounds
+    a single hung HTTP request independent of the operator bound.
+
+    **Capability probe cached per (base_url, model).** The probe is 2-3
+    real LLM requests; running it on every question would make
+    steady-state questions cost 3+ LLM calls. The result is cached on
+    ``app.state.question_capability_cache`` (``CapabilityCache``, keyed
+    by base_url + model id hash — the same cache the startup probe uses),
+    so a steady-state question makes exactly ONE LLM request. A catalogue
+    edit changing the question role's model or base is a cache miss and
+    re-probes exactly once, like the design role. A cached, degraded
+    (T2/T3) capability is NOT re-probed on the next call (the design
+    role's same semantics — a re-probe storm would defeat the cache).
+
+    **Observability (request_logs).** Each question-role call is
+    logged through ``Connection.log_request`` (role=``question``,
+    ``prompt_hash`` = ``canonical_hash(role, messages, system)`` — the
+    same key the T0 path in ``d33d.design_llm.send`` computes, so
+    model-vs-model diffs join), mirroring ``make_llm_fn``'s plumbing:
+    ``llm_fn`` returns the ``LLMResult`` and the caller writes the row.
+    ``prompt_tokens`` / ``completion_tokens`` come from the ``LLMResult``
+    (zero when the model reports no usage); ``latency_ms`` is measured
+    here. A non-OK wire response (``status == "error"``) logs status
+    ``error``; a T2/T3 ``SenderError`` is NOT logged (no request went
+    out — same as the design role, whose ``send`` raises before any
+    HTTP call) and degrades to the design loop.
+    """
+    from d33d.config.catalogue import ResolutionError
+    from d33d.config.resolve import resolve_model
+    from d33d.design_llm import SenderError
+    from d33d.question_answer import ANSWER_CALL_TIMEOUT_SECONDS, build_answer_prompt
+
+    async def _wrapper(question: str, entries: list[dict[str, Any]]) -> str:
+        import time as _time
+
+        from d33d.config.catalogue import load_catalogue
+        from d33d.config.probes import probe_capabilities
+        from d33d.design_loop import make_llm_fn
+
+        state = app_state.state  # bound at build time (see the docstring above)
+        cat = load_catalogue(catalogue_path)
+        try:
+            res = resolve_model(cat, "question")
+        except (ResolutionError, KeyError):
+            # The ``question`` role is ADDITIVE: a catalogue without it
+            # (a pre-#249 models.yaml) degrades the whole pre-route to
+            # the design loop exactly as today — an empty reply is
+            # ``answerable: false`` to the guard, which routes to the
+            # loop. Zero added failure modes, zero added latency on the
+            # common case.
+            logger.info(
+                "question-answer: no 'question' role in the catalogue — "
+                "skipping stage 2 (design loop) (len(question)=%d)",
+                len(question),
+            )
+            return ""
+        provider = res.provider  # already the Provider object (resolve() does the dict lookup)
+        # The per-request httpx bound (issue #249's latency decision):
+        # the stage-2 LLM call is a single cheap completion — a hung
+        # request is bounded per-request independent of the operator's
+        # 10 s bound (which ``ask_answer_call`` enforces).
+        factory = _http_request_factory(
+            res.provider.base, provider.key, timeout=ANSWER_CALL_TIMEOUT_SECONDS
+        )
+        # The capability probe, cached per (base_url, model): steady-state
+        # questions make exactly one LLM request (the completion).
+        cache: CapabilityCache = state.question_capability_cache
+        base_url = res.provider.base
+        model_id = res.entry.model
+        capability = cache.get(base_url, model_id)
+        if capability is None:
+            capability = await probe_capabilities(
+                base_url=base_url,
+                model_id=model_id,
+                api_key=provider.key,
+                request_factory=factory,
+            )
+            cache.put(base_url, model_id, capability)
+        llm_fn = make_llm_fn(cat, {"question": factory}, {"question": capability})
+        prompt = build_answer_prompt(question, entries)
+        t0 = _time.monotonic()
+        try:
+            result = await llm_fn(
+                "question", [{"role": "user", "content": prompt}], None
+            )
+        except SenderError:
+            # T2/T3 (no tool channel) or a codec failure — no request
+            # went out (T2/T3) or the codec failed after the wire call;
+            # degrade to the design loop. (A T2/T3 probe failure degrades
+            # ``capability`` and takes this path — logged here once, not
+            # re-probed, per the cache semantics above.)
+            logger.info(
+                "question-answer: stage 2 sender error — routing to the "
+                "design loop (len(question)=%d)",
+                len(question),
+            )
+            return ""
+        latency_ms = int((_time.monotonic() - t0) * 1000)
+        # The request_logs row (the same path other roles use — see the
+        # module docstring's observability note): the prompt_hash is the
+        # ``LLMResult.prompt_hash`` — the canonical hash of the role's
+        # logical request (the path in ``d33d.design_llm.send`` that
+        # computed it hashes role + dialect-converted messages + system,
+        # so model-vs-model diffs join on it).
+        conn = getattr(state, "conn", None)
+        if conn is not None:
+            usage = getattr(result, "usage", None) or {}
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            if not isinstance(prompt_tokens, int):
+                prompt_tokens = 0
+            if not isinstance(completion_tokens, int):
+                completion_tokens = 0
+            conn.log_request(
+                project_id=None,
+                model_alias=res.entry.id,
+                model_id=res.entry.model,
+                provider=res.provider.name,
+                role="question",
+                status="ok" if result.status != "error" else "error",
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                latency_ms=latency_ms,
+                prompt_hash=result.prompt_hash or "",
+            )
+        return result.content
+
+    return _wrapper
 
 
 def _build_production_design_loop():

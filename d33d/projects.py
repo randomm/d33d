@@ -36,6 +36,7 @@ from d33d.design_loop_events import (
     run_design_loop_with_events,
 )
 from d33d.dimension_protocol import stated_axes_from_message
+from d33d.question_answer import route_chat_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -188,6 +189,23 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _answered_frames(answer: str):
+    """The answer-path SSE stream (issue #249): ONE terminal ``done``
+    frame whose ``message`` is the answer text and which carries the
+    additive ``kind: "answer"`` discriminator (design-loop done frames
+    carry no ``kind`` at all — existing frames are byte-identical).
+
+    No token frames, no version-created progress frame: the answer text
+    is delivered exclusively in the done frame's ``message`` (the
+    operator's decision — token frames feed the model-source view, and
+    the SPA renders an ``kind: "answer"`` done frame's ``message``
+    verbatim as a plain assistant chat message)."""
+    yield (
+        "done",
+        {"message": answer, "kind": "answer"},
+    )
+
+
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
     """A project row with the raw git-repo path removed (git invisibility
     — the on-disk path names a git repo and is never exposed in an API
@@ -303,6 +321,20 @@ def create_projects_router() -> APIRouter:
         if project_id in inflight:
             raise HTTPException(status_code=409, detail="a design loop is already in flight")
 
+        # Claim the in-flight flag IMMEDIATELY (issue #249 review):
+        # the pre-route (``route_chat_message``) awaits a stage-2 LLM
+        # call (up to 10 s) between the 409 check and the old
+        # ``inflight.add`` — a second concurrent POST in that window saw
+        # an un-set flag and passed the 409. The flag is now set before
+        # the pre-route; EVERY exit path that does not end in a
+        # registered event source releases it (``inflight.discard``), so
+        # a pre-route failure or a design-loop setup failure never leaves
+        # the project stuck. The two paths that DO register an event
+        # source (the answer path here; the design-loop generator below)
+        # keep the flag — streaming.py's ``finally`` clears it when the
+        # stream is drained.
+        inflight.add(project_id)
+
         # Resolve the loop's stated dimensions (ticket #91; issue #247's
         # per-axis decision) — the SPA never sends ``stated_dims`` (it
         # posts only ``message`` + ``chat_history``): the loop receives
@@ -319,6 +351,37 @@ def create_projects_router() -> APIRouter:
         # current turn confirmed no axis. This route never reads W/D/H
         # param keys and never reads a persisted version row for the gate.
         chat_history = tuple(body.chat_history or ())
+
+        # Issue #249 — the pre-route (BEFORE the design loop): if the
+        # message is a question AND the project's design state can answer
+        # it, the answer is emitted on the chat stream as a single
+        # terminal done frame (``kind: "answer"`` — the additive
+        # discriminator; no token frames, no version-created frame, no
+        # version). Everything else — including anything ambiguous — goes
+        # to the design loop EXACTLY as today. The route is narrow on
+        # purpose (one stage-1 question detector, one cheap stage-2 LLM
+        # call with a deterministic number guard, a 10 s hard timeout):
+        # the common case ("make it taller") costs nothing.
+        try:
+            answer_route = await route_chat_message(
+                body.message,
+                app.state.versions.latest_version(project_id),
+                answer_edge=getattr(app.state, "answer_question", None),
+            )
+        except Exception:
+            # The pre-route must never take the project down with it:
+            # release the claim and degrade to the design loop (exactly
+            # as an un-wired answer edge would).
+            inflight.discard(project_id)
+            raise
+        if answer_route is not None:
+            # The event source is registered — the flag stays set
+            # (streaming.py's ``finally`` clears it when the stream is
+            # drained; no event source means no stream to drain it).
+            app.state.event_sources[project_id] = _answered_frames(
+                answer_route["answer"]
+            )
+            return {"status": "accepted"}
 
         # The per-axis stated evidence — the gate's current-message source
         # AND what the loop pass persists on the new version row (issue
@@ -365,22 +428,27 @@ def create_projects_router() -> APIRouter:
         # inflight flag is set here (synchronously, before the 202
         # response) and cleared in the SSE endpoint's ``finally`` when the
         # generator is exhausted (or an SSE client disconnects).
-        events = run_design_loop_with_events(
-            app,
-            project_id,
-            user_message=body.message,
-            stated_dims=stated,
-            stated_axes=per_axis_stated,
-            chat_history=chat_history,
-            photo=photo,
-            request_text=body.message,
-        )
+        try:
+            events = run_design_loop_with_events(
+                app,
+                project_id,
+                user_message=body.message,
+                stated_dims=stated,
+                stated_axes=per_axis_stated,
+                chat_history=chat_history,
+                photo=photo,
+                request_text=body.message,
+            )
+        except Exception:
+            # Design-loop setup failed BEFORE an event source was
+            # registered: release the claim so the project is not stuck
+            # (the flag was claimed before the pre-route — see above).
+            inflight.discard(project_id)
+            raise
         app.state.event_sources[project_id] = events
-
-        # Set the in-flight flag (synchronously, before the 202 response).
-        # The SSE endpoint's ``finally`` clears it on ALL exit paths
-        # (generator exhausted, client disconnect, exception).
-        inflight.add(project_id)
+        # The flag stays set — the SSE endpoint's ``finally`` clears it
+        # on ALL exit paths (generator exhausted, client disconnect,
+        # exception).
 
         return {"status": "accepted"}
 
