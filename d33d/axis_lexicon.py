@@ -152,6 +152,17 @@ def _has_number(fragment: str) -> bool:
     ) is not None
 
 
+#: A foreign length unit (cm, inch/in, m) attached to a number (with a
+#: word boundary on both sides so "cmm"/"imm" does not match): a clause
+#: holding one does not assign an absolute axis (the operator decision
+#: "no cm/in conversion" applies to STATEMENTS, not to feature sizes —
+#: a clause with "5 cm" neither maps an axis nor leaks its number into
+#: tier-2, which is mm-only). Issue #261 round 2: without this, a user
+#: writing "make it 5 cm tall" was assigned H=5 (a 10×-wrong statement)
+#: because the bare 5 was adjacent to the axis word.
+_FOREIGN_UNIT_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:cm|in|inches|inch|m)\b")
+
+
 def _axis_words_in(text: str) -> set[str]:
     """The set of axis words (absolute or relative) present in text."""
     found: set[str] = set()
@@ -205,7 +216,6 @@ def _split_on_and(clause: str) -> list[str]:
 
 def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, list[str]]:
     """Classify one clause. Returns (absolute, relative, global_, cue_words)."""
-    absolute: dict[str, float] = {}
     relative: set[str] = set()
     global_: bool = False
     cue_words: list[str] = []
@@ -218,9 +228,8 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
             break  # one global cue is enough
 
     # Check axis words (absolute and relative) in this clause.
-    for word, axis in _ABSOLUTE.items():
+    for word in _ABSOLUTE:
         if _word_re(word).search(clause):
-            absolute[word] = 0.0  # placeholder, filled below
             cue_words.append(word)
 
     for word, axis in _RELATIVE.items():
@@ -246,6 +255,14 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     # the clause maps nothing (the two-axes-one-number rule).
     if axis_count >= 2 and len(all_numbers) <= 1:
         return ({}, set(), global_, cue_words)
+
+    # A clause with a foreign-unit number (cm/in/m) does not assign an
+    # absolute axis: no unit conversion is the operator decision, and
+    # assigning the raw number would fabricate a 10×-wrong statement
+    # ("5 cm tall" → H=5). Relative/global cues in the same clause are
+    # kept (a "make it 5 cm taller"-style message still releases H).
+    if axis_words_found & set(_ABSOLUTE) and _FOREIGN_UNIT_RE.search(clause):
+        return ({}, relative, global_, cue_words)
 
     # Assign numbers to absolute axes.
     # An absolute axis word with an mm number or a bare number adjacent
@@ -287,6 +304,18 @@ def classify(message: str) -> Cues:
 
     Returns a :class:`Cues` with the absolute axes, relative axes,
     global flag, cue words, and unmapped mm numbers.
+
+    A relative/global cue is also emitted when the message carries NO
+    absolute axis word at all and holds no number (a pure direction
+    request like "increase the height" or "make it 20% taller" — the
+    operator decision "no cm/in conversion" left such phrasings outside
+    the closed word sets, which left the gate enforcing the carried old
+    axis against a user who asked to change it — issue #261 round 2).
+    The emitted cue releases the axis in ``effective_stated_dims`` and
+    feeds the tier-1 offer, without setting any axis value. A message
+    that DOES carry an absolute axis word (or a number, which the
+    number-mapping needs) keeps the strict behavior: "increase the
+    height to 30 mm" sets H=30 without releasing it.
     """
     clauses = _split_clauses(message)
 
@@ -309,6 +338,39 @@ def classify(message: str) -> Cues:
             for w in words_c:
                 if w not in all_cue_words:
                     all_cue_words.append(w)
+
+    has_any_number = bool(_BARE_NUMBER_RE.search(message))
+    has_percent: bool = False
+    # Scan for a bare "%" (the number is already filtered out — a
+    # percentage is not an axis measurement, "20% taller" must not
+    # set H=20).
+    if not has_any_number:
+        for clause in clauses:
+            if "%" in clause:
+                has_percent = True
+                break
+
+    # The #261 round-2 release: a pure direction request (no absolute
+    # value assigned, no number present, or only a percentage number)
+    # still releases the carried axes via a relative cue — the closed
+    # word sets cover "taller"/"bigger" and the like, but English has
+    # other ways to say the same thing ("increase the height", "20% taller"
+    # without the axis word). Without this, such a message left the old
+    # carried value in place and the gate enforced it. The fallback only
+    # fires when the message did NOT state an absolute value: "increase
+    # the height to 30 mm" sets H=30 and carries the rest — it does not
+    # ALSO release H.
+    if not all_absolute and not (has_any_number and not has_percent):
+        for word, axis in _RELATIVE.items():
+            if _word_re(word).search(message):
+                all_relative.add(axis)
+        for word, axis in _ABSOLUTE.items():
+            if _word_re(word).search(message):
+                all_relative.add(axis)
+        for phrase in sorted(_GLOBAL, key=len, reverse=True):
+            if _word_re(phrase).search(message):
+                all_global = True
+                break
 
     # Collect all explicit-mm numbers in the message.
     all_mm_numbers = _mm_numbers_in(message)

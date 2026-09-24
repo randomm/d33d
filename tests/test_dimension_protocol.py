@@ -826,6 +826,39 @@ class TestEffectiveStatedDims:
         cues = classify("add a hole")
         assert effective_stated_dims({"H": 12.0}, cues) == {"H": 12.0}
 
+    def test_missed_relative_cue_word_releases_axis(self):
+        """The #247 regression class re-entering through the vocabulary
+        the closed set does not cover: 'increase the height' carries no
+        lexicon word, yet against a carried {H: 12} the gate must NOT
+        enforce the old H — the round-2 release fallback emits a relative
+        H cue so the carried axis is released, not enforced."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("increase the height")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
+    def test_foreign_unit_message_carries_forward(self):
+        """'make it 5 cm tall' abstains (no cm/in conversion) — the
+        carried H is neither overridden with the 10×-wrong 5.0 nor
+        released (no relative cue): the gate keeps the carried value,
+        which is the honest outcome for a statement the system cannot
+        measure."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 5 cm tall")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {
+            "H": 12.0,
+            "W": 30.0,
+        }
+
+    def test_percent_relative_releases(self):
+        """'make it 20% taller' releases H (the 20 is a percentage, not
+        a mm value — it never becomes H=20)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 20% taller")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
 
 class TestUserQuotedUnmappedMm:
     """user_quoted_unmapped_mm — the tier-2 helper (issue #261):
@@ -868,3 +901,27 @@ class TestUserQuotedUnmappedMm:
     def test_empty_history_is_empty(self):
         assert user_quoted_unmapped_mm([]) == set()
         assert user_quoted_unmapped_mm(("",)) == set()
+
+    def test_bare_axis_letter_followed_by_number_not_consumed(self):
+        """'H is the axis you want, 12 mm' — the axis letter with NO
+        ``:``/``=`` marker and NO mm unit immediately after it does NOT
+        consume the 12 (issue #261 round 2: the old ``[:=]?`` + optional
+        ``mm`` shape let a stray letter followed by any number suppress a
+        tier-2 offer — an offer miss, not a wrong offer)."""
+        assert user_quoted_unmapped_mm(["H is the axis you want, 12 mm"]) == {12.0}
+
+    def test_marker_form_still_consumes(self):
+        """'H = 20 mm' and 'W: 42' — the ``:``/``=`` marker forms
+        consume the number (unchanged behavior)."""
+        assert user_quoted_unmapped_mm(["H = 20 mm"]) == set()
+        assert user_quoted_unmapped_mm(["W: 42"]) == set()
+
+    def test_axis_letter_no_marker_not_consumed(self):
+        """'H 20 mm' (no ``:``/``=`` marker) — the tightened
+        ``_mm_cue_values`` regex does NOT match this shape (issue #261
+        round 2: a bare axis letter followed by a number is ambiguous —
+        "H is the axis you want, 12 mm somewhere" would otherwise mark
+        the 12 as consumed). The ``_extract_stated`` pass still reads
+        this form for the gate, but the offer helper errs on the side of
+        offering (a missed offer is cheaper than a wrong one)."""
+        assert user_quoted_unmapped_mm(["H 20 mm"]) == {20.0}

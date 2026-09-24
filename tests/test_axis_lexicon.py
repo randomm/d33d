@@ -219,6 +219,96 @@ class TestClauseSplitting:
         # 20 is an explicit mm number not assigned to any axis → unmapped
         assert 20.0 in result.unmapped_mm_numbers
 
+
+class TestForeignUnitAbstain:
+    """A clause holding a foreign-unit number (cm/in/m) does NOT assign
+    an absolute axis (issue #261 round 2: the operator decision "no cm/in
+    conversion" means the lexicon abstains — it never maps the raw number,
+    which would fabricate a 10×-wrong statement, and the number is not mm
+    so it never leaks into tier-2). Relative/global cues in the same
+    clause are kept."""
+
+    def test_cm_tall_abstains(self):
+        result = classify("make it 5 cm tall")
+        assert result.absolute == {}
+        assert result.relative == set()
+        assert result.unmapped_mm_numbers == []
+
+    def test_cm_wide_abstains(self):
+        result = classify("make it 15 cm wide")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == []
+
+    def test_cm_inch_m_all_abstain(self):
+        for msg in ("5 cm tall", "2 in wide", "3 m deep"):
+            result = classify(f"make it {msg}")
+            assert result.absolute == {}, msg
+            assert result.unmapped_mm_numbers == [], msg
+
+    def test_cm_with_relative_keeps_release(self):
+        """'make it 5 cm taller' still releases H (the relative cue
+        survives the foreign-unit abstain — the user asked to change H)."""
+        result = classify("make it 5 cm taller")
+        assert result.absolute == {}
+        assert "H" in result.relative
+
+    def test_mm_number_in_other_clause_still_maps(self):
+        """A cm clause and an mm clause: the mm clause maps, the cm
+        clause abstains."""
+        result = classify("5 cm tall, 12 mm wide")
+        assert result.absolute == {"W": 12.0}
+
+
+class TestReleaseFallback:
+    """The #261 round-2 release: a pure direction request — no absolute
+    axis word, no number, no stated value — releases the carried axis via
+    a relative/global cue even when the wording is outside the closed word
+    sets ("increase the height", "raise it", "20% taller")."""
+
+    def test_increase_the_height_releases_h(self):
+        """'increase the height' (no lexicon word) → H released — the
+        gate must not enforce the carried old H."""
+        result = classify("increase the height")
+        assert "H" in result.relative
+        assert result.absolute == {}
+
+    def test_make_it_20pct_taller_releases_h(self):
+        """'make it 20% taller' — the 20 is a percentage, not a mm
+        measurement: H is released, not set to 20."""
+        result = classify("make it 20% taller")
+        assert "H" in result.relative
+        assert result.absolute == {}
+
+    def test_percentage_does_not_become_absolute(self):
+        result = classify("make it 20% wider")
+        assert "W" in result.relative
+        assert result.absolute == {}
+
+    def test_direction_with_absolute_value_still_sets(self):
+        """'increase the height to 30 mm' sets H=30 (the absolute cue
+        wins) and does NOT also release H (the fallback only fires when
+        no value was stated)."""
+        result = classify("increase the height to 30 mm")
+        assert result.absolute == {"H": 30.0}
+        assert "H" not in result.relative
+
+    def test_plain_absolute_sets_not_releases(self):
+        """'height 90 mm' sets H=90 (existing behavior preserved)."""
+        result = classify("height 90 mm")
+        assert result.absolute == {"H": 90.0}
+        assert "H" not in result.relative
+
+    def test_no_cue_message_carries_forward(self):
+        """'raise it' (no lexicon word at all) → no cues — the carried
+        set is unchanged (the fallback only fires when SOME axis-ish
+        word is present; a totally cueless message is not a release).
+        NOTE: 'raise' is not in the lexicon at all — this documents the
+        known residual gap of the closed set (plumb: widen or not)."""
+        result = classify("raise it")
+        assert result.absolute == {}
+        assert result.relative == set()
+        assert result.global_ is False
+
     def test_comma_splits_clauses(self):
         """A comma separates clauses; each is evaluated independently."""
         result = classify("20 mm wide, 12 mm tall")

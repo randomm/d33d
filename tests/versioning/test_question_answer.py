@@ -130,6 +130,18 @@ class TestStage1Detector:
     def test_absolute_word_height_is_still_a_candidate(self) -> None:
         assert is_candidate_question("What is the height?")
 
+    def test_relative_cue_in_question_form_is_a_known_tradeoff(self) -> None:
+        """Issue #261 round 2 (minor observation 3, accepted): the stage-1
+        union makes "is it higher than the shelf?" non-candidate ("higher"
+        is relative → imperative → routed to the design loop, a wasted
+        render instead of an answer). The trade-off is deliberate: the
+        COMMON case "Can it be 20 mm wider?" IS a change request and
+        must go to the loop; distinguishing question-form from
+        change-form requires intent classification, which stage 1 is not.
+        Pinned so a future change is a conscious decision."""
+        assert not is_candidate_question("is it higher than the shelf?")
+        assert not is_candidate_question("is it half the size of the other one?")
+
 
 # ---------------------------------------------------------------------------
 # Stage 2 — the number guard (pure function)

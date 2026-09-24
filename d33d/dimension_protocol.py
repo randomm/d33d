@@ -270,16 +270,31 @@ def _mm_cue_values(message: str) -> set[float]:
     30mm" / "H = 20 mm" — the ``_extract_stated`` axis pass) and the
     equal-axis shorthand ("a 20 mm cube" — the ONLY form that fills
     three axes from one number). A number consumed here is MAPPED and
-    never eligible for the tier-2 offer."""
+    never eligible for the tier-2 offer.
+
+    The axis-letter forms REQUIRE the ``:``/``=`` marker or an explicit
+    ``mm`` unit: "H is the axis you want" + "12 mm somewhere else" must
+    NOT mark the 12 as consumed (issue #261 round 2 — the old optional
+    ``[:]?``/bare-number shape let a stray letter followed by any number
+    suppress a tier-2 offer)."""
     values: set[float] = set()
     for axis in DIMENSION_AXES:
+        # Two explicit shapes: "H = 20" (the ``:``/``=`` marker — any
+        # unit, the user meant the marker form) and "H 20 mm" (the
+        # explicit mm unit, no marker — the ``_extract_stated`` pass
+        # still reads this shape, so the offer helper must match it
+        # for per-message consumption consistency). Anything else —
+        # "H is the axis you want" + "12 mm somewhere" — does NOT
+        # consume the 12 (issue #261 round 2).
         m = re.search(
-            rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:mm)?\b",
+            rf"\b{axis}\b\s*[:=]\s*(\d+(?:\.\d+)?)"
+            r"|\b{axis}\b\s+(\d+(?:\.\d+)?)\s*mm\b",
             message,
             re.IGNORECASE,
         )
         if m:
-            v = _coerce(m.group(1))
+            raw = m.group(1) if m.group(1) else m.group(2)
+            v = _coerce(raw)
             if v is not None:
                 values.add(v)
     m = re.search(
