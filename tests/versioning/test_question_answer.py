@@ -1080,6 +1080,12 @@ class TestStage2OutcomeWarningLogs:
         return [r for r in caplog.records if r.levelno == logging.WARNING]
 
     def test_answer_emits_one_warning_no_text(self, caplog) -> None:
+        # Every stage-2 outcome — the three kinds AND the four failure
+        # classes (timeout/exception/malformed/guard) — emits exactly one
+        # WARNING naming the outcome plus elapsed ms and message length
+        # (issue #260: "log every stage-2 outcome at WARNING"). The
+        # successful answer is no exception: the warning carries only
+        # lengths — never the message or the answer text (no PII).
         async def _edge(q, e):
             return '{"kind": "answer", "answer": "It is 12 mm tall."}'
 
@@ -1097,6 +1103,13 @@ class TestStage2OutcomeWarningLogs:
         assert "len(message)=" in warnings[0].getMessage()
         # Never the message or answer text (no PII in logs).
         for record in warnings:
+            assert "How tall is it now?" not in record.getMessage()
+            assert "It is 12 mm tall." not in record.getMessage()
+        # The answered path also keeps its INFO record (lengths only).
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
+        assert len(infos) == 1, f"expected 1 INFO, got {len(infos)}"
+        assert "answering from the design-state block" in infos[0].getMessage()
+        for record in infos:
             assert "How tall is it now?" not in record.getMessage()
             assert "It is 12 mm tall." not in record.getMessage()
 

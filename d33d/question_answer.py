@@ -660,6 +660,11 @@ async def route_chat_message(
         # really a request is the model's call via kind "request" —
         # "unanswerable" never defaults to the loop.
         return {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+    # kind == "answer" (the guard passed — ask_answer_call runs it):
+    # the #249 path, byte-for-byte unchanged. The stage-2 outcome
+    # already logged its one WARNING from ask_answer_call (issue #260);
+    # this INFO keeps the answered case separately visible with lengths
+    # only (no PII in either).
     logger.info(
         "question-answer: answering from the design-state block "
         "(len(message)=%d, len(answer)=%d)",
