@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from d33d.design_loop import BboxInfo, best_match_component
+from d33d.design_loop import BboxInfo, best_match_component, scad_title
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -607,28 +607,47 @@ async def _resolve_version_create(
        (``validate_params`` accepts it);
     2. else the latest version's params snapshot (a mid-project pass whose
        candidate somehow carries a non-dict param set — the fallback is
-       unchanged in meaning from before the fix);
+       unchanged in meaning from before the fix; ``latest_version`` is
+       read once above for the name derivation and reused here);
     3. else ``{}`` — the version is still created: a pass with unknown
        dimensions is a legitimate state and the user must still get their
        model (the old guard returned ``None`` here, suppressing the
        version entirely).
 
-    ``None`` is returned only when ``best`` itself is missing (a loop
-    result that does not carry a candidate at all — a contract violation
-    that must not fabricate a version), never when the parameter set is
-    merely empty. The version ``message`` is the user's chat text
-    truncated to 200 characters (Python string slicing is code-point-safe
-    — no multi-byte split, unlike a raw byte slice)."""
+    The version ``name`` (issue #245) is derived from WHAT CHANGED, never
+    from the raw user message (a question like "how tall is it now" used
+    to become the version name). Name source, in strict precedence:
+
+    1. the model's ``// title:`` leading comment in the candidate's own
+       SCAD — extracted like params (``d33d.design_loop.scad_title``),
+       cleaned via ``d33d.versions.clean_name`` (the loop's design prompt
+       now asks the model for exactly this comment line);
+    2. a deterministic phrase from the param diff vs the previous
+       version's params (``d33d.versions.param_diff_name``):
+       "First design" / "<name> <old> → <new>" / "<n> parameters
+       changed" / "Revised geometry".
+
+    The raw user message is still passed as the ``message`` field
+    (provenance — the "triggering message excerpt" the timeline renders)
+    and NEVER becomes the name. ``None`` is returned only when ``best``
+    itself is missing (a loop result that does not carry a candidate at
+    all — a contract violation that must not fabricate a version), never
+    when the parameter set is merely empty. The version ``message`` is the
+    user's chat text truncated to 200 characters (Python string slicing is
+    code-point-safe — no multi-byte split, unlike a raw byte slice)."""
     best = getattr(result, "best", None)
     if best is None:
         return None
+    # The previous version, read ONCE up front (a single-row query): it is
+    # both the param-diff baseline for the name (issue #245) and the
+    # params fallback for the non-dict-params case below.
+    latest = app.state.versions.latest_version(project_id)
     named = best.params  # a declared IterationRecord field (issue #93)
     if not isinstance(named, dict):
         # The only reachable case for a real record: a defensive fallback
         # that cannot actually fire — kept because the adapter is typed
         # ``Any`` and a corrupt record (non-dict param set) must degrade
         # to the latest-version snapshot rather than fabricate one.
-        latest = app.state.versions.latest_version(project_id)
         named = dict(latest["params"]) if latest is not None else {}
     # The candidate's OWN source (a declared field — ``best.scad_source``
     # is verified against the real ``IterationRecord``, not a stub's
@@ -636,14 +655,32 @@ async def _resolve_version_create(
     candidate_source = getattr(best, "scad_source", None)
     if not isinstance(candidate_source, str) or not candidate_source.strip():
         candidate_source = None
+    # The version name (issue #245): WHAT CHANGED, never the raw message.
+    # The model's ``// title:`` comment in the candidate's own SCAD wins
+    # when present; otherwise a deterministic phrase from the param diff
+    # vs the previous version's params. (``named`` is a dict at this
+    # point — the non-dict fallback just ran.)
+    prev_params: dict | None = dict(latest["params"]) if latest is not None else None
+    # Lazy import: ``d33d.versions`` imports ``d33d.projects`` (which imports
+    # this module), so the name helpers are pulled in at call time.
+    from d33d.versions import clean_name, param_diff_name
+
+    if candidate_source is not None:
+        title = scad_title(candidate_source)
+        if title is not None:
+            version_name = clean_name(title)
+        else:
+            version_name = param_diff_name(prev_params, dict(named))
+    else:
+        version_name = param_diff_name(prev_params, dict(named))
     # The thumbnail is the best render's iso view (the only view guaranteed
     # to frame the whole object — side views can be cropped per the
     # separately-tracked camera-fit issue). ``_artifact_bytes_from_path``
     # returns an empty dict for ``view_bytes`` when fewer than the full
     # 6-view set is present, so the pick degrades to ``None`` (a NULL row)
     # rather than substituting a different view or a placeholder. The name
-    # is NOT passed: ``create_version``/``_run_create`` derive it from
-    # ``message`` via ``derive_auto_name`` whenever name is falsy.
+    # IS passed (issue #245): the raw user message is the ``message``
+    # field (provenance) and never becomes the name.
     render = getattr(best, "render", None)
     thumbnail = None
     if render is not None:
@@ -654,6 +691,7 @@ async def _resolve_version_create(
     version = await app.state.versions.create_version(
         project_id,
         dict(named),
+        name=version_name,
         message=user_message[:200],
         scad_source=candidate_source,
         thumbnail=thumbnail,

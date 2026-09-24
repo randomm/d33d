@@ -105,6 +105,77 @@ def derive_auto_name(message: str, existing_names: set[str] | None = None) -> st
     return candidate
 
 
+#: Control characters stripped from model-supplied names (issue #245):
+#: a title is untrusted text and must not smuggle a control character
+#: into the display name.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+
+#: Runs of whitespace collapsed to one space (ends are trimmed by
+#: :func:`clean_name`).
+_WS_RUN_RE = re.compile(r"\s+")
+
+
+def clean_name(raw: str, existing_names: set[str] | None = None) -> str:
+    """Clean a model-supplied name (a ``// title:`` value, a param-diff
+    phrase) to a display name — issue #245.
+
+    Deliberately NOT the message-derived ``derive_auto_name`` sanitizer:
+    titles and diff phrases keep case and ordinary punctuation (``_ . → ×
+    - ,``). Control characters are stripped, whitespace runs collapsed, the
+    ends trimmed, and the result capped at :data:`NAME_MAX_LEN`. A
+    whitespace-only input yields ``"version"`` (the same honest fallback
+    as ``derive_auto_name``); on collision with ``existing_names`` the
+    existing numeric-suffix behaviour applies.
+    """
+    base = _CTRL_RE.sub("", raw)
+    base = _WS_RUN_RE.sub(" ", base)
+    base = base[:NAME_MAX_LEN].strip()
+    if not base:
+        base = "version"
+    candidate = base
+    n = 2
+    while existing_names is not None and candidate in existing_names:
+        candidate = f"{base}-{n}"
+        n += 1
+    return candidate
+
+
+def _param_value_str(value: ParamValue) -> str:
+    """Render a param value without a spurious trailing zero (12.0 →
+    ``"12"``). Non-numeric values (strings, bools) render verbatim."""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)):
+        return f"{value:g}"
+    return str(value)
+
+
+def param_diff_name(
+    prev_params: dict[str, ParamValue] | None,
+    new_params: dict[str, ParamValue],
+) -> str:
+    """A deterministic phrase from the param diff vs the previous version
+    (issue #245's fallback name source).
+
+    - no previous version → ``"First design"``
+    - exactly one value-changed param (none added / removed) →
+      ``"<name> <old> → <new>"`` (e.g. ``"hole_diameter 3.3 → 3.8"``)
+    - any other non-empty diff → ``"<n> parameters changed"`` (n =
+      added + removed + changed)
+    - identical params → ``"Revised geometry"``
+    """
+    if prev_params is None:
+        return "First design"
+    added, removed, changed = diff_params(prev_params, new_params)
+    if len(changed) == 1 and not added and not removed:
+        key = changed[0]
+        return f"{key} {_param_value_str(prev_params[key])} → {_param_value_str(new_params[key])}"
+    n = len(added) + len(removed) + len(changed)
+    if n == 0:
+        return "Revised geometry"
+    return f"{n} parameters changed"
+
+
 def diff_params(
     a: dict[str, ParamValue], b: dict[str, ParamValue]
 ) -> tuple[list[str], list[str], list[str]]:
@@ -983,10 +1054,12 @@ __all__ = [
     "ParamValue",
     "VersionConflictError",
     "VersionService",
+    "clean_name",
     "derive_auto_name",
     "diff_params",
     "init_git_repo",
     "install_text_file_atomic",
     "migrate",
+    "param_diff_name",
     "validate_params",
 ]

@@ -85,6 +85,7 @@ __all__ = [
     "run_design_loop",
     "run_design_loop_async",
     "scad_looks_valid",
+    "scad_title",
     "score",
 ]
 
@@ -394,6 +395,14 @@ def _views_non_blank(render: RenderResult) -> bool:
 #: gate can never disagree on what counts as a declaration.
 _DECLARATION_RE = re.compile(r"^\s*(\w+)\s*=\s*([\d.]+)\s*;", re.MULTILINE)
 
+#: The version-title comment scanner (issue #245): the first line matching
+#: ``// title: <text>`` wins; later title lines are ignored. A leading
+#: comment the model emits BEFORE the parameter block — ``// title:
+#: Bore to 38 mm`` — is not a declaration (it is a comment with a
+#: non-numeric RHS, so :data:`_DECLARATION_RE` never matches it) and is
+#: read exactly this way: one regex pass, first match, honest absence.
+_TITLE_RE = re.compile(r"^\s*//[ \t]*title:[ \t]*(\S.*?)?[ \t]*$", re.MULTILINE)
+
 
 @functools.lru_cache(maxsize=256)
 def extract_named_params(scad_source: str) -> tuple[tuple[str, float], ...]:
@@ -421,6 +430,29 @@ def extract_named_params(scad_source: str) -> tuple[tuple[str, float], ...]:
         except ValueError:
             continue  # malformed numeric RHS (e.g. 20.5.0) — never a crash
     return tuple(out)
+
+
+@functools.lru_cache(maxsize=256)
+def scad_title(scad_source: str) -> str | None:
+    r"""The version title a model supplies as a leading ``// title:`` comment.
+
+    Issue #245: the primary version-name source. One pass of
+    :data:`_TITLE_RE` over the source, first match wins (later title lines
+    are ignored — a defined rule, mirroring :func:`extract_named_params`
+    honest-absence semantics). A title whose value is empty or
+    whitespace-only is treated as absent (``None``); the value itself is
+    returned UNtrimmed (the caller — ``d33d.versions.clean_name`` —
+    trims, sanitises, and caps at ``NAME_MAX_LEN``). A source without a
+    title line yields ``None``: an honest absence, never a fabricated
+    default.
+    """
+    m = _TITLE_RE.search(scad_source)
+    if m is None:
+        return None
+    value = m.group(1)
+    if value is None or not value.strip():
+        return None
+    return value
 
 
 def _named_params_present(
@@ -728,10 +760,13 @@ def _design_messages(
         f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}"
     )
     lines.append(
-        "Emit parametric OpenSCAD. Every stated dimension and any FDM "
-        "tolerance must be a named parameter in a top variable block, "
-        "never an inline literal. Reply with a single fenced JSON block: "
-        '```json {"tool": "emit_design", "arguments": {"scad": <string>}} ```'
+        "Emit parametric OpenSCAD. Start the file with one comment line "
+        "`// title: <what this version is or what changed, at most 40 "
+        "characters>` — e.g. `// title: Bore to 38 mm`. Every stated "
+        "dimension and any FDM tolerance must be a named parameter in a "
+        "top variable block, never an inline literal. Reply with a single "
+        'fenced JSON block: ```json {"tool": "emit_design", "arguments": '
+        '{"scad": <string>}} ```'
     )
     if repair is not None:
         lines.append("REPAIR directive (structured, not raw stderr):")
