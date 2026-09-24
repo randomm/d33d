@@ -16,7 +16,8 @@ Covers:
 - its prompt pin resolves to the hash-pinned question-answer prompt, and
   the pinned hash matches the on-disk content (drift detection)
 - the ``expected`` shape the stage-2 number guard scores against:
-  ``answerable``, ``answer_must_cite``, and the five-provenance phrase
+  ``kind`` (the three-way ``answer``/``unanswerable``/``request`` shape
+  from #260), ``answer_must_cite``, and the five-provenance phrase
   map (the merged closed set from #246/#248)
 - the block carries exactly the stated/assumed provenance split the
   operator decision pins (H stated, W/D assumed)
@@ -77,15 +78,17 @@ def test_fixture_pins_the_question_answer_prompt_by_hash() -> None:
     ).hexdigest() == pin["sha256"]
 
 
-def test_expected_shape_pins_answerable_cites_and_provenance_phrases() -> None:
+def test_expected_shape_pins_kind_cites_and_provenance_phrases() -> None:
     """The ``question_answer.expected`` shape is what the stage-2 number
-    guard scores: an answerable flag, the numeric tokens the answer must
-    cite, and the full five-provenance phrase map (the merged closed set
-    from #246/#248 — the guard accepts exactly these phrases)."""
+    guard scores: the reply kind (the closed three-way set from #260 —
+    the legacy ``answerable`` boolean schema was retired in favour of
+    ``kind``), the numeric tokens the answer must cite, and the full
+    five-provenance phrase map (the merged closed set from #246/#248 —
+    the guard accepts exactly these phrases)."""
     fixture = _fixture()
     expected = fixture["question_answer"]["expected"]
 
-    assert expected["answerable"] is True
+    assert expected["kind"] == "answer"
     # H is the only stated axis: the answer must cite 12
     assert expected["answer_must_cite"] == ["12"]
 

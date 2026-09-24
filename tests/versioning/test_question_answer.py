@@ -6,13 +6,27 @@ current part and named it after the question ("v22 — how tall is it now").
 The pre-route sits in the /chat path BEFORE the design loop: if the
 message is a question AND the project's design state can answer it, the
 answer is emitted on the chat stream as an assistant message — no design
-run, no render, no version, no filmstrip entry. Everything else, including
+run, no render, no version, no filmstrip entry. Anything else, including
 anything ambiguous, goes to the design loop exactly as today.
+
+Issue #260: a question the stage-1 filter accepts must never become a
+design run because the stage-2 call failed. A stage-2 timeout, exception,
+malformed reply, or number-guard failure replies with the fixed
+"couldn't answer" no-run message (never the design loop); a kind
+"unanswerable" reply gets the fixed "not established" no-run message;
+a kind "request" reply routes to the design loop exactly as a
+non-question message. Every stage-2 outcome logs exactly one WARNING
+record naming the outcome (no message or answer text in it).
 
 This file covers the Python side of the seam (task-a scope):
 
 * stage 1 — the deterministic question detector (no LLM, no app);
 * stage 2 — the cheap single LLM call + the number guard (stub answer_fn);
+  issue #260: the three-way outcome (answer/unanswerable/request) and the
+  no-run replies — a stage-2 failure (timeout, exception, malformed reply,
+  guard failure) or an ``unanswerable`` reply gets the fixed no-run copy,
+  NO design run, NO version, and exactly one WARNING log; a ``request``
+  reply routes to the design loop exactly as a non-question does;
 * the /chat route wiring — the answer path emits ONE terminal done frame
   (``kind: "answer"``) and NO version is created; the design-loop path
   is unchanged for every non-answer message.
@@ -23,10 +37,14 @@ All fast (no LLM, no Docker).
 from __future__ import annotations
 
 import asyncio
+import logging
+import re
 from typing import Any
 
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
+    COULD_NOT_ANSWER,
+    NOT_ESTABLISHED,
     build_answer_prompt,
     guard_answer_numbers,
     is_candidate_question,
@@ -151,28 +169,71 @@ class TestNumberGuard:
 
 
 class TestParseAnswerReply:
-    """``parse_answer_reply`` — the stage-2 reply codec."""
+    """``parse_answer_reply`` — the stage-2 reply codec (the #260
+    three-way ``kind`` shape, plus the legacy ``answerable`` bool for
+    backward compatibility)."""
 
-    def test_valid_json(self) -> None:
+    def test_valid_json_kind_answer(self) -> None:
+        assert parse_answer_reply(
+            '{"kind": "answer", "answer": "It is 12 mm tall."}'
+        ) == ("answer", "It is 12 mm tall.")
+
+    def test_kind_unanswerable(self) -> None:
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": ""}'
+        ) == ("unanswerable", "")
+
+    def test_kind_request(self) -> None:
+        assert parse_answer_reply(
+            '{"kind": "request", "answer": ""}'
+        ) == ("request", "")
+
+    def test_kind_must_be_closed_set(self) -> None:
+        assert parse_answer_reply('{"kind": "maybe", "answer": "x"}') is None
+        assert parse_answer_reply('{"kind": true, "answer": ""}') is None
+
+    def test_kind_answer_requires_nonempty_answer(self) -> None:
+        assert parse_answer_reply('{"kind": "answer", "answer": ""}') is None
+        assert parse_answer_reply('{"kind": "answer", "answer": "  "}') is None
+
+    def test_legacy_answerable_true_maps_to_answer(self) -> None:
+        # The old boolean schema may still come back from the model:
+        # mapped, never a false "unanswerable".
         assert parse_answer_reply(
             '{"answerable": true, "answer": "It is 12 mm tall."}'
-        ) == (True, "It is 12 mm tall.")
+        ) == ("answer", "It is 12 mm tall.")
 
-    def test_answerable_false(self) -> None:
+    def test_legacy_answerable_false_maps_to_request(self) -> None:
+        # Preserving today's routing: a legacy false reply is a change
+        # REQUEST to the design loop, never a false "unanswerable".
         assert parse_answer_reply(
             '{"answerable": false, "answer": ""}'
-        ) == (False, "")
+        ) == ("request", "")
+
+    def test_legacy_answerable_true_empty_answer_is_malformed(self) -> None:
+        assert parse_answer_reply('{"answerable": true, "answer": ""}') is None
+
+    def test_both_shapes_is_malformed(self) -> None:
+        # A reply carrying both discriminators is ambiguous: malformed.
+        assert parse_answer_reply(
+            '{"kind": "answer", "answerable": true, "answer": "x"}'
+        ) is None
 
     def test_malformed_returns_none(self) -> None:
         assert parse_answer_reply("not json") is None
         assert parse_answer_reply("") is None
         assert parse_answer_reply('{"answerable": "yes"}') is None
         assert parse_answer_reply('{"answerable": true}') is None  # no answer key
+        assert parse_answer_reply('{"kind": "answer"}') is None  # no answer key
+        assert parse_answer_reply('{"kind": "unanswerable"}') is None
 
     def test_json_in_surrounding_prose(self) -> None:
         assert parse_answer_reply(
             'Here is the answer: {"answerable": true, "answer": "12 mm"}'
-        ) == (True, "12 mm")
+        ) == ("answer", "12 mm")
+        assert parse_answer_reply(
+            'Sure: {"kind": "request", "answer": ""}'
+        ) == ("request", "")
 
 
 # ---------------------------------------------------------------------------
@@ -181,13 +242,13 @@ class TestParseAnswerReply:
 
 
 class TestBuildAnswerPrompt:
-    """``build_answer_prompt`` — the stage-2 user message."""
+    """``build_answer_prompt`` — the stage-2 user message (the #260
+    three-way ``kind`` contract, one example per kind)."""
 
     def test_prompt_contains_block_values(self) -> None:
-        entries = _entries(("H", 12.0), ("W", 20.0))
+        entries = _entries(("H", 12.0))
         prompt = build_answer_prompt("How tall is it?", entries)
         assert "12" in prompt
-        assert "20" in prompt
         assert "How tall is it?" in prompt
 
     def test_prompt_forbids_offering_to_set(self) -> None:
@@ -196,6 +257,30 @@ class TestBuildAnswerPrompt:
         # The operator's decision: the prompt must NOT ask the model to
         # offer to set/confirm values.
         assert "do NOT offer to change, set, or confirm" in prompt
+
+    def test_prompt_asks_for_three_kinds_with_examples(self) -> None:
+        # #260: the reply schema is the closed three-way kind, with one
+        # example per kind in the prompt.
+        entries = _entries(("H", 12.0))
+        prompt = build_answer_prompt("How tall is it?", entries)
+        assert '{"kind": "answer"|' in prompt
+        assert '"unanswerable"|"request", "answer": "…"}' in prompt
+        assert "\"answer\" — the block contains every value you need" in prompt
+        assert "\"unanswerable\" — a genuine question" in prompt
+        assert "\"request\" — the message asks for a change" in prompt
+        # One example per kind (the operator decision).
+        assert "\"How tall is it now?\" with the height stated 12 mm" in prompt
+        assert "colour, material or finish" in prompt
+        assert "\"Can it be 20 mm wider?\"" in prompt
+
+    def test_prompt_no_longer_speaks_the_answerable_bool(self) -> None:
+        # The legacy boolean schema is retired from the production prompt
+        # (parsing still accepts it for old-style model replies).
+        entries = _entries(("H", 12.0))
+        prompt = build_answer_prompt("How tall is it?", entries)
+        assert '"answerable"' not in prompt
+        assert "answerable: true" not in prompt
+        assert "answerable: false" not in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -241,23 +326,67 @@ class TestRouteChatMessage:
         result = run_async_safe(route_chat_message(msg, latest))
         assert result is None
 
-    def test_unanswerable_returns_none(self) -> None:
+    def test_kind_unanswerable_returns_not_established_no_run(self) -> None:
+        # #260: kind "unanswerable" → the fixed no-run reply (NOT the
+        # design loop — today's buggy behaviour, which inverted this).
         latest = _latest({"H": 12.0})
-        edge = self._answer_edge('{"answerable": false, "answer": ""}')
-        result = run_async_safe(route_chat_message("What colour is it?", latest, edge))
+        edge = self._answer_edge('{"kind": "unanswerable", "answer": ""}')
+        result = run_async_safe(
+            route_chat_message("What colour is it?", latest, edge)
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+
+    def test_kind_request_returns_none_goes_to_loop(self) -> None:
+        # #260: kind "request" → the design loop, exactly as a
+        # non-question message (the model says the message asks for a
+        # change).
+        latest = _latest({"H": 12.0})
+        edge = self._answer_edge('{"kind": "request", "answer": ""}')
+        result = run_async_safe(
+            route_chat_message("Can it be 20 mm wider?", latest, edge)
+        )
         assert result is None
 
-    def test_invented_number_guard_fails(self) -> None:
+    def test_invented_number_guard_fails_returns_could_not_answer(self) -> None:
+        # #260: a guard failure is a FAILED ANSWER — the fixed no-run
+        # reply, not a design run.
         latest = _latest({"H": 12.0})
         edge = self._answer_edge('{"answerable": true, "answer": "It is 15 mm tall."}')
         result = run_async_safe(route_chat_message("How tall is it now?", latest, edge))
-        assert result is None
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
-    def test_malformed_reply_returns_none(self) -> None:
+    def test_malformed_reply_returns_could_not_answer(self) -> None:
         latest = _latest({"H": 12.0})
         edge = self._answer_edge("not json at all")
         result = run_async_safe(route_chat_message("How tall is it now?", latest, edge))
-        assert result is None
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+
+    def test_exception_from_edge_returns_could_not_answer(self) -> None:
+        latest = _latest({"H": 12.0})
+
+        async def _raise_edge(question: str, entries: list) -> str:
+            raise RuntimeError("simulated stage-2 failure")
+
+        result = run_async_safe(
+            route_chat_message("How tall is it now?", latest, _raise_edge)
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+
+    def test_stage2_timeout_returns_could_not_answer(self) -> None:
+        # The hard timeout at a short test value (the 10 s production
+        # bound's contract, pinned in <1 s of wall clock).
+        latest = _latest({"H": 12.0})
+
+        async def _hanging_edge(question: str, entries: list) -> str:
+            await asyncio.sleep(0.5)  # well past the 0.05 s bound
+            return ""
+
+        result = run_async_safe(
+            route_chat_message(
+                "How tall is it now?", latest, _hanging_edge, timeout=0.05
+            )
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
     def test_no_answer_edge_returns_none(self) -> None:
         latest = _latest({"H": 12.0})
@@ -440,9 +569,11 @@ def test_imperative_question_goes_to_loop_not_answer(app_with_versions) -> None:
     assert terminal[1].get("kind") != ANSWER_DONE_KIND
 
 
-def test_unanswerable_question_goes_to_loop(app_with_versions) -> None:
-    """A question the block cannot answer ("What colour is it?") →
-    answerable: false → design loop, not the answer path."""
+def test_unanswerable_kind_gets_no_run_reply_not_loop(app_with_versions) -> None:
+    """#260: kind "unanswerable" (a genuine question the block does not
+    establish, "What colour is it?") → the fixed no-run copy, NO design
+    run, NO version. Today's behaviour (inverted by this ticket) was the
+    design loop — which produced a wrong or failing new version."""
 
     loop_called = False
 
@@ -471,18 +602,31 @@ def test_unanswerable_question_goes_to_loop(app_with_versions) -> None:
             client,
             pid,
             {"message": "What colour is it?", "chat_history": []},
-            answer_reply='{"answerable": false, "answer": ""}',
+            answer_reply='{"kind": "unanswerable", "answer": ""}',
         )
-        return r, frames
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
 
-    r, frames = run_async(app_with_versions, _call)
+    r, frames, version_count = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert loop_called, "the design loop was NOT called for an unanswerable question"
+    assert not loop_called, "the design loop was called for an unanswerable question"
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    # ONE terminal done frame, kind "answer" (the #249 plain-message
+    # path), carrying the fixed no-run copy — never the design loop's
+    # frame.
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == NOT_ESTABLISHED
 
 
-def test_invented_number_goes_to_loop(app_with_versions) -> None:
-    """An LLM answer containing a number not in the block → guard fails
-    → design loop, not the answer path."""
+def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
+    app_with_versions,
+) -> None:
+    """#260: an LLM answer containing a number not in the block → guard
+    fails → the fixed no-run copy. No design run, no version — the
+    design loop is never the fallback for a failed answer."""
 
     loop_called = False
 
@@ -511,13 +655,23 @@ def test_invented_number_goes_to_loop(app_with_versions) -> None:
             client,
             pid,
             {"message": "How tall is it now?", "chat_history": []},
-            answer_reply='{"answerable": true, "answer": "It is 15 mm tall."}',
+            answer_reply='{"kind": "answer", "answer": "It is 15 mm tall."}',
         )
-        return r, frames
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
 
-    r, frames = run_async(app_with_versions, _call)
+    r, frames, version_count = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert loop_called, "the design loop was NOT called for an invented-number answer"
+    assert not loop_called, (
+        "the design loop was called for an invented-number answer "
+        "(the design loop is never the fallback for a failed answer)"
+    )
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == COULD_NOT_ANSWER
 
 
 def test_no_versions_goes_to_loop(app_with_versions) -> None:
@@ -556,13 +710,18 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
     assert loop_called, "the design loop was NOT called for a fresh project"
 
 
-def test_stage2_llm_timeout_goes_to_loop(app_with_versions, monkeypatch) -> None:
-    """A stage-2 LLM call that times out (simulated via a hanging stub)
-    → design loop, exactly as today. The timeout is monkeypatched to 0.1 s
-    so the test runs in <1 s of wall clock (the same contract as the 10 s
-    production bound, at a shorter value — the operator's latency decision
-    is pinned by the ``ask_answer_call`` timeout param, not by the literal
-    value of ``ANSWER_CALL_TIMEOUT_SECONDS``)."""
+def test_stage2_llm_timeout_gets_no_run_reply(app_with_versions, monkeypatch) -> None:
+    """#260 REPRO-VERIFICATION: a stage-2 LLM call that times out
+    (simulated via a hanging stub — the same 0.1 s monkeypatch contract
+    as before) → the fixed "couldn't answer" no-run done frame, the
+    design loop is NEVER invoked, the version count is unchanged. The
+    design loop is never the fallback for a failed answer.
+
+    The timeout is monkeypatched to 0.1 s so the test runs in <1 s of
+    wall clock (the same contract as the 10 s production bound, at a
+    shorter value — the operator's latency decision is pinned by the
+    ``ask_answer_call`` timeout param, not by the literal value of
+    ``ANSWER_CALL_TIMEOUT_SECONDS``)."""
     import d33d.question_answer as _qa_mod
     monkeypatch.setattr(_qa_mod, "ANSWER_CALL_TIMEOUT_SECONDS", 0.1)
 
@@ -604,14 +763,24 @@ def test_stage2_llm_timeout_goes_to_loop(app_with_versions, monkeypatch) -> None
             frames.append((event, data))
             if event in ("done", "error"):
                 break
-        return r, frames
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
 
-    r, frames = run_async(app_with_versions, _call)
+    r, frames, version_count = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert loop_called, "the design loop was NOT called after a stage-2 timeout"
-    # The terminal frame is from the design loop (no kind "answer").
-    terminal = frames[-1]
-    assert terminal[1].get("kind") != ANSWER_DONE_KIND
+    assert not loop_called, (
+        "the design loop was called after a stage-2 timeout (the design "
+        "loop is never the fallback for a failed answer)"
+    )
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    # The no-run done frame: ONE terminal frame, kind "answer", the
+    # fixed couldn't-answer copy — no design-loop frame, no
+    # version-created frame.
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == COULD_NOT_ANSWER
 
 
 def test_answer_done_frame_passes_seam_d_schema(app_with_versions) -> None:
@@ -668,9 +837,8 @@ def test_stage2_call_receives_state_block(app_with_versions) -> None:
             {"H": 12.0, "W": 20.0},
             stated_dims={"H": 12.0},
         )
-        # A stub design loop (so the design-loop path doesn't try to load
-        # a real catalogue — the answer path calls _capturing_edge, which
-        # returns answerable:false → the design loop is invoked).
+        # A stub design loop (a defensive fallback — this stub edge
+        # answers, so the loop is never invoked for this question).
         def _loop(app, **kwargs):
             class _R:
                 status = "pass"
@@ -747,6 +915,358 @@ class TestWrittenNumberGuard:
     def test_case_insensitive(self) -> None:
         entries = _entries(("H", 12.0))
         assert guard_answer_numbers("It is TWELVE millimetres tall.", entries)
+
+
+def test_kind_request_goes_to_loop_exactly_as_non_question(app_with_versions) -> None:
+    """#260: a stage-2 kind "request" reply runs the design loop exactly
+    as a non-question message does (the model says the message asks for
+    a change). The frame is the design loop's own (NO kind "answer"),
+    and the stage-2 edge IS called (the pre-route classified it)."""
+
+    loop_called = False
+    edge_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _request_edge(question: str, entries: list) -> str:
+        nonlocal edge_called
+        edge_called = True
+        return '{"kind": "request", "answer": ""}'
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"H": 12.0},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        app_with_versions.state.answer_question = _request_edge
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "Can it be 20 mm wider?", "chat_history": []},
+            answer_edge=_request_edge,
+        )
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
+
+    r, frames, version_count = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert edge_called, "the stage-2 edge was NOT called for a request-kind question"
+    assert loop_called, "the design loop was NOT called for a kind 'request' reply"
+    # The design loop ran (the stub loop does not create a version, so
+    # the count stays 1 — same as the non-question tests).
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    # The terminal frame is the design loop's own — no kind "answer".
+    terminal = frames[-1]
+    assert terminal[0] == "done"
+    assert terminal[1].get("kind") != ANSWER_DONE_KIND
+
+
+def test_stage2_exception_gets_no_run_reply_releases_flag(app_with_versions) -> None:
+    """#260: a stage-2 edge that raises → the fixed no-run reply (not the
+    design loop), the in-flight flag is released (the follow-up POST is
+    not 409'd), and no version is created."""
+
+    loop_called = 0
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called += 1
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    def _raise_edge(question: str, entries: list) -> str:
+        raise RuntimeError("simulated stage-2 failure")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"H": 12.0},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.answer_question = _raise_edge
+        # The failing POST: the edge raises → the fixed no-run reply.
+        r_fail = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "How tall is it now?", "chat_history": []},
+        )
+        # The flag is released by the STREAM's finally — drain via the
+        # real SSE endpoint (the sole driver of event sources, per
+        # streaming.py's contract).
+        async with client.stream("GET", f"/api/stream/{pid}") as resp:
+            async for _chunk in resp.aiter_text():
+                pass
+        # The in-flight flag was released by the stream's finally: a
+        # follow-up POST must NOT be 409'd. The follow-up is a
+        # NON-QUESTION ("make it taller") → stage-1 rejects → the design
+        # loop, whose stub (pass result) never reaches the real catalogue.
+        app_with_versions.state.answer_question = None
+        app_with_versions.state.run_design_loop = _loop
+        r_ok = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make it taller", "chat_history": []},
+        )
+        source2 = app_with_versions.state.event_sources.get(pid)
+        frames2 = []
+        if source2 is not None:
+            async for event, data in source2:
+                frames2.append((event, data))
+                if event in ("done", "error"):
+                    break
+        # The flag is released again by the stream's finally.
+        async with client.stream("GET", f"/api/stream/{pid}") as resp:
+            async for _chunk in resp.aiter_text():
+                pass
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r_fail, r_ok, frames2, len(versions)
+
+    r_fail, r_ok, frames2, version_count = run_async(app_with_versions, _call)
+    assert r_fail.status_code == 202, r_fail.text
+    # The failing question did NOT route to the design loop: the loop
+    # ran exactly once, for the follow-up (non-question) POST — the
+    # stage-2 exception got the fixed no-run reply, not a design run.
+    assert loop_called == 1, (
+        f"the design loop was called {loop_called} time(s); expected exactly "
+        f"one call — for the follow-up non-question POST, not for the "
+        f"failed-answer question (the design loop is never the fallback "
+        f"for a failed answer)"
+    )
+    # The follow-up POST is not 409'd: the in-flight flag was released
+    # on the no-run path (the SSE stream's finally cleared it).
+    assert r_ok.status_code == 202, (
+        f"POST after a stage-2 exception expected 202, got {r_ok.status_code} "
+        f"(the in-flight flag was not released): {r_ok.text}"
+    )
+    # The follow-up went to the design loop (the stub did not create a
+    # version — the count is unchanged either way). The loop's frame
+    # stream is terminal with a done frame that carries NO kind "answer"
+    # (the no-run reply's done frame is the one with kind "answer").
+    assert frames2 and frames2[-1][0] == "done"
+    assert frames2[-1][1].get("kind") != ANSWER_DONE_KIND
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+
+
+class TestStage2OutcomeWarningLogs:
+    """#260: every stage-2 outcome — the three kinds AND the four failure
+    classes — emits exactly ONE WARNING record naming the outcome, with
+    elapsed ms and message length, and NEVER the message or answer text
+    (no PII in logs). The stage-1 short-circuits stay at INFO (no
+    WARNING at all)."""
+
+    def _latest(self, params: dict) -> dict:
+        return {"params": params, "stated_dims": None, "bbox": None, "param_meta": None}
+
+    def _outcome_warning(self, caplog) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_answer_emits_one_warning_no_text(self, caplog) -> None:
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=answer" in warnings[0].getMessage()
+        assert "elapsed_ms=" in warnings[0].getMessage()
+        assert "len(message)=" in warnings[0].getMessage()
+        # Never the message or answer text (no PII in logs).
+        for record in warnings:
+            assert "How tall is it now?" not in record.getMessage()
+            assert "It is 12 mm tall." not in record.getMessage()
+
+    def test_unanswerable_emits_one_warning(self, caplog) -> None:
+        async def _edge(q, e):
+            return '{"kind": "unanswerable", "answer": ""}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What colour is it?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=unanswerable" in warnings[0].getMessage()
+
+    def test_request_emits_one_warning(self, caplog) -> None:
+        async def _edge(q, e):
+            return '{"kind": "request", "answer": ""}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "Can it be 20 mm wider?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result is None  # request → the design loop
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=request" in warnings[0].getMessage()
+
+    def test_timeout_emits_one_warning(self, caplog) -> None:
+        async def _edge(q, e):
+            await asyncio.sleep(0.5)  # well past the 0.05 s bound
+            return ""
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge,
+                    timeout=0.05,
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=timeout" in warnings[0].getMessage()
+
+    def test_exception_emits_one_warning(self, caplog) -> None:
+        async def _edge(q, e):
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=exception" in warnings[0].getMessage()
+
+    def test_malformed_emits_one_warning_no_reply_text(self, caplog) -> None:
+        # The old malformed path logged raw=%r (the reply text) at INFO —
+        # the exact PII pattern this removes: the WARNING names the class
+        # and never the text.
+        async def _edge(q, e):
+            return "not a json reply at all"
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=malformed" in warnings[0].getMessage()
+        for record in warnings:
+            assert "not a json reply at all" not in record.getMessage()
+
+    def test_guard_failure_emits_one_warning(self, caplog) -> None:
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 15 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=guard" in warnings[0].getMessage()
+        for record in warnings:
+            assert "It is 15 mm tall." not in record.getMessage()
+
+    def test_stage1_short_circuit_emits_no_warning(self, caplog) -> None:
+        # The stage-1 short-circuits (no versions / not a candidate /
+        # no answer edge) stay at INFO: zero WARNING records.
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            assert asyncio.run(route_chat_message("How tall is it now?", None)) is None
+            assert (
+                asyncio.run(
+                    route_chat_message(
+                        "make it taller", self._latest({"H": 12.0})
+                    )
+                )
+                is None
+            )
+            assert (
+                asyncio.run(
+                    route_chat_message(
+                        "How tall is it now?", self._latest({"H": 12.0})
+                    )
+                )
+                is None
+            )
+        assert self._outcome_warning(caplog) == []
+
+
+class TestCopyDeckParity:
+    """#260: the backend's two no-run reply strings are pinned against
+    ``web/src/copy.ts``'s ``answerRoute`` deck, the same way the #250
+    ``confirmOffer`` strings are — a deck edit without the backend (or
+    vice versa) is a drift this catches."""
+
+    def test_backend_no_run_strings_match_copy_ts_deck(self) -> None:
+        from pathlib import Path
+
+        copy_ts = (
+            Path(__file__).resolve().parents[2]
+            / "web" / "src" / "copy.ts"
+        ).read_text()
+
+        # Extract the deck's ``answerRoute`` object literal.
+        start = copy_ts.find("export const answerRoute = {")
+        assert start != -1, "copy.ts has no answerRoute deck"
+        end = copy_ts.find("} as const;", start)
+        assert end != -1
+        body = copy_ts[start:end]
+
+        strings: list[str] = []
+        for line in body.splitlines():
+            m = re.search(r'"((?:[^"\\]|\\.)*)"', line)
+            if m is not None:
+                value = m.group(1)
+                if value and not value.startswith("/"):
+                    strings.append(value)
+        assert strings, f"no string literals found in the answerRoute deck: {body}"
+
+        deck = set(strings)
+        # The backend emits the deck's strings verbatim (both directions
+        # — a backend rewrite or a deck rewrite breaks the pin).
+        assert COULD_NOT_ANSWER in deck, (
+            f"COULD_NOT_ANSWER {COULD_NOT_ANSWER!r} not in the copy.ts "
+            f"answerRoute deck: {sorted(deck)}"
+        )
+        assert NOT_ESTABLISHED in deck, (
+            f"NOT_ESTABLISHED {NOT_ESTABLISHED!r} not in the copy.ts "
+            f"answerRoute deck: {sorted(deck)}"
+        )
+        # The two strings are distinct (a failure and an unanswerable
+        # question are different honest statements).
+        assert COULD_NOT_ANSWER != NOT_ESTABLISHED
 
 
 class TestConcurrentInflightClaim:
@@ -1076,9 +1596,16 @@ class TestPromptPairAgreement:
         entries = _entries(("H", 12.0), ("W", 20.0))
         prompt = build_answer_prompt("How tall is it?", entries)
 
-        # The reply format: the same JSON object shape in both.
-        assert '{"answerable": true|false, "answer": "…"}' in prompt
-        assert '{"answerable": true|false, "answer": "…"}' in evals_md
+        # The reply format: the same JSON object shape in both (the #260
+        # three-way kind — the legacy {"answerable": true|false, …} shape
+        # is retired from both prompts).
+        assert '{"kind": "answer"|' in prompt
+        assert '"unanswerable"|"request", "answer": "…"}' in prompt
+        assert '{"kind": "answer"|' in evals_md
+        assert '"unanswerable"|"request", "answer": "…"}' in evals_md
+        # The legacy shape is gone from both.
+        assert "\"answerable\": true|false" not in prompt
+        assert "\"answerable\": true|false" not in evals_md
 
         # The value-integrity contract: both forbid inventing values and
         # require every number to come from the block.
