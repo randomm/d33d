@@ -29,6 +29,7 @@ Async entry points run under plain ``asyncio.run`` (no async plugin in CI).
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
@@ -43,6 +44,7 @@ from d33d.design_llm import (
     send,
     to_ollama_messages,
 )
+from d33d.question_answer import parse_answer_reply
 from d33d.render_worker import VIEWS
 from d33d.response_shape import response_message_shape
 
@@ -1409,18 +1411,25 @@ QUESTION_TOOLS = [
             "name": "emit_answer",
             "description": (
                 "Emit the answer to the user's question about the current "
-                "design. ``answerable`` is true ONLY if the design-state "
-                "block contains every value you need; ``answer`` is the "
-                "plain-words answer (each cited value names its provenance) "
-                "or empty when not answerable."
+                "design. ``kind`` is the three-way outcome: "
+                "``\"answer\"`` ONLY if the design-state block contains "
+                "every value you need, ``\"unanswerable\"`` for a genuine "
+                "question the block does not establish, or "
+                "``\"request\"`` if the message asks for a design change. "
+                "``answer`` is the plain-words answer (each cited value "
+                "names its provenance) when kind is "
+                "``\"answer\"``, empty otherwise."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "answerable": {"type": "boolean"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["answer", "unanswerable", "request"],
+                    },
                     "answer": {"type": "string"},
                 },
-                "required": ["answerable", "answer"],
+                "required": ["kind", "answer"],
             },
         },
     }
@@ -1429,6 +1438,90 @@ QUESTION_TOOLS = [
 
 def _question_messages() -> list[dict[str, Any]]:
     return [{"role": "user", "content": "How tall is it now?"}]
+
+
+def test_t0_question_role_wire_advertises_kind_not_answerable():
+    """The T0 wire body advertises the three-way ``kind`` (issue #260) —
+    a T0/T1 model following the wire schema can say "unanswerable" (the
+    old ``{answerable: bool}`` shape could never express it, and
+    ``answerable: false`` mapped to the design loop). The schema's
+    ``kind`` is a closed-string enum and both fields are required."""
+    sent: list[dict[str, Any]] = []
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        return _ok_response("", tool_calls=[])
+
+    _run(
+        send(
+            role="question",
+            model_id="m",
+            messages=_question_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    body = sent[0]
+    tool = body["tools"][0]["function"]
+    params = tool["parameters"]
+    # The wire advertises kind, not the legacy answerable.
+    assert "kind" in params["properties"]
+    assert "answerable" not in params["properties"]
+    assert params["properties"]["kind"] == {
+        "type": "string",
+        "enum": ["answer", "unanswerable", "request"],
+    }
+    assert params["required"] == ["kind", "answer"]
+
+
+def test_t0_question_role_unanswerable_call_flows_to_parse():
+    """A T0 tool call ``{\"kind\": \"unanswerable\", \"answer\": \"\"}`` is
+    a well-formed emit_answer call: it passes the tool-name allowlist in
+    :func:`send`, and ``kind`` flows through to ``parse_answer_reply`` as
+    the three-way outcome — an ``unanswerable`` reply is NOT a design
+    loop (the old shape's ``answerable: false`` → request mapping never
+    applies to a kind reply)."""
+    sent: list[dict[str, Any]] = []
+
+    async def factory(request: dict[str, Any]):
+        sent.append(request)
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_answer",
+                        "arguments": '{"kind": "unanswerable", "answer": ""}',
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="question",
+            model_id="m",
+            messages=_question_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    # The wire body advertises kind (the new shape), not answerable.
+    assert "kind" in sent[0]["tools"][0]["function"]["parameters"]["properties"]
+    assert "answerable" not in sent[0]["tools"][0]["function"]["parameters"]["properties"]
+    # The call is accepted (not rejected at the sender boundary).
+    assert result.status == "ok"
+    assert result.tier == "T0"
+    args = result.tool_calls[0]["arguments"]
+    assert args == {"kind": "unanswerable", "answer": ""}
+    # kind flows through to the stage-2 codec: an unanswerable reply is a
+    # no-run outcome, never a request (never the design loop).
+    outcome = parse_answer_reply(
+        json.dumps({"kind": args["kind"], "answer": args["answer"]})
+    )
+    assert outcome == ("unanswerable", "")
 
 
 def test_t0_question_role_attaches_its_own_tool_and_passes_through():
@@ -1449,7 +1542,7 @@ def test_t0_question_role_attaches_its_own_tool_and_passes_through():
                     "function": {
                         "name": "emit_answer",
                         "arguments": (
-                            '{"answerable": true, "answer": "It is 12 mm tall"}'
+                            '{"kind": "answer", "answer": "It is 12 mm tall"}'
                         ),
                     },
                 }
@@ -1478,7 +1571,56 @@ def test_t0_question_role_attaches_its_own_tool_and_passes_through():
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0]["name"] == "emit_answer"
     args = result.tool_calls[0]["arguments"]
+    assert args == {"kind": "answer", "answer": "It is 12 mm tall"}
+
+
+def test_t0_question_role_legacy_answerable_call_still_accepted():
+    """Back-compat shim: a legacy ``{answerable, answer}`` tool call is
+    still accepted at the sender boundary (the wire now advertises
+    ``kind``, but an older model reply shape must not hard-fail) and the
+    legacy ``answerable`` parse mapping in ``parse_answer_reply`` holds —
+    ``true`` → ``"answer"``, ``false`` → ``"request"`` (never a false
+    ``"unanswerable"``)."""
+
+    async def factory(request: dict[str, Any]):
+        return _ok_response(
+            "",
+            tool_calls=[
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {
+                        "name": "emit_answer",
+                        "arguments": (
+                            '{"answerable": true, "answer": "It is 12 mm tall"}'
+                        ),
+                    },
+                }
+            ],
+        )
+
+    result = _run(
+        send(
+            role="question",
+            model_id="m",
+            messages=_question_messages(),
+            request_factory=factory,
+            capability=_t0(),
+        )
+    )
+    # The legacy shape is still accepted (not rejected at the boundary).
+    assert result.status == "ok"
+    args = result.tool_calls[0]["arguments"]
     assert args == {"answerable": True, "answer": "It is 12 mm tall"}
+    # The legacy parse mapping is preserved.
+    assert parse_answer_reply('{"answerable": true, "answer": "It is 12 mm tall"}') == (
+        "answer",
+        "It is 12 mm tall",
+    )
+    assert parse_answer_reply('{"answerable": false, "answer": ""}') == (
+        "request",
+        "",
+    )
 
 
 def test_t0_question_role_wrong_tool_name_fails_loudly():
@@ -1525,7 +1667,7 @@ def test_t1_question_role_advertises_emit_answer_and_synthesizes_call():
     sent: list[dict[str, Any]] = []
     fenced = (
         '```json\n{"tool": "emit_answer", '
-        '"arguments": {"answerable": true, "answer": "It is 12 mm tall"}}\n```'
+        '"arguments": {"kind": "answer", "answer": "It is 12 mm tall"}}\n```'
     )
 
     async def factory(request: dict[str, Any]):
@@ -1555,7 +1697,7 @@ def test_t1_question_role_advertises_emit_answer_and_synthesizes_call():
     assert result.status == "ok"
     assert result.tool_calls[0]["name"] == "emit_answer"
     assert result.tool_calls[0]["arguments"] == {
-        "answerable": True,
+        "kind": "answer",
         "answer": "It is 12 mm tall",
     }
 

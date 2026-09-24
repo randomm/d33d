@@ -64,6 +64,14 @@ import json
 import logging
 import re
 import time
+
+try:  # The production edge is httpx-based; the timeout classification
+    # below needs httpx's timeout exception. The import is guarded so the
+    # module loads even in an environment without httpx (tests inject the
+    # edge and never take the httpx timeout branch).
+    import httpx
+except ImportError:  # pragma: no cover - httpx is a hard dep in production
+    httpx = None
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
@@ -81,6 +89,7 @@ __all__ = [
     "ANSWER_KINDS",
     "COULD_NOT_ANSWER",
     "NOT_ESTABLISHED",
+    "AnswerOutcome",
     "ask_answer_call",
     "build_answer_prompt",
     "extract_answer_numbers",
@@ -102,7 +111,7 @@ ANSWER_CALL_TIMEOUT_SECONDS = 10.0
 #: answer-path terminal frame carries ``kind == "answer"``; a
 #: design-loop terminal frame carries no ``kind`` at all (treated as
 #: design — the old shape, byte-identical for existing frames).
-ANSWER_DONE_KIND = "answer"
+ANSWER_DONE_KIND = "answer"  # note: the stage-2 reply's kind (issue #260) is a different, three-way value; the Python type for it is :data:`AnswerOutcome` below
 
 #: The stage-2 reply's ``kind`` field (issue #260): a closed three-way
 #: set. ``"answer"`` — the block contains every value the question needs;
@@ -110,7 +119,12 @@ ANSWER_DONE_KIND = "answer"
 #: ``"request"`` — the message asks for a design change (routes to the
 #: design loop). The legacy ``{answerable: bool}`` shape maps onto this
 #: set (``true`` → ``"answer"``, ``false`` → ``"request"``).
-AnswerKind = Literal["answer", "unanswerable", "request"]
+#
+#: Named ``AnswerOutcome`` (NOT ``ANSWER_DONE_KIND``) to avoid colliding
+#: with the done-frame discriminator above: both are called "answer" but
+#: one is the stage-2 reply's wire kind and the other is the done frame's
+#: additive field.
+AnswerOutcome = Literal["answer", "unanswerable", "request"]
 ANSWER_KINDS: tuple[str, ...] = ("answer", "unanswerable", "request")
 
 # ---------------------------------------------------------------------------
@@ -409,7 +423,7 @@ def build_answer_prompt(
     )
 
 
-def parse_answer_reply(text: str) -> tuple[AnswerKind, str] | None:
+def parse_answer_reply(text: str) -> tuple[AnswerOutcome, str] | None:
     """The model reply → ``(kind, answer)`` or ``None`` (malformed).
 
     ``None`` (not an exception) is the contract: a malformed reply is a
@@ -465,7 +479,7 @@ def parse_answer_reply(text: str) -> tuple[AnswerKind, str] | None:
     # "unanswerable" (a legacy false routes to the design loop exactly
     # as it does today).
     answerable = doc.get("answerable")
-    legacy_kind: AnswerKind = "answer" if answerable else "request"
+    legacy_kind: AnswerOutcome = "answer" if answerable else "request"
     if answerable and not answer.strip():
         return None
     return legacy_kind, answer.strip()
@@ -486,7 +500,7 @@ async def ask_answer_call(
     entries: list[dict[str, Any]],
     answer_fn: AnswerFn,
     timeout: float = ANSWER_CALL_TIMEOUT_SECONDS,
-) -> tuple[AnswerKind, str] | None:
+) -> tuple[AnswerOutcome, str] | None:
     """Stage 2: one cheap LLM call + the deterministic number guard.
 
     ``answer_fn`` is the injected single-shot completion
@@ -526,12 +540,30 @@ async def ask_answer_call(
     raw: Any
     try:
         raw = await asyncio.wait_for(answer_fn(prompt), timeout=timeout)
-    except Exception:  # noqa: BLE001 — ANY failure (incl. the 10 s TimeoutError) is a failed answer
-        # The elapsed time distinguishes the two failure classes the
-        # operator decision names separately: a call that ran the whole
-        # bound is a timeout; an early failure is an exception.
-        elapsed = (time.monotonic() - started) * 1000
-        _warn("timeout" if elapsed >= timeout * 1000 else "exception", elapsed)
+    except asyncio.CancelledError:
+        # Cancellation is a control-flow signal, NOT a failed answer: it
+        # must propagate so the caller's cancellation (and any of its
+        # ``except CancelledError`` cleanup) is never swallowed into a
+        # no-run reply.
+        raise
+    except TimeoutError:
+        # The hard ``timeout`` bound fired (``asyncio.wait_for`` raises
+        # ``TimeoutError`` — ``asyncio.TimeoutError`` is an alias of the
+        # builtin in 3.11+): a failed answer of the ``timeout`` class.
+        _warn("timeout", (time.monotonic() - started) * 1000)
+        return None
+    except Exception as exc:  # noqa: BLE001 — any non-timeout failure is a failed answer; the classification below is by class, not blind
+        # ANY other failure is a failed answer — classify by the exception
+        # class, never by elapsed time (the old heuristic misclassified a
+        # late-firing non-timeout error as a timeout). The production edge
+        # is httpx-based: an httpx timeout (the per-request client bound
+        # in ``_http_request_factory``) is a ``timeout`` too; anything else
+        # (a plain exception, an HTTP error, a connection reset) is an
+        # ``exception``.
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            _warn("timeout", (time.monotonic() - started) * 1000)
+        else:
+            _warn("exception", (time.monotonic() - started) * 1000)
         return None
     parsed = parse_answer_reply(raw)
     if parsed is None:
@@ -625,12 +657,12 @@ async def route_chat_message(
         logger.info("question-answer: no versions yet — design loop")
         return None
     if not is_candidate_question(message):
+        # Length-only log (no PII — the message text is never logged).
         logger.info(
             "question-answer: message is not a stage-1 question "
             "(len(message)=%d) — design loop",
             len(message),
         )
-        logger.debug("question-answer: message=%r", message)
         return None
     entries = state_block_for_chat(latest)
     if answer_edge is None:

@@ -38,8 +38,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
+
+import pytest
 
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
@@ -1235,6 +1236,66 @@ class TestStage2OutcomeWarningLogs:
             )
         assert self._outcome_warning(caplog) == []
 
+    def test_cancellation_propagates_not_no_run(self, caplog) -> None:
+        """Cancellation of the stage-2 call propagates as
+        ``CancelledError`` — it is NEVER swallowed into a no-run
+        ``COULD_NOT_ANSWER`` reply (a no-run reply would hide the
+        cancellation from the caller's ``except CancelledError``
+        cleanup)."""
+
+        async def _canceling_edge(q, e):
+            raise asyncio.CancelledError()
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            coro = route_chat_message(
+                "How tall is it now?", self._latest({"H": 12.0}), _canceling_edge
+            )
+            with pytest.raises(asyncio.CancelledError):
+                asyncio.run(coro)
+        # Cancellation is NOT a stage-2 outcome: no outcome= record at all.
+        assert self._outcome_warning(caplog) == []
+
+    def test_httpx_timeout_emits_timeout_warning(self, caplog) -> None:
+        """An ``httpx.TimeoutException`` (the per-request client bound in
+        ``_http_request_factory``) is a ``timeout`` outcome, not an
+        ``exception`` — the classification is by exception class, never
+        by elapsed time."""
+        import httpx
+
+        async def _edge(q, e):
+            raise httpx.ReadTimeout("read timed out")
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=timeout" in warnings[0].getMessage()
+
+    def test_httpx_non_timeout_emits_exception_warning(self, caplog) -> None:
+        """An ``httpx`` error that is NOT a timeout (e.g. a connection
+        reset) is an ``exception``, not a ``timeout`` — the
+        httpx.TimeoutException check is specific to the timeout class."""
+        import httpx
+
+        async def _edge(q, e):
+            raise httpx.ConnectError("connection reset")
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=exception" in warnings[0].getMessage()
+
 
 class TestCopyDeckParity:
     """#260: the backend's two no-run reply strings are pinned against
@@ -1250,33 +1311,17 @@ class TestCopyDeckParity:
             / "web" / "src" / "copy.ts"
         ).read_text()
 
-        # Extract the deck's ``answerRoute`` object literal.
-        start = copy_ts.find("export const answerRoute = {")
-        assert start != -1, "copy.ts has no answerRoute deck"
-        end = copy_ts.find("} as const;", start)
-        assert end != -1
-        body = copy_ts[start:end]
-
-        strings: list[str] = []
-        for line in body.splitlines():
-            m = re.search(r'"((?:[^"\\]|\\.)*)"', line)
-            if m is not None:
-                value = m.group(1)
-                if value and not value.startswith("/"):
-                    strings.append(value)
-        assert strings, f"no string literals found in the answerRoute deck: {body}"
-
-        deck = set(strings)
-        # The backend emits the deck's strings verbatim (both directions
-        # — a backend rewrite or a deck rewrite breaks the pin).
-        assert COULD_NOT_ANSWER in deck, (
-            f"COULD_NOT_ANSWER {COULD_NOT_ANSWER!r} not in the copy.ts "
-            f"answerRoute deck: {sorted(deck)}"
-        )
-        assert NOT_ESTABLISHED in deck, (
-            f"NOT_ESTABLISHED {NOT_ESTABLISHED!r} not in the copy.ts "
-            f"answerRoute deck: {sorted(deck)}"
-        )
+        # Exact membership check (issue #260 review): each backend string,
+        # quoted exactly as it appears in the TS source, must be present in
+        # copy.ts — no line-by-line regex extraction (which is brittle to
+        # deck reformatting and can pick up the wrong string). Both
+        # directions are pinned: a backend rewrite or a deck rewrite breaks
+        # the check.
+        for backend_string in (COULD_NOT_ANSWER, NOT_ESTABLISHED):
+            assert f'"{backend_string}"' in copy_ts, (
+                f"backend string {backend_string!r} not found in copy.ts "
+                f"(the copy.ts deck must carry it verbatim)"
+            )
         # The two strings are distinct (a failure and an unanswerable
         # question are different honest statements).
         assert COULD_NOT_ANSWER != NOT_ESTABLISHED

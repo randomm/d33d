@@ -165,18 +165,25 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "name": "emit_answer",
             "description": (
                 "Emit the answer to the user's question about the current "
-                "design. ``answerable`` is true ONLY if the design-state "
-                "block contains every value you need; ``answer`` is the "
-                "plain-words answer (each cited value names its provenance) "
-                "or empty when not answerable."
+                "design. ``kind`` is the three-way outcome: "
+                "``\"answer\"`` ONLY if the design-state block contains "
+                "every value you need, ``\"unanswerable\"`` for a genuine "
+                "question the block does not establish, or "
+                "``\"request\"`` if the message asks for a design change. "
+                "``answer`` is the plain-words answer (each cited value "
+                "names its provenance) when kind is "
+                "``\"answer\"``, empty otherwise."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "answerable": {"type": "boolean"},
+                    "kind": {
+                        "type": "string",
+                        "enum": ["answer", "unanswerable", "request"],
+                    },
                     "answer": {"type": "string"},
                 },
-                "required": ["answerable", "answer"],
+                "required": ["kind", "answer"],
             },
         },
     },
