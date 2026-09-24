@@ -114,6 +114,42 @@ describe("ChatPanel", () => {
         "What size do you need?",
       );
     });
+
+    it("renders an answered-question turn as plain text with no PassCard, no filmstrip entry, no version badge (issue #249)", () => {
+      // The answer path: an assistant message with the answer text as
+      // content, no versionId, no views, no source. This is what the
+      // App's onDone handler produces when data.kind === "answer" — it
+      // sets content to the answer text verbatim (not the passCard
+      // summary) and leaves versionId undefined, so ChatPanel renders
+      // a plain message.
+      const answerText = "It is 12 mm tall — you said that. The footprint is 20 × 20 mm, which I assumed.";
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "user", content: "How tall is it now?" },
+        { id: "m2", role: "assistant", content: answerText },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+
+      // The answer renders verbatim as plain text in the assistant message.
+      expect(screen.getByTestId("chat-msg-assistant")).toHaveTextContent(answerText);
+      // No PassCard — the answer path produces no version.
+      expect(screen.queryByTestId("pass-card")).toBeNull();
+      // No view thumbnails (no version-created frame → no views).
+      expect(screen.queryAllByTestId(/^pass-card-view-/)).toHaveLength(0);
+      // The user's question is also in the transcript.
+      expect(screen.getByTestId("chat-msg-user")).toHaveTextContent("How tall is it now?");
+    });
+
+    it("an answered turn with streaming:false renders no streaming cursor (issue #249)", () => {
+      // The answer path sets streaming: false in onDone. The message
+      // should not show the streaming cursor.
+      const answerText = "It is 12 mm tall — you said that.";
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: answerText, streaming: false },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      expect(screen.queryByTestId("streaming-cursor")).toBeNull();
+      expect(screen.getByTestId("chat-msg-assistant")).toHaveTextContent(answerText);
+    });
   });
 
   it("disables send button when input is empty", () => {

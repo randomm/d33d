@@ -1,0 +1,30 @@
+{
+  "case_id": "question-answer-height-12mm",
+  "kind": "question_answer",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/question_answer_v1.md",
+    "sha256": "3379f2c0706b54ad083536c789e5f7929e291a768b16cab5136f7ab49e033e40"
+  },
+  "request": "How tall is it now?",
+  "design_state_block": {
+    "W": {"value": 20, "unit": "mm", "provenance": "assumed"},
+    "D": {"value": 20, "unit": "mm", "provenance": "assumed"},
+    "H": {"value": 12, "unit": "mm", "provenance": "stated"}
+  },
+  "gate_expectations": [],
+  "question_answer": {
+    "expected": {
+      "answerable": true,
+      "answer_must_cite": ["12"],
+      "provenance_phrases": {
+        "stated": "you said that",
+        "measured": "I measured",
+        "assumed": "I assumed",
+        "unknown": "not established",
+        "disagrees": "you said X, I measured Y"
+      },
+      "diagnostic": "H is stated 12 mm (the operator said so) — the answer must state 12 mm with the stated provenance ('you said that'), cite no number that is not in the block, and end after the provenance citation (no offer to set, change or confirm any value). The W/D 20 mm values are assumed: a correct answer may mention them only with the 'I assumed' phrase, and the deterministic number guard (every numeric token in the answer, unit suffix stripped, must exactly match a block value) must accept '12' and '20' and reject anything else (e.g. 13, 12.5, 24)."
+    }
+  }
+}

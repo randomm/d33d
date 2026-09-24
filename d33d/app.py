@@ -98,6 +98,7 @@ from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,
     latest_version_stated_dims,
 )
+from d33d.question_answer import build_answer_prompt
 from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
@@ -594,6 +595,17 @@ def create_app(
     # d33d/evals/failure_capture.py). The wrapper is lazily built on first
     # call so an empty catalogue at startup is not a wiring error.
     app.state.run_design_loop = _build_production_design_loop()
+    # The stage-2 question-answer call (issue #249): one cheap single LLM
+    # completion, resolved through the SAME live catalogue as the design
+    # role (the model is configured, never hardcoded). The question
+    # pre-route (``d33d.projects.post_chat`` →
+    # ``d33d.question_answer.route_chat_message``) awaits this under its
+    # own 10 s hard timeout; any failure degrades to the design loop
+    # exactly as today. A catalogue without a ``question`` role (a
+    # pre-#249 models.yaml) degrades the pre-route to the design loop
+    # with zero added failure modes (the role is ADDITIVE — no new
+    # catalogue entry is required, and none is hard-coded here).
+    app.state.answer_question = _build_question_answer_call(state_catalogue_path)
     # The failures.jsonl path the production design-loop hook appends to
     # (issue #9, workstream task-failures). Defaults to the repo-relative
     # ``evals/failures.jsonl``; overridable via env var for tests / runs
@@ -1221,6 +1233,67 @@ def _http_request_factory(base_url: str, api_key: str):
             return await client.post(url, json=payload, headers=headers)
 
     return _factory
+
+
+def _build_question_answer_call(catalogue_path: Path):
+    """The production stage-2 question-answer edge (issue #249).
+
+    Returns ``async (question_text, entries) -> reply_text`` for
+    ``d33d.question_answer.ask_answer_call`` — which enforces the 10 s
+    hard timeout (``ANSWER_CALL_TIMEOUT_SECONDS``) and the number guard
+    around the raw call. One cheap single-shot completion, resolved
+    lazily through the SAME live catalogue as the design role (the model
+    is configured, never hardcoded; the catalogue hot-reloads — a
+    ``models.yaml`` edited while the app is running is picked up on the
+    next call, like the design role).
+
+    The ``question`` role is ADDITIVE: a catalogue without a ``question``
+    entry (a pre-#249 models.yaml) degrades the whole pre-route to the
+    design loop exactly as today — zero added failure modes, zero added
+    latency on the common case. A probe failure degrades the role to
+    ``None`` (the ``send`` sender then raises a T2/T3 ``SenderError``,
+    caught by ``ask_answer_call`` → design loop).
+    """
+    from d33d.config.catalogue import ResolutionError, load_catalogue
+    from d33d.config.probes import probe_capabilities
+    from d33d.config.resolve import resolve_model
+    from d33d.design_loop import make_llm_fn
+
+    async def _call(question: str, entries: list[dict[str, Any]]) -> str:
+        cat = load_catalogue(catalogue_path)
+        try:
+            res = resolve_model(cat, "question")
+        except (ResolutionError, KeyError):
+            # The ``question`` role is ADDITIVE: a catalogue without it
+            # (a pre-#249 models.yaml) degrades the whole pre-route to
+            # the design loop exactly as today — an empty reply is
+            # ``answerable: false`` to the guard, which routes to the
+            # loop. Zero added failure modes, zero added latency on the
+            # common case.
+            logger.info(
+                "question-answer: no 'question' role in the catalogue — "
+                "skipping stage 2 (design loop)"
+            )
+            return ""
+        provider = cat.providers[res.provider]
+        factory = _http_request_factory(res.provider.base, provider.key)
+        capability = await probe_capabilities(
+            base_url=res.provider.base,
+            model_id=res.entry.model,
+            api_key=provider.key,
+            request_factory=factory,
+        )
+        llm_fn = make_llm_fn(cat, {"question": factory}, {"question": capability})
+        prompt = build_answer_prompt(question, entries)
+        result = await llm_fn(
+            "question", [{"role": "user", "content": prompt}], None
+        )
+        return result.content
+
+    def _wrapper(question: str, entries: list[dict[str, Any]]) -> Any:
+        return _call(question, entries)
+
+    return _wrapper
 
 
 def _build_production_design_loop():

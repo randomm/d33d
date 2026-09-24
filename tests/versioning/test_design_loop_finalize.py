@@ -1984,6 +1984,222 @@ def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
     assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
 
 
+def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
+    """Issue #249, stage 1, pinned THROUGH THE /chat ROUTE (the pure
+    detector matrix lives in
+    ``tests.versioning.test_question_answer.TestStage1Detector`` — this
+    test is the routing guard: every non-candidate message in the matrix
+    is routed to the design loop, and the answer path is never taken,
+    while the one true question reaches the pre-route's stage-2 stub).
+
+    The design loop is a stub that passes (a version would be created on
+    the pass — the loop's call itself is the routing evidence); the
+    answer edge is a stub that answers (so any stage-1 candidate that
+    leaks through to stage 2 would emit a ``kind: "answer"`` frame —
+    the assertion that NO frame carries that kind is the matrix guard).
+    """
+    # (message, expected route) — the ticket's acceptance-criterion matrix:
+    #   question, no imperative             -> answer path (stage 2)
+    #   imperative, no interrogative        -> design loop
+    #   imperative + trailing question      -> design loop (imperative wins)
+    #   "can you make" (interrogative opener) -> design loop (multi-word cue)
+    #   imperative cue, no "?" / no opener  -> design loop, unchanged
+    MATRIX = [
+        ("How tall is it now?", "answer"),
+        ("make it taller", "loop"),
+        ("Is it tall enough for a 12 mm shelf? Make it 15.", "loop"),
+        ("Can you make it 15?", "loop"),
+        ("Make it 15", "loop"),
+    ]
+
+    async def _loop(app, **kwargs):
+        return _StubResult("pass", {"W": 10})
+
+    async def _answer_edge(question: str, entries: list) -> str:
+        # A reply the number guard passes (10 is in the block) — if a
+        # non-candidate message leaked to stage 2 it would emit the
+        # kind: "answer" frame the matrix guard forbids.
+        return '{"answerable": true, "answer": "It is 10 mm."}'
+
+    for message, expected in MATRIX:
+        loop_called = {"n": 0}
+
+        async def _loop(app, **kwargs):
+            loop_called["n"] += 1
+            return _StubResult("pass", {"W": 10})
+
+        async def _call(client):
+            # The shared connection is closed after the first run_async's
+            # lifespan teardown; reopen it for each matrix case (the
+            # lifespan's ``if state.conn is None`` guard then skips the
+            # reconnect, so the reopened connection stays in use through
+            # the case). The matrix is one logical test: each case runs
+            # under its own lifespan cycle.
+            closed = False
+            try:
+                app_with_versions.state.conn.raw.execute("SELECT 1")
+            except Exception:
+                closed = True
+            if app_with_versions.state.conn is None or closed:
+                import d33d.db as _db
+                from d33d import versions as _versions_mod
+
+                fresh = _db.connect(app_with_versions.state.db_path)
+                _versions_mod.migrate(fresh)
+                app_with_versions.state.conn = fresh
+                app_with_versions.state.versions = _versions_mod.VersionService(fresh)
+            proj = await create_project(client)
+            pid = proj["id"]
+            # A version with W=10 (the stage-2 stub's number appears in
+            # the block, so a leak to stage 2 would be guard-clean and
+            # the kind-frame assertion is the sole leak detector).
+            await create_version(client, pid, {"W": 10.0})
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _answer_edge
+            r = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": message, "chat_history": []}
+            )
+            assert r.status_code == 202, r.text
+            source = app_with_versions.state.event_sources.get(pid)
+            frames = []
+            assert source is not None
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+            return frames
+
+        frames = run_async(app_with_versions, _call)
+        answer_frames = [d for k, d in frames if k == "done" and d.get("kind") == "answer"]
+        if expected == "answer":
+            # The true question clears stage 1 and the stage-2 stub
+            # answers: exactly one kind-answer done frame, the design
+            # loop was NOT invoked.
+            assert len(answer_frames) == 1, f"{message!r}: expected the answer path, got frames {frames}"
+            assert loop_called["n"] == 0, f"{message!r}: the design loop was invoked on the answer path"
+        else:
+            # Every imperative / non-candidate: the design loop was
+            # invoked, and NO frame carries the answer-path kind.
+            assert loop_called["n"] == 1, f"{message!r}: the design loop was NOT invoked"
+            assert not answer_frames, f"{message!r}: an answer-path frame leaked — the matrix routed wrong: {frames}"
+
+
+def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
+    """Issue #249, operator latency decision: the 10 s hard bound covers
+    the WHOLE pre-route (catalogue load + capability probe + the
+    completion), not just the completion. This test monkeypatches the
+    ``ANSWER_CALL_TIMEOUT_SECONDS`` to 0.1 s and uses a stub answer edge
+    that hangs (sleeps 0.5 s, well past the 0.1 s bound). The /chat route
+    must degrade to the design loop — the timeout fires, the design loop
+    is invoked, and the terminal frame is a design-loop done (no
+    ``kind: "answer"``). The test runs in <1 s of wall clock (the
+    same contract as the 10 s production bound, at a shorter value).
+
+    The production edge (``_build_question_answer_call._wrapper``) wraps
+    the entire ``_call`` body in ``asyncio.wait_for`` — the test's stub
+    edge (which replaces ``app.state.answer_question``) exercises the
+    ``ask_answer_call`` timeout, which is the same mechanism the
+    production edge relies on. The catalogue-load + probe bound is the
+    production edge's additional guarantee (the ``_wrapper``'s outer
+    ``wait_for``), verified structurally in the code (the ``_wrapper``
+    wraps the whole ``_call`` including the probe)."""
+    import types
+
+    from d33d import design_loop as _design_loop_mod
+    from d33d.app import _build_question_answer_call
+    from d33d.config import catalogue as _catalogue_mod
+    from d33d.config import probes as _probes_mod
+    from d33d.config import resolve as _resolve_mod
+
+    captured: dict = {"probe_called": False, "completion_called": False}
+
+    async def _fake_probe(base_url, model_id, api_key, request_factory):
+        captured["probe_called"] = True
+        return None  # T3 — the loop degrades
+
+    class _HangingLLM:
+        async def __call__(self, role, messages, system):
+            captured["completion_called"] = True
+            import asyncio as _a
+            await _a.sleep(0.5)  # well past the 0.1 s bound
+            return ''
+
+    monkeypatch.setattr(
+        _catalogue_mod,
+        "load_catalogue",
+        lambda p: types.SimpleNamespace(
+            providers={"p": types.SimpleNamespace(key="stub")},
+            roles={"question": "q", "design": "d", "critique": "c", "classification": "cl"},
+        ),
+    )
+    monkeypatch.setattr(
+        _resolve_mod,
+        "resolve_model",
+        lambda cat, role: types.SimpleNamespace(
+            entry=types.SimpleNamespace(model="stub"),
+            provider=types.SimpleNamespace(base="http://stub"),
+        ),
+    )
+    monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)
+    monkeypatch.setattr(_design_loop_mod, "make_llm_fn", lambda cat, f, c: _HangingLLM())
+
+    # Monkeypatch the timeout to 0.1 s so the test runs in <1 s.
+    import d33d.question_answer as _qa_mod
+    monkeypatch.setattr(_qa_mod, "ANSWER_CALL_TIMEOUT_SECONDS", 0.1)
+
+    loop_called = [False]
+
+    def _loop(app, **kwargs):
+        loop_called[0] = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"H": 12.0},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        # The production edge (with the monkeypatched 0.1 s bound):
+        app_with_versions.state.answer_question = _build_question_answer_call(
+            app_with_versions.state.catalogue_path
+        )
+        import time
+        t0 = time.monotonic()
+        r = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "How tall is it now?", "chat_history": []},
+        )
+        elapsed = time.monotonic() - t0
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        assert source is not None
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return r, frames, elapsed, loop_called[0]
+
+    r, frames, elapsed, was_loop_called = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    # The design loop was invoked (the pre-route timed out and degraded).
+    assert was_loop_called, "the design loop was NOT called after a pre-route timeout"
+    # The terminal frame is from the design loop (no kind "answer").
+    terminal = frames[-1]
+    assert terminal[1].get("kind") != "answer"
+    # The pre-route was bounded: the total time from POST to 202 response
+    # was well under 1 s (the 0.1 s bound + margin).
+    assert elapsed < 1.0, f"pre-route took {elapsed:.2f}s — not bounded to the 0.1 s override"
+
+
 def test_chat_project_deleted_mid_flight_emits_error(app_with_versions):
     """Project deleted mid-flight → terminal error frame + flag release,
     not a 500."""

@@ -62,7 +62,7 @@ from typing import Any, Literal
 from d33d.config.catalogue import Catalogue
 from d33d.config.probes import CapabilityResult
 from d33d.config.resolve import resolve_model
-from d33d.design_llm import LLMResult, role_tools, send
+from d33d.design_llm import LLMResult, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
     classify_failure,
@@ -1351,11 +1351,11 @@ def make_llm_fn(
             capability=capability,
             dialect=dialect,  # type: ignore[arg-type]
             system=system,
-            # T0 native tool schema, attached per the role actually being
-            # called (design -> emit_design, critique -> emit_critique, ...);
-            # send() only puts it in the body on the T0 branch, and T1
-            # bodies never carry a tools array regardless.
-            tools=role_tools(role) if capability is not None and capability.tier == "T0" else None,
+            # The T0 native tool schema is the role's OWN (resolved by
+            # ``send`` from the role registry — ``role_tools(role)``); it
+            # is never caller-supplied, so the wire ``tools`` always
+            # matches the name the response-side allowlist enforces, for
+            # every role (design / critique / classification / question).
         )
 
     return llm_fn

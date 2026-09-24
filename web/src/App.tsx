@@ -1084,13 +1084,25 @@ export default function App({ client }: AppProps) {
                   // refuses to overwrite. Nothing else (token text arrives
                   // on `source` only) can reach content, so no guard is
                   // needed to keep source out of the summary.
+                  //
+                  // Issue #249: `kind: "answer"` — the answer path (a
+                  // question answered from the design-state block, no
+                  // design loop, no version). The `message` field carries
+                  // the model-generated answer text; it is rendered verbatim
+                  // as the chat content, NOT replaced with the passCard
+                  // summary. No `versionId` is set, so ChatPanel renders a
+                  // plain message (no PassCard). No design-state refetch
+                  // (the onProgress version-created handler never fires on
+                  // this path). The `kind` field is additive: absent means
+                  // the design-loop done frame (existing behaviour).
                   const msg = typeof data.message === "string" ? data.message : "";
                   const isReal = msg.length > 0 && !msg.startsWith("Error:");
+                  const isAnswer = data.kind === "answer";
                   return {
                     ...m,
                     streaming: false,
                     ...(isReal && m.content === ""
-                      ? { content: copy.passCard.summary }
+                      ? { content: isAnswer ? msg : copy.passCard.summary }
                       : {}),
                   };
                 }),

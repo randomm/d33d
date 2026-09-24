@@ -36,6 +36,7 @@ from d33d.design_loop_events import (
     run_design_loop_with_events,
 )
 from d33d.dimension_protocol import stated_axes_from_message
+from d33d.question_answer import route_chat_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -188,6 +189,23 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+async def _answered_frames(answer: str):
+    """The answer-path SSE stream (issue #249): ONE terminal ``done``
+    frame whose ``message`` is the answer text and which carries the
+    additive ``kind: "answer"`` discriminator (design-loop done frames
+    carry no ``kind`` at all — existing frames are byte-identical).
+
+    No token frames, no version-created progress frame: the answer text
+    is delivered exclusively in the done frame's ``message`` (the
+    operator's decision — token frames feed the model-source view, and
+    the SPA renders an ``kind: "answer"`` done frame's ``message``
+    verbatim as a plain assistant chat message)."""
+    yield (
+        "done",
+        {"message": answer, "kind": "answer"},
+    )
+
+
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
     """A project row with the raw git-repo path removed (git invisibility
     — the on-disk path names a git repo and is never exposed in an API
@@ -319,6 +337,28 @@ def create_projects_router() -> APIRouter:
         # current turn confirmed no axis. This route never reads W/D/H
         # param keys and never reads a persisted version row for the gate.
         chat_history = tuple(body.chat_history or ())
+
+        # Issue #249 — the pre-route (BEFORE the design loop): if the
+        # message is a question AND the project's design state can answer
+        # it, the answer is emitted on the chat stream as a single
+        # terminal done frame (``kind: "answer"`` — the additive
+        # discriminator; no token frames, no version-created frame, no
+        # version). Everything else — including anything ambiguous — goes
+        # to the design loop EXACTLY as today. The route is narrow on
+        # purpose (one stage-1 question detector, one cheap stage-2 LLM
+        # call with a deterministic number guard, a 10 s hard timeout):
+        # the common case ("make it taller") costs nothing.
+        answer_route = await route_chat_message(
+            body.message,
+            app.state.versions.latest_version(project_id),
+            answer_edge=getattr(app.state, "answer_question", None),
+        )
+        if answer_route is not None:
+            app.state.event_sources[project_id] = _answered_frames(
+                answer_route["answer"]
+            )
+            inflight.add(project_id)
+            return {"status": "accepted"}
 
         # The per-axis stated evidence — the gate's current-message source
         # AND what the loop pass persists on the new version row (issue
