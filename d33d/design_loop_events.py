@@ -901,6 +901,19 @@ async def run_design_loop_with_events(
         design_source = current_version_source(row, app.state.versions)
     if design_source is not None:
         kwargs["design_source"] = design_source
+
+    # The design-state block's inputs (issue #120/#137/#246 — the SAME
+    # values ``_finalize_loop_kwargs`` passes on the finalize path): the
+    # latest version's full params snapshot, persisted measured bbox, and
+    # persisted per-axis stated set, read ONCE here so the live chat
+    # prompt, the finalize prompt and the GET the SPA reads all render
+    # the SAME block via ``state_block_for_version``. All ``None`` when
+    # no version exists yet (the block then renders its honest empty
+    # state — never a fabricated dimension).
+    latest = app.state.versions.latest_version(project_id)
+    kwargs["state_params"] = dict(latest["params"]) if latest is not None else None
+    kwargs["state_bbox"] = latest["bbox"] if latest is not None else None
+    kwargs["state_stated"] = latest["stated_dims"] if latest is not None else None
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)
