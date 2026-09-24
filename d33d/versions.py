@@ -420,6 +420,7 @@ class VersionService:
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
+        confirmed_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -469,6 +470,7 @@ class VersionService:
                 render_artifact_dir=render_artifact_dir,
                 stated_dims=stated_dims,
                 param_meta=param_meta,
+                confirmed_params=confirmed_params,
             ),
         )
 
@@ -487,6 +489,7 @@ class VersionService:
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
+        confirmed_params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -533,6 +536,7 @@ class VersionService:
             render_artifact_dir=render_artifact_dir,
             stated_dims=stated_dims,
             param_meta=param_meta,
+            confirmed_params=confirmed_params,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -694,6 +698,113 @@ class VersionService:
             return self._public_project(row)
 
         return await self._with_project_lock(project_id, _set_main)
+
+    # -- offer state (issue #250) ---------------------------------------------
+
+    def get_pending_offer(self, project_id: int) -> dict[str, Any] | None:
+        """The project's outstanding offer (``{"version_id": int,
+        "param": str}``), or ``None`` (no pending offer — NULL or
+        malformed row degrades to no offer, never a raise)."""
+        row = self.conn.raw.execute(
+            "SELECT pending_offer FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"project {project_id} not found")
+        raw = row["pending_offer"]
+        if not raw:
+            return None
+        try:
+            doc = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        if not isinstance(doc, dict):
+            return None
+        version_id = doc.get("version_id")
+        param = doc.get("param")
+        if (
+            not isinstance(version_id, int)
+            or isinstance(version_id, bool)
+            or not isinstance(param, str)
+            or not param
+        ):
+            return None
+        return {"version_id": version_id, "param": param}
+
+    def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None:
+        """Persist (or clear, with ``None``) the project's pending offer.
+
+        ``offer`` is ``{"version_id": int, "param": str}`` — the caller
+        validates the param is a real assumed param of that version
+        (``d33d.confirm_offer``); the writer stores the JSON as-is
+        (``None`` → NULL, the cleared state).
+
+        Shape guard (input validation at the boundary): a non-``None``
+        offer must carry an ``int`` ``version_id`` (``bool`` excluded —
+        ``isinstance(True, int)`` is true and a bool is never a version
+        id) and a NON-EMPTY ``str`` ``param``; anything else is a
+        contract violation and raises ``ValueError`` (never silently
+        persisted — a malformed row would degrade to no offer on read
+        anyway, but the raise is the early, loud failure)."""
+        if offer is not None:
+            version_id = offer.get("version_id")
+            param = offer.get("param")
+            if not isinstance(version_id, int) or isinstance(version_id, bool):
+                raise ValueError(
+                    f"pending offer's version_id must be an int, got {version_id!r}"
+                )
+            if not isinstance(param, str) or not param:
+                raise ValueError(
+                    f"pending offer's param must be a non-empty str, got {param!r}"
+                )
+        raw = json.dumps(offer) if offer else None
+        self.conn.raw.execute(
+            "UPDATE projects SET pending_offer = ? WHERE id = ?",
+            (raw, project_id),
+        )
+        self.conn.commit()
+
+    def record_confirmation(
+        self, project_id: int, version_id: int, name: str, value: Any
+    ) -> None:
+        """Record ONE param as explicitly user-confirmed on a version
+        (issue #250's accepted-offer write — the ONLY writer of
+        ``confirmed_params``).
+
+        ``value`` is the param's CURRENT value in the version's params
+        snapshot (the caller verifies it matches the offered value before
+        calling). The value is frozen into the set (``{name: value}``,
+        merged into any existing set) so a later value change in a NEW
+        version never inherits a stale confirmation — each version owns
+        its own set, and the design-state promotion re-checks the value
+        against the current params anyway (tolerance 1e-6)."""
+        version = self.get_version(project_id, version_id)
+        if version is None:
+            raise LookupError(f"version {version_id} not found")
+        raw_confirmed = version["confirmed_params"]
+        # Shape guard: a malformed stored row (non-dict — a corrupted
+        # JSON load or a hand-edited row) must never 500 the acceptance
+        # flow: log a WARNING and start from ``{}`` (the new write then
+        # overwrites the row with a well-formed set).
+        if raw_confirmed is None:
+            confirmed: dict[str, Any] = {}
+        elif isinstance(raw_confirmed, dict):
+            confirmed = dict(raw_confirmed)
+        else:
+            logger.warning(
+                "confirmed_params on version %s is not a dict (%r) — "
+                "starting from an empty set",
+                version_id,
+                raw_confirmed,
+            )
+            confirmed = {}
+        confirmed[name] = value
+        self.conn.raw.execute(
+            "UPDATE versions SET confirmed_params = ?,"
+            " updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            " WHERE id = ?",
+            (json.dumps(confirmed, sort_keys=True), version_id),
+        )
+        self.conn.commit()
 
     async def rename_version(
         self, project_id: int, version_id: int, name: str
@@ -861,6 +972,7 @@ class VersionService:
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
+        confirmed_params: dict[str, Any] | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -891,6 +1003,18 @@ class VersionService:
         # or every legacy row — an honest abstain, never a fabricated
         # label).
         param_meta_json = json.dumps(param_meta, sort_keys=True) if param_meta else None
+        # ``confirmed_params`` (issue #250): the param-keyed set of values
+        # the user explicitly confirmed on this version (``{name: value}``)
+        # — written ONLY by the accepted-offer flow in
+        # ``d33d.projects.post_chat`` (a new version's set stays NULL
+        # until the user accepts THAT version's offer — confirmations
+        # from a previous version are honoured by the offer selection
+        # and by rule (b)'s value re-check, never re-persisted onto the
+        # new row); ``None`` persists a NULL (no confirmed params — never
+        # a fabricated ``{}``).
+        confirmed_params_json = (
+            json.dumps(confirmed_params, sort_keys=True) if confirmed_params else None
+        )
         # ``render_artifact_dir``: the on-disk path of the per-render
         # directory whose model.stl produced this version (issue #163).
         # Stored as a plain path string (no JSON wrapping — it is a single
@@ -901,8 +1025,9 @@ class VersionService:
             "INSERT INTO versions"
             " (project_id, params, name, created_by_message, parent,"
             "  restored_from, forked_from, thumbnail, bbox,"
-            "  render_artifact_dir, stated_dims, param_meta)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  render_artifact_dir, stated_dims, param_meta,"
+            "  confirmed_params)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -916,6 +1041,7 @@ class VersionService:
                 render_artifact_dir,
                 stated_dims_json,
                 param_meta_json,
+                confirmed_params_json,
             ),
         )
         self.conn.commit()
@@ -947,6 +1073,12 @@ class VersionService:
         # state block to identifier labels for every entry, honestly).
         raw_meta = out.get("param_meta")
         out["param_meta"] = json.loads(raw_meta) if raw_meta else None
+        # ``confirmed_params`` (issue #250): NULL (no confirmed params —
+        # every pre-change row) maps to ``None``, never a fabricated ``{}``
+        # (an absent set means "nothing was confirmed" — the design-state
+        # block reads that as: no rule (b) evidence).
+        raw_confirmed = out.get("confirmed_params")
+        out["confirmed_params"] = json.loads(raw_confirmed) if raw_confirmed else None
         # ``render_artifact_dir``: NULL (pre-#163 rows, or a version
         # created without a recorded render) maps to ``None``, NEVER to a
         # sentinel or empty string (issue #163: an absent render record
@@ -1054,6 +1186,7 @@ def migrate(conn: db_mod.Connection) -> None:
             render_artifact_dir TEXT,
             stated_dims TEXT,
             param_meta TEXT,
+            confirmed_params TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -1108,6 +1241,24 @@ def migrate(conn: db_mod.Connection) -> None:
     # default; pre-existing rows read back as ``None`` (an absent metadata
     # set abstains — never a fabricated label).
     _ensure_column(conn, "versions", "param_meta", "TEXT")
+    # ``versions.confirmed_params`` (issue #250): the param-keyed set of
+    # values the user EXPLICITLY confirmed by accepting the assistant's
+    # offer on this version (``{name: value}`` — JSON, e.g. ``{"wall_
+    # thickness": 3.0}``). Written ONLY by the accepted-offer flow in
+    # ``d33d.projects.post_chat`` (explicit user confirmation of that
+    # specific param — never by name inference); ``None`` persists a NULL
+    # (no confirmed params, never a fabricated ``{}``). The design-state
+    # block promotes a param ``assumed`` → ``stated`` from this set (the
+    # rule (b) evidence, issue #250's operator decision).
+    _ensure_column(conn, "versions", "confirmed_params", "TEXT")
+    # ``projects.pending_offer`` (issue #250): the server-side state of
+    # the assistant's OUTSTANDING offer — which assumed parameter was
+    # offered for confirmation on which version (JSON ``{"version_id":
+    # 7, "param": "wall_thickness"}`` — the offer is only live while that
+    # version is the project's latest). Persisted so the acceptance check
+    # in ``post_chat`` never relies on the client's chat history; a new
+    # offer overwrites, an accepted/lapsed offer clears it (NULL).
+    _ensure_column(conn, "projects", "pending_offer", "TEXT")
 
 
 __all__ = [

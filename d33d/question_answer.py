@@ -470,7 +470,13 @@ def state_block_for_chat(
     """The latest version's design-state entries (the SAME
     ``state_block_for_version`` the prompt and the SPA's GET call) —
     ``None`` (no version) yields an empty block (an honest empty state,
-    never fabricated dimensions)."""
+    never fabricated dimensions).
+
+    The version's ``confirmed_params`` (issue #250, rule (b)) rides the
+    latest row too — the chat pre-route's block renders a confirmed param
+    ``stated`` exactly as the design-state GET (and the prompt) do, so
+    the offer path (which runs BEFORE this pre-route) and the answer
+    path agree on the state they see."""
     if latest is None:
         return []
     return state_block_for_version(
@@ -478,6 +484,7 @@ def state_block_for_chat(
         latest.get("bbox"),
         latest.get("stated_dims"),
         latest.get("param_meta"),
+        latest.get("confirmed_params"),
     )
 
 

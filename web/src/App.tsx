@@ -148,6 +148,30 @@ export default function App({ client }: AppProps) {
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [projectId, setProjectId] = useState<number | null>(null);
+  // Chat message id factory (issue #250 review): a monotonically
+  // increasing counter — two messages created in the same millisecond
+  // (a pass card + its offer sentence in ONE done frame) get distinct
+  // ids. A `Date.now()`-based id collided on that pair (duplicate React
+  // keys, one message clobbering the other's render). `crypto.randomUUID`
+  // is used as an availability-guarded alternative for a wider prefix,
+  // but the counter is the monotonically-increasing guarantee — a
+  // randomUUID without the counter could in principle repeat (it is
+  // random, not a sequence), so the counter is always present and the
+  // UUID only widens the uniqueness when the API is available.
+  const msgSeqRef = useRef(0);
+  const nextMsgId = useCallback((suffix?: string): string => {
+    msgSeqRef.current += 1;
+    const n = msgSeqRef.current;
+    let prefix: string;
+    try {
+      prefix = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID().slice(0, 8)
+        : "r";
+    } catch {
+      prefix = "r";
+    }
+    return `msg-${prefix}-${n}${suffix ? `-${suffix}` : ""}`;
+  }, []);
   // The build envelope (GET /api/config/envelope) — the first-run plate
   // backdrop's caption and the plate's drawn dimensions both come from this
   // fetch, never from a literal in the SPA (issue #128, W14). Null until the
@@ -850,7 +874,7 @@ export default function App({ client }: AppProps) {
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
       const userMsg: ChatMessage = {
-        id: `msg-${Date.now()}`,
+        id: nextMsgId(),
         role: "user",
         content: text,
         ...(selectionToAttach
@@ -883,7 +907,7 @@ export default function App({ client }: AppProps) {
         setPendingSelection(null);
         // W12: a region-edit failure is a turn in the conversation, like
         // any other stream failure — append it to messages, not a card.
-        const turnId = `msg-${Date.now()}-failure`;
+        const turnId = nextMsgId("failure");
         void apiClient
           .createRegionEdit(effectiveProjectId, {
             module_ids: selectionToAttach.moduleIds,
@@ -905,7 +929,7 @@ export default function App({ client }: AppProps) {
             setMessages((prev) => [
               ...prev,
               {
-                id: `msg-${Date.now()}-region-edit-accepted`,
+                id: nextMsgId("region-edit-accepted"),
                 role: "assistant",
                 content:
                   "Region edit request accepted — the design loop is running in the background; a new version will appear in the timeline when it passes.",
@@ -957,7 +981,7 @@ export default function App({ client }: AppProps) {
           });
       }
 
-      const assistantId = `msg-${Date.now()}-assistant`;
+      const assistantId = nextMsgId("assistant");
       setMessages((prev) => [
         ...prev,
         { id: assistantId, role: "assistant", content: "", streaming: true },
@@ -1107,6 +1131,48 @@ export default function App({ client }: AppProps) {
                   };
                 }),
               );
+              // Issue #250: the done frame's additive `confirm_offer` field
+              // (the server validated it — at most one param per turn, never
+              // re-offering a confirmed or user-changed value) carries the
+              // offer sentence as its own message AFTER the pass card: a
+              // plain assistant turn, never inside the PassCard, never a
+              // form. The pass card's turn itself (the assistant message
+              // above) already rendered the pass summary; the offer is a
+              // distinct plain message that follows it in the transcript.
+              // `confirm_ack` is the accepted-offer acknowledgement —
+              // likewise its own plain assistant message (no design run,
+              // no new version — the server did the recording), rendered
+              // through the ChatMessage's `confirmAck` field so the value
+              // renders in the mono face.
+              const confirmSentence =
+                typeof data.confirm_sentence === "string" ? data.confirm_sentence : "";
+              if (data.confirm_offer !== undefined && confirmSentence.length > 0) {
+                const offerId = nextMsgId("confirm-offer");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: offerId,
+                    role: "assistant",
+                    content: confirmSentence,
+                  },
+                ]);
+              }
+              const confirmAckLabel =
+                typeof data.confirm_ack_label === "string" ? data.confirm_ack_label : "";
+              const confirmAckValue =
+                typeof data.confirm_ack_value === "string" ? data.confirm_ack_value : "";
+              if (data.confirm_ack !== undefined && confirmAckLabel.length > 0) {
+                const ackId = nextMsgId("confirm-ack");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: ackId,
+                    role: "assistant",
+                    content: copy.confirmOffer.acknowledged(confirmAckLabel, confirmAckValue),
+                    confirmAck: { label: confirmAckLabel, value: confirmAckValue },
+                  },
+                ]);
+              }
             },
             onError: (data) => {
               setMessages((prev) =>
@@ -1126,7 +1192,7 @@ export default function App({ client }: AppProps) {
               // appended to `messages` (rendered by the ChatPanel), not a
               // card beside it. A new failure replaces the previous turn, so
               // the conversation never stacks failure turns.
-              const turnId = `msg-${Date.now()}-failure`;
+              const turnId = nextMsgId("failure");
               setMessages((prev) => {
                 const withoutPrevious = prev.filter((m) => m.failure === undefined);
                 return [
@@ -1150,7 +1216,7 @@ export default function App({ client }: AppProps) {
           // W12: a stream failure is a TURN in the conversation — append
           // it to `messages` (ChatPanel renders it as a FailureTurn), not
           // a card beside the panel.
-          const turnId = `msg-${Date.now()}-failure`;
+          const turnId = nextMsgId("failure");
           setMessages((prev) => {
             const withoutPrevious = prev.filter((m) => m.failure === undefined);
             return [
@@ -1175,7 +1241,7 @@ export default function App({ client }: AppProps) {
           setViewProgress(INITIAL_VIEW_PROGRESS);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState],
+    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, nextMsgId],
   );
 
   // The send entry point (issue #192): creates the project lazily on the
@@ -1237,7 +1303,7 @@ export default function App({ client }: AppProps) {
       setMessages((prev) => [
         ...prev,
         {
-          id: `msg-${Date.now()}-export-done`,
+          id: nextMsgId("export-done"),
           role: "assistant",
           content: copy.shell.exportDone(filename),
         },
@@ -1259,7 +1325,7 @@ export default function App({ client }: AppProps) {
         });
       }
     },
-    [projectId, projectName, versions, apiClient],
+    [projectId, projectName, versions, apiClient, nextMsgId],
   );
 
   // Elapsed-seconds timer for the design-loop stage indicator (issue

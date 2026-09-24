@@ -384,6 +384,46 @@ export const firstRun = {
   plateCaptionUnverified: " — not yet confirmed against your machine",
 } as const;
 
+/**
+ * Assumed-value confirmation (issue #250). After a passing design pass the
+ * assistant offers to confirm ONE assumed value — the one that most affects
+ * fit — as a single plain sentence in the conversation, never a form.
+ *
+ * WIRING (deck vs wire): the OFFER sentence that reaches the user is built
+ * server-side (`d33d.confirm_offer.offer_sentence` — either the model's own
+ * `confirm_sentence` when it passes the server's number guard, or the
+ * server's deterministic template) and rides the done frame's
+ * `confirm_sentence` field; the SPA renders that field VERBATIM as a plain
+ * assistant message (App.tsx never calls `confirmOffer.offer` in
+ * production — the offer path is server-templated). `confirmOffer.offer`
+ * below exists in the deck so the deterministic offer template has a
+ * single, testable home on the SPA side and so the design-contract test
+ * can pin that the deck's and the server's templates match in substance
+ * ("I assumed {value} for {label}. Want it different?") — it is a
+ * mirror of the server template, not a second writer of the wire string.
+ * The ACKNOWLEDGEMENT, by contrast, IS rendered from the deck in
+ * production: App.tsx builds it from the done frame's `confirm_ack_label`
+ * / `confirm_ack_value` via `confirmOffer.acknowledged` (the server also
+ * carries the same sentence in the frame's `message` field as the wire
+ * of record; the deck render and the wire are one string — the ack is
+ * deterministic, the model never writes it).
+ *
+ * `value` arrives pre-formatted, and `label` is the parameter's user-facing
+ * label with the raw identifier as the mono fallback.
+ */
+export const confirmOffer = {
+  /** The deterministic offer template (deck mirror of the server's
+   *  `offer_sentence` template — the server is the writer of the wire
+   *  string; see the module docstring above for the full wiring). */
+  offer: (value: string, label: string): string =>
+    `I assumed ${value} for ${label}. Want it different?`,
+
+  /** The short acknowledgement after the user accepts the offer (no design
+   *  run, no new version — the value is recorded as confirmed). */
+  acknowledged: (label: string, value: string): string =>
+    `Got it — ${label} stays ${value}.`,
+} as const;
+
 export const shell = {
   addPhoto: "Add a reference photo",
   composerPlaceholder:
@@ -447,6 +487,7 @@ export const copy = {
   firstPass,
   progress,
   failure,
+  confirmOffer,
   region,
   history,
   firstRun,

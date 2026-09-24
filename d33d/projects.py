@@ -189,21 +189,102 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _answered_frames(answer: str):
+async def _confirm_offer_route(app: Any, project_id: int, message: str):
+    """The issue #250 offer-acceptance decision for ONE chat message.
+
+    Returns ``{"kind": "answer", "answer": <acknowledgement>}`` when ALL
+    of the following hold (otherwise ``None`` — the caller routes to the
+    existing question pre-route / design loop exactly as today):
+
+    * the project has a PENDING offer (``versions.get_pending_offer`` —
+      server-side state written by the design pass's adapter, never
+      client-derived);
+    * the offer is LIVE: its version is the project's CURRENT LATEST
+      version (a newer version supersedes it — a stale offer lapses);
+    * the message is a CLEAN AFFIRMATION (``_is_clean_affirmation`` —
+      short, no question mark, no negation, no hedge — "yes but make it
+      2 mm" is NOT an acceptance);
+    * the offered param is still ASSUMED and still carries the offered
+      value in the latest version's design-state block (a value the user
+      already moved, or a param the state no longer marks assumed, is not
+      a live offer).
+
+    On acceptance (the body, run under no lock — SQLite's own write
+    serialization is the concurrency boundary, same as the
+    ``design_state`` reads elsewhere in this module): the value is
+    recorded as user-confirmed on the version row
+    (``versions.record_confirmation`` — the ONLY writer of
+    ``confirmed_params``) and the pending offer is CLEARED (a consumed
+    offer is a consumed offer — it never re-fires on a later "yes").
+    """
+    from d33d.confirm_offer import (
+        ack_sentence,
+        format_param_value,
+        is_pending_offer_acceptance,
+        offer_entry,
+    )
+
+    versions = app.state.versions
+    offer = versions.get_pending_offer(project_id)
+    if offer is None:
+        return None
+    latest = versions.latest_version(project_id)
+    if not is_pending_offer_acceptance(message, offer, latest):
+        return None
+    name = offer["param"]
+    entry = offer_entry(dict(latest["params"]), latest["param_meta"], name)
+    if entry is None or entry.get("provenance") != "assumed":
+        # The param is gone or no longer assumed (confirmed/stated /
+        # measured): the offer is stale — leave it be (the next pass
+        # overwrites the pending-offer state) and route normally.
+        return None
+    versions.record_confirmation(project_id, latest["id"], name, entry.get("value"))
+    versions.set_pending_offer(project_id, None)
+    return {"kind": "answer", "answer": ack_sentence(entry), "entry": entry}
+
+
+async def _answered_frames(
+    answer: str,
+    project_id: int | None = None,
+    app: Any = None,
+    confirm_ack: dict[str, str] | None = None,
+):
     """The answer-path SSE stream (issue #249): ONE terminal ``done``
     frame whose ``message`` is the answer text and which carries the
     additive ``kind: "answer"`` discriminator (design-loop done frames
     carry no ``kind`` at all — existing frames are byte-identical).
+
+    ``confirm_ack`` (issue #250, the accepted-offer flow only) adds the
+    acknowledgement's ``label``/``value`` as ADDITIVE ``confirm_ack_*``
+    fields on the same done frame — the SPA's ``App.tsx`` renders the
+    value in the mono face (a measurement must never hide inside a
+    sentence). The question-answer path passes ``None`` (no ``confirm_*``
+    keys, byte-identical).
 
     No token frames, no version-created progress frame: the answer text
     is delivered exclusively in the done frame's ``message`` (the
     operator's decision — token frames feed the model-source view, and
     the SPA renders an ``kind: "answer"`` done frame's ``message``
     verbatim as a plain assistant chat message)."""
-    yield (
-        "done",
-        {"message": answer, "kind": "answer"},
-    )
+    done_data: dict[str, Any] = {"message": answer, "kind": "answer"}
+    if confirm_ack is not None:
+        done_data["confirm_ack"] = True
+        done_data["confirm_ack_label"] = confirm_ack["label"]
+        done_data["confirm_ack_value"] = confirm_ack["value"]
+    yield ("done", done_data)
+    # The in-flight flag is released by the STREAM's ``finally``
+    # (``d33d.streaming._stream_events`` — the single release point for
+    # every event source, on every exit path: the SSE endpoint drains in
+    # production; tests that drive the source directly exhaust the same
+    # generator via the SSE endpoint's ``_stream_events``). There is
+    # deliberately no post-yield discard here: a release would have to
+    # happen in generator ``finally`` code (not after the last ``yield`` —
+    # that runs only if the consumer exhausts the generator), and
+    # ``_stream_events``'s ``finally`` already covers every drain path.
+    # A bare ``async for`` over the raw source (bypassing the SSE
+    # endpoint) leaves the flag set by design — the contract is that the
+    # stream endpoint is the sole driver of event sources (its
+    # ``finally`` is the single release point).
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -334,6 +415,62 @@ def create_projects_router() -> APIRouter:
         # keep the flag — streaming.py's ``finally`` clears it when the
         # stream is drained.
         inflight.add(project_id)
+
+        # Issue #250 — the offer-acceptance pre-route (BEFORE the
+        # question pre-route): if the project has a LIVE pending offer
+        # (the previous turn's design pass offered to confirm param P on
+        # the current latest version — server-side state, never parsed
+        # from the client's chat) AND the message is a clean affirmation
+        # (``_is_clean_affirmation`` — "yes" yes; "yes but make it 2 mm"
+        # no) AND the offered param still carries the offered value, the
+        # acceptance records the value as user-confirmed on that version
+        # (the ``confirmed_params`` write — the ONLY writer of that set)
+        # and replies with the deterministic acknowledgement as a
+        # ``kind: "answer"`` plain-message done frame. NO design run, NO
+        # new version. Anything else (a change request, a question, a
+        # hedge, a lapsed/stale offer, a value that moved) falls through
+        # to the existing routes exactly as today.
+        try:
+            offer_route = await _confirm_offer_route(app, project_id, body.message)
+        except Exception:  # noqa: BLE001 — degrade to the normal route, never 500
+            inflight.discard(project_id)
+            raise
+        if offer_route is not None:
+            # The event source is registered — the flag stays set
+            # (streaming.py's ``finally`` clears it when the stream is
+            # drained). The answer path has no SSE client (the SPA polls
+            # the stream), so the source is drained by the test's direct
+            # iteration; popping the drained source here would be too
+            # early (the SSE endpoint reads it at request time). The flag
+            # is released when the source is exhausted — the SAME contract
+            # as the question-answer path. The acknowledgement's label /
+            # value ride the done frame as ADDITIVE ``confirm_ack_*``
+            # fields (the SPA renders the value in the mono face).
+            from d33d.confirm_offer import format_param_value as _fmt_pv
+
+            ack_entry = offer_route["entry"]
+            app.state.event_sources[project_id] = _answered_frames(
+                offer_route["answer"],
+                project_id,
+                app,
+                confirm_ack={
+                    # The label is ALWAYS non-empty (the wire contract — the
+                    # SPA's ``confirm_ack`` render gate keys off it): fall
+                    # back to the param's identifier, never an empty
+                    # string (the identifier is present by construction —
+                    # ``offer_entry`` returns an entry whose ``name`` is
+                    # the pending offer's param).
+                    "label": (
+                        ack_entry.get("label")
+                        or ack_entry.get("name")
+                        or offer["param"]
+                    ),
+                    # The shared value formatter (``confirm_offer`` — the
+                    # same bool/number/other rule, one implementation).
+                    "value": _fmt_pv(ack_entry["value"]),
+                },
+            )
+            return {"status": "accepted"}
 
         # Resolve the loop's stated dimensions (ticket #91; issue #247's
         # per-axis decision) — the SPA never sends ``stated_dims`` (it

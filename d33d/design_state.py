@@ -80,6 +80,20 @@ evidence and no measurement is OMITTED entirely — never rendered as a
 fabricated value; the model's own W/D/H-named parameters still render as
 ``assumed`` param rows, so the number is never lost.
 
+Rule (b) promotion (issue #250 — explicit user confirmation): a param
+row is ALSO ``stated`` when its version's persisted ``confirmed_params``
+set (the param-keyed ``{name: value}`` written ONLY by the accepted-
+offer flow — never by name inference) carries the param with a value
+equal (within ``CONFIRMED_VALUE_TOLERANCE`` = 1e-6) to the param's
+current value. The operator decision: a param becomes ``stated`` when
+EITHER (a) the #248 axis evidence holds OR (b) explicit confirmation
+holds — for ANY param (the design team's own example offer is a wall
+thickness, which has no axis). A confirmed value that the param no
+longer carries (a value change in this version) does NOT promote — the
+confirmation is stale evidence. The confirmed set is INDEPENDENT of the
+axis-keyed ``stated_dims`` store: confirming a wall thickness does not
+close the W/D/H axis evidence, and vice versa.
+
 The prompt rendering marks provenance (``format_design_state_block`` /
 ``format_design_state_line``): an ``assumed`` value renders
 ``label = value (assumed — the user never set this)`` and a ``stated``
@@ -384,6 +398,7 @@ def state_block_for_version(
     measurement: Any = None,
     stated: dict[str, Any] | None = None,
     param_meta: dict[str, Any] | None = None,
+    confirmed_params: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-state block for ONE version: the version's params
     snapshot (``state_block_from_params`` — every model-emitted parameter
@@ -446,7 +461,24 @@ def state_block_for_version(
     with the stated value riding along). The persisted stated set only
     drives the SEPARATE axis rows (appended after the param rows); the
     two surfaces are independent and never name-matched.
+
+    ``confirmed_params`` (issue #250, rule (b)) is the version row's
+    persisted param-keyed confirmed set (``{name: value}`` — written only
+    by the accepted-offer flow). A param in the set with a value equal
+    to its current value (within 1e-6) renders ``stated`` — for ANY
+    param, axis or not. The confirmation is FROZEN evidence of that
+    value: a W/D/H-named param that ALSO carries a measurement keeps the
+    full comparison (within tolerance → ``measured``; outside it →
+    ``disagrees`` with the confirmed value riding along as
+    ``stated_value`` — the measurement is the number that will print,
+    and a confirmed value the measurement contradicts by an unbounded
+    margin must not silently win). A param WITHOUT a measurement (or not
+    W/D/H-named) skips nothing: there is no comparison to re-open, and
+    the promoted row renders ``stated``. ``None`` / empty → no rule (b)
+    promotion.
     """
+    from d33d.confirm_offer import CONFIRMED_VALUE_TOLERANCE
+
     entries = state_block_from_params(params, param_meta)
     evidence = _axis_stated_evidence(stated)
     # The single, clearly-marked promotion seam (issue #248, filled):
@@ -454,6 +486,13 @@ def state_block_for_version(
     # match promotes ``assumed`` → ``stated``. Name-based promotion is
     # still forbidden — only a declared ``axis`` field qualifies.
     entries = _maybe_promote_params(entries, evidence)
+    # Rule (b) (issue #250): explicit user confirmation promotes a param
+    # ``assumed`` → ``stated`` when the confirmed set carries its current
+    # value. The promotion only — the W/D/H-named param below still runs
+    # the FULL measurement comparison (a confirmed number the measurement
+    # contradicts renders ``disagrees``; the confirmation is frozen
+    # evidence of a value, never a measurement bypass).
+    _maybe_confirm_params(entries, confirmed_params, CONFIRMED_VALUE_TOLERANCE)
     extents = persisted_bbox_extents(measurement)
     if not evidence and extents is None:
         # No stated evidence and no measurement: the params-only
@@ -467,7 +506,12 @@ def state_block_for_version(
         # W/D/H-named params (issue #137 — the stated value the version
         # was built with is the param's own value when the user stated
         # nothing per axis; the model's number is the best available
-        # reference and is what the #137 gate compares against).
+        # reference and is what the #137 gate compares against). A rule
+        # (b) confirmed param runs it too — the comparison is the
+        # measurement's own honesty, independent of who stated the
+        # value: within tolerance the confirmed value holds as
+        # ``measured``; outside it the row renders ``disagrees`` with
+        # the stated (confirmed) value riding along.
         name = entry["name"]
         if extents is not None and name in AXIS_PARAM_NAMES:
             stated_value = entry["value"]
@@ -507,6 +551,60 @@ def state_block_for_version(
         else:
             out.append(_axis_row(axis, extent, "disagrees", axis_value))
     return out
+
+
+def _maybe_confirm_params(
+    entries: list[dict[str, Any]],
+    confirmed: dict[str, Any] | None,
+    tolerance: float = 1e-6,
+) -> None:
+    """Rule (b) promotion (issue #250, filled): explicit user
+    confirmation.
+
+    A param row is promoted ``assumed`` → ``stated`` iff the version's
+    persisted ``confirmed_params`` set (``{name: value}`` — written ONLY
+    by the accepted-offer flow in ``d33d.projects.post_chat``; never by
+    name inference) carries the param with a value equal to the param's
+    CURRENT value within ``tolerance`` (1e-6, issue #250's operator
+    decision). The promotion applies to ANY param — axis or not (the
+    design team's example offer is a wall thickness, which has no axis),
+    numeric or not (non-numeric values compare with ``==``, no tolerance
+    arithmetic). A confirmed value the param no longer carries does NOT
+    promote (stale evidence — the value changed in this version). The
+    set is independent of the axis-keyed ``stated_dims`` store: a
+    confirmation never touches the W/D/H axis rows.
+
+    The promotion does NOT exempt the param from the measurement
+    comparison: a W/D/H-named confirmed param keeps it (within tolerance
+    → ``measured``; outside → ``disagrees`` with the confirmed value
+    riding along) — the measurement is the number that will print, and a
+    confirmed value the measurement contradicts by an unbounded margin
+    must not silently win.
+
+    Do not add confirmation promotion anywhere else; do not infer a
+    confirmation from a parameter name.
+    """
+    if not confirmed:
+        return
+    for entry in entries:
+        if entry.get("kind") != "param":
+            continue
+        if entry["provenance"] != "assumed":
+            continue  # unknown / already stated/measured: nothing to confirm
+        if entry["name"] not in confirmed:
+            continue
+        confirmed_value = confirmed[entry["name"]]
+        value = entry.get("value")
+        if isinstance(confirmed_value, (int, float)) and not isinstance(
+            confirmed_value, bool
+        ):
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if abs(float(value) - float(confirmed_value)) > tolerance:
+                continue
+        elif confirmed_value != value:
+            continue
+        entry["provenance"] = "stated"
 
 
 def _maybe_promote_params(

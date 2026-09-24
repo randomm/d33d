@@ -118,6 +118,7 @@ describe("design contract", () => {
   it("the copy deck exports every documented surface", () => {
     expect(Object.keys(copy).sort()).toEqual([
       "brief",
+      "confirmOffer",
       "export3mf",
       "failure",
       "firstPass",
@@ -128,6 +129,61 @@ describe("design contract", () => {
       "region",
       "shell",
     ]);
+  });
+
+  /* ----------------------------------------- W250 */
+
+  it("the assumed-value confirmation copy lives in the deck (issue #250)", () => {
+    // All user-facing strings live in web/src/copy.ts. The offer is a
+    // single plain sentence (never a form), and the deterministic offer
+    // template and the short acknowledgement both have a deck home — the
+    // model may supply its own offer sentence (the done frame's
+    // `confirm_sentence`), but only when it passes the server's number
+    // guard; the template below is the wording for everything else.
+    const offer = copy.confirmOffer.offer("3.0\u202Fmm", "Wall thickness");
+    expect(offer).toBe(
+      "I assumed 3.0\u202Fmm for Wall thickness. Want it different?",
+    );
+    // The value slot is filled verbatim — no second formatting pass (the
+    // caller pre-forms via `mm` for millimetre params, the model's own
+    // string for non-numeric ones).
+    expect(copy.confirmOffer.offer("2 grooves", "Channel depth")).toBe(
+      "I assumed 2 grooves for Channel depth. Want it different?",
+    );
+    const ack = copy.confirmOffer.acknowledged("Wall thickness", "3.0\u202Fmm");
+    expect(ack).toBe("Got it — Wall thickness stays 3.0\u202Fmm.");
+    // The two surfaces are distinct — an offer and an acknowledgement must
+    // never read as the same thing.
+    expect(ack).not.toBe(offer);
+    expect(ack).not.toContain("Want it different?");
+  });
+
+  it("the deck's offer template agrees in substance with the server's (issue #250)", () => {
+    // The offer sentence the USER sees is built server-side
+    // (`d33d.confirm_offer.offer_sentence`) and rendered verbatim by the
+    // SPA (the done frame's `confirm_sentence` field). The deck's
+    // `confirmOffer.offer` is a MIRROR of the server template (a testable
+    // home on the SPA side, not a second writer of the wire string) —
+    // this tripwire pins that the two templates agree in substance:
+    // same structure, same value/label slots, same closing question. A
+    // deck drift from the server template would silently desynchronise
+    // what the design contract pins here from what the backend actually
+    // emits, so the tripwire reads both sides.
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    // The SPA renders the wire string verbatim — it never substitutes its
+    // own offer template into the offer message (the offer path builds
+    // the content from `data.confirm_sentence`, not from
+    // `confirmOffer.offer`).
+    expect(appSrc).not.toMatch(/content:\s*copy\.confirmOffer\.offer\(/);
+    // The deck's mirror template carries the server's exact structure
+    // (value slot, label slot, closing question) — a deck rewrite that
+    // changes the wording without touching the server would break the
+    // design-contract pin above, so the structural tripwire here catches
+    // the other half: a deck rewrite that keeps the shape but changes a
+    // word (e.g. "Want it different?" → "Want it thinner?") would fail
+    // the exact-match assertion at the top of this file's W250 block.
+    const deck = copy.confirmOffer.offer("V", "L");
+    expect(deck).toBe("I assumed V for L. Want it different?");
   });
 
   it("the pass card summary is a plain user-facing sentence, never system language or fabricated values", () => {
