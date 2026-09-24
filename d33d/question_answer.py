@@ -21,11 +21,15 @@ Two stages, per the ticket:
 * **Stage 2** (:func:`ask_answer_call`) — one cheap single LLM call given
   the question and the current design-state block (provenance and labels
   from the merged ``state_block_for_version`` output), returning a
-  structured ``{answerable, answer}``. The prompt forbids inventing
+  structured ``{kind, answer}`` three-way outcome (issue #260): ``kind``
+  is ``"answer"`` (the block contains every value the question needs),
+  ``"unanswerable"`` (a genuine question the block does not establish),
+  or ``"request"`` (the message asks for a design change). The legacy
+  ``{answerable, answer}`` boolean shape is still accepted and mapped
+  (``true`` → ``answer``, ``false`` → ``request``) so an old-style reply
+  never becomes a false "unanswerable". The prompt forbids inventing
   values and forbids offering to set/confirm anything (that offer is a
-  separate ticket). ``answerable`` false, any call failure, or the
-  10 s hard timeout (the operator's latency bound) all degrade to the
-  design loop.
+  separate ticket).
 * **The number guard** (:func:`guard_answer_numbers`) — deterministic,
   presence-only: every numeric token in the answer must appear in the
   design-state block (``value`` and ``stated_value``), unit suffixes
@@ -37,7 +41,20 @@ The wire (operator decision, overrides the earlier token-frame wording):
 the answer path emits NO token frames and NO version-created frame. It
 emits ONE terminal ``done`` frame whose ``message`` is the answer text
 plus an ADDITIVE ``kind: "answer"`` field (``done`` frames without
-``kind`` are unaffected and mean a design-loop completion).
+``kind`` are unaffected and mean a design-loop completion). The two
+no-run replies (issue #260) ride the SAME done frame: the design loop
+is NEVER the fallback for a question the pre-route already took — a
+failed stage-2 call (timeout, exception, malformed reply, guard failure)
+replies ``COULD_NOT_ANSWER`` and an ``unanswerable`` classification
+replies ``NOT_ESTABLISHED``, both fixed copy.ts strings pinned by the
+design-contract test, both with no design run and no version.
+
+Observability (issue #260): every stage-2 outcome — the three kinds AND
+the four failure classes (timeout, exception, malformed, guard) — logs
+exactly ONE ``WARNING`` record naming the outcome plus elapsed ms and
+message length. NEVER the message text or the answer text (no PII in
+logs). The stage-1 short-circuits (no versions, not a candidate,
+no answer edge) stay at INFO.
 """
 
 from __future__ import annotations
@@ -46,8 +63,17 @@ import asyncio
 import json
 import logging
 import re
+import time
+
+try:  # The production edge is httpx-based; the timeout classification
+    # below needs httpx's timeout exception. The import is guarded so the
+    # module loads even in an environment without httpx (tests inject the
+    # edge and never take the httpx timeout branch).
+    import httpx
+except ImportError:  # pragma: no cover - httpx is a hard dep in production
+    httpx = None
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import Any, Literal
 
 from d33d.design_state import (
     build_design_state_block,
@@ -60,6 +86,10 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ANSWER_CALL_TIMEOUT_SECONDS",
     "ANSWER_DONE_KIND",
+    "ANSWER_KINDS",
+    "COULD_NOT_ANSWER",
+    "NOT_ESTABLISHED",
+    "AnswerOutcome",
     "ask_answer_call",
     "build_answer_prompt",
     "extract_answer_numbers",
@@ -81,7 +111,42 @@ ANSWER_CALL_TIMEOUT_SECONDS = 10.0
 #: answer-path terminal frame carries ``kind == "answer"``; a
 #: design-loop terminal frame carries no ``kind`` at all (treated as
 #: design — the old shape, byte-identical for existing frames).
-ANSWER_DONE_KIND = "answer"
+ANSWER_DONE_KIND = "answer"  # note: the stage-2 reply's kind (issue #260) is a different, three-way value; the Python type for it is :data:`AnswerOutcome` below
+
+#: The stage-2 reply's ``kind`` field (issue #260): a closed three-way
+#: set. ``"answer"`` — the block contains every value the question needs;
+#: ``"unanswerable"`` — a genuine question the block does not establish;
+#: ``"request"`` — the message asks for a design change (routes to the
+#: design loop). The legacy ``{answerable: bool}`` shape maps onto this
+#: set (``true`` → ``"answer"``, ``false`` → ``"request"``).
+#
+#: Named ``AnswerOutcome`` (NOT ``ANSWER_DONE_KIND``) to avoid colliding
+#: with the done-frame discriminator above: both are called "answer" but
+#: one is the stage-2 reply's wire kind and the other is the done frame's
+#: additive field.
+AnswerOutcome = Literal["answer", "unanswerable", "request"]
+ANSWER_KINDS: tuple[str, ...] = ("answer", "unanswerable", "request")
+
+# ---------------------------------------------------------------------------
+# The two no-run replies (issue #260) — copy.ts is the source of truth
+# ---------------------------------------------------------------------------
+
+#: The no-run reply for a FAILED stage-2 call (timeout, exception,
+#: malformed reply, or number-guard failure): the chat says the answer
+#: could not be produced just now and nothing changed — no design run,
+#: no version. The design loop is NEVER the fallback for a failed answer
+#: (the old behaviour — a stage-2 failure fell through to the design
+#: loop, which then produced a wrong or failing new version).
+COULD_NOT_ANSWER = "I couldn't answer that just now — nothing was changed."
+
+#: The no-run reply for a ``kind: "unanswerable"`` stage-2 classification
+#: (a genuine question the design state does not establish — e.g. a
+#: question about colour, material, or finish): the design as it stands
+#: doesn't establish that, and nothing changed. Also no design run, no
+#: version: deciding whether a question is really a change REQUEST is the
+#: model's call via ``kind: "request"`` — "unanswerable" never defaults
+#: to the loop.
+NOT_ESTABLISHED = "The design as it stands doesn't establish that — nothing was changed."
 
 # ---------------------------------------------------------------------------
 # Stage 1 — the deterministic question detector
@@ -332,9 +397,17 @@ def build_answer_prompt(
         "source of truth: if it does not contain the value the question "
         "asks about, you cannot answer.\n\n"
         "Rules:\n"
-        "- answerable is true ONLY if the block contains every value you "
-        "need; if the block cannot answer the question, set answerable "
-        "to false and leave answer empty.\n"
+        "- choose the reply kind, one of three:\n"
+        '- kind "answer" — the block contains every value you need to '
+        "answer (for example \"How tall is it now?\" with the height "
+        "stated 12 mm, answer \"It is 12 mm tall — you said that.\"), "
+        "answering from the block alone.\n"
+        '- kind "unanswerable" — a genuine question the block does not '
+        "establish (for example a question about colour, material or "
+        "finish) → leave the answer empty. Do not guess.\n"
+        '- kind "request" — the message asks for a change to the design '
+        '(for example "Can it be 20 mm wider?") → leave the answer '
+        "empty.\n"
         "- every number in your answer must come from the block — never "
         "invent, round to a different value, or combine values.\n"
         "- each value you cite must name its provenance in plain words: "
@@ -345,21 +418,30 @@ def build_answer_prompt(
         "ends after the provenance citation.\n\n"
         f"{state_text}\n\n"
         f"Question: {question}\n"
-        'Reply with a single JSON object: {"answerable": true|false, '
-        '"answer": "…"} — no other text.'
+        'Reply with a single JSON object: {"kind": "answer"|'
+        '"unanswerable"|"request", "answer": "…"} — no other text.'
     )
 
 
-def parse_answer_reply(text: str) -> tuple[bool, str] | None:
-    """The model reply → ``(answerable, answer)`` or ``None`` (malformed).
+def parse_answer_reply(text: str) -> tuple[AnswerOutcome, str] | None:
+    """The model reply → ``(kind, answer)`` or ``None`` (malformed).
 
-    ``None`` (not an exception) is the contract: a malformed reply is
-    "not answerable" — the route degrades to the design loop exactly as
-    today. Extraction is lenient (a JSON object inside surrounding
-    prose is still parseable), but the shape is strict: ``answerable``
-    must be a bool; ``answer`` must be a non-empty string when
-    ``answerable`` is true (an ``answerable: true`` with an empty answer
-    is malformed — an empty answer answers nothing).
+    ``None`` (not an exception) is the contract: a malformed reply is a
+    FAILED ANSWER — the route replies with the fixed
+    ``COULD_NOT_ANSWER`` no-run message (issue #260), never the design
+    loop. Extraction is lenient (a JSON object inside surrounding prose
+    is still parseable), but the shape is strict:
+
+    * the current three-way shape: ``kind`` must be one of the closed
+      ``ANSWER_KINDS`` set; ``answer`` must be a non-empty string when
+      ``kind`` is ``"answer"`` (an ``"answer"`` with an empty answer is
+      malformed — an empty answer answers nothing).
+    * the LEGACY ``{answerable: bool, answer}`` shape is still accepted
+      and mapped (issue #260's pitfall): ``true`` → ``"answer"`` and
+      ``false`` → ``"request"`` — preserving today's routing (an
+      unanswerable-old-style reply is a change REQUEST to the design
+      loop, never a false "unanswerable"). A reply carrying BOTH or
+      NEITHER discriminator shape is malformed.
     """
     if not isinstance(text, str):
         return None
@@ -376,15 +458,31 @@ def parse_answer_reply(text: str) -> tuple[bool, str] | None:
         return None
     if not isinstance(doc, dict):
         return None
-    answerable = doc.get("answerable")
-    if not isinstance(answerable, bool):
-        return None
     answer = doc.get("answer")
     if not isinstance(answer, str):
         return None
+    # A reply carrying BOTH discriminator shapes (kind AND answerable) is
+    # ambiguous: malformed. Neither present: malformed.
+    has_kind = isinstance(doc.get("kind"), str)
+    has_legacy = isinstance(doc.get("answerable"), bool)
+    if has_kind == has_legacy:
+        return None
+    # The current shape: a closed-set ``kind`` (answer/unanswerable/request).
+    kind = doc.get("kind")
+    if has_kind:
+        if kind not in ANSWER_KINDS:
+            return None
+        if kind == "answer" and not answer.strip():
+            return None
+        return kind, answer.strip()
+    # The legacy shape: ``answerable`` bool → mapped, never a false
+    # "unanswerable" (a legacy false routes to the design loop exactly
+    # as it does today).
+    answerable = doc.get("answerable")
+    legacy_kind: AnswerOutcome = "answer" if answerable else "request"
     if answerable and not answer.strip():
         return None
-    return answerable, answer.strip()
+    return legacy_kind, answer.strip()
 
 
 AnswerFn = Callable[[str], Awaitable[Any]]
@@ -402,61 +500,87 @@ async def ask_answer_call(
     entries: list[dict[str, Any]],
     answer_fn: AnswerFn,
     timeout: float = ANSWER_CALL_TIMEOUT_SECONDS,
-) -> tuple[bool, str] | None:
+) -> tuple[AnswerOutcome, str] | None:
     """Stage 2: one cheap LLM call + the deterministic number guard.
 
     ``answer_fn`` is the injected single-shot completion
     (``prompt_text -> raw reply text``) — the route supplies the real
-    model edge; tests supply a stub. The guard runs on the parsed answer
-    BEFORE the route trusts it (a model that invents a number is
-    unanswerable, deterministically — not a judgment call).
+    model edge; tests supply a stub. The guard runs on the parsed
+    ``"answer"`` reply BEFORE the route trusts it (a model that invents
+    a number fails the answer, deterministically — not a judgment call);
+    a ``"request"`` or ``"unanswerable"`` reply skips the guard entirely
+    (its answer field is empty by contract).
 
-    Returns ``(True, answer)`` on success, ``None`` in every failure
-    case (the caller routes to the design loop unchanged): a malformed
-    reply, an ``answerable: false`` reply, a guard failure, an exception
-    from ``answer_fn``, or the hard ``timeout`` (operator decision: the
-    10 s bound is hard — a hung call degrades exactly like a failed
-    one).
+    Returns ``(kind, answer)`` on a usable outcome — ``"answer"``
+    (guard passing), ``"unanswerable"``, or ``"request"`` — and
+    ``None`` in every failure case (the caller replies with the fixed
+    ``COULD_NOT_ANSWER`` no-run message — the design loop is never the
+    fallback for a failed answer): a malformed reply, a guard failure,
+    an exception from ``answer_fn``, or the hard ``timeout`` (operator
+    decision: the 10 s bound is hard — a hung call fails exactly like a
+    failed one).
+
+    Every outcome logs exactly ONE ``WARNING`` record naming the outcome
+    (the kind, or the failure class ``timeout`` / ``exception`` /
+    ``malformed`` / ``guard``) plus elapsed ms and message length —
+    never the message text or the answer text (no PII in logs).
     """
     prompt = build_answer_prompt(question, entries)
+    started = time.monotonic()
+
+    def _warn(outcome: str, elapsed_ms: float) -> None:
+        logger.warning(
+            "question-answer stage 2: outcome=%s elapsed_ms=%.0f "
+            "len(message)=%d",
+            outcome,
+            elapsed_ms,
+            len(question),
+        )
+
     raw: Any
     try:
         raw = await asyncio.wait_for(answer_fn(prompt), timeout=timeout)
-    except Exception:  # noqa: BLE001 — ANY failure (incl. the 10 s TimeoutError) degrades to the loop
-        logger.info(
-            "question-answer stage 2 call failed or timed out "
-            "(len(message)=%d) — routing to the design loop",
-            len(question),
-        )
+    except asyncio.CancelledError:
+        # Cancellation is a control-flow signal, NOT a failed answer: it
+        # must propagate so the caller's cancellation (and any of its
+        # ``except CancelledError`` cleanup) is never swallowed into a
+        # no-run reply.
+        raise
+    except TimeoutError:
+        # The hard ``timeout`` bound fired (``asyncio.wait_for`` raises
+        # ``TimeoutError`` — ``asyncio.TimeoutError`` is an alias of the
+        # builtin in 3.11+): a failed answer of the ``timeout`` class.
+        _warn("timeout", (time.monotonic() - started) * 1000)
+        return None
+    except Exception as exc:  # noqa: BLE001 — any non-timeout failure is a failed answer; the classification below is by class, not blind
+        # ANY other failure is a failed answer — classify by the exception
+        # class, never by elapsed time (the old heuristic misclassified a
+        # late-firing non-timeout error as a timeout). The production edge
+        # is httpx-based: an httpx timeout (the per-request client bound
+        # in ``_http_request_factory``) is a ``timeout`` too; anything else
+        # (a plain exception, an HTTP error, a connection reset) is an
+        # ``exception``.
+        if httpx is not None and isinstance(exc, httpx.TimeoutException):
+            _warn("timeout", (time.monotonic() - started) * 1000)
+        else:
+            _warn("exception", (time.monotonic() - started) * 1000)
         return None
     parsed = parse_answer_reply(raw)
     if parsed is None:
-        raw_repr = raw if isinstance(raw, str) else type(raw).__name__
-        logger.info(
-            "question-answer stage 2 reply was malformed (raw=%r) — "
-            "routing to the design loop",
-            raw_repr,
-        )
+        _warn("malformed", (time.monotonic() - started) * 1000)
         return None
-    answerable, answer = parsed
-    if not answerable:
-        logger.info(
-            "question-answer stage 2: block cannot answer "
-            "(len(message)=%d) — routing to the design loop",
-            len(question),
-        )
-        return None
+    kind, answer = parsed
+    if kind == "request":
+        _warn("request", (time.monotonic() - started) * 1000)
+        return "request", answer
+    if kind == "unanswerable":
+        _warn("unanswerable", (time.monotonic() - started) * 1000)
+        return "unanswerable", answer
     if not guard_answer_numbers(answer, entries):
-        logger.info(
-            "question-answer number guard failed (len(answer)=%d) — "
-            "routing to the design loop",
-            len(answer),
-        )
-        logger.debug(
-            "question-answer number guard failed (answer=%r)", answer
-        )
+        _warn("guard", (time.monotonic() - started) * 1000)
         return None
-    return True, answer
+    _warn("answer", (time.monotonic() - started) * 1000)
+    return "answer", answer
 
 
 # ---------------------------------------------------------------------------
@@ -496,36 +620,49 @@ async def route_chat_message(
 ) -> dict[str, Any] | None:
     """The pre-route decision for ONE chat message.
 
-    Returns ``{"kind": "answer", "answer": <text>}`` when the message
-    clears stage 1 (a question, no imperative) AND the project has at
-    least one version AND stage 2 answers from the design-state block
-    (number guard passing). Returns ``None`` in EVERY other case (the
-    caller routes to the design loop exactly as today):
+    Returns ``{"kind": "answer", "answer": <text>}`` (the ``kind`` field
+    is the wire discriminator ``ANSWER_DONE_KIND`` — a done frame with
+    ``kind == "answer"`` — NOT the stage-2 outcome kind) in every case
+    the pre-route takes ownership of the message:
+
+    * a stage-2 ``"answer"`` (number guard passing) — the design-state
+      block's answer (the #249 path, byte-for-byte unchanged);
+    * a stage-2 ``"unanswerable"`` — the fixed ``NOT_ESTABLISHED``
+      no-run reply (issue #260); no design run, no version;
+    * a stage-2 failure (timeout, exception, malformed reply, or
+      number-guard failure) — the fixed ``COULD_NOT_ANSWER`` no-run
+      reply (issue #260); no design run, no version.
+
+    Returns ``None`` (the caller routes to the design loop exactly as
+    today) ONLY when:
 
     * no version yet (the design-state block is empty — nothing to
       answer from);
     * stage 1 rejects (not a question, or an imperative is present —
       ambiguous → loop, per the ticket);
-    * stage 2 fails, times out, is unanswerable, or trips the guard.
+    * no answer edge is wired;
+    * stage 2 classifies the message as a ``"request"`` — the model
+      says the message asks for a change, and the design loop is the
+      right home (exactly as a non-question message would route).
 
     The ``timeout`` parameter (default: ``ANSWER_CALL_TIMEOUT_SECONDS``
     = 10 s) is the hard bound the stage-2 call runs under — the operator
     decision's latency bound. Tests pass a shorter value to pin the
     timeout contract in <1 s of wall clock.
 
-    The decision is logged at INFO (which route was taken and why — the
-    operator's requirement).
+    The stage-1 short-circuits log at INFO; every stage-2 outcome logs
+    at WARNING from :func:`ask_answer_call` (issue #260).
     """
     if latest is None:
         logger.info("question-answer: no versions yet — design loop")
         return None
     if not is_candidate_question(message):
+        # Length-only log (no PII — the message text is never logged).
         logger.info(
             "question-answer: message is not a stage-1 question "
             "(len(message)=%d) — design loop",
             len(message),
         )
-        logger.debug("question-answer: message=%r", message)
         return None
     entries = state_block_for_chat(latest)
     if answer_edge is None:
@@ -539,8 +676,27 @@ async def route_chat_message(
 
     result = await ask_answer_call(message, entries, _answer_fn, timeout=timeout)
     if result is None:
+        # A FAILED stage-2 call (timeout, exception, malformed reply,
+        # or number-guard failure): the fixed no-run reply. The design
+        # loop is never the fallback for a failed answer (issue #260).
+        return {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+    kind, answer = result
+    if kind == "request":
+        # The model says the message asks for a change to the design:
+        # the design loop is the right home, exactly as a non-question
+        # message routes. No no-run reply.
         return None
-    _ok, answer = result
+    if kind == "unanswerable":
+        # A genuine question the design state does not establish: the
+        # fixed no-run reply (issue #260). Deciding when a question is
+        # really a request is the model's call via kind "request" —
+        # "unanswerable" never defaults to the loop.
+        return {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+    # kind == "answer" (the guard passed — ask_answer_call runs it):
+    # the #249 path, byte-for-byte unchanged. The stage-2 outcome
+    # already logged its one WARNING from ask_answer_call (issue #260);
+    # this INFO keeps the answered case separately visible with lengths
+    # only (no PII in either).
     logger.info(
         "question-answer: answering from the design-state block "
         "(len(message)=%d, len(answer)=%d)",

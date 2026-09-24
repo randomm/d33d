@@ -17,9 +17,14 @@ disagrees. Answer the question from that block alone.
    - assumed — "I assumed"
    - unknown — "not established"
    - disagrees — "you said X, I measured Y"
-3. If the block does not contain what the question asks (for example a
-   question about colour, material or finish), set answerable to false and
-   leave the answer empty. Do not guess.
+3. Choose the kind:
+   - kind "answer" — the block contains every value you need to answer
+     (for example "How tall is it now?" with H stated 12 mm → answer).
+   - kind "unanswerable" — a genuine question the block does not contain
+     (for example a question about colour, material or finish) → leave the
+     answer empty. Do not guess.
+   - kind "request" — the message asks for a change to the design (for
+     example "Can it be 20 mm wider?" → request); leave the answer empty.
 4. End the answer after the provenance citation. Do not offer to set, change
    or confirm any value; do not ask the operator a question; do not propose
    a new design.
@@ -29,7 +34,7 @@ disagrees. Answer the question from that block alone.
 
 Emit exactly one JSON object, no prose:
 
-{"answerable": true|false, "answer": "…"}
+{"kind": "answer"|"unanswerable"|"request", "answer": "…"}
 
-The answer, when answerable is true, is one or two plain sentences that
+The answer, when the kind is "answer", is one or two plain sentences that
 state the value(s) with their provenance and nothing else.

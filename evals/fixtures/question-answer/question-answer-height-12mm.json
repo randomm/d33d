@@ -4,7 +4,7 @@
   "prompt": {
     "prompt_version": "v1",
     "path": "evals/prompts/question_answer_v1.md",
-    "sha256": "3379f2c0706b54ad083536c789e5f7929e291a768b16cab5136f7ab49e033e40"
+    "sha256": "331426dbc89186fa865cc08e385e2d8662858c891e4dbc134973f6c740576f6f"
   },
   "request": "How tall is it now?",
   "design_state_block": {
@@ -15,7 +15,7 @@
   "gate_expectations": [],
   "question_answer": {
     "expected": {
-      "answerable": true,
+      "kind": "answer",
       "answer_must_cite": ["12"],
       "provenance_phrases": {
         "stated": "you said that",

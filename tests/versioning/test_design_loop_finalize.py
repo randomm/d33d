@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from d33d.design_loop import BboxInfo, IterationRecord, Score
+from d33d.question_answer import COULD_NOT_ANSWER
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
@@ -2085,15 +2086,17 @@ def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
 
 
 def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
-    """Issue #249, operator latency decision: the 10 s hard bound covers
-    the WHOLE pre-route (catalogue load + capability probe + the
-    completion), not just the completion. This test monkeypatches the
-    ``ANSWER_CALL_TIMEOUT_SECONDS`` to 0.1 s and uses a stub answer edge
-    that hangs (sleeps 0.5 s, well past the 0.1 s bound). The /chat route
-    must degrade to the design loop — the timeout fires, the design loop
-    is invoked, and the terminal frame is a design-loop done (no
-    ``kind: "answer"``). The test runs in <1 s of wall clock (the
-    same contract as the 10 s production bound, at a shorter value).
+    """Issue #249 operator latency decision (re-pinned for #260): the
+    10 s hard bound covers the WHOLE pre-route (catalogue load +
+    capability probe + the completion), not just the completion. This
+    test monkeypatches the ``ANSWER_CALL_TIMEOUT_SECONDS`` to 0.1 s and
+    uses a production edge whose wire call hangs (sleeps 0.5 s, well
+    past the 0.1 s bound). The /chat route must reply with the fixed
+    no-run ``couldn't answer`` done frame (issue #260 — the design loop
+    is never the fallback for a failed answer), and the total POST→202
+    time stays under the bound + margin. The test runs in <1 s of wall
+    clock (the same contract as the 10 s production bound, at a
+    shorter value).
 
     There is exactly ONE 10 s enforcement point (issue #249 review):
     ``ask_answer_call``'s ``asyncio.wait_for`` around the edge. The test
@@ -2209,11 +2212,19 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
 
     r, frames, elapsed, was_loop_called = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    # The design loop was invoked (the pre-route timed out and degraded).
-    assert was_loop_called, "the design loop was NOT called after a pre-route timeout"
-    # The terminal frame is from the design loop (no kind "answer").
-    terminal = frames[-1]
-    assert terminal[1].get("kind") != "answer"
+    # The pre-route timed out → the fixed no-run reply (issue #260):
+    # the design loop is NEVER the fallback for a failed answer.
+    assert not was_loop_called, (
+        "the design loop was called after a pre-route timeout (the design "
+        "loop is never the fallback for a failed answer)"
+    )
+    # The terminal frame is the no-run done frame: kind "answer" (the
+    # #249 plain-message path) with the fixed couldn't-answer copy.
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    terminal = frames[0]
+    assert terminal[0] == "done"
+    assert terminal[1].get("kind") == "answer"
+    assert terminal[1]["message"] == COULD_NOT_ANSWER
     # The pre-route was bounded: the total time from POST to 202 response
     # was well under 1 s (the 0.1 s bound + margin).
     assert elapsed < 1.0, f"pre-route took {elapsed:.2f}s — not bounded to the 0.1 s override"

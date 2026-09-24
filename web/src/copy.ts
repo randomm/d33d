@@ -424,6 +424,30 @@ export const confirmOffer = {
     `Got it — ${label} stays ${value}.`,
 } as const;
 
+/**
+ * The question pre-route's two no-run replies (issue #260). When a
+ * chat question the stage-1 filter accepts cannot be answered — the
+ * stage-2 call times out, errors, returns a malformed reply, trips the
+ * number guard, or says the design state does not establish the value —
+ * the chat replies with one of these two fixed plain messages: no
+ * design run, no version. The strings are written in copy.ts and the
+ * backend emits the same strings verbatim (pinned by the design-
+ * contract test), so the wire and the deck are one sentence.
+ */
+export const answerRoute = {
+  /** The stage-2 call failed (timeout, exception, malformed reply, or
+   *  the number guard rejected the reply) — the honest "I could not
+   *  check just now" reply. Never routes to the design loop. */
+  couldNotAnswer:
+    "I couldn't answer that just now — nothing was changed.",
+  /** The stage-2 call succeeded and said the design state does not
+   *  establish what the question asks — the honest "the design as it
+   *  stands doesn't establish that" reply. Never routes to the design
+   *  loop either. */
+  notEstablished:
+    "The design as it stands doesn't establish that — nothing was changed.",
+} as const;
+
 export const shell = {
   addPhoto: "Add a reference photo",
   composerPlaceholder:
@@ -488,6 +512,7 @@ export const copy = {
   progress,
   failure,
   confirmOffer,
+  answerRoute,
   region,
   history,
   firstRun,
