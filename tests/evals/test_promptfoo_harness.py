@@ -60,7 +60,11 @@ def test_config_references_the_hash_pinned_prompts() -> None:
     doc = _load_config()
     prompts_dir = REPO_ROOT / doc["prompts_dir"]
     prompt_files = sorted(prompts_dir.glob("*.md"))
-    assert len(prompt_files) == 5, f"expected 5 prompt files, got {len(prompt_files)}"
+    # 5 design-loop golden-set prompts + the question-answer stage-2
+    # prompt (issue #249) — every golden case pins one of the first five;
+    # the question-answer prompt is pinned by its own fixture (see
+    # tests/evals/test_question_answer_fixture.py).
+    assert len(prompt_files) >= 5, f"expected >= 5 prompt files, got {len(prompt_files)}"
 
     # Every case's pin path points into the config's prompts_dir.
     cases = load_golden_set(REPO_ROOT / doc["cases_dir"], REPO_ROOT)
