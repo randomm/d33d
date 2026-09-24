@@ -419,6 +419,7 @@ class VersionService:
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
+        param_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -467,6 +468,7 @@ class VersionService:
                 bbox=bbox,
                 render_artifact_dir=render_artifact_dir,
                 stated_dims=stated_dims,
+                param_meta=param_meta,
             ),
         )
 
@@ -484,6 +486,7 @@ class VersionService:
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
+        param_meta: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -529,6 +532,7 @@ class VersionService:
             bbox=bbox,
             render_artifact_dir=render_artifact_dir,
             stated_dims=stated_dims,
+            param_meta=param_meta,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -856,6 +860,7 @@ class VersionService:
         bbox: tuple[float, float, float] | None = None,
         render_artifact_dir: str | None = None,
         stated_dims: dict[str, float] | None = None,
+        param_meta: dict[str, Any] | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -877,6 +882,15 @@ class VersionService:
             if stated_dims
             else None
         )
+        # ``param_meta`` (issue #248): the model's per-parameter metadata
+        # (``{name: {label?, unit?, axis?, reason?}}``) for the run that
+        # produced this version — persisted at creation so the design-
+        # state block can join the model's labels/units/axis/reason by
+        # name without re-deriving from the loop result. ``None``
+        # persists a NULL (a model that emitted no ``parameters`` array,
+        # or every legacy row — an honest abstain, never a fabricated
+        # label).
+        param_meta_json = json.dumps(param_meta, sort_keys=True) if param_meta else None
         # ``render_artifact_dir``: the on-disk path of the per-render
         # directory whose model.stl produced this version (issue #163).
         # Stored as a plain path string (no JSON wrapping — it is a single
@@ -887,8 +901,8 @@ class VersionService:
             "INSERT INTO versions"
             " (project_id, params, name, created_by_message, parent,"
             "  restored_from, forked_from, thumbnail, bbox,"
-            "  render_artifact_dir, stated_dims)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  render_artifact_dir, stated_dims, param_meta)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -901,6 +915,7 @@ class VersionService:
                 bbox_json,
                 render_artifact_dir,
                 stated_dims_json,
+                param_meta_json,
             ),
         )
         self.conn.commit()
@@ -926,6 +941,12 @@ class VersionService:
         # statement abstains).
         raw_stated = out.get("stated_dims")
         out["stated_dims"] = json.loads(raw_stated) if raw_stated else None
+        # ``param_meta`` (issue #248): NULL (legacy rows, or a model that
+        # emitted no parameters array) maps to ``None`` — never a
+        # fabricated ``{}`` (an absent metadata set degrades the design
+        # state block to identifier labels for every entry, honestly).
+        raw_meta = out.get("param_meta")
+        out["param_meta"] = json.loads(raw_meta) if raw_meta else None
         # ``render_artifact_dir``: NULL (pre-#163 rows, or a version
         # created without a recorded render) maps to ``None``, NEVER to a
         # sentinel or empty string (issue #163: an absent render record
@@ -1032,6 +1053,7 @@ def migrate(conn: db_mod.Connection) -> None:
             exported_at TEXT,
             render_artifact_dir TEXT,
             stated_dims TEXT,
+            param_meta TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -1079,6 +1101,13 @@ def migrate(conn: db_mod.Connection) -> None:
     # no default; pre-existing rows read back as ``None`` (an absent
     # statement abstains — never a fabricated axis row).
     _ensure_column(conn, "versions", "stated_dims", "TEXT")
+    # ``versions.param_meta``: the model's per-parameter metadata (JSON)
+    # for the run that produced the version (issue #248 — the design-state
+    # block joins the model's labels/units/axis/reason by name from this
+    # persisted evidence, never from live loop results). Nullable with no
+    # default; pre-existing rows read back as ``None`` (an absent metadata
+    # set abstains — never a fabricated label).
+    _ensure_column(conn, "versions", "param_meta", "TEXT")
 
 
 __all__ = [

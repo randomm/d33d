@@ -56,10 +56,18 @@ export const brief = {
   },
 
   /** The expanded assumed row: nobody stated this value, the model picked
-   *  it. No "because {reason}" clause — the reason arrives with the
-   *  labels-from-model ticket (issue #246 keeps it out). */
+   *  it. Issue #248: when the model carried a ``reason`` for the value
+   *  (a value the user did not give), the sentence gains the reason
+   *  clause; the reason-less variant is #246's sentence, unchanged. */
   provenanceAssumed: (quoted: string): string =>
     `Nobody said this. I picked ${quoted}.`,
+
+  /** Issue #248: the expanded assumed row when the model carried a
+   *  reason for the value — the same sentence with the reason clause
+   *  appended. The reason is the model's own words (the ``reason`` field
+   *  of the ``parameters`` metadata), never a fabricated justification. */
+  provenanceAssumedWithReason: (quoted: string, reason: string): string =>
+    `Nobody said this. I picked ${quoted} because ${reason.replace(/[.\s]+$/, ".")}`,
 
   /** The chip's assumed-value count (issue #246): how many values the
    *  model assumed on its own — counted separately from unknowns, which

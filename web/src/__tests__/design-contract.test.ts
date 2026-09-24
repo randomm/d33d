@@ -40,7 +40,7 @@ import { describe, it, expect, vi } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join, relative } from "node:path";
-import { render } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { createElement } from "react";
 
 import copy, { mm } from "../copy";
@@ -543,6 +543,101 @@ describe("design contract", () => {
   });
 
   /* --------------------------------------------------------------- W13 */
+
+  it("the copy deck exports the assumed-reason strings (issue #248)", () => {
+    expect(copy.brief.provenanceAssumed("34.0 mm")).toBe(
+      "Nobody said this. I picked 34.0 mm.",
+    );
+    // Issue #248: the reason clause is a copy.ts string (the model's own
+    // words, never invented) — and it is distinct from the reason-less
+    // sentence.
+    const withReason = copy.brief.provenanceAssumedWithReason("34.0 mm", "it looked about right");
+    expect(withReason).toContain("because");
+    expect(withReason).not.toBe(copy.brief.provenanceAssumed("34.0 mm"));
+  });
+
+  it("the label fallback renders the identifier in the mono face (issue #248)", () => {
+    // A model label (label_is_identifier false/absent) renders in the UI
+    // face; a raw SCAD identifier (label_is_identifier true) renders in
+    // the mono face — mono = machine value, so the user can tell a human
+    // label from an identifier at a glance. The copy deck exports the
+    // reason string; no component synthesises a prettified label.
+    render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "fillet_size_top", kind: "param", label: "Top fillet size", value: 2, unit: "mm", provenance: "assumed" },
+          { name: "fst", kind: "param", label: "fst", value: 2, unit: "mm", provenance: "assumed", label_is_identifier: true },
+        ],
+      }),
+    );
+    // Both labels render their text.
+    expect(screen.getByText("Top fillet size")).toBeTruthy();
+    expect(screen.getByText("fst")).toBeTruthy();
+    // The identifier renders in the mono face, the label in the UI face.
+    const fstEl = screen.getByText("fst");
+    const labelEl = screen.getByText("Top fillet size");
+    expect(fstEl.style.fontFamily).toBe("var(--font-mono)");
+    expect(labelEl.style.fontFamily).toBe("var(--font-ui)");
+  });
+
+  it("the assumed expanded row shows the reason sentence when one exists (issue #248)", () => {
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          {
+            name: "wall_t",
+            kind: "param",
+            label: "Wall thickness",
+            value: 3,
+            unit: "mm",
+            provenance: "assumed",
+            reason: "0.4 mm nozzle FDM tolerance",
+          },
+        ],
+      }),
+    );
+    // Expand the row (click the inner div that carries the onClick).
+    const row = container.querySelector("[data-testid='brief-row-wall_t']");
+    const clickable = row?.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const expanded = container.querySelector("[data-testid='brief-row-expanded']");
+    expect(expanded).toBeTruthy();
+    expect(expanded?.textContent).toContain(
+      copy.brief.provenanceAssumedWithReason("3.0\u202Fmm", "0.4 mm nozzle FDM tolerance"),
+    );
+  });
+
+  it("the assumed expanded row shows the reason-less sentence when no reason (issue #246 fallback)", () => {
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          {
+            name: "wall_t",
+            kind: "param",
+            label: "Wall thickness",
+            value: 3,
+            unit: "mm",
+            provenance: "assumed",
+          },
+        ],
+      }),
+    );
+    const row = container.querySelector("[data-testid='brief-row-wall_t']");
+    const clickable = row?.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const expanded = container.querySelector("[data-testid='brief-row-expanded']");
+    expect(expanded).toBeTruthy();
+    expect(expanded?.textContent).toContain(copy.brief.provenanceAssumed("3.0\u202Fmm"));
+  });
 
   it("the filmstrip is absent, not empty, when a project has no versions", () => {
     // W13: a project with zero versions (and no pass in flight) renders NO

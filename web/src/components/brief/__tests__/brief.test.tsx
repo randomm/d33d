@@ -3,7 +3,7 @@
  * top-left chip — issue #209).
  */
 
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { Brief } from "../Brief";
 import copy from "../../../copy";
@@ -128,5 +128,49 @@ describe("Brief", () => {
     );
     expect(keyWarnings).toEqual([]);
     consoleErrorSpy.mockRestore();
+  });
+
+  it("the label renders in the UI face when label_is_identifier is false (issue #248)", () => {
+    const entries: DesignStateEntry[] = [
+      { name: "fillet_size_top", kind: "param", label: "Top fillet size", value: 2, unit: "mm", provenance: "assumed", label_is_identifier: false },
+    ];
+    render(<Brief isChip={false} inset={24} conversationCollapsed={false} entries={entries} />);
+    const labelEl = screen.getByText("Top fillet size");
+    expect(labelEl.style.fontFamily).toBe("var(--font-ui)");
+  });
+
+  it("the identifier renders in the mono face when label_is_identifier is true (issue #248)", () => {
+    const entries: DesignStateEntry[] = [
+      { name: "fst", kind: "param", label: "fst", value: 2, unit: "mm", provenance: "assumed", label_is_identifier: true },
+    ];
+    render(<Brief isChip={false} inset={24} conversationCollapsed={false} entries={entries} />);
+    const labelEl = screen.getByText("fst");
+    expect(labelEl.style.fontFamily).toBe("var(--font-mono)");
+  });
+
+  it("the assumed expanded row shows the reason sentence when one exists (issue #248)", () => {
+    const entries: DesignStateEntry[] = [
+      { name: "wall_t", kind: "param", label: "Wall thickness", value: 3, unit: "mm", provenance: "assumed", reason: "0.4 mm nozzle FDM tolerance" },
+    ];
+    const { container } = render(<Brief isChip={false} inset={24} conversationCollapsed={false} entries={entries} />);
+    const row = container.querySelector("[data-testid='brief-row-wall_t']");
+    const clickable = row?.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const expanded = container.querySelector("[data-testid='brief-row-expanded']");
+    expect(expanded?.textContent).toContain(
+      copy.brief.provenanceAssumedWithReason("3.0\u202Fmm", "0.4 mm nozzle FDM tolerance"),
+    );
+  });
+
+  it("the assumed expanded row shows the reason-less sentence when no reason (issue #246 fallback)", () => {
+    const entries: DesignStateEntry[] = [
+      { name: "wall_t", kind: "param", label: "Wall thickness", value: 3, unit: "mm", provenance: "assumed" },
+    ];
+    const { container } = render(<Brief isChip={false} inset={24} conversationCollapsed={false} entries={entries} />);
+    const row = container.querySelector("[data-testid='brief-row-wall_t']");
+    const clickable = row?.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const expanded = container.querySelector("[data-testid='brief-row-expanded']");
+    expect(expanded?.textContent).toContain(copy.brief.provenanceAssumed("3.0\u202Fmm"));
   });
 });

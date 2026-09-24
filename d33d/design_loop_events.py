@@ -589,6 +589,28 @@ def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     return (bbox.x, bbox.y, bbox.z)
 
 
+def _version_param_meta(result: Any) -> dict[str, Any] | None:
+    """The best candidate's per-parameter metadata for persistence
+    (issue #248), or ``None``.
+
+    The version OWNS its metadata: the render that becomes the version is
+    the BEST candidate (``result.best``), and the metadata is that
+    candidate's DECLARED ``IterationRecord.param_meta`` field (issue
+    #248's precedent — read from the record, never re-derived from the
+    LLM result). ``{}`` (a model that emitted no ``parameters`` array)
+    and a missing field both persist ``None`` (the row stores NULL — an
+    honest absence; an empty dict is not a metadata set, never a
+    fabricated label).
+    """
+    best = getattr(result, "best", None)
+    if best is None:
+        return None
+    meta = getattr(best, "param_meta", None)
+    if not isinstance(meta, dict) or not meta:
+        return None
+    return dict(meta)
+
+
 def _version_render_artifact_dir(result: Any) -> str | None:
     """The durable on-disk path of the render that produced the version
     (issue #163), or ``None``.
@@ -772,6 +794,7 @@ async def _resolve_version_create(
         bbox=_version_bbox_extents(result),
         render_artifact_dir=_version_render_artifact_dir(result),
         stated_dims=stated_axes,
+        param_meta=_version_param_meta(result),
     )
     return int(version["id"])
 
@@ -953,18 +976,20 @@ async def run_design_loop_with_events(
     if design_source is not None:
         kwargs["design_source"] = design_source
 
-    # The design-state block's inputs (issue #120/#137/#246 — the SAME
-    # values ``_finalize_loop_kwargs`` passes on the finalize path): the
-    # latest version's full params snapshot, persisted measured bbox, and
-    # persisted per-axis stated set, read ONCE here so the live chat
-    # prompt, the finalize prompt and the GET the SPA reads all render
-    # the SAME block via ``state_block_for_version``. All ``None`` when
-    # no version exists yet (the block then renders its honest empty
-    # state — never a fabricated dimension).
+    # The design-state block's inputs (issue #120/#137/#246/#248 — the
+    # SAME values ``_finalize_loop_kwargs`` passes on the finalize path):
+    # the latest version's full params snapshot, persisted measured bbox,
+    # persisted per-axis stated set, and persisted per-parameter
+    # metadata, read ONCE here so the live chat prompt, the finalize
+    # prompt and the GET the SPA reads all render the SAME block via
+    # ``state_block_for_version``. All ``None`` when no version exists
+    # yet (the block then renders its honest empty state — never a
+    # fabricated dimension).
     latest = app.state.versions.latest_version(project_id)
     kwargs["state_params"] = dict(latest["params"]) if latest is not None else None
     kwargs["state_bbox"] = latest["bbox"] if latest is not None else None
     kwargs["state_stated"] = latest["stated_dims"] if latest is not None else None
+    kwargs["state_meta"] = latest["param_meta"] if latest is not None else None
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)

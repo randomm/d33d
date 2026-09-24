@@ -37,6 +37,42 @@ from d33d.design_prompts import (
 STATED = (20.0, 25.0, 30.0)
 
 
+def test_design_prompt_instructs_readable_names_and_labels() -> None:
+    """Issue #248: the design-role prompt instructs the model to use
+    readable full-word snake_case parameter names (with the fst →
+    fillet_size_top bad/good example) and a plain-language label for every
+    declared parameter, and to carry a ``parameters`` metadata array in
+    the reply."""
+    import d33d.design_loop as dl
+
+    # Pull the emission instruction out of the live prompt builder —
+    # never a hardcoded copy that can drift from the module.
+    from d33d.design_loop import _design_messages
+
+    messages = _design_messages(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated=STATED,
+        repair=None,
+        request="make a part",
+    )
+    user_text = "\n".join(
+        part["text"] if isinstance(part, dict) and part.get("type") == "text"
+        else str(part)
+        for part in messages[0]["content"]
+    )
+    # The readable-name instruction, with the bad/good example.
+    assert "full words in snake_case" in user_text
+    assert "fst" in user_text
+    assert "fillet_size_top" in user_text
+    # The plain-language label instruction.
+    assert "label" in user_text and "Top fillet size" in user_text
+    # The parameters metadata array in the reply shape.
+    assert '"parameters"' in user_text
+    # The axis constraint (W/D/H only when the param realises it).
+    assert '"W" or "D" or "H"' in user_text
+
+
 def _catalogue():
     env = {"TRAIL_OPENERS_LLM_KEY": "stub", "PAID_AZURE_LLM_KEY": "stub"}
     saved = {k: os.environ.get(k) for k in env}

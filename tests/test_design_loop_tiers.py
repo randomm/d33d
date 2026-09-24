@@ -58,7 +58,25 @@ DESIGN_TOOLS = [
             "description": "Emit the parametric OpenSCAD",
             "parameters": {
                 "type": "object",
-                "properties": {"scad": {"type": "string"}},
+                "properties": {
+                    "scad": {"type": "string"},
+                    # Issue #248: the model's per-parameter metadata array
+                    # ({name, label, unit, axis?, reason?} objects).
+                    "parameters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "label": {"type": "string"},
+                                "unit": {"type": "string"},
+                                "axis": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["name", "label"],
+                        },
+                    },
+                },
             },
         },
     }
