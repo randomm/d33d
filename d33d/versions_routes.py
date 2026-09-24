@@ -617,28 +617,29 @@ def create_versions_router() -> APIRouter:
         # words (``stated_axes_from_message`` — the same ``_extract_stated``
         # pipeline, partial statements count for the axes they state),
         # else the body's explicit ``stated_dims`` (a client's structured
-        # declaration, the protocol's highest-priority source). Persisted
-        # on the version row so the design-state block can render stated
-        # axis rows without re-deriving from live chat. No stated axes
-        # (empty result) persist a NULL — an absent statement abstains,
-        # never a fabricated axis row.
+        # declaration, the protocol's highest-priority source). Computed
+        # INSIDE the try below, alongside ``create_version``, so an
+        # unexpected error (e.g. a non-numeric ``stated_dims`` component
+        # or a protocol failure) goes through ``_raise_mapped`` like every
+        # other failure — never a raw 500. Persisted on the version row
+        # so the design-state block can render stated axis rows without
+        # re-deriving from live chat. No stated axes (empty result)
+        # persist a NULL — an absent statement abstains, never a
+        # fabricated axis row.
         from d33d.dimension_protocol import stated_axes_from_message
 
-        per_axis_stated: dict[str, float] = {}
-        if body.stated_dims is not None:
-            _w, _d, _h = body.stated_dims
-            if _w:
-                per_axis_stated["W"] = float(_w)
-            if _d:
-                per_axis_stated["D"] = float(_d)
-            if _h:
-                per_axis_stated["H"] = float(_h)
-        else:
-            per_axis_stated = stated_axes_from_message(
-                body.request or body.message or "", chat_history=()
-            )
-
         try:
+            if body.stated_dims is not None:
+                _w, _d, _h = body.stated_dims
+                per_axis_stated = {
+                    axis: float(value)
+                    for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
+                    if value
+                }
+            else:
+                per_axis_stated = stated_axes_from_message(
+                    body.request or body.message or "", chat_history=()
+                )
             v = await svc.create_version(
                 project_id,
                 params,

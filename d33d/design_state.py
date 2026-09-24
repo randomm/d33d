@@ -10,13 +10,22 @@ and the API route the SPA reads (``d33d.versions_routes``) call — the same
 callable, asserted by the tests, not two functions that happen to agree.
 
 Entry shape (the contract the SPA's Brief renders and the prompt renders):
-``name`` (the parameter key), ``label`` (the human label — for a parameter
+``name`` (the parameter key), ``kind`` (``"param" | "axis"`` — the
+discriminator, below), ``label`` (the human label — for a parameter
 with no label the label IS the parameter name, never invented prose),
 ``value`` (nullable), ``unit`` (``"mm"`` for numeric params, else ``None``),
 and ``provenance`` — a ``Literal`` (closed set, never a bare ``str``;
 the project's ``error_class`` enum is the precedent) of
 ``"stated" | "measured" | "assumed" | "unknown" | "disagrees"``, plus
 ``stated_value`` when ``provenance == "disagrees"``.
+
+``kind`` (issue #246 review): ``"param"`` — a row built from the version's
+params snapshot (the model emitted the value), ``"axis"`` — a row built
+from the persisted per-axis stated set (the dimension protocol's W/D/H
+axes). ``name`` is NOT unique within a block: a param row and an axis row
+can both be named ``W`` (the model emits a ``W`` param AND the user stated
+``W``) — ``kind``+``name`` is the row identity, and nothing in this module
+dedupes, drops, or matches rows by name.
 
 Provenance semantics (issue #246 — default to ``assumed``, promote to
 ``stated`` on evidence, NEVER the reverse):
@@ -82,6 +91,20 @@ from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
 
+#: The row-kind discriminator: ``"param"`` (a row built from the version's
+#: params snapshot — the model emitted the value) vs ``"axis"`` (a row
+#: built from the persisted per-axis stated set — the dimension
+#: protocol's W/D/H axes). ``name`` alone is NOT the row identity — a
+#: param row and an axis row can share the name ``W``.
+RowKind = Literal["param", "axis"]
+
+#: The dimension protocol's axis words, used to render an axis row's
+#: prompt line (``Width (W) = 60 (stated by the user)``) so the model can
+#: tell an axis row from its own ``W`` parameter. Defined ONCE here for
+#: the prompt; the SPA carries the same words in ``copy.ts``
+#: (``copy.brief.axisLabel``) for its own display.
+AXIS_LABELS: dict[str, str] = {"W": "Width", "D": "Depth", "H": "Height"}
+
 from d33d.design_loop import (
     BBOX_TOLERANCE_MIN_MM,
     BBOX_TOLERANCE_REL,
@@ -131,6 +154,7 @@ class StateEntry(TypedDict):
     """
 
     name: str
+    kind: RowKind
     label: str
     value: float | str | bool | None
     unit: str | None
@@ -148,10 +172,12 @@ def _entry(
     value: Any,
     provenance: Provenance,
     stated_value: Any = None,
+    kind: RowKind = "param",
 ) -> dict[str, Any]:
     """One entry from a (name, value) pair (provenance supplied)."""
     out: dict[str, Any] = {
         "name": name,
+        "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
         "value": value,
         "unit": "mm" if _is_number(value) else None,
@@ -242,7 +268,7 @@ def _axis_row(
     stated_value: Any = None,
 ) -> dict[str, Any]:
     """An axis row (name = W/D/H) for the design-state block."""
-    return _entry(axis, value, provenance, stated_value)
+    return _entry(axis, value, provenance, stated_value, kind="axis")
 
 
 def _axis_stated_evidence(
@@ -446,6 +472,18 @@ def _provenance_suffix(provenance: Any) -> str:
     return ""
 
 
+def _axis_prefix(entry: dict[str, Any]) -> str:
+    """The line prefix for one entry: an axis row (``kind == "axis"``)
+    renders its axis word first — ``Width (W)`` — so the model can tell
+    the protocol's axis row from its own ``W`` parameter; a param row
+    keeps its bare name."""
+    if entry.get("kind") == "axis":
+        name = entry.get("name")
+        word = AXIS_LABELS.get(name, name)  # type: ignore[arg-type]
+        return f"{word} ({name})"  # type: ignore[index]
+    return entry.get("name") or entry.get("label")
+
+
 def _render_value_line(name: str, value: Any, provenance: Any) -> str:
     """One entry as ``label = value`` + the provenance mark (if any)."""
     if _is_number(value):
@@ -482,9 +520,10 @@ def format_design_state_block(block: dict[str, Any]) -> str:
     """
     lines: list[str] = []
     for entry in block.get("entries", []):  # type: ignore[union-attr]
-        label = entry.get("label") or entry.get("name")
         lines.append(
-            _render_value_line(label, entry.get("value"), entry.get("provenance"))
+            _render_value_line(
+                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
+            )
         )
     if block.get("dropped_count", 0) > 0:
         n = block["dropped_count"]
@@ -504,8 +543,9 @@ def format_design_state_line(entries: list[dict[str, Any]]) -> str:
         return "not specified"
     parts: list[str] = []
     for entry in entries:
-        label = entry.get("label") or entry.get("name")
         parts.append(
-            _render_value_inline(label, entry.get("value"), entry.get("provenance"))
+            _render_value_inline(
+                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
+            )
         )
     return ", ".join(parts)

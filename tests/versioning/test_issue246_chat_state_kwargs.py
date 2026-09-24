@@ -193,9 +193,11 @@ def test_chat_adapter_kwargs_render_the_state_block_in_the_live_prompt():
     # The stated axis row renders the stated mark (the per-axis protocol
     # evidence — the row the stated set drives, distinct from the
     # model's W param row, which the matching bbox upgrades to
-    # ``measured``).
+    # ``measured``). Axis rows render their axis word (``Depth``), not
+    # the bare letter, so the model can tell the protocol's axis from a
+    # model param named ``D``.
     stated_rows = [ln for ln in text.split("\n") if ln.endswith("(stated by the user)")]
-    assert "D = 25 (stated by the user)" in stated_rows, stated_rows
+    assert "Depth (D) = 25 (stated by the user)" in stated_rows, stated_rows
 
 
 def test_production_design_loop_forwards_state_stated():

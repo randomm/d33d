@@ -16,6 +16,7 @@ import type { DesignStateEntry } from "../../../lib/api";
 
 const stated = (name: string, value: number): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value,
   unit: "mm",
@@ -23,6 +24,7 @@ const stated = (name: string, value: number): DesignStateEntry => ({
 });
 const measured = (name: string, value: number | null): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value,
   unit: value === null ? null : "mm",
@@ -30,6 +32,7 @@ const measured = (name: string, value: number | null): DesignStateEntry => ({
 });
 const unknown = (name: string): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value: null,
   unit: null,
@@ -37,6 +40,7 @@ const unknown = (name: string): DesignStateEntry => ({
 });
 const disagrees = (name: string, measuredMm: number, statedMm: number): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value: measuredMm,
   unit: "mm",
@@ -45,10 +49,22 @@ const disagrees = (name: string, measuredMm: number, statedMm: number): DesignSt
 });
 const assumed = (name: string, value: number): DesignStateEntry => ({
   name,
+  kind: "param",
   label: name,
   value,
   unit: "mm",
   provenance: "assumed",
+});
+/** An AXIS row — the dimension protocol's own W/D/H axis (the user's
+ *  stated evidence), never a parameter. Renders the axis word (Width/
+ *  Depth/Height) and the `brief-row-axis-<name>` testid. */
+const axisStated = (axis: "W" | "D" | "H", value: number): DesignStateEntry => ({
+  name: axis,
+  kind: "axis",
+  label: axis,
+  value,
+  unit: "mm",
+  provenance: "stated",
 });
 
 const baseProps = { isChip: false, inset: 24, conversationCollapsed: false } as const;
@@ -221,8 +237,51 @@ describe("Brief — the list that does not grow", () => {
       copy.brief.allParameters(9),
     );
     // The individual resolved rows are NOT rendered in the list (they sit
-    // behind the count).
+    // behind the count) — param row `W` and axis row `W` both hidden.
     expect(screen.queryByTestId("brief-row-W")).toBeNull();
+    expect(screen.queryByTestId("brief-row-axis-W")).toBeNull();
+  });
+
+  it("coexistence: a param W row and an axis W row render as TWO rows with distinct identities (issue #246 review)", () => {
+    // The HIGH finding: the model emits a `W` param (assumed) AND the user
+    // stated `W` (the axis row) — the block carries BOTH, `name` alone is
+    // not unique, and `kind`+`name` is the identity. Rendered through the
+    // real Brief: two rows, distinct testids, no React key warning, and
+    // expanding one row does not expand the other.
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    render(
+      <Brief
+        {...baseProps}
+        entries={[assumed("W", 60), axisStated("W", 60)]}
+      />,
+    );
+    // No key warning across the coexistence block.
+    const keyWarnings = consoleErrorSpy.mock.calls.filter((c) =>
+      String(c[0]).includes('Each child in a list should have a unique "key" prop'),
+    );
+    expect(keyWarnings).toEqual([]);
+    consoleErrorSpy.mockRestore();
+    // Both rows are visible, with distinct testids (param W vs axis W).
+    const paramRow = screen.getByTestId("brief-row-W");
+    const axisRow = screen.getByTestId("brief-row-axis-W");
+    expect(paramRow).toBeTruthy();
+    expect(axisRow).toBeTruthy();
+    expect(paramRow.getAttribute("data-provenance")).toBe("assumed");
+    expect(axisRow.getAttribute("data-provenance")).toBe("stated");
+    // The axis row renders its axis word (Width), the param row its name.
+    expect(axisRow.textContent).toContain(copy.brief.axisLabel.W);
+    expect(axisRow.textContent).toContain("Width");
+    expect(paramRow.textContent).toContain("W");
+    // Expanding the param row does not expand the axis row (identity is
+    // per row, not per name).
+    const paramInner = paramRow.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(paramInner);
+    const expanded = screen.getByTestId("brief-row-expanded");
+    expect(paramRow.contains(expanded)).toBe(true);
+    expect(axisRow.contains(expanded)).toBe(false);
+    // The param row's expand sentence is the assumed one; the axis row
+    // still carries no expanded node.
+    expect(expanded.textContent).toContain("Nobody said this");
   });
 
   it("below the group threshold the resolved rows render individually", () => {

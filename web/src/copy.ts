@@ -40,6 +40,12 @@ export const brief = {
    *  so is the honest form. Never a number, never a guess from the request. */
   awaitingFirstMeasure: "measured when it lands",
 
+  /** The user-facing axis label for an axis row (`kind: "axis"`) — the
+   *  dimension protocol's own axes (W/D/H), not a prettified parameter
+   *  name. Mirrors the backend's `AXIS_LABELS` in `d33d/design_state.py`,
+   *  which the prompt uses for its own rendering. */
+  axisLabel: { W: "Width", D: "Depth", H: "Height" } as Record<string, string>,
+
   legend: {
     stated: "you said",
     measured: "measured off the model",

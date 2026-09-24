@@ -30,11 +30,11 @@ describe("Brief", () => {
 
   it("the collapsed chip counts assumed separately from unknowns (issue #246)", () => {
     const entries: DesignStateEntry[] = [
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-      { name: "spacer_height", label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" },
-      { name: "wall_thickness", label: "wall_thickness", value: 3, unit: "mm", provenance: "assumed" },
-      { name: "hole_clearance", label: "hole_clearance", value: 0.3, unit: "mm", provenance: "assumed" },
-      { name: "H", label: "Height", value: null, unit: null, provenance: "unknown" },
+      { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "spacer_height", kind: "param" as const, label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" },
+      { name: "wall_thickness", kind: "param" as const, label: "wall_thickness", value: 3, unit: "mm", provenance: "assumed" },
+      { name: "hole_clearance", kind: "param" as const, label: "hole_clearance", value: 0.3, unit: "mm", provenance: "assumed" },
+      { name: "H", kind: "param" as const, label: "Height", value: null, unit: null, provenance: "unknown" },
     ];
     render(<Brief isChip inset={24} conversationCollapsed={false} entries={entries} />);
     const chip = screen.getByTestId("brief-chip");
@@ -57,7 +57,7 @@ describe("Brief", () => {
         isChip
         inset={24}
         conversationCollapsed={false}
-        entries={[{ name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" }]}
+        entries={[{ name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" }]}
       />,
     );
     expect(screen.queryByTestId("brief-chip-assumed")).toBeNull();
@@ -98,23 +98,23 @@ describe("Brief", () => {
     // mixing provenances (including "assumed", issue #246) so both list
     // maps (unknowns + resolved) fire.
     const entries: DesignStateEntry[] = [
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" },
       {
-        name: "H",
+        name: "H", kind: "param" as const,
         label: "Height",
         value: null,
         unit: null,
         provenance: "unknown",
       },
       {
-        name: "D",
+        name: "D", kind: "param" as const,
         label: "Depth",
         value: 45,
         unit: "mm",
         provenance: "measured",
       },
       {
-        name: "wall_thickness",
+        name: "wall_thickness", kind: "param" as const,
         label: "wall_thickness",
         value: 3,
         unit: "mm",

@@ -268,18 +268,25 @@ def test_finalize_pass_yields_measured_design_state(app_with_versions) -> None:
         ds = await client.get(f"/api/projects/{pid}/design-state")
         assert ds.status_code == 200, ds.text
         # Identity guard: the route's block is built by the SAME shared
-        # callable on the row's params + persisted bbox.
+        # callable on the row's params + persisted bbox. The W/D/H rows
+        # here are the PARAM rows (kind "param") — index by the full
+        # row identity (kind+name; `name` alone is NOT unique within a
+        # block once axis rows coexist), not by name.
         expected = state_block_for_version(row["params"], row["bbox"])
-        return ds.json(), {e["name"]: e for e in expected}
+        return (
+            ds.json(),
+            {(e["kind"], e["name"]): e for e in expected},
+        )
 
     body, expected = run_async(app_with_versions, _call)
-    by_name = {e["name"]: e for e in body}
-    for name in ("W", "D", "H"):
+    by_name = {(e["kind"], e["name"]): e for e in body}
+    for axis in ("W", "D", "H"):
+        entry = by_name[("param", axis)]
         # W is off-nominal (30.4 vs 30.0, within tolerance) and STILL
         # 'measured' — display carries the measured value.
-        assert by_name[name]["provenance"] == "measured", (name, by_name[name])
-        assert by_name[name] == expected[name]
-    assert by_name["W"]["value"] == 30.4
+        assert entry["provenance"] == "measured", (axis, entry)
+        assert entry == expected[("param", axis)]
+    assert by_name[("param", "W")]["value"] == 30.4
 
 
 # ---------------------------------------------------------------------------

@@ -896,9 +896,9 @@ describe("App Brief wiring (issue #123)", () => {
 
   it("renders the design-state rows in the full panel when the window is large (issue #123)", async () => {
     vi.spyOn(client, "getDesignState").mockResolvedValue([
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-      { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
-      { name: "H", label: "Height", value: 80, unit: "mm", provenance: "stated" },
+      { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      { name: "D", kind: "param", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
+      { name: "H", kind: "param", label: "Height", value: 80, unit: "mm", provenance: "stated" },
     ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
@@ -3334,6 +3334,7 @@ describe("App region-selection (point pick) wiring", () => {
     vi.spyOn(client, "getDesignState").mockResolvedValue([
       {
         name: "wing_left",
+        kind: "param" as const,
         label: "Wing (left)",
         value: 60,
         unit: "mm",

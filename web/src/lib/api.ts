@@ -123,9 +123,17 @@ export type DesignStateProvenance =
  * `null` (never `0`). `unit` is `"mm"` for numeric params, `null` for
  * non-numeric ones. `stated_value` is present ONLY when `provenance` is
  * `"disagrees"`.
+ *
+ * `kind` discriminates the row's origin: `"param"` (a row built from the
+ * version's params snapshot — the model emitted the value) vs `"axis"`
+ * (a row built from the persisted per-axis stated set — the dimension
+ * protocol's W/D/H axes). `name` is NOT unique within a block: a param
+ * row and an axis row can both be named `W` — `kind`+`name` is the row
+ * identity, and nothing may dedupe, drop, or match rows by name.
  */
 export interface DesignStateEntry {
   name: string;
+  kind: "param" | "axis";
   label: string;
   value: number | string | boolean | null;
   unit: string | null;

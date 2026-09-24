@@ -60,6 +60,7 @@ def test_state_entry_carries_name_label_value_unit_provenance() -> None:
     provenance."""
     entry: StateEntry = {
         "name": "W",
+        "kind": "param",
         "label": "W",
         "value": 20.0,
         "unit": "mm",
@@ -144,6 +145,7 @@ def test_design_state_block_disagrees_carries_both_values() -> None:
 
     entry: StateEntry = {
         "name": "W",
+        "kind": "param",
         "label": "W",
         "value": 60.0,  # the MEASURED value (displayed — what prints)
         "unit": "mm",
@@ -271,6 +273,7 @@ def test_disagrees_entry_renders_measured_value_with_stated_ridealong() -> None:
     rules are pinned in the ``state_block_for_version`` tests)."""
     entry: StateEntry = {
         "name": "W",
+        "kind": "param",
         "label": "W",
         "value": 60.0,
         "unit": "mm",
@@ -738,7 +741,11 @@ def test_prompt_format_marks_assumed_and_stated_provenance() -> None:
         )
     )
     text = format_design_state_block(block)
-    assert "W = 30 (stated by the user)" in text
+    # The param row keeps its bare name; the axis row renders its axis
+    # word — the model can tell the protocol's W axis from its own W
+    # parameter (the discriminator is `kind`, never a name match).
+    assert "W = 30 (assumed — the user never set this)" in text
+    assert "Width (W) = 30 (stated by the user)" in text
     assert "spacer_width = 20 (assumed — the user never set this)" in text
     # Unknown renders as before (no mark) — but its sibling param IS
     # assumed (issue #246), so the block as a whole carries the mark.
@@ -752,4 +759,32 @@ def test_prompt_format_marks_assumed_and_stated_provenance() -> None:
     from d33d.design_state import format_design_state_line
 
     line = format_design_state_line(block["entries"])
-    assert "W=30 (stated by the user)" in line
+    assert "W=30 (assumed — the user never set this)" in line
+    assert "Width (W)=30 (stated by the user)" in line
+
+
+def test_coexistence_block_entries_carry_distinct_kind_names() -> None:
+    """Issue #246 review (HIGH): the coexistence block (a model-emitted
+    ``W`` param + a persisted ``W`` axis statement) yields TWO entries
+    with distinct (kind, name) identities — ``param``+``W`` and
+    ``axis``+``W``. ``name`` alone is NOT unique within a block; the
+    ``kind`` discriminator carries the identity, and neither row is
+    dropped or deduped."""
+    entries = state_block_for_version({"W": 60.0}, None, {"W": 60.0})
+    assert len(entries) == 2
+    ids = [(e["kind"], e["name"]) for e in entries]
+    assert ids == [("param", "W"), ("axis", "W")]
+    assert len(set(ids)) == 2
+    # Every entry carries the discriminator.
+    assert all(e["kind"] in ("param", "axis") for e in entries)
+
+
+def test_param_and_axis_rows_always_carry_kind() -> None:
+    """The discriminator is on EVERY entry shape: the params-only
+    substrate (pure param rows) and the axis rows (stated evidence) each
+    carry their ``kind`` — never omitted, never guessed from the name."""
+    params_only = state_block_from_params({"W": 30.0, "bore": 8.0})
+    assert {e["kind"] for e in params_only} == {"param"}
+    axis_only = state_block_for_version(None, None, {"H": 12.0})
+    assert axis_only[0]["kind"] == "axis"
+    assert axis_only[0]["name"] == "H"

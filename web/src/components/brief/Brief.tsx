@@ -150,9 +150,29 @@ function primaryValue(entry: DesignStateEntry): number | string | boolean | null
 
 /** The row label — a parameter with no human label uses its NAME as the
  *  label. The block always carries one, but a defensive fallback keeps the
- *  contract honest. */
+ *  contract honest. An AXIS row (`kind: "axis"` — the dimension protocol's
+ *  own W/D/H axis, never a parameter) renders its axis word from
+ *  `copy.brief.axisLabel`, not the bare letter: the row the user stated.
+ *  The `label || name` fallback stays for defensive honesty (a missing
+ *  label falls back to the name, never an invented string). */
 function rowLabel(entry: DesignStateEntry): string {
+  if (entry.kind === "axis") return copy.brief.axisLabel[entry.name] ?? entry.name;
   return entry.label || entry.name;
+}
+
+/** The row's stable identity: `kind`+`name` — `name` alone is NOT unique
+ *  within a block (a param row and an axis row can both be named `W`), so
+ *  the key, the testid, and the expanded state are all keyed off
+ *  `kind:name` (issue #246 review: duplicate identity for W/D/H rows). */
+function rowIdentity(entry: DesignStateEntry): string {
+  return `${entry.kind}:${entry.name}`;
+}
+
+/** The row's `data-testid`: param rows keep `brief-row-<name>` (existing
+ *  tests and consumers), axis rows use `brief-row-axis-<name>` — the two
+ *  can never collide, even for the same letter. */
+function rowTestId(entry: DesignStateEntry): string {
+  return entry.kind === "axis" ? `brief-row-axis-${entry.name}` : `brief-row-${entry.name}`;
 }
 
 export function Brief({
@@ -183,7 +203,8 @@ export function Brief({
   const renderRow = (entry: DesignStateEntry) => {
     const label = rowLabel(entry);
     const name = entry.name;
-    const isExpanded = expanded === name;
+    const identity = rowIdentity(entry);
+    const isExpanded = expanded === identity;
 
     const inFlightEntry = inFlight?.[name];
     const isReMeasuring = reMeasuring?.includes(name) === true;
@@ -343,11 +364,14 @@ export function Brief({
       <div
         className="brief-row"
         // Stable identity across re-renders and refetches: the row's
-        // data-testid (brief-row-${name}) and the expanded state are both
-        // keyed off name — the list key must be the same stable identity
-        // (issue #196: the unkeyed lists were the "unique key" warning).
-        key={name}
-        data-testid={`brief-row-${name}`}
+        // data-testid and the expanded state are both keyed off
+        // kind:name — `name` alone is NOT unique within a block (a param
+        // row and an axis row can both be `W`), so `kind`+`name` is the
+        // row identity the list key, the testid, and the expanded state
+        // all share (issue #246 review: duplicate identity for W/D/H
+        // rows; issue #196: the unkeyed lists were the "unique key" warning).
+        key={identity}
+        data-testid={rowTestId(entry)}
         data-provenance={entry.provenance}
         // The resolved module id from a pending pick is outlined in the
         // marker colour (MARKER_COLOR, inline style — no CSS token by design).
@@ -366,7 +390,7 @@ export function Brief({
       >
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
-          onClick={() => setExpanded(isExpanded ? null : name)}
+          onClick={() => setExpanded(isExpanded ? null : identity)}
         >
           <span
             data-testid="brief-mark"

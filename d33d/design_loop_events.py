@@ -681,8 +681,18 @@ async def _resolve_version_create(
     # through verbatim, so the suffix must be applied HERE, on BOTH the
     # title and the param-diff phrase, or two passes with the same diff
     # phrase ("2 parameters changed") would create two identically named
-    # versions.
-    existing_names = {v["name"] for v in app.state.versions.list_versions(project_id)}
+    # versions. A failure here must NEVER kill the version: the name may
+    # lack its suffix, but the version is still created.
+    try:
+        existing_names = {v["name"] for v in app.state.versions.list_versions(project_id)}
+    except Exception:  # noqa: BLE001 — resilience: name may lack suffix, version still created
+        logger.warning(
+            "list_versions failed for project %s; creating the version "
+            "without a collision baseline (the name may lack a suffix)",
+            project_id,
+            exc_info=True,
+        )
+        existing_names = set()
 
     if candidate_source is not None:
         title = scad_title(candidate_source)

@@ -365,3 +365,46 @@ def test_two_consecutive_passes_same_diff_phrase_get_collision_suffix(
     t1, t2 = names2._versions
     assert t1["name"] == "Bore to 38 mm"
     assert t2["name"] == "Bore to 38 mm-2"
+
+
+def test_list_versions_failure_degrades_to_empty_baseline(app_with_versions) -> None:
+    """Resilience (PR #254 review): a ``list_versions`` call that raises
+    on the collision baseline must NOT kill the version — the resolver
+    logs a WARNING and creates the version with an EMPTY baseline (the
+    name may then lack its ``-2`` suffix; the version is still made).
+    A stub whose ``list_versions`` raises is the tripwire."""
+    import asyncio
+    from dataclasses import replace
+
+    from d33d.design_loop_events import _resolve_version_create
+
+    fixture = load_fixture("C")
+    record = _record_from_payload(fixture.payload["best"])
+
+    class _BrokenList(_StubVersions):
+        def list_versions(self, project_id):
+            raise RuntimeError("db blew up")
+
+    broken = _BrokenList()
+    app = app_with_versions
+    app.state.versions = broken
+
+    created_name: list = []
+
+    async def _capturing_create(project_id, params, name=None, message="", **kwargs):
+        created_name.append(name)
+        v = broken._next
+        broken._next += 1
+        return {"id": v, "params": params, "name": name, "message": message}
+
+    broken.create_version = _capturing_create
+
+    version_id = asyncio.run(
+        _resolve_version_create(app, 1, _StubResult(record), "make a cube")
+    )
+    assert version_id is not None
+    assert isinstance(version_id, int)
+    # A version WAS created with a non-None name (degraded to the empty
+    # baseline, not a crash).
+    assert len(created_name) == 1
+    assert created_name[0] is not None

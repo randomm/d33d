@@ -528,8 +528,8 @@ describe("design contract", () => {
         inset: 24,
         conversationCollapsed: false,
         entries: [
-          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-          { name: "H", label: "Height", value: null, unit: null, provenance: "unknown" },
+          { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+          { name: "H", kind: "param", label: "Height", value: null, unit: null, provenance: "unknown" },
         ],
       }),
     );
@@ -971,16 +971,16 @@ describe("design contract", () => {
     // The >7 resolved entries hit the group-collapsed branch; the unknowns
     // hit their own list — both maps must be warning-free.
     const entries = [
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
-      { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" as const },
-      { name: "H", label: "Height", value: 80, unit: "mm", provenance: "stated" as const },
-      { name: "p4", label: "p4", value: 10, unit: "mm", provenance: "stated" as const },
-      { name: "p5", label: "p5", value: 10, unit: "mm", provenance: "stated" as const },
-      { name: "p6", label: "p6", value: 10, unit: "mm", provenance: "stated" as const },
-      { name: "p7", label: "p7", value: 10, unit: "mm", provenance: "stated" as const },
-      { name: "p8", label: "p8", value: 10, unit: "mm", provenance: "stated" as const },
-      { name: "u1", label: "u1", value: null, unit: null, provenance: "unknown" as const },
-      { name: "u2", label: "u2", value: null, unit: null, provenance: "unknown" as const },
+      { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+      { name: "D", kind: "param" as const, label: "Depth", value: 45, unit: "mm", provenance: "stated" as const },
+      { name: "H", kind: "param" as const, label: "Height", value: 80, unit: "mm", provenance: "stated" as const },
+      { name: "p4", kind: "param" as const, label: "p4", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p5", kind: "param" as const, label: "p5", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p6", kind: "param" as const, label: "p6", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p7", kind: "param" as const, label: "p7", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p8", kind: "param" as const, label: "p8", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "u1", kind: "param" as const, label: "u1", value: null, unit: null, provenance: "unknown" as const },
+      { name: "u2", kind: "param" as const, label: "u2", value: null, unit: null, provenance: "unknown" as const },
     ];
     const consoleErrorSpy = vi.spyOn(console, "error");
     const first = render(
@@ -1061,9 +1061,9 @@ describe("design contract", () => {
         inset: 24,
         conversationCollapsed: false,
         entries: [
-          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
-          { name: "spacer_height", label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" as const },
-          { name: "H", label: "Height", value: null, unit: null, provenance: "unknown" as const },
+          { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "spacer_height", kind: "param", label: "spacer_height", value: 12, unit: "mm", provenance: "assumed" as const },
+          { name: "H", kind: "param", label: "Height", value: null, unit: null, provenance: "unknown" as const },
         ],
       }),
     );
@@ -1091,10 +1091,10 @@ describe("design contract", () => {
         inset: 24,
         conversationCollapsed: false,
         entries: [
-          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
-          { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
-          { name: "H", label: "Height", value: 80, unit: "mm", provenance: "assumed" as const },
-          { name: "u1", label: "u1", value: null, unit: null, provenance: "unknown" as const },
+          { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "D", kind: "param", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
+          { name: "H", kind: "param", label: "Height", value: 80, unit: "mm", provenance: "assumed" as const },
+          { name: "u1", kind: "param", label: "u1", value: null, unit: null, provenance: "unknown" as const },
         ],
       }),
     );
@@ -1112,8 +1112,8 @@ describe("design contract", () => {
         inset: 24,
         conversationCollapsed: false,
         entries: [
-          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
-          { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
+          { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "D", kind: "param", label: "Depth", value: 45, unit: "mm", provenance: "assumed" as const },
         ],
       }),
     );
