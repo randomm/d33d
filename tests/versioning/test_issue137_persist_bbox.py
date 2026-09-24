@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 from d33d.design_loop import BboxInfo
 from d33d.render_worker import RenderResult
@@ -739,7 +740,7 @@ def test_shared_callable_identity_pins_both_consumers(app_with_versions) -> None
     # The loop's prompt-builder path: import the design_state symbols the
     # way _design_state_lines does and prove the loop module's block is
     # built by the same object (the loop imports the module-level name).
-    from d33d.design_state import build_design_state_block, state_block_for_version
+    from d33d.design_state import state_block_for_version
 
     assert state_block_for_version is shared
     # The loop's _design_state_lines renders the block via the shared

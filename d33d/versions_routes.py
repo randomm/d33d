@@ -511,14 +511,8 @@ def create_versions_router() -> APIRouter:
         svc = _service(request)
         app = request.app
         _project_or_404(svc, project_id)
-        # The current design source (issue #105): the project's current
-        # version's per-version source, captured BEFORE the loop runs.
-        # ``None`` when no version owns a source yet (turn one).
         row = svc.get_project(project_id)
         assert row is not None  # already 404'd above
-        from d33d.design_source import current_version_source
-
-        design_source = current_version_source(row, svc)
         run_loop = request.app.state.run_design_loop
         if run_loop is None:
             raise HTTPException(status_code=503, detail="design loop not wired")
@@ -615,14 +609,8 @@ def create_versions_router() -> APIRouter:
         # never-coerced honest abstain) and the render's declared
         # ``render_artifact_dir`` (``None`` when the render did not record
         # one). Computing them on the pass path only (never on the
-        # 422/502 early returns above) — the early-returning results are
-        # never persisted anyway.
-        from d33d.design_loop_events import (
-            _version_bbox_extents,
-            _version_confirm_hints,
-            _version_param_meta,
-            _version_render_artifact_dir,
-        )
+        # 422/502 early returns above).
+        from d33d.design_loop_events import _version_param_meta
 
         # The per-axis stated evidence for the run (issue #246): the
         # dimension protocol's per-axis extraction of the user's own
@@ -696,7 +684,7 @@ def create_versions_router() -> APIRouter:
                     else None
                 ),
             )
-        except Exception:  # noqa: BLE001 — the offer must never kill the 201
+        except Exception:  # the offer must never kill the 201
             logger.debug(
                 "offer resolution failed for finalize project %s",
                 project_id,

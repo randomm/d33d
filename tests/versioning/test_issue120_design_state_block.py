@@ -255,7 +255,7 @@ def test_route_latest_version_params_feed_the_block(app_with_versions):
     has W=30 → the params the route reads (``latest_version['params']``)
     feed the shared block, which contains 30 (the 30/60 bug pinned at the
     route's data source)."""
-    from d33d.design_state import build_design_state_block, format_design_state_block, state_block_for_version
+    from d33d.design_state import build_design_state_block, format_design_state_block
 
     async def _call(client):
         proj = await create_project(client)
