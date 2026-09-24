@@ -1204,13 +1204,25 @@ def create_app(
     return app
 
 
-def _http_request_factory(base_url: str, api_key: str):
+def _http_request_factory(
+    base_url: str, api_key: str, timeout: float | None = None
+):
     """The production HTTP edge for one provider endpoint.
 
     ``request(body) -> response`` (httpx-shaped: ``.ok`` / ``.json()``);
     the key stays in the ``Authorization: Bearer`` header, never in a
-    request body or message (the key never reaches the browser)."""
+    request body or message (the key never reaches the browser).
+
+    ``timeout`` (seconds) is the PER-REQUEST bound for the httpx client.
+    The design-loop closure uses the default 120 s (a render-loop LLM
+    call can legitimately be slow); the stage-2 question-answer closure
+    uses a short per-request bound (issue #249's latency decision — the
+    10 s operator bound must cover the catalogue load + capability probe
+    + the completion itself, not just the completion). ``None`` keeps
+    the historical 120 s."""
     import httpx
+
+    effective_timeout = 120.0 if timeout is None else timeout
 
     async def _factory(body: dict[str, Any]) -> httpx.Response:
         # ``probe_capabilities`` hands over an envelope
@@ -1229,7 +1241,7 @@ def _http_request_factory(base_url: str, api_key: str):
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=effective_timeout) as client:
             return await client.post(url, json=payload, headers=headers)
 
     return _factory
@@ -1253,11 +1265,22 @@ def _build_question_answer_call(catalogue_path: Path):
     latency on the common case. A probe failure degrades the role to
     ``None`` (the ``send`` sender then raises a T2/T3 ``SenderError``,
     caught by ``ask_answer_call`` → design loop).
+
+    The 10 s operator bound (issue #249) covers the WHOLE pre-route —
+    catalogue load + capability probe + the completion — not just the
+    completion: the httpx factory gets a per-request ``timeout`` (the
+    stage-2 LLM call itself), and the entire ``_call`` body runs under
+    ``asyncio.wait_for`` (the 10 s hard bound). A degraded endpoint
+    cannot stall the /chat request handler for the factory's 120 s
+    default; the probe's three HTTP requests each inherit the per-request
+    bound, so the probe itself cannot exceed the operator's latency
+    decision.
     """
     from d33d.config.catalogue import ResolutionError, load_catalogue
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
     from d33d.design_loop import make_llm_fn
+    from d33d.question_answer import ANSWER_CALL_TIMEOUT_SECONDS
 
     async def _call(question: str, entries: list[dict[str, Any]]) -> str:
         cat = load_catalogue(catalogue_path)
@@ -1276,7 +1299,14 @@ def _build_question_answer_call(catalogue_path: Path):
             )
             return ""
         provider = cat.providers[res.provider]
-        factory = _http_request_factory(res.provider.base, provider.key)
+        # The per-request httpx bound (issue #249's latency decision): the
+        # stage-2 LLM call is a single cheap completion — a hung call is
+        # treated exactly like a failed one (design loop), and the probe's
+        # three HTTP requests each inherit this bound, so the probe itself
+        # cannot stall the /chat handler for 120 s.
+        factory = _http_request_factory(
+            res.provider.base, provider.key, timeout=ANSWER_CALL_TIMEOUT_SECONDS
+        )
         capability = await probe_capabilities(
             base_url=res.provider.base,
             model_id=res.entry.model,
@@ -1290,8 +1320,24 @@ def _build_question_answer_call(catalogue_path: Path):
         )
         return result.content
 
-    def _wrapper(question: str, entries: list[dict[str, Any]]) -> Any:
-        return _call(question, entries)
+    async def _wrapper(question: str, entries: list[dict[str, Any]]) -> str:
+        """The production stage-2 edge: the 10 s hard bound wraps the
+        WHOLE pre-route (catalogue load + capability probe + the
+        completion), not just the completion. A hung probe or a slow
+        catalogue load degrades to the design loop exactly as a timed-out
+        completion does — the operator's latency decision (10 s) is
+        honored end-to-end, not just at the final HTTP call."""
+        try:
+            return await asyncio.wait_for(
+                _call(question, entries), timeout=ANSWER_CALL_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "question-answer: pre-route timed out (10 s operator bound) "
+                "— routing to the design loop (question=%r)",
+                question,
+            )
+            return ""
 
     return _wrapper
 
