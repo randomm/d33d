@@ -172,6 +172,11 @@ class _StubVersions:
     def __init__(self) -> None:
         self._next = 1
 
+    def latest_version(self, project_id):
+        # Fresh-project stub: no previous version (the adapter reads this
+        # unconditionally for the param-diff name baseline, issue #245).
+        return None
+
     async def create_version(self, project_id, params, name=None, message="", **kwargs):
         v = self._next
         self._next += 1

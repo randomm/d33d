@@ -145,6 +145,26 @@ def test_request_renders_into_prompt_on_fresh_project_empty_history():
     # token is nowhere in it; the decisive surface is the user text.)
 
 
+def test_design_prompt_instructs_title_comment() -> None:
+    """Issue #245: the live design-role emission instruction asks the model
+    to start the SCAD with a ``// title:`` comment (the primary version-name
+    source). Asserted on the REAL loop's rendered prompt (the production
+    path — ``_design_messages``), not the dead ``design_prompt``."""
+    scad = "x = 12;\nsphere(d = x);\n"
+    result, captured = _run(
+        scad_script=[scad],
+        request="make a thing",
+        chat_history=(),
+        stated=None,
+        bbox=_bbox_ok_all,
+    )
+    assert result.status == "pass"
+    user_text = _user_text(captured, 0)
+    assert "// title:" in user_text, (
+        f"title instruction missing from the design emission prompt:\n{user_text}"
+    )
+
+
 def test_request_renders_before_chat_history_and_dims_on_followup_turn():
     """Follow-up turn: the request appears AND prior chat_history turns
     still appear — in the specified order: Request first, then the

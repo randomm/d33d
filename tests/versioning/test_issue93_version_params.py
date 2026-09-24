@@ -592,11 +592,11 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
     assert len(timeline) == 1, (
         f"expected exactly ONE version, got {len(timeline)}: {timeline}"
     )
-    # The name is derived from the user message via derive_auto_name
-    # (issue #222: the hardcoded "design" literal was removed).
-    from d33d.versions import derive_auto_name
-
-    assert timeline[0]["name"] == derive_auto_name("Create a 20mm cube")
+    # The name is derived from WHAT CHANGED, never the raw user message
+    # (issue #245): no title comment in the SCAD, no previous version →
+    # "First design". The message field keeps the raw text.
+    assert timeline[0]["name"] == "First design"
+    assert timeline[0]["created_by_message"] == "Create a 20mm cube"
     # The params equal the expected converted map — numeric W/D/H, the
     # exact stored JSON shape (a future coercion change fails loudly).
     assert timeline[0]["params"] == {"W": 20.0, "D": 20.0, "H": 20.0}
@@ -700,7 +700,7 @@ def test_chat_pass_partial_views_version_thumbnail_is_null(
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         return r, frames, timeline
 
-    r, frames, timeline = run_async(app_with_versions, _call)
+    r, _frames, timeline = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
     assert len(timeline) == 1, "pass must still create a version with partial views"
     # The thumbnail is NULL — the iso view is missing, so the pick
@@ -708,10 +708,10 @@ def test_chat_pass_partial_views_version_thumbnail_is_null(
     assert timeline[0]["thumbnail"] is None, (
         f"thumbnail must be NULL with a partial view set, got: {timeline[0]['thumbnail']!r}"
     )
-    # The version is still created with the correct name.
-    from d33d.versions import derive_auto_name
-
-    assert timeline[0]["name"] == derive_auto_name("Create a 20mm cube")
+    # The version is still created with the correct name (issue #245:
+    # WHAT CHANGED, never the raw message — fresh project, no title →
+    # "First design").
+    assert timeline[0]["name"] == "First design"
 
 
 def test_chat_pass_no_render_dir_version_thumbnail_is_null(
@@ -768,9 +768,10 @@ def test_chat_pass_no_render_dir_version_thumbnail_is_null(
     assert timeline[0]["thumbnail"] is None, (
         f"thumbnail must be NULL without a render dir, got: {timeline[0]['thumbnail']!r}"
     )
-    from d33d.versions import derive_auto_name
-
-    assert timeline[0]["name"] == derive_auto_name("make a cube")
+    # Issue #245: the name is "First design" (fresh project, no title),
+    # never the raw message "make a cube"; the message field keeps it.
+    assert timeline[0]["name"] == "First design"
+    assert timeline[0]["created_by_message"] == "make a cube"
     # Issue #219: the version's params are the SCAD-declared "x = 20"
     # (the extraction replaces the old caller-stated source), carried
     # through the version row to the wire.
@@ -1165,14 +1166,13 @@ def test_region_edit_pass_creates_version_unchanged(app_with_versions, tmp_path)
     assert r.status_code == 202, r.text
     # A version WAS created (the region-edit pass path is unchanged).
     assert len(timeline) == 1, f"region-edit pass must create a version, got {len(timeline)}"
-    # The name is derived from the composed region-edit request text via
-    # derive_auto_name (issue #222: the hardcoded "design" literal was
-    # removed).
-    from d33d.versions import derive_auto_name
-
-    assert timeline[0]["name"] == derive_auto_name(
-        "Region edit on modules curl_3 at the marked point "
-        "(view: front): open up this spiral"
+    # The name is derived from WHAT CHANGED (issue #245), never the
+    # composed region-edit request text: fresh project, no title comment
+    # in the SCAD → "First design". The message field keeps the raw text.
+    assert timeline[0]["name"] == "First design"
+    assert (
+        timeline[0]["created_by_message"]
+        == "Region edit on modules curl_3 at the marked point (view: front): open up this spiral"
     )
     # Issue #219: the version's params are the SCAD-declared parameters
     # (the stub SCAD declares W=11; D=22; H=33; and the fresh project's
@@ -1468,3 +1468,199 @@ def test_extract_named_params_caller_defines_never_leak():
     # render path still yields the same extraction (the helper's input is
     # the source alone).
     assert dict(extract_named_params(scad)) == {"W": 50.0}
+
+
+# ---------------------------------------------------------------------------
+# Issue #245: version naming — never the raw user message
+# ---------------------------------------------------------------------------
+
+
+def test_scad_title_present_returns_value() -> None:
+    """A ``// title:`` leading comment is extracted (first match wins; the
+    value is returned untrimmed — ``clean_name`` trims/caps it)."""
+    from d33d.design_loop import scad_title
+
+    assert scad_title("// title: Bore to 38 mm\nW = 20;\ncube([W, 20, 1]);") == (
+        "Bore to 38 mm"
+    )
+    assert scad_title("// title:   padded   \nW = 20;") == "padded"
+    # Multiple title lines: the FIRST wins, later ones are ignored.
+    assert scad_title("// title: First\n// title: Second\nW = 1;") == "First"
+    # A title not on the leading line is still a title (first match).
+    assert scad_title("// a note\n// title: Later\nW = 1;") == "Later"
+
+
+def test_scad_title_absent_or_empty_is_honest_absence() -> None:
+    """No title line, or a title with an empty/whitespace value → ``None``
+    (an honest absence, never a fabricated default — the caller falls
+    through to the param-diff name)."""
+    from d33d.design_loop import scad_title
+
+    assert scad_title("W = 20;\ncube([W]);") is None
+    assert scad_title("// title:\nW = 20;") is None
+    assert scad_title("// title:    \nW = 20;") is None
+    assert scad_title("") is None
+
+
+def test_title_comment_does_not_break_named_param_gate() -> None:
+    """Operator decision: a ``// title:`` line carrying digits must not make
+    a candidate fail the named-parameter / magic-number gate (issue #219),
+    and its params are extracted unchanged (the title is a comment, never a
+    declaration)."""
+    from d33d.design_loop import _named_params_present, extract_named_params
+
+    scad = "// title: Bore to 38 mm\nW = 20;\nH = 38;\ncube([W, H, 1]);"
+    assert _named_params_present(scad, (20.0, 0.0, 38.0)) is True
+    assert dict(extract_named_params(scad)) == {"W": 20.0, "H": 38.0}
+
+
+def test_clean_name_keeps_case_and_punctuation() -> None:
+    """``clean_name`` is deliberately NOT the message sanitizer: case and
+    ordinary punctuation survive (a diff phrase like
+    ``hole_diameter 3.3 → 3.8`` must not become ``holediameter 33  38``)."""
+    from d33d.versions import clean_name
+
+    assert clean_name("Taller upright") == "Taller upright"
+    assert clean_name("hole_diameter 3.3 → 3.8") == "hole_diameter 3.3 → 3.8"
+    # Whitespace runs collapse; ends trim.
+    assert clean_name("  spaced   out  ") == "spaced out"
+    # Capped at NAME_MAX_LEN.
+    assert len(clean_name("x" * 55)) <= 40
+    # Whitespace-only → the honest "version" fallback.
+    assert clean_name("   ") == "version"
+    # Collision suffix preserved.
+    assert clean_name("2 parameters changed", {"2 parameters changed"}) == (
+        "2 parameters changed-2"
+    )
+
+
+def test_param_diff_name_phrases() -> None:
+    """The four-way deterministic phrase (issue #245's fallback name)."""
+    from d33d.versions import param_diff_name
+
+    assert param_diff_name(None, {"W": 1.0}) == "First design"
+    assert param_diff_name({"hole_diameter": 3.3}, {"hole_diameter": 3.8}) == (
+        "hole_diameter 3.3 → 3.8"
+    )
+    # Integer-valued floats render without a spurious trailing zero.
+    assert param_diff_name({"W": 12.0}, {"W": 24.0}) == "W 12 → 24"
+    # Several changed → count phrase.
+    assert param_diff_name({"W": 1.0, "H": 2.0}, {"W": 2.0, "H": 3.0}) == (
+        "2 parameters changed"
+    )
+    # An add (not a value change) is NOT "one changed" → count phrase.
+    assert param_diff_name({}, {"W": 1.0}) == "1 parameters changed"
+    # A remove is not "one changed" either.
+    assert param_diff_name({"W": 1.0}, {}) == "1 parameters changed"
+    # Identical → "Revised geometry".
+    assert param_diff_name({"W": 1.0}, {"W": 1.0}) == "Revised geometry"
+
+
+def _render_scad(scad_text: str):
+    async def _render(scad_source, defines):
+        return _ok_render(scad_source)
+
+    return _render
+
+
+def test_chat_pass_title_present_becomes_version_name(app_with_versions):
+    """Issue #245 acceptance: a chat-created version whose best candidate
+    carries a ``// title:`` comment is named from that title (trimmed),
+    and the raw user message "how tall is it now" is preserved in the
+    message field but NEVER becomes the name."""
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    scad = "// title: Taller upright\nW = 20;\nH = 30;\ncube([W, W, H]);"
+    bbox = BboxInfo(x=20.0, y=20.0, z=30.0, volume=12000.0)
+
+    def _loop_impl(scad_text, bbox_):
+        async def _loop(app, **kwargs):
+            return await run_design_loop_async(
+                photo=kwargs["photo"],
+                chat_history=kwargs["chat_history"],
+                stated_dims=kwargs["stated_dims"],
+                render_fn=_render_scad(scad_text),
+                llm_fn=_stub_llm(scad_text),
+                bbox_fn=lambda r: bbox_,
+            )
+
+        return _loop
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop_impl(scad, bbox)
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "how tall is it now", "chat_history": []},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        async for event, data in source:
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return timeline
+
+    timeline = run_async(app_with_versions, _call)
+    assert len(timeline) == 1
+    # The name is the model's title (trimmed), never the raw message.
+    assert timeline[0]["name"] == "Taller upright"
+    assert timeline[0]["name"] != "how tall is it now"
+    # The message field keeps the raw user text (provenance).
+    assert timeline[0]["created_by_message"] == "how tall is it now"
+
+
+def test_chat_pass_no_title_second_version_param_diff_name(app_with_versions):
+    """Issue #245 acceptance: two consecutive chat passes where v2's params
+    differ from v1 by exactly one param → v2's name is the diff phrase
+    ("H 20 → 30"), never the raw message. No ``// title:`` in either SCAD.
+    """
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    scad_v1 = "W = 20;\nH = 20;\ncube([W, W, H]);"
+    scad_v2 = "W = 20;\nH = 30;\ncube([W, W, H]);"
+    bbox = BboxInfo(x=20.0, y=20.0, z=30.0, volume=12000.0)
+    state = {"n": 0}
+
+    def _loop_impl():
+        async def _loop(app, **kwargs):
+            text = scad_v1 if state["n"] == 0 else scad_v2
+            state["n"] += 1
+            return await run_design_loop_async(
+                photo=kwargs["photo"],
+                chat_history=kwargs["chat_history"],
+                stated_dims=kwargs["stated_dims"],
+                render_fn=_render_scad(text),
+                llm_fn=_stub_llm(text),
+                bbox_fn=lambda r: bbox,
+            )
+
+        return _loop
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop_impl()
+        for msg in ("make a box", "make it taller"):
+            await client.post(
+                f"/api/projects/{pid}/chat", json={"message": msg, "chat_history": []}
+            )
+            source = app_with_versions.state.event_sources[pid]
+            async for event, data in source:
+                if event in ("done", "error"):
+                    break
+            # Release the in-flight flag (the SSE endpoint's finally would
+            # do this in production, but driving the generator directly
+            # leaves it set — a second POST would 409).
+            app_with_versions.state.design_loop_inflight.discard(pid)
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return timeline
+
+    timeline = run_async(app_with_versions, _call)
+    assert len(timeline) == 2, timeline
+    # First version (no previous): "First design" (no title in the SCAD).
+    assert timeline[0]["name"] == "First design"
+    # Second version: exactly one param changed (H 20 → 30) → the diff
+    # phrase, never the raw message "make it taller".
+    assert timeline[1]["name"] == "H 20 → 30"
+    assert timeline[1]["created_by_message"] == "make it taller"
