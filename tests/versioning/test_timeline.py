@@ -189,6 +189,63 @@ def test_timeline_exposes_no_raw_git_objects(app_with_versions):
         assert "hash" not in entry
 
 
+def test_answered_question_leaves_timeline_unchanged(app_with_versions):
+    """Issue #249: after an ANSWERED question (the pre-route's answer
+    path — no design loop, no render, no version),
+    ``GET /api/projects/{id}/versions`` is UNCHANGED: no new row exists,
+    and no row carries the question as ``created_by_message`` (the live
+    bug this regression pins — v22 "how tall is it now" was a new
+    version named after the question; the answer path must produce
+    exactly none of that). The timeline count is invariant."""
+
+    async def _answer_edge(question: str, entries: list) -> str:
+        # A stage-2 reply the number guard passes (12 and 20 are both in
+        # the state block: H stated 12, W/D assumed 20).
+        return ('{"answerable": true, "answer": ' 
+                '"It is 12 mm tall — you said that. The footprint is 20 × 20 mm — I assumed."}')
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj['id']
+        # A version whose state block can answer "How tall is it now?":
+        # H stated 12 (the ticket's example), W/D assumed 20 (so the
+        # provenance-citing answer's numbers all appear in the block).
+        await create_version(client, pid, {"H": 12.0, "W": 20.0, "D": 20.0})
+        app_with_versions.state.answer_question = _answer_edge
+        # The design loop must NOT be invoked (the answer path skips it
+        # — a spy that fails loudly if the route falls through).
+        loop_called = []
+        def _loop(app, **kwargs):
+            loop_called.append(kwargs)
+            raise AssertionError("the design loop must NOT be called on the answer path")
+        app_with_versions.state.run_design_loop = _loop
+        before = (await client.get(f"/api/projects/{pid}/versions")).json()
+        r = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "How tall is it now?", "chat_history": []}
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        assert source is not None
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        after = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return r, before, after, frames, loop_called
+
+    r, before, after, frames, loop_called = run_async(app_with_versions, _call)
+    # The answer path was taken (the terminal frame is the kind-answer done).
+    assert r.status_code == 202, r.text
+    assert not loop_called, "the design loop was called on the answer path"
+    assert frames[-1][0] == "done"
+    assert frames[-1][1].get("kind") == "answer"
+    # The timeline is UNCHANGED: same count, same ids, no new row.
+    assert len(after) == len(before) == 1
+    assert [v["id"] for v in after] == [v["id"] for v in before]
+    # No row is named after the question (the live bug's signature).
+    assert all(v["created_by_message"] != "How tall is it now?" for v in after)
+
+
 def test_version_files_are_committed_to_git_on_disk(app_with_versions):
     """The content spine: the full snapshot lands in the per-project git
     repo as ``versions/{id}/params.json`` — verified on disk (git is the

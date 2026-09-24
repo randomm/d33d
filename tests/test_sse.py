@@ -294,9 +294,24 @@ def test_sse_event_schema_fields():
     assert events[0]["data"]["text"] == "hi"
 
     # done event
-    frame = format_sse("done", {})
+    frame = format_sse("done", {"message": "Design loop passed validation"})
     events = parse_sse_stream(frame)
     assert events[0]["event"] == "done"
+    # A design-loop done frame carries a message string.
+    assert isinstance(events[0]["data"].get("message"), str)
+
+    # done event (issue #249, the answer path): ONE terminal frame whose
+    # ``message`` is the answer text plus the additive ``kind: "answer"
+    # discriminator (design-loop done frames carry no ``kind`` — the
+    # SPA renders an answer done's message verbatim, no PassCard, no
+    # refetch). The ``kind`` field is additive: a bare done frame
+    # (``kind`` absent) still parses identically, and the answer done
+    # frame's ``kind`` rides through the SSE wire unchanged.
+    frame = format_sse("done", {"message": "It is 12 mm tall - you said that.", "kind": "answer"})
+    events = parse_sse_stream(frame)
+    assert events[0]["event"] == "done"
+    assert events[0]["data"]["message"] == "It is 12 mm tall - you said that."
+    assert events[0]["data"]["kind"] == "answer"
 
     # error event
     frame = format_sse("error", {"message": "boom"})
