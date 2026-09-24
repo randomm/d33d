@@ -146,11 +146,15 @@ class BboxInfo:
     "a 20mm cube with a 10mm sphere beside it" renders one STL holding
     several disjoint bodies, and comparing the whole-assembly bbox against
     the single stated triple made the gate unsatisfiable by construction).
-    The bbox gate compares the stated triple against the BEST-MATCHING
-    component when ``components`` is non-empty; when it is empty the gate
-    takes the whole-part path exactly as before, so every existing caller
-    that builds ``BboxInfo(x, y, z, volume)`` sees byte-for-byte the old
-    behaviour (an empty breakdown means "no component data", never "one
+    The bbox gate compares the confirmed set against the BEST-MATCHING
+    component only for a FULL positive (W, D, H) triple and a non-empty
+    ``components`` breakdown (issue #247: with a PARTIAL confirmed set
+    there is no well-defined component selection, so a partial triple
+    compares its confirmed axes against the whole-mesh extents instead);
+    when ``components`` is empty the gate takes the whole-part path
+    exactly as before, so every existing caller that builds
+    ``BboxInfo(x, y, z, volume)`` sees byte-for-byte the old behaviour
+    (an empty breakdown means "no component data", never "one
     component").
     """
 
@@ -303,10 +307,10 @@ def best_match_component(
     deterministic across repeated runs and across component orderings.
 
     The per-axis difference sums over ALL THREE axes — the caller is
-    contractually passed only a FULL confirmed triple (issue #247:
-    :func:`_bbox_within_tolerance` falls back to the whole-mesh extents
-    when the confirmed set is partial, so a component match is only ever
-    asked for when every axis is confirmed). ``None`` is never returned
+    contractually passed only a FULL POSITIVE (W, D, H) triple (issue
+    #247: :func:`_bbox_within_tolerance` compares a PARTIAL confirmed set
+    against the whole-mesh extents instead, so a component match is only
+    ever asked for when every axis is confirmed). ``None`` is never returned
     for a non-empty breakdown, so no ``continue`` sentinel is needed.
 
     Volume here is only a TIE-BREAKER, never a conformance signal: for
@@ -392,6 +396,15 @@ def _bbox_within_tolerance(
         # abstention is recorded DISTINCTLY by :func:`score`'s
         # ``bbox_abstained`` field, never a vacuous unmarked pass.
         return True
+    if len(stated) > 3:
+        # A widened input over the (W, D, H) envelope: the gate measures
+        # three axes only — longer input is a caller contract violation,
+        # not a fourth measurement target (fail loudly, never silently
+        # ignore). ``_dim_params`` and the loop's normalization never
+        # produce this; it guards the seam.
+        raise ValueError(
+            f"stated dimensions must be at most 3 axes (W, D, H), got {len(stated)}"
+        )
     if len(stated) == 3 and all(t > 0 for t in stated):
         # Full confirmed triple + component breakdown: rank the components
         # and compare against the best match (issue #100). Without a
@@ -552,27 +565,25 @@ def score(
     (deterministic, earlier bits first).
 
     ``Score.bbox_abstained`` (ticket #91, issue #247) marks a bbox bit
-    that is True while at least one stated axis is unknown (a zero/absent
-    axis — :func:`_bbox_within_tolerance` skips it). The flag is raised
-    whenever ANY stated axis is unknown and the bit is True (not only
-    when the bit is true merely because of the abstention): a partial
-    triple whose known axes happen to match still leaves an unmeasured
-    axis, and that pass must be distinguishable from a fully measured one.
-    It is a SEPARATE field, not a fifth bit, so the bit ordering, the
-    ``tiebreak`` tuple, and ``GATE_REASON_BITS`` names are all unchanged
-    while the abstention stays distinguishable from a measured pass.
+    that is True while any stated axis is unconfirmed (a zero axis —
+    :func:`_bbox_within_tolerance` skips it). The flag is True whenever
+    the bit is True and any axis is unconfirmed, INCLUDING a partial
+    pass — ``bbox_abstained`` therefore means "not every axis was
+    checked" (per-axis reality), and it is False only for a fully
+    confirmed, fully measured pass. A partial triple whose confirmed axes
+    happen to match still leaves an unmeasured axis, and that pass must
+    be distinguishable from a fully measured one. It is a SEPARATE field,
+    not a fifth bit, so the bit ordering, the ``tiebreak`` tuple, and
+    ``GATE_REASON_BITS`` names are all unchanged while the abstention
+    stays distinguishable from a measured pass.
 
     Per-axis semantics (issue #247): ``stated_dims`` is the per-axis
     confirmed set normalized into the triple — a partially confirmed run
-    (e.g. only H) checks ONLY H and abstains on W/D. The flag is True
-    whenever the bit is True and any axis is unconfirmed, INCLUDING a
-    partial pass — ``bbox_abstained`` therefore means "not every axis was
-    checked" (per-axis reality), and it is False only for a fully
-    confirmed, fully measured pass. The frame contract that reads it
-    (``d33d.design_loop_events``: the ``done`` / version-created frames)
-    is unchanged: the flag is always present and True only when no
-    CONFIRMED axis was checked — the old all-or-nothing meaning ("all
-    axes unknown") is a strict subset of the new one.
+    (e.g. only H) checks ONLY H and abstains on W/D. The frame contract
+    that reads the flag (``d33d.design_loop_events``: the ``done`` /
+    version-created frames) is unchanged: the flag is always present, and
+    the old all-or-nothing meaning ("all axes unknown") is a strict
+    subset of the new one.
     """
     bits = (
         render.error_class == "ok",
@@ -620,11 +631,15 @@ def _dim_params(
     stated: tuple[float, float, float], dims: dict[str, str]
 ) -> dict[str, str]:
     """The stated dimensions as a NAMED parameter map — extra entries from
-    ``dims`` (e.g. FDM clearances) plus the stated triple as W/D/H when not
-    already named."""
+    ``dims`` (e.g. FDM clearances) plus each CONFIRMED stated axis as
+    W/D/H when not already named. An unconfirmed axis (``<= 0``) becomes
+    no define at all (issue #247: ``-DW=0`` would inject a fabricated
+    zero into the render's named-parameter channel) — only positive axes
+    are injected."""
     out = {str(k): str(v) for k, v in dims.items()}
     for name, value in zip(("W", "D", "H"), stated):
-        out.setdefault(name, str(value))
+        if value > 0:
+            out.setdefault(name, str(value))
     return out
 
 
@@ -965,10 +980,13 @@ async def run_design_loop_async(
 
     ``photo`` is the reference image (data URI / URL). ``stated_dims`` is
     the ground-truth (W, D, H) triple in mm — never estimated. ``None``
-    (or a zero/absent axis inside the triple) means "no dimensions known":
-    the bbox gate ABSTAINS (``Score.bbox_abstained``) instead of hard-
-    failing on a ``target <= 0`` target — an unmeasurable gate must not
-    fail every candidate (ticket #91). ``render_fn(scad, defines)
+    means "no axis confirmed this run": the whole gate abstains (``Score.
+    bbox_abstained``). A zero axis inside the triple means that single
+    axis is unconfirmed: it is SKIPPED per-axis (never a measurement
+    target) while the positive axes are measured — a partially confirmed
+    run (e.g. only H) checks only H, and the pass is recorded as
+    abstained unless every axis is confirmed (ticket #91 / issue #247)
+    — a gate with no confirmed target must not hard-fail every candidate. ``render_fn(scad, defines)
     -> RenderResult`` and ``llm_fn(role, messages, system) -> LLMResult``
     are injected (dependency injection, the same testable pattern as
     ``d33d.render_worker``); ``defines`` carries extra named parameters

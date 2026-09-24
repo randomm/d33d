@@ -58,6 +58,7 @@ import asyncio
 import inspect
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -682,11 +683,11 @@ def _finalize_loop_kwargs(
       neither exists (text-only finalize — the hook's photo is optional).
     - ``stated_dims`` — the current run's per-axis confirmed set (the
       body's ``stated_dims`` axes, else the per-axis extraction of the
-      message), falling back to the latest version row's persisted
-      confirmed set (issue #247's per-axis decision — issue #247 removed
-      the dead W/D/H param-key read); a partial confirmed set is a
-      zero-filled triple (per-axis abstention), ``None`` when no axis is
-      confirmed anywhere (the gate then abstains, never fabricates).
+      message). There is NO persisted fallback (issue #247's per-axis
+      decision — issue #247 removed the dead W/D/H param-key read): a
+      statement that confirms nothing abstains the gate (``None``), a
+      partial confirmed set is a zero-filled triple (per-axis
+      abstention).
     - ``render_fn`` — the production render worker (``d33d.render_worker.
       render_for_design_loop``). ``llm_fn`` — a no-op async edge: the
       production closure builds its OWN ``llm_fn`` from the live catalogue
@@ -749,7 +750,7 @@ def _finalize_loop_kwargs(
         current_axes: dict[str, float] = {
             axis: float(value)
             for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
-            if value
+            if value > 0  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
         }
     else:
         current_axes = stated_axes_from_message(body.request or body.message or "")
@@ -959,11 +960,21 @@ async def _parse_finalize_body(request: Request):
                 status_code=422, detail="'stated_dims' must be a 3-element array"
             )
         try:
-            stated_dims = tuple(float(d) for d in stated_dims)
+            parsed = tuple(float(d) for d in stated_dims)
         except (TypeError, ValueError):
             raise HTTPException(
                 status_code=422, detail="'stated_dims' must be numeric"
             ) from None
+        if not all(math.isfinite(v) for v in parsed):
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' elements must be finite numbers"
+            )
+        if any(v < 0 for v in parsed):
+            # Negative is malformed input; 0 stays legal = unconfirmed axis.
+            raise HTTPException(
+                status_code=422, detail="'stated_dims' elements must be >= 0"
+            )
+        stated_dims = parsed
     return FinalizeBody(
         params=params,
         name=name,

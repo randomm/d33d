@@ -1072,12 +1072,12 @@ def create_app(
           the stored reference photo); the fixed transparent-PNG constant
           is the fallback only if the (schema-required) field were ever
           absent.
-        - ``stated_dims`` = the latest version row's persisted per-axis
-          confirmed set as a (W, D, H) triple (a fresh project, or a row
-          with no confirmed axes, yields ``None`` — the gate then ABSTAINS
-          entirely, recorded distinctly as ``Score.bbox_abstained``;
-          ticket #91 / issue #247; the dead W/D/H param-key read is gone);
-          there is no client override for region edits.
+        - ``stated_dims`` = always ``None`` — a region edit carries NO
+          dimension statement, so the gate ABSTAINS entirely, recorded
+          distinctly as ``Score.bbox_abstained`` (ticket #91 / issue
+          #247). There is deliberately no persisted fallback and no
+          client override: the gate enforces only the axes the current
+          run's input confirmed, and a region edit confirms nothing.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
         - ``request`` = the instruction prefixed with the ``view_id`` and,
@@ -1125,12 +1125,13 @@ def create_app(
             else EMPTY_PHOTO_DATA_URI
         )
         # Stated dims: a region edit carries NO dimension statement, so
-        # the gate ABSTAINS (``None``) — as before issue #247. The gate
-        # enforces only the axes the current run's input confirmed; a
-        # region edit confirms nothing, so there is deliberately no
-        # persisted fallback (issue #247's operator decision). The gate
-        # measures rather than fabricates, and an unmeasurable gate must
-        # not hard-fail every candidate.
+        # the gate ABSTAINS (``None``). Pre-#247 the route passed a zero
+        # triple; #247 replaced it with the abstaining ``None`` (the gate
+        # enforces only the axes the current run's input confirmed, and a
+        # region edit confirms nothing — no persisted fallback, issue
+        # #247's operator decision). The gate measures rather than
+        # fabricates, and an unmeasurable gate must not hard-fail every
+        # candidate.
         stated_dims: tuple[float, float, float] | None = None
 
         # The composed request text: the instruction prefixed with the view

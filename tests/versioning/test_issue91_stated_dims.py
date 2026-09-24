@@ -4,15 +4,17 @@ an unsatisfiable ``target <= 0`` bbox target to EVERY browser-driven turn
 (the gate hard-failed, the loop exhausted, and the design prompt carried
 "W=0, D=0, H=0").
 
-The fix (per the PM's settled decisions):
+The fix (per the PM's settled decisions, refined by issue #247's per-axis
+operator decision):
 
-* Dimension source, strict precedence —
-  (a) the user's own message, via the EXISTING
-  ``d33d.dimension_protocol`` extraction (``stated_dims_from_message``
-  reuses ``_extract_stated`` — never a new parser);
-  (b) else the latest version's W/D/H (``latest_version_stated_dims``,
-  the same fallback the finalize seam uses);
-  (c) else ``None`` — never a zero triple.
+* Dimension source — ONLY the current turn's input: the user's own
+  message, via the EXISTING ``d33d.dimension_protocol`` extraction
+  (``stated_dims_from_message`` reuses ``_extract_stated`` — never a new
+  parser); else ``None`` — never a zero triple. There is NO fallback to
+  the latest version's persisted W/D/H (the ``latest_version_stated_dims``
+  helper survives for the 3MF export seam, not the loop-facing chat
+  route): a cueless follow-up confirms nothing, so the gate abstains
+  rather than enforcing an axis confirmed on an earlier turn.
 * Abstain semantics — with no known dimensions the bbox gate ABSTAINS
   (``_bbox_within_tolerance`` returns True on an unknown axis) and the
   abstention is recorded DISTINCTLY in ``Score.bbox_abstained`` — an
@@ -134,7 +136,7 @@ def test_chat_spa_shape_message_without_dims_abstains_not_zero(app_with_versions
     assert captured["stated_dims"] != (0.0, 0.0, 0.0)
 
 
-def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
+def test_chat_follow_up_cueless_message_abstains_no_persisted_fallback(app_with_versions):
     """Follow-up turn: a project WITH a latest version whose persisted
     ``stated_dims`` column carries a full W/D/H triple and a message that
     states no dimensions — the loop receives ``None`` (the gate

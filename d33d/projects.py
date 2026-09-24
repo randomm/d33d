@@ -132,23 +132,20 @@ class ChatRequest(BaseModel):
     """Body of ``POST /api/projects/{id}/chat`` (issue #54).
 
     ``message`` is the user's chat text (the design-loop request text).
-    ``stated_dims`` is an optional (W, D, H) triple in mm; when present it
-    is passed to the design loop verbatim. When absent (the SPA never
-    sends the field), the server resolves dimensions itself — it does NOT
-    depend on the client supplying it (ticket #91):
-
-    1. dimensions stated in the user's OWN message via the existing
-       ``d33d.dimension_protocol`` per-axis extraction
-       (``stated_axes_from_message``); the body's explicit ``stated_dims``
-       axes take priority when a client sends them;
-    2. else ``None`` — "no dimensions confirmed THIS turn": the loop's
-       bbox gate ABSTAINS (``Score.bbox_abstained``) instead of
-       hard-failing on a fabricated ``(0.0, 0.0, 0.0)`` target (the bug
-       this ticket fixes). A PARTIAL confirmation is a zero-filled
-       triple — the unconfirmed axes abstain per-axis, never a full
-       triple or a zero triple. There is deliberately NO fallback to a
-       persisted version row's dimensions: the gate enforces only what
-       the current turn confirmed (issue #247's operator decision).
+    ``stated_dims`` is an optional (W, D, H) triple in mm. The body's
+    ``stated_dims`` REPLACES (not merges with) the message extraction:
+    when present, ONLY the body's axes (those ``> 0``) feed the loop's
+    gate; when absent (the SPA never sends the field), the server
+    resolves dimensions itself via the existing
+    ``d33d.dimension_protocol`` per-axis extraction of the user's OWN
+    message (``stated_axes_from_message``) — there is no other source.
+    The result is the current turn's per-axis confirmed set (ticket
+    #91): a PARTIAL confirmation is a zero-filled triple (unconfirmed
+    axes abstain per-axis), ``None`` when no axis is confirmed THIS turn
+    (the gate ABSTAINS — ``Score.bbox_abstained`` — never a fabricated
+    ``(0.0, 0.0, 0.0)`` target). There is deliberately NO fallback to a
+    persisted version row's dimensions: the gate enforces only what the
+    current turn confirmed (issue #247's operator decision).
 
     ``chat_history`` is the list of prior user messages (the SPA sends the
     last 10); absent → empty tuple.
@@ -175,8 +172,14 @@ class ChatRequest(BaseModel):
         import math
 
         for x in v:
-            if not isinstance(x, (int, float)) or not math.isfinite(float(x)):
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                raise ValueError("stated_dims elements must be numbers")
+            x = float(x)
+            if not math.isfinite(x):
                 raise ValueError("stated_dims elements must be finite numbers")
+            if x < 0:
+                # Negative is malformed input; 0 stays legal = unconfirmed axis.
+                raise ValueError("stated_dims elements must be >= 0")
         return [float(x) for x in v]
 
 
@@ -329,11 +332,11 @@ def create_projects_router() -> APIRouter:
         per_axis_stated: dict[str, float] = {}
         if body.stated_dims is not None:
             _w, _d, _h = body.stated_dims
-            if _w:
+            if _w > 0:  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
                 per_axis_stated["W"] = float(_w)
-            if _d:
+            if _d > 0:
                 per_axis_stated["D"] = float(_d)
-            if _h:
+            if _h > 0:
                 per_axis_stated["H"] = float(_h)
         else:
             per_axis_stated = stated_axes_from_message(body.message, chat_history)

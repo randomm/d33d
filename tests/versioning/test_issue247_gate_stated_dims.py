@@ -40,6 +40,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from d33d.design_loop import BboxInfo, score
 from d33d.design_prompts import design_prompt
 from d33d.render_worker import RenderResult
@@ -274,7 +276,7 @@ def test_real_score_partial_triple_catches_v24_seven_mm_z_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Finalize route: per-axis source + latest-row fallback (real route,
+# Finalize route: per-axis source, no persisted fallback (real route,
 # stub loop)
 # ---------------------------------------------------------------------------
 
@@ -373,8 +375,7 @@ def test_finalize_no_dimensions_in_current_message_abstains(app_with_versions):
 
 
 # ---------------------------------------------------------------------------
-# Region-edit route: latest row's persisted confirmed set (real route,
-# stub loop)
+# Region-edit route: always abstains (None) (real route, stub loop)
 # ---------------------------------------------------------------------------
 
 
@@ -470,3 +471,87 @@ def test_design_messages_reference_line_zero_filled_triple() -> None:
     assert text == "W=not specified, D=not specified, H=12"
     # A zero must never read as a dimension value.
     assert "W=0" not in text and "D=0" not in text and "H=0" not in text
+
+
+# ---------------------------------------------------------------------------
+# Render defines: only confirmed axes become defines (issue #247)
+# ---------------------------------------------------------------------------
+
+
+def test_dim_params_partial_triple_only_confirmed_axes_become_defines() -> None:
+    """``_dim_params`` injects only the CONFIRMED (``> 0``) axes as W/D/H
+    defines — an unconfirmed axis contributes no define at all (never
+    ``-DW=0``, a fabricated zero in the render's named-parameter channel).
+    (0.0, 0.0, 12.0) → H only."""
+    from d33d.design_loop import _dim_params
+
+    defines = _dim_params((0.0, 0.0, 12.0), {})
+    assert defines == {"H": "12.0"}
+    # A full triple still injects all three.
+    assert _dim_params((20.0, 25.0, 30.0), {}) == {
+        "W": "20.0",
+        "D": "25.0",
+        "H": "30.0",
+    }
+    # Explicit caller defines keep priority (setdefault semantics).
+    assert _dim_params((20.0, 25.0, 30.0), {"W": "99"})["W"] == "99"
+
+
+# ---------------------------------------------------------------------------
+# Input validation: negative / non-finite stated_dims are rejected (422)
+# ---------------------------------------------------------------------------
+
+
+def test_chat_negative_stated_dims_422(app_with_versions):
+    """A chat body with a NEGATIVE ``stated_dims`` element → 422 (malformed
+    input; 0 stays legal = unconfirmed axis)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        return await client.post(
+            f"/api/projects/{proj['id']}/chat",
+            json={
+                "message": "make it",
+                "chat_history": [],
+                "stated_dims": [-5.0, 0.0, 12.0],
+            },
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 422, r.text
+
+
+def test_finalize_negative_stated_dims_422(app_with_versions):
+    """A finalize body with a NEGATIVE ``stated_dims`` element → 422
+    (the parser mirrors the chat validator: finite, >= 0; 0 = unconfirmed
+    stays legal)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"message": "finalize", "stated_dims": [-5.0, 0.0, 12.0]},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 422, r.text
+
+
+def test_finalize_nonfinite_stated_dims_422(app_with_versions):
+    """A finalize body with a non-finite ``stated_dims`` element → 422
+    (the parser's ``math.isfinite`` check — ``1e999`` parses to inf in
+    the JSON float parse)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        raw = b'{"message": "finalize", "stated_dims": [1e999, 0, 12]}'
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            content=raw,
+            headers={"content-type": "application/json"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 422, r.text

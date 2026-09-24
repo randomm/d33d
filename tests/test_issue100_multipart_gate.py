@@ -302,8 +302,10 @@ def test_best_match_tie_broken_by_volume() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_abstain_before_component_work() -> None:
-    """Unknown axis (<=0) → abstain BEFORE any component matching."""
+def test_no_axis_confirmed_abstains_whole_gate() -> None:
+    """No axis confirmed (all zero) → the whole gate ABSTAINS (True) with
+    no component matching; a partial triple instead SKIPS the unconfirmed
+    axes and measures the confirmed ones — never a whole-gate abstention."""
     bbox = BboxInfo(20.0, 20.0, 20.0, 8000.0, components=(
         (20.0, 20.0, 20.0, 8000.0, 0.0, 0.0, 0.0),
     ))
@@ -330,6 +332,10 @@ def test_partial_triple_checks_only_confirmed_axes() -> None:
     assert _bbox_within_tolerance(bbox_tall, (0.0, 0.0, 20.0)) is False
     # No axis confirmed → abstain (True).
     assert _bbox_within_tolerance(bbox, (0.0, 0.0, 0.0)) is True
+    # A triple over the 3-axis (W, D, H) envelope is a caller contract
+    # violation — the widened signature normalizes to 3, then rejects.
+    with pytest.raises(ValueError, match="at most 3"):
+        _bbox_within_tolerance(bbox, (0.0, 0.0, 12.0, 9.0))
 
 
 def test_partial_triple_multi_part_uses_whole_mesh_extents() -> None:
