@@ -102,40 +102,72 @@ def photo_data_uri(source_photo_path: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
-def latest_version_stated_axes(
+def axes_to_gate_triple(
+    axes: dict[str, float] | None,
+) -> tuple[float, float, float] | None:
+    """The bbox gate's (W, D, H) target from one run's OWN per-axis
+    confirmed set — issue #247's per-axis operator decision: the gate
+    enforces ONLY the axes the current run's input confirmed.
+
+    The return is the confirmed set NORMALIZED into a W/D/H triple with
+    ``0.0`` for every unconfirmed axis — the #91 zero-means-unknown
+    convention the loop's consumers already speak (``_bbox_within_tolerance``
+    skips ``<= 0`` axes, ``_dim_axis_list`` renders them as
+    ``not specified``). ``None`` ONLY when no axis at all is confirmed
+    (abstain entirely — never a zero triple). Non-positive values are
+    dropped like everywhere else in the per-axis pipeline.
+
+    There is deliberately NO fallback to a persisted version row: a
+    follow-up message with no explicit dimension cue ("make it taller",
+    "make it 20 mm tall") confirms nothing — the gate abstains — even if
+    an earlier version row persisted ``{"H": 12}``. Forcing the stale
+    axis against a candidate the user just asked to change is exactly
+    what regressed the gate (it failed every candidate → exhausted).
+    Carry-forward of confirmed dimensions across turns is a separate
+    product decision (issue #247's operator decision superseded the
+    one-turn persisted-axes fallback).
+    """
+    if not axes:
+        return None
+    cleaned: dict[str, float] = {}
+    for axis, value in axes.items():
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            cleaned[str(axis)] = f
+    if not cleaned:
+        return None
+    return (
+        cleaned.get("W", 0.0),
+        cleaned.get("D", 0.0),
+        cleaned.get("H", 0.0),
+    )
+
+
+def latest_version_stated_dims(
     versions_service: Any, project_id: int
-) -> dict[str, float] | None:
-    """The latest version row's persisted per-axis confirmed set
-    (``versions.stated_dims`` — issue #246), or ``None``.
+) -> tuple[float, float, float] | None:
+    """The latest version's confirmed (W, D, H) triple, or ``None`` —
+    issue #247's re-pointing of ticket #91's fallback source.
 
-    This is the dead W/D/H param-key fallback REPLACED (issue #247): the
-    old helper read ``params.get("W")`` / ``"D"`` / ``"H"`` — keys the
-    design model never emits (it emits free names like ``spacer_width``),
-    so on a follow-up turn with no inline dims it always returned ``None``
-    and the gate abstained on every real design. The per-axis set the user
-    actually confirmed is PERSISTED on the version row by the dimension
-    protocol's per-axis extraction (``stated_axes_from_message`` — the same
-    ``_extract_stated`` pipeline), and that persisted column is now the
-    single source.
+    Reads the PERSISTED per-axis confirmed set
+    (``versions.stated_dims`` — the latest version row's column, written
+    by the dimension protocol's per-axis extraction) and derives the
+    triple from it. The return contract is the strict one — a full
+    positive ``(W, D, H)`` triple or ``None`` — kept for the 3MF export
+    route (``d33d.app`` → ``validate_stl`` ``stated_mm``): a full triple
+    when ALL three axes are confirmed on the latest row, else ``None``
+    (abstain). The loop-facing routes (chat, finalize, region-edit) use
+    :func:`axes_to_gate_triple` instead — a PARTIAL confirmed set is a
+    zero-filled triple, never ``None`` (the #247 per-axis decision).
 
-    The contract per the ticket's operator decision:
+    The dead W/D/H param-key read is GONE: a prior version whose ``params``
+    snapshot happens to carry ``W``/``D``/``H`` keys but whose
+    ``stated_dims`` is NULL (every pre-#246 row) yields ``None``, not a
+    triple re-derived from param names the model never emitted.
 
-    * the source is EXACTLY the latest version row's ``stated_dims``
-      column — no transitive walk back through older versions;
-    * a row with NULL ``stated_dims`` (every pre-#246 row, or a run where
-      the user confirmed nothing) yields ``None`` (abstain) — never a
-      value re-derived from ``params`` (that is precisely the dead read
-      being removed);
-    * only axes present with a positive value are returned — a partial
-      confirmation (e.g. ``{"H": 12.0}``) is a partial dict, and an empty
-      or all-``<= 0`` set collapses to ``None`` (an absent confirmation
-      abstains; the caller must never see a zero-encoded axis it could
-      mistake for a measurement target).
-
-    ``None`` means "no confirmed axis": the caller falls back to
-    abstaining the gate / dimension plumbing (``Score.bbox_abstained``,
-    the export route's ``stated_mm=None`` semantics from #91) — exactly as
-    when the column is NULL.
     """
     latest = versions_service.latest_version(project_id)
     if latest is None:
@@ -151,83 +183,6 @@ def latest_version_stated_axes(
             continue
         if f > 0:
             axes[str(axis)] = f
-    return axes or None
-
-
-def gate_stated_dims(
-    current_axes: dict[str, float] | None,
-    versions_service: Any,
-    project_id: int,
-) -> tuple[float, float, float] | None:
-    """The bbox gate's (W, D, H) target for one run — issue #247's
-    per-axis operator decision: the gate is fed the CURRENT run's
-    per-axis confirmed set, falling back to the latest version row's
-    confirmed set (``versions.stated_dims`` — :func:
-    `latest_version_stated_axes`) when the current message confirms
-    nothing.
-
-    The return is the per-axis confirmed set NORMALIZED into a W/D/H
-    triple with ``0.0`` for every unconfirmed axis — the #91
-    zero-means-unknown convention the loop's consumers already speak
-    (``_bbox_within_tolerance`` skips ``<= 0`` axes, ``_dim_axis_list``
-    renders them as ``not specified``). ``None`` ONLY when no axis at all
-    is confirmed anywhere (abstain entirely — never a zero triple from
-    this helper).
-
-    ``current_axes`` is the per-axis extraction of the current user
-    statement (the protocol's ``stated_axes_from_message`` — or the
-    body's explicit ``stated_dims`` axes when a client sends one); an
-    empty/absent dict means "the current message confirmed nothing",
-    which is the fall-back trigger (a full explicit triple is already a
-    non-empty dict and short-circuits the fallback). Non-positive values
-    are dropped like everywhere else in the per-axis pipeline.
-    """
-    axes: dict[str, float] = {}
-    if current_axes:
-        for axis, value in current_axes.items():
-            try:
-                f = float(value)
-            except (TypeError, ValueError):
-                continue
-            if f > 0:
-                axes[str(axis)] = f
-    if not axes:
-        axes = latest_version_stated_axes(versions_service, project_id) or {}
-    if not axes:
-        return None
-    return (
-        axes.get("W", 0.0),
-        axes.get("D", 0.0),
-        axes.get("H", 0.0),
-    )
-
-
-def latest_version_stated_dims(
-    versions_service: Any, project_id: int
-) -> tuple[float, float, float] | None:
-    """The latest version's confirmed (W, D, H) triple, or ``None`` —
-    issue #247's re-pointing of ticket #91's fallback source.
-
-    Reads the PERSISTED per-axis confirmed set
-    (:func:`latest_version_stated_axes` — ``versions.stated_dims``,
-    written by the dimension protocol's per-axis extraction) and derives
-    the triple from it. The return contract is the strict one — a full
-    positive ``(W, D, H)`` triple or ``None`` — kept for the 3MF export
-    route (``d33d.app`` → ``validate_stl`` ``stated_mm``): a full triple
-    when ALL three axes are confirmed on the latest row, else ``None``
-    (abstain). The loop-facing routes (chat, finalize, region-edit) use
-    :func:`gate_stated_dims` instead — a PARTIAL confirmed set is a
-    zero-filled triple, never ``None`` (the #247 per-axis decision).
-
-    The dead W/D/H param-key read is GONE: a prior version whose ``params``
-    snapshot happens to carry ``W``/``D``/``H`` keys but whose
-    ``stated_dims`` is NULL (every pre-#246 row) yields ``None``, not a
-    triple re-derived from param names the model never emitted.
-
-    """
-    axes = latest_version_stated_axes(versions_service, project_id)
-    if axes is None:
-        return None
     if "W" not in axes or "D" not in axes or "H" not in axes:
         return None
     return (axes["W"], axes["D"], axes["H"])
@@ -1237,9 +1192,8 @@ async def run_design_loop_with_events(
 
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
+    "axes_to_gate_triple",
     "bbox_from_render",
-    "gate_stated_dims",
-    "latest_version_stated_axes",
     "latest_version_stated_dims",
     "photo_data_uri",
     "run_design_loop_with_events",

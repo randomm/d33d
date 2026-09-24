@@ -96,7 +96,6 @@ from d33d.config.catalogue import (
 from d33d.config.resolve import resolve_model
 from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,
-    gate_stated_dims,
     latest_version_stated_dims,
 )
 from d33d.evals.failure_capture import default_failures_path
@@ -1125,15 +1124,14 @@ def create_app(
             if image_bytes
             else EMPTY_PHOTO_DATA_URI
         )
-        # Stated dims: the latest version row's persisted per-axis
-        # confirmed set (no client override — a region edit is a scoped
-        # directive; issue #247 removed the dead W/D/H param-key read).
-        # A partial confirmed set is a zero-filled triple (per-axis
-        # abstention); no confirmed axis anywhere → None (the bbox gate
-        # ABSTAINS entirely — Score.bbox_abstained, ticket #91). The gate
+        # Stated dims: a region edit carries NO dimension statement, so
+        # the gate ABSTAINS (``None``) — as before issue #247. The gate
+        # enforces only the axes the current run's input confirmed; a
+        # region edit confirms nothing, so there is deliberately no
+        # persisted fallback (issue #247's operator decision). The gate
         # measures rather than fabricates, and an unmeasurable gate must
         # not hard-fail every candidate.
-        stated_dims = gate_stated_dims(None, app.state.versions, project_id)
+        stated_dims: tuple[float, float, float] | None = None
 
         # The composed request text: the instruction prefixed with the view
         # id, and with the resolved module_ids only when the pick resolved

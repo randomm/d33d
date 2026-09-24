@@ -41,7 +41,6 @@ from d33d.design_loop import (
     score,
 )
 from d33d.design_loop_events import (
-    latest_version_stated_axes,
     latest_version_stated_dims,
 )
 from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
@@ -138,9 +137,11 @@ def test_chat_spa_shape_message_without_dims_abstains_not_zero(app_with_versions
 def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
     """Follow-up turn: a project WITH a latest version whose persisted
     ``stated_dims`` column carries a full W/D/H triple and a message that
-    states no dimensions — the latest version's confirmed set supplies the
-    triple (the fallback the finalize seam uses), not (0, 0, 0) and not
-    None."""
+    states no dimensions — the loop receives ``None`` (the gate
+    abstains): the gate enforces only the axes the current turn's input
+    confirmed, and a cueless follow-up confirms nothing (issue #247's
+    operator decision — no carry-forward of a stale persisted triple
+    into the gate), never the stale persisted set and never (0, 0, 0)."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -161,7 +162,7 @@ def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
 
     r, captured, _frames = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_chat_latest_version_zero_dims_abstains_not_zero(app_with_versions):
@@ -278,45 +279,6 @@ def test_latest_version_stated_dims_helper_null_stated_dims_yields_none() -> Non
             return {"params": {"W": 12.0, "D": 8.0, "H": 5.0}, "stated_dims": None}
 
     assert latest_version_stated_dims(_Svc(), 1) is None
-
-
-def test_latest_version_stated_axes_helper_reads_column() -> None:
-    """Issue #247: the new per-axis reader reads the persisted
-    ``stated_dims`` column and returns only the axes present with a
-    positive value. A partial set (only H) yields ``{"H": 12.0}``, not
-    a full triple or None."""
-
-    class _Svc:
-        def latest_version(self, project_id):
-            return {
-                "params": {"spacer_height": 12.0},
-                "stated_dims": {"H": 12.0},
-            }
-
-    assert latest_version_stated_axes(_Svc(), 1) == {"H": 12.0}
-
-
-def test_latest_version_stated_axes_helper_full_set() -> None:
-    """A full set in the column yields all three axes."""
-
-    class _Svc:
-        def latest_version(self, project_id):
-            return {
-                "params": {},
-                "stated_dims": {"W": 10.0, "D": 8.0, "H": 6.0},
-            }
-
-    assert latest_version_stated_axes(_Svc(), 1) == {"W": 10.0, "D": 8.0, "H": 6.0}
-
-
-def test_latest_version_stated_axes_helper_null_column_yields_none() -> None:
-    """A NULL ``stated_dims`` column → None (no confirmed axes)."""
-
-    class _Svc:
-        def latest_version(self, project_id):
-            return {"params": {}, "stated_dims": None}
-
-    assert latest_version_stated_axes(_Svc(), 1) is None
 
 
 # ---------------------------------------------------------------------------
@@ -734,14 +696,15 @@ def test_region_edit_fresh_project_passes_none_not_zero_triple(app_with_versions
     assert captured["stated_dims"] is None
 
 
-def test_region_edit_latest_version_uses_persisted_confirmed_set(
+def test_region_edit_latest_version_abstains_no_persisted_fallback(
     app_with_versions,
 ):
-    """A region edit with an existing version hands the loop the latest
-    version row's PERSISTED per-axis confirmed set — the dead W/D/H
-    param-key read (which on a version whose W/D/H live under free names
-    like ``spacer_*`` always yielded (0,0,0)) is gone: the column, not
-    the params, is the source."""
+    """A region edit with an existing version hands the loop ``None`` —
+    a region edit carries NO dimension statement, so the gate abstains,
+    as before issue #247: there is no persisted fallback for the gate
+    (the 3MF export route still reads the column via
+    ``latest_version_stated_dims``; the loop-facing region-edit route
+    does not)."""
     from tests.versioning.test_design_loop_finalize import _StubResult
 
     captured: dict = {}
@@ -772,7 +735,7 @@ def test_region_edit_latest_version_uses_persisted_confirmed_set(
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(

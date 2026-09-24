@@ -702,7 +702,7 @@ def _finalize_loop_kwargs(
       failures.jsonl line is un-archivable without it).
     """
     from d33d.config.catalogue import CatalogueError, ResolutionError
-    from d33d.design_loop_events import gate_stated_dims
+    from d33d.design_loop_events import axes_to_gate_triple
     from d33d.dimension_protocol import stated_axes_from_message
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
@@ -737,13 +737,13 @@ def _finalize_loop_kwargs(
     # The gate's target (ticket #91; issue #247's per-axis decision): the
     # CURRENT run's per-axis confirmed set — the body's explicit
     # ``stated_dims`` axes when a client sends one, else the protocol's
-    # per-axis extraction of the finalize message — falling back to the
-    # latest version row's persisted confirmed set when the current
-    # statement confirms nothing. A PARTIAL confirmed set is a
-    # zero-filled (W, D, H) triple (per-axis abstention in the gate, 
+    # per-axis extraction of the finalize message. NO persisted fallback:
+    # a statement that confirms nothing abstains the gate (``None``) —
+    # it must not enforce an axis confirmed on an earlier turn against a
+    # candidate the user just asked to change. A PARTIAL confirmed set
+    # is a zero-filled (W, D, H) triple (per-axis abstention in the gate,
     # ``not specified`` in the prompt), never (0.0, 0.0, 0.0) and never
-    # re-derived from W/D/H param keys (the dead read issue #247
-    # removed); ``None`` only when no axis is confirmed anywhere.
+    # re-derived from W/D/H param keys (the dead read issue #247 removed).
     if body.stated_dims is not None:
         _w, _d, _h = body.stated_dims
         current_axes: dict[str, float] = {
@@ -753,7 +753,7 @@ def _finalize_loop_kwargs(
         }
     else:
         current_axes = stated_axes_from_message(body.request or body.message or "")
-    stated_dims = gate_stated_dims(current_axes, app.state.versions, project_id)
+    stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest
     # version's full params snapshot, passed INTO the loop (the loop's
     # prompt builder renders it). The GET the SPA reads

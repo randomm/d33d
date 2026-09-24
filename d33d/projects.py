@@ -31,7 +31,7 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d.design_loop_events import (
-    gate_stated_dims,
+    axes_to_gate_triple,
     photo_data_uri,
     run_design_loop_with_events,
 )
@@ -137,13 +137,18 @@ class ChatRequest(BaseModel):
     sends the field), the server resolves dimensions itself — it does NOT
     depend on the client supplying it (ticket #91):
 
-    1. dimensions stated in the user's own message, via the existing
-       ``d33d.dimension_protocol`` extraction (``stated_dims_from_message``);
-    2. else the latest version's W/D/H (``latest_version_stated_dims`` —
-       the same fallback the finalize seam uses);
-    3. else ``None`` — "no dimensions known": the loop's bbox gate
-       ABSTAINS (``Score.bbox_abstained``) instead of hard-failing on a
-       fabricated ``(0.0, 0.0, 0.0)`` target (the bug this ticket fixes).
+    1. dimensions stated in the user's OWN message via the existing
+       ``d33d.dimension_protocol`` per-axis extraction
+       (``stated_axes_from_message``); the body's explicit ``stated_dims``
+       axes take priority when a client sends them;
+    2. else ``None`` — "no dimensions confirmed THIS turn": the loop's
+       bbox gate ABSTAINS (``Score.bbox_abstained``) instead of
+       hard-failing on a fabricated ``(0.0, 0.0, 0.0)`` target (the bug
+       this ticket fixes). A PARTIAL confirmation is a zero-filled
+       triple — the unconfirmed axes abstain per-axis, never a full
+       triple or a zero triple. There is deliberately NO fallback to a
+       persisted version row's dimensions: the gate enforces only what
+       the current turn confirmed (issue #247's operator decision).
 
     ``chat_history`` is the list of prior user messages (the SPA sends the
     last 10); absent → empty tuple.
@@ -298,16 +303,18 @@ def create_projects_router() -> APIRouter:
         # Resolve the loop's stated dimensions (ticket #91; issue #247's
         # per-axis decision) — the SPA never sends ``stated_dims`` (it
         # posts only ``message`` + ``chat_history``): the loop receives
-        # the CURRENT run's per-axis confirmed set (``gate_stated_dims``
-        # — the body's explicit ``stated_dims`` axes when a client sends
-        # one, else the protocol's per-axis extraction of the message),
-        # falling back to the latest version row's persisted confirmed set
-        # when the current message confirms nothing. A PARTIAL confirmed
-        # set is a zero-filled (W, D, H) triple — unconfirmed axes render
-        # as ``not specified`` in the prompt and abstain per-axis in the
-        # bbox gate; ``None`` (abstain entirely, recorded in
-        # ``Score.bbox_abstained``) only when no axis is confirmed
-        # anywhere. This route never reads W/D/H param keys.
+        # the CURRENT run's per-axis confirmed set (the body's explicit
+        # ``stated_dims`` axes when a client sends one, else the
+        # protocol's per-axis extraction of the message). NO persisted
+        # fallback: a follow-up message with no explicit dimension cue
+        # confirms nothing and the gate ABSTAINS (``Score.bbox_abstained``)
+        # — it must not enforce an axis confirmed on an earlier turn
+        # against a candidate the user just asked to change. A PARTIAL
+        # confirmed set is a zero-filled (W, D, H) triple — unconfirmed
+        # axes render as ``not specified`` in the prompt and abstain
+        # per-axis in the bbox gate; ``None`` (abstain entirely) when the
+        # current turn confirmed no axis. This route never reads W/D/H
+        # param keys and never reads a persisted version row for the gate.
         chat_history = tuple(body.chat_history or ())
 
         # The per-axis stated evidence — the gate's current-message source
@@ -331,9 +338,7 @@ def create_projects_router() -> APIRouter:
         else:
             per_axis_stated = stated_axes_from_message(body.message, chat_history)
 
-        stated = gate_stated_dims(
-            per_axis_stated, app.state.versions, project_id
-        )
+        stated = axes_to_gate_triple(per_axis_stated)
 
         # Photo: read the project's stored photo NOW (synchronously, before
         # the 202 response) — the background task runs via asyncio and the

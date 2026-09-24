@@ -906,12 +906,12 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     )
 
 
-def test_region_edit_stated_dims_from_latest_version(app_with_versions):
-    """stated_dims is ALWAYS derived from the latest version row's
-    PERSISTED per-axis confirmed set (no client override for region
-    edits) — a project with an existing version passes that row's
-    confirmed set as a (W, D, H) triple (zero-filled for unconfirmed
-    axes), never re-derived from W/D/H param keys (issue #247)."""
+def test_region_edit_stated_dims_none_gate_abstains(app_with_versions):
+    """A region edit carries NO dimension statement, so the loop
+    receives ``None`` — the gate abstains, as before issue #247 (there
+    is no persisted fallback for the gate; the 3MF export route's
+    ``latest_version_stated_dims`` is the only reader of the column on
+    the loop side)."""
     captured: dict = {}
 
     async def _loop(app, **kwargs):
@@ -941,7 +941,7 @@ def test_region_edit_stated_dims_from_latest_version(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
+    assert captured["stated_dims"] is None
 
 
 def test_region_edit_pass_creates_version_visible_in_get_versions(

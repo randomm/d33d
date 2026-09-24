@@ -934,15 +934,14 @@ def test_latest_version_stated_dims_omitted_axes_yields_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chat_follow_up_latest_version_fallback_supplies_dims(
-    app_with_versions,
-):
+def test_chat_follow_up_cueless_message_abstains(app_with_versions):
     """FOLLOW-UP TURN (issue #247): a project that HAS a version whose
     persisted ``stated_dims`` column carries a full W/D/H triple — a
-    follow-up message that states no dimensions (the extraction yields
-    ``{}``) falls back to the latest version's persisted per-axis set,
-    which supplies the full triple. The loop seam captures the
-    stated_dims it receives."""
+    follow-up message that states no dimensions confirms nothing, so the
+    gate ABSTAINS: the loop seam captures ``None`` (no carry-forward of
+    confirmed dimensions across turns — the operator decision that
+    superseded the persisted-set fallback; carry-forward is a separate
+    product decision)."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -956,10 +955,10 @@ def test_chat_follow_up_latest_version_fallback_supplies_dims(
             stated_dims={"W": 20.0, "D": 20.0, "H": 20.0},
         )
 
-        # A follow-up message with NO stated dimensions — the latest
-        # version's persisted set must supply the triple (the fallback
-        # that was a no-op before the fix because the dead W/D/H param-key
-        # read always returned None).
+        # A follow-up message with NO stated dimensions — the current
+        # turn confirms nothing, so the gate abstains (None); there is no
+        # persisted fallback to carry the previous turn's dimensions
+        # forward (issue #247's operator decision).
         def _capture_loop(app, **kwargs):
             captured_turn2.update(kwargs)
 
@@ -984,9 +983,10 @@ def test_chat_follow_up_latest_version_fallback_supplies_dims(
 
     captured_turn2: dict = {}
     r2 = run_async(app_with_versions, _call)
-    # The fallback supplies the dims — not None, not (0,0,0).
+    # The cueless follow-up confirms nothing — None (abstain), not the
+    # stale persisted triple and never (0,0,0).
     assert r2.status_code == 202, r2.text
-    assert captured_turn2["stated_dims"] == (20.0, 20.0, 20.0)
+    assert captured_turn2["stated_dims"] is None
     assert captured_turn2["stated_dims"] != (0.0, 0.0, 0.0)
 
 
