@@ -2095,14 +2095,13 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
     ``kind: "answer"``). The test runs in <1 s of wall clock (the
     same contract as the 10 s production bound, at a shorter value).
 
-    The production edge (``_build_question_answer_call._wrapper``) wraps
-    the entire ``_call`` body in ``asyncio.wait_for`` — the test's stub
-    edge (which replaces ``app.state.answer_question``) exercises the
-    ``ask_answer_call`` timeout, which is the same mechanism the
-    production edge relies on. The catalogue-load + probe bound is the
-    production edge's additional guarantee (the ``_wrapper``'s outer
-    ``wait_for``), verified structurally in the code (the ``_wrapper``
-    wraps the whole ``_call`` including the probe)."""
+    There is exactly ONE 10 s enforcement point (issue #249 review):
+    ``ask_answer_call``'s ``asyncio.wait_for`` around the edge. The test
+    installs the PRODUCTION edge (``_build_question_answer_call``) with
+    the probe monkeypatched to RAISE (the capability cache is seeded so
+    the probe is not on the path) and the wire call hanging — the bound
+    that fires is ``ask_answer_call``'s, the wire call's, and the
+    total POST→202 time stays under the bound + margin."""
     import types
 
     from d33d import design_loop as _design_loop_mod
@@ -2111,18 +2110,25 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
     from d33d.config import probes as _probes_mod
     from d33d.config import resolve as _resolve_mod
 
-    captured: dict = {"probe_called": False, "completion_called": False}
+    captured: dict = {"probe_calls": 0}
 
     async def _fake_probe(base_url, model_id, api_key, request_factory):
-        captured["probe_called"] = True
-        return None  # T3 — the loop degrades
+        captured["probe_calls"] += 1
+        raise RuntimeError("probe must not run — the hang is on the wire call")
 
     class _HangingLLM:
         async def __call__(self, role, messages, system):
-            captured["completion_called"] = True
             import asyncio as _a
             await _a.sleep(0.5)  # well past the 0.1 s bound
-            return ''
+            return ""
+
+    def _fake_make_llm_fn(cat, f, c):
+        # A T0-shaped capability (the probe never ran — the cache would
+        # be cold, so the monkeypatched ``_fake_probe`` raises if it
+        # does): this pins that the bound the test measures is the
+        # single 10 s enforcement point (``ask_answer_call``'s
+        # ``wait_for``) around the wire call, with no probe in the path.
+        return _HangingLLM()
 
     monkeypatch.setattr(
         _catalogue_mod,
@@ -2141,7 +2147,20 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
         ),
     )
     monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)
-    monkeypatch.setattr(_design_loop_mod, "make_llm_fn", lambda cat, f, c: _HangingLLM())
+    monkeypatch.setattr(_design_loop_mod, "make_llm_fn", _fake_make_llm_fn)
+    # The production edge reads ``app_state.question_capability_cache`` —
+    # seed a T0 capability for the stub key so the probe path is not
+    # taken (the monkeypatched probe raises if it is). The cache is a
+    # FRESH object owned by this test — the fixture's app carries one
+    # from ``create_app``, and a test-local instance is monkeypatched
+    # back by pytest's fixture teardown (state attributes are restored
+    # per test by the fixture's own yield/teardown).
+    from d33d.config.probes import CapabilityResult as _Cap
+
+    app_with_versions.state.question_capability_cache = _probes_mod.CapabilityCache()
+    app_with_versions.state.question_capability_cache.put(
+        "http://stub", "stub", _Cap(tools=True, json_schema=False, vision=False, max_images=0)
+    )
 
     # Monkeypatch the timeout to 0.1 s so the test runs in <1 s.
     import d33d.question_answer as _qa_mod
@@ -2170,7 +2189,7 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
         app_with_versions.state.run_design_loop = _loop
         # The production edge (with the monkeypatched 0.1 s bound):
         app_with_versions.state.answer_question = _build_question_answer_call(
-            app_with_versions.state.catalogue_path
+            app_with_versions.state.catalogue_path, app_with_versions
         )
         import time
         t0 = time.monotonic()

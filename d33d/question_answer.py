@@ -60,15 +60,16 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "ANSWER_CALL_TIMEOUT_SECONDS",
     "ANSWER_DONE_KIND",
-    "is_candidate_question",
-    "state_block_numbers",
-    "extract_answer_numbers",
-    "guard_answer_numbers",
-    "build_answer_prompt",
-    "parse_answer_reply",
     "ask_answer_call",
-    "state_block_for_chat",
+    "build_answer_prompt",
+    "extract_answer_numbers",
+    "extract_written_numbers",
+    "guard_answer_numbers",
+    "is_candidate_question",
+    "parse_answer_reply",
     "route_chat_message",
+    "state_block_for_chat",
+    "state_block_numbers",
 ]
 
 #: The stage-2 hard timeout (operator decision: 10 s). The stage-2 call
@@ -97,13 +98,14 @@ _INTERROGATIVE_RE = re.compile(
 #: ANY of them sends the message to the design loop, no matter what the
 #: interrogative check said. The ticket's single-word list is the core;
 #: the inflections ("making", "change it", …) are added so a cue is not
-#: missed by conjugation. "set" is deliberately NOT in the list: the
-#: ticket's example answer ("Want to set it?") and common design-state
-#: prose make it ambiguous in a question context, and the multi-word
-#: cues below cover the imperative forms of it.
+#: missed by conjugation. "set" IS in the list — "set" is a change cue
+#: ("set the height to 15" goes to the loop, never the answer path);
+#: only its conjugated inflections are listed, never misspellings.
+#: The multi-word imperative forms ("can you set", …) are the cues
+#: below.
 _IMPERATIVE_RE = re.compile(
     r"\b(?:"
-    "make|makes|made|making|set|sets|seting|setted|setting|change|changes|changed|changing"
+    "make|makes|made|making|set|sets|setting|change|changes|changed|changing"
     "|add|adds|added|adding|remove|removes|removed|removing|increase|increases|increased|increasing"
     "|decrease|decreases|decreased|decreasing|reduce|reduces|reduced|reducing"
     "|move|moves|moved|moving|widen|widens|widened|widening"
@@ -159,9 +161,7 @@ def is_candidate_question(message: str) -> bool:
     # 15." → not a candidate (the imperative is present).
     if _IMPERATIVE_RE.search(m) is not None:
         return False
-    if _MULTIWORD_IMPERATIVE_RE.search(m) is not None:
-        return False
-    return True
+    return _MULTIWORD_IMPERATIVE_RE.search(m) is None
 
 
 # ---------------------------------------------------------------------------
@@ -211,15 +211,78 @@ def extract_answer_numbers(answer: str) -> list[float]:
     return [float(t) for t in _NUMBER_TOKEN_RE.findall(answer)]
 
 
+#: Spelled-out numbers the guard also checks (issue #249 review): a model
+#: that writes "twelve millimetres tall" for H=12 would pass the digit
+#: guard (no digit present), so the spelled-out forms of the small
+#: integers are mapped to their values and held to the same presence rule
+#: as digit tokens. Zero–twenty plus the tens up to ninety cover the
+#: realistic measurement vocabulary; "a dozen" (12) is the common idiom.
+_WRITTEN_NUMBER_VALUES = {
+    "zero": 0.0,
+    "one": 1.0,
+    "two": 2.0,
+    "three": 3.0,
+    "four": 4.0,
+    "five": 5.0,
+    "six": 6.0,
+    "seven": 7.0,
+    "eight": 8.0,
+    "nine": 9.0,
+    "ten": 10.0,
+    "eleven": 11.0,
+    "twelve": 12.0,
+    "thirteen": 13.0,
+    "fourteen": 14.0,
+    "fifteen": 15.0,
+    "sixteen": 16.0,
+    "seventeen": 17.0,
+    "eighteen": 18.0,
+    "nineteen": 19.0,
+    "twenty": 20.0,
+    "thirty": 30.0,
+    "forty": 40.0,
+    "fifty": 50.0,
+    "sixty": 60.0,
+    "seventy": 70.0,
+    "eighty": 80.0,
+    "ninety": 90.0,
+}
+
+_WRITTEN_NUMBER_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_WRITTEN_NUMBER_VALUES, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
+
+_WRITTEN_DOZEN_RE = re.compile(r"\ba\s+dozen\b", re.IGNORECASE)
+
+
+def extract_written_numbers(answer: str) -> list[float]:
+    """The spelled-out numbers in an answer text, in order (zero–twenty,
+    tens up to ninety, and "a dozen" → 12). Case-insensitive; "forty"
+    and "fourty" — only the correct spelling is in the map ("fourty"
+    matches nothing: an unlisted word is not a number)."""
+    out: list[float] = []
+    for m in _WRITTEN_NUMBER_RE.finditer(answer):
+        out.append(_WRITTEN_NUMBER_VALUES[m.group(0).lower()])
+    for _ in _WRITTEN_DOZEN_RE.findall(answer):
+        out.append(12.0)
+    return out
+
+
 def guard_answer_numbers(
     answer: str, entries: list[dict[str, Any]], tolerance: float = 1e-6
 ) -> bool:
     """The deterministic number guard: ``True`` iff every number in
     ``answer`` appears in the design-state block.
 
+    "Number" means a digit token (``12``, ``12.5``, ``20 × 20`` → …) OR
+    a spelled-out form ("twelve", "fifteen", "a dozen", … — zero–twenty
+    plus the tens up to ninety); both are held to the same presence rule.
+
     Presence-only (operator decision): citing another axis's number
     (e.g. "20 mm tall" when H=12, W=20) PASSES — the guard checks
-    digit presence, not parameter attribution. A block value of ``12.5``
+    presence, not parameter attribution. A block value of ``12.5``
     does not license ``"12"`` or ``"13"`` (exact match within the
     tolerance, unit suffix stripped). An answer with no numbers is
     unanswerable by construction (the block is the only source of
@@ -230,6 +293,9 @@ def guard_answer_numbers(
     """
     allowed = state_block_numbers(entries)
     for n in extract_answer_numbers(answer):
+        if not any(abs(n - a) <= tolerance for a in allowed):
+            return False
+    for n in extract_written_numbers(answer):
         if not any(abs(n - a) <= tolerance for a in allowed):
             return False
     return True
@@ -356,11 +422,11 @@ async def ask_answer_call(
     raw: Any
     try:
         raw = await asyncio.wait_for(answer_fn(prompt), timeout=timeout)
-    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — ANY failure degrades to the loop
+    except Exception:  # noqa: BLE001 — ANY failure (incl. the 10 s TimeoutError) degrades to the loop
         logger.info(
             "question-answer stage 2 call failed or timed out "
-            "(question=%r) — routing to the design loop",
-            question,
+            "(len(message)=%d) — routing to the design loop",
+            len(question),
         )
         return None
     parsed = parse_answer_reply(raw)
@@ -375,16 +441,19 @@ async def ask_answer_call(
     answerable, answer = parsed
     if not answerable:
         logger.info(
-            "question-answer stage 2: block cannot answer (question=%r) — "
-            "routing to the design loop",
-            question,
+            "question-answer stage 2: block cannot answer "
+            "(len(message)=%d) — routing to the design loop",
+            len(question),
         )
         return None
     if not guard_answer_numbers(answer, entries):
         logger.info(
-            "question-answer number guard failed (answer=%r) — routing "
-            "to the design loop",
-            answer,
+            "question-answer number guard failed (len(answer)=%d) — "
+            "routing to the design loop",
+            len(answer),
+        )
+        logger.debug(
+            "question-answer number guard failed (answer=%r)", answer
         )
         return None
     return True, answer
@@ -446,9 +515,10 @@ async def route_chat_message(
     if not is_candidate_question(message):
         logger.info(
             "question-answer: message is not a stage-1 question "
-            "(%r) — design loop",
-            message,
+            "(len(message)=%d) — design loop",
+            len(message),
         )
+        logger.debug("question-answer: message=%r", message)
         return None
     entries = state_block_for_chat(latest)
     if answer_edge is None:
@@ -466,7 +536,8 @@ async def route_chat_message(
     _ok, answer = result
     logger.info(
         "question-answer: answering from the design-state block "
-        "(question=%r)",
-        message,
+        "(len(message)=%d, len(answer)=%d)",
+        len(message),
+        len(answer),
     )
     return {"kind": ANSWER_DONE_KIND, "answer": answer}
