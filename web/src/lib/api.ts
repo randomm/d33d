@@ -139,6 +139,18 @@ export interface DesignStateEntry {
   unit: string | null;
   provenance: DesignStateProvenance;
   stated_value?: number | string | boolean | null;
+  /** Issue #248: true when the label is the raw SCAD identifier (no
+   *  model label) — the UI renders it in the mono face (mono = machine
+   *  value). Absent/legacy entries are treated as identifiers. */
+  label_is_identifier?: boolean;
+  /** Issue #248: the model's declared axis ("W" | "D" | "H") — the only
+   *  promotion evidence; present on param rows only. The UI renders the
+   *  row via `kind`, not this field, but the contract test surface
+   *  pins the full payload shape. */
+  axis?: "W" | "D" | "H";
+  /** Issue #248: the model's stated reason for a value the user did not
+   *  give — the Brief's expanded assumed row renders it. */
+  reason?: string;
 }
 
 /**

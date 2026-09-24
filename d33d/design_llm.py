@@ -95,7 +95,28 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
             "description": "Emit the parametric OpenSCAD",
             "parameters": {
                 "type": "object",
-                "properties": {"scad": {"type": "string"}},
+                "properties": {
+                    "scad": {"type": "string"},
+                    # Issue #248: the model's own words about each
+                    # parameter it declares in the top variable block —
+                    # {name, label, unit, axis?, reason?}. Metadata is
+                    # joined by name in d33d.design_state; the SCAD
+                    # declarations remain the source of the values.
+                    "parameters": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "label": {"type": "string"},
+                                "unit": {"type": "string"},
+                                "axis": {"type": "string"},
+                                "reason": {"type": "string"},
+                            },
+                            "required": ["name", "label"],
+                        },
+                    },
+                },
             },
         },
     },

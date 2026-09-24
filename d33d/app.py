@@ -1328,6 +1328,7 @@ def _build_production_design_loop():
             state_params=kwargs.get("state_params"),
             state_bbox=kwargs.get("state_bbox"),
             state_stated=kwargs.get("state_stated"),
+            state_meta=kwargs.get("state_meta"),
             design_source=kwargs.get("design_source"),
             model=res.entry.model,
             prompt_version=prompt_version,

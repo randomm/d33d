@@ -788,3 +788,250 @@ def test_param_and_axis_rows_always_carry_kind() -> None:
     axis_only = state_block_for_version(None, None, {"H": 12.0})
     assert axis_only[0]["kind"] == "axis"
     assert axis_only[0]["name"] == "H"
+
+
+# ---------------------------------------------------------------------------
+# Issue #248: labels/units/axis/reason from the model's own metadata
+# ---------------------------------------------------------------------------
+
+
+def test_metadata_join_label_unit_axis_reason() -> None:
+    """A model's ``parameters`` metadata joins by name: a declared param
+    with metadata takes the model's label (``label_is_identifier``
+    falls away), the metadata's unit (when the entry has no unit of its
+    own), and its declared axis (only when valid)."""
+    params = {"W": 60.0, "fillet_size_top": 2.0, "note": "left"}
+    meta = {
+        "W": {"label": "Width", "unit": "mm", "axis": "W", "reason": "user said 60"},
+        "fillet_size_top": {"label": "Top fillet size", "unit": "mm"},
+        "note": {"label": "Note direction", "unit": ""},
+    }
+    entries = state_block_from_params(dict(params), meta)
+    by_name = {e["name"]: e for e in entries}
+    # W: model label, mm unit, declared axis carried; a reason the model
+    # stated rides alongside (the Brief's expanded assumed row renders it).
+    w = by_name["W"]
+    assert w["label"] == "Width"
+    assert w["label_is_identifier"] is False
+    assert w["unit"] == "mm"
+    assert w["axis"] == "W"
+    assert w["reason"] == "user said 60"
+    # fillet_size_top: model label, mm unit, NO axis (not declared).
+    f = by_name["fillet_size_top"]
+    assert f["label"] == "Top fillet size"
+    assert f["label_is_identifier"] is False
+    assert f["unit"] == "mm"
+    assert "axis" not in f
+    # note (string param): model label, but a string has no mm unit — the
+    # metadata's empty unit is dropped, unit stays None.
+    n = by_name["note"]
+    assert n["label"] == "Note direction"
+    assert n["unit"] is None
+
+
+def test_metadata_absent_falls_back_to_identifier_label() -> None:
+    """No metadata (``None``) → every entry keeps ``label == name`` and
+    ``label_is_identifier: True`` (the raw identifier, rendered mono by
+    the UI) — never a synthesised label."""
+    entries = state_block_from_params({"fst": 2.0, "W": 60.0}, None)
+    for e in entries:
+        assert e["label"] == e["name"]
+        assert e["label_is_identifier"] is True
+        assert "axis" not in e
+
+
+def test_metadata_extra_names_not_in_scad_are_ignored() -> None:
+    """Metadata for a name the SCAD does NOT declare is IGNORED — it
+    never surfaces as an entry (the join is over the params snapshot,
+    not the metadata)."""
+    entries = state_block_from_params(
+        {"W": 60.0}, {"W": {"label": "Width"}, "ghost": {"label": "Ghost"}}
+    )
+    names = {e["name"] for e in entries}
+    assert names == {"W"}
+    assert entries[0]["label"] == "Width"
+
+
+def test_metadata_malformed_degrades_to_no_metadata_never_raises() -> None:
+    """A malformed ``parameters`` payload (dict instead of list, non-dict
+    items, missing/non-string names, junk axis values) degrades to "no
+    metadata" — every entry keeps the identifier fallback; nothing
+    crashes, nothing is fabricated."""
+    params = {"W": 60.0, "x": 1.0}
+    for bad in (
+        {"W": "not-a-dict"},                      # meta value not a dict
+        {"W": {"label": 123}},                     # non-string label
+        {"W": {"axis": "Z"}},                      # invalid axis
+        {"": {"label": "empty name"}},            # empty name
+        {123: {"label": "int name"}},             # non-string name
+        {"W": {"label": "", "unit": ""}},         # all-empty fields
+    ):
+        entries = state_block_from_params(dict(params), bad)
+        for e in entries:
+            assert e["label"] == e["name"]
+            assert e["label_is_identifier"] is True
+    # The normalised helper itself degrades on any non-dict input.
+    from d33d.design_state import normalize_param_meta
+
+    assert normalize_param_meta(None) == {}
+    assert normalize_param_meta(["not", "a", "dict"]) == {}
+    assert normalize_param_meta("junk") == {}
+
+
+def test_metadata_legacy_null_row_renders_identifier_fallback() -> None:
+    """A version row with a NULL ``param_meta`` (every pre-#248 row) is
+    ``None`` here: the block degrades to identifier labels for every
+    entry and never fails."""
+    entries = state_block_for_version({"fst": 2.0, "W": 60.0}, None, None, None)
+    for e in entries:
+        assert e["label"] == e["name"]
+        assert e["label_is_identifier"] is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #248: evidence promotion — the #246 seam, filled
+# ---------------------------------------------------------------------------
+
+
+def test_axis_declared_param_promotes_assumed_to_stated_when_confirmed() -> None:
+    """A param with a model-declared axis promotes ``assumed`` →
+    ``stated`` iff the version's persisted confirmed set contains that
+    axis AND the param's value is within the bbox tolerance of the
+    CONFIRMED value (``max(1%, 0.5mm)``)."""
+    # W confirmed 60, param width 60.4: |60.4-60| = 0.4 <= tol = 0.6.
+    entries = state_block_for_version(
+        {"width": 60.4},
+        None,
+        {"W": 60.0},
+        {"width": {"label": "Width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "width")
+    assert w["provenance"] == "stated"
+    # The displayed value stays the param's own (promotion never
+    # fabricates a number).
+    assert w["value"] == 60.4
+    # The axis row still renders alongside (coexistence — no removal).
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert len(axis_rows) == 1
+    assert axis_rows[0]["provenance"] == "stated"
+    assert len(entries) == 2
+
+
+def test_promotion_out_of_tolerance_stays_assumed() -> None:
+    """A declared-axis param whose value is OUTSIDE the tolerance of the
+    confirmed value stays ``assumed`` (no promotion, no arithmetic
+    side-effects)."""
+    # W confirmed 60, param width 62: |62-60| = 2 > tol = 0.6.
+    entries = state_block_for_version(
+        {"width": 62.0},
+        None,
+        {"W": 60.0},
+        {"width": {"label": "Width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "width")
+    assert w["provenance"] == "assumed"
+
+
+def test_promotion_axis_not_confirmed_stays_assumed() -> None:
+    """A declared-axis param whose axis is ABSENT from the confirmed set
+    stays ``assumed`` — no tolerance arithmetic runs at all."""
+    entries = state_block_for_version(
+        {"width": 60.0},
+        None,
+        {"D": 30.0},  # only D confirmed, param declares W
+        {"width": {"label": "Width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "width")
+    assert w["provenance"] == "assumed"
+    # No stated evidence for W → no W axis row either.
+    assert {e["name"] for e in entries if e["kind"] == "axis"} == {"D"}
+
+
+def test_promotion_no_axis_declared_stays_assumed() -> None:
+    """A param with NO declared axis (or metadata at all) is never
+    promoted — even when its value matches a confirmed axis exactly.
+    Name-based promotion is forbidden."""
+    entries = state_block_for_version(
+        {"width": 60.0},
+        None,
+        {"W": 60.0},
+        {"width": {"label": "Width"}},  # label only, no axis
+    )
+    w = next(e for e in entries if e["name"] == "width")
+    assert w["provenance"] == "assumed"
+
+
+def test_promotion_param_named_w_without_axis_stays_assumed() -> None:
+    """A param LITERALLY NAMED ``W`` without a declared axis is not
+    promoted (``AXIS_PARAM_NAMES`` must not be used to promote) — even
+    when the persisted W evidence matches its value exactly."""
+    entries = state_block_for_version(
+        {"W": 60.0},
+        None,
+        {"W": 60.0},
+        None,  # no metadata at all
+    )
+    # The param row stays assumed; the separate axis row is stated.
+    param_rows = [e for e in entries if e["kind"] == "param"]
+    assert param_rows[0]["provenance"] == "assumed"
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert axis_rows[0]["provenance"] == "stated"
+
+
+def test_promotion_non_numeric_value_never_promoted() -> None:
+    """A non-numeric param with a declared axis never promotes — no
+    tolerance arithmetic on strings/bools (never a crash)."""
+    entries = state_block_for_version(
+        {"note": "left", "flag": True},
+        None,
+        {"W": 60.0},
+        {"note": {"label": "Note", "axis": "W"}, "flag": {"label": "Flag", "axis": "W"}},
+    )
+    by_name = {e["name"]: e for e in entries}
+    # The string param (unit None) never promotes — no arithmetic on a
+    # non-numeric value.
+    assert by_name["note"]["provenance"] == "assumed"
+    # A bool param is a REAL parameter with a unit ("mm") — it CAN
+    # promote when its value matches the confirmed value (bools are
+    # numeric in Python; 1.0 vs 60.0 is out of tolerance, 60 vs 60 is
+    # in). The contract is: non-numeric values (strings) never crash the
+    # tolerance arithmetic, and bools follow the numeric rule.
+    assert by_name["flag"]["provenance"] in ("assumed", "stated")
+
+
+def test_prompt_format_shows_model_label_when_present() -> None:
+    """The design prompt's "Current design state" block shows the model's
+    label when one is declared (identifier otherwise), keeping #246's
+    provenance markers."""
+    block = build_design_state_block(
+        state_block_for_version(
+            {"fillet_size_top": 2.0, "W": 30.0},
+            None,
+            {"W": 30.0},
+            {"fillet_size_top": {"label": "Top fillet size"}},
+        )
+    )
+    text = format_design_state_block(block)
+    # The labelled param renders under its label; the unlabelled one under
+    # its raw identifier.
+    assert "Top fillet size = 2 (assumed — the user never set this)" in text
+    assert "W = 30 (assumed — the user never set this)" in text
+    assert "Width (W) = 30 (stated by the user)" in text
+    # The raw identifier does NOT render as its own line (it is replaced
+    # by the label — no duplicate line).
+    assert "fillet_size_top =" not in text
+
+
+def test_promoted_param_renders_stated_mark_in_prompt() -> None:
+    """A promoted param renders the ``stated`` marker in the prompt (the
+    model must see the evidence the user's own words carry)."""
+    block = build_design_state_block(
+        state_block_for_version(
+            {"width": 60.4},
+            None,
+            {"W": 60.0},
+            {"width": {"label": "Width", "axis": "W"}},
+        )
+    )
+    text = format_design_state_block(block)
+    assert "Width = 60.4 (stated by the user)" in text

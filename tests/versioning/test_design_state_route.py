@@ -164,6 +164,80 @@ def test_design_state_route_returns_entries_for_latest_version(app_with_versions
     # The numeric param carries ``unit: "mm"``.
     assert by_name["W"]["unit"] == "mm"
     assert by_name["W"]["provenance"] == "assumed"
+    # Issue #248: with no param_meta on the version row (the legacy
+    # shape), every label is the raw identifier + the mono flag.
+    for name, entry in by_name.items():
+        assert entry.get("label_is_identifier") is True
+
+
+def test_design_state_route_carries_model_labels_and_promotion(
+    app_with_versions,
+) -> None:
+    """Issue #248 (consumer 2 — the GET the SPA reads): a version row
+    with a non-NULL ``param_meta`` renders the model's label where one is
+    present (``label_is_identifier`` False) and the raw identifier +
+    mono flag where absent; a metadata-declared axis with a persisted
+    confirmed value and within-tolerance param value promotes the param
+    row ``assumed`` → ``stated`` (the same shared callable as the prompt
+    builder)."""
+    meta = {
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        "fillet_size_top": {"label": "Top fillet size", "unit": "mm"},
+    }
+    params = {"width": 60.4, "fillet_size_top": 2.0}
+    stated = {"W": 60.0}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # Create the version directly via the service (the write path's
+        # full contract — stated_dims + param_meta persist on the row; the
+        # POST versions route does not take those fields, so the direct
+        # call is the honest seam for the persisted-column test).
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            dict(params),
+            stated_dims=stated,
+            param_meta=meta,
+        )
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    by_name = {e["name"]: e for e in body}
+    # width: model label present → not an identifier; declared axis W
+    # confirmed at 60.0, value 60.4 within tolerance → promoted stated.
+    w = by_name["width"]
+    assert w["label"] == "Width"
+    assert w["label_is_identifier"] is False
+    assert w["provenance"] == "stated"
+    # fillet_size_top: model label present → not an identifier; no
+    # declared axis → stays assumed (no promotion without axis evidence).
+    f = by_name["fillet_size_top"]
+    assert f["label"] == "Top fillet size"
+    assert f["label_is_identifier"] is False
+    assert f["provenance"] == "assumed"
+    # The W axis row (the persisted confirmed evidence) coexists — the
+    # promoted param row and the axis row both render, counted once each
+    # by their own provenance.
+    axis_rows = [e for e in body if e.get("kind") == "axis"]
+    assert len(axis_rows) == 1
+    assert axis_rows[0]["name"] == "W"
+    assert axis_rows[0]["provenance"] == "stated"
+
+
+def test_design_state_route_missing_project_is_404(app_with_versions) -> None:
+    """A missing project is a 404 (consistent with the other routes)."""
+
+    async def _call(client):
+        r = await client.get("/api/projects/999999/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 404
 
 
 def test_design_state_route_no_version_yet_returns_empty_array(app_with_versions) -> None:
@@ -199,17 +273,6 @@ def test_design_state_route_unknown_value_serialises_as_null(app_with_versions) 
     assert by_name["H"]["provenance"] == "unknown"
     # The stated W still carries its value.
     assert by_name["W"]["value"] == 30.0
-
-
-def test_design_state_route_missing_project_is_404(app_with_versions) -> None:
-    """A missing project is a 404 (consistent with the other routes)."""
-
-    async def _call(client):
-        r = await client.get("/api/projects/999999/design-state")
-        return r
-
-    result = run_async(app_with_versions, _call)
-    assert result.status_code == 404
 
 
 def test_design_state_route_uses_the_latest_version(app_with_versions) -> None:

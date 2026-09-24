@@ -117,6 +117,7 @@ __all__ = [
     "StateEntry",
     "build_design_state_block",
     "format_design_state_block",
+    "normalize_param_meta",
     "persisted_bbox_extents",
     "state_block_for_version",
     "state_block_from_params",
@@ -160,6 +161,15 @@ class StateEntry(TypedDict):
     unit: str | None
     provenance: Provenance
     stated_value: NotRequired[float | str | bool | None]
+    #: ``True`` when the label is the raw SCAD identifier (no model label)
+    #: — the UI renders it in the mono face (mono = machine value).
+    label_is_identifier: NotRequired[bool]
+    #: The model's declared axis (``"W" | "D" | "H"``) — the ONLY
+    #: promotion evidence (issue #248). Present on param rows only.
+    axis: NotRequired[str]
+    #: The model's stated reason for a value the user did not give
+    #: (issue #248) — the Brief's expanded assumed row renders it.
+    reason: NotRequired[str]
 
 
 def _is_number(value: Any) -> bool:
@@ -179,6 +189,7 @@ def _entry(
         "name": name,
         "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
+        "label_is_identifier": True,  # no model label — raw identifier
         "value": value,
         "unit": "mm" if _is_number(value) else None,
         "provenance": provenance,
@@ -188,11 +199,57 @@ def _entry(
     return out
 
 
+#: The axes a model may declare in a parameter's metadata (issue #248).
+_VALID_META_AXES: frozenset[str] = frozenset(("W", "D", "H"))
+
+
+def normalize_param_meta(raw: Any) -> dict[str, Any]:
+    """The model's ``parameters`` metadata, normalised to
+    ``{name: {label?, unit?, axis?, reason?}}`` (issue #248).
+
+    ``raw`` is the version row's persisted ``param_meta`` column (``None``
+    — legacy rows, or a model that emitted no ``parameters`` array — or
+    the JSON the write path stored). ``None`` / an absent / malformed
+    input degrades to ``{}`` ("no metadata" — every entry falls back to
+    its identifier label), NEVER a crash: a metadata failure must never
+    fail the design state (or the design pass).
+
+    Each stored value keeps only the fields that survive a shape check:
+    ``label``/``unit``/``reason`` as non-empty strings, ``axis`` only when
+    one of ``W``/``D``/``H``. A metadata entry whose name is not a
+    non-empty string is dropped (the join is by name — a nameless entry
+    has nothing to join against), as is one that carries no usable
+    field (storing it would be a no-op the caller could not distinguish
+    from absence). The result is insertion-ordered (declaration order).
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for name, meta in raw.items():
+        if not isinstance(name, str) or not name:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        cleaned: dict[str, Any] = {}
+        for key in ("label", "unit", "axis", "reason"):
+            v = meta.get(key)
+            if not isinstance(v, str) or not v:
+                continue
+            if key == "axis" and v not in _VALID_META_AXES:
+                continue
+            cleaned[key] = v
+        if cleaned:
+            out[name] = cleaned
+    return out
+
+
 def state_block_from_params(
     params: dict[str, Any] | None,
+    param_meta: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-state block from a version's params snapshot
-    (``versions_service.latest_version(project_id)["params"]``).
+    (``versions_service.latest_version(project_id)["params"]``) with
+    the model's per-parameter metadata joined in (issue #248).
 
     This is the LIVE route's data source. Every declared parameter
     (never a fixed {W, D, H} triple) becomes an entry:
@@ -206,22 +263,51 @@ def state_block_from_params(
     - a missing/null/zero/absent value → provenance ``"unknown"`` with
       ``value: None`` (``null`` — never ``0``, never an omitted key).
 
+    ``param_meta`` (issue #248) is the version row's persisted
+    ``param_meta`` (``{name: {label?, unit?, axis?, reason?}}`` — the
+    model's own words about each parameter it declared). The join is BY
+    NAME: an entry for a declared name takes that name's ``label``
+    (``label_is_identifier`` falls away) and, when the entry has no
+    unit of its own, the metadata's ``unit``; a metadata name that no
+    param declares is IGNORED (never surfaced as an entry); a param
+    with no metadata entry keeps ``label == name`` +
+    ``label_is_identifier: True`` (the raw identifier, rendered mono by
+    the UI). No label is ever synthesised (no prettifying — DECISIONS.md).
+
     ``None`` (no version yet) → an empty block (zero entries).
     """
     if params is None:
         return []
+    meta = normalize_param_meta(param_meta)
     out: list[dict[str, Any]] = []
     for name, value in params.items():
         if _is_number(value):
             if value == 0:
-                out.append(_entry(name, None, "unknown"))
+                entry = _entry(name, None, "unknown")
             else:
-                out.append(_entry(name, value, "assumed"))
+                entry = _entry(name, value, "assumed")
         elif value is None:
-            out.append(_entry(name, None, "unknown"))
+            entry = _entry(name, None, "unknown")
         else:
             # string/bool — a real parameter, model-emitted, no mm unit.
-            out.append(_entry(name, value, "assumed"))
+            entry = _entry(name, value, "assumed")
+        m = meta.get(name)
+        if m is not None:
+            label = m.get("label")
+            if isinstance(label, str) and label:
+                entry["label"] = label
+                entry["label_is_identifier"] = False
+            if entry["unit"] is None:
+                unit = m.get("unit")
+                if isinstance(unit, str) and unit:
+                    entry["unit"] = unit
+            axis = m.get("axis")
+            if isinstance(axis, str) and axis in _VALID_META_AXES:
+                entry["axis"] = axis
+            reason = m.get("reason")
+            if isinstance(reason, str) and reason:
+                entry["reason"] = reason
+        out.append(entry)
     return out
 
 
@@ -297,11 +383,13 @@ def state_block_for_version(
     params: dict[str, Any] | None,
     measurement: Any = None,
     stated: dict[str, Any] | None = None,
+    param_meta: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """The design-state block for ONE version: the version's params
     snapshot (``state_block_from_params`` — every model-emitted parameter
-    ``assumed``/``unknown``) merged with the version's PERSISTED per-axis
-    stated set and PERSISTED measurement (issue #246 + #137).
+    ``assumed``/``unknown``, labels from the model's own metadata) merged
+    with the version's PERSISTED per-axis stated set and PERSISTED
+    measurement (issue #246 + #137).
 
     This is THE shared callable — the live prompt builder
     (``d33d.design_loop``) and the GET route the SPA reads
@@ -315,8 +403,12 @@ def state_block_for_version(
     version row's persisted ``stated_dims`` (issue #246: the dimension
     protocol's per-axis confirmed set for the run that produced the
     version — a partial statement counts for the axes it states, ``None``
-    when nothing was stated). Both ``None`` → the pure params-only
-    substrate's output, verbatim (``assumed``/``unknown``).
+    when nothing was stated). ``param_meta`` is the version row's
+    persisted ``param_meta`` (issue #248: the model's per-parameter
+    ``{name: {label?, unit?, axis?, reason?}}`` — ``None`` on every
+    legacy row, which degrades to the identifier fallback for all
+    entries). All ``None`` → the pure params-only substrate's output,
+    verbatim.
 
     Axis rows are driven by the PERSISTED per-axis stated set, never by
     param names: for each axis in ``stated`` the block carries a W/D/H
@@ -340,12 +432,12 @@ def state_block_for_version(
     number is never lost). An axis with a persisted stated value but no
     measurement keeps its row as ``stated``.
 
-    No model-emitted parameter is promoted to ``stated`` in this ticket —
-    not even one literally named W/D/H (DECISIONS.md: "key it on the
-    protocol's confirmed set, not on parameter names"). The single, clearly
-    marked seam :func:`_maybe_promote_params` is a no-op; the later
-    axis-binding ticket (labels from the model) fills it, at that one
-    call site, with real evidence.
+    No model-emitted parameter is promoted to ``stated`` without its
+    metadata declaring an axis (issue #248 fills the seam below — see
+    :func:`_maybe_promote_params`): the model's ``axis`` field is the
+    ONLY promotion evidence; a param named W/D/H without one is never
+    promoted (DECISIONS.md: "key it on the protocol's confirmed set, not
+    on parameter names").
 
     The MEASUREMENT comparison (issue #137) still applies to a param
     literally named W/D/H that the snapshot carries — regardless of the
@@ -355,13 +447,12 @@ def state_block_for_version(
     drives the SEPARATE axis rows (appended after the param rows); the
     two surfaces are independent and never name-matched.
     """
-    entries = state_block_from_params(params)
+    entries = state_block_from_params(params, param_meta)
     evidence = _axis_stated_evidence(stated)
-    # SEAM (#248: axis binding from model-supplied labels) — the ONE place
-    # a model-emitted param may be promoted from ``assumed`` to ``stated``.
-    # No-op for now: no evidence mechanism exists yet, and name-based
-    # promotion is explicitly forbidden. Do not scatter promotion logic;
-    # extend this seam only.
+    # The single, clearly-marked promotion seam (issue #248, filled):
+    # metadata-declared axis + persisted confirmed value + within-tolerance
+    # match promotes ``assumed`` → ``stated``. Name-based promotion is
+    # still forbidden — only a declared ``axis`` field qualifies.
     entries = _maybe_promote_params(entries, evidence)
     extents = persisted_bbox_extents(measurement)
     if not evidence and extents is None:
@@ -422,19 +513,43 @@ def _maybe_promote_params(
     entries: list[dict[str, Any]],
     stated_evidence: dict[str, float],
 ) -> list[dict[str, Any]]:
-    """SEAM (#248: axis binding from model-supplied labels).
+    """The single, clearly-marked promotion seam (issue #248, filled).
 
-    The single, clearly-marked place a model-emitted parameter may be
-    promoted from ``assumed`` to ``stated``. This ticket does NOT promote
-    on any basis — not on name (a param literally named ``W``/``D``/``H``
-    stays ``assumed`` even when the persisted axis evidence matches it),
-    not on value — DECISIONS.md: "key it on the protocol's confirmed set,
-    not on parameter names"; #246: "No model-emitted param is stated in
-    this ticket". The later axis-binding ticket (which will let the model
-    declare which axis each parameter realises) fills this seam, at this
-    one call site, with real per-parameter evidence. Do not add
-    promotion anywhere else.
+    A model-emitted parameter is promoted ``assumed`` → ``stated`` iff
+    THREE conditions hold — the model's metadata declares an axis for it
+    (``entry["axis"]``, set ONLY from the model's ``parameters`` metadata
+    during the join in :func:`state_block_from_params` — a param named
+    ``W``/``D``/``H`` WITHOUT a declared axis has no ``axis`` key and is
+    not promoted, never is), the version's persisted confirmed set
+    contains that axis, and the param's value is numeric, positive, and
+    within the existing bbox tolerance of the CONFIRMED value for that
+    axis (``max(BBOX_TOLERANCE_REL * confirmed, BBOX_TOLERANCE_MIN_MM)``
+    — the same rule the bbox gate applies). A promotion only ever lowers
+    the burden of proof, never changes the displayed value (the param
+    keeps its own number), and never runs on a non-numeric value (no
+    tolerance arithmetic on strings/bools — they stay ``assumed``).
+
+    The comparison target is the CONFIRMED value (the user's evidence,
+    ``stated_dims``) — never the measured bbox. Do not add promotion
+    anywhere else; do not infer an axis from a parameter name.
     """
+    if not stated_evidence:
+        return entries
+    for entry in entries:
+        axis = entry.get("axis")
+        if entry.get("kind") != "param" or axis not in _VALID_META_AXES:
+            continue
+        if entry["provenance"] != "assumed":
+            continue
+        confirmed = stated_evidence.get(axis)
+        if confirmed is None:
+            continue
+        value = entry.get("value")
+        if not _is_number(value) or value <= 0:
+            continue  # non-numeric / zero: never promoted, no arithmetic
+        tol = max(BBOX_TOLERANCE_REL * confirmed, BBOX_TOLERANCE_MIN_MM)
+        if abs(value - confirmed) <= tol:
+            entry["provenance"] = "stated"
     return entries
 
 
@@ -481,7 +596,8 @@ def _axis_prefix(entry: dict[str, Any]) -> str:
         name = entry.get("name")
         word = AXIS_LABELS.get(name, name)  # type: ignore[arg-type]
         return f"{word} ({name})"  # type: ignore[index]
-    return entry.get("name") or entry.get("label")
+    label = entry.get("label")
+    return label if label else (entry.get("name") or "")
 
 
 def _render_value_line(name: str, value: Any, provenance: Any) -> str:

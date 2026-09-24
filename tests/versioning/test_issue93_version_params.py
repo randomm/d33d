@@ -82,6 +82,34 @@ def _stub_llm(scad: str):
     return _llm
 
 
+def _llm_with_meta(scad: str):
+    """A stub LLM whose design-role reply ALSO carries a ``parameters``
+    metadata array (issue #248): the fenced-JSON content carries the
+    array, and a synthesized tool call carries it too — either channel
+    the loop reads (``extract_param_meta`` scans tool call arguments).
+    """
+    from d33d.design_llm import LLMResult
+
+    meta = [
+        {"name": "W", "label": "Width", "unit": "mm", "axis": "W"},
+        {"name": "D", "label": "Depth", "unit": "mm", "axis": "D"},
+        {"name": "H", "label": "Height", "unit": "mm", "axis": "H"},
+    ]
+    args = {"scad": scad, "parameters": meta}
+
+    async def _llm(role, messages, system):
+        return LLMResult(
+            content=f"```scad\n{scad}\n```",
+            tool_calls=({"name": "emit_design", "arguments": args},),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    return _llm
+
+
 def test_loop_pass_record_carries_numeric_stated_dims() -> None:
     """The REAL ``IterationRecord`` from a passing loop carries the
     defines map the render was made with, with numeric W/D/H (the stored
@@ -564,7 +592,7 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
                 chat_history=kwargs["chat_history"],
                 stated_dims=kwargs["stated_dims"],
                 render_fn=render_fn,
-                llm_fn=_stub_llm(scad_text),
+                llm_fn=_llm_with_meta(scad_text),
                 bbox_fn=lambda r: bbox_,
             )
 
@@ -599,9 +627,10 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
             if event in ("done", "error"):
                 break
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
-        return r, frames, timeline, fixture
+        latest = app_with_versions.state.versions.latest_version(pid)
+        return r, frames, timeline, fixture, pid, latest
 
-    r, frames, timeline, fixture = run_async(app_with_versions, _call)
+    r, frames, timeline, fixture, pid, latest = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
 
     # EXACTLY ONE versions row.
@@ -613,6 +642,15 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
     # "First design". The message field keeps the raw text.
     assert timeline[0]["name"] == "First design"
     assert timeline[0]["created_by_message"] == "Create a 20mm cube"
+    # Issue #248: the model's parameters metadata (the LLM reply's
+    # parameters array) is persisted on the version row — the nullable
+    # param_meta column is non-NULL on the chat path when the model
+    # emitted the array (the LLM stub above carries it in its tool call).
+    assert latest["param_meta"] == {
+        "W": {"label": "Width", "unit": "mm", "axis": "W"},
+        "D": {"label": "Depth", "unit": "mm", "axis": "D"},
+        "H": {"label": "Height", "unit": "mm", "axis": "H"},
+    }
     # The params equal the expected converted map — numeric W/D/H, the
     # exact stored JSON shape (a future coercion change fails loudly).
     assert timeline[0]["params"] == {"W": 20.0, "D": 20.0, "H": 20.0}
@@ -1205,7 +1243,7 @@ def test_finalize_real_iteration_record_precedes_seed(app_with_versions):
                     chat_history=kwargs["chat_history"],
                     stated_dims=(50.0, 40.0, 30.0),  # the test's stated dims
                     render_fn=_render,
-                    llm_fn=_stub_llm(scad_text),
+                    llm_fn=_llm_with_meta(scad_text),
                     bbox_fn=lambda r: bbox_,
                 ))
 
@@ -1225,9 +1263,10 @@ def test_finalize_real_iteration_record_precedes_seed(app_with_versions):
             f"/api/projects/{pid}/finalize",
             json={"params": {"W": 1, "D": 1, "H": 1}, "name": "the seed"},
         )
-        return r
+        latest = app_with_versions.state.versions.latest_version(pid)
+        return r, latest
 
-    r = run_async(app_with_versions, _call)
+    r, latest = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     version = r.json()
     # The loop's result overwrote the seed (the route's direct
@@ -1235,6 +1274,14 @@ def test_finalize_real_iteration_record_precedes_seed(app_with_versions):
     # the new precedence that the dead getattr never exercised).
     assert version["params"] == {"W": 50.0, "D": 40.0, "H": 30.0}
     assert version["name"] == "the seed"
+    # Issue #248: the finalize path persists the model's metadata too —
+    # the same nullable param_meta column as the chat path (the loop
+    # result's best candidate carries the reply's parameters array).
+    assert latest["param_meta"] == {
+        "W": {"label": "Width", "unit": "mm", "axis": "W"},
+        "D": {"label": "Depth", "unit": "mm", "axis": "D"},
+        "H": {"label": "Height", "unit": "mm", "axis": "H"},
+    }
 
 
 def test_finalize_semantic_flip_fresh_project_pass_now_201(app_with_versions):

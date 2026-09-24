@@ -427,9 +427,13 @@ def create_versions_router() -> APIRouter:
         # The persisted per-axis stated set (issue #246): the design-state
         # block's axis rows render ``stated`` from this evidence (and are
         # omitted when it is absent) — read from the persisted row, never
-        # re-derived from live chat.
+        # re-derived from live chat. The persisted per-parameter metadata
+        # (issue #248): the model's labels/units/axis/reason join into the
+        # block by name (``None`` on legacy rows — the identifier fallback
+        # for every entry).
         stated = latest["stated_dims"] if latest is not None else None
-        return state_block_for_version(params, measurement, stated)
+        param_meta = latest["param_meta"] if latest is not None else None
+        return state_block_for_version(params, measurement, stated, param_meta)
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
@@ -610,6 +614,7 @@ def create_versions_router() -> APIRouter:
         # never persisted anyway.
         from d33d.design_loop_events import (
             _version_bbox_extents,
+            _version_param_meta,
             _version_render_artifact_dir,
         )
 
@@ -650,6 +655,7 @@ def create_versions_router() -> APIRouter:
                 bbox=_version_bbox_extents(result),
                 render_artifact_dir=_version_render_artifact_dir(result),
                 stated_dims=per_axis_stated or None,
+                param_meta=_version_param_meta(result),
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
@@ -778,6 +784,12 @@ def _finalize_loop_kwargs(
     # rows render stated/omitted identically in both consumers). ``None``
     # when no version exists yet or the run stated no axes.
     state_stated = latest["stated_dims"] if latest is not None else None
+    # The design-state block's per-parameter metadata (issue #248): the
+    # latest version's persisted model metadata, forwarded so the
+    # prompt's block is the SAME block the GET the SPA reads serves
+    # (labels/units/axis/reason join in identically in both consumers).
+    # ``None`` when no version exists yet or the version has no metadata.
+    state_meta = latest["param_meta"] if latest is not None else None
 
     # The current design source (issue #105): the project's current
     # version's per-version source, captured BEFORE the loop runs (the
@@ -818,6 +830,7 @@ def _finalize_loop_kwargs(
         "state_params": state_params,
         "state_bbox": state_bbox,
         "state_stated": state_stated,
+        "state_meta": state_meta,
         "design_source": design_source,
     }
 

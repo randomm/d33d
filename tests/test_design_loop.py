@@ -52,6 +52,7 @@ from d33d.design_loop import (
     Score,
     _scad_from_result,
     extract_named_params,
+    extract_param_meta,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -684,6 +685,132 @@ def test_extract_named_params_malformed_numeric_rhs_is_skipped_not_crash():
 
 
 # ---------------------------------------------------------------------------
+# Issue #248: the model's parameters metadata array
+# ---------------------------------------------------------------------------
+
+
+def _llm_result_with_params(meta_list: Any) -> Any:
+    """A design-role LLMResult whose tool call carries a ``parameters``
+    field (the T0/T1 metadata channel)."""
+    args: dict[str, Any] = {"scad": GOOD_SCAD}
+    if meta_list is not None:
+        args["parameters"] = meta_list
+    return LLMResult(
+        content=GOOD_SCAD,
+        tool_calls=({"name": "emit_design", "arguments": args},),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def test_extract_param_meta_present_joined_by_name() -> None:
+    """A well-formed ``parameters`` array normalises to
+    ``{name: {label, unit, axis, reason}}`` keeping only valid fields."""
+    result = _llm_result_with_params(
+        [
+            {"name": "W", "label": "Width", "unit": "mm", "axis": "W", "reason": "user said 60"},
+            {"name": "fillet_size_top", "label": "Top fillet size", "unit": "mm"},
+        ]
+    )
+    meta = extract_param_meta(result)
+    assert meta == {
+        "W": {"label": "Width", "unit": "mm", "axis": "W", "reason": "user said 60"},
+        "fillet_size_top": {"label": "Top fillet size", "unit": "mm"},
+    }
+
+
+def test_extract_param_meta_malformed_degrades_to_empty_never_raises() -> None:
+    """A malformed ``parameters`` payload degrades to ``{}`` (no
+    metadata) — never a crash, never a partial parse that would half-
+    label the block. A malformed array never fails the design pass."""
+    # A dict-instead-of-list payload degrades to no metadata (the
+    # "parameters" field present but malformed is "no metadata", never a
+    # partial parse).
+    assert extract_param_meta(_llm_result_with_params({"name": "W", "label": "Width"})) == {}
+    for bad in (
+        [{"label": "no name"}],                    # missing name
+        ["not-a-dict", {"name": 1, "label": "x"}],  # junk items
+        None,                                        # absent
+    ):
+        result = _llm_result_with_params(bad)
+        assert extract_param_meta(result) == {}
+    # A bad axis value drops ONLY the axis field (the item's other valid
+    # fields are legitimate metadata — the label survives, the axis is
+    # never surfaced as an invalid value).
+    partial = extract_param_meta(
+        _llm_result_with_params([{"name": "W", "label": "Width", "axis": "Z"}])
+    )
+    assert partial == {"W": {"label": "Width"}}
+    # A result with no parameters field at all → empty.
+    bare = LLMResult(
+        content=GOOD_SCAD,
+        tool_calls=({"name": "emit_design", "arguments": {"scad": GOOD_SCAD}},),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+    assert extract_param_meta(bare) == {}
+
+
+def test_extract_param_meta_duplicate_name_first_wins() -> None:
+    """A name appearing twice in the array: the first occurrence wins
+    (declaration order — later entries never overwrite)."""
+    result = _llm_result_with_params(
+        [
+            {"name": "W", "label": "First"},
+            {"name": "W", "label": "Second"},
+        ]
+    )
+    assert extract_param_meta(result) == {"W": {"label": "First"}}
+
+
+def test_loop_record_carries_param_meta_from_tool_call() -> None:
+    """A passing loop whose design-role reply carries a ``parameters``
+    array records the metadata on the ``IterationRecord`` (declared
+    ``param_meta`` field) without failing the pass — the values still
+    come from the SCAD (``params`` is the SCAD extraction)."""
+    from d33d.design_loop import BboxInfo, run_design_loop_async
+
+    bbox = BboxInfo(x=20.0, y=25.0, z=30.0, volume=1.0)
+    meta_list = [
+        {"name": "W", "label": "Width", "unit": "mm", "axis": "W"},
+        {"name": "D", "label": "Depth", "unit": "mm", "axis": "D"},
+    ]
+
+    async def _render(scad_source, defines):
+        return RenderResult(
+            ok=True, exit_code=0, duration_ms=1, error_class="ok",
+            stderr="", stl=None, csg=None, views=("v" * 1,) * 6,
+        )
+
+    async def llm_fn(role, messages, system):
+        return _llm_result_with_params(meta_list)
+
+    result = asyncio.run(
+        run_design_loop_async(
+            photo=PHOTO,
+            chat_history=(),
+            stated_dims=STATED,
+            render_fn=_render,
+            llm_fn=llm_fn,
+            bbox_fn=lambda r: bbox,
+        )
+    )
+    assert result.status == "pass"
+    # The declared field carries the model's metadata, joined by name.
+    assert result.best.param_meta == {
+        "W": {"label": "Width", "unit": "mm", "axis": "W"},
+        "D": {"label": "Depth", "unit": "mm", "axis": "D"},
+    }
+    # The values still come from the SCAD (the params field is the
+    # SCAD extraction, not the metadata array).
+    assert result.best.params == {"W": 20.0, "D": 25.0, "H": 30.0}
+
+
+# ---------------------------------------------------------------------------
 # T1 end-to-end: fenced-JSON protocol completes the loop
 # ---------------------------------------------------------------------------
 
@@ -841,7 +968,8 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
     out = asyncio.run(llm_fn("design", [{"role": "user", "content": "hi"}], "sys"))
     assert out.tier == "T0"
     # The outgoing body carries the emit_design tool definition
-    # (structural equality with the DESIGN_TOOLS test constant).
+    # (structural equality with the DESIGN_TOOLS test constant — issue
+    # #248: the schema gained the ``parameters`` metadata array).
     assert sent_design[0]["tools"] == [
         {
             "type": "function",
@@ -850,7 +978,23 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
                 "description": "Emit the parametric OpenSCAD",
                 "parameters": {
                     "type": "object",
-                    "properties": {"scad": {"type": "string"}},
+                    "properties": {
+                        "scad": {"type": "string"},
+                        "parameters": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "label": {"type": "string"},
+                                    "unit": {"type": "string"},
+                                    "axis": {"type": "string"},
+                                    "reason": {"type": "string"},
+                                },
+                                "required": ["name", "label"],
+                            },
+                        },
+                    },
                 },
             },
         }
@@ -904,7 +1048,23 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
     assert design_tool["function"]["name"] == "emit_design"
     assert design_tool["function"]["parameters"] == {
         "type": "object",
-        "properties": {"scad": {"type": "string"}},
+        "properties": {
+            "scad": {"type": "string"},
+            "parameters": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "label": {"type": "string"},
+                        "unit": {"type": "string"},
+                        "axis": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["name", "label"],
+                },
+            },
+        },
     }
 
     # Per-call role follows: a critique-role call through the same maker

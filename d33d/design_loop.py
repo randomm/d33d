@@ -254,6 +254,16 @@ class IterationRecord:
     #: persisted record by this SCAD extraction; the render's ``defines``
     #: channel itself is unchanged and stays caller-sourced.)
     params: dict[str, Any] = field(default_factory=dict)
+    #: The model's per-parameter metadata THIS candidate's design-role
+    #: reply carried (issue #248): the ``name -> {label?, unit?, axis?,
+    #: reason?}`` dict from :func:`extract_param_meta` over the LLM
+    #: result that produced this record. Metadata is the model's own
+    #: words about the parameters it declared — the values stay sourced
+    #: from the SCAD (``params`` above); the caller's write path
+    #: persists this as the version row's ``param_meta`` (``{}`` when the
+    #: model emitted no array — a missing field is honest absence, never
+    #: a fabricated label).
+    param_meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -694,6 +704,7 @@ def _design_state_lines(
     state_params: dict[str, Any] | None,
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
+    state_meta: dict[str, Any] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -739,7 +750,7 @@ def _design_state_lines(
     )
 
     block = build_design_state_block(
-        state_block_for_version(state_params, state_bbox, state_stated)
+        state_block_for_version(state_params, state_bbox, state_stated, state_meta)
     )
     # ``format_design_state_block`` renders the header + the entries. The
     # header (``Current design state (mm):``) and the entry lines are
@@ -785,6 +796,7 @@ def _design_messages(
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
+    state_meta: dict[str, Any] | None = None,
     design_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
@@ -814,7 +826,9 @@ def _design_messages(
     # reads calls (asserted by the tests — not two functions that happen
     # to agree). Empty when no version exists yet (an honest empty state,
     # never a fabricated dimension).
-    lines.extend(_design_state_lines(stated, state_params, state_bbox, state_stated))
+    lines.extend(
+        _design_state_lines(stated, state_params, state_bbox, state_stated, state_meta)
+    )
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,
@@ -830,9 +844,22 @@ def _design_messages(
         "`// title: <what this version is or what changed, at most 40 "
         "characters>` — e.g. `// title: Bore to 38 mm`. Every stated "
         "dimension and any FDM tolerance must be a named parameter in a "
-        "top variable block, never an inline literal. Reply with a single "
+        "top variable block, never an inline literal. Name every parameter "
+        "with full words in snake_case — readable identifiers, not "
+        "abbreviations (BAD: `fst` for a fillet size; GOOD: `fillet_size_top`). "
+        "Reply with a single "
         'fenced JSON block: ```json {"tool": "emit_design", "arguments": '
-        '{"scad": <string>}} ```'
+        '{"scad": <string>, "parameters": [<per parameter: {"name", '
+        '"label", "unit", "axis", "reason"}>]}} ``` where "parameters" '
+        "lists every parameter you declared, one object each: "
+        'the "name" is the exact identifier from the SCAD, the "label" '
+        'is a plain-language label a person would recognise (e.g. '
+        'fillet_size_top to "Top fillet size"), the "unit" is the unit '
+        '("mm" for millimetres), the "axis" is "W" or "D" or "H" ONLY '
+        'when the parameter realises that overall dimension of the part '
+        '(omit it otherwise - never guess an axis), and the "reason" is '
+        'one short clause saying why you picked that value, for values '
+        'the user did not give.'
     )
     if repair is not None:
         lines.append("REPAIR directive (structured, not raw stderr):")
@@ -907,6 +934,70 @@ def scad_looks_valid(scad: str) -> bool:
     return _SCAD_KEYWORD_RE.search(scad) is not None
 
 
+"""Extract the ``parameters`` metadata array from a design-role reply
+(issue #248).
+
+The model's ``parameters`` array (the fenced-JSON protocol's
+``arguments.parameters``, the T0 tool call's ``arguments.parameters`` —
+the same shape either way) is a LIST of ``{name, label, unit, axis?,
+reason?}`` objects. This normaliser degrades to ``{}`` on ANY malformed
+shape (a non-list, a non-dict item, a missing/non-string ``name``) —
+"no metadata" is the honest output, and a malformed array NEVER fails
+the design pass. Values are never read from here (the SCAD declarations
+are the value source); only metadata is joined in by name in
+``d33d.design_state``.
+
+Each surviving item keeps only usable fields: ``label``/``unit``/``reason``
+as non-empty strings, ``axis`` only when one of ``"W" | "D" | "H"``
+(the closed axis set — anything else is dropped, never surfaced). An
+item with no usable field is dropped. A name appearing twice: the first
+occurrence wins (declaration order — later entries never overwrite).
+"""
+
+
+def extract_param_meta(result: LLMResult) -> dict[str, Any]:
+    """The model's per-parameter metadata from a design-role ``LLMResult``.
+
+    Reads ``tool_calls[*].arguments.parameters`` (the first tool call
+    carrying a ``parameters`` field wins — the loop's own tool, whichever
+    tier produced the call) and normalises it as above. ``{}`` when no
+    tool call carries the field (the T1 fenced path without metadata, or
+    a reply that emitted no array) — the loop never raises here.
+    """
+    raw: Any = None
+    for call in result.tool_calls:
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            continue
+        if "parameters" in args:
+            raw = args["parameters"]
+            break
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, Any] = {}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        if name in out:
+            continue  # first occurrence wins (declaration order)
+        cleaned: dict[str, Any] = {}
+        for key in ("label", "unit", "axis", "reason"):
+            v = item.get(key)
+            if not isinstance(v, str) or not v:
+                continue
+            if key == "axis" and v not in ("W", "D", "H"):
+                continue
+            cleaned[key] = v
+        if cleaned:
+            out[name] = cleaned
+    return out
+
+
 def _scad_from_result(result: LLMResult) -> str:
     """The .scad source from a design-role LLMResult.
 
@@ -972,6 +1063,7 @@ async def run_design_loop_async(
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
+    state_meta: dict[str, Any] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     on_progress_iteration: Any = "_current",
@@ -1035,6 +1127,7 @@ async def run_design_loop_async(
                 state_params=state_params,
                 state_bbox=state_bbox,
                 state_stated=state_stated,
+                state_meta=state_meta,
                 design_source=design_source,
             ),
             _design_system(stated_dims),
@@ -1071,6 +1164,7 @@ async def run_design_loop_async(
                 prompt_hashes={"design": design_hash},
                 bbox=None,
                 params=_scad_params(scad_source),
+                param_meta=extract_param_meta(scad),
             )
             iterations.append(record)
             if best is None or is_best(candidate_score, best_score):
@@ -1127,6 +1221,7 @@ async def run_design_loop_async(
             prompt_hashes={"design": design_hash},
             bbox=bbox,
             params=_scad_params(scad_source),
+            param_meta=extract_param_meta(scad),
         )
         iterations.append(record)
 
@@ -1195,6 +1290,7 @@ def run_design_loop(
     state_params: dict[str, Any] | None = None,
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
+    state_meta: dict[str, Any] | None = None,
     design_source: str | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
@@ -1218,6 +1314,7 @@ def run_design_loop(
             state_params=state_params,
             state_bbox=state_bbox,
             state_stated=state_stated,
+            state_meta=state_meta,
             design_source=design_source,
         )
     )

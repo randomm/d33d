@@ -302,18 +302,23 @@ export function Brief({
     // The expanded row: the provenance in a sentence + the two actions.
     // The sentence names WHAT the value is; the value cell above it names
     // the value itself — the sentence is never the value.
-    // The assumed row: "Nobody said this. I picked {value}." — no reason
-    // clause yet (issue #246 adds the "because {reason}" clause with the
-    // later labels ticket when a reason exists).
+    // The assumed row: "Nobody said this. I picked {value}." — issue #248
+    // adds the "because {reason}" clause when the model carried a reason
+    // for the value (the reason is the model's own words, never invented).
     const expandedSentence =
       entry.provenance === "stated"
         ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.stated}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
         : entry.provenance === "measured"
           ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.measured}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
           : entry.provenance === "assumed"
-            ? copy.brief.provenanceAssumed(
-                formatValue(entry.value) ?? copy.brief.unknownValue,
-              )
+            ? entry.reason
+              ? copy.brief.provenanceAssumedWithReason(
+                  formatValue(entry.value) ?? copy.brief.unknownValue,
+                  entry.reason,
+                )
+              : copy.brief.provenanceAssumed(
+                  formatValue(entry.value) ?? copy.brief.unknownValue,
+                )
             : entry.provenance === "unknown"
               ? copy.brief.legend.unknown
               : copy.brief.legend.disagrees;
@@ -408,6 +413,13 @@ export function Brief({
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              // Issue #248: a model label renders in the UI face; a raw
+              // SCAD identifier (no model label) renders in the mono face
+              // (mono = machine value — the user can tell a human label
+              // from an identifier at a glance).
+              fontFamily: entry.label_is_identifier
+                ? "var(--font-mono)"
+                : "var(--font-ui)",
             }}
           >
             {label}

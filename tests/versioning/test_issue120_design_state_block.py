@@ -161,6 +161,49 @@ def test_design_prompt_non_envelope_params_reach_live_prompt():
     assert "bore_diameter = 8" in user_text
 
 
+def test_design_prompt_shows_model_label_not_identifier():
+    """Issue #248: when a param carries a model label in the version's
+    ``param_meta``, the live prompt's "Current design state" block shows
+    the LABEL (not the raw identifier) — the same block the GET the SPA
+    reads serves (the shared callable, with ``state_meta`` threaded
+    through the loop's kwargs)."""
+    captured: list[list[dict[str, Any]]] = []
+
+    async def llm_fn(role, messages, system):
+        captured.append(messages)
+        return _llm_result("width = 60;\ncube([width, 1, 1]);\n")
+
+    async def render_fn(scad, defines):
+        return _passing_render()
+
+    state_params = {"width": 60.0}
+    state_meta = {"width": {"label": "Overall width", "unit": "mm", "axis": "W"}}
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=None,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+        request="make a part",
+        state_params=state_params,
+        state_meta=state_meta,
+    )
+    assert result.status == "pass"
+    user_text = _user_text(captured, 0)
+    assert "Current design state (mm):" in user_text
+    # The label renders, not the raw identifier — scoped to the state
+    # block's section (the design-source section legitimately carries the
+    # SCAD's own `width` declaration, which is not the block's label).
+    state_pos = user_text.index("Current design state (mm):")
+    block_text = user_text[state_pos:]
+    assert "Overall width = 60" in block_text
+    # The raw identifier does not appear as a state-block line (it is
+    # replaced by the label — no duplicate line).
+    assert "width = 60" not in block_text.split("\n", 2)[2]
+
+
 def test_design_prompt_no_version_yet_renders_empty_block():
     """A no-version-yet turn (``state_params=None``) renders an honest
     EMPTY block (zero entries) — never a fabricated dimension, never a
