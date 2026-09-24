@@ -691,9 +691,9 @@ def _axis_prefix(entry: dict[str, Any]) -> str:
     the protocol's axis row from its own ``W`` parameter; a param row
     keeps its bare name."""
     if entry.get("kind") == "axis":
-        name = entry.get("name")
-        word = AXIS_LABELS.get(name, name)  # type: ignore[arg-type]
-        return f"{word} ({name})"  # type: ignore[index]
+        name = str(entry.get("name") or "")
+        word = AXIS_LABELS.get(name, name)
+        return f"{word} ({name})"
     label = entry.get("label")
     return label if label else (entry.get("name") or "")
 

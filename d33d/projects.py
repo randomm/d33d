@@ -219,7 +219,6 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     """
     from d33d.confirm_offer import (
         ack_sentence,
-        format_param_value,
         is_pending_offer_acceptance,
         offer_entry,
     )
@@ -240,7 +239,12 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
         return None
     versions.record_confirmation(project_id, latest["id"], name, entry.get("value"))
     versions.set_pending_offer(project_id, None)
-    return {"kind": "answer", "answer": ack_sentence(entry), "entry": entry}
+    return {
+        "kind": "answer",
+        "answer": ack_sentence(entry),
+        "entry": entry,
+        "param": name,
+    }
 
 
 async def _answered_frames(
@@ -463,7 +467,7 @@ def create_projects_router() -> APIRouter:
                     "label": (
                         ack_entry.get("label")
                         or ack_entry.get("name")
-                        or offer["param"]
+                        or offer_route["param"]
                     ),
                     # The shared value formatter (``confirm_offer`` — the
                     # same bool/number/other rule, one implementation).
