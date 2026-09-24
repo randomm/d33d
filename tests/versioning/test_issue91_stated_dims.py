@@ -40,7 +40,10 @@ from d33d.design_loop import (
     run_design_loop,
     score,
 )
-from d33d.design_loop_events import latest_version_stated_dims
+from d33d.design_loop_events import (
+    latest_version_stated_axes,
+    latest_version_stated_dims,
+)
 from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
@@ -130,14 +133,22 @@ def test_chat_spa_shape_message_without_dims_abstains_not_zero(app_with_versions
 
 
 def test_chat_follow_up_uses_latest_version_fallback(app_with_versions):
-    """Follow-up turn: a project WITH a latest version and a message that
-    states no dimensions — the latest version's W/D/H supplies the triple
-    (the fallback the finalize seam uses), not (0, 0, 0) and not None."""
+    """Follow-up turn: a project WITH a latest version whose persisted
+    ``stated_dims`` column carries a full W/D/H triple and a message that
+    states no dimensions — the latest version's confirmed set supplies the
+    triple (the fallback the finalize seam uses), not (0, 0, 0) and not
+    None."""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        # A version whose PERSISTED per-axis confirmed set is a full triple
+        # (the stated_dims column — issue #246), not W/D/H param keys.
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_height": 5.0, "spacer_depth": 8.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
         return await _drive_chat(
             app_with_versions,
             client,
@@ -220,12 +231,13 @@ def test_chat_body_stated_dims_passed_verbatim(app_with_versions):
 
 
 def test_latest_version_stated_dims_helper_partial_version_yields_none() -> None:
-    """A version with only SOME of W/D/H stated → None (abstain), not a
-    partially-zero triple that would still hard-fail the gate."""
+    """A version whose persisted ``stated_dims`` column has only SOME of
+    W/D/H → None (abstain), not a partially-zero triple that would still
+    hard-fail the gate."""
 
     class _Svc:
         def latest_version(self, project_id):
-            return {"params": {"W": 10.0}}
+            return {"params": {"W": 10.0}, "stated_dims": {"W": 10.0}}
 
     assert latest_version_stated_dims(_Svc(), 1) is None
 
@@ -239,11 +251,69 @@ def test_latest_version_stated_dims_helper_no_version_yields_none() -> None:
 
 
 def test_latest_version_stated_dims_helper_complete_version() -> None:
+    """A version whose persisted ``stated_dims`` column has all three
+    axes → the full triple (W, D, H)."""
+
     class _Svc:
         def latest_version(self, project_id):
-            return {"params": {"W": 10.0, "D": 8.0, "H": 6.0}}
+            return {
+                "params": {"spacer_width": 10.0},
+                "stated_dims": {"W": 10.0, "D": 8.0, "H": 6.0},
+            }
 
     assert latest_version_stated_dims(_Svc(), 1) == (10.0, 8.0, 6.0)
+
+
+def test_latest_version_stated_dims_helper_null_stated_dims_yields_none() -> None:
+    """Issue #247: a version with W/D/H param keys but a NULL
+    ``stated_dims`` column (a pre-#246 row) → None (abstain), NOT a
+    triple re-derived from the param keys. The dead W/D/H param-key
+    read is gone."""
+
+    class _Svc:
+        def latest_version(self, project_id):
+            return {"params": {"W": 12.0, "D": 8.0, "H": 5.0}, "stated_dims": None}
+
+    assert latest_version_stated_dims(_Svc(), 1) is None
+
+
+def test_latest_version_stated_axes_helper_reads_column() -> None:
+    """Issue #247: the new per-axis reader reads the persisted
+    ``stated_dims`` column and returns only the axes present with a
+    positive value. A partial set (only H) yields ``{"H": 12.0}``, not
+    a full triple or None."""
+
+    class _Svc:
+        def latest_version(self, project_id):
+            return {
+                "params": {"spacer_height": 12.0},
+                "stated_dims": {"H": 12.0},
+            }
+
+    assert latest_version_stated_axes(_Svc(), 1) == {"H": 12.0}
+
+
+def test_latest_version_stated_axes_helper_full_set() -> None:
+    """A full set in the column yields all three axes."""
+
+    class _Svc:
+        def latest_version(self, project_id):
+            return {
+                "params": {},
+                "stated_dims": {"W": 10.0, "D": 8.0, "H": 6.0},
+            }
+
+    assert latest_version_stated_axes(_Svc(), 1) == {"W": 10.0, "D": 8.0, "H": 6.0}
+
+
+def test_latest_version_stated_axes_helper_null_column_yields_none() -> None:
+    """A NULL ``stated_dims`` column → None (no confirmed axes)."""
+
+    class _Svc:
+        def latest_version(self, project_id):
+            return {"params": {}, "stated_dims": None}
+
+    assert latest_version_stated_axes(_Svc(), 1) is None
 
 
 # ---------------------------------------------------------------------------

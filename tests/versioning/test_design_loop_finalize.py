@@ -133,17 +133,23 @@ def _measured_render(artifact_dir: str) -> RenderResult:
 
 
 def _pass_result_with_bbox(
-    bbox: BboxInfo | None, *, render: RenderResult | None = None, scad: str = ""
+    bbox: BboxInfo | None,
+    *,
+    render: RenderResult | None = None,
+    scad: str = "",
+    params: dict | None = None,
 ) -> object:
     """A pass result whose ``best`` is a REAL ``IterationRecord`` carrying
     ``bbox`` on its DECLARED field (``None`` = no measurement obtained —
-    the honest abstain that must persist a NULL, never a zero triple)."""
+    the honest abstain that must persist a NULL, never a zero triple).
+    ``params`` overrides the default ``{"W": 30.0, "D": 30.0, "H": 30.0}``
+    when the test needs free-named params (issue #247: the v24 shape)."""
     record = IterationRecord(
         iteration=0,
         scad_source=scad,
         render=render if render is not None else _default_render(),
         score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
-        params={"W": 30.0, "D": 30.0, "H": 30.0},
+        params=params if params is not None else {"W": 30.0, "D": 30.0, "H": 30.0},
         bbox=bbox,
     )
 
@@ -194,6 +200,56 @@ def test_finalize_pass_persists_measured_bbox_and_render_artifact_dir(
     assert row["bbox"] == {"x": 30.4, "y": 30.0, "z": 30.0}, row["bbox"]
     # The render reference is the best render's declared durable dir.
     assert row["render_artifact_dir"] == str(tmp_path / "durable-235")
+
+
+def test_finalize_pass_persists_whole_mesh_bbox_with_free_named_params(
+    app_with_versions,
+) -> None:
+    """Issue #247: a finalize pass whose best candidate carries a v24-shaped
+    BboxInfo (1 component, free-named params — no W/D/H) still persists the
+    WHOLE-MESH bbox (non-NULL). The old ``_version_bbox_extents`` would
+    return None for this shape (no W/D/H keys to match against), so the
+    version row's bbox was NULL on the finalize path too. The new rule is
+    independent of stated dims, param names, or component count."""
+
+    async def _loop(app, **kwargs):
+        return _pass_result_with_bbox(
+            BboxInfo(
+                x=21.21,
+                y=21.43,
+                z=19.30,
+                volume=6369.8,
+                components=((21.21, 21.43, 19.30, 6369.8, 0.0, 0.0, 0.0),),
+            ),
+            scad="spacer_width = 20;\nspacer_height = 12;\ncube([spacer_width, spacer_width, spacer_height]);",
+            params={
+                "fillet_radius": 1.5,
+                "hole_clearance": 0.3,
+                "hole_diameter": 3.3,
+                "spacer_depth": 20.0,
+                "spacer_height": 12.0,
+                "spacer_width": 20.0,
+                "wall_thickness": 3.0,
+            },
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the spacer", "message": "make a spacer"},
+        )
+        row = app_with_versions.state.versions.latest_version(pid)
+        return r, row
+
+    r, row = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert row is not None, "no version persisted for a passing finalize"
+    # The persisted bbox is the whole-mesh extents — NOT None (the old
+    # code's bug: NULL bbox for this shape).
+    assert row["bbox"] == {"x": 21.21, "y": 21.43, "z": 19.30}
 
 
 def test_finalize_pass_without_measurement_persists_null_bbox(

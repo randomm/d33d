@@ -97,6 +97,49 @@ def _passing_loop(bbox_for: Any):
     return _loop
 
 
+def _passing_loop_v24_shape(bbox_for: Any):
+    """A v24-shaped design-loop stub: the best record carries FREE-NAMED
+    params (no W/D/H keys — the model's actual output shape) and a
+    BboxInfo on its declared ``bbox`` field. This is the shape that
+    triggered issue #247's bug: the old ``_version_bbox_extents`` would
+    return None for this (no W/D/H keys to match against), so the
+    version row's bbox was NULL."""
+    from d33d.design_loop import IterationRecord, Score
+
+    record = IterationRecord(
+        iteration=1,
+        scad_source="spacer_width = 20;\nspacer_height = 12;\ncube([spacer_width, spacer_width, spacer_height]);",
+        render=_ok_render(),
+        score=Score(
+            bits=(True, True, True, True),
+            rank=4,
+            tiebreak=(True, True, True, True),
+        ),
+        params={
+            "fillet_radius": 1.5,
+            "hole_clearance": 0.3,
+            "hole_diameter": 3.3,
+            "spacer_depth": 20.0,
+            "spacer_height": 12.0,
+            "spacer_width": 20.0,
+            "wall_thickness": 3.0,
+        },
+        bbox=bbox_for,
+    )
+
+    class _Result:
+        status = "pass"
+        best = record
+        iterations = (record,)
+        failure_reason = None
+        iterations_used = 1
+
+    async def _loop(app: Any, **kwargs: Any) -> Any:
+        return _Result()
+
+    return _loop
+
+
 # ---------------------------------------------------------------------------
 # The decisive test: a REAL design loop pass → the block carries "measured"
 # from persisted data (end to end, not a hand-built dict).
@@ -310,12 +353,13 @@ def test_pre_change_row_reads_cleanly_and_yields_assumed(app_with_versions, tmp_
 # ---------------------------------------------------------------------------
 
 
-def test_multipart_persists_matched_component_not_assembly() -> None:
-    """A multi-part render (assembly 20x30x30, two components: a 30x30x30
-    body and a 20x20x20 body beside it): with stated W/D/H=30 the gate
-    matches the 30x30x30 component — and so does the version row. The
-    block's W entry is ``measured`` at 30 (the matched component's x
-    extent), NOT 20 (the assembly's) and NOT disagrees."""
+def test_multipart_persists_whole_mesh_extents_not_component() -> None:
+    """Issue #247: a multi-part render (assembly 20x30x30, two components:
+    a 30x30x30 body and a 20x20x20 body beside it) — the version row
+    persists the WHOLE-MESH extents (20, 30, 30), NOT the matched
+    component's extents (30, 30, 30). Component matching is no longer
+    used for persistence: reading the extents of a mesh is a measurement,
+    not a guess."""
     from d33d.design_loop_events import _version_bbox_extents
 
     # Components: (x_extent, y_extent, z_extent, volume, min_x, min_y, min_z)
@@ -339,15 +383,16 @@ def test_multipart_persists_matched_component_not_assembly() -> None:
         iterations_used = 1
 
     extents = _version_bbox_extents(_Result())
-    # The matched component's extents (30,30,30), not the assembly's (20,30,30).
-    assert extents == (30.0, 30.0, 30.0)
+    # The whole-mesh extents (20, 30, 30), NOT the matched component's (30, 30, 30).
+    assert extents == (20.0, 30.0, 30.0)
 
 
-def test_multipart_unidentifiable_component_persists_nothing() -> None:
-    """A multi-part render whose stated triple has an UNKNOWN axis (D
-    absent): the best-matching component is not identifiable (the gate
-    abstains) → the version persists NOTHING (None → NULL), abstaining
-    rather than guessing an extent."""
+def test_multipart_with_free_named_params_persists_whole_mesh() -> None:
+    """Issue #247: a multi-part render with FREE-NAMED params (no W/D/H
+    keys — the model's actual output shape) still persists the whole-mesh
+    extents. The old code's component-matching branch would have returned
+    None (no W/D/H keys to match against); the new rule is independent
+    of param names."""
     from d33d.design_loop_events import _version_bbox_extents
 
     bbox = BboxInfo(
@@ -359,7 +404,19 @@ def test_multipart_unidentifiable_component_persists_nothing() -> None:
             (30.0, 30.0, 30.0, 27000.0, 0.0, 0.0, 0.0),
         ),
     )
-    record = _record_for_bbox(bbox, {"W": 30.0, "H": 30.0})  # D unknown
+    # Free-named params (no W/D/H — the model's actual output shape).
+    record = _record_for_bbox(
+        bbox,
+        {
+            "fillet_radius": 1.5,
+            "hole_clearance": 0.3,
+            "hole_diameter": 3.3,
+            "spacer_depth": 20.0,
+            "spacer_height": 12.0,
+            "spacer_width": 20.0,
+            "wall_thickness": 3.0,
+        },
+    )
 
     class _Result:
         status = "pass"
@@ -368,7 +425,94 @@ def test_multipart_unidentifiable_component_persists_nothing() -> None:
         failure_reason = None
         iterations_used = 1
 
-    assert _version_bbox_extents(_Result()) is None
+    extents = _version_bbox_extents(_Result())
+    assert extents == (20.0, 30.0, 30.0)
+
+
+def test_v24_shaped_single_component_persists_whole_mesh() -> None:
+    """Issue #247 ACCEPTANCE CRITERION: a v24-shaped BboxInfo (1 component,
+    free-named params, no W/D/H) → persisted bbox = (21.21, 21.43, 19.30),
+    NOT None. The old code's component-matching branch would have returned
+    None (no W/D/H keys); the new rule is independent of stated dims,
+    param names, or component count."""
+    from d33d.design_loop_events import _version_bbox_extents
+
+    # v24-shaped: 1 component (a healthy single body splits to exactly 1),
+    # free-named params (spacer_height etc., no W/D/H).
+    bbox = BboxInfo(
+        x=21.21,
+        y=21.43,
+        z=19.30,
+        volume=6369.8,
+        components=(
+            (21.21, 21.43, 19.30, 6369.8, 0.0, 0.0, 0.0),  # the single body
+        ),
+    )
+    record = _record_for_bbox(
+        bbox,
+        {
+            "fillet_radius": 1.5,
+            "hole_clearance": 0.3,
+            "hole_diameter": 3.3,
+            "spacer_depth": 20.0,
+            "spacer_height": 12.0,
+            "spacer_width": 20.0,
+            "wall_thickness": 3.0,
+        },
+    )
+
+    class _Result:
+        status = "pass"
+        best = record
+        iterations = (record,)
+        failure_reason = None
+        iterations_used = 1
+
+    extents = _version_bbox_extents(_Result())
+    # The whole-mesh extents — NOT None (the old code's bug).
+    assert extents == (21.21, 21.43, 19.30)
+
+
+def test_v24_shaped_chat_path_persists_non_null_bbox(app_with_versions) -> None:
+    """Issue #247 ACCEPTANCE CRITERION: an end-to-end chat-path test — a
+    single-body render (components len==1, free param names, no W/D/H)
+    persists a NON-NULL bbox on the version row. Every existing persistence
+    test used W/D/H param names (which masked the bug); this test uses the
+    v24 shape that actually triggered it."""
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    # v24-shaped BboxInfo: 1 component, free-named params.
+    bbox = BboxInfo(
+        x=21.21,
+        y=21.43,
+        z=19.30,
+        volume=6369.8,
+        components=((21.21, 21.43, 19.30, 6369.8, 0.0, 0.0, 0.0),),
+    )
+
+    async def _call(client):
+        proj = await _create_project_via_api(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _passing_loop_v24_shape(bbox)
+        frames = []
+        async for frame in run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="make a spacer",
+            stated_dims=None,  # no stated dims — the v24 shape
+            chat_history=(),
+            photo="data:image/png;base64,REF",
+            request_text="make a spacer",
+        ):
+            frames.append(frame)
+        latest = app_with_versions.state.versions.latest_version(pid)
+        return frames, latest
+
+    frames, latest = run_async(app_with_versions, _call)
+    assert latest is not None, "no version persisted"
+    # The decisive assertion: the bbox is NON-NULL (the old code's bug
+    # was NULL bbox for this shape).
+    assert latest["bbox"] == {"x": 21.21, "y": 21.43, "z": 19.30}
 
 
 def _record_for_bbox(bbox: BboxInfo, params: dict[str, Any]):

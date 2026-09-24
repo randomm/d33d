@@ -312,6 +312,60 @@ def test_abstain_before_component_work() -> None:
     assert _bbox_within_tolerance(bbox, (20.0, 20.0, 20.0)) is True
 
 
+def test_partial_triple_checks_only_confirmed_axes() -> None:
+    """Issue #247: a PARTIAL confirmed triple (only H confirmed, W/D
+    unconfirmed) checks ONLY the confirmed axis — the unconfirmed axes
+    are SKIPPED (per-axis abstention), not a whole-gate abstention.
+
+    - H=20 confirmed, render z=20 → H is within tolerance → True.
+    - H=20 confirmed, render z=30 → H is OUT of tolerance → False (the
+      10 mm error is caught — the old all-or-nothing rule would have
+      abstained and missed it).
+    - No axis confirmed (all zero) → the gate abstains (True)."""
+    bbox = BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0)
+    # Only H confirmed (z is the axis that matters here).
+    assert _bbox_within_tolerance(bbox, (0.0, 0.0, 20.0)) is True
+    # H out of tolerance → False (the 10 mm error is caught).
+    bbox_tall = BboxInfo(x=20.0, y=20.0, z=30.0, volume=12000.0)
+    assert _bbox_within_tolerance(bbox_tall, (0.0, 0.0, 20.0)) is False
+    # No axis confirmed → abstain (True).
+    assert _bbox_within_tolerance(bbox, (0.0, 0.0, 0.0)) is True
+
+
+def test_partial_triple_multi_part_uses_whole_mesh_extents() -> None:
+    """Issue #247: with a PARTIAL confirmed set and a multi-part mesh,
+    the confirmed axes are compared against the WHOLE-MESH extents (not
+    a component — there is no well-defined component selection without a
+    full triple). A component's z can pass while the assembly's z fails.
+    """
+    # Two components: a 20mm body (z=20) and a 30mm body (z=30).
+    bbox = BboxInfo(
+        x=50.0, y=30.0, z=30.0,  # whole-mesh extents
+        volume=27000.0,
+        components=(
+            (20.0, 20.0, 20.0, 8000.0, 0.0, 0.0, 0.0),  # small body
+            (30.0, 30.0, 30.0, 27000.0, 0.0, 0.0, 0.0),  # tall body
+        ),
+    )
+    # Only H confirmed (20mm): the small component's z=20 would pass, but
+    # the whole-mesh z=30 is OUT of tolerance → False.
+    assert _bbox_within_tolerance(bbox, (0.0, 0.0, 20.0)) is False
+    # H=30 confirmed: the whole-mesh z=30 is within tolerance → True.
+    assert _bbox_within_tolerance(bbox, (0.0, 0.0, 30.0)) is True
+
+
+def test_partial_single_axis_h_12_z_19_3_fails() -> None:
+    """Issue #247 ACCEPTANCE CRITERION: a message confirming only H=12
+    with a candidate whose z=19.3 → gate FAILS on H (the 7 mm error is
+    caught). H=12 and z=12.2 → passes (within max(0.12, 0.5mm) tol)."""
+    # H=12 confirmed, z=19.3 → |19.3-12| = 7.3 > max(12*0.01, 0.5)=0.5 → FAIL.
+    bbox = BboxInfo(x=21.21, y=21.43, z=19.3, volume=6369.8)
+    assert _bbox_within_tolerance(bbox, (0.0, 0.0, 12.0)) is False
+    # H=12 confirmed, z=12.2 → |12.2-12| = 0.2 <= 0.5 → PASS.
+    bbox_ok = BboxInfo(x=21.21, y=21.43, z=12.2, volume=6369.8)
+    assert _bbox_within_tolerance(bbox_ok, (0.0, 0.0, 12.0)) is True
+
+
 # ---------------------------------------------------------------------------
 # Magic numbers: both directions
 # ---------------------------------------------------------------------------

@@ -35,7 +35,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from d33d.design_loop import BboxInfo, best_match_component, scad_title
+from d33d.design_loop import BboxInfo, scad_title
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -102,19 +102,79 @@ def photo_data_uri(source_photo_path: str | None) -> str:
     return f"data:{mime};base64,{b64}"
 
 
+def latest_version_stated_axes(
+    versions_service: Any, project_id: int
+) -> dict[str, float] | None:
+    """The latest version row's persisted per-axis confirmed set
+    (``versions.stated_dims`` — issue #246), or ``None``.
+
+    This is the dead W/D/H param-key fallback REPLACED (issue #247): the
+    old helper read ``params.get("W")`` / ``"D"`` / ``"H"`` — keys the
+    design model never emits (it emits free names like ``spacer_width``),
+    so on a follow-up turn with no inline dims it always returned ``None``
+    and the gate abstained on every real design. The per-axis set the user
+    actually confirmed is PERSISTED on the version row by the dimension
+    protocol's per-axis extraction (``stated_axes_from_message`` — the same
+    ``_extract_stated`` pipeline), and that persisted column is now the
+    single source.
+
+    The contract per the ticket's operator decision:
+
+    * the source is EXACTLY the latest version row's ``stated_dims``
+      column — no transitive walk back through older versions;
+    * a row with NULL ``stated_dims`` (every pre-#246 row, or a run where
+      the user confirmed nothing) yields ``None`` (abstain) — never a
+      value re-derived from ``params`` (that is precisely the dead read
+      being removed);
+    * only axes present with a positive value are returned — a partial
+      confirmation (e.g. ``{"H": 12.0}``) is a partial dict, and an empty
+      or all-``<= 0`` set collapses to ``None`` (an absent confirmation
+      abstains; the caller must never see a zero-encoded axis it could
+      mistake for a measurement target).
+
+    ``None`` means "no confirmed axis": the caller falls back to
+    abstaining the gate / dimension plumbing (``Score.bbox_abstained``,
+    the export route's ``stated_mm=None`` semantics from #91) — exactly as
+    when the column is NULL.
+    """
+    latest = versions_service.latest_version(project_id)
+    if latest is None:
+        return None
+    raw = latest.get("stated_dims")
+    if not isinstance(raw, dict):
+        return None
+    axes: dict[str, float] = {}
+    for axis, value in raw.items():
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            axes[str(axis)] = f
+    return axes or None
+
+
 def latest_version_stated_dims(
     versions_service: Any, project_id: int
 ) -> tuple[float, float, float] | None:
-    """The latest version's (W, D, H) as a fully-positive triple, or
-    ``None`` — ticket #91's fallback source (mirrors
-    ``create_region_edit``'s latest-version W/D/H read, but returns ``None``
-    instead of a zero triple when the dimensions are not KNOWN).
+    """The latest version's confirmed (W, D, H) triple, or ``None`` —
+    issue #247's re-pointing of ticket #91's fallback source.
 
-    ``None`` is returned when there is no version, or when any of W/D/H is
-    missing/null or ``<= 0`` — an all-zero (or partial) triple must never
-    re-enter the bbox gate as a ``target <= 0`` hard-fail target (the
-    original #91 bug); the caller treats ``None`` as "no dimensions known"
-    and the gate abstains (``Score.bbox_abstained``).
+    Reads the PERSISTED per-axis confirmed set
+    (:func:`latest_version_stated_axes` — ``versions.stated_dims``,
+    written by the dimension protocol's per-axis extraction) and derives
+    the triple from it. The return contract is unchanged from the
+    pre-#247 helper — a full positive ``(W, D, H)`` triple or ``None`` —
+    so the chat-route fallback (``d33d.projects``), the
+    finalize/region-edit kwargs (``d33d.versions_routes``), and the 3MF
+    export route (``d33d.app`` → ``validate_stl`` ``stated_mm``) keep
+    their shapes: a full triple when ALL three axes are confirmed on the
+    latest row, else ``None`` (abstain — the #91 semantics unchanged).
+
+    The dead W/D/H param-key read is GONE: a prior version whose ``params``
+    snapshot happens to carry ``W``/``D``/``H`` keys but whose
+    ``stated_dims`` is NULL (every pre-#246 row) yields ``None``, not a
+    triple re-derived from param names the model never emitted.
 
     ``create_region_edit`` does NOT use this helper — it builds its own
     ``float(params.get(axis, 0.0))`` triple, which on a fresh project
@@ -127,20 +187,12 @@ def latest_version_stated_dims(
     dimension gate measures rather than fabricates") was always intended
     to describe.
     """
-    latest = versions_service.latest_version(project_id)
-    if latest is None:
+    axes = latest_version_stated_axes(versions_service, project_id)
+    if axes is None:
         return None
-    params = latest.get("params") or {}
-    triple: list[float] = []
-    for axis in ("W", "D", "H"):
-        try:
-            value = float(params.get(axis, 0.0))
-        except (TypeError, ValueError):
-            return None
-        triple.append(value)
-    if any(value <= 0 for value in triple):
+    if "W" not in axes or "D" not in axes or "H" not in axes:
         return None
-    return (triple[0], triple[1], triple[2])
+    return (axes["W"], axes["D"], axes["H"])
 
 
 def _component_extent(component: Any) -> tuple[float, float, float, float, float, float, float]:
@@ -504,17 +556,34 @@ def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     that render — never re-derived from the STL file, which may be gone
     by the time the version row is written).
 
-    Multi-part (issue #100, same rule the bbox gate applies): when
-    ``BboxInfo.components`` is non-empty, the gate matched the stated
-    triple against the BEST-MATCHING COMPONENT, so the version persists
-    THAT component's extents — the assembly extents would describe a
-    body the user did not ask for. When the component is not identifiable
-    (no breakdown, an empty split, or no stated triple to match against —
-    the stated dims are read from the version's own params snapshot, and
-    a zero/absent axis means "unknown", never a target), the measurement
-    is NOT persisted (``None`` → the row stores NULL): abstaining is
-    correct, guessing is not. A zero extent inside the extents abstains
-    the same way (a zero is the encoded absence, issue #91).
+    The persisted bbox is ALWAYS the WHOLE-MESH extents
+    (``BboxInfo.x``/``y``/``z`` — the union bounding box of everything the
+    render produced) whenever a valid ``BboxInfo`` exists with all three
+    extents ``> 0`` (issue #247). This applies on BOTH the chat path and
+    the finalize path (both funnel through this helper, via
+    ``_resolve_version_create`` and ``d33d.versions_routes`` respectively),
+    and is INDEPENDENT of stated dims, parameter names, and component
+    count: reading the extents of a mesh is a measurement, not a guess —
+    it does not need to know what the user asked for (DECISIONS.md 2026-
+    09-24: abstention is right for choosing WHICH component the user
+    meant, wrong for MEASURING).
+
+    The pre-#247 rule is removed: when ``components`` was non-empty the
+    helper matched the stated triple (read from the version's own params
+    snapshot under the literal ``W``/``D``/``H`` keys) against the best-
+    matching component and persisted that component's extents — or
+    nothing. But ``bbox_from_render`` sets ``components`` for EVERY
+    watertight body (a healthy single body splits to exactly one
+    component), and the design model never emits ``W``/``D``/``H`` param
+    keys (it emits free names like ``spacer_width``), so the branch
+    always returned ``None``: versions.bbox was NULL on both the chat and
+    the finalize path for every real design. Component matching is no
+    longer used for persistence at all.
+
+    A zero extent or a missing ``BboxInfo`` still persists ``None`` (the
+    row stores NULL — honest absence): a zero is the encoded absence
+    (issue #91), and an absent measurement abstains (issue #137) — it is
+    never encoded as ``(0, 0, 0)``.
     """
     best = getattr(result, "best", None)
     if best is None:
@@ -522,27 +591,6 @@ def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     bbox = getattr(best, "bbox", None)
     if not isinstance(bbox, BboxInfo):
         return None
-    if bbox.components:
-        params = best.params if isinstance(best.params, dict) else {}
-        try:
-            stated = (
-                float(params.get("W", 0.0)),
-                float(params.get("D", 0.0)),
-                float(params.get("H", 0.0)),
-            )
-        except (TypeError, ValueError):
-            return None
-        if any(t <= 0 for t in stated):
-            # An unknown stated axis: best_match_component has no defined
-            # selection without a full triple (the gate abstains) — the
-            # component is not identifiable, persist nothing.
-            return None
-        matched = best_match_component(bbox, stated)
-        if matched is None:
-            return None
-        if any(e <= 0 for e in matched):
-            return None
-        return matched
     if any(e <= 0 for e in (bbox.x, bbox.y, bbox.z)):
         return None
     return (bbox.x, bbox.y, bbox.z)
@@ -1097,14 +1145,21 @@ async def run_design_loop_with_events(
                     name: _data_uri_from_bytes(raw, "image/png")
                     for name, raw in view_bytes.items()
                 }
-        # Ticket #91: propagate the bbox abstention to the wire so a
-        # consumer can never mistake an abstained pass for a verified
-        # one — ``Score.bbox_abstained`` exists on the score, but a
-        # flag that stops at the Score object is not a safeguard: every
-        # pass frame carries the flag (False for a fully measured pass,
-        # True when any stated axis was unknown), in both the
-        # version-created progress frame and the terminal done frame.
-        # (The failures.jsonl archive needs no field: it fires ONLY on
+        # Ticket #91 / issue #247: propagate the bbox abstention to the
+        # wire so a consumer can never mistake an abstained pass for a
+        # verified one — ``Score.bbox_abstained`` exists on the score, but
+        # a flag that stops at the Score object is not a safeguard: every
+        # pass frame carries the flag in both the version-created progress
+        # frame and the terminal done frame. Per-axis semantics (issue
+        # #247): the flag is False ONLY for a fully confirmed, fully
+        # measured pass; True when no axis was checked at all (the gate
+        # abstained entirely) AND when SOME axes were checked but others
+        # were not confirmed (a partial pass still carries unmeasured
+        # axes — the per-axis reality). A per-axis breakdown is NOT added
+        # to the frame: the frame schema is frozen (SEAM D tests), and the
+        # flag plus the version row's persisted ``stated_dims`` column
+        # (issue #246) together carry the per-axis truth. (The
+        # failures.jsonl archive needs no field: it fires ONLY on
         # ``exhausted`` results, and an abstained bbox bit is always
         # True, so an abstained gate never lands there as a failure —
         # it can only make a loop more pass-prone.)
@@ -1145,6 +1200,7 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
+    "latest_version_stated_axes",
     "latest_version_stated_dims",
     "photo_data_uri",
     "run_design_loop_with_events",
