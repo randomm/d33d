@@ -384,6 +384,31 @@ export const firstRun = {
   plateCaptionUnverified: " — not yet confirmed against your machine",
 } as const;
 
+/**
+ * Assumed-value confirmation (issue #250). After a passing design pass the
+ * assistant offers to confirm ONE assumed value — the one that most affects
+ * fit — as a single plain sentence in the conversation, never a form. The
+ * deterministic fallback offer and the short acknowledgement both live here:
+ * the model may supply its own offer sentence (the done frame's `confirm_sentence`),
+ * but only when it passes the server's number guard; otherwise the
+ * template below is the wording. `value` arrives pre-formatted (via `mm`
+ * for millimetre params, the model's own string for non-numeric ones), and
+ * `label` is the parameter's user-facing label with the raw identifier as
+ * the fallback (the ChatPanel renders the identifier in the mono face — the
+ * same mono-face rule as the Brief's rows).
+ */
+export const confirmOffer = {
+  /** The deterministic offer template, used when the model's own sentence
+   *  is absent or fails the server-side number guard. */
+  offer: (value: string, label: string): string =>
+    `I assumed ${value} for ${label}. Want it different?`,
+
+  /** The short acknowledgement after the user accepts the offer (no design
+   *  run, no new version — the value is recorded as confirmed). */
+  acknowledged: (label: string, value: string): string =>
+    `Got it — ${label} stays ${value}.`,
+} as const;
+
 export const shell = {
   addPhoto: "Add a reference photo",
   composerPlaceholder:
@@ -447,6 +472,7 @@ export const copy = {
   firstPass,
   progress,
   failure,
+  confirmOffer,
   region,
   history,
   firstRun,

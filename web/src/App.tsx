@@ -1107,6 +1107,46 @@ export default function App({ client }: AppProps) {
                   };
                 }),
               );
+              // Issue #250: the done frame's additive `confirm_offer` field
+              // (the server validated it — at most one param per turn, never
+              // re-offering a confirmed or user-changed value) carries the
+              // offer sentence as its own message AFTER the pass card: a
+              // plain assistant turn, never inside the PassCard, never a
+              // form. The pass card's turn itself (the assistant message
+              // above) already rendered the pass summary; the offer is a
+              // distinct plain message that follows it in the transcript.
+              // `confirm_ack` is the accepted-offer acknowledgement —
+              // likewise its own plain assistant message (no design run,
+              // no new version — the server did the recording), rendered
+              // through the ChatMessage's `confirmAck` field so the value
+              // renders in the mono face.
+              const confirmSentence =
+                typeof data.confirm_sentence === "string" ? data.confirm_sentence : "";
+              if (data.confirm_offer !== undefined && confirmSentence.length > 0) {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: `msg-${Date.now()}-confirm-offer`,
+                    role: "assistant",
+                    content: confirmSentence,
+                  },
+                ]);
+              }
+              const confirmAckLabel =
+                typeof data.confirm_ack_label === "string" ? data.confirm_ack_label : "";
+              const confirmAckValue =
+                typeof data.confirm_ack_value === "string" ? data.confirm_ack_value : "";
+              if (data.confirm_ack !== undefined && confirmAckLabel.length > 0) {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: `msg-${Date.now()}-confirm-ack`,
+                    role: "assistant",
+                    content: copy.confirmOffer.acknowledged(confirmAckLabel, confirmAckValue),
+                    confirmAck: { label: confirmAckLabel, value: confirmAckValue },
+                  },
+                ]);
+              }
             },
             onError: (data) => {
               setMessages((prev) =>

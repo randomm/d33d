@@ -264,6 +264,23 @@ class IterationRecord:
     #: model emitted no array — a missing field is honest absence, never
     #: a fabricated label).
     param_meta: dict[str, Any] = field(default_factory=dict)
+    #: The param the model flagged as MOST FIT-CRITICAL to confirm
+    #: (issue #250): the ``confirm_first`` field of the design-role reply
+    #: (the fenced-JSON / tool-call ``arguments.confirm_first``), or
+    #: ``None`` (the model offered no flag — the selection rule then has
+    #: only the declared-axis branch). The adapter VALIDATES the name
+    #: against the version's own params before offering (a name that is
+    #: not an assumed numeric param of the version is rejected — never a
+    #: guessed fallback); the record only carries the model's raw flag.
+    confirm_first: str | None = None
+    #: The model's own OFFER SENTENCE for the flagged param (issue
+    #: #250): the ``confirm_sentence`` field of the design-role reply,
+    #: or ``None``. The adapter accepts it only when it names the chosen
+    #: param's value AND every number in it appears in the design-state
+    #: block (the issue #249 number guard); anything else falls to the
+    #: deterministic template. The record carries the raw text — the
+    #: guard runs server-side, never in the model.
+    confirm_sentence: str | None = None
 
 
 @dataclass(frozen=True)
@@ -705,6 +722,7 @@ def _design_state_lines(
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
+    state_confirmed: dict[str, Any] | None = None,
 ) -> list[str]:
     """The design-state block's prompt lines (issue #120).
 
@@ -750,7 +768,9 @@ def _design_state_lines(
     )
 
     block = build_design_state_block(
-        state_block_for_version(state_params, state_bbox, state_stated, state_meta)
+        state_block_for_version(
+            state_params, state_bbox, state_stated, state_meta, state_confirmed
+        )
     )
     # ``format_design_state_block`` renders the header + the entries. The
     # header (``Current design state (mm):``) and the entry lines are
@@ -797,6 +817,7 @@ def _design_messages(
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
+    state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
@@ -827,7 +848,10 @@ def _design_messages(
     # to agree). Empty when no version exists yet (an honest empty state,
     # never a fabricated dimension).
     lines.extend(
-        _design_state_lines(stated, state_params, state_bbox, state_stated, state_meta)
+        _design_state_lines(
+            stated, state_params, state_bbox, state_stated, state_meta,
+            state_confirmed,
+        )
     )
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
@@ -857,9 +881,17 @@ def _design_messages(
         'fillet_size_top to "Top fillet size"), the "unit" is the unit '
         '("mm" for millimetres), the "axis" is "W" or "D" or "H" ONLY '
         'when the parameter realises that overall dimension of the part '
-        '(omit it otherwise - never guess an axis), and the "reason" is '
-        'one short clause saying why you picked that value, for values '
-        'the user did not give.'
+        "(omit it otherwise - never guess an axis), and the \"reason\" is "
+        "one short clause saying why you picked that value, for values the user did "
+        "not give. In the SAME reply, optionally offer to confirm ONE of your own "
+        "assumed values (one the design state block marks \"assumed\") that most "
+        'affects fit: "confirm_first" is that parameter' + "'" + 's exact identifier '
+        'and "confirm_sentence" is one short plain sentence naming its value (e.g. '
+        '"I assumed 3 mm walls. That is sturdy for a shelf spacer. Want it '
+        'thinner?") — every number in confirm_sentence must come from the '
+        'design state block (never invent one), and omit BOTH fields when '
+        'you have no value to offer (never more than one offer, never a '
+        'value the state block already marks stated or measured).'
     )
     if repair is not None:
         lines.append("REPAIR directive (structured, not raw stderr):")
@@ -998,6 +1030,38 @@ def extract_param_meta(result: LLMResult) -> dict[str, Any]:
     return out
 
 
+def extract_confirm_hints(result: LLMResult) -> tuple[str | None, str | None]:
+    """The model's offer hints from a design-role ``LLMResult``
+    (issue #250): the ``confirm_first`` / ``confirm_sentence`` fields of
+    the design tool call (``arguments.confirm_first`` /
+    ``arguments.confirm_sentence`` — the same T0-tool-call or T1-fenced
+    shape as ``scad`` / ``parameters``).
+
+    Returns ``(name_or_None, sentence_or_None)``. Lenient by contract
+    (like :func:`extract_param_meta`): a non-dict ``arguments``, a
+    missing field, a non-string field, or a blank string all degrade to
+    ``None`` for that field — a malformed hint NEVER fails the design
+    pass, and ``None`` simply means "the model offered no flag" (the
+    selection rule's declared-axis branch still runs)."""
+    first: str | None = None
+    sentence: str | None = None
+    for call in result.tool_calls:
+        args = call.get("arguments")
+        if not isinstance(args, dict):
+            continue
+        if first is None and isinstance(args.get("confirm_first"), str) and args[
+            "confirm_first"
+        ].strip():
+            first = args["confirm_first"].strip()
+        if sentence is None and isinstance(args.get("confirm_sentence"), str) and args[
+            "confirm_sentence"
+        ].strip():
+            sentence = args["confirm_sentence"].strip()
+        if first is not None and sentence is not None:
+            break
+    return first, sentence
+
+
 def _scad_from_result(result: LLMResult) -> str:
     """The .scad source from a design-role LLMResult.
 
@@ -1064,6 +1128,7 @@ async def run_design_loop_async(
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
+    state_confirmed: dict[str, Any] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     on_progress_iteration: Any = "_current",
@@ -1128,6 +1193,7 @@ async def run_design_loop_async(
                 state_bbox=state_bbox,
                 state_stated=state_stated,
                 state_meta=state_meta,
+                state_confirmed=state_confirmed,
                 design_source=design_source,
             ),
             _design_system(stated_dims),
@@ -1136,6 +1202,9 @@ async def run_design_loop_async(
         if log is not None:
             log("design", design_hash, scad.status)
 
+        # The model's offer hints (issue #250), extracted ONCE per design
+        # call and carried onto the iteration record(s) this call builds.
+        _confirm_first, _confirm_sentence = extract_confirm_hints(scad)
         scad_source = _scad_from_result(scad)
         if not scad_source.strip():
             # Fail fast: an empty/blank SCAD would burn a whole render run
@@ -1165,6 +1234,8 @@ async def run_design_loop_async(
                 bbox=None,
                 params=_scad_params(scad_source),
                 param_meta=extract_param_meta(scad),
+                confirm_first=_confirm_first,
+                confirm_sentence=_confirm_sentence,
             )
             iterations.append(record)
             if best is None or is_best(candidate_score, best_score):
@@ -1222,6 +1293,8 @@ async def run_design_loop_async(
             bbox=bbox,
             params=_scad_params(scad_source),
             param_meta=extract_param_meta(scad),
+            confirm_first=_confirm_first,
+            confirm_sentence=_confirm_sentence,
         )
         iterations.append(record)
 
@@ -1291,6 +1364,7 @@ def run_design_loop(
     state_bbox: dict[str, float] | None = None,
     state_stated: dict[str, float] | None = None,
     state_meta: dict[str, Any] | None = None,
+    state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
@@ -1315,6 +1389,7 @@ def run_design_loop(
             state_bbox=state_bbox,
             state_stated=state_stated,
             state_meta=state_meta,
+            state_confirmed=state_confirmed,
             design_source=design_source,
         )
     )

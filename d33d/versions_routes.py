@@ -433,7 +433,11 @@ def create_versions_router() -> APIRouter:
         # for every entry).
         stated = latest["stated_dims"] if latest is not None else None
         param_meta = latest["param_meta"] if latest is not None else None
-        return state_block_for_version(params, measurement, stated, param_meta)
+        # The param-keyed confirmed set (issue #250): the accepted-offer
+        # flow's evidence — a confirmed param renders ``stated`` (rule
+        # (b)) in the SAME block the live prompt renders.
+        confirmed = latest["confirmed_params"] if latest is not None else None
+        return state_block_for_version(params, measurement, stated, param_meta, confirmed)
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 
@@ -505,6 +509,7 @@ def create_versions_router() -> APIRouter:
         candidate's parameters; any other status is 422 (no spurious
         version). ``params`` defaults to the current version's snapshot."""
         svc = _service(request)
+        app = request.app
         _project_or_404(svc, project_id)
         # The current design source (issue #105): the project's current
         # version's per-version source, captured BEFORE the loop runs.
@@ -614,6 +619,7 @@ def create_versions_router() -> APIRouter:
         # never persisted anyway.
         from d33d.design_loop_events import (
             _version_bbox_extents,
+            _version_confirm_hints,
             _version_param_meta,
             _version_render_artifact_dir,
         )
@@ -634,6 +640,10 @@ def create_versions_router() -> APIRouter:
         # fabricated axis row.
         from d33d.dimension_protocol import stated_axes_from_message
 
+        # The previous version BEFORE the create below (the offer
+        # selection's changed-set baseline and the confirmed-set
+        # carry-forward source — issue #250).
+        prev_version = svc.latest_version(project_id)
         try:
             if body.stated_dims is not None:
                 _w, _d, _h = body.stated_dims
@@ -659,6 +669,26 @@ def create_versions_router() -> APIRouter:
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
+        # The assumed-value offer (issue #250): the finalize route
+        # versions the same way the chat adapter does — a pass that
+        # created a version resolves its pending offer from the new
+        # version's params (the model's ``confirm_first`` hint, the
+        # declared-axis preference, the user's changed set vs the
+        # previous version — read BEFORE the create above, since the
+        # create IS the "previous version" baseline). Best-effort: an
+        # offer-path failure must never fail the 201.
+        try:
+            from d33d.design_loop_events import _resolve_offer
+
+            await _resolve_offer(
+                app, project_id, int(v["id"]), result, prev_version
+            )
+        except Exception:  # noqa: BLE001 — the offer must never kill the 201
+            logger.debug(
+                "offer resolution failed for finalize project %s",
+                project_id,
+                exc_info=True,
+            )
         return svc._version_public(v)
 
     return router
@@ -790,6 +820,13 @@ def _finalize_loop_kwargs(
     # (labels/units/axis/reason join in identically in both consumers).
     # ``None`` when no version exists yet or the version has no metadata.
     state_meta = latest["param_meta"] if latest is not None else None
+    # The design-state block's param-keyed confirmed set (issue #250):
+    # the latest version's persisted ``confirmed_params`` (the values the
+    # user explicitly confirmed via the accepted-offer flow), forwarded so
+    # the finalize prompt's block renders a confirmed param ``stated``
+    # exactly as the GET the SPA reads serves it. ``None`` when no version
+    # exists yet or nothing was confirmed.
+    state_confirmed = latest["confirmed_params"] if latest is not None else None
 
     # The current design source (issue #105): the project's current
     # version's per-version source, captured BEFORE the loop runs (the
@@ -831,6 +868,7 @@ def _finalize_loop_kwargs(
         "state_bbox": state_bbox,
         "state_stated": state_stated,
         "state_meta": state_meta,
+        "state_confirmed": state_confirmed,
         "design_source": design_source,
     }
 

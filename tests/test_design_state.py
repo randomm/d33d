@@ -1035,3 +1035,128 @@ def test_promoted_param_renders_stated_mark_in_prompt() -> None:
     )
     text = format_design_state_block(block)
     assert "Width = 60.4 (stated by the user)" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #250: rule (b) — explicit user confirmation promotes a param
+# ---------------------------------------------------------------------------
+
+
+def test_confirmed_non_axis_param_promotes_to_stated() -> None:
+    """Issue #250 operator decision: a param in ``confirmed_params`` with
+    a value equal (within 1e-6) to its current value renders ``stated``
+    — for ANY param, including one with NO declared axis (the design
+    team's own example offer is a wall thickness, which has no axis)."""
+    entries = state_block_for_version(
+        {"wall_thickness": 3.0, "spacer_width": 20.0},
+        None,
+        None,
+        {"wall_thickness": {"label": "Wall thickness", "unit": "mm"}},
+        {"wall_thickness": 3.0},
+    )
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["wall_thickness"]["provenance"] == "stated"
+    assert by_name["wall_thickness"]["value"] == 3.0
+    # A non-confirmed sibling stays assumed (confirmation is per-param,
+    # never name- or set-inferred).
+    assert by_name["spacer_width"]["provenance"] == "assumed"
+
+
+def test_confirmed_param_stays_assumed_when_value_changed() -> None:
+    """A confirmed value the param no longer carries does NOT promote
+    (stale evidence — the value moved in this version, so the user's
+    confirmation of the old value is not evidence for the new one)."""
+    entries = state_block_for_version(
+        {"wall_thickness": 2.0},
+        None,
+        None,
+        None,
+        {"wall_thickness": 3.0},  # confirmed at 3, param is now 2
+    )
+    assert entries[0]["provenance"] == "assumed"
+
+
+def test_confirmed_param_tolerance_is_1e_6() -> None:
+    """The rule (b) value equality is within 1e-6 (issue #250's operator
+decision) — a 1e-7 drift promotes (float noise, same value), a 1e-3
+drift does not (a real change)."""
+    entries = state_block_for_version(
+        {"wall_thickness": 3.0000001}, None, None, None, {"wall_thickness": 3.0}
+    )
+    assert entries[0]["provenance"] == "stated"
+    entries2 = state_block_for_version(
+        {"wall_thickness": 3.001}, None, None, None, {"wall_thickness": 3.0}
+    )
+    assert entries2[0]["provenance"] == "assumed"
+
+
+def test_confirmed_param_with_matching_measurement_renders_measured() -> None:
+    """A confirmed W-named param whose value the measurement AGREES with
+    (within tolerance) renders ``measured`` with the measured value —
+    the confirmation is evidence for the value, and the measurement
+    confirms it (no ``disagrees``, no fabricated ``stated``)."""
+    entries = state_block_for_version(
+        {"W": 30.0},
+        {"x": 30.0, "y": 30.0, "z": 30.0},  # the measurement agrees
+        None,
+        None,
+        {"W": 30.0},  # the user confirmed W = 30
+    )
+    param_rows = [e for e in entries if e["kind"] == "param"]
+    assert param_rows[0]["provenance"] == "measured"
+    assert param_rows[0]["value"] == 30.0
+
+
+def test_confirmed_param_with_mismatching_measurement_renders_disagrees() -> None:
+    """A confirmed W-named param whose value the measurement MISMATCHS
+    renders ``disagrees`` (never a silent ``stated``): the measurement
+    is the number that will print, and a confirmed value the measurement
+    contradicts must not silently win over it (issue #250 round-1 review
+    finding 1 — the review's worked example was a confirmed ``W = -10``
+    against a measured 25, which renders ``disagrees`` with the confirmed
+    value riding along as ``stated_value``)."""
+    entries = state_block_for_version(
+        {"W": 35.0},
+        {"x": 25.0, "y": 30.0, "z": 30.0},  # 10 mm off — well past tolerance
+        None,
+        None,
+        {"W": 35.0},  # the user confirmed W = 35
+    )
+    param_rows = [e for e in entries if e["kind"] == "param"]
+    assert param_rows[0]["provenance"] == "disagrees"
+    assert param_rows[0]["value"] == 25.0  # the measured number (what prints)
+    assert param_rows[0]["stated_value"] == 35.0  # the confirmed value, riding along
+
+
+def test_confirmed_and_axis_rules_are_independent() -> None:
+    """The two stores stay independent: confirming wall_thickness does
+    NOT close the W/D/H axis evidence (no axis rows appear), and an axis
+    statement does NOT confirm a non-axis param."""
+    # Confirmed non-axis param + no axis evidence: no axis rows.
+    entries = state_block_for_version(
+        {"wall_thickness": 3.0}, None, None, None, {"wall_thickness": 3.0}
+    )
+    assert {e["kind"] for e in entries} == {"param"}
+    # Axis evidence + no confirmed set: the non-axis param stays assumed
+    # (an axis statement is not a license to confirm wall_thickness).
+    entries2 = state_block_for_version(
+        {"wall_thickness": 3.0, "width": 60.0},
+        None,
+        {"W": 60.0},
+        {"width": {"label": "Width", "axis": "W"}},
+        None,
+    )
+    by_name = {e["name"]: e for e in entries2}
+    assert by_name["width"]["provenance"] == "stated"  # rule (a)
+    assert by_name["wall_thickness"]["provenance"] == "assumed"  # not confirmed
+
+
+def test_confirmed_set_none_and_empty_never_promote() -> None:
+    """``confirmed_params=None`` (every legacy row) or ``{}`` promotes
+    nothing (an absent set means "nothing was confirmed" — never a
+    fabricated promotion)."""
+    for confirmed in (None, {}):
+        entries = state_block_for_version(
+            {"wall_thickness": 3.0}, None, None, None, confirmed
+        )
+        assert entries[0]["provenance"] == "assumed"

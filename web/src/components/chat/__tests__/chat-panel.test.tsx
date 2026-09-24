@@ -150,6 +150,81 @@ describe("ChatPanel", () => {
       expect(screen.queryByTestId("streaming-cursor")).toBeNull();
       expect(screen.getByTestId("chat-msg-assistant")).toHaveTextContent(answerText);
     });
+
+    it("the confirmation offer renders as a plain assistant message after the pass card (issue #250)", () => {
+      // The done frame's additive `confirm_offer` field is routed by App as
+      // its OWN assistant message AFTER the pass card — a plain sentence in
+      // the flow, not inside the PassCard, not a form. The offer message
+      // carries no versionId (so no PassCard of its own), no views, no
+      // failure.
+      const offerText =
+        "I assumed 3.0\u202Fmm for Wall thickness. Want it different?";
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "user", content: "make a shelf spacer 12 mm tall" },
+        { id: "m2", role: "assistant", content: "pass summary", versionId: 4, views },
+        { id: "m3", role: "assistant", content: offerText },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+
+      // The offer text renders verbatim as a plain assistant message
+      // (the NNBSP in "3.0 mm" is the deck's `mm` formatter, so the
+      // substring assertion uses the spaced form of the value).
+      const offerTurn = screen.getAllByTestId("chat-msg-assistant")[1];
+      expect(offerTurn.textContent).toContain("I assumed 3.0\u202fmm for Wall thickness.");
+      expect(offerTurn.textContent).toContain("Want it different?");
+      // It is a separate turn, not part of the pass card's summary.
+      const passCard = screen.getByTestId("pass-card");
+      expect(passCard.textContent).not.toContain(offerText);
+      expect(screen.getByTestId("pass-card-summary").textContent).toBe("pass summary");
+      // Exactly one pass card — the offer message is not a card.
+      expect(screen.getAllByTestId("pass-card")).toHaveLength(1);
+      // No form, no buttons: an offer is a sentence, not a control. The
+      // composer (the chat input form) is the ONLY form in the panel, and
+      // the offer turn itself carries no button/input of its own — it is a
+      // plain message, not a form control.
+      expect(offerTurn.querySelectorAll("button")).toHaveLength(0);
+      expect(offerTurn.querySelectorAll("input")).toHaveLength(0);
+      expect(screen.getByTestId("chat-input")).toBeTruthy();
+    });
+
+    it("the confirmation acknowledgement renders as a plain message with the value in the mono face (issue #250)", () => {
+      // The accepted-offer acknowledgement ("Got it — {label} stays
+      // {value}.") is its own plain assistant message (no design run, no
+      // new version). The measured value renders in the mono face — the
+      // project rule that a number can never hide inside a sentence —
+      // while the prose stays in the UI face.
+      const ackText = "Got it — Wall thickness stays 3.0\u202Fmm.";
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: "I assumed 3.0\u202Fmm for Wall thickness. Want it different?" },
+        { id: "m2", role: "user", content: "yes" },
+        {
+          id: "m3",
+          role: "assistant",
+          content: ackText,
+          confirmAck: { label: "Wall thickness", value: "3.0\u202Fmm" },
+        },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+
+      // The full acknowledgement sentence renders in the transcript
+      // (the NBSP in "3.0 mm" is the deck's `mm` formatter, so the
+      // substring assertion uses the spaced form of the value).
+      const ackTurn = screen.getAllByTestId("chat-msg-assistant")[1];
+      expect(ackTurn.textContent).toContain("Got it — Wall thickness stays 3.0\u202fmm.");
+      // The value span renders in the mono face (the identifier fallback
+      // would render there too — one rule, not two).
+      const valueEl = screen.getAllByTestId("chat-msg-assistant")[1].querySelector(
+        "[class*='mono'], [style*='mono']",
+      );
+      expect(valueEl, "the value must render in a mono-face span").not.toBeNull();
+      // The value span carries the sentence's terminal period (the ack
+      // sentence is "…stays {value}." — the period belongs to the value's
+      // mono-face span, not to the prose label).
+      expect(valueEl?.textContent).toBe("3.0\u202Fmm.");
+      expect(valueEl?.getAttribute("style")).toContain("var(--font-mono)");
+      // No PassCard — confirming a value never creates a version.
+      expect(screen.queryByTestId("pass-card")).toBeNull();
+    });
   });
 
   it("disables send button when input is empty", () => {

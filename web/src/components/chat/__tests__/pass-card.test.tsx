@@ -64,6 +64,26 @@ describe("PassCard", () => {
     expect(copy.passCard.summary.length).toBeGreaterThan(0);
   });
 
+  it("the confirmation offer never leaks into the pass card's summary (issue #250)", () => {
+    // The done frame's additive `confirm_offer` field is delivered by App
+    // as its OWN plain assistant message AFTER the pass card — the PassCard
+    // itself renders ONLY the copy deck's pass summary, never the offer
+    // sentence (which belongs to the confirmOffer surface, not passCard).
+    // The offer is a sentence in the conversation, not a form.
+    const offer = copy.confirmOffer.offer("3.0\u202Fmm", "Wall thickness");
+    render(
+      <PassCard versionId={4} views={SIX_VIEWS} summary={copy.passCard.summary} />,
+    );
+    expect(screen.getByTestId("pass-card-summary").textContent).toBe(copy.passCard.summary);
+    expect(screen.getByTestId("pass-card-summary").textContent).not.toContain(offer);
+    expect(screen.getByTestId("pass-card-summary").textContent).not.toContain(
+      "I assumed",
+    );
+    // No form or button inside the card beyond its attested actions — the
+    // offer is never rendered as a control here.
+    expect(screen.queryByRole("form")).toBeNull();
+  });
+
   it("renders the version label when a version id is present", () => {
     render(<PassCard versionId={4} views={SIX_VIEWS} />);
     expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");

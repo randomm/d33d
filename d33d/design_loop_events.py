@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -589,6 +590,112 @@ def _version_bbox_extents(result: Any) -> tuple[float, float, float] | None:
     return (bbox.x, bbox.y, bbox.z)
 
 
+def _version_confirm_hints(result: Any) -> tuple[str | None, str | None]:
+    """The best candidate's offer hints for the adapter (issue #250), or
+    ``(None, None)``.
+
+    The hints are DECLARED ``IterationRecord`` fields (``confirm_first`` /
+    ``confirm_sentence`` — set from the design-role reply by
+    ``d33d.design_loop.extract_confirm_hints``); read from the record, never
+    re-derived. A stub result without the fields (an older loop seam) or a
+    model that emitted no hints both yield ``(None, None)`` — the offer
+    selection still has the declared-axis branch to run.
+    """
+    best = getattr(result, "best", None)
+    if best is None:
+        return None, None
+    first = getattr(best, "confirm_first", None)
+    if not isinstance(first, str) or not first.strip():
+        first = None
+    sentence = getattr(best, "confirm_sentence", None)
+    if not isinstance(sentence, str) or not sentence.strip():
+        sentence = None
+    return first, sentence
+
+
+async def _resolve_offer(
+    app: Any, project_id: int, version_id: int | None, result: Any, prev_version: Any
+) -> dict[str, Any] | None:
+    """Resolve the pending offer for a passing design pass (issue #250).
+
+    On a pass (``version_id`` set): pick AT MOST ONE assumed param of the
+    NEW version (``d33d.confirm_offer.select_offer_candidate`` — a
+    declared-axis assumed param first, else the model's validated
+    ``confirm_first``; a param already confirmed or changed by the user is
+    never re-offered), build the sentence (the model's
+    ``confirm_sentence`` only when it names the chosen value AND passes
+    the issue #249 number guard against the new version's design-state
+    block, else the deterministic template), and persist the offer
+    server-side (``versions.set_pending_offer`` — the acceptance check in
+    ``post_chat`` reads it, never the client). Returns the done frame's
+    additive ``offer`` field ``{"param", "sentence"}``.
+
+    No confirmed-set carry-forward is written: the NEW version row's
+    ``confirmed_params`` stays NULL until the user accepts THAT
+    version's offer — a confirmation the user made on a PREVIOUS version
+    is still honoured on the new row by the selection (the previous
+    version's confirmed set, stashed in ``app.state`` by the adapter, is
+    what excludes a carried param from being re-offered) and by rule (b)
+    (the design-state block re-checks the value against the row's own
+    set, which is empty until the user accepts this version's offer — a
+    value change in this version breaks the chain by construction).
+
+    ``None`` in every no-offer case (no new version, no eligible param,
+    offer state write failed — logged, never fatal).
+    """
+    if version_id is None:
+        return None
+    from d33d.confirm_offer import (
+        offer_entry,
+        offer_sentence,
+        select_offer_candidate,
+    )
+    from d33d.design_state import state_block_for_version
+
+    versions = app.state.versions
+    new_version = versions.get_version(project_id, version_id)
+    if new_version is None:
+        return None
+    params: dict[str, Any] = dict(new_version["params"] or {})
+    meta = new_version["param_meta"]
+    # The confirmed set for selection is the PREVIOUS version's
+    # ``confirmed_params`` (the stashed pre-pass value): a param the
+    # user confirmed ON A PREVIOUS version is confirmed evidence, not an
+    # assumption to re-confirm — a carried forward confirmed param
+    # (identical value) is excluded from the new version's offer.
+    confirmed = getattr(app.state, "_offer_prev_confirmed", None)
+    # The user's changed set vs the previous version (issue #250: a param
+    # the user changed via the design loop — a param the user asked for
+    # and whose value now differs from the previous version — is never
+    # re-offered; it is the user's own move, not an assumption to confirm).
+    # ONLY value changes count: a param newly introduced this version is
+    # NOT in the previous snapshot at all, so it is not "changed" — it is
+    # a fresh assumption and is offerable. On the project's FIRST version
+    # (no previous version) the changed set is empty by definition.
+    prev_params: dict[str, Any] = dict(prev_version["params"]) if prev_version else {}
+    changed = {
+        name
+        for name, value in params.items()
+        if name in prev_params and prev_params[name] != value
+    }
+    confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
+    name = select_offer_candidate(params, meta, confirmed, changed, confirm_first)
+    if name is None:
+        versions.set_pending_offer(project_id, None)
+        return None
+    entry = offer_entry(params, meta, name)
+    if entry is None:
+        versions.set_pending_offer(project_id, None)
+        return None
+    block = state_block_for_version(
+        params, new_version["bbox"], new_version["stated_dims"], meta,
+        new_version["confirmed_params"],
+    )
+    sentence = offer_sentence(entry, confirm_sentence_raw, block)
+    versions.set_pending_offer(project_id, {"version_id": version_id, "param": name})
+    return {"param": name, "sentence": sentence}
+
+
 def _version_param_meta(result: Any) -> dict[str, Any] | None:
     """The best candidate's per-parameter metadata for persistence
     (issue #248), or ``None``.
@@ -990,6 +1097,18 @@ async def run_design_loop_with_events(
     kwargs["state_bbox"] = latest["bbox"] if latest is not None else None
     kwargs["state_stated"] = latest["stated_dims"] if latest is not None else None
     kwargs["state_meta"] = latest["param_meta"] if latest is not None else None
+    # The version's param-keyed confirmed set (issue #250, rule (b)): the
+    # same value the design-state route reads — the live prompt's block
+    # renders a confirmed param ``stated`` exactly as the SPA's Brief does.
+    # Read BEFORE the pass, so it is also the PREVIOUS version's set the
+    # pass branch's ``_resolve_offer`` uses for selection: a confirmation
+    # the user made on the previous version is confirmed evidence, excluded
+    # from the new version's offer (the new row's own ``confirmed_params``
+    # stays NULL until the user accepts THAT version's offer).
+    kwargs["state_confirmed"] = (
+        latest["confirmed_params"] if latest is not None else None
+    )
+    app.state._offer_prev_confirmed = kwargs["state_confirmed"]
     try:
         if _loop_takes_app(run_loop):
             raw = run_loop(app=app, **kwargs)
@@ -1183,6 +1302,10 @@ async def run_design_loop_with_events(
         # it can only make a loop more pass-prone.)
         score = getattr(best, "score", None)
         abstained = bool(getattr(score, "bbox_abstained", False))
+        # The previous version BEFORE this pass creates one (the offer
+        # selection's diff baseline and the confirmed-set carry-forward
+        # source — issue #250), read once.
+        prev_version = app.state.versions.latest_version(project_id)
         version_id = await _resolve_version_create(
             app,
             project_id,
@@ -1190,6 +1313,27 @@ async def run_design_loop_with_events(
             user_message,
             stated_axes=stated_axes,
         )
+        # The assumed-value offer (issue #250): pick AT MOST ONE assumed
+        # param of the NEW version, build its sentence (the model's
+        # ``confirm_sentence`` when the number guard passes, else the
+        # deterministic template), and persist the pending offer
+        # server-side. Never on a stale offer (a newer version supersedes
+        # it — this IS a new version, so a prior pending offer lapses and
+        # is replaced by this one, or cleared when no param qualifies).
+        # Best-effort: any offer-path failure logs and degrades to no
+        # offer (the pass itself is unaffected).
+        offer_field: dict[str, Any] | None = None
+        try:
+            offer_field = await _resolve_offer(
+                app, project_id, version_id, result, prev_version
+            )
+        except Exception:  # noqa: BLE001 — the offer must never kill the pass
+            logger.exception(
+                "offer resolution failed for project %s — emitting the "
+                "pass without an offer",
+                project_id,
+            )
+            offer_field = None
         if version_id is not None:
             vc_frame: dict[str, Any] = {
                 "step": "version-created",
@@ -1200,8 +1344,28 @@ async def run_design_loop_with_events(
             yield ("progress", vc_frame)
         scad = getattr(best, "scad_source", None)
         yield ("token", {"text": scad if isinstance(scad, str) else ""})
-        yield ("done", {"message": _result_message(result), "bbox_abstained": abstained})
+        done_data: dict[str, Any] = {
+            "message": _result_message(result),
+            "bbox_abstained": abstained,
+        }
+        # The offer rides the done frame as ADDITIVE fields (the SPA's
+        # ``App.tsx`` routes ``confirm_offer`` + ``confirm_sentence`` to a
+        # separate plain assistant message after the pass card — issue
+        # #250's task-b contract; existing frames carry no ``confirm_*``
+        # keys at all, byte-identical when no offer was made).
+        if offer_field is not None:
+            done_data["confirm_offer"] = offer_field["param"]
+            done_data["confirm_sentence"] = offer_field["sentence"]
+        yield ("done", done_data)
     else:
+        # Exhausted (or otherwise non-pass): a failed run can carry no
+        # offer — a stale pending offer lapses (the acceptance check
+        # requires a live offer on the CURRENT latest version, and a
+        # subsequent passing pass will set a fresh one).
+        try:
+            app.state.versions.set_pending_offer(project_id, None)
+        except Exception:  # noqa: BLE001 — clearing is best-effort
+            logger.debug("failed to clear pending offer for project %s", project_id)
         # Exhausted (or otherwise non-pass): the terminal error frame gains
         # the STRUCTURED failure reason (issue #82) so the SPA can map it
         # to plain-language copy without string-matching the free-text

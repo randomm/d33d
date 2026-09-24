@@ -63,6 +63,14 @@ export interface ChatMessage {
    *  turn in the conversation, not a card beside it. A message with this
    *  set renders as a FailureTurn. */
   failure?: DisplayError;
+  /** Issue #250: present when this plain assistant message is an assumed-value
+   *  confirmation acknowledgement ("Got it — {label} stays {value}.").
+   *  The rendered content is split into label and value spans so the value
+   *  (and the identifier-fallback label) render in the mono face, per the
+   *  project rule that measurements render in mono and prose in the UI face.
+   *  The offer message itself ("I assumed {value} for {label}…") renders
+   *  as an ordinary plain message — no marker, no extra fields. */
+  confirmAck?: { label: string; value: string };
 }
 
 interface ChatPanelProps {
@@ -165,6 +173,22 @@ export function ChatPanel({
                   source={msg.source}
                   onBesidePhoto={onBesidePhoto}
                 />
+              ) : msg.confirmAck ? (
+                // Issue #250: the confirmation acknowledgement is a plain
+                // message (no form, no buttons) whose measured value renders
+                // in the mono face. The label may be a raw SCAD identifier
+                // (the model-supplied label's fallback) — it renders in the
+                // mono face too, so the user can tell it from a human label
+                // at a glance (the same rule as the Brief's rows).
+                <span className="chat-msg-content" data-testid="confirm-ack-msg">
+                  <span className="chat-msg-confirm-label">Got it — {msg.confirmAck.label} stays </span>
+                  <span
+                    className="chat-msg-confirm-value"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
+                    {msg.confirmAck.value}.
+                  </span>
+                </span>
               ) : (
                 <span className="chat-msg-content">{msg.content}</span>
               )}
