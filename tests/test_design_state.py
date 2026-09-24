@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from d33d.design_state import (
+    AXIS_PARAM_NAMES,
     MAX_STATE_BLOCK_ENTRIES,
     Provenance,
     StateEntry,
@@ -613,30 +614,33 @@ def test_partial_stated_axes_omit_unstated_axis_entirely() -> None:
     assert by_name["spacer_height"]["provenance"] == "assumed"
 
 
-def test_axis_param_promoted_to_stated_on_value_match() -> None:
-    """The promotion seam: a model-emitted param NAMED ``W`` whose value
-    equals the persisted axis evidence is promoted from ``assumed`` to
-    ``stated`` (the value has evidence). A DIFFERENT value is not
-    promoted (the axis row carries the user's number; the param row keeps
-    its own)."""
-    # Match → promoted (single row for W, stated).
+def test_axis_named_param_stays_assumed_even_when_value_matches() -> None:
+    """#248 decisions: ``AXIS_PARAM_NAMES`` must NOT promote params. A
+    model-emitted param LITERALLY NAMED ``W`` whose value EQUALS the
+    persisted W evidence stays ``assumed`` (the spec forbids name-based
+    promotion: "key it on the protocol's confirmed set, not on parameter
+    names"). The user's stated evidence renders as the separate W AXIS
+    ROW (stated); a mismatching param value stays ``assumed`` too."""
+    # Match → the param row stays assumed; the axis row is stated.
     entries = state_block_for_version({"W": 60.0}, None, {"W": 60.0})
-    by_name = {e["name"]: e for e in entries}
-    assert by_name["W"]["provenance"] == "stated"
-    assert by_name["W"]["value"] == 60.0
-    assert len(entries) == 1  # one row for the axis, no duplicate
+    assumed_rows = [e for e in entries if e["provenance"] == "assumed"]
+    assert len(assumed_rows) == 1
+    assert assumed_rows[0]["value"] == 60.0
+    # The separate W axis row (appended after the param rows) carries the
+    # user's stated value.
+    stated_rows = [e for e in entries if e["provenance"] == "stated"]
+    assert len(stated_rows) == 1
+    assert stated_rows[0]["value"] == 60.0
+    assert len(entries) == 2  # param row + axis row, never collapsed
     # Mismatch → the param row stays assumed; the axis row carries the
     # user's stated value. Both render (never collapsed, never guessed).
     entries2 = state_block_for_version({"W": 50.0}, None, {"W": 60.0})
-    # The axis row (the user's 60) is emitted LAST (after the param rows)
-    # and carries the name W — it is the stated-by-evidence row for that
-    # axis. The assumed param row (50) precedes it.
-    stated_rows = [e for e in entries2 if e["provenance"] == "stated"]
-    assumed_rows = [e for e in entries2 if e["provenance"] == "assumed"]
-    assert len(stated_rows) == 1
-    assert stated_rows[0]["value"] == 60.0
-    assert len(assumed_rows) == 1
-    assert assumed_rows[0]["value"] == 50.0
+    stated_rows2 = [e for e in entries2 if e["provenance"] == "stated"]
+    assumed_rows2 = [e for e in entries2 if e["provenance"] == "assumed"]
+    assert len(stated_rows2) == 1
+    assert stated_rows2[0]["value"] == 60.0
+    assert len(assumed_rows2) == 1
+    assert assumed_rows2[0]["value"] == 50.0
     assert len(entries2) == 2
 
 
@@ -651,17 +655,24 @@ def test_stated_axis_plus_bbox_within_tolerance_yields_measured() -> None:
         {"W": 30.0, "D": 30.0, "H": 30.0},
     )
     by_name = {e["name"]: e for e in entries}
-    # All three params are promoted (values match the persisted axis
-    # evidence) and compared against the measurement — within tolerance
-    # → measured (the displayed value is the measured one: 30.4 for W).
+    # The model's own W/D/H-named param rows are compared against the
+    # measurement (issue #137) — within tolerance → measured (the
+    # displayed value is the measured one: 30.4 for W).
     assert by_name["W"]["provenance"] == "measured"
     assert by_name["W"]["value"] == 30.4
     assert by_name["D"]["provenance"] == "measured"
     assert by_name["D"]["value"] == 30.0
     assert by_name["H"]["provenance"] == "measured"
     assert by_name["H"]["value"] == 30.0
-    # One row per name (promoted rows ARE the axis rows — no duplicates).
-    assert len(entries) == 3
+    # The SEPARATE axis rows (driven by the persisted stated set) are
+    # appended after the param rows — three more measured rows, one per
+    # axis (param rows and axis rows are independent surfaces).
+    axis_rows = entries[3:]
+    assert len(axis_rows) == 3
+    for axis in ("W", "D", "H"):
+        assert axis_rows[AXIS_PARAM_NAMES.index(axis)]["name"] == axis
+        assert axis_rows[AXIS_PARAM_NAMES.index(axis)]["provenance"] == "measured"
+    assert len(entries) == 6
 
 
 def test_stated_axis_plus_bbox_outside_tolerance_yields_disagrees() -> None:
@@ -676,17 +687,21 @@ def test_stated_axis_plus_bbox_outside_tolerance_yields_disagrees() -> None:
         {"W": 30.0},
     )
     by_name = {e["name"]: e for e in entries}
-    # The param is promoted (value matches the evidence) and compared
-    # against the measurement — outside tolerance → disagrees, carrying
-    # both numbers (the measured one displayed, the stated one riding
-    # along) — the existing rule, driven by the persisted axis-stated
-    # evidence.
+    # The model's own W param row is compared against the measurement —
+    # outside tolerance → disagrees, carrying both numbers (the measured
+    # one displayed, the stated one riding along).
     w = by_name["W"]
     assert w["provenance"] == "disagrees"
     assert w["value"] == 29.2  # the measured value (the display)
     assert w["stated_value"] == 30.0  # the stated value (the ride-along)
-    # Single row (the promoted param row IS the axis row — no duplicate).
-    assert len(entries) == 1
+    # The separate W axis row (the persisted stated evidence vs the
+    # measurement) renders alongside — also disagrees, same numbers.
+    axis_rows = [e for e in entries if e is not w]
+    assert len(axis_rows) == 1
+    assert axis_rows[0]["provenance"] == "disagrees"
+    assert axis_rows[0]["value"] == 29.2
+    assert axis_rows[0]["stated_value"] == 30.0
+    assert len(entries) == 2
 
 
 def test_assumed_axis_name_without_stated_evidence_stays_assumed() -> None:

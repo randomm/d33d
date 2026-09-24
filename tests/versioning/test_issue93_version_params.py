@@ -343,10 +343,20 @@ def _resolve_version_create_test(
 
     class _Svc:
         def __init__(self):
-            self.latest_version = lambda pid: None
+            self._versions: list[dict] = []
+            self._next = 1
+            self.latest_version = lambda pid: (
+                self._versions[-1] if self._versions else None
+            )
+
+        def list_versions(self, pid):
+            return list(self._versions)
 
         async def create_version(self, pid, params, *, name=None, message="", **kwargs):
             calls.append({"params": params, "name": name, "message": message})
+            v = self._next
+            self._next += 1
+            self._versions.append({"id": v, "params": params, "name": name})
             return {"id": 7}
 
     app.state.versions = _Svc()
@@ -404,6 +414,9 @@ def test_resolve_version_create_no_best_returns_none(app_with_versions):
         def __init__(self):
             self.latest_version = lambda pid: {"id": 3, "params": {"W": 1.0}}
 
+        def list_versions(self, pid):
+            return []
+
         async def create_version(self, pid, params, *, name=None, message="", **kwargs):
             raise AssertionError("create_version must not be called")
 
@@ -431,6 +444,9 @@ def test_resolve_version_create_empty_params_creates_version(app_with_versions):
                 "id": 3,
                 "params": {"W": 99.0, "D": 88.0, "H": 77.0},
             }
+
+        def list_versions(self, pid):
+            return []
 
         async def create_version(self, pid, params, *, name=None, message="", **kwargs):
             return {"id": 7}

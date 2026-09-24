@@ -30,11 +30,14 @@ Provenance semantics (issue #246 — default to ``assumed``, promote to
 - ``stated`` — evidence from the dimension protocol: an axis (W/D/H) whose
   value the user actually said for the run that produced the version,
   carried on the version row as the persisted per-axis stated set
-  (``versions.stated_dims``). A param named W/D/H whose value matches the
-  persisted axis evidence carries that evidence (the promotion seam — the
-  single, clearly-marked place a later axis-binding ticket will extend;
-  name-guessing any OTHER param to an axis is forbidden); a param named
-  W/D/H with no persisted axis evidence for it stays ``assumed``.
+  (``versions.stated_dims``). ONLY the separate axis rows built from that
+  set are ever ``stated``. No model-emitted parameter is ``stated`` in
+  this ticket — not even one literally named W/D/H (DECISIONS.md: "key it
+  on the protocol's confirmed set, not on parameter names"); the value
+  the user said is never a license for a name match. The promotion seam
+  (:func:`_maybe_promote_param`) is the single, clearly-marked place a
+  later axis-binding ticket will extend to grant a model-emitted
+  parameter evidence.
 - ``measured`` / ``disagrees`` — a stated axis value compared against the
   persisted measurement (below).
 - ``unknown`` — no value (never 0, never an omitted key).
@@ -232,6 +235,16 @@ def persisted_bbox_extents(measurement: Any) -> tuple[float, float, float] | Non
     return extents
 
 
+def _axis_row(
+    axis: str,
+    value: float,
+    provenance: Provenance,
+    stated_value: Any = None,
+) -> dict[str, Any]:
+    """An axis row (name = W/D/H) for the design-state block."""
+    return _entry(axis, value, provenance, stated_value)
+
+
 def _axis_stated_evidence(
     stated: dict[str, Any] | None,
 ) -> dict[str, float]:
@@ -252,16 +265,6 @@ def _axis_stated_evidence(
         if _is_number(v) and v > 0:
             out[axis] = float(v)
     return out
-
-
-def _axis_row(
-    axis: str,
-    value: float,
-    provenance: Provenance,
-    stated_value: Any = None,
-) -> dict[str, Any]:
-    """An axis row (name = W/D/H) for the design-state block."""
-    return _entry(axis, value, provenance, stated_value)
 
 
 def state_block_for_version(
@@ -311,18 +314,29 @@ def state_block_for_version(
     number is never lost). An axis with a persisted stated value but no
     measurement keeps its row as ``stated``.
 
-    Param promotion (the SEAM for the later axis-binding ticket, and the
-    ONLY promotion this module does): a model-emitted parameter NAMED
-    ``W``/``D``/``H`` whose value equals a persisted axis's value is
-    promoted from ``assumed`` to ``stated`` — the value has evidence.
-    Every other parameter — axis-named without evidence, or not
-    axis-named at all — stays ``assumed``; name similarity (``
-    spacer_height`` ≈ ``H``) is NEVER inferred here (that link arrives
-    with the model-supplied labels ticket, which will replace this
-    value-match seam).
+    No model-emitted parameter is promoted to ``stated`` in this ticket —
+    not even one literally named W/D/H (DECISIONS.md: "key it on the
+    protocol's confirmed set, not on parameter names"). The single, clearly
+    marked seam :func:`_maybe_promote_params` is a no-op; the later
+    axis-binding ticket (labels from the model) fills it, at that one
+    call site, with real evidence.
+
+    The MEASUREMENT comparison (issue #137) still applies to a param
+    literally named W/D/H that the snapshot carries — regardless of the
+    persisted stated set (within the named tolerance the param row renders
+    ``measured`` with the measured value displayed; outside it ``disagrees``
+    with the stated value riding along). The persisted stated set only
+    drives the SEPARATE axis rows (appended after the param rows); the
+    two surfaces are independent and never name-matched.
     """
     entries = state_block_from_params(params)
     evidence = _axis_stated_evidence(stated)
+    # SEAM (#248: axis binding from model-supplied labels) — the ONE place
+    # a model-emitted param may be promoted from ``assumed`` to ``stated``.
+    # No-op for now: no evidence mechanism exists yet, and name-based
+    # promotion is explicitly forbidden. Do not scatter promotion logic;
+    # extend this seam only.
+    entries = _maybe_promote_params(entries, evidence)
     extents = persisted_bbox_extents(measurement)
     if not evidence and extents is None:
         # No stated evidence and no measurement: the params-only
@@ -331,90 +345,39 @@ def state_block_for_version(
         return entries
 
     out: list[dict[str, Any]] = []
-    # The axes whose evidence is consumed by a PROMOTED param row (value
-    # match — that row IS the axis's row). A mismatched axis-named param
-    # row does NOT consume the evidence: the axis row renders alongside
-    # it (both the user's number and the model's number are shown).
-    consumed: set[str] = set()
     for entry in entries:
+        # The measurement comparison applies to the snapshot's own
+        # W/D/H-named params (issue #137 — the stated value the version
+        # was built with is the param's own value when the user stated
+        # nothing per axis; the model's number is the best available
+        # reference and is what the #137 gate compares against).
         name = entry["name"]
-        if (
-            name in AXIS_PARAM_NAMES
-            and evidence.get(name) is not None
-            and entry["value"] == evidence[name]
-        ):
-            consumed.add(name)
-    for entry in entries:
-        axis = entry["name"] if entry["name"] in AXIS_PARAM_NAMES else None
-        if axis is None:
-            out.append(entry)
-            continue
-        stated = evidence.get(axis)
-        if stated is not None and entry["value"] == stated:
-            # The promotion seam: a model-emitted axis-named param whose
-            # value matches the persisted axis evidence carries that
-            # evidence (stated, never the reverse). The promoted row is
-            # the axis's row, so it is compared against the measurement
-            # exactly as an axis row is (stated+measured agree →
-            # measured; disagree → disagrees — the existing rule).
-            e = dict(entry)
-            e["provenance"] = "stated"
-            if extents is not None:
-                extent = extents[AXIS_PARAM_NAMES.index(axis)]
-                tol = max(
-                    BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM
-                )
-                if abs(extent - stated) <= tol:
+        if extents is not None and name in AXIS_PARAM_NAMES:
+            stated_value = entry["value"]
+            if _is_number(stated_value) and stated_value > 0:
+                extent = extents[AXIS_PARAM_NAMES.index(name)]
+                tol = max(BBOX_TOLERANCE_REL * stated_value, BBOX_TOLERANCE_MIN_MM)
+                e = dict(entry)
+                if abs(extent - stated_value) <= tol:
                     e["value"] = extent
                     e["provenance"] = "measured"
                 else:
                     e["value"] = extent
                     e["provenance"] = "disagrees"
-                    e["stated_value"] = stated
-            out.append(e)
-            continue
-        if stated is not None:
-            # The user stated this axis at one value; the model's
-            # snapshot carries a different one — the param row keeps its
-            # own (assumed) value; the axis's stated evidence renders as
-            # a separate row (the second entry below), so the user's
-            # number is never lost or collapsed into the model's.
-            out.append(entry)
-            continue
-        # No persisted stated value for this axis.
-        if extents is None:
-            out.append(entry)
-            continue
-        stated_value = entry["value"]
-        if not _is_number(stated_value) or stated_value <= 0:
-            # unknown/zero stated value: no comparison possible (the
-            # gate's ticket #91 abstain semantics, mirrored here).
-            out.append(entry)
-            continue
-        extent = extents[AXIS_PARAM_NAMES.index(axis)]
-        tol = max(BBOX_TOLERANCE_REL * stated_value, BBOX_TOLERANCE_MIN_MM)
-        if abs(extent - stated_value) <= tol:
-            e = dict(entry)
-            e["value"] = extent
-            e["provenance"] = "measured"
-            out.append(e)
-        else:
-            e = dict(entry)
-            e["value"] = extent
-            e["provenance"] = "disagrees"
-            e["stated_value"] = stated_value
-            out.append(e)
+                    e["stated_value"] = stated_value
+                out.append(e)
+                continue
+        out.append(entry)
 
     # Axis rows from the persisted per-axis stated set (declaration order
     # W/D/H — the protocol's axis order), appended AFTER the param rows.
-    # An axis whose evidence was consumed by a promoted param row (value
-    # match) is represented by that row — no second, same-named row (the
-    # block must not render two W rows). An axis the snapshot carries as
-    # a DIFFERENT (unmatched) param row gets its own axis row alongside
-    # it (both render — the user's number and the model's number, never
-    # collapsed, never guessed).
+    # A param row and an axis row for the same letter can coexist (e.g.
+    # the model emits an ``H`` param and the user stated ``H`` too): the
+    # param row keeps its ``assumed`` value, the axis row carries the
+    # user's stated evidence — both render, never collapsed, never
+    # guessed, never name-matched.
     for axis in AXIS_PARAM_NAMES:
-        if axis not in evidence or axis in consumed:
+        if axis not in evidence:
             continue
         axis_value = evidence[axis]
         if extents is None:
@@ -427,6 +390,26 @@ def state_block_for_version(
         else:
             out.append(_axis_row(axis, extent, "disagrees", axis_value))
     return out
+
+
+def _maybe_promote_params(
+    entries: list[dict[str, Any]],
+    stated_evidence: dict[str, float],
+) -> list[dict[str, Any]]:
+    """SEAM (#248: axis binding from model-supplied labels).
+
+    The single, clearly-marked place a model-emitted parameter may be
+    promoted from ``assumed`` to ``stated``. This ticket does NOT promote
+    on any basis — not on name (a param literally named ``W``/``D``/``H``
+    stays ``assumed`` even when the persisted axis evidence matches it),
+    not on value — DECISIONS.md: "key it on the protocol's confirmed set,
+    not on parameter names"; #246: "No model-emitted param is stated in
+    this ticket". The later axis-binding ticket (which will let the model
+    declare which axis each parameter realises) fills this seam, at this
+    one call site, with real per-parameter evidence. Do not add
+    promotion anywhere else.
+    """
+    return entries
 
 
 def build_design_state_block(
