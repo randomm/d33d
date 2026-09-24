@@ -48,12 +48,14 @@ __all__ = [
     "HOLES_PRINT_UNDERSIZE_MM",
     "DimensionClarification",
     "FitType",
+    "effective_stated_dims",
     "emit_named_params",
     "require_dimensions_confirmed",
     "resolution_questions",
     "resolve_tolerance_mm",
     "stated_axes_from_message",
     "stated_dims_from_message",
+    "user_quoted_unmapped_mm",
 ]
 
 #: The closed fit-type enum the protocol asks about. The spec pins slip
@@ -260,6 +262,145 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
     return out
+
+
+def _mm_cue_values(message: str) -> set[float]:
+    """The mm values an explicit protocol cue in ONE message consumed
+    (issue #261, task-b): the axis-prefixed forms (``W: 42`` / "D is
+    30mm" / "H = 20 mm" — the ``_extract_stated`` axis pass) and the
+    equal-axis shorthand ("a 20 mm cube" — the ONLY form that fills
+    three axes from one number). A number consumed here is MAPPED and
+    never eligible for the tier-2 offer."""
+    values: set[float] = set()
+    for axis in DIMENSION_AXES:
+        m = re.search(
+            rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:mm)?\b",
+            message,
+            re.IGNORECASE,
+        )
+        if m:
+            v = _coerce(m.group(1))
+            if v is not None:
+                values.add(v)
+    m = re.search(
+        r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm\b"
+        r"\s+(?:cube|box|sphere|ball)\b",
+        message,
+        re.IGNORECASE,
+    )
+    if m:
+        v = _coerce(m.group(1))
+        if v is not None:
+            values.add(v)
+    return values
+
+
+def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]:
+    """The user-quoted explicit-mm numbers no axis was ever assigned to
+    (issue #261's tier-2 offer scan — the "user-quoted number the lexicon
+    did not map is offered first" rule) — the tier-2 helper.
+
+    Scans ALL of the project's user messages (full history, not just this
+    turn). Only numbers written with an explicit ``mm`` unit count ("12
+    mm", "12mm", "12.5 mm" — no cm/in conversion, no bare numbers). A
+    number is MAPPED — and excluded — when the closed axis lexicon
+    (``d33d.axis_lexicon.classify``) or an explicit protocol cue in the
+    SAME message assigned it to an axis; every other mm number is
+    unmapped and eligible ("a 20 mm wide thing, lift it 12 mm" → {12.0} —
+    the 20 is mapped to W, the 12 is not, and per-number evaluation is
+    what makes the 12 eligible even though its clause held no axis word).
+    """
+    from d33d.axis_lexicon import classify
+
+    unmapped: set[float] = set()
+    for msg in messages:
+        text = str(msg)
+        # Mapped by the lexicon: the mm numbers it assigned to an axis
+        # (``classify(text).absolute`` — an axis-word clause with its
+        # number). An mm number the lexicon saw but did NOT assign ("a
+        # 15 mm hole") is unmapped either way.
+        lexicon_mapped: set[float] = set(classify(text).absolute.values())
+        # Mapped by an explicit protocol cue in the SAME message
+        # ("W: 42" / "a 20 mm cube" — the ``_extract_stated`` axis pass
+        # and the equal-axis shorthand).
+        mapped_by_protocol = _mm_cue_values(text)
+        for n in re.findall(r"\b(\d+(?:\.\d+)?)\s*mm\b", text):
+            value = float(n)
+            if value in lexicon_mapped:
+                continue
+            if any(abs(value - pv) < 1e-6 for pv in mapped_by_protocol):
+                continue
+            unmapped.add(value)
+    return unmapped
+
+
+def effective_stated_dims(
+    latest_stated: dict[str, float] | None,
+    cues: Any = None,
+) -> dict[str, float]:
+    """The carry-forward merge helper (issue #261's operator decision —
+    ONE function, THREE call sites: chat ``post_chat``, finalize
+    (``versions_routes``) and region edit (``app.create_region_edit``)).
+
+    The effective per-axis stated set for the NEW version row — and, at
+    chat and finalize, the gate input (``axes_to_gate_triple``) — computed
+    in one place, never two divergent copies:
+
+    * the set STARTS as the latest version's persisted ``stated_dims``
+      (axes confirmed on an earlier turn are NOT stale — the user's
+      "add a hole" keeps H=12 stated; #247's no-fallback rule dies);
+    * a RELATIVE cue on an axis RELEASES that axis ("make it taller" →
+      the gate must not enforce the old H — the #247 regression);
+    * a GLOBAL cue releases ALL three ("make it bigger");
+    * an ABSOLUTE cue SETS that axis ("make it 12 mm tall" → H=12, even
+      when the latest row carried nothing or a different value —
+      "H: 20" after {H: 12} states 20, the cue overrides the carried
+      value);
+    * axes with no cue carry forward unchanged.
+
+    ``cues`` is one of: a ``d33d.axis_lexicon.Cues`` (the chat route's
+    current-message classification), an explicit ``dict[str, float]``
+    (a caller's body-stated or protocol-extracted set — treated as an
+    absolute statement: the caller's explicit set OVERRIDES the carried
+    set, per the precedence "body field > explicit protocol cues >
+    lexicon", and carries no release semantics), or ``None`` / an empty
+    set (the region-edit call site: the carried set comes back unchanged,
+    no release). Precedence of cue kinds: the explicit set wins over the
+    lexicon's absolute; releases and overrides compose.
+    """
+    carried: dict[str, float] = {}
+    if latest_stated:
+        for axis, value in latest_stated.items():
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                carried[str(axis)] = f
+
+    released: set[str] = set()
+    absolute: dict[str, float] = {}
+
+    if isinstance(cues, dict):
+        # Explicit set (body field / protocol extraction): an absolute
+        # override statement — no release semantics (a "W: 42" body does
+        # not release H).
+        for axis, value in cues.items():
+            f = _coerce(value)
+            if f is not None:
+                absolute[str(axis)] = f
+    elif cues is not None:
+        absolute = dict(getattr(cues, "absolute", None) or {})
+        released = set(getattr(cues, "relative", None) or ())
+        if getattr(cues, "global_", False):
+            released.update(DIMENSION_AXES)
+
+    effective = {axis: v for axis, v in carried.items() if axis not in released}
+    for axis, value in absolute.items():
+        f = _coerce(value)
+        if f is not None:
+            effective[axis] = f
+    return effective
 
 
 def stated_axes_from_message(

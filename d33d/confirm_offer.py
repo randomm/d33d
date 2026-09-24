@@ -12,6 +12,12 @@ row's ``confirmed_params`` write, the project row's ``pending_offer``
 state, the done-frame field, the ``post_chat`` acceptance pre-route)
 lives in ``d33d.design_loop_events`` / ``d33d.projects``.
 
+The tier-1/tier-2 sentence builders (``tier_1_sentence`` /
+``tier_2_sentence``) are deck mirrors of ``copy.ts``: the backend is
+the writer of the wire string, ``web/src/copy.ts`` holds the same
+templates so the design-contract test can pin that deck and server
+match in substance (the #250 way).
+
 The offer is a PARAMETER (a model-emitted value the user never set), not
 an axis: DECISIONS.md's own example offer is a wall thickness, which has
 no axis. Selection, in strict precedence (AT MOST ONE param per turn):
@@ -40,7 +46,15 @@ deterministic template — ``copy.confirmOffer.offer`` in the SPA's
 ``copy.ts`` — renders the sentence: "I assumed {value} for {label}. Want
 it different?" (the label per #248, identifier fallback). The
 acknowledgement on acceptance: "Got it — {label} stays {value}."
-(``copy.confirmOffer.acknowledged``).
+(``copy.confirmOffer.acknowledged``). Tier 3 (issue #261) is this
+#250 template, terminal when tiers 1 and 2 are both empty.
+
+Tier-1 (a released axis) and tier-2 (a user-quoted unmapped number)
+sentences (issue #261) render ``{value}`` via :func:`mm_formatted`
+when the param unit is ``mm`` — NEVER the raw number: the deck's
+``mm()`` (``toFixed(1)`` + U+202F + ``mm``) is the wire string, and
+Python's ``:g`` (``format_param_value``) would diverge (``12`` vs
+``12.0``).
 
 Import graph (acyclic by construction): this module is a LEAF of the
 design-state chain — ``design_state`` imports
@@ -70,9 +84,15 @@ __all__ = [
     "ack_sentence",
     "format_param_value",
     "is_pending_offer_acceptance",
+    "mm_formatted",
     "offer_entry",
+    "tier_1_sentence_template",
+    "tier_2_sentence_template",
     "offer_sentence",
     "select_offer_candidate",
+    "tier_1_cue",
+    "tier_1_sentence",
+    "tier_2_sentence",
     "validate_confirm_first",
 ]
 
@@ -140,28 +160,57 @@ def select_offer_candidate(
     confirmed: dict[str, Any] | None,
     changed: set[str] | tuple[str, ...],
     confirm_first: str | None,
+    released_axes: set[str] | None = None,
+    user_quoted_mm: set[float] | None = None,
 ) -> str | None:
     """The ONE assumed param to offer for this version, or ``None``.
 
-    Precedence (module docstring): a model-declared-axis assumed numeric
-    param first (declaration order), else the validated ``confirm_first``
-    (the model's fit-critical flag — rejected when it names a
-    non-assumed, non-numeric, already-confirmed, or user-changed param,
-    in which case the offer is ABSENT rather than a silent second
-    fallback — the model flagged a value that is no longer an open
-    question, and a wrong second guess would be worse than none), else
-    none.
+    Precedence (issue #261's operator decision — tiers in order, an empty
+    tier falls through to the next, tier 3 is today's order and is
+    terminal; still at most ONE offer, never a confirmed or changed
+    param):
+
+    1. an assumed numeric param with a declared axis ON AN AXIS RELEASED
+       by this turn's relative/global cue (``released_axes`` — "make it
+       taller" released H → the H-declared assumed param is the one the
+       user's own words are about);
+    2. an assumed numeric param whose value equals (±1e-6) a user-quoted
+       UNMAPPED mm number (``user_quoted_mm`` — the tier-2 helper's
+       output; "a spacer to lift a shelf 12 mm" → the 12-valued param);
+    3. today's order: a declared-axis assumed param (declaration order),
+       else the validated ``confirm_first`` (the model's fit-critical
+       flag — rejected when it names a non-assumed, non-numeric,
+       already-confirmed, or user-changed param, in which case the offer
+       is ABSENT rather than a silent second fallback), else none.
+
+    ``released_axes`` / ``user_quoted_mm`` default to ``None`` — callers
+    that do not run the #261 tiering (the pre-#261 behaviour) get exactly
+    today's order.
     """
     changed_set = set(changed or ())
     eligible = _assumed_numeric_params(params, param_meta, confirmed, changed_set)
     if not eligible:
         return None
-    # Rule 1: a declared-axis assumed param (declaration order — the
-    # first in the params snapshot).
+    if released_axes:
+        # Tier 1: a declared-axis assumed param on a released axis
+        # (declaration order — the first in the params snapshot).
+        for entry in eligible:
+            if entry.get("axis") in released_axes:
+                return entry["name"]
+    if user_quoted_mm is not None and user_quoted_mm:
+        # Tier 2: a value that equals (±1e-6) a user-quoted unmapped mm
+        # number (declaration order).
+        for entry in eligible:
+            value = entry.get("value")
+            if _is_number(value) and any(
+                abs(float(value) - n) <= CONFIRMED_VALUE_TOLERANCE
+                for n in user_quoted_mm
+            ):
+                return entry["name"]
+    # Tier 3: today's order (terminal).
     for entry in eligible:
         if entry.get("axis"):
             return entry["name"]
-    # Rule 2: the model's own flag, validated.
     eligible_names = {e["name"] for e in eligible}
     if confirm_first in eligible_names:
         return str(confirm_first)
@@ -234,6 +283,118 @@ def offer_sentence(
 
 def _format_value(value: Any) -> str:  # alias — the private name predates the public one
     return format_param_value(value)
+
+
+#: The no-break space copy.ts's ``mm()`` uses (U+202F narrow no-break
+#: space — keeps "34 mm" from breaking across a line). The backend's
+#: mm-formatted strings must byte-match the deck's (the design-contract
+#: test pins the backend sentence against copy.ts — the #250 way).
+_NB_SPACE = "\u202F"
+
+
+def mm_formatted(value: Any) -> str:
+    """A value rendered the way the deck's ``copy.ts mm()`` renders it:
+    ONE decimal, the U+202F narrow no-break space, ``mm`` (``12`` →
+    ``"12.0\u202fmm"``). The tier-1/tier-2 offer sentences' ``{value}``
+    slot is ALWAYS this form when the param unit is mm — never the raw
+    number, never ``:g`` (Python's ``12`` would diverge from the deck's
+    ``12.0``)."""
+    return f"{float(value):.1f}{_NB_SPACE}mm"
+
+
+def _tier_entry(
+    params: dict[str, Any],
+    param_meta: dict[str, Any] | None,
+    confirmed: dict[str, Any] | None,
+    excluded: set[str],
+    predicate,
+) -> dict[str, Any] | None:
+    """The FIRST eligible assumed numeric param (declaration order) whose
+    design-state entry satisfies ``predicate`` — or ``None`` (an empty
+    tier falls through to the next)."""
+    for entry in _assumed_numeric_params(params, param_meta, confirmed, excluded):
+        if predicate(entry):
+            return entry
+    return None
+
+
+# The closed relative + global word sets (built once, lazily —
+# ``d33d.axis_lexicon`` is a LEAF, so the import is cycle-safe, but the
+# set is built at first call to keep module import order free of d33d-
+# internal edges at import time).
+_REL_GLOBAL_SET: frozenset[str] | None = None
+
+
+def _rel_global_set() -> frozenset[str]:
+    global _REL_GLOBAL_SET
+    if _REL_GLOBAL_SET is None:
+        from d33d import axis_lexicon
+
+        _REL_GLOBAL_SET = frozenset(axis_lexicon._RELATIVE) | axis_lexicon._GLOBAL
+    return _REL_GLOBAL_SET
+
+
+def tier_1_cue(message: str) -> str | None:
+    """The tier-1 ``{cue}`` — the FIRST entry of
+    ``classify(message).cue_words`` that belongs to the lexicon's
+    relative or global word sets (issue #261's operator decision: no
+    second scan of the raw message), verbatim, lowercased ("taller",
+    "half the size"). ``None`` when the message carried no
+    relative/global cue (the tier-1 sentence is not the offer)."""
+    from d33d.axis_lexicon import classify
+
+    cues = classify(message)
+    if not (cues.relative or cues.global_):
+        return None
+    rel_global = _rel_global_set()
+    for word in cues.cue_words:
+        if word.lower() in rel_global:
+            return word.lower()
+    return None
+
+
+def tier_1_sentence(entry: dict[str, Any], cue: str) -> str:
+    """The tier-1 offer sentence (issue #261 — "You asked for {cue} — I
+    made {label} {value}. Right?"): ``{value}`` is always the ``mm()``-
+    formatted string when the param unit is mm (``mm_formatted``), never
+    the raw number; the label per #248 (identifier fallback)."""
+    value_str = (
+        mm_formatted(entry["value"])
+        if entry.get("unit") == "mm"
+        else _format_value(entry.get("value"))
+    )
+    label = entry.get("label") or entry.get("name") or entry["name"]
+    return f"You asked for {cue} — I made {label} {value_str}. Right?"
+
+
+def tier_1_sentence_template() -> str:
+    """The tier-1 offer template, slots in place — the deck-mirror shape
+    (``copy.ts`` ``confirmOffer.tier1Offer``, the #250 pinning pattern:
+    the deck holds the string so a test can render it with its own
+    ``mm()``-formatted value and compare it slot-for-slot against this
+    function's output)."""
+    return "You asked for {cue} — I made {label} {value}. Right?"
+
+
+def tier_2_sentence_template() -> str:
+    """The tier-2 offer template, slots in place (``copy.ts``
+    ``confirmOffer.tier2Offer`` — see :func:`tier_1_sentence_template`
+    for the pinning pattern)."""
+    return "You said {value} — I used it for {label}. Right?"
+
+
+def tier_2_sentence(entry: dict[str, Any]) -> str:
+    """The tier-2 offer sentence (issue #261 — "You said {value} — I used
+    it for {label}. Right?"): the user-quoted unmapped mm number the
+    param's value equals; ``{value}`` ``mm()``-formatted (``mm_formatted``)
+    when the param unit is mm."""
+    value_str = (
+        mm_formatted(entry["value"])
+        if entry.get("unit") == "mm"
+        else _format_value(entry.get("value"))
+    )
+    label = entry.get("label") or entry.get("name") or entry["name"]
+    return f"You said {value_str} — I used it for {label}. Right?"
 
 
 def ack_sentence(entry: dict[str, Any]) -> str:

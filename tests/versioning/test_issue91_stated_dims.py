@@ -164,7 +164,7 @@ def test_chat_follow_up_cueless_message_abstains_no_persisted_fallback(app_with_
 
     r, captured, _frames = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert captured["stated_dims"] is None
+    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
 
 
 def test_chat_latest_version_zero_dims_abstains_not_zero(app_with_versions):

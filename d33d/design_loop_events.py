@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
-import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -613,6 +612,15 @@ def _version_confirm_hints(result: Any) -> tuple[str | None, str | None]:
     return first, sentence
 
 
+def _value_matches_quoted(entry: dict[str, Any], quoted: set[float]) -> bool:
+    """True iff the entry's value is a number (not bool) and equals any
+    of the quoted values within 1e-6 tolerance (issue #261 tier 2)."""
+    value = entry.get("value")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    return any(abs(float(value) - n) <= 1e-6 for n in quoted)
+
+
 async def _resolve_offer(
     app: Any,
     project_id: int,
@@ -620,6 +628,8 @@ async def _resolve_offer(
     result: Any,
     prev_version: Any,
     prev_confirmed: dict[str, Any] | None = None,
+    user_message: str = "",
+    chat_history: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """Resolve the pending offer for a passing design pass (issue #250).
 
@@ -689,7 +699,35 @@ async def _resolve_offer(
         if name in prev_params and prev_params[name] != value
     }
     confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
-    name = select_offer_candidate(params, meta, confirmed, changed, confirm_first)
+    # Issue #261's offer tiering — the two new signals, computed here
+    # (the offer's seam): TIER 1 (a released-axis param) needs THIS
+    # turn's lexicon classification of the user's message (relative
+    # cues release their axis, global cues release all — the released
+    # set is what the user's words are about); TIER 2 (a user-quoted
+    # unmapped number) needs the full-history scan
+    # (``user_quoted_unmapped_mm`` — every explicit-mm number the
+    # lexicon and the explicit protocol cues never assigned to an axis,
+    # across ALL user messages, not just this turn).
+    from d33d.dimension_protocol import user_quoted_unmapped_mm
+
+    released_axes: set[str] | None = None
+    quoted: set[float] | None = None
+    try:
+        from d33d.axis_lexicon import classify
+
+        _cues = classify(user_message)
+        if _cues.relative or _cues.global_:
+            released_axes = set(_cues.relative) | (
+                {"W", "D", "H"} if _cues.global_ else set()
+            )
+        quoted = user_quoted_unmapped_mm((*chat_history, user_message))
+    except Exception:
+        logger.debug("offer tier signals unavailable", exc_info=True)
+        released_axes, quoted = None, None
+    name = select_offer_candidate(
+        params, meta, confirmed, changed, confirm_first,
+        released_axes=released_axes, user_quoted_mm=quoted,
+    )
     if name is None:
         versions.set_pending_offer(project_id, None)
         return None
@@ -701,7 +739,24 @@ async def _resolve_offer(
         params, new_version["bbox"], new_version["stated_dims"], meta,
         new_version["confirmed_params"],
     )
-    sentence = offer_sentence(entry, confirm_sentence_raw, block)
+    # The sentence: the tier that WON picks its template (issue #261 —
+    # tier 1 "You asked for {cue}…", tier 2 "You said {value}…"); tier 3
+    # keeps the #250 machinery (the model's ``confirm_sentence`` when the
+    # number guard passes, else the deterministic template).
+    if released_axes and entry.get("axis") in released_axes:
+        from d33d.confirm_offer import tier_1_cue, tier_1_sentence
+
+        cue = tier_1_cue(user_message)
+        if cue is None:
+            sentence = offer_sentence(entry, confirm_sentence_raw, block)
+        else:
+            sentence = tier_1_sentence(entry, cue)
+    elif quoted and _value_matches_quoted(entry, quoted):
+        from d33d.confirm_offer import tier_2_sentence
+
+        sentence = tier_2_sentence(entry)
+    else:
+        sentence = offer_sentence(entry, confirm_sentence_raw, block)
     versions.set_pending_offer(project_id, {"version_id": version_id, "param": name})
     return {"param": name, "sentence": sentence}
 
@@ -865,7 +920,7 @@ async def _resolve_version_create(
     # lack its suffix, but the version is still created.
     try:
         existing_names = {v["name"] for v in app.state.versions.list_versions(project_id)}
-    except Exception:  # noqa: BLE001 — resilience: name may lack suffix, version still created
+    except Exception:
         logger.warning(
             "list_versions failed for project %s; creating the version "
             "without a collision baseline (the name may lack a suffix)",
@@ -966,7 +1021,7 @@ async def run_design_loop_with_events(
     #: consumer, so an ``asyncio.Queue`` needs no locking; frames are
     #: yielded while the render is still running (see the ``asyncio.wait``
     #: below), not after it completes.
-    _frame_queue: "asyncio.Queue[tuple[str, dict[str, Any]] | None]" = asyncio.Queue()
+    _frame_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
 
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -1347,8 +1402,10 @@ async def run_design_loop_with_events(
                 result,
                 prev_version,
                 prev_confirmed=kwargs["state_confirmed"],
+                user_message=user_message,
+                chat_history=chat_history,
             )
-        except Exception:  # noqa: BLE001 — the offer must never kill the pass
+        except Exception:
             logger.exception(
                 "offer resolution failed for project %s — emitting the "
                 "pass without an offer",

@@ -37,10 +37,12 @@ from d33d.dimension_protocol import (
     DIMENSION_AXES,
     FDM_CLEARANCE_TABLE,
     DimensionClarification,
+    effective_stated_dims,
     emit_named_params,
     require_dimensions_confirmed,
     resolution_questions,
     resolve_tolerance_mm,
+    user_quoted_unmapped_mm,
 )
 
 # ---------------------------------------------------------------------------
@@ -735,3 +737,134 @@ def test_numeric_string_ai_suggested_surfaces() -> None:
         ai_suggested={"W": 40.0, "D": "30", "H": 20},
     )
     assert c.suggested == {"W": 40.0, "D": 30.0, "H": 20.0}
+
+
+# ---------------------------------------------------------------------------
+# Issue #261 (task-b): the carry-forward merge helper and the tier-2
+# user-quoted helper (the two pure functions the three call sites share)
+# ---------------------------------------------------------------------------
+
+
+class TestEffectiveStatedDims:
+    """effective_stated_dims — the carry-forward merge (issue #261's
+    operator decision: ONE function, THREE call sites)."""
+
+    def test_cueless_carries_forward(self):
+        """No cues (the region-edit call site) → the carried set comes
+        back unchanged (a fresh project → {})."""
+        assert effective_stated_dims({"H": 12.0}) == {"H": 12.0}
+        assert effective_stated_dims({"W": 12.0, "D": 8.0, "H": 5.0}) == {
+            "W": 12.0,
+            "D": 8.0,
+            "H": 5.0,
+        }
+        assert effective_stated_dims(None) == {}
+        assert effective_stated_dims({"H": 12.0}, None) == {"H": 12.0}
+
+    def test_relative_cue_releases_its_axis_only(self):
+        """make it taller (relative H) on {H: 12, W: 30} → W carries,
+        H is released (never rendered stated)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it taller")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
+    def test_global_cue_releases_all_axes(self):
+        """make it bigger (global) on a full set → {} (the gate
+        abstains entirely)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it bigger")
+        assert effective_stated_dims(
+            {"W": 12.0, "D": 8.0, "H": 5.0}, cues
+        ) == {}
+
+    def test_absolute_cue_overrides_carried_value(self):
+        """H: 20 (explicit) on {H: 12} → {H: 20} (the cue OVERRIDES
+        the carried value — precedence)."""
+        assert effective_stated_dims({"H": 12.0}, {"H": 20.0}) == {"H": 20.0}
+
+    def test_absolute_cue_adds_uncarried_axis(self):
+        """make it 12 mm tall (lexicon absolute H) on a fresh project →
+        {H: 12} (the cue sets the axis)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 12 mm tall")
+        assert effective_stated_dims(None, cues) == {"H": 12.0}
+
+    def test_lexicon_absolute_and_relative_compose(self):
+        """make it 12 mm tall, 40 mm wide — the absolute cues SET H
+        and W; uncued D is absent (fresh project)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 12 mm tall, 40 mm wide")
+        assert effective_stated_dims(None, cues) == {"H": 12.0, "W": 40.0}
+
+    def test_explicit_set_overrides_and_carries(self):
+        """A caller's explicit set (the body field / protocol extraction)
+        is an ABSOLUTE OVERRIDING statement with no release semantics:
+        {W: 10} on {H: 12} → {W: 10, H: 12} (the cue sets W, the
+        uncued H carries forward — the explicit set does not release
+        axes it does not name)."""
+        assert effective_stated_dims({"H": 12.0}, {"W": 10.0}) == {
+            "H": 12.0,
+            "W": 10.0,
+        }
+
+    def test_non_positive_and_bad_values_are_dropped(self):
+        """A carried 0.0 / negative axis (the unconfirmed marker) is not
+        carried (the axes_to_gate_triple cleaning rule)."""
+        assert effective_stated_dims({"H": 0.0, "W": -5.0, "D": 8.0}) == {
+            "D": 8.0
+        }
+
+    def test_cues_with_no_absolute_no_relative_no_global(self):
+        """A lexicon classification of a cueless message (add a hole)
+        carries the set forward unchanged."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("add a hole")
+        assert effective_stated_dims({"H": 12.0}, cues) == {"H": 12.0}
+
+
+class TestUserQuotedUnmappedMm:
+    """user_quoted_unmapped_mm — the tier-2 helper (issue #261):
+    the full-history scan of explicit-mm numbers no axis was ever
+    assigned to."""
+
+    def test_unmapped_lexicon_and_protocol_cues(self):
+        """a 20 mm wide thing, lift it 12 mm → {12.0} (20 is mapped
+        to W by the lexicon; 12's clause holds no axis word)."""
+        assert user_quoted_unmapped_mm(
+            ["a 20 mm wide thing, lift it 12 mm"]
+        ) == {12.0}
+
+    def test_mapped_numbers_are_excluded(self):
+        """12 mm tall, 20 mm wide → {} (both mapped)."""
+        assert user_quoted_unmapped_mm(["12 mm tall, 20 mm wide"]) == set()
+
+    def test_bare_numbers_never_count(self):
+        """A bare number (no mm unit) is never eligible."""
+        assert user_quoted_unmapped_mm(["spacer_height 12"]) == set()
+
+    def test_no_unit_conversion(self):
+        """cm/in numbers are not mm numbers — never eligible."""
+        assert user_quoted_unmapped_mm(["1.5 cm wide"]) == set()
+
+    def test_unions_across_full_history(self):
+        """The scan covers ALL user messages (not just this turn): a
+        number from an earlier message is eligible on a later turn."""
+        assert user_quoted_unmapped_mm(
+            ["make a 15 mm shelf", "add a fillet"]
+        ) == {15.0}
+
+    def test_protocol_cue_consumed_number_is_mapped(self):
+        """W: 42 mm — the number an explicit protocol cue consumed is
+        mapped (never eligible), even though the lexicon has no W.
+        (The axis-prefixed form is the protocol's cue, not the
+        lexicon's.)"""
+        assert user_quoted_unmapped_mm(["W: 42 mm"]) == set()
+
+    def test_empty_history_is_empty(self):
+        assert user_quoted_unmapped_mm([]) == set()
+        assert user_quoted_unmapped_mm(("",)) == set()

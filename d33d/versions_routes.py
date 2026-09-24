@@ -610,6 +610,7 @@ def create_versions_router() -> APIRouter:
         # ``render_artifact_dir`` (``None`` when the render did not record
         # one). Computing them on the pass path only (never on the
         # 422/502 early returns above).
+        from d33d.axis_lexicon import classify as _classify_axis_cues
         from d33d.design_loop_events import _version_param_meta
 
         # The per-axis stated evidence for the run (issue #246): the
@@ -626,23 +627,43 @@ def create_versions_router() -> APIRouter:
         # re-deriving from live chat. No stated axes (empty result)
         # persist a NULL — an absent statement abstains, never a
         # fabricated axis row.
-        from d33d.dimension_protocol import stated_axes_from_message
+        from d33d.dimension_protocol import (
+            effective_stated_dims,
+            stated_axes_from_message,
+        )
+        from d33d.projects import _latest_stated_dict
 
         # The previous version BEFORE the create below (the offer
         # selection's changed-set baseline and the confirmed-set
-        # carry-forward source — issue #250).
+        # carry-forward source — issue #250; also the carry-forward
+        # merge's latest-row input — issue #261).
         prev_version = svc.latest_version(project_id)
         try:
+            # The per-axis stated evidence (issue #261) — the SAME
+            # merge helper the chat route uses (never two divergent
+            # copies): the effective set starts as the latest version's
+            # persisted ``stated_dims``, the body's explicit field or the
+            # protocol's explicit cues OVERRIDE it (precedence), and the
+            # lexicon's relative/global cues release (an absolute cue
+            # overrides). This is the SINGLE value persisted on the new
+            # row (the gate seam's ``current_axes`` below is the other
+            # consumer of the same merge).
+            msg_text = body.request or body.message or ""
             if body.stated_dims is not None:
                 _w, _d, _h = body.stated_dims
-                per_axis_stated = {
+                explicit_axes = {
                     axis: float(value)
                     for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
                     if value
-                }
+                } or None
+                per_axis_stated = effective_stated_dims(
+                    _latest_stated_dict(svc, project_id), explicit_axes
+                )
             else:
-                per_axis_stated = stated_axes_from_message(
-                    body.request or body.message or "", chat_history=()
+                _am = stated_axes_from_message(msg_text, chat_history=())
+                per_axis_stated = effective_stated_dims(
+                    _latest_stated_dict(svc, project_id),
+                    _am if _am else _classify_axis_cues(msg_text),
                 )
             v = await svc.create_version(
                 project_id,
@@ -683,6 +704,7 @@ def create_versions_router() -> APIRouter:
                     and prev_version["confirmed_params"]
                     else None
                 ),
+                user_message=msg_text,
             )
         except Exception:  # the offer must never kill the 201
             logger.debug(
@@ -739,9 +761,14 @@ def _finalize_loop_kwargs(
       readable), and the user's request text (guaranteed non-empty — the
       failures.jsonl line is un-archivable without it).
     """
+    from d33d.axis_lexicon import classify as _classify_axis_cues
     from d33d.config.catalogue import CatalogueError, ResolutionError
     from d33d.design_loop_events import axes_to_gate_triple
-    from d33d.dimension_protocol import stated_axes_from_message
+    from d33d.dimension_protocol import (
+        effective_stated_dims,
+        stated_axes_from_message,
+    )
+    from d33d.projects import _latest_stated_dict
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
@@ -782,15 +809,29 @@ def _finalize_loop_kwargs(
     # is a zero-filled (W, D, H) triple (per-axis abstention in the gate,
     # ``not specified`` in the prompt), never (0.0, 0.0, 0.0) and never
     # re-derived from W/D/H param keys (the dead read issue #247 removed).
+    # The gate's target (issue #261): the SAME carry-forward merge helper
+    # the route's version create uses (one helper, both consumers — the
+    # gate input and the persisted set can never diverge). The body's
+    # explicit field or the message's protocol cues OVERRIDE the latest
+    # row's persisted set; uncued axes carry forward; a statement that
+    # confirms nothing (and nothing carried) is ``None`` (abstain) —
+    # never (0.0, 0.0, 0.0).
     if body.stated_dims is not None:
         _w, _d, _h = body.stated_dims
-        current_axes: dict[str, float] = {
+        _explicit = {
             axis: float(value)
             for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
             if value > 0  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
-        }
+        } or None
+        current_axes = effective_stated_dims(
+            _latest_stated_dict(app.state.versions, project_id), _explicit
+        )
     else:
-        current_axes = stated_axes_from_message(body.request or body.message or "")
+        _am = stated_axes_from_message(body.request or body.message or "")
+        current_axes = effective_stated_dims(
+            _latest_stated_dict(app.state.versions, project_id),
+            _am if _am else _classify_axis_cues(body.request or body.message or ""),
+        )
     stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest
     # version's full params snapshot, passed INTO the loop (the loop's

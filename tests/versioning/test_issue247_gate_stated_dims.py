@@ -1,15 +1,16 @@
-"""Issue #247 (regression fix): the loop-facing routes (chat, finalize)
-feed the bbox gate ONLY the axes confirmed in the CURRENT run's own input
-— a (W, D, H) triple with 0.0 for unconfirmed axes (the #91
-zero-means-unknown convention) — and the region-edit route abstains
-entirely (a region edit carries no dimension statement). There is
-deliberately NO fallback to a persisted version row: a follow-up message
-with no explicit dimension cue ("make it taller") confirms nothing, so
-the gate abstains — it must not enforce a stale H from an earlier turn
-against a candidate the user just asked to make taller (the regression
-that exhausted the loop). Pre-fix the helper fell back to the latest
-row's persisted ``stated_dims`` when the current message confirmed
-nothing; that fallback is gone.
+"""Issue #247 (regression fix) + issue #261 (carry-forward): the
+loop-facing routes (chat, finalize) feed the bbox gate the EFFECTIVE
+per-axis set (the #261 carry-forward merge helper — issue #247's
+``no persisted fallback`` rule dies to it): the set starts as the
+LATEST version's persisted ``stated_dims`` and is adjusted by THIS
+turn's cues — a relative/global cue RELEASES its axis (the #247
+regression: "make it taller" must not enforce the stale H), an absolute
+cue OVERRIDES, and uncued axes CARRY forward ("add a hole" keeps the
+gate enforcing H=12). The effective set is the SINGLE value both the
+gate (``axes_to_gate_triple`` — a (W, D, H) triple with 0.0 for
+unconfirmed axes, the #91 zero-means-unknown convention) and the new
+version row's persisted ``stated_dims`` consume — the region-edit route
+abstains (gate ``None``) but persists the carried set unchanged.
 
 Tests drive the REAL routes (stub only the loop callable, capture the
 kwargs it receives):
@@ -20,8 +21,12 @@ cube" — are the statement shapes it confirms; a bare single number like
   "12 mm tall" is deliberately NOT a stated envelope, the #91
   fabricate-don't-measure rule, and the per-axis path inherits that)
 - chat follow-up "make it taller" after a version whose ``stated_dims``
-  is ``{"H": 12}`` → None (the gate ABSTAINS — the regression test)
+  is ``{"H": 12}`` → None (the gate ABSTAINS — the regression test;
+  #261's carry-forward releases H via the relative cue, so no stale H)
+- chat follow-up "add a hole" on the same project → (0.0, 0.0, 12.0)
+  (#261's carry-forward — H carries forward, the gate enforces it)
 - chat follow-up "H: 20" on the same project → (0.0, 0.0, 20.0)
+  (the cue OVERRIDES the carried value — precedence)
 - chat with no dimensions in the current message → None (abstain)
 - chat "W: 60, D: 45, H: 80" → (60.0, 45.0, 80.0)
 - the REAL ``score()`` with the captured partial triple: a bbox of z=19.3
@@ -39,8 +44,6 @@ cube" — are the statement shapes it confirms; a bare single number like
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 from d33d.design_loop import BboxInfo, score
 from d33d.design_prompts import design_prompt
@@ -103,7 +106,6 @@ async def _drive_chat_capture(app, client, pid: int, body: dict) -> dict:
 
     def _loop(app, **kwargs):
         captured.update(kwargs)
-        return None  # non-pass → terminal error frame; no version write
 
     app.state.run_design_loop = _loop
     r = await client.post(f"/api/projects/{pid}/chat", json=body)
@@ -137,16 +139,16 @@ tall, H: 20" — the protocol's axis-prefixed forms are its confirmed
     assert captured["stated_dims"] == (0.0, 0.0, 20.0)
 
 
-def test_chat_cueless_follow_up_abstains_no_persisted_fallback(
-    app_with_versions,
-):
-    """REGRESSION (issue #247, adversarial vector 5): a follow-up message
-    with NO explicit dimension cue on a project whose latest version row
-    persists ``stated_dims`` ``{"H": 12}`` — the loop receives ``None``
-    (the gate abstains), NOT the stale (0.0, 0.0, 12.0). "Make it
-taller" confirms no axis; enforcing H=12 against a candidate the user
-    asked to make taller is exactly the failure that exhausted the loop.
-    The pre-fix helper fell back to the persisted row here."""
+def test_chat_relative_cue_releases_carry_forward_axis(app_with_versions):
+    """REGRESSION (issue #247; #261's carry-forward keeps it green):
+    a follow-up with a RELATIVE cue on a carried axis ("make it taller"
+    on a project whose latest row persists ``{"H": 12}``) — the loop
+    receives ``None`` (the gate abstains), NOT the stale (0.0, 0.0,
+    12.0): the lexicon classifies "taller" as a relative H cue, the
+    carry-forward merge RELEASES H (a relative cue removes the axis), so
+    nothing is enforced. Enforcing the old H against a candidate the
+    user just asked to make taller is exactly the failure that
+    exhausted the loop — #247's regression."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -165,11 +167,64 @@ taller" confirms no axis; enforcing H=12 against a candidate the user
     assert captured["stated_dims"] is None
 
 
+def test_chat_cueless_follow_up_carries_forward(app_with_versions):
+    """CARRY-FORWARD (issue #261, one axis): a follow-up message with NO
+    axis cue at all ("add a hole") on a project whose latest version row
+    persists ``stated_dims`` ``{"H": 12}`` — the loop receives (0.0, 0.0,
+    12.0): the effective set starts as the latest row's stated set and
+    no cue changes it, so the gate enforces the carried H=12 (and the
+    new version row persists {H: 12}). #247's "no persisted fallback"
+    rule (the loop receives ``None`` here) is superseded by #261's
+    carry-forward: a carried axis is the user's own prior statement, not
+    a stale value — only a relative/global cue releases it."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_height": 12.0, "spacer_width": 30.0},
+            stated_dims={"H": 12.0},
+        )
+        return await _drive_chat_capture(
+            app_with_versions, client, pid,
+            {"message": "add a hole", "chat_history": []},
+        )
+
+    captured = run_async(app_with_versions, _call)
+    assert captured["stated_dims"] == (0.0, 0.0, 12.0)
+
+
+def test_chat_global_cue_releases_all_axes(app_with_versions):
+    """CARRY-FORWARD (issue #261, global cue): "make it bigger" on a
+    project whose latest row persists a FULL {W: 12, D: 8, H: 5} set —
+    the loop receives ``None`` (the global cue releases ALL THREE axes,
+    the gate abstains entirely) — never the persisted triple."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_depth": 8.0, "spacer_height": 5.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
+        return await _drive_chat_capture(
+            app_with_versions, client, pid,
+            {"message": "make it bigger", "chat_history": []},
+        )
+
+    captured = run_async(app_with_versions, _call)
+    assert captured["stated_dims"] is None
+
+
 def test_chat_follow_up_reconfirms_axis(app_with_versions):
-    """A follow-up message that DOES confirm an axis ("H: 20") on a
+    """A follow-up message that OVERRIDES a carried axis ("H: 20") on a
     project whose latest row persists ``{"H": 12}``: the current turn's
-    axis wins — (0.0, 0.0, 20.0), no carry-forward or merge of the
-    stale value."""
+    explicit cue wins — (0.0, 0.0, 20.0), the carried 12 is replaced
+    (precedence: explicit cues > the carried set — the assertion is
+    unchanged from #247; only the mechanism moved from "no merge" to
+    "override")."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -189,9 +244,9 @@ def test_chat_follow_up_reconfirms_axis(app_with_versions):
 
 
 def test_chat_no_dimensions_in_current_message_abstains(app_with_versions):
-    """A current message that states no dimensions → None (abstain
-    entirely), never a zero triple — regardless of anything a version
-    row persisted."""
+    """A current message that states no dimensions on a FRESH project →
+    None (abstain entirely), never a zero triple — there is no version
+    row to carry from, and the statement confirms nothing."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -220,27 +275,55 @@ def test_chat_full_statement_feeds_full_triple(app_with_versions):
     assert captured["stated_dims"] == (60.0, 45.0, 80.0)
 
 
-def test_chat_current_axes_no_merge_with_persisted(app_with_versions):
-    """A current message that confirms an axis DIFFERENT from the latest
-    row's confirmed set: the gate gets EXACTLY the current turn's
-    confirmed axis — no transitive merge with the persisted row (the
-    gate enforces only what the current run's input confirmed)."""
+def test_chat_two_axes_carry_forward_except_released(app_with_versions):
+    """CARRY-FORWARD (issue #261, two axes): a message that confirms
+    NOTHING ("add a hole") on a project whose latest row persists
+    {W: 12.0, H: 12.0}: the gate gets BOTH carried axes — (12.0, 0.0,
+    12.0) — no axis released, no axis overridden. And the same project
+    with a RELATIVE cue on one axis ("make it taller") keeps the other
+    (W=12 enforced — (12.0, 0.0, 0.0) — H released, never the stale H).
+    (The gate-triple capture is the loop kwarg; the new version row
+    persists the same effective set — the single-value contract.)"""
 
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
         await app_with_versions.state.versions.create_version(
             pid,
-            {"spacer_width": 12.0},
-            stated_dims={"W": 12.0},
+            {"spacer_width": 12.0, "spacer_height": 12.0},
+            stated_dims={"W": 12.0, "H": 12.0},
         )
         return await _drive_chat_capture(
             app_with_versions, client, pid,
-            {"message": "make it 20mm tall, H: 20", "chat_history": []},
+            {"message": "add a hole", "chat_history": []},
         )
 
     captured = run_async(app_with_versions, _call)
-    assert captured["stated_dims"] == (0.0, 0.0, 20.0)
+    assert captured["stated_dims"] == (12.0, 0.0, 12.0)
+
+
+def test_chat_relative_releases_one_of_two_carried_axes(app_with_versions):
+    """CARRY-FORWARD (issue #261, two axes, one released): "make it
+taller" on a project whose latest row persists {W: 12.0, H: 12.0} —
+    the gate enforces W=12 ONLY (12.0, 0.0, 0.0): the relative H cue
+    releases H, the un-cued W carries forward, and the new version
+    row's persisted set is {W: 12.0} (no stale H)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_height": 12.0},
+            stated_dims={"W": 12.0, "H": 12.0},
+        )
+        return await _drive_chat_capture(
+            app_with_versions, client, pid,
+            {"message": "make it taller", "chat_history": []},
+        )
+
+    captured = run_async(app_with_versions, _call)
+    assert captured["stated_dims"] == (12.0, 0.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -333,14 +416,13 @@ def test_finalize_message_dims_partial_feed_zero_filled_triple(app_with_versions
     assert captured["stated_dims"] == (0.0, 0.0, 12.0)
 
 
-def test_finalize_cueless_message_abstains_no_persisted_fallback(
-    app_with_versions,
-):
-    """REGRESSION (issue #247): a finalize message with no explicit
-    dimension cue on a project whose latest row's persisted
-    ``stated_dims`` is a full triple → the loop receives ``None``
-    (abstain), NOT the persisted triple — no carry-forward of
-    confirmed dimensions across turns."""
+def test_finalize_cueless_message_carries_forward(app_with_versions):
+    """CARRY-FORWARD (issue #261): a finalize message with no axis cue
+    on a project whose latest row's persisted ``stated_dims`` is a full
+    triple → the loop receives the PERSISTED triple (12.0, 8.0, 5.0):
+    the SAME merge helper the chat route uses starts the effective set
+    from the latest row and carries it forward (uncued axes carry) —
+    #247's "no carry-forward" abstain here is superseded by #261."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -356,12 +438,13 @@ def test_finalize_cueless_message_abstains_no_persisted_fallback(
         )
 
     captured = run_async(app_with_versions, _call)
-    assert captured["stated_dims"] is None
+    assert captured["stated_dims"] == (12.0, 8.0, 5.0)
 
 
 def test_finalize_no_dimensions_in_current_message_abstains(app_with_versions):
-    """No dimensions in the current message → None (abstain), never
-    (0.0, 0.0, 0.0) from the removed param-key fallback."""
+    """No dimensions in the current message on a FRESH project → None
+    (abstain), never (0.0, 0.0, 0.0) from the removed param-key
+    fallback — no version row to carry from either."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -384,7 +467,6 @@ async def _drive_region_edit_capture(app, client, pid: int) -> dict:
 
     async def _loop(app, **kwargs):
         captured.update(kwargs)
-        return None  # non-pass → terminal error frame; no version write
 
     app.state.run_design_loop = _loop
     r = await client.post(
@@ -439,6 +521,70 @@ def test_region_edit_no_confirmed_axis_abstains(app_with_versions):
 
     captured = run_async(app_with_versions, _call)
     assert captured["stated_dims"] is None
+
+
+def test_region_edit_persists_carried_stated_dims_unchanged(app_with_versions):
+    """A region edit persists the latest version's ``stated_dims``
+    UNCHANGED on the new version row (issue #261's region-edit rule —
+    the SAME merge helper the chat and finalize routes use, computed
+    with NO cues: nothing released, nothing added, the carried set
+    comes back as-is). A region edit on a project whose latest row
+    persists ``{"H": 12, "W": 30}`` therefore feeds the loop
+    ``stated_axes == {"H": 12, "W": 30}`` — which ``_resolve_version_create``
+    persists verbatim as the new row's ``stated_dims`` — while the gate
+    input (``stated_dims``) stays ``None`` (abstain, #247). A region
+    edit on a fresh project (no carried row) feeds an empty set — the
+    new row persists NULL, as before."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_height": 12.0, "spacer_width": 30.0},
+            stated_dims={"H": 12.0, "W": 30.0},
+        )
+        captured = await _drive_region_edit_capture(app_with_versions, client, pid)
+
+        # The new version row the loop pass creates (the adapter's
+        # ``_resolve_version_create`` persists the kwargs ``stated_axes``
+        # verbatim as the row's ``stated_dims``).
+        new_version = app_with_versions.state.versions.latest_version(pid)
+        return captured, new_version
+
+    captured, new_version = run_async(app_with_versions, _call)
+    # The gate input abstains — the region edit confirms nothing.
+    assert captured["stated_dims"] is None
+    # The carried set is persisted unchanged (not NULL, not released).
+    assert new_version["stated_dims"] == {"H": 12.0, "W": 30.0}
+
+
+def test_region_edit_fresh_project_persists_nothing(app_with_versions):
+    """A region edit on a project with NO carried ``stated_dims`` feeds
+    the merge helper an empty carry: the adapter's ``stated_axes`` is
+    ``{}`` — which ``_resolve_version_create`` maps to a NULL row
+    (``stated_dims=stated_axes`` falsy → NULL; today's no-row behaviour
+    is unchanged, never a fabricated axis). Verified via the merge
+    helper's exact input shape: ``_latest_stated_dict`` on the fresh
+    project is ``None`` and ``effective_stated_dims(None)`` is ``{}``,
+    so the adapter receives an empty set and the gate input (the loop
+    kwargs' ``stated_dims``) stays ``None``."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        captured = await _drive_region_edit_capture(
+            app_with_versions, client, proj["id"]
+        )
+        from d33d.dimension_protocol import effective_stated_dims
+        from d33d.projects import _latest_stated_dict
+
+        carry = _latest_stated_dict(app_with_versions.state.versions, proj["id"])
+        merged = effective_stated_dims(carry)
+        return captured, merged
+
+    captured, merged = run_async(app_with_versions, _call)
+    assert captured["stated_dims"] is None
+    assert merged == {}
 
 
 # ---------------------------------------------------------------------------

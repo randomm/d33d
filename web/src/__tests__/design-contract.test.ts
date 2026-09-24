@@ -210,6 +210,85 @@ describe("design contract", () => {
     expect(deck).toBe("I assumed V for L. Want it different?");
   });
 
+  /* ----------------------------------------- W261 */
+
+  it("the axis-lexicon offer tiers live in the deck (issue #261)", () => {
+    // Issue #261 adds two offer tiers above #250's deterministic template.
+    // The offer sentence the USER sees is built server-side and rides the
+    // done frame's `confirm_sentence` verbatim; the deck carries each
+    // template so the wiring has a single testable home and the pin below
+    // can catch a wording drift between deck and server.
+    //
+    // Tier 1 — the user's message carried a relative or global cue ("taller",
+    // "bigger", "half the size"): the axis is released this turn, the new
+    // value lands assumed, and the offer names the user's own cue verbatim.
+    const tier1 = copy.confirmOffer.offerReleasedAxis(
+      "taller",
+      "Spacer height",
+      "18.0\u202Fmm",
+    );
+    expect(tier1).toBe(
+      "You asked for taller — I made Spacer height 18.0\u202Fmm. Right?",
+    );
+    // The cue is verbatim, lowercased — a cue like "half the size" is a
+    // phrase, not a single token, and must survive intact in the sentence.
+    expect(
+      copy.confirmOffer.offerReleasedAxis("half the size", "Overall scale", "24.0\u202Fmm"),
+    ).toBe("You asked for half the size — I made Overall scale 24.0\u202Fmm. Right?");
+    // The cue slot is verbatim — no second lowercasing/formatting pass.
+    expect(copy.confirmOffer.offerReleasedAxis("Taller", "H", "3")).toBe(
+      "You asked for Taller — I made H 3. Right?",
+    );
+
+    // Tier 2 — the user quoted an explicit mm number the lexicon did not map
+    // to an axis; the machine used it, and the offer names that number and
+    // the parameter. `value` is always the mm()-formatted string, never the
+    // raw number — so the sentence renders the way the rest of the deck
+    // renders dimensions (one decimal, narrow no-break space, unit).
+    const tier2 = copy.confirmOffer.offerUserNumber("12.0\u202Fmm", "Spacer height");
+    expect(tier2).toBe("You said 12.0\u202Fmm — I used it for Spacer height. Right?");
+    // The acceptance criterion's exact sentence: an assumed param of 12, the
+    // value spelled the way mm(12) renders it.
+    expect(copy.confirmOffer.offerUserNumber(mm(12), "{label}"))
+      .toBe("You said 12.0\u202Fmm — I used it for {label}. Right?");
+
+    // The three tiers are distinct — a released-axis confirmation, a
+    // quoted-number confirmation, and #250's pure-assumption confirmation
+    // must never read as the same thing.
+    expect(tier1).not.toBe(tier2);
+    expect(tier1).not.toBe(copy.confirmOffer.offer("18.0\u202Fmm", "Spacer height"));
+    expect(tier2).not.toBe(copy.confirmOffer.offer("12.0\u202Fmm", "Spacer height"));
+    // Both new tiers close with the same honest question — a confirmation
+    // offer, not a form.
+    expect(tier1).toContain("Right?");
+    expect(tier2).toContain("Right?");
+  });
+
+  it("the deck's tier-1/tier-2 templates agree in substance with the server's (issue #261)", () => {
+    // The offer sentence the USER sees is built server-side (`d33d.confirm_offer`
+    // — the two new tier templates sit alongside #250's `offer_sentence`) and
+    // rides the done frame's `confirm_sentence` field verbatim. The deck's
+    // `offerReleasedAxis` / `offerUserNumber` are MIRRORS (a testable home on
+    // the SPA side, not a second writer of the wire string) — this tripwire
+    // pins the deck's exact strings, the #250 way: a deck rewrite that changes
+    // a word without touching the server fails the exact-match assertions in
+    // the block above.
+    //
+    // The value slot is filled verbatim (the caller pre-forms via `mm` for
+    // millimetre params) — the deck templates never re-format a number.
+    expect(copy.confirmOffer.offerReleasedAxis("V", "L", "X")).toBe(
+      "You asked for V — I made L X. Right?",
+    );
+    expect(copy.confirmOffer.offerUserNumber("X", "L")).toBe(
+      "You said X — I used it for L. Right?",
+    );
+    // The SPA renders the wire string verbatim — it never substitutes its own
+    // tier-1/tier-2 template into the offer message.
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(appSrc).not.toMatch(/content:\s*copy\.confirmOffer\.offerReleasedAxis\(/);
+    expect(appSrc).not.toMatch(/content:\s*copy\.confirmOffer\.offerUserNumber\(/);
+  });
+
   it("the pass card summary is a plain user-facing sentence, never system language or fabricated values", () => {
     // Issue #218: the pass card's summary line must be a copy.ts string —
     // an honest generic fallback confirming a design was produced and

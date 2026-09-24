@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - httpx is a hard dep in production
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+from d33d.axis_lexicon import _GLOBAL, _RELATIVE
 from d33d.design_state import (
     build_design_state_block,
     format_design_state_block,
@@ -168,16 +169,30 @@ _INTERROGATIVE_RE = re.compile(
 #: only its conjugated inflections are listed, never misspellings.
 #: The multi-word imperative forms ("can you set", …) are the cues
 #: below.
-_IMPERATIVE_RE = re.compile(
-    r"\b(?:"
+#
+#: issue #261: the word list is the UNION of the original imperative
+#: words and the axis lexicon's relative + global sets ("taller",
+#: "wider", "bigger", "half the size", …). "Can it be 20 mm wider?" is
+#: a change request, not a question — the relative cue "wider" sends it
+#: to the design loop. Absolute words ("tall", "wide", "height") are NOT
+#: in this union: "how tall is it?" remains a candidate question.
+_BASE_IMPERATIVE_WORDS: frozenset[str] = frozenset(
     "make|makes|made|making|set|sets|setting|change|changes|changed|changing"
     "|add|adds|added|adding|remove|removes|removed|removing|increase|increases|increased|increasing"
     "|decrease|decreases|decreased|decreasing|reduce|reduces|reduced|reducing"
     "|move|moves|moved|moving|widen|widens|widened|widening"
     "|lengthen|lengthens|lengthened|lengthening|shorten|shortens|shortened|shortening"
-    "|thicker|thinner|taller|bigger|smaller"
-    "|round|rounds|rounded|rounding|fillet|fillets|bore|bores|drill|drills|drilled|drilling"
-    r")\b",
+    "|thicker|thinner"
+    "|round|rounds|rounded|rounding|fillet|fillets|bore|bores|drill|drills|drilled|drilling".split("|")
+)
+
+#: The lexicon's relative + global words join the imperative set.
+#: Multi-word phrases ("half the size", "twice the size") are escaped.
+_LEXICON_IMPERATIVE_WORDS: frozenset[str] = frozenset(_RELATIVE) | _GLOBAL
+_ALL_IMPERATIVE_WORDS: frozenset[str] = _BASE_IMPERATIVE_WORDS | _LEXICON_IMPERATIVE_WORDS
+
+_IMPERATIVE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_ALL_IMPERATIVE_WORDS)) + r")\b",
     re.IGNORECASE,
 )
 #: The multi-word imperative cues the ticket lists explicitly ("can you
