@@ -155,8 +155,7 @@ def _has_number(fragment: str) -> bool:
 def _axis_words_in(text: str) -> set[str]:
     """The set of axis words (absolute or relative) present in text."""
     found: set[str] = set()
-    low = text.lower()
-    for word, axis in _ABSOLUTE.items():
+    for word in _ABSOLUTE:
         if _word_re(word).search(text):
             found.add(word)
     for word in _RELATIVE:
@@ -211,8 +210,6 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     global_: bool = False
     cue_words: list[str] = []
 
-    low = clause.lower()
-
     # Check global cues (multi-word phrases first, then single words).
     for phrase in sorted(_GLOBAL, key=len, reverse=True):
         if _word_re(phrase).search(clause):
@@ -233,7 +230,6 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
 
     # Find all numbers in the clause.
     all_numbers = _numbers_in(clause)
-    mm_numbers = _mm_numbers_in(clause)
 
     # Determine the axis-word count in this clause.
     # Count distinct axis words (absolute + relative).

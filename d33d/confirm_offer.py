@@ -86,13 +86,13 @@ __all__ = [
     "is_pending_offer_acceptance",
     "mm_formatted",
     "offer_entry",
-    "tier_1_sentence_template",
-    "tier_2_sentence_template",
     "offer_sentence",
     "select_offer_candidate",
     "tier_1_cue",
     "tier_1_sentence",
+    "tier_1_sentence_template",
     "tier_2_sentence",
+    "tier_2_sentence_template",
     "validate_confirm_first",
 ]
 
