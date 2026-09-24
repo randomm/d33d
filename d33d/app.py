@@ -94,7 +94,11 @@ from d33d.config.catalogue import (
     load_catalogue,
 )
 from d33d.config.resolve import resolve_model
-from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, latest_version_stated_dims
+from d33d.design_loop_events import (
+    EMPTY_PHOTO_DATA_URI,
+    gate_stated_dims,
+    latest_version_stated_dims,
+)
 from d33d.evals.failure_capture import default_failures_path
 from d33d.module_registry import (
     MAX_CALL_SITES,
@@ -1069,11 +1073,12 @@ def create_app(
           the stored reference photo); the fixed transparent-PNG constant
           is the fallback only if the (schema-required) field were ever
           absent.
-        - ``stated_dims`` = the latest version's W/D/H (a fresh project
-          yields ``(0.0, 0.0, 0.0)`` — the gate then ABSTAINS on the
-          unknown target rather than measuring it, recorded distinctly as
-          ``Score.bbox_abstained``; ticket #91); there is no client
-          override for region edits.
+        - ``stated_dims`` = the latest version row's persisted per-axis
+          confirmed set as a (W, D, H) triple (a fresh project, or a row
+          with no confirmed axes, yields ``None`` — the gate then ABSTAINS
+          entirely, recorded distinctly as ``Score.bbox_abstained``;
+          ticket #91 / issue #247; the dead W/D/H param-key read is gone);
+          there is no client override for region edits.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
         - ``request`` = the instruction prefixed with the ``view_id`` and,
@@ -1120,20 +1125,15 @@ def create_app(
             if image_bytes
             else EMPTY_PHOTO_DATA_URI
         )
-        # Stated dims: the latest version's W/D/H (no client override —
-        # a region edit is a scoped directive). Fresh project (or a version
-        # with missing/zero W/D/H) → (0,0,0): the bbox gate ABSTAINS on the
-        # unknown target (the design loop records it as
-        # Score.bbox_abstained, ticket #91) — the gate measures rather than
-        # fabricates, and an unmeasurable gate must not hard-fail every
-        # candidate.
-        latest = app.state.versions.latest_version(project_id)
-        p = latest["params"] if latest is not None else {}
-        stated_dims = (
-            float(p.get("W", 0.0)),
-            float(p.get("D", 0.0)),
-            float(p.get("H", 0.0)),
-        )
+        # Stated dims: the latest version row's persisted per-axis
+        # confirmed set (no client override — a region edit is a scoped
+        # directive; issue #247 removed the dead W/D/H param-key read).
+        # A partial confirmed set is a zero-filled triple (per-axis
+        # abstention); no confirmed axis anywhere → None (the bbox gate
+        # ABSTAINS entirely — Score.bbox_abstained, ticket #91). The gate
+        # measures rather than fabricates, and an unmeasurable gate must
+        # not hard-fail every candidate.
+        stated_dims = gate_stated_dims(None, app.state.versions, project_id)
 
         # The composed request text: the instruction prefixed with the view
         # id, and with the resolved module_ids only when the pick resolved

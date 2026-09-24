@@ -154,6 +154,54 @@ def latest_version_stated_axes(
     return axes or None
 
 
+def gate_stated_dims(
+    current_axes: dict[str, float] | None,
+    versions_service: Any,
+    project_id: int,
+) -> tuple[float, float, float] | None:
+    """The bbox gate's (W, D, H) target for one run — issue #247's
+    per-axis operator decision: the gate is fed the CURRENT run's
+    per-axis confirmed set, falling back to the latest version row's
+    confirmed set (``versions.stated_dims`` — :func:
+    `latest_version_stated_axes`) when the current message confirms
+    nothing.
+
+    The return is the per-axis confirmed set NORMALIZED into a W/D/H
+    triple with ``0.0`` for every unconfirmed axis — the #91
+    zero-means-unknown convention the loop's consumers already speak
+    (``_bbox_within_tolerance`` skips ``<= 0`` axes, ``_dim_axis_list``
+    renders them as ``not specified``). ``None`` ONLY when no axis at all
+    is confirmed anywhere (abstain entirely — never a zero triple from
+    this helper).
+
+    ``current_axes`` is the per-axis extraction of the current user
+    statement (the protocol's ``stated_axes_from_message`` — or the
+    body's explicit ``stated_dims`` axes when a client sends one); an
+    empty/absent dict means "the current message confirmed nothing",
+    which is the fall-back trigger (a full explicit triple is already a
+    non-empty dict and short-circuits the fallback). Non-positive values
+    are dropped like everywhere else in the per-axis pipeline.
+    """
+    axes: dict[str, float] = {}
+    if current_axes:
+        for axis, value in current_axes.items():
+            try:
+                f = float(value)
+            except (TypeError, ValueError):
+                continue
+            if f > 0:
+                axes[str(axis)] = f
+    if not axes:
+        axes = latest_version_stated_axes(versions_service, project_id) or {}
+    if not axes:
+        return None
+    return (
+        axes.get("W", 0.0),
+        axes.get("D", 0.0),
+        axes.get("H", 0.0),
+    )
+
+
 def latest_version_stated_dims(
     versions_service: Any, project_id: int
 ) -> tuple[float, float, float] | None:
@@ -163,29 +211,19 @@ def latest_version_stated_dims(
     Reads the PERSISTED per-axis confirmed set
     (:func:`latest_version_stated_axes` — ``versions.stated_dims``,
     written by the dimension protocol's per-axis extraction) and derives
-    the triple from it. The return contract is unchanged from the
-    pre-#247 helper — a full positive ``(W, D, H)`` triple or ``None`` —
-    so the chat-route fallback (``d33d.projects``), the
-    finalize/region-edit kwargs (``d33d.versions_routes``), and the 3MF
-    export route (``d33d.app`` → ``validate_stl`` ``stated_mm``) keep
-    their shapes: a full triple when ALL three axes are confirmed on the
-    latest row, else ``None`` (abstain — the #91 semantics unchanged).
+    the triple from it. The return contract is the strict one — a full
+    positive ``(W, D, H)`` triple or ``None`` — kept for the 3MF export
+    route (``d33d.app`` → ``validate_stl`` ``stated_mm``): a full triple
+    when ALL three axes are confirmed on the latest row, else ``None``
+    (abstain). The loop-facing routes (chat, finalize, region-edit) use
+    :func:`gate_stated_dims` instead — a PARTIAL confirmed set is a
+    zero-filled triple, never ``None`` (the #247 per-axis decision).
 
     The dead W/D/H param-key read is GONE: a prior version whose ``params``
     snapshot happens to carry ``W``/``D``/``H`` keys but whose
     ``stated_dims`` is NULL (every pre-#246 row) yields ``None``, not a
     triple re-derived from param names the model never emitted.
 
-    ``create_region_edit`` does NOT use this helper — it builds its own
-    ``float(params.get(axis, 0.0))`` triple, which on a fresh project
-    (or a version whose W/D/H are missing/null/zero) is ``(0.0, 0.0, 0.0)``.
-    Note: the bbox gate NOW ABSTAINS on such a triple (``_bbox_within_tolerance``
-    returns True on a ``target <= 0`` axis, ticket #91) and records the
-    abstention in ``Score.bbox_abstained`` — where that route previously
-    hard-FAILED every candidate. The abstain is the correct semantics for
-    region edits: it is the behavior that route's own comment ("the
-    dimension gate measures rather than fabricates") was always intended
-    to describe.
     """
     axes = latest_version_stated_axes(versions_service, project_id)
     if axes is None:
@@ -1200,6 +1238,7 @@ async def run_design_loop_with_events(
 __all__ = [
     "EMPTY_PHOTO_DATA_URI",
     "bbox_from_render",
+    "gate_stated_dims",
     "latest_version_stated_axes",
     "latest_version_stated_dims",
     "photo_data_uri",

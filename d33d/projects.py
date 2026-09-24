@@ -31,11 +31,11 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d.design_loop_events import (
-    latest_version_stated_dims,
+    gate_stated_dims,
     photo_data_uri,
     run_design_loop_with_events,
 )
-from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
+from d33d.dimension_protocol import stated_axes_from_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -295,33 +295,30 @@ def create_projects_router() -> APIRouter:
         if project_id in inflight:
             raise HTTPException(status_code=409, detail="a design loop is already in flight")
 
-        # Resolve the loop's stated dimensions (ticket #91), in strict
-        # precedence order — the SPA never sends ``stated_dims`` (it posts
-        # only ``message`` + ``chat_history``), so a client-absent value
-        # must not silently become an unsatisfiable (0,0,0) gate target:
-        #   1. the user's own message, via the existing dimension_protocol
-        #      extraction (``stated_dims_from_message`` reuses
-        #      ``_extract_stated`` — never a new parser);
-        #   2. else the latest version's W/D/H (``latest_version_stated_dims``
-        #      — the same fallback the finalize seam uses); a version with
-        #      null/zero/partial W/D/H yields None, not a zero triple;
-        #   3. else None — the loop's bbox gate ABSTAINS (recorded
-        #      distinctly in ``Score.bbox_abstained``); it never receives
-        #      (0.0, 0.0, 0.0) from this route.
+        # Resolve the loop's stated dimensions (ticket #91; issue #247's
+        # per-axis decision) — the SPA never sends ``stated_dims`` (it
+        # posts only ``message`` + ``chat_history``): the loop receives
+        # the CURRENT run's per-axis confirmed set (``gate_stated_dims``
+        # — the body's explicit ``stated_dims`` axes when a client sends
+        # one, else the protocol's per-axis extraction of the message),
+        # falling back to the latest version row's persisted confirmed set
+        # when the current message confirms nothing. A PARTIAL confirmed
+        # set is a zero-filled (W, D, H) triple — unconfirmed axes render
+        # as ``not specified`` in the prompt and abstain per-axis in the
+        # bbox gate; ``None`` (abstain entirely, recorded in
+        # ``Score.bbox_abstained``) only when no axis is confirmed
+        # anywhere. This route never reads W/D/H param keys.
         chat_history = tuple(body.chat_history or ())
 
-        # The per-axis stated evidence persisted on the version the loop
-        # pass creates (issue #246): the protocol's per-axis extraction of
-        # the user's own words (``stated_axes_from_message`` reuses the
-        # same ``_extract_stated`` pipeline as the full-triple extraction
-        # above — partial statements count for the axes they state; the
-        # body's explicit stated_dims, when a client sends one, is the
-        # protocol's highest-priority source and ranks identically). The
-        # design-state block reads this PERSISTED set on the version row
-        # (never re-derives from live chat), so the loop adapter hands it
-        # to ``create_version`` alongside the measured bbox. A statement
-        # that names no axis persists ``{}`` → NULL (abstain, never a
-        # fabricated axis row).
+        # The per-axis stated evidence — the gate's current-message source
+        # AND what the loop pass persists on the new version row (issue
+        # #246): the body's explicit ``stated_dims`` axes when a client
+        # sends one (the protocol's highest-priority source), else the
+        # protocol's per-axis extraction of the user's own words
+        # (``stated_axes_from_message`` reuses the same ``_extract_stated``
+        # pipeline — partial statements count for the axes they state).
+        # A statement that names no axis is ``{}`` → the version row
+        # persists NULL (abstain, never a fabricated axis row).
         per_axis_stated: dict[str, float] = {}
         if body.stated_dims is not None:
             _w, _d, _h = body.stated_dims
@@ -334,16 +331,9 @@ def create_projects_router() -> APIRouter:
         else:
             per_axis_stated = stated_axes_from_message(body.message, chat_history)
 
-        if body.stated_dims is not None:
-            stated: tuple[float, float, float] | None = tuple(
-                float(d) for d in body.stated_dims
-            )
-        else:
-            stated = stated_dims_from_message(body.message, chat_history)
-            if stated is None:
-                stated = latest_version_stated_dims(
-                    app.state.versions, project_id
-                )
+        stated = gate_stated_dims(
+            per_axis_stated, app.state.versions, project_id
+        )
 
         # Photo: read the project's stored photo NOW (synchronously, before
         # the 202 response) — the background task runs via asyncio and the

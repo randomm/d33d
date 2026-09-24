@@ -444,7 +444,11 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         "prompt_version",
     ):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # No confirmed axis anywhere (no stated_dims in the body, no dims in
+    # the message, no version yet) → None — the abstaining state (issue
+    # #247: the dead W/D/H param-key fallback that produced (0,0,0) is
+    # gone; the gate abstains and records it as Score.bbox_abstained).
+    assert captured["stated_dims"] is None
     assert callable(captured["render_fn"])
     assert callable(captured["llm_fn"])
     assert isinstance(captured["prompt_version"], str) and captured["prompt_version"]
@@ -815,8 +819,10 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     the composed request text (instruction prefixed with the view_id and,
     when named modules resolve, with module_ids + "at the marked point",
     non-empty), the marked PNG as a data URI (NOT the stored photo),
-    stated_dims from the latest version's W/D/H ((0,0,0) for a fresh
-    project), an EMPTY chat_history (a scoped directive, not a chat turn —
+    stated_dims from the latest version row's persisted per-axis
+    confirmed set (None for a fresh project — the gate abstains;
+    issue #247 removed the (0,0,0) zero-triple fallback), an EMPTY
+    chat_history (a scoped directive, not a chat turn —
     even when the project has prior transcripts), and a callable bbox_fn."""
     captured: dict = {}
 
@@ -859,10 +865,12 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # photo: the marked PNG from the body as a data URI (the vision model
     # sees the marked-up render, not the stored reference photo).
     assert captured["photo"] == f"data:image/png;base64,{_REGION_EDIT_PNG_BASE64}"
-    # stated_dims: fresh project (no versions) → (0, 0, 0), passed verbatim;
-    # the bbox gate ABSTAINS on the unknown target (recorded as
-    # Score.bbox_abstained, ticket #91) instead of hard-failing it.
-    assert captured["stated_dims"] == (0.0, 0.0, 0.0)
+    # stated_dims: fresh project (no confirmed axis anywhere) → None;
+    # the bbox gate ABSTAINS entirely (recorded as Score.bbox_abstained,
+    # ticket #91) instead of hard-failing every candidate. Issue #247
+    # removed the (0,0,0) zero-triple hand-off and the dead W/D/H
+    # param-key read behind it.
+    assert captured["stated_dims"] is None
     # chat_history: the EMPTY tuple — a region edit is a scoped directive,
     # not a chat turn (the project's transcript is never auto-included).
     assert captured["chat_history"] == ()
@@ -877,10 +885,17 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
     # ``Request:`` line is removed from _design_messages.
     from d33d.design_loop import _design_messages
 
+    # ``None`` (no confirmed axis) is the abstaining state — the loop
+    # normalizes it to the zero triple before the prompt renders
+    # (``not specified`` per axis, never "0 mm"); test the same shape
+    # the loop core hands the prompt builder.
+    stated = captured["stated_dims"]
+    if stated is None:
+        stated = (0.0, 0.0, 0.0)
     rendered = _design_messages(
         photo=captured["photo"],
         chat_history=captured["chat_history"],
-        stated=captured["stated_dims"],
+        stated=stated,
         repair=None,
         request=captured["request"],
     )
@@ -892,9 +907,11 @@ def test_region_edit_returns_202_accepted_and_records_full_kwargs(
 
 
 def test_region_edit_stated_dims_from_latest_version(app_with_versions):
-    """stated_dims is ALWAYS derived from the latest version's W/D/H
-    (no client override for region edits) — a project with an existing
-    version passes that version's W/D/H, not (0,0,0)."""
+    """stated_dims is ALWAYS derived from the latest version row's
+    PERSISTED per-axis confirmed set (no client override for region
+    edits) — a project with an existing version passes that row's
+    confirmed set as a (W, D, H) triple (zero-filled for unconfirmed
+    axes), never re-derived from W/D/H param keys (issue #247)."""
     captured: dict = {}
 
     async def _loop(app, **kwargs):
@@ -904,7 +921,14 @@ def test_region_edit_stated_dims_from_latest_version(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        await create_version(client, pid, {"W": 12.0, "D": 8.0, "H": 5.0})
+        # Free-named params + the persisted per-axis confirmed set (the
+        # production shape — the model never emits W/D/H keys, so the
+        # dead param-key read could never see these dimensions).
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"spacer_width": 12.0, "spacer_depth": 8.0, "spacer_height": 5.0},
+            stated_dims={"W": 12.0, "D": 8.0, "H": 5.0},
+        )
         app_with_versions.state.run_design_loop = _loop
         r = await client.post(
             f"/api/projects/{pid}/region-edits", json=_region_edit_body()
