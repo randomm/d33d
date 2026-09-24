@@ -360,6 +360,47 @@ def test_partial_triple_single_axis_gate_pass_reaches_pass():
     assert result.best.score.bbox_abstained is True
 
 
+def test_partial_confirmed_set_does_not_flag_unconfirmed_literals_through_loop():
+    """Issue #247 operator decision (``_named_params_present`` coupling):
+    a run that confirms only H=12 must not fail the loop because the
+    unconfirmed 20 mm dimension is declared as ``spacer_width = 20`` —
+    the exemption/requirement applies only to the confirmed axes, so
+    the named-params bit stays True and the loop passes (every confirmed
+    axis measured within tolerance, unconfirmed axes skipped). The
+    declared shape is the model's actual v24 output: free-named params,
+    no W/D/H keys."""
+    scad = (
+        "spacer_width = 20;\n"
+        "spacer_height = 12;\n"
+        "cube([spacer_width, spacer_width, spacer_height]);\n"
+    )
+    llm = [_scad_llm(scad)]
+    renders = [_render()]
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        # z=12.2 is within tolerance of H=12; x/y (20) unconfirmed —
+        # skipped, never a target.
+        return BboxInfo(x=20.0, y=20.0, z=12.2, volume=1.0)
+
+    result = _run_loop(
+        llm_script=llm,
+        render_script=renders,
+        stated=(0.0, 0.0, 12.0),  # only H confirmed
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    # The named-params bit is True — the unconfirmed ``spacer_width = 20``
+    # is NOT flagged as a magic number (if it were, the loop would
+    # exhaust on ``stated_dims_not_named_parameters``).
+    assert result.best.score.bits[3] is True
+    # The partial pass still carries the abstention flag (W/D were never
+    # checked) — per-axis reality.
+    assert result.best.score.bbox_abstained is True
+
+
 def test_early_stop_after_two_consecutive_no_improvements():
     # A DECLINING rank sequence proves the no-improvement stop is active
     # (not just the cap): 2 → 0 → 0 hits two consecutive non-improvements

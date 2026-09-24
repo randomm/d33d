@@ -329,7 +329,7 @@ def best_match_component(
 
 
 def _bbox_within_tolerance(
-    bbox: BboxInfo, stated: tuple[float, float, float]
+    bbox: BboxInfo, stated: tuple[float, ...]
 ) -> bool:
     """True iff every rendered axis the user CONFIRMED is within
     max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).

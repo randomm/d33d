@@ -348,7 +348,12 @@ def test_partial_triple_multi_part_uses_whole_mesh_extents() -> None:
         ),
     )
     # Only H confirmed (20mm): the small component's z=20 would pass, but
-    # the whole-mesh z=30 is OUT of tolerance → False.
+    # the whole-mesh z=30 is OUT of tolerance → False. This failure of a
+    # component that fits is the INTENDED trade-off of the documented
+    # choice (fail-safe direction: the assembly can only be larger than
+    # the part) — do not "fix" it back to component matching; the
+    # conservative whole-mesh comparison is what keeps a confirmed-axis
+    # error from ever being under-reported.
     assert _bbox_within_tolerance(bbox, (0.0, 0.0, 20.0)) is False
     # H=30 confirmed: the whole-mesh z=30 is within tolerance → True.
     assert _bbox_within_tolerance(bbox, (0.0, 0.0, 30.0)) is True
@@ -453,6 +458,52 @@ def test_magic_reported_scad_with_inlined_sphere_fails() -> None:
     assert detect_magic_numbers(
         scad, stated_dimensions={"W": 20.0, "D": 20.0, "H": 20.0}
     ) is True
+
+
+def test_magic_partial_confirmed_set_does_not_flag_unconfirmed_literals() -> None:
+    """Issue #247 operator decision (``_named_params_present`` coupling):
+    a PARTIAL confirmed set must not cause unconfirmed dimension literals
+    to be flagged as magic numbers — a design where the user confirmed
+    only H=12 and the model declares the unconfirmed 20 mm as a named
+    parameter (``spacer_width = 20``) PASSES the named-params gate. The
+    exemption is value-based (any declared/stated value exempts the
+    matching literal), not axis-based, so the partial confirmed set
+    passed to the gate — ``{"H": 12.0}`` — never changes the verdict
+    for the unconfirmed 20: it is exempt either way, never flagged.
+    """
+    # The declared shape: every dimension is a named parameter (the
+    # model's actual v24 output shape — free names, no W/D/H).
+    declared = (
+        "spacer_width = 20;\n"
+        "spacer_height = 12;\n"
+        "cube([spacer_width, spacer_width, spacer_height]);\n"
+    )
+    # Gate-4 as the loop calls it with only H confirmed: the declared
+    # 20 must NOT be flagged (it is not a magic number — it is a named
+    # parameter the model declared, whether confirmed or not).
+    assert detect_magic_numbers(declared, stated_dimensions={"H": 12.0}) is False
+    # Same verdict with no confirmed axis at all — the exemption of the
+    # declared 20 does not depend on the confirmed set (declared values
+    # are stated values, issue #100): the partial set changes nothing.
+    assert detect_magic_numbers(declared) is False
+
+    # The inlined variant: the model leaves the unconfirmed 20 inline.
+    inlined = "spacer_height = 12;\ncube([20, 20, spacer_height]);\n"
+    # The 20 is flagged with or without the partial confirmed set —
+    # it is a genuinely undeclared literal, and confirming H must not
+    # suddenly make it magic (the exemption is not axis-based). The
+    # failure is the literal, not the partial confirmation: the verdict
+    # is identical with no confirmed axis at all.
+    assert detect_magic_numbers(inlined, stated_dimensions={"H": 12.0}) is True
+    assert detect_magic_numbers(inlined) is True
+    # And the same SCAD with a FULL confirmed triple in which 20 IS a
+    # stated value: the inlined 20 is exempt (the stated-value
+    # exemption, issue #100) — the gate distinguishes "unconfirmed
+    # literal" from "stated value inlined" by the values, not by
+    # which axis the user happened to confirm.
+    assert detect_magic_numbers(
+        inlined, stated_dimensions={"W": 20.0, "D": 20.0, "H": 12.0}
+    ) is False
 
 
 def test_magic_genuinely_hardcoded_still_fails() -> None:

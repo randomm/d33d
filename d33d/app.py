@@ -970,11 +970,12 @@ def create_app(
             )
 
         # ``stated_mm`` ABSTAINS, it does not compare against zero: the
-        # latest version's W/D/H via ``latest_version_stated_dims`` — a
-        # fully-positive triple, or ``None`` when any axis is missing,
-        # null, or <= 0 (so ``validate_stl``'s dimension gate skips rather
-        # than measuring a perfectly good model against 0.0 and failing
-        # it — the #91 bug). A bbox-gate abstention is still ``ok=True``
+        # latest version's confirmed W/D/H via ``latest_version_stated_dims``
+        # — a fully-positive triple, or ``None`` when any axis is missing
+        # from (or <= 0 in) that version's persisted ``stated_dims`` column
+        # (issue #247 — the helper no longer reads W/D/H param keys), so
+        # ``validate_stl``'s dimension gate skips rather than measuring a
+        # perfectly good model against 0.0 and failing it (the #91 bug). A bbox-gate abstention is still ``ok=True``
         # (issue #91); the route carries no metadata claiming otherwise —
         # a 3MF served under an abstention is a valid millimetre artefact.
         stated = latest_version_stated_dims(versions, project_id)
