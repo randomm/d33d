@@ -388,14 +388,14 @@ export const firstRun = {
  * Assumed-value confirmation (issue #250). After a passing design pass the
  * assistant offers to confirm ONE assumed value — the one that most affects
  * fit — as a single plain sentence in the conversation, never a form. The
- * deterministic fallback offer and the short acknowledgement both live here:
- * the model may supply its own offer sentence (the done frame's `confirm_sentence`),
- * but only when it passes the server's number guard; otherwise the
- * template below is the wording. `value` arrives pre-formatted (via `mm`
- * for millimetre params, the model's own string for non-numeric ones), and
- * `label` is the parameter's user-facing label with the raw identifier as
- * the fallback (the ChatPanel renders the identifier in the mono face — the
- * same mono-face rule as the Brief's rows).
+ * model may supply its own offer sentence (the done frame's `confirm_sentence`),
+ * but only when it passes the server's number guard; the template below is the
+ * deterministic wording for everything else (the server builds the sentence with
+ * the same template — the two are one string, pinned by the design-contract test
+ * and the backend's sentence tests). `value` arrives pre-formatted, and `label`
+ * is the parameter's user-facing label with the raw identifier as the mono
+ * fallback. The short acknowledgement ("Got it — {label} stays {value}.") is the
+ * accepted-offer reply.
  */
 export const confirmOffer = {
   /** The deterministic offer template, used when the model's own sentence

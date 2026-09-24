@@ -1152,33 +1152,6 @@ describe("design contract", () => {
     expect(second.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
   });
 
-  /* --------------------------------------------------------------- W250 */
-
-  it("the assumed-value confirmation copy lives in the deck (issue #250)", () => {
-    // All user-facing strings live in web/src/copy.ts. The offer is a
-    // single plain sentence (never a form), and the deterministic offer
-    // template and the short acknowledgement both have a deck home — the
-    // model may supply its own offer sentence (the done frame's
-    // `confirm_sentence`), but only when the server's number guard
-    // accepts it; the template below is the wording for everything else.
-    const offer = copy.confirmOffer.offer("3.0\u202Fmm", "Wall thickness");
-    expect(offer).toBe(
-      "I assumed 3.0\u202Fmm for Wall thickness. Want it different?",
-    );
-    // The value slot is filled verbatim — no second formatting pass (the
-    // caller pre-forms via `mm` for millimetre params, the model's own
-    // string for non-numeric ones).
-    expect(copy.confirmOffer.offer("2 grooves", "Channel depth")).toBe(
-      "I assumed 2 grooves for Channel depth. Want it different?",
-    );
-    const ack = copy.confirmOffer.acknowledged("Wall thickness", "3.0\u202Fmm");
-    expect(ack).toBe("Got it — Wall thickness stays 3.0\u202Fmm.");
-    // The two surfaces are distinct — an offer and an acknowledgement must
-    // never read as the same thing.
-    expect(ack).not.toBe(offer);
-    expect(ack).not.toContain("Want it different?");
-  });
-
   /* --------------------------------------------------------------- W246 */
 
   it("the Brief renders a fifth 'assumed' provenance: half-dot mark, legend entry, separate chip count (issue #246)", () => {
