@@ -45,6 +45,7 @@ import pytest
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
     COULD_NOT_ANSWER,
+    DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
     build_answer_prompt,
     deterministic_axis_answer,
@@ -511,13 +512,14 @@ def _latest263(
     stated: dict | None = None,
     bbox: dict | None = None,
     name: str | None = None,
+    param_meta: dict | None = None,
 ) -> dict:
     """Build a minimal version dict for the #263 deterministic-stage tests."""
     out: dict = {
         "params": params or {},
         "stated_dims": stated,
         "bbox": bbox,
-        "param_meta": None,
+        "param_meta": param_meta,
     }
     if name is not None:
         out["name"] = name
@@ -622,6 +624,39 @@ class TestDeterministicAxisStage:
         )
         assert result == "It measures 20.0\u202fmm × 25.0\u202fmm × 12.0\u202fmm."
 
+    def test_dimension_list_triggers_closed_list(self) -> None:
+        # The dimension-list trigger list is CLOSED (operator decision).
+        # Every member of the closed set answers the list; any other
+        # phrasing falls through (None).
+        latest = _latest263(bbox={"x": 20.0, "y": 25.0, "z": 12.0})
+        expected = "It measures 20.0\u202fmm × 25.0\u202fmm × 12.0\u202fmm."
+        for trigger in (
+            "What are the dimensions?",
+            "what are its dimensions?",
+            "What size is it?",
+            "How big is it?",
+            "How large is it?",
+            "What's the size?",
+        ):
+            assert DETERMINISTIC_DIMENSION_LIST_RE.search(trigger) is not None, (
+                f"closed-list trigger {trigger!r} not matched"
+            )
+            result = deterministic_axis_answer(trigger, latest)
+            assert result == expected, f"trigger {trigger!r} → {result!r}"
+        # Anything else is NOT a dimension-list trigger: it falls through
+        # to the single-axis rule or to stage 2.
+        for non_trigger in (
+            "What are the measurements?",
+            "How large is the hole?",
+            "What is the size of the post?",
+            "What is the material?",
+            "How big is the shelf bracket?",
+        ):
+            result = deterministic_axis_answer(non_trigger, latest)
+            assert result is None, (
+                f"{non_trigger!r} must fall through, got {result!r}"
+            )
+
     def test_param_row_never_an_answer_source(self) -> None:
         # A param row named "H" (assumed) is NEVER an answer source —
         # the deterministic stage filters on kind == "axis" explicitly.
@@ -634,6 +669,52 @@ class TestDeterministicAxisStage:
         # The axis row (from the bbox) says 43.8 measured; the param row
         # says 40 assumed. The answer must use 43.8.
         assert result == "It measures 43.8\u202fmm tall."
+
+    def test_model_source_disagrees_param_row_never_an_answer_source(self) -> None:
+        # Issue #264: a param row with ``disagrees_source: "model"``
+        # (an assumed param whose declared axis contests the measurement)
+        # is NEVER an answer source — the deterministic stage filters on
+        # ``kind == "axis"`` explicitly. After #264, axis rows are
+        # measured or user-disagrees, so the axis-row answer is always
+        # correct even when a model-source param row also claims the
+        # axis. Here: spacer_width=40 (assumed, axis W) + bbox x=43.8 →
+        # the param row renders disagrees_source "model" with value 43.8
+        # (the measured extent) and stated_value 40; the W axis row is
+        # measured at 43.8. "How wide is it?" answers 43.8 (the axis
+        # row), never 40 (the model's value).
+        from d33d.design_state import state_block_for_version
+
+        entries = state_block_for_version(
+            {"spacer_width": 40.0},
+            {"x": 43.8, "y": 43.9, "z": 12.0},
+            None,
+            {"spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"}},
+        )
+        # Sanity: the block carries a model-source disagrees param row
+        # AND a W axis row (measured at 43.8).
+        model_rows = [
+            e
+            for e in entries
+            if e.get("kind") == "param"
+            and e.get("provenance") == "disagrees"
+            and e.get("disagrees_source") == "model"
+        ]
+        assert model_rows, f"expected a model-source disagrees row: {entries}"
+        w_axis_rows = [
+            e for e in entries if e.get("kind") == "axis" and e.get("name") == "W"
+        ]
+        assert w_axis_rows and w_axis_rows[0]["value"] == 43.8
+
+        latest = _latest263(
+            params={"spacer_width": 40.0},
+            bbox={"x": 43.8, "y": 43.9, "z": 12.0},
+            param_meta={
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"}
+            },
+        )
+        result = deterministic_axis_answer("How wide is it?", latest)
+        # The axis row (43.8) wins; the model's 40 never answers.
+        assert result == "It measures 43.8\u202fmm wide."
 
     def test_feature_noun_falls_through(self) -> None:
         # "How tall is the post?" → None (feature noun, not the part).
@@ -743,6 +824,198 @@ class TestDeterministicAxisStage:
             "kind": ANSWER_DONE_KIND,
             "answer": "It measures 12.0\u202fmm tall.",
         }
+
+    def test_route_thick_wall_not_answered_deterministically(self) -> None:
+        # "How thick is the wall?" is NOT a size question for the
+        # deterministic stage ("thick" is excluded from the lexicon, and
+        # "wall" is a feature noun). It falls through to stage 2:
+        # with no answer edge, the route returns None (design loop).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = run_async_safe(
+            route_chat_message("How thick is the wall?", latest)
+        )
+        assert result is None
+
+
+class TestDeterministicWarningLog:
+    """Issue #263: every deterministic answer logs exactly ONE WARNING
+    naming the outcome ("deterministic"), the axis (or the dimension-list
+    marker), and the provenance class — NEVER the message text or the
+    answer text (no PII in logs)."""
+
+    def _latest(self, params: dict, stated: dict | None, bbox: dict | None) -> dict:
+        return {
+            "params": params,
+            "stated_dims": stated,
+            "bbox": bbox,
+            "param_meta": None,
+        }
+
+    def _warnings(self, caplog) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_single_axis_emits_one_warning_axis_and_provenance(self, caplog) -> None:
+        latest = self._latest({}, None, {"x": 20.0, "y": 20.0, "z": 12.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message("How tall is it now?", latest)
+            )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "It measures 12.0\u202fmm tall.",
+        }
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=measured" in msg
+        # Never the message or the answer text (no PII in logs).
+        assert "How tall is it now?" not in msg
+        assert "12.0" not in msg
+
+    def test_dimension_list_emits_one_warning_list_and_provenance_classes(
+        self, caplog
+    ) -> None:
+        latest = self._latest({}, None, {"x": 20.0, "y": 25.0, "z": 12.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How big is it?", latest))
+        assert result is not None
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=list" in msg
+        # The dimension list reports each axis's provenance class
+        # (W/D/H order, "+"-joined — a closed vocabulary, no free text).
+        assert "provenance=measured+measured+measured" in msg
+        assert "How big is it?" not in msg
+
+    def test_not_established_emits_one_warning(self, caplog) -> None:
+        latest = self._latest({}, None, None)
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How tall is it now?", latest))
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "The height isn't established yet.",
+        }
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=not_established" in msg
+        # No PII: no message text, no number.
+        assert "How tall is it now?" not in msg
+        assert "12.0" not in msg
+
+    def test_disagrees_emits_one_warning(self, caplog) -> None:
+        latest = self._latest({}, {"H": 12.0}, {"x": 20.0, "y": 20.0, "z": 15.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How tall is it now?", latest))
+        assert result is not None
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=disagrees" in msg
+        # No PII: neither the stated number nor the measured number
+        # (the provenance class is a closed vocabulary token, not a value).
+        assert "12.0" not in msg
+        assert "15.0" not in msg
+
+    def test_non_axis_question_falls_through_no_deterministic_warning(
+        self, caplog
+    ) -> None:
+        # A stage-1 candidate the deterministic stage does not take
+        # ("What is the material?" — no axis word) falls through to
+        # stage 2; no deterministic WARNING is emitted (the stage-2
+        # outcome logs its own WARNING via ask_answer_call).
+        latest = self._latest({"H": 12.0}, None, None)
+
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message("What is the material?", latest, _edge)
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
+        warnings = self._warnings(caplog)
+        # The only WARNING is the stage-2 outcome ("answer"), NOT
+        # a deterministic one.
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=answer" in warnings[0].getMessage()
+        assert "outcome=deterministic" not in warnings[0].getMessage()
+
+
+class TestDeterministicCopyDeckParity:
+    """Issue #263: the backend's deterministic answer strings are pinned
+    against ``web/src/copy.ts``'s ``deterministicAnswer`` deck, the same
+    way the #250 ``confirmOffer`` and #260 ``answerRoute`` strings are —
+    a deck edit without the backend (or vice versa) is a drift this
+    catches."""
+
+    def test_backend_deterministic_strings_match_copy_ts_deck(self) -> None:
+        from pathlib import Path
+
+        copy_ts = (
+            Path(__file__).resolve().parents[2]
+            / "web"
+            / "src"
+            / "copy.ts"
+        ).read_text()
+
+        # The backend's per-provenance sentence templates (issue #263)
+        # must be present in copy.ts — no line-by-line regex extraction
+        # (which is brittle to deck reformatting and can pick up the
+        # wrong string). Both directions are pinned: a backend rewrite
+        # or a deck rewrite breaks the check.
+        # The deck parameterises the axis adjective/noun and the W/D/H
+        # slots (${axis}, ${axisNoun}, ${w}/${d}/${h}); the backend has
+        # one literal string per axis. The test substitutes the deck's
+        # interpolation syntax so the raw template shape can be matched.
+        for tpl in (
+            "It's {value} {axis} — you said that, and I measured it.",
+            "It measures {value} {axis}.",
+            "You said {value} {axis}. Nothing has measured it yet.",
+            "You said {stated}; what came out measures {measured}.",
+            "The {axisNoun} isn't established yet.",
+            "It measures {w} × {d} × {h}.",
+        ):
+            deck_tpl = tpl
+            for var in ("value", "axis", "stated", "measured", "axisNoun", "w", "d", "h"):
+                deck_tpl = deck_tpl.replace(
+                    "{" + var + "}", "${" + var + "}"
+                )
+            assert f'"{deck_tpl}"' in copy_ts or f"`{deck_tpl}`" in copy_ts, (
+                f"backend string {tpl!r} (deck form {deck_tpl!r}) not "
+                f"found in copy.ts (the copy.ts deck must carry it verbatim)"
+            )
+        # The per-axis adjective / noun pins: the backend's per-axis
+        # variants must match the deck's axis parameterisation.
+        for adjective in ("tall", "wide", "deep"):
+            for tpl in (
+                f"It's {{value}} {adjective} — you said that, and I measured it.",
+                f"It measures {{value}} {adjective}.",
+                f"You said {{value}} {adjective}. Nothing has measured it yet.",
+            ):
+                deck_tpl = tpl.replace("{value}", "${value}").replace(
+                    adjective, "${axis}"
+                )
+                assert f"`{deck_tpl}`" in copy_ts, (
+                    f"backend per-axis string {tpl!r} (deck form {deck_tpl!r}) "
+                    f"not found in copy.ts"
+                )
+        for noun in ("height", "width", "depth"):
+            deck_tpl = f"The {noun} isn't established yet.".replace(
+                noun, "${axisNoun}"
+            )
+            assert f"`{deck_tpl}`" in copy_ts, (
+                f"backend not-established string for {noun!r} (deck form {deck_tpl!r}) "
+                f"not found in copy.ts"
+            )
 
 
 class TestDeterministicAxisStageRouteLevel:

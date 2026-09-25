@@ -101,6 +101,7 @@ __all__ = [
     "ask_answer_call",
     "build_answer_prompt",
     "deterministic_axis_answer",
+    "deterministic_axis_outcome",
     "extract_answer_numbers",
     "extract_written_numbers",
     "guard_answer_numbers",
@@ -703,6 +704,11 @@ def deterministic_axis_answer(
     ``latest is None`` early exit runs first in :func:`route_chat_message`.
     The answer rides the #249 plain-message path (``{"kind": "answer",
     "answer": …}``), no version, no design run.
+
+    The stage outcome (the axis, or the dimension-list marker, plus the
+    provenance class) is available to the caller via
+    :func:`deterministic_axis_outcome` for the WARNING log (one record
+    naming the outcome, axis, provenance class — no message text).
     """
     if latest is None:
         return None
@@ -734,6 +740,38 @@ def deterministic_axis_answer(
     if cls == "not_established":
         return tmpl
     return tmpl.format(value=mm_formatted(value) if value is not None else "?")
+
+
+def deterministic_axis_outcome(
+    message: str,
+    latest: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    """The deterministic stage's log outcome for ONE message, or ``None``
+    (the stage does not take the message — fall through to stage 2).
+
+    Returns ``(axis, provenance_class)`` where ``axis`` is ``"W"`` / ``"D"``
+    / ``"H"`` / ``"list"`` and ``provenance_class`` is one of the
+    :data:`DETERMINISTIC_AXIS_SENTENCES` keys. The route logs exactly ONE
+    WARNING naming this outcome (plus message length) — never the message
+    text or the answer text (no PII in logs). The dimension-list case
+    reports its per-axis provenance classes joined by ``+`` in W/D/H order
+    (``"measured+measured+not_established"`` — a closed vocabulary, never
+    free text)."""
+    if latest is None:
+        return None
+    version_name = latest.get("name")
+    entries = state_block_for_chat(latest)
+    what = _deterministic_axis(message, version_name)
+    if what == "list":
+        classes = [
+            _axis_value_for(ax, entries, latest)[0]
+            for ax in ("W", "D", "H")
+        ]
+        return "list", "+".join(classes)
+    if what is None:
+        return None
+    cls, _, _ = _axis_value_for(what, entries, latest)
+    return what, cls
 
 
 # ---------------------------------------------------------------------------
@@ -1043,11 +1081,17 @@ async def route_chat_message(
     # is answered from the design state with NO LLM call (no timeout,
     # no model call, no guard). It runs BEFORE the answer-edge check
     # (the deterministic answer needs no model). Anything it does not
-    # take falls through to stage 2 exactly as today.
-    deterministic = deterministic_axis_answer(message, latest)
-    if deterministic is not None:
+    # take falls through to stage 2 exactly as today. ONE WARNING names
+    # the outcome (axis, provenance class — no message text).
+    outcome = deterministic_axis_outcome(message, latest)
+    if outcome is not None:
+        deterministic = deterministic_axis_answer(message, latest)
+        axis, prov = outcome
         logger.warning(
-            "question-answer: outcome=deterministic (len(message)=%d)",
+            "question-answer: outcome=deterministic axis=%s "
+            "provenance=%s (len(message)=%d)",
+            axis,
+            prov,
             len(message),
         )
         return {"kind": ANSWER_DONE_KIND, "answer": deterministic}
