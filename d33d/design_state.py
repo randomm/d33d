@@ -38,7 +38,14 @@ to ``stated`` (rule (a) axis match or rule (b) confirmed_params). Inside
 tolerance the row is ``measured`` (the measured extent displayed);
 outside it ``disagrees`` with the param's own value as ``stated_value``
 and source ``"user"`` (the user gave the evidence — the model's assumed
-number is the ride-along only via its own model-source path). A param is
+number is the ride-along only via its own model-source path). A model-
+source ``disagrees`` row (``disagrees_source: "model"``) ALSO carries
+``disagrees_major`` — ``True`` when the miss exceeds
+``max(DISAGREES_MAJOR_THRESHOLD_REL * stated_value,
+DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` (20% of the model's number, floored
+at 5 mm; issue #274, INDEPENDENT of the BBOX tolerance above),
+``False`` otherwise — the SPA renders major ochre, quiet neutral. No
+other row kind carries the flag. A param is
 never compared twice; each param row's single comparison is the one
 above (``disagrees_source``'s semantics are pinned on
 ``StateEntry.disagrees_source``).
@@ -150,6 +157,8 @@ from d33d.design_loop import (
 
 __all__ = [
     "AXIS_PARAM_NAMES",
+    "DISAGREES_MAJOR_THRESHOLD_MIN_MM",
+    "DISAGREES_MAJOR_THRESHOLD_REL",
     "MAX_STATE_BLOCK_ENTRIES",
     "Provenance",
     "StateEntry",
@@ -206,8 +215,18 @@ class StateEntry(TypedDict):
     #: number (issue #264 — the Brief renders the model copy, never
     #: "You asked for"). Axis rows never carry it.
     disagrees_source: NotRequired[Literal["model", "user"]]
+    #: Issue #274 — the severity flag on MODEL-SOURCE ``disagrees`` param
+    #: rows ONLY: ``True`` when |measured − stated_value| exceeds
+    #: ``max(DISAGREES_MAJOR_THRESHOLD_REL * stated_value,
+    #: DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` (the major/ochre case),
+    #: ``False`` otherwise (the quiet/neutral-mark case). Absent on
+    #: user-source and axis disagreements (those are always ochre) and on
+    #: every non-disagrees row.
+    disagrees_major: NotRequired[bool]
     #: ``True`` when the label is the raw SCAD identifier (no model label)
-    #: — the UI renders it in the mono face (mono = machine value).
+    #: — the UI renders it in the mono face (mono = machine value). Axis
+    #: rows explicitly carry ``False`` (issue #274: their label is the
+    #: UI-face word Width/Depth/Height, never an identifier).
     label_is_identifier: NotRequired[bool]
     #: The model's declared axis (``"W" | "D" | "H"``) — the ONLY
     #: promotion evidence (issue #248). Present on param rows only.
@@ -229,12 +248,20 @@ def _entry(
     stated_value: Any = None,
     kind: RowKind = "param",
 ) -> dict[str, Any]:
-    """One entry from a (name, value) pair (provenance supplied)."""
+    """One entry from a (name, value) pair (provenance supplied).
+
+    ``label_is_identifier`` is explicit, never omitted: param rows carry
+    ``True`` (the raw identifier — mono face) until a model label lands,
+    and AXIS rows carry ``False`` (issue #274: the Brief renders their
+    label as the UI-face word Width/Depth/Height via ``copy.brief.
+    axisLabel`` — the field must say so; absent/legacy entries are treated
+    as identifiers, so the backend sets it; it does not rely on omission).
+    """
     out: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
-        "label_is_identifier": True,  # no model label — raw identifier
+        "label_is_identifier": kind != "axis",
         "value": value,
         "unit": "mm" if _is_number(value) else None,
         "provenance": provenance,
@@ -535,7 +562,9 @@ def state_block_for_version(
     only route for an ``assumed`` declared-axis param; the measurement
     honesty comparison above is the only route for a promoted one, and
     a param is never compared twice. Only positive numeric values enter
-    either comparison.
+    either comparison. The model-source ``disagrees`` row carries
+    ``disagrees_major`` (issue #274 — see ``DISAGREES_MAJOR_THRESHOLD_*``
+    and ``_disagrees_major_flag``); no other row carries it.
     """
     from d33d.confirm_offer import CONFIRMED_VALUE_TOLERANCE
 
@@ -667,7 +696,10 @@ def state_block_for_version(
                 and value > 0
             ):
                 # Model-source disagreement (issue #264 — see the module
-                # docstring for the full contract).
+                # docstring for the full contract). The 20%/5 mm
+                # disagrees_major flag rides along (issue #274):
+                # ``True`` beyond the severity threshold (ochre),
+                # ``False`` at or below it (the quiet neutral-mark case).
                 extent = extents[AXIS_PARAM_NAMES.index(axis)]
                 tol = max(BBOX_TOLERANCE_REL * value, BBOX_TOLERANCE_MIN_MM)
                 if abs(extent - value) > tol:
@@ -676,6 +708,7 @@ def state_block_for_version(
                     e["provenance"] = "disagrees"
                     e["stated_value"] = value
                     e["disagrees_source"] = "model"
+                    e["disagrees_major"] = _disagrees_major_flag(extent, value)
                     out.append(e)
                     continue
         out.append(entry)
@@ -778,6 +811,38 @@ def _maybe_promote_params(
         if abs(value - confirmed) <= tol:
             entry["provenance"] = "stated"
     return entries
+
+
+#: The disagreement-SEVERITY threshold (issue #274): a model-source
+#: ``disagrees`` row is ``disagrees_major`` (ochre) when
+#: ``|measured − stated_value| > max(DISAGREES_MAJOR_THRESHOLD_REL *
+#: stated_value, DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` and quiet (neutral
+#: ``MARKS.measured`` style) at or below it.
+#
+#: INDEPENDENT of ``BBOX_TOLERANCE_REL`` / ``BBOX_TOLERANCE_MIN_MM``
+#: (1% / 0.5 mm in ``d33d.design_loop``): that pair decides
+#: ``measured`` vs ``disagrees`` (does the measurement contradict the
+#: value AT ALL); this pair decides quiet vs major WITHIN ``disagrees``
+#: (how large the model's miss is). They are different questions with
+#: different magnitudes and must NEVER be unified.
+#: 20% of the model's own number, floored at 5 mm (the operator
+#: decision, issue #274: 30 → 31 is quiet, 20 → 102 is major).
+DISAGREES_MAJOR_THRESHOLD_REL = 0.20
+DISAGREES_MAJOR_THRESHOLD_MIN_MM = 5.0
+
+
+def _disagrees_major_flag(measured: float, model_value: float) -> bool:
+    """Issue #274 severity flag: ``True`` (major/ochre) when the
+    measured extent is MORE than ``max(20% of the model's number, 5 mm)``
+    away from the model's own number; ``False`` (quiet) at or below the
+    threshold. Only called on positive numeric values (every disagrees
+    comparison in this module enters on ``_is_number(v) and v > 0``).
+    """
+    tol = max(
+        DISAGREES_MAJOR_THRESHOLD_REL * model_value,
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+    )
+    return abs(measured - model_value) > tol
 
 
 def build_design_state_block(
