@@ -44,6 +44,8 @@ from d33d.dimension_protocol import (
     require_dimensions_confirmed,
     resolution_questions,
     resolve_tolerance_mm,
+    stated_axes_from_message,
+    stated_dims_from_message,
     user_quoted_unmapped_mm,
 )
 
@@ -982,3 +984,125 @@ class TestOfferTierSignals:
         released, quoted = offer_tier_signals("make a part")
         assert released is None
         assert quoted == set()
+
+
+class TestTripleExtraction:
+    """W×D×H triple extraction via ``stated_axes_from_message`` / ``stated_dims_from_message``
+    (issue #275 task-b). The triple is matched on the raw message by
+    ``_extract_triple`` and integrated into ``_extract_stated`` with
+    precedence: axis-letter cues > triple > cube shorthand > lexicon.
+    """
+
+    def test_three_numbers_triple(self):
+        """'60 × 45 × 80 mm' → W 60, D 45, H 80."""
+        axes = stated_axes_from_message("60 × 45 × 80 mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+
+    def test_no_space_no_unit(self):
+        """'60x45x80mm' → W 60, D 45, H 80."""
+        axes = stated_axes_from_message("60x45x80mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+
+    def test_unit_after_each_number(self):
+        """'60mm x 45mm x 20mm' → W 60, D 45, H 20."""
+        axes = stated_axes_from_message("60mm x 45mm x 20mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_two_numbers_wd_only(self):
+        """'60 × 45 mm' → W 60, D 45 (no H)."""
+        axes = stated_axes_from_message("60 × 45 mm")
+        assert axes == {"W": 60.0, "D": 45.0}
+        assert "H" not in axes
+
+    def test_no_unit_triple(self):
+        """'60×45×20' → W 60, D 45, H 20 (no unit: states)."""
+        axes = stated_axes_from_message("60×45×20")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_foreign_unit_triple_abstains(self):
+        """'2 × 2 inch' → nothing (foreign unit)."""
+        axes = stated_axes_from_message("2 × 2 inch")
+        assert axes == {}
+
+    def test_foreign_unit_triple_cm(self):
+        """'6 x 4 cm' → nothing (foreign unit)."""
+        axes = stated_axes_from_message("6 x 4 cm")
+        assert axes == {}
+
+    def test_feature_noun_after_window_suppresses(self):
+        """'a 10 × 10 mm hole' → nothing (feature noun in after-window),
+        with [10, 10] unmapped."""
+        axes = stated_axes_from_message("a 10 × 10 mm hole")
+        assert axes == {}
+        # The 10s are unmapped (not consumed by any axis).
+        from d33d.axis_lexicon import classify
+
+        cues = classify("a 10 × 10 mm hole")
+        assert 10.0 in cues.unmapped_mm_numbers
+
+    def test_tray_with_flared_lip_states(self):
+        """'a tray 60 × 45 × 20 mm with a flared lip around the top' →
+        W 60, D 45, H 20 (after-window stops at 'with'; 'lip' is outside)."""
+        axes = stated_axes_from_message(
+            "a tray 60 × 45 × 20 mm with a flared lip around the top"
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_two_triples_first_suppressed_second_states(self):
+        """'a 10 × 10 mm hole in a 60 × 45 × 20 mm tray' → first triple
+        suppressed (hole in after-window), second states W 60, D 45, H 20."""
+        axes = stated_axes_from_message("a 10 × 10 mm hole in a 60 × 45 × 20 mm tray")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_triple_with_10mm_hole(self):
+        """'a 60 x 45 x 20 mm tray with a 10 mm hole' → W 60, D 45, H 20,
+        with [10] unmapped."""
+        axes = stated_axes_from_message("a 60 x 45 x 20 mm tray with a 10 mm hole")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+        from d33d.axis_lexicon import classify
+
+        cues = classify("a 60 x 45 x 20 mm tray with a 10 mm hole")
+        assert 10.0 in cues.unmapped_mm_numbers
+
+    def test_triple_beats_lexicon_for_same_axis(self):
+        """'a 60 × 45 × 20 mm tray 40 mm wide' → W 60, D 45, H 20, with 40
+        unmapped (the triple overrides the lexicon's W=40)."""
+        axes = stated_axes_from_message("a 60 × 45 × 20 mm tray 40 mm wide")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+        # The 40 is unmapped in the tier-2 offer sense: the triple
+        # assigns W=60, overriding the lexicon's W=40, so 40 is
+        # eligible for the offer.
+        assert user_quoted_unmapped_mm(
+            ["a 60 × 45 × 20 mm tray 40 mm wide"]
+        ) == {40.0}
+
+    def test_axis_letter_beats_triple(self):
+        """'H 30, 60 × 45 × 20 mm' → W 60, D 45, H 30 (axis letter wins
+        for H; triple fills W and D)."""
+        axes = stated_axes_from_message("H 30, 60 × 45 × 20 mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 30.0}
+
+    def test_stated_dims_full_triple(self):
+        """stated_dims_from_message returns the full (W, D, H) tuple for
+        a complete triple."""
+        dims = stated_dims_from_message("60 × 45 × 80 mm")
+        assert dims == (60.0, 45.0, 80.0)
+
+    def test_stated_dims_partial_triple_returns_none(self):
+        """A two-number triple (W, D only) → stated_dims_from_message
+        returns None (not a full triple)."""
+        dims = stated_dims_from_message("60 × 45 mm")
+        assert dims is None
+
+    def test_triple_numbers_excluded_from_unmapped(self):
+        """Triple-consumed numbers are excluded from
+        ``user_quoted_unmapped_mm`` (the tier-2 offer scan). The lexicon's
+        own ``unmapped_mm_numbers`` does not know about triples (that's
+        the ``dimension_protocol`` helper's job); the tier-2 scan does.
+        """
+        assert user_quoted_unmapped_mm(["60 × 45 × 80 mm"]) == set()
+
+    def test_triple_numbers_excluded_from_unmapped_no_space(self):
+        """'60x45x80mm' — no-space form: numbers are triple-consumed
+        and excluded from the tier-2 offer scan."""
+        assert user_quoted_unmapped_mm(["60x45x80mm"]) == set()

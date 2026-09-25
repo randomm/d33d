@@ -431,7 +431,7 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         app_with_versions.state.run_design_loop = _loop
         return await client.post(
             f"/api/projects/{pid}/finalize",
-            json={"request": "make a 20mm wide bracket"},
+            json={"request": "make a bracket"},
         )
 
     r = run_async(app_with_versions, _call)
@@ -445,10 +445,13 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         "prompt_version",
     ):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    # No confirmed axis anywhere (no stated_dims in the body, no dims in
-    # the message, no version yet) → None — the abstaining state (issue
-    # #247: the dead W/D/H param-key fallback that produced (0,0,0) is
-    # gone; the gate abstains and records it as Score.bbox_abstained).
+    # No confirmed axis anywhere (no stated_dims in the body, no stated
+    # dimensions in the message — "make a 20mm wide bracket" is a single
+    # number with no axis word, which the lexicon maps as a feature size,
+    # not a stated envelope — no version yet) → None — the abstaining
+    # state (issue #247: the dead W/D/H param-key fallback that produced
+    # (0,0,0) is gone; the gate abstains and records it as
+    # Score.bbox_abstained).
     assert captured["stated_dims"] is None
     assert callable(captured["render_fn"])
     assert callable(captured["llm_fn"])
@@ -456,7 +459,7 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
     # ``request`` is always a non-empty string (empty would make the
     # failures.jsonl hook silently drop the line for an exhausted loop).
     assert isinstance(captured["request"], str) and captured["request"]
-    assert captured["request"] == "make a 20mm wide bracket"
+    assert captured["request"] == "make a bracket"
 
 
 def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkeypatch):

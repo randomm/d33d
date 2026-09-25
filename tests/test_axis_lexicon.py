@@ -547,3 +547,88 @@ class TestAxisForQuestionWord:
     )
     def test_axis_for_question_word(self, word: str, expected: str | None):
         assert axis_for_question_word(word) == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #275 task-a: shared number token + release guard acceptance criteria
+# ---------------------------------------------------------------------------
+
+
+class TestSharedNumberToken:
+    """The shared number token (issue #275 task-a): one number + optional
+    mm unit, used by ``_numbers_in``, the has-number check, the release
+    guard, the absolute-cue assignment and ``unmapped_mm_numbers``.
+
+    Matches: "40mm", "40 mm", "40.5mm", "40 millimetres", "40 millimeter".
+    The #91 guard holds: "make me a 42 millimeter thing" states nothing;
+    42 is unmapped.
+    """
+
+    @pytest.mark.parametrize(
+        ("msg", "expected_abs", "expected_relative"),
+        [
+            # No-space mm: the core bug — "40mm wide" must state W=40,
+            # not release W.
+            ("40mm wide", {"W": 40.0}, set()),
+            ("12mm tall", {"H": 12.0}, set()),
+            ("40mm wide and 12mm tall", {"W": 40.0, "H": 12.0}, set()),
+            # Spelled-out unit: "40 millimetres wide" → W 40.
+            ("40 millimetres wide", {"W": 40.0}, set()),
+            ("40 millimeters wide", {"W": 40.0}, set()),
+            ("40.5mm deep", {"D": 40.5}, set()),
+            # #91 guard: spelled-out unit, no axis word → states nothing,
+            # 42 is unmapped.
+            ("make me a 42 millimeter thing", {}, set()),
+            # Foreign units stay foreign (abstain).
+            ("make it 5 cm wider", {}, {"W"}),
+            ("make it 5 cm taller", {}, {"H"}),
+            # No number → release.
+            ("increase the height", {}, {"H"}),
+            ("make it wider", {}, {"W"}),
+            # Relative cues with no-space mm.
+            ("12mm lower", {}, {"H"}),
+            ("12 mm lower", {}, {"H"}),
+            # Bare number still works.
+            ("20 wide", {"W": 20.0}, set()),
+            ("20 tall", {"H": 20.0}, set()),
+        ],
+    )
+    def test_shared_number_token_acceptance(
+        self, msg: str, expected_abs: dict, expected_relative: set
+    ) -> None:
+        result = classify(msg)
+        assert result.absolute == expected_abs, f"{msg!r}: absolute mismatch"
+        assert result.relative == expected_relative, f"{msg!r}: relative mismatch"
+
+    def test_40mm_wide_unmapped(self) -> None:
+        """"40mm wide" → W 40, and 40 is NOT in unmapped_mm_numbers
+        (it is mapped to W by the lexicon)."""
+        result = classify("40mm wide")
+        assert result.absolute == {"W": 40.0}
+        assert 40.0 not in result.unmapped_mm_numbers
+
+    def test_42_millimeter_unmapped(self) -> None:
+        """"make me a 42 millimeter thing" → nothing stated, 42 is
+        unmapped (the #91 guard: a single number with a spelled-out mm
+        unit and no axis word is unmapped, not stated)."""
+        result = classify("make me a 42 millimeter thing")
+        assert result.absolute == {}
+        assert 42.0 in result.unmapped_mm_numbers
+
+    def test_foreign_unit_not_in_unmapped(self) -> None:
+        """"make it 5 cm wider" → release W, 5 is NOT in unmapped
+        (cm is not mm)."""
+        result = classify("make it 5 cm wider")
+        assert result.absolute == {}
+        assert "W" in result.relative
+        assert result.unmapped_mm_numbers == []
+
+
+class TestTripleExtraction:
+    """W×D×H triple extraction (issue #275 task-a).
+
+    Implemented in ``dimension_protocol``'s ``_extract_stated``; the
+    lexicon's role is to exclude triple-consumed numbers from
+    ``unmapped_mm_numbers`` via the shared helper.
+    """
+
