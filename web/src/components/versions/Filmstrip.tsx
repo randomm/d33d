@@ -203,7 +203,16 @@ export function Filmstrip({
                     data-testid={`filmstrip-thumb-${v.id}`}
                   />
                 )}
-                <span className="filmstrip-name" data-testid={`filmstrip-name-${v.id}`}>
+                {/* The name clamps to one line (ellipsis, CSS); the full name
+                    lives in the title — on the inner span, not the slot
+                    button (whose title is the exportedAt string, issue #265).
+                    Truncation is visual only, so the button's accessible name
+                    still derives from the full text. */}
+                <span
+                  className="filmstrip-name"
+                  data-testid={`filmstrip-name-${v.id}`}
+                  title={v.name}
+                >
                   {v.name}
                 </span>
                 <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
@@ -266,7 +275,11 @@ export function Filmstrip({
             data-testid="filmstrip-pending"
             style={{ border: "2px dashed var(--color-live)" }}
           >
-            <span className="filmstrip-name" data-testid="filmstrip-pending-name">
+            <span
+              className="filmstrip-name filmstrip-pending-name"
+              data-testid="filmstrip-pending-name"
+              title={pendingName ?? copy.history.building}
+            >
               {pendingName ?? copy.history.building}
             </span>
           </span>

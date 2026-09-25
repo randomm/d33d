@@ -460,7 +460,7 @@ def create_projects_router() -> APIRouter:
             # as the question-answer path. The acknowledgement's label /
             # value ride the done frame as ADDITIVE ``confirm_ack_*``
             # fields (the SPA renders the value in the mono face).
-            from d33d.confirm_offer import format_param_value as _fmt_pv
+            from d33d.confirm_offer import mm_value_str
 
             ack_entry = offer_route["entry"]
             app.state.event_sources[project_id] = _answered_frames(
@@ -480,8 +480,10 @@ def create_projects_router() -> APIRouter:
                         or offer_route["param"]
                     ),
                     # The shared value formatter (``confirm_offer`` — the
-                    # same bool/number/other rule, one implementation).
-                    "value": _fmt_pv(ack_entry["value"]),
+                    # same spelling the ack sentence used: mm-formatted
+                    # for a genuinely-mm param, bare otherwise — issue
+                    # #265).
+                    "value": mm_value_str(ack_entry),
                 },
             )
             return {"status": "accepted"}

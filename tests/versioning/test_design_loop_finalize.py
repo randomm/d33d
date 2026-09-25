@@ -3098,5 +3098,10 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
     # entry (the wire sentence is persisted on the pending-offer state
     # in the chat adapter; the finalize seam records the param +
     # version, and the sentence is rendered from the same tier-2
-    # template the chat route renders — verify the template output):
-    assert tier_2_sentence(entry) == "You said 12.0\u202fmm — I used it for lift_gap. Right?"
+    # template the chat route renders — verify the template output).
+    # This finalize version carries NO param_meta (the stub's result has
+    # no parameters array) → the entry's meta_unit is absent → the value
+    # keeps the bare ``:g`` spelling (issue #265's unitless rule): the
+    # tier-2 sentence is the bare-number form for a unitless param.
+    assert entry.get("meta_unit") is None
+    assert tier_2_sentence(entry) == "You said 12 — I used it for lift_gap. Right?"

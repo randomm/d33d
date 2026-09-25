@@ -266,6 +266,27 @@ describe("Filmstrip", () => {
     expect(screen.queryByTestId("filmstrip-earlier-exported")).toBeNull();
   });
 
+  it("the inner name span carries title = the full name (issue #265)", () => {
+    // Long names clamp visually (ellipsis) but the tooltip carries the full
+    // name; the title lives on the INNER name span, never on the slot button
+    // (whose title stays the exportedAt string).
+    const longName = "a very long version name that will not fit in the slot at all";
+    const versions = [entry(1, { name: longName })];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    const name = screen.getByTestId("filmstrip-name-1");
+    expect(name.getAttribute("title")).toBe(longName);
+    // The slot button's title stays the exportedAt string (unset here — no
+    // export), so the name never collides with it.
+    expect(screen.getByTestId("filmstrip-slot-1").hasAttribute("title")).toBe(false);
+  });
+
+  it("the pending slot's name span carries title = the full pending name (issue #265)", () => {
+    const longName = "an in-flight name that is far too long for the slot";
+    render(<Filmstrip {...baseProps({ passInFlight: true, pendingName: longName })} />);
+    const name = screen.getByTestId("filmstrip-pending-name");
+    expect(name.getAttribute("title")).toBe(longName);
+  });
+
   it("the filmstrip slot is a real button: focusable, keyboard-activatable, expand is a sibling (issue #127)", () => {
     const onCompareSelect = vi.fn();
     const onOpenSheet = vi.fn();
