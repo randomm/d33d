@@ -266,10 +266,10 @@ def _is_bg(rgb: tuple[int, int, int], tol: int = BG_TOL) -> bool:
 
 
 def _pixel_bbox(
-    png_path: Path,
+    w: int, h: int, bpp: int, out: bytearray
 ) -> tuple[list[int], list[int], dict[str, int]]:
     """Compute the non-background pixel bounding box and centroid of a
-    view PNG.
+    decoded view PNG (``w, h, bpp, out`` — the output of ``_decode_png``).
 
     Returns ``(bbox, centroid, edge_px_3band)`` where:
       - ``bbox`` = [x_min, y_min, x_max, y_max] in pixel coordinates
@@ -278,7 +278,6 @@ def _pixel_bbox(
         non-background pixels within a 3-px band of each frame edge
         (the "touches or exceeds an edge" signal for the framing gate)
     """
-    w, h, bpp, out = _decode_png(png_path)
     minx = miny = 10**9
     maxx = maxy = -1
     sx = sy = n = 0
@@ -514,7 +513,7 @@ def test_views_frame_worst_case_full_extent_box_with_margin(
             # every edge of the iso frame, not merely a non-zero 1-px
             # bbox margin.
             png = workdir / "out" / iso_view
-            bbox, _centroid, edge_px = _pixel_bbox(png)
+            bbox, _centroid, edge_px = _pixel_bbox(*_decode_png(png))
             for side, count in edge_px.items():
                 assert count == 0, (
                     f"{extent} mm {name} {iso_view}: {count} non-background "
@@ -623,7 +622,9 @@ def _check_iso_margin(png: Path, label: object) -> None:
     rather than "non-zero edge band": the bounding box must leave at
     least ``ISO_MIN_MARGIN_PX`` (24 px) of background on all four edges.
     """
-    bbox, _centroid, edge_px = _pixel_bbox(png)
+    w, h, bpp, out = _decode_png(png)
+    assert w > 0 and h > 0, f"{label} iso: view decoded to an empty buffer"
+    bbox, _centroid, edge_px = _pixel_bbox(w, h, bpp, out)
     assert all(v >= 0 for v in bbox), f"{label} iso: no model pixels found"
 
     # The 3-px edge band must still be background (inherited from
@@ -667,7 +668,9 @@ def _check_framing(png: Path, label: object, view: str) -> None:
          is blind to this, the edge-bbox check catches it (the #223
          acceptance criterion).
     """
-    bbox, _centroid, edge_px = _pixel_bbox(png)
+    w, h, bpp, out = _decode_png(png)
+    assert w > 0 and h > 0, f"{label} {view}: view decoded to an empty buffer"
+    bbox, _centroid, edge_px = _pixel_bbox(w, h, bpp, out)
     assert all(v >= 0 for v in bbox), f"{label} {view}: no model pixels found"
 
     # Edge-bbox check (the #223 gate): no model pixel may appear within
@@ -759,19 +762,19 @@ def _marker_scad() -> str:
     )
 
 
-def _half_top(png_path: Path) -> tuple[int, int]:
+def _half_top(w: int, h: int, bpp: int, out: bytearray) -> tuple[int, int]:
     """The topmost (smallest ``y``) model pixel in the left half (``x < 400``)
-    and the right half (``x >= 400``) of an 800×800 view.
+    and the right half (``x >= 400``) of a decoded 800×800 view.
 
     Returns ``(top_left_y, top_right_y)``; each value is the frame height
-    (800) when that half has no model pixels. The feature that projects
+    (``h``) when that half has no model pixels. The feature that projects
 tallest in a view is the one whose half reaches higher (the smaller ``y``),
     so comparing the two values tells which side of the frame the tall
     +X post sits in — the per-view placement signal the issue #269 gate
     needs (a wrong rotation puts the post on the wrong side). Built on the
     existing ``_decode_png`` / ``_is_bg`` machinery.
     """
-    w, h, bpp, out = _decode_png(png_path)
+    assert w > 0 and h > 0, "_half_top: view decoded to an empty buffer"
     top_left = top_right = h
     for y in range(h):
         base = y * w * bpp
@@ -786,36 +789,35 @@ tallest in a view is the one whose half reaches higher (the smaller ``y``),
 
 
 def _column_profile(
-    png_path: Path,
-) -> tuple[list[int | None], list[bool]]:
-    """Per-column "top of model" and "any model pixel" profiles.
+    w: int, h: int, bpp: int, out: bytearray
+) -> list[int | None]:
+    """Per-column "top of model" profile of a decoded view.
 
-    Returns ``(top_row, has_model)`` where ``top_row[x]`` is the smallest
-    ``y`` with a non-background pixel in column ``x`` (``None`` when the
-    column is all background) and ``has_model[x]`` is whether column ``x``
-    contains any non-background pixel at all. Both lists have length 800
-    (the frame width). Basis for the issue #269 cone and notch assertions:
-    the cone shows as a raised segment (smaller ``y``) than the slab rows
-    that flank it; the notch shows as a background gap in the top view.
+    Returns ``top_row`` where ``top_row[x]`` is the smallest ``y`` with a
+    non-background pixel in column ``x`` (``None`` when the column is all
+    background). The list has length ``w`` (the frame width). Basis for the
+    issue #269 cone and notch assertions: the cone shows as a raised segment
+    (smaller ``y``) than the slab rows that flank it; the notch shows as a
+    background gap in the top view.
     """
-    w, h, bpp, out = _decode_png(png_path)
+    assert w > 0 and h > 0, "_column_profile: view decoded to an empty buffer"
     top: list[int | None] = [None] * w
-    has = [False] * w
     for x in range(w):
         for y in range(h):
             i = (y * w + x) * bpp
             if not _is_bg((out[i], out[i + 1], out[i + 2])):
                 top[x] = y
-                has[x] = True
                 break
-    return top, has
+    return top
 
 
 def _bg_count_in_rect(
-    png_path: Path, x0: int, x1: int, y0: int, y1: int
+    w: int, h: int, bpp: int, out: bytearray, x0: int, x1: int, y0: int, y1: int
 ) -> int:
-    """Count background pixels in the rectangle ``[x0, x1) × [y0, y1)``."""
-    w, h, bpp, out = _decode_png(png_path)
+    """Count background pixels in the rectangle ``[x0, x1) × [y0, y1)`` of
+    a decoded view.
+    """
+    assert w > 0 and h > 0, "_bg_count_in_rect: view decoded to an empty buffer"
     count = 0
     for y in range(max(0, y0), min(h, y1)):
         for x in range(max(0, x0), min(w, x1)):
@@ -865,14 +867,24 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     for view in VIEW_FILES:
         png = workdir / "out" / view
         assert png.is_file(), f"marker: missing {view}"
-        bbox, _centroid, _edge_px = _pixel_bbox(png)
+        bbox, _centroid, _edge_px = _pixel_bbox(*_decode_png(png))
         assert all(v >= 0 for v in bbox), f"marker {view}: no model pixels"
 
     def view(name: str) -> Path:
         return workdir / "out" / name
 
+    # Decode each view PNG ONCE per test and pass the decoded data to the
+    # helpers (a single decode per view, shared across all the assertions
+    # below) rather than re-decoding per helper call.
+    decoded: dict[str, tuple[int, int, int, bytearray]] = {}
+
+    def vdata(name: str) -> tuple[int, int, int, bytearray]:
+        if name not in decoded:
+            decoded[name] = _decode_png(view(name))
+        return decoded[name]
+
     # ── front: +X post on the RIGHT, +Z up (tall feature reaches top-right)
-    tl, tr = _half_top(view("view_00_front.png"))
+    tl, tr = _half_top(*vdata("view_00_front.png"))
     assert tr < tl, (
         f"front: tall +X post should be on the RIGHT (right-half top {tr}px "
         f"< left-half top {tl}px); +X is right, +Z is up in the front view"
@@ -885,23 +897,35 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    cone at z=10..26 — a 16 mm difference, ~68 px at the render scale).
     #    This FAILS on the old SCAD: the cone sat at the slab's (+X, −Y)
     #    corner, so the central region's peak is the slab top, not the cone.
-    top_f, _has_f = _column_profile(view("view_00_front.png"))
+    top_f = _column_profile(*vdata("view_00_front.png"))
     # The cone's peak: the minimum top_row in x=360..440 (the cone's x
     # extent is ±8 mm = ±30 px from centre; use a wider window to be safe).
-    cone_peak_y = min(
-        top_f[x] for x in range(360, 440) if top_f[x] is not None
+    cone_window = [top_f[x] for x in range(360, 440) if top_f[x] is not None]
+    assert cone_window, (
+        "front: the cone peak window x=360..440 has no model pixels — "
+        "the cone (z=10..26, centred at the origin) must project here"
     )
-    # The slab top: the minimum top_row in x=300..360 (left of the cone,
-    # where only the slab is visible in the central region).
-    slab_top_f = min(
+    cone_peak_y = min(cone_window)
+    # The −X short block: the minimum top_row in x=300..360 (left of the
+    # cone, where only the slab and the −X short block are visible in the
+    # central region — NOT the slab top: the slab top is at z=10 while
+    # the short block reaches z=22, so this window measures the short
+    # block's silhouette).
+    short_block_window = [
         top_f[x] for x in range(300, 360) if top_f[x] is not None
+    ]
+    assert short_block_window, (
+        "front: the −X short block window x=300..360 has no model pixels — "
+        "the short block (z=0..22 at −X) must project here"
     )
-    assert slab_top_f - cone_peak_y >= 30, (
+    short_block_top_f = min(short_block_window)
+    assert short_block_top_f - cone_peak_y >= 30, (
         f"front: the cone's peak (y={cone_peak_y}) must be at least 30px "
-        f"above the slab top (y={slab_top_f}); the cone is at z=10..26, "
-        f"the slab top at z=10 — the cone sits ON TOP of the slab. The old "
-        f"SCAD put the cone at the slab corner, where it reads as part of "
-        f"the slab silhouette (no peak in the central region)"
+        f"above the −X short block's top (y={short_block_top_f}); the cone "
+        f"is at z=10..26, the short block at z=0..22 — the cone sits ON "
+        f"TOP of the slab. The old SCAD put the cone at the slab corner, "
+        f"where it reads as part of the slab silhouette (no peak in the "
+        f"central region)"
     )
     # The cone's x-centre: the peak must be at x≈400 (the cone is at the
     # origin, the slab centred at the origin, so the cone projects to
@@ -918,7 +942,7 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     )
 
     # ── back: +X post on the LEFT (mirror of front, +X is left from +Y)
-    tl, tr = _half_top(view("view_01_back.png"))
+    tl, tr = _half_top(*vdata("view_01_back.png"))
     assert tl < tr, (
         f"back: tall +X post should be on the LEFT (left-half top {tl}px "
         f"< right-half top {tr}px); from +Y, +X is left and +Z is up"
@@ -928,12 +952,12 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    block (y=22..34) projects to the LEFT of the frame. The tall post
     #    (+X) is behind the slab; the short block (−X) is closest.
     #    The +Y block should be in the left half of the frame.
-    lbbox, _lcent, _ = _pixel_bbox(view("view_02_left.png"))
+    lbbox, _lcent, _ = _pixel_bbox(*vdata("view_02_left.png"))
     _lx0, _ly0, _lx1, _ly1 = lbbox
-    # The +Y block (y=22..34) projects to the LEFT of the frame (image x =
-    # −y in the left view). The model's y range is [−28, 34], so the +Y
-    # block occupies the left portion of the frame and the left edge of the
-    # silhouette extends well past the left of centre.
+    # The left edge of the silhouette (x_min in the left view). The model's
+    # y range is [−21, 34] and the image x-axis in the left view is −Y, so
+    # the +Y block (y=22..34) projects to the LEFT of the frame and the
+    # left edge of the silhouette extends well past the left of centre.
     assert _lx0 < 300, (
         f"left: the +Y block should extend the silhouette to the left "
         f"(left edge {_lx0}px < 300); +Y is left in the left view "
@@ -943,7 +967,7 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     # ── right: camera at +X (90°X, 90°Z). Image x-axis = +Y, so the +Y
     #    block (y=22..34) projects to the RIGHT of the frame. The post
     #    (+X, closest) is at the centre; the short block (−X) is behind.
-    rbbox, _rcent, _ = _pixel_bbox(view("view_03_right.png"))
+    rbbox, _rcent, _ = _pixel_bbox(*vdata("view_03_right.png"))
     _rx0, _ry0, rx1, _ry1 = rbbox
     # The +Y block is on the right, so the right edge of the silhouette
     # extends past centre. The post (closest) is near the centre.
@@ -957,7 +981,7 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    The post (+X, x=24..32) is at the right edge; the +Y block
     #    (y=22..34) is toward the top; the −Y notch is toward the bottom;
     #    the cone is at the centre.
-    tbbox, tcent, _ = _pixel_bbox(view("view_04_top.png"))
+    tbbox, tcent, _ = _pixel_bbox(*vdata("view_04_top.png"))
     tx0, ty0, tx1, ty1 = tbbox
     # The post (+X) is at the right edge of the model; the short block (−X)
     # is at the left edge. The silhouette spans the full width.
@@ -983,9 +1007,7 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     # Count background pixels in the notch region — the corrected model
     # has a real cut (≥ 100 bg pixels), the old model has no cut (0 bg
     # pixels in the slab interior).
-    notch_bg = _bg_count_in_rect(
-        view("view_04_top.png"), 376, 424, 520, 538
-    )
+    notch_bg = _bg_count_in_rect(*vdata("view_04_top.png"), 376, 424, 520, 538)
     assert notch_bg >= 100, (
         f"top: the −Y notch should appear as a background gap of ≥ 100 "
         f"pixels in the slab's bottom-centre region (found {notch_bg}); "
@@ -1011,13 +1033,13 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    front-right-top octant). The old sideways rotation (0,45,45) put the
     #    post as a horizontal bar pointing LEFT; the correct (55,0,25) puts it
     #    vertical and on the right.
-    _ibbox, icent, _ = _pixel_bbox(view("view_05_iso.png"))
+    _ibbox, icent, _ = _pixel_bbox(*vdata("view_05_iso.png"))
     icx, _icy = icent
     assert icx > 380, (
         f"iso: the centroid should be right of centre (x {icx:.0f} > 380); "
         f"the post is at +X, toward the viewer's right"
     )
-    tl, tr = _half_top(view("view_05_iso.png"))
+    tl, tr = _half_top(*vdata("view_05_iso.png"))
     assert tr < tl, (
         f"iso: the tall +X post should reach higher on the RIGHT (right-half "
         f"top {tr}px < left-half top {tl}px); the post is vertical and at +X, "
@@ -1042,13 +1064,21 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    so 25px is the conservative lower bound. The old SCAD put the
     #    cone at the slab's (+X, −Y) corner, so the central region's peak
     #    is the slab top, not the cone.
-    top_iso, _ = _column_profile(view("view_05_iso.png"))
-    cone_tip_y = min(
-        top_iso[x] for x in range(350, 450) if top_iso[x] is not None
+    top_iso = _column_profile(*vdata("view_05_iso.png"))
+    cone_window_iso = [top_iso[x] for x in range(350, 450) if top_iso[x] is not None]
+    assert cone_window_iso, (
+        "iso: the cone tip window x=350..450 has no model pixels — the cone "
+        "(z=10..26, centred at the origin) must project here"
     )
-    slab_top_at_edge = min(
+    cone_tip_y = min(cone_window_iso)
+    slab_edge_window = [
         top_iso[x] for x in range(200, 300) if top_iso[x] is not None
+    ]
+    assert slab_edge_window, (
+        "iso: the slab-edge window x=200..300 has no model pixels — the "
+        "slab's top edge must project here"
     )
+    slab_top_at_edge = min(slab_edge_window)
     assert slab_top_at_edge - cone_tip_y >= 25, (
         f"iso: the cone's tip (y={cone_tip_y}) must be at least 25px above "
         f"the slab's top edge (y={slab_top_at_edge}); the cone is at z=10..26, "

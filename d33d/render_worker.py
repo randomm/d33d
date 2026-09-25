@@ -38,9 +38,10 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
   ``(0, 45, 45)`` rendered the model sideways (+Z pointing left, the 45 mm
   post as a horizontal bar). The new ``(55, 0, 25)`` — OpenSCAD's GUI
   default view angle — renders from the front-right-top octant (−Y, +X,
-  +Z) with +Z up, the post vertical on the right, and the −Y notch face
-  visible, as required by the per-view pixel assertions in
-  ``tests/slow/test_render_views.py::test_views_marker_model_feature_placement``.
+  +Z). Verified pixel facts (per the marker test
+  ``tests/slow/test_render_views.py::test_views_marker_model_feature_placement``):
+  the post is vertical on the right of the frame, the −Y notch face is
+  visible, and +Z is up.
 """
 
 from __future__ import annotations
@@ -116,7 +117,9 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: toward +Y, +X right in the frame). The iso rotation ``(55, 0, 25)`` was
 #: re-verified in #269: the original ``(0, 45, 45)`` rendered the model
 #: sideways; ``(55, 0, 25)`` (OpenSCAD's GUI default) renders from the
-#: front-right-top octant (−Y, +X, +Z) with +Z up.
+#: front-right-top octant (−Y, +X, +Z). Verified pixel facts (per the marker
+#: test ``tests/slow/test_render_views.py::test_views_marker_model_feature_placement``):
+#: the post is vertical on the right, the −Y notch face is visible, and +Z is up.
 #: See ``docs/bosl2-pinning.md`` § "Camera tuple verification" for the
 #: full marker-model description and per-view results.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
