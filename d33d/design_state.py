@@ -17,7 +17,31 @@ with no label the label IS the parameter name, never invented prose),
 and ``provenance`` — a ``Literal`` (closed set, never a bare ``str``;
 the project's ``error_class`` enum is the precedent) of
 ``"stated" | "measured" | "assumed" | "unknown" | "disagrees"``, plus
-``stated_value`` when ``provenance == "disagrees"``.
+``stated_value`` when ``provenance == "disagrees"``, and
+``disagrees_source`` (``"model" | "user"``) on PARAM rows whose
+provenance is ``"disagrees"`` — ``"user"`` when the stated value is the
+user's (the default; the field is ABSENT on the wire for backward
+compat in that case), ``"model"`` when an ASSUMED param with a declared
+``axis`` (issue #248 metadata) differs from that axis's measured extent
+beyond the bbox tolerance (issue #264 — the Brief renders the model
+copy "I set X, it measures Y", never "You asked for"). Axis rows NEVER
+carry the field — an axis-row disagreement is always user-stated.
+
+What is compared (issue #264 — measurement honesty): every PARAM row
+whose provenance is ``stated`` with a positive numeric value is compared
+against its reference extent with the bbox tolerance (``max(
+BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)``, the #137 rule):
+a param literally named W/D/H against that letter's measured extent
+(the #137 path, unchanged), and an axis-DECLARED param (param_meta
+``axis``) against that axis's measured extent — including one promoted
+to ``stated`` (rule (a) axis match or rule (b) confirmed_params). Inside
+tolerance the row is ``measured`` (the measured extent displayed);
+outside it ``disagrees`` with the param's own value as ``stated_value``
+and source ``"user"`` (the user gave the evidence — the model's assumed
+number is the ride-along only via its own model-source path). A param is
+never compared twice; each param row's single comparison is the one
+above (``disagrees_source``'s semantics are pinned on
+``StateEntry.disagrees_source``).
 
 ``kind`` (issue #246 review): ``"param"`` — a row built from the version's
 params snapshot (the model emitted the value), ``"axis"`` — a row built
@@ -175,6 +199,13 @@ class StateEntry(TypedDict):
     unit: str | None
     provenance: Provenance
     stated_value: NotRequired[float | str | bool | None]
+    #: Present ONLY on param rows with ``provenance == "disagrees"``
+    #: (mirroring ``stated_value``): ``"user"`` when the stated value is
+    #: the user's (the default — absent on the wire for backward
+    #: compat), ``"model"`` when the value is the model's own assumed
+    #: number (issue #264 — the Brief renders the model copy, never
+    #: "You asked for"). Axis rows never carry it.
+    disagrees_source: NotRequired[Literal["model", "user"]]
     #: ``True`` when the label is the raw SCAD identifier (no model label)
     #: — the UI renders it in the mono face (mono = machine value).
     label_is_identifier: NotRequired[bool]
@@ -454,13 +485,29 @@ def state_block_for_version(
     promoted (DECISIONS.md: "key it on the protocol's confirmed set, not
     on parameter names").
 
-    The MEASUREMENT comparison (issue #137) still applies to a param
-    literally named W/D/H that the snapshot carries — regardless of the
-    persisted stated set (within the named tolerance the param row renders
-    ``measured`` with the measured value displayed; outside it ``disagrees``
-    with the stated value riding along). The persisted stated set only
-    drives the SEPARATE axis rows (appended after the param rows); the
-    two surfaces are independent and never name-matched.
+    The MEASUREMENT comparison (issue #137) applies to a param literally
+    named W/D/H that the snapshot carries — regardless of the persisted
+    stated set (within the named tolerance the param row renders
+    ``measured`` with the measured value displayed; outside it
+    ``disagrees`` with the stated value riding along, source
+    ``disagrees_source: "user"`` — the #137 path always names ``"user"``
+    explicitly: the user's stated value is what the measurement
+    contradicts, never the model's own assumption). The persisted stated
+    set only drives the SEPARATE axis rows; the two surfaces are
+    independent and never name-matched.
+
+    AXIS ROWS (issue #264 — "measured rows always"): for every axis whose
+    measured extent is positive the block carries a W/D/H row, in W, D, H
+    order, FIRST (before the param rows — the entry list order is the
+    prompt order): a stated axis keeps today's rule (no measurement →
+    ``stated``; within tolerance → ``measured`` with the measured value
+    displayed; outside → ``disagrees`` carrying both numbers, never
+    ``disagrees_source`` — an axis-row disagreement is always
+    user-stated). An UNSTATED axis with a positive measured extent gets a
+    row with provenance ``measured`` and the measured value (the part's
+    real extent, never a fabricated number). Zero or absent extents
+    abstain (no row), as today — ``persisted_bbox_extents`` stays
+    all-or-nothing.
 
     ``confirmed_params`` (issue #250, rule (b)) is the version row's
     persisted param-keyed confirmed set (``{name: value}`` — written only
@@ -476,6 +523,19 @@ def state_block_for_version(
     W/D/H-named) skips nothing: there is no comparison to re-open, and
     the promoted row renders ``stated``. ``None`` / empty → no rule (b)
     promotion.
+
+    MODEL-SOURCE DISAGREEMENT (issue #264): an ASSUMED param whose
+    metadata declares an axis (``axis``, issue #248) — one the user never
+    stated and never confirmed — is compared against that axis's measured
+    extent: within tolerance it stays ``assumed`` (the measurement does
+    not promote it); OUTSIDE tolerance it renders ``disagrees`` with the
+    MEASURED value displayed, the param's own value as ``stated_value``,
+    and ``disagrees_source: "model"`` (the Brief renders the model copy
+    — the user never asked for the value). This model-source path is the
+    only route for an ``assumed`` declared-axis param; the measurement
+    honesty comparison above is the only route for a promoted one, and
+    a param is never compared twice. Only positive numeric values enter
+    either comparison.
     """
     from d33d.confirm_offer import CONFIRMED_VALUE_TOLERANCE
 
@@ -500,7 +560,35 @@ def state_block_for_version(
         # value and no measurement is omitted entirely).
         return entries
 
+    # Axis rows FIRST (issue #264 — the operator decision: axis rows
+    # come first in W/D/H order, in both the entry list and the Brief):
+    # every axis with a positive measured extent gets a row. A stated
+    # axis keeps today's rule (stated / measured / disagrees, where
+    # disagrees is always user-stated — axis rows never carry
+    # ``disagrees_source``); an unstated axis with a positive measured
+    # extent gets a row with provenance ``measured`` and the measured
+    # value (the part's real extent — never a fabricated number).
     out: list[dict[str, Any]] = []
+    for axis in AXIS_PARAM_NAMES:
+        if extents is None:
+            # No measurement: only a stated axis yields a row.
+            if axis in evidence:
+                out.append(_axis_row(axis, evidence[axis], "stated"))
+            continue
+        extent = extents[AXIS_PARAM_NAMES.index(axis)]
+        if axis in evidence:
+            axis_value = evidence[axis]
+            tol = max(BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)
+            if abs(extent - axis_value) <= tol:
+                out.append(_axis_row(axis, extent, "measured"))
+            else:
+                out.append(_axis_row(axis, extent, "disagrees", axis_value))
+        else:
+            # No stated evidence for this axis, but the measurement
+            # carries it: emit the measured row (issue #264 — the
+            # Brief always shows the part's measured W/D/H).
+            out.append(_axis_row(axis, extent, "measured"))
+
     for entry in entries:
         # The measurement comparison applies to the snapshot's own
         # W/D/H-named params (issue #137 — the stated value the version
@@ -511,7 +599,8 @@ def state_block_for_version(
         # measurement's own honesty, independent of who stated the
         # value: within tolerance the confirmed value holds as
         # ``measured``; outside it the row renders ``disagrees`` with
-        # the stated (confirmed) value riding along.
+        # the stated (confirmed) value riding along (user-sourced —
+        # ``disagrees_source`` absent, the backward-compatible default).
         name = entry["name"]
         if extents is not None and name in AXIS_PARAM_NAMES:
             stated_value = entry["value"]
@@ -526,30 +615,70 @@ def state_block_for_version(
                     e["value"] = extent
                     e["provenance"] = "disagrees"
                     e["stated_value"] = stated_value
+                    e["disagrees_source"] = "user"  # #137 path: user-sourced
                 out.append(e)
                 continue
+            # The W/D/H-named param has no positive numeric value (it
+            # renders ``unknown``): fall through to the declared-axis
+            # comparison below — a model that declared ``axis: W`` on it
+            # can still yield a model-source disagreement (its value is
+            # the measurement's only candidate), never a user-source one.
+        # Model-source disagreement (issue #264): an ASSUMED param whose
+        # metadata declares an axis, compared against that axis's
+        # measured extent. Within tolerance it stays ``assumed`` (no
+        # promotion — the measurement does not promote); outside it the
+        # row renders ``disagrees`` with the measured value displayed,
+        # the param's own value riding along as ``stated_value``, and
+        # ``disagrees_source: "model"`` (the user never stated it — the
+        # Brief must never render "You asked for"). A param promoted to
+        # ``stated`` (rule (a)/(b)) or rendered ``measured`` by the
+        # W/D/H-named path above is never model-source (the user gave
+        # the evidence); only positive numeric values enter the
+        # comparison.
+        axis = entry.get("axis")
+        if extents is not None and entry.get("kind") == "param":
+            value = entry.get("value")
+            if entry.get("provenance") == "stated":
+                # Measurement honesty (issue #264): a param promoted to
+                # ``stated`` (rule (a) or (b)) that declared an axis is
+                # compared against that axis's measured extent — the
+                # user's own evidence, so any disagreement is user-sourced
+                # (``disagrees_source`` pinned on StateEntry). A literal
+                # W/D/H-named param is handled by the #137 comparison
+                # above (the two paths never overlap — a param is never
+                # compared twice).
+                if axis in _VALID_META_AXES and _is_number(value) and value > 0:
+                    extent = extents[AXIS_PARAM_NAMES.index(axis)]
+                    tol = max(BBOX_TOLERANCE_REL * value, BBOX_TOLERANCE_MIN_MM)
+                    if abs(extent - value) <= tol:
+                        out.append(entry)  # stays stated, value unchanged
+                        continue
+                    e = dict(entry)
+                    e["value"] = extent
+                    e["provenance"] = "disagrees"
+                    e["stated_value"] = value
+                    e["disagrees_source"] = "user"
+                    out.append(e)
+                    continue
+            elif (
+                entry.get("provenance") == "assumed"
+                and axis in _VALID_META_AXES
+                and _is_number(value)
+                and value > 0
+            ):
+                # Model-source disagreement (issue #264 — see the module
+                # docstring for the full contract).
+                extent = extents[AXIS_PARAM_NAMES.index(axis)]
+                tol = max(BBOX_TOLERANCE_REL * value, BBOX_TOLERANCE_MIN_MM)
+                if abs(extent - value) > tol:
+                    e = dict(entry)
+                    e["value"] = extent
+                    e["provenance"] = "disagrees"
+                    e["stated_value"] = value
+                    e["disagrees_source"] = "model"
+                    out.append(e)
+                    continue
         out.append(entry)
-
-    # Axis rows from the persisted per-axis stated set (declaration order
-    # W/D/H — the protocol's axis order), appended AFTER the param rows.
-    # A param row and an axis row for the same letter can coexist (e.g.
-    # the model emits an ``H`` param and the user stated ``H`` too): the
-    # param row keeps its ``assumed`` value, the axis row carries the
-    # user's stated evidence — both render, never collapsed, never
-    # guessed, never name-matched.
-    for axis in AXIS_PARAM_NAMES:
-        if axis not in evidence:
-            continue
-        axis_value = evidence[axis]
-        if extents is None:
-            out.append(_axis_row(axis, axis_value, "stated"))
-            continue
-        extent = extents[AXIS_PARAM_NAMES.index(axis)]
-        tol = max(BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)
-        if abs(extent - axis_value) <= tol:
-            out.append(_axis_row(axis, extent, "measured"))
-        else:
-            out.append(_axis_row(axis, extent, "disagrees", axis_value))
     return out
 
 
@@ -660,28 +789,47 @@ def build_design_state_block(
 
     The bound is enforced HERE (the single function both consumers call):
     at most ``max_entries`` entries reach the prompt (or the SPA). Past
-    the bound the overflow is dropped and counted — the first
-    ``max_entries`` entries (declaration order) render and the block's
-    ``dropped_count`` carries how many were omitted. ``dropped_count == 0``
-    means nothing was dropped (the count line is omitted by the formatter).
+    the bound the overflow is dropped and counted — axis rows are ALWAYS
+    kept (issue #264: the measured W/D/H rows are the part's real
+    extents, never trimmed); PARAM rows are trimmed first, from the tail
+    of the param section, declaration order preserved. The block's
+    ``dropped_count`` carries how many param entries were omitted.
+    ``dropped_count == 0`` means nothing was dropped (the count line is
+    omitted by the formatter).
     """
-    dropped = max(0, len(entries) - max_entries)
+    axis_rows = [e for e in entries if e.get("kind") == "axis"]
+    param_rows = [e for e in entries if e.get("kind") != "axis"]
+    keep = max(0, max_entries - len(axis_rows))
+    kept_params = param_rows[:keep]
+    dropped = len(param_rows) - keep
     return {
-        "entries": list(entries[:max_entries]),
+        "entries": list(axis_rows) + list(kept_params),
         "dropped_count": dropped,
         "unit": "mm",
     }
 
 
-def _provenance_suffix(provenance: Any) -> str:
-    """The prompt's provenance mark (issue #246): the model must be able
-    to tell user-set values from its own guesses. ``stated`` and
-    ``assumed`` carry a mark; ``measured``/``disagrees``/``unknown`` keep
-    their existing rendering."""
+def _provenance_suffix(entry: dict[str, Any]) -> str:
+    """The prompt's provenance mark (issue #246 + #264): the model must
+    be able to tell user-set values from its own guesses. ``stated`` and
+    ``assumed`` carry a mark; ``measured``/``unknown`` keep their existing
+    plain rendering. ``disagrees`` names WHO the compared value belongs
+    to: a model-sourced disagreement (``disagrees_source == "model"`` —
+    the model's own assumed number versus the measurement) renders "my
+    value differs from the measurement" — never "stated by the user" (the
+    user never said it); a user-sourced one (``disagrees_source`` absent
+    or ``"user"``) renders "you stated this; the measurement differs".
+    Axis rows never carry ``disagrees_source`` — an axis-row disagreement
+    is always user-stated and uses the user-sourced wording."""
+    provenance = entry.get("provenance")
     if provenance == "stated":
         return " (stated by the user)"
     if provenance == "assumed":
         return " (assumed — the user never set this)"
+    if provenance == "disagrees":
+        if entry.get("disagrees_source") == "model":
+            return " (my value differs from the measurement)"
+        return " (you stated this; the measurement differs)"
     return ""
 
 
@@ -698,26 +846,23 @@ def _axis_prefix(entry: dict[str, Any]) -> str:
     return label if label else (entry.get("name") or "")
 
 
-def _render_value_line(name: str, value: Any, provenance: Any) -> str:
+def _render_value_line(entry: dict[str, Any]) -> str:
     """One entry as ``label = value`` + the provenance mark (if any)."""
-    if _is_number(value):
-        value_str = f"{value:g}"
-    elif value is None:
-        value_str = "not specified"
-    else:
-        value_str = str(value)
-    return f"{name} = {value_str}{_provenance_suffix(provenance)}"
+    return f"{_axis_prefix(entry)} = {_render_value(entry.get('value'))}{_provenance_suffix(entry)}"
 
 
-def _render_value_inline(name: str, value: Any, provenance: Any) -> str:
+def _render_value_inline(entry: dict[str, Any]) -> str:
     """One entry as ``label=value`` + the provenance mark (if any)."""
+    return f"{_axis_prefix(entry)}={_render_value(entry.get('value'))}{_provenance_suffix(entry)}"
+
+
+def _render_value(value: Any) -> str:
+    """The entry's value as prompt text (``not specified`` for a null)."""
     if _is_number(value):
-        value_str = f"{value:g}"
-    elif value is None:
-        value_str = "not specified"
-    else:
-        value_str = str(value)
-    return f"{name}={value_str}{_provenance_suffix(provenance)}"
+        return f"{value:g}"
+    if value is None:
+        return "not specified"
+    return str(value)
 
 
 def format_design_state_block(block: dict[str, Any]) -> str:
@@ -734,11 +879,7 @@ def format_design_state_block(block: dict[str, Any]) -> str:
     """
     lines: list[str] = []
     for entry in block.get("entries", []):  # type: ignore[union-attr]
-        lines.append(
-            _render_value_line(
-                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
-            )
-        )
+        lines.append(_render_value_line(entry))
     if block.get("dropped_count", 0) > 0:
         n = block["dropped_count"]
         lines.append(f"… {n} more parameter{'s' if n != 1 else ''}")
@@ -757,9 +898,5 @@ def format_design_state_line(entries: list[dict[str, Any]]) -> str:
         return "not specified"
     parts: list[str] = []
     for entry in entries:
-        parts.append(
-            _render_value_inline(
-                _axis_prefix(entry), entry.get("value"), entry.get("provenance")
-            )
-        )
+        parts.append(_render_value_inline(entry))
     return ", ".join(parts)

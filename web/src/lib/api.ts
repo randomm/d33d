@@ -139,6 +139,14 @@ export interface DesignStateEntry {
   unit: string | null;
   provenance: DesignStateProvenance;
   stated_value?: number | string | boolean | null;
+  /** Issue #264: who caused a `disagrees` row — `"model"` when the model
+   *  picked the value (nobody stated it) and the measurement contradicts
+   *  it, `"user"` (the default; the field is also absent on legacy
+   *  entries) when the value was user-stated. Present ONLY on
+   *  `provenance: "disagrees"` param rows, mirroring `stated_value`; axis
+   *  rows never carry it (an axis disagreement is always user-stated).
+   *  The Brief selects its disagreement sentence on this field. */
+  disagrees_source?: "model" | "user";
   /** Issue #248: true when the label is the raw SCAD identifier (no
    *  model label) — the UI renders it in the mono face (mono = machine
    *  value). Absent/legacy entries are treated as identifiers. */

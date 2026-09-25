@@ -449,9 +449,11 @@ def build_answer_prompt(
     The prompt forbids inventing values (every number must come from the
     block, each cited value naming its provenance in plain words: "you
     said that" / "I measured" / "I assumed" / "not established" / for a
-    disagreement, "you said X, I measured Y"), and — per the operator's
-    decision — it does NOT ask the model to offer to set/confirm
-    anything: the answer ends after the provenance citation.
+    user-source disagreement, "you said X, I measured Y" / for a
+    model-source disagreement, "I set X, it measures Y"), and — per the
+    operator's decision — it does NOT ask the model to offer to
+    set/confirm anything: the answer ends after the provenance
+    citation.
     """
     if block is None:
         block = build_design_state_block(entries)
@@ -478,7 +480,9 @@ def build_answer_prompt(
         "- each value you cite must name its provenance in plain words: "
         "'you said that' (stated), 'I measured' (measured), 'I assumed' "
         "(assumed), 'not established' (unknown); when the block shows a "
-        "disagreement, say 'you said X, I measured Y'.\n"
+        "user-source disagreement, say 'you said X, I measured Y'; when "
+        "it shows a model-source disagreement, say 'I set X, it measures "
+        "Y'.\n"
         "- do NOT offer to change, set, or confirm anything. The answer "
         "ends after the provenance citation.\n\n"
         f"{state_text}\n\n"

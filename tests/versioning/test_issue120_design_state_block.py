@@ -375,3 +375,164 @@ def test_live_prompt_enforces_entry_bound_and_counts_overflow():
     state_pos = user_text.index("Current design state (mm):")
     ref_pos = user_text.index("Reference dimensions (mm, ground truth):")
     assert state_pos < ref_pos
+
+
+# ---------------------------------------------------------------------------
+# Issue #264 (live path): always-measured axis rows + model-source
+# disagreement, through the LIVE prompt the model actually reads.
+# ---------------------------------------------------------------------------
+
+
+def test_live_prompt_model_source_disagreement_says_my_value_never_user_said():
+    """Issue #264 ACCEPTANCE: a v25-shaped previous version (params
+    Spacer width/depth 40 with declared axis W/D, bbox 43.8 × 43.9 ×
+    12.0, no stated dims) reaches the LIVE prompt through the loop's
+    ``state_bbox``/``state_meta`` kwargs. The rendered block: (1) the
+    three measured axis rows FIRST, (2) the Spacer width/depth param rows
+    as model-source disagrees rendered "my value differs from the
+    measurement" — never "stated by the user" / "you asked for" (the
+    user never gave those numbers)."""
+    captured: list[list[dict[str, Any]]] = []
+
+    async def llm_fn(role, messages, system):
+        captured.append(messages)
+        return _llm_result("x = 40;\ncube([x, x, 12]);\n")
+
+    async def render_fn(scad, defines):
+        return _passing_render()
+
+    state_params = {"spacer_width": 40.0, "spacer_depth": 40.0}
+    state_bbox = {"x": 43.80, "y": 43.90, "z": 12.0}
+    state_meta = {
+        "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+        "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+    }
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=None,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(x=43.80, y=43.90, z=12.0, volume=2297.0),
+        request="add a flared lip",
+        state_params=state_params,
+        state_bbox=state_bbox,
+        state_meta=state_meta,
+    )
+    assert result.status == "pass"
+    user_text = _user_text(captured, 0)
+    state_pos = user_text.index("Current design state (mm):")
+    ref_pos = user_text.index("Reference dimensions (mm, ground truth):")
+    block_text = user_text[state_pos:ref_pos]
+    # The three measured axis rows reach the prompt.
+    assert "Width (W) = 43.8" in block_text
+    assert "Depth (D) = 43.9" in block_text
+    assert "Height (H) = 12" in block_text
+    # Axis rows come FIRST in the rendered block.
+    first_line = block_text.split("\n")[1]
+    assert first_line.startswith("Width (W) = 43.8")
+    # The model-source disagrees rows render the model wording.
+    assert "Spacer width = 43.8 (my value differs from the measurement)" in block_text
+    assert "Spacer depth = 43.9 (my value differs from the measurement)" in block_text
+    # NEVER the user wording (the user never stated these numbers).
+    assert "stated by the user" not in block_text
+    assert "you asked for" not in block_text
+
+
+def test_live_prompt_stated_axis_disagreement_keeps_user_wording():
+    """Issue #264 ACCEPTANCE: with stated W=40 and a persisted bbox 43.8
+    × 40 × 12 (the W axis only is off — the flared lip), the W axis row
+    reaches the LIVE prompt as a user-sourced disagreement — rendered
+    "you stated this; the measurement differs" (today's copy semantics,
+    ``disagrees_source`` absent) — while the D/H axis rows (within
+    tolerance) render as measured. The prompt seam (``state_bbox`` /
+    ``state_stated``) is the version row's persisted fields — independent
+    of THIS turn's live gate (which would itself flag the off-spec W
+    render, as it must)."""
+    captured: list[list[dict[str, Any]]] = []
+
+    async def llm_fn(role, messages, system):
+        captured.append(messages)
+        return _llm_result("x = 40;\ncube([x, x, 12]);\n")
+
+    async def render_fn(scad, defines):
+        return _passing_render()
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=(40.0, 40.0, 12.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(x=40.0, y=40.0, z=12.0, volume=1920.0),
+        request="add a flared lip",
+        state_params={"spacer_width": 40.0, "spacer_depth": 40.0},
+        state_bbox={"x": 43.80, "y": 40.0, "z": 12.0},
+        state_stated={"W": 40.0, "D": 40.0, "H": 12.0},
+        state_meta={
+            "spacer_width": {"label": "Spacer width", "axis": "W"},
+            "spacer_depth": {"label": "Spacer depth", "axis": "D"},
+        },
+    )
+    assert result.status == "pass", f"gate must pass: {result.failure_reason}"
+    user_text = _user_text(captured, 0)
+    state_pos = user_text.index("Current design state (mm):")
+    ref_pos = user_text.index("Reference dimensions (mm, ground truth):")
+    block_text = user_text[state_pos:ref_pos]
+    # The W axis row is a user-sourced disagreement (today's copy).
+    assert "Width (W) = 43.8 (you stated this; the measurement differs)" in block_text
+    # D: stated 40 vs measured 40 → within tolerance → measured.
+    assert "Depth (D) = 40" in block_text
+    # H: exact match → measured.
+    assert "Height (H) = 12" in block_text
+    # No model-source wording anywhere in the block.
+    assert "my value differs" not in block_text
+
+
+def test_live_prompt_block_cap_protects_axis_rows_over_params():
+    """Issue #264 ACCEPTANCE: 14 params + a persisted bbox reach the LIVE
+    prompt → the block carries 12 entries: 3 axis rows (always present,
+    first) + 9 params; the tail 5 params are dropped and counted. The
+    axis rows are NEVER the ones trimmed."""
+    from d33d.design_state import MAX_STATE_BLOCK_ENTRIES
+
+    captured: list[list[dict[str, Any]]] = []
+    n = MAX_STATE_BLOCK_ENTRIES + 2  # 14 params + 3 axis rows = 17 total
+    state_params = {f"p{i}": float(i + 1) for i in range(n)}
+
+    async def llm_fn(role, messages, system):
+        captured.append(messages)
+        return _llm_result("x = 20;\ncube([x, x, x]);\n")
+
+    async def render_fn(scad, defines):
+        return _passing_render()
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: _bbox_ok(r),
+        request="make a part",
+        state_params=state_params,
+        state_bbox={"x": 20.0, "y": 20.0, "z": 20.0},
+    )
+    assert result.status == "pass"
+    user_text = _user_text(captured, 0)
+    state_pos = user_text.index("Current design state (mm):")
+    ref_pos = user_text.index("Reference dimensions (mm, ground truth):")
+    block_text = user_text[state_pos:ref_pos]
+    # All three axis rows present, FIRST (the cap protects them).
+    assert "Width (W) = 20" in block_text
+    assert "Depth (D) = 20" in block_text
+    assert "Height (H) = 20" in block_text
+    first_line = block_text.split("\n")[1]
+    assert first_line.startswith("Width (W) = 20")
+    # 9 params kept (the first 9 in declaration order); 5 dropped.
+    for i in range(9):
+        assert f"p{i} = {i + 1:g}" in block_text
+    for i in range(9, 14):
+        assert f"p{i} =" not in block_text
+    assert "… 5 more parameters" in block_text

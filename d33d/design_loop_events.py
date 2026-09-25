@@ -708,6 +708,33 @@ async def _resolve_offer(
         return None
     params: dict[str, Any] = dict(new_version["params"] or {})
     meta = new_version["param_meta"]
+    # The NEW version's FULL design-state block (issue #264): computed
+    # ONCE here — it feeds BOTH the offer-eligibility exclusion set and
+    # the tier-3 number guard (the ``block`` the sentence checks
+    # against). The block is the only place the measurement comparison
+    # runs, so it is also the single source of the disagree set below.
+    block = state_block_for_version(
+        params,
+        new_version["bbox"],
+        new_version["stated_dims"],
+        meta,
+        new_version["confirmed_params"],
+    )
+    # Issue #264 — offer eligibility must exclude any param the block
+    # renders ``disagrees`` (either source — user-stated or
+    # model-emitted): a value the measurement contradicts is never an
+    # assumption to confirm (offering it would ask the user to affirm a
+    # number the part itself disproves). The set is passed EXPLICITLY to
+    # ``select_offer_candidate`` — the helper itself is measurement-
+    # blind (it reads ``state_block_from_params``). Only param rows
+    # (``kind == "param"``) enter the set: an axis row's disagreement is
+    # the axis's own business (it is never offered — offers are params,
+    # not axes).
+    disagree_names = {
+        e["name"]
+        for e in block
+        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+    }
     # The confirmed set for SELECTION is the pre-pass latest version's
     # ``confirmed_params`` (the caller's ``prev_confirmed`` — read and
     # passed explicitly, never stashed in ``app.state`` where an
@@ -746,6 +773,7 @@ async def _resolve_offer(
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
         released_axes=released_axes, user_quoted_mm=quoted,
+        disagree_names=disagree_names,
     )
     if name is None:
         versions.set_pending_offer(project_id, None)
@@ -754,10 +782,6 @@ async def _resolve_offer(
     if entry is None:
         versions.set_pending_offer(project_id, None)
         return None
-    block = state_block_for_version(
-        params, new_version["bbox"], new_version["stated_dims"], meta,
-        new_version["confirmed_params"],
-    )
     # The sentence: the tier that WON picks its template (issue #261 —
     # tier 1 "You asked for {cue}…", tier 2 "You said {value}…"); tier 3
     # keeps the #250 machinery (the model's ``confirm_sentence`` when the

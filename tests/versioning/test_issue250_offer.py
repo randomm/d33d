@@ -287,6 +287,34 @@ class _OfferStubResult:
         )
 
 
+class _V25PassStub:
+    """A v25-shaped pass result (issue #264): params 40/40 with declared
+    axis W/D on a render that MEASURES 43.80 x 43.90 x 12.0 (the flared
+    lip adds 3.8 mm) — the best candidate's declared ``bbox`` is what the
+    version write path persists, and it is the precondition the offer
+    gate keys on (both params render model-source disagrees in the new
+    version's own design-state block)."""
+
+    def __init__(self) -> None:
+        from d33d.design_loop import BboxInfo, IterationRecord, Score
+        from tests.versioning.test_design_loop_finalize import _default_render
+
+        self.status = "pass"
+        self.failure_reason = None
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source="x = 40; cube([x, x, 12]);",
+            render=_default_render(),
+            score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,) * 4),
+            bbox=BboxInfo(x=43.80, y=43.90, z=12.0, volume=2297.0),
+            params={"spacer_width": 40.0, "spacer_depth": 40.0},
+            param_meta={
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+                "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+            },
+        )
+
+
 class _ExhaustedStub:
     """An exhausted result (no version, no offer — the pending offer is
     cleared on the exhausted path)."""
@@ -465,6 +493,17 @@ def test_tier_sentences_mm_formatted_exactly_as_mm():
         .replace("{label}", "Lift height")
         == tier_2_sentence(entry)
     )
+
+
+def test_tier_sentences_non_numeric_value_falls_back_to_format_value():
+    """A non-numeric value in an mm-labelled entry never reaches
+    ``mm_formatted`` (it needs a number): the tier sentences fall back
+    to the plain value formatter (verbatim, no fabricated ``mm``)."""
+    from d33d.confirm_offer import tier_1_sentence, tier_2_sentence
+
+    entry = {"name": "finish", "label": "Finish", "value": "matte", "unit": "mm"}
+    assert tier_2_sentence(entry) == "You said matte — I used it for Finish. Right?"
+    assert tier_1_sentence(entry, "taller") == "You asked for taller — I made Finish matte. Right?"
 
 
 def test_tier1_cue_from_lexicon():
@@ -676,6 +715,66 @@ def test_chat_pass_with_assumed_axis_param_offers_it(app_with_versions):
     # Server-side pending-offer state: the offer's version is the NEW
     # version, the param is the axis param.
     assert row_offer == {"version_id": latest["id"], "param": "width"}
+
+
+def test_chat_pass_disagreeing_param_never_offered(app_with_versions):
+    """Issue #264 ACCEPTANCE (the v25 offer gate): a v1 whose persisted
+    bbox CONTESTS the param (spacer_width 40, declared axis W; bbox
+    43.80 x 43.90 x 12.0 — the flared lip adds 3.8 mm, outside the
+    tolerance) renders the param ``disagrees`` (``disagrees_source =
+    "model"``) in the version's own design-state block. A passing pass
+    that keeps the same value (40) must NOT offer the param: the offer
+    sentence "I assumed 40 for Spacer width" would be false — the
+    measurement already contradicts it. The done frame carries no offer
+    and the pending-offer state is absent."""
+
+    async def _loop(app, **kwargs):
+        return _V25PassStub()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        # v1: the v25 shape — the persisted bbox 43.80 x 43.90 x 12.0
+        # makes both declared-axis params disagree (model-source).
+        await svc.create_version(
+            pid,
+            {"spacer_width": 40.0, "spacer_depth": 40.0},
+            param_meta={
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+                "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+            },
+            bbox=(43.80, 43.90, 12.0),
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "add a flared lip"}
+        )
+        latest = svc.latest_version(pid)
+        row_offer = svc.get_pending_offer(pid)
+        return r.status_code, frames, latest, row_offer
+
+    status, frames, latest, row_offer = run_async(app_with_versions, _call)
+    assert status == 202, status
+    # The new version's own block renders both params disagrees
+    # (model-source) — the precondition the gate keys on.
+    from d33d.design_state import state_block_for_version
+
+    block = state_block_for_version(
+        latest["params"], latest["bbox"], latest["stated_dims"],
+        latest["param_meta"], latest["confirmed_params"],
+    )
+    by_name = {e["name"]: e for e in block if e.get("kind") == "param"}
+    for name in ("spacer_width", "spacer_depth"):
+        assert by_name[name]["provenance"] == "disagrees", by_name[name]
+        assert by_name[name]["disagrees_source"] == "model", by_name[name]
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # NEITHER param is offered (both disagree with the measurement);
+    # no offer at all, and no pending-offer state on the row.
+    assert "confirm_offer" not in done[-1], done
+    assert row_offer is None
 
 
 def test_chat_pass_confirm_first_valid_offers_that_param(app_with_versions):

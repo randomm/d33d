@@ -263,14 +263,22 @@ def test_design_state_route_block_can_cite_stated_height_and_assumed_footprint(
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
-    by_name = {e["name"]: e for e in r.json()}
-    # H is STATED (the user said 12 — the ticket's example), W/D are
-    # ASSUMED (the model emitted them; no axis evidence yet).
-    assert by_name["H"]["value"] == 12.0
-    assert by_name["H"]["provenance"] == "stated", "H must be stated for the provenance-citing answer"
-    assert by_name["W"]["value"] == 20.0
-    assert by_name["W"]["provenance"] == "assumed", "the footprint axis must be assumed (the 'I assumed' citation)"
-    assert by_name["D"]["provenance"] == "assumed"
+    by_kind = {(e["kind"], e["name"]): e for e in r.json()}
+    # H AXIS ROW is STATED (the user said 12 — the ticket's example).
+    h_axis = by_kind[("axis", "H")]
+    assert h_axis["value"] == 12.0
+    assert h_axis["provenance"] == "stated", "H must be stated for the provenance-citing answer"
+    # W/D AXIS ROWS: not stated, no persisted bbox on this version → no
+    # axis rows (issue #264: measured rows need a measurement; stated
+    # rows need stated evidence — neither holds for W/D here).
+    assert ("axis", "W") not in by_kind
+    assert ("axis", "D") not in by_kind
+    # The model's own W/D/H-NAMED PARAM ROWS are assumed (issue #246:
+    # model-emitted params are never stated from a params snapshot; no
+    # measurement to upgrade them).
+    assert by_kind[("param", "W")]["value"] == 20.0
+    assert by_kind[("param", "W")]["provenance"] == "assumed", "the footprint axis must be assumed (the 'I assumed' citation)"
+    assert by_kind[("param", "D")]["provenance"] == "assumed"
 
 
 def test_design_state_route_missing_project_is_404(app_with_versions) -> None:
