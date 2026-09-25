@@ -741,6 +741,43 @@ describe("App layout", () => {
     expect(assistantMsgs.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("one ack done frame gives exactly one ack message in the transcript (issue #265)", async () => {
+    // Issue #265: the accepted-offer acknowledgement done frame carries
+    // the ack text BOTH as `message` (kind "answer") and the additive
+    // `confirm_ack*` fields. The old code set the placeholder's content
+    // to the ack text AND appended a SECOND assistant message with the
+    // same text (the mono `confirmAck` field), so the acknowledgement
+    // rendered twice. The fix updates the placeholder in place (giving
+    // it the `confirmAck` field) and appends nothing — one ack frame
+    // gives exactly ONE ack message.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      // The ack done frame: kind "answer" + message + confirm_ack fields.
+      // No version-created progress frame (no design run, no new version).
+      handlers.onDone?.({
+        message: "Got it — Wall thickness stays 3.0\u202fmm.",
+        kind: "answer",
+        confirm_ack: true,
+        confirm_ack_label: "Wall thickness",
+        confirm_ack_value: "3.0\u202fmm",
+      });
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("yes");
+    // Wait for the send to settle.
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+    // The ack message: the `confirmAck` field is rendered by ChatPanel as
+    // a span with the mono value. Exactly ONE ack message (the placeholder
+    // was updated in place, not duplicated).
+    const ackMsgs = screen.getAllByTestId("confirm-ack-msg");
+    expect(ackMsgs).toHaveLength(1);
+  });
+
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
     // W10: the views map is on the wire in the version-created frame; the
     // pass card (via ChatPanel) is what displays it. The App-level `renders`

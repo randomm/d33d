@@ -49,6 +49,15 @@ acknowledgement on acceptance: "Got it — {label} stays {value}."
 (``copy.confirmOffer.acknowledged``). Tier 3 (issue #261) is this
 #250 template, terminal when tiers 1 and 2 are both empty.
 
+The tier-3 ``{value}`` slot is the :func:`mm_value_str` spelling
+(issue #265): ``mm_formatted`` (one decimal + U+202F + ``mm`` — the
+deck's ``mm()``) ONLY when the param is genuinely an mm measurement —
+its ``param_meta`` carries ``unit: "mm"`` explicitly OR it declares an
+axis; the entry's default ``unit: "mm"`` (every numeric param) does not
+count, and a non-mm / unitless value keeps :func:`format_param_value`
+verbatim. The model-sentence value-name check accepts EITHER the bare
+or the mm-formatted spelling of the value.
+
 Tier-1 (a released axis) and tier-2 (a user-quoted unmapped number)
 sentences (issue #261) render ``{value}`` via :func:`mm_formatted`
 when the param unit is ``mm`` — NEVER the raw number: the deck's
@@ -86,6 +95,7 @@ __all__ = [
     "format_param_value",
     "is_pending_offer_acceptance",
     "mm_formatted",
+    "mm_value_str",
     "offer_entry",
     "offer_sentence",
     "select_offer_candidate",
@@ -282,6 +292,35 @@ def offer_entry(
     return None
 
 
+def mm_value_str(entry: dict[str, Any]) -> str:
+    """The value spelling an MM param renders with in the tier-3 offer
+    and ack (issue #265): the ``mm()``-formatted string (``12`` →
+    ``"12.0\u202fmm"`` — one decimal, the U+202F narrow no-break space,
+    ``mm`` — the deck's ``copy.ts mm()`` rendering, byte-for-byte) ONLY
+    when the param is genuinely an mm measurement — its ``param_meta``
+    carries an explicit ``unit: "mm"`` OR it declares an axis (the
+    binding operator decision; the design-state entry's default
+    ``unit: "mm"`` for every numeric param does NOT count — a count like
+    ``hole_count 3`` stays ``"3"``).
+
+    A non-mm unit, no unit, or a non-numeric value keeps
+    :func:`format_param_value` verbatim — no unit is ever fabricated."""
+    from d33d.design_state import normalize_param_meta
+
+    value = entry.get("value")
+    if not _is_number(value):
+        return _format_value(value)
+    name = entry.get("name") or ""
+    m = normalize_param_meta(entry.get("param_meta")).get(name) or {}
+    meta_unit = m.get("unit")
+    axis = m.get("axis")
+    if (isinstance(meta_unit, str) and meta_unit == "mm") or (
+        isinstance(axis, str) and axis
+    ):
+        return mm_formatted(value)
+    return _format_value(value)
+
+
 def offer_sentence(
     entry: dict[str, Any],
     sentence: str | None,
@@ -298,17 +337,30 @@ def offer_sentence(
     param is 3) fails the value-name check; a sentence with an invented
     number fails the guard; both fall to the template. A sentence with
     no number at all cannot name the value either → template (the
-    sentence must carry the value, not just a mood)."""
+    sentence must carry the value, not just a mood).
+
+    The value-name check (issue #265) accepts the chosen value spelled
+    EITHER the bare ``:g`` rendering ("40") OR the ``mm()``-formatted
+    rendering ("40.0 mm" — U+202F or a regular space): a model sentence
+    that says "I assumed 40 for …" is as valid as one that says "I
+    assumed 40.0 mm for …". The template render always uses the mm
+    spelling for an mm param and the bare spelling otherwise."""
     from d33d.question_answer import guard_answer_numbers
 
     if isinstance(sentence, str) and sentence.strip():
-        value_str = _format_value(entry.get("value"))
+        bare = _format_value(entry.get("value"))
         label = entry.get("label") or entry.get("name") or ""
-        if value_str in sentence and label and label in sentence and guard_answer_numbers(
+        spellings: set[str] = {bare}
+        mm = mm_value_str(entry)
+        if mm != bare:
+            spellings.add(mm)
+            spellings.add(mm.replace("\u202F", " "))
+        names_value = any(sp in sentence for sp in spellings if sp)
+        if names_value and label and label in sentence and guard_answer_numbers(
             sentence, block_entries
         ):
             return sentence.strip()
-    value_str = _format_value(entry.get("value"))
+    value_str = mm_value_str(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"I assumed {value_str} for {label}. Want it different?"
 
@@ -419,8 +471,13 @@ def ack_sentence(entry: dict[str, Any]) -> str:
     """The acknowledgement the accepted-offer flow replies with (the
     SPA's ``confirmOffer.acknowledged`` in ``copy.ts``): "Got it —
     {label} stays {value}." (label per #248, identifier fallback — the
-    template is deterministic; the model never writes it)."""
-    value_str = _format_value(entry.get("value"))
+    template is deterministic; the model never writes it).
+
+    ``{value}`` is the :func:`mm_value_str` spelling (issue #265): the
+    ``mm()``-formatted string for a genuinely-mm param (``"3.0\u202fmm"``),
+    the bare ``:g`` rendering otherwise — the same spelling the tier-3
+    offer used, so the offer and its ack agree."""
+    value_str = mm_value_str(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"Got it — {label} stays {value_str}."
 

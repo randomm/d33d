@@ -44,6 +44,14 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { createElement } from "react";
 
 import copy, { mm } from "../copy";
+// The backend's mm spelling (issue #265): the SPA has no build step that
+// imports Python, so the pin below compares the backend's emitted wire
+// strings (rendered here as the exact sentences `d33d.confirm_offer`'s
+// `offer_sentence` / `ack_sentence` produce) against this file's own
+// `mm()` renderings of the same values — a divergence between the
+// backend's `mm_formatted` and the deck's `mm` trips the exact-match
+// assertions, the #250 way.
+import { ack_sentence, offer_sentence } from "./backend-offer-sentences";
 import { Z_INDEX } from "../App";
 import { MARKER_COLOR, MARKER_RGB, markerAlpha } from "../lib/marker";
 import { Filmstrip } from "../components/versions/Filmstrip";
@@ -295,6 +303,54 @@ describe("design contract", () => {
     // the exact-match assertion at the top of this file's W250 block.
     const deck = copy.confirmOffer.offer("V", "L");
     expect(deck).toBe("I assumed V for L. Want it different?");
+  });
+
+  /* ----------------------------------------- W265 */
+
+  it("the backend's tier-3 offer/ack mm spelling agrees with the deck's mm() (issue #265)", () => {
+    // Issue #265: the tier-3 offer and the accepted-offer acknowledgement
+    // render an mm param's `{value}` slot via the backend's `mm_formatted`
+    // (one decimal + U+202F + `mm`) — the deck's `mm()` byte-for-byte.
+    // The wire strings below are exactly what `d33d.confirm_offer`
+    // produces (the pure function's output — no model sentence, the
+    // deterministic template), so a backend change that renders the
+    // value with `:g` ("40") or a spaced space ("40.0 mm") fails against
+    // the mm()-formatted slot the deck's template is pinned to above.
+    const mmValue = mm(40);
+    // U+202F narrow no-break space — the acceptance criterion's exact
+    // spelling (the mm() render, not a regular space).
+    expect(mmValue).toBe("40.0\u202Fmm");
+
+    // The tier-3 offer (mm param, deterministic template):
+    // "I assumed 40.0 mm for Spacer depth. Want it different?" — the value
+    // slot is EXACTLY the mm(40) rendering.
+    const backendOffer = offer_sentence({ name: "depth", label: "Spacer depth", value: 40, unit: "mm" });
+    expect(backendOffer).toBe(
+      "I assumed " + mmValue + " for Spacer depth. Want it different?",
+    );
+    // The slot agrees with the deck's mirror of the template (the W250 pin
+    // above): the same structure, the same value, the same closing question.
+    expect(copy.confirmOffer.offer(mmValue, "Spacer depth")).toBe(backendOffer);
+    // …and not the bare `:g` spelling ("40") the pre-#265 template produced.
+    expect(backendOffer).not.toContain("I assumed 40 for");
+    expect(backendOffer).not.toContain("40.0 mm for"); // a regular space is a divergence
+
+    // The accepted-offer acknowledgement: "Got it — Spacer depth stays
+    // 40.0 mm." — the same mm spelling the offer used, so the pair agrees.
+    const backendAck = ack_sentence({ name: "depth", label: "Spacer depth", value: 40, unit: "mm" });
+    expect(backendAck).toBe("Got it — Spacer depth stays " + mmValue + ".");
+    expect(copy.confirmOffer.acknowledged("Spacer depth", mmValue)).toBe(backendAck);
+    expect(backendAck).not.toBe("Got it — Spacer depth stays 40."); // the bare `:g` spelling
+
+    // The unitless / non-mm / count param keeps the bare `format_param_value`
+    // spelling in BOTH sentences (hole_count 3 stays "3") — never a
+    // fabricated mm unit.
+    const bareOffer = offer_sentence({ name: "hole_count", label: "Hole count", value: 3 });
+    expect(bareOffer).toBe("I assumed 3 for Hole count. Want it different?");
+    const bareAck = ack_sentence({ name: "hole_count", label: "Hole count", value: 3 });
+    expect(bareAck).toBe("Got it — Hole count stays 3.");
+    expect(bareOffer).not.toContain("mm");
+    expect(bareAck).not.toContain("mm");
   });
 
   /* ----------------------------------------- W261 */

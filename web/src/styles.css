@@ -151,6 +151,17 @@ body {
   border-radius: var(--radius-sm);
 }
 
+/* The slot's name (issue #265): clamps to one line — ellipsis on overflow,
+   min-width: 0 so the flex item can shrink below its content and the
+   siblings (pos, fork, exported) are never pushed out. The full name lives
+   in the span's title attribute. The pending slot's name uses the same rule. */
+.filmstrip-name {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .filmstrip-earlier {
   color: var(--color-muted);
   font-family: var(--font-mono);

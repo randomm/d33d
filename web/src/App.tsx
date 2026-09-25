@@ -1122,12 +1122,36 @@ export default function App({ client }: AppProps) {
                   const msg = typeof data.message === "string" ? data.message : "";
                   const isReal = msg.length > 0 && !msg.startsWith("Error:");
                   const isAnswer = data.kind === "answer";
+                  // Issue #265: the ack done frame carries the ack text BOTH as
+                  // the ``message`` (kind "answer") and the additive
+                  // ``confirm_ack*`` fields. The old code set the placeholder's
+                  // content to the ack text AND appended a SECOND assistant
+                  // message with the same text (the mono ``confirmAck`` field),
+                  // so the acknowledgement rendered twice. Fix: when the frame
+                  // carries ``confirm_ack`` fields, give the streaming
+                  // placeholder the ``confirmAck`` field IN PLACE — the ack text
+                  // rides the ``confirmAck`` field only (ChatPanel renders it
+                  // from there, value in the mono face), and nothing is
+                  // appended. The offer path (``confirm_offer`` + a pass-card
+                  // turn) is untouched — it still appends its own offer message.
+                  const ackLabel =
+                    typeof data.confirm_ack_label === "string"
+                      ? data.confirm_ack_label
+                      : "";
+                  const ackValue =
+                    typeof data.confirm_ack_value === "string"
+                      ? data.confirm_ack_value
+                      : "";
+                  const isAck =
+                    data.confirm_ack !== undefined && ackLabel.length > 0;
                   return {
                     ...m,
                     streaming: false,
-                    ...(isReal && m.content === ""
-                      ? { content: isAnswer ? msg : copy.passCard.summary }
-                      : {}),
+                    ...(isAck
+                      ? { confirmAck: { label: ackLabel, value: ackValue } }
+                      : isReal && m.content === ""
+                        ? { content: isAnswer ? msg : copy.passCard.summary }
+                        : {}),
                   };
                 }),
               );
@@ -1139,11 +1163,15 @@ export default function App({ client }: AppProps) {
               // form. The pass card's turn itself (the assistant message
               // above) already rendered the pass summary; the offer is a
               // distinct plain message that follows it in the transcript.
-              // `confirm_ack` is the accepted-offer acknowledgement —
-              // likewise its own plain assistant message (no design run,
-              // no new version — the server did the recording), rendered
-              // through the ChatMessage's `confirmAck` field so the value
-              // renders in the mono face.
+              //
+              // Issue #265: the `confirm_ack` branch no longer APPENDS a
+              // second assistant message. The ack text rides the streaming
+              // placeholder's `confirmAck` field (set in the in-place update
+              // above — ChatPanel renders it from there, value in the mono
+              // face), so one ack done frame renders exactly ONE ack message
+              // with message order and ids stable. The offer branch below is
+              // byte-identical: the pass card's turn plus one appended offer
+              // message.
               const confirmSentence =
                 typeof data.confirm_sentence === "string" ? data.confirm_sentence : "";
               if (data.confirm_offer !== undefined && confirmSentence.length > 0) {
@@ -1154,22 +1182,6 @@ export default function App({ client }: AppProps) {
                     id: offerId,
                     role: "assistant",
                     content: confirmSentence,
-                  },
-                ]);
-              }
-              const confirmAckLabel =
-                typeof data.confirm_ack_label === "string" ? data.confirm_ack_label : "";
-              const confirmAckValue =
-                typeof data.confirm_ack_value === "string" ? data.confirm_ack_value : "";
-              if (data.confirm_ack !== undefined && confirmAckLabel.length > 0) {
-                const ackId = nextMsgId("confirm-ack");
-                setMessages((prev) => [
-                  ...prev,
-                  {
-                    id: ackId,
-                    role: "assistant",
-                    content: copy.confirmOffer.acknowledged(confirmAckLabel, confirmAckValue),
-                    confirmAck: { label: confirmAckLabel, value: confirmAckValue },
                   },
                 ]);
               }

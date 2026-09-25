@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from d33d.confirm_offer import offer_entry
 from tests.versioning.helpers import (
     create_project,
     create_version,
@@ -171,8 +172,9 @@ def test_sentence_invented_number_falls_to_template():
     params = {"wall_thickness": 3.0}
     meta = {"wall_thickness": {"label": "Wall thickness", "unit": "mm"}}
     entry = offer_entry(params, meta, "wall_thickness")
+    entry["param_meta"] = meta
     sentence = offer_sentence(entry, "I assumed 4 mm walls. Want it thinner?", [entry])
-    assert sentence == "I assumed 3 for Wall thickness. Want it different?"
+    assert sentence == "I assumed 3.0\u202fmm for Wall thickness. Want it different?"
 
 
 def test_sentence_wrong_value_falls_to_template():
@@ -187,12 +189,13 @@ def test_sentence_wrong_value_falls_to_template():
         "spacer_width": {"label": "Spacer width", "unit": "mm"},
     }
     entry = offer_entry(params, meta, "wall_thickness")
+    entry["param_meta"] = meta
     block = [
         offer_entry(params, meta, "wall_thickness"),
         offer_entry(params, meta, "spacer_width"),
     ]
     sentence = offer_sentence(entry, "I assumed 20 mm walls. Want it thinner?", block)
-    assert sentence == "I assumed 3 for Wall thickness. Want it different?"
+    assert sentence == "I assumed 3.0\u202fmm for Wall thickness. Want it different?"
 
 
 def test_sentence_none_falls_to_template_with_identifier_fallback():
@@ -215,7 +218,8 @@ def test_ack_sentence_shape():
     params = {"wall_thickness": 3.0}
     meta = {"wall_thickness": {"label": "Wall thickness", "unit": "mm"}}
     entry = offer_entry(params, meta, "wall_thickness")
-    assert ack_sentence(entry) == "Got it — Wall thickness stays 3."
+    entry["param_meta"] = meta
+    assert ack_sentence(entry) == "Got it — Wall thickness stays 3.0\u202fmm."
     entry2 = offer_entry({"bore": 8.0}, None, "bore")
     assert ack_sentence(entry2) == "Got it — bore stays 8."
 
@@ -541,6 +545,140 @@ def test_tier2_user_quoted_unmapped_mm_helper():
     )
     # An explicit protocol cue in the message consumes the number.
     assert user_quoted_unmapped_mm(["H: 12 mm"]) == set()
+
+
+# ---------------------------------------------------------------------------
+# Issue #265: the tier-3 offer and ack carry the mm unit (reusing
+# ``mm_formatted``), unitless / non-mm params keep the bare form, and the
+# model-sentence value-name check accepts BOTH spellings.
+# ---------------------------------------------------------------------------
+
+
+def test_tier3_offer_and_ack_mm_formatted_for_mm_param():
+    """A tier-3 offer for a param whose ``param_meta`` carries unit "mm"
+    spells the value EXACTLY as ``mm()`` renders it ("40.0\u202fmm"),
+    and the ack matches — the acceptance criterion's two sentences."""
+    from d33d.confirm_offer import ack_sentence, mm_value_str, offer_sentence
+
+    params = {"spacer_depth": 40.0}
+    meta = {"spacer_depth": {"label": "Spacer depth", "unit": "mm"}}
+    entry = offer_entry(params, meta, "spacer_depth")
+    entry["param_meta"] = meta
+    assert mm_value_str(entry) == "40.0\u202fmm"
+    assert offer_sentence(entry, None, [entry]) == (
+        "I assumed 40.0\u202fmm for Spacer depth. Want it different?"
+    )
+    assert ack_sentence(entry) == "Got it — Spacer depth stays 40.0\u202fmm."
+
+
+def test_tier3_offer_and_ack_bare_when_unitless_or_non_mm():
+    """A unitless param (no param_meta) or a non-mm unit ("count") keeps
+    the bare ``:g`` spelling in BOTH sentences — no unit is fabricated
+    (the binding operator decision: the entry's default ``unit: "mm"``
+    does NOT count)."""
+    from d33d.confirm_offer import ack_sentence, mm_value_str, offer_sentence
+
+    # No metadata at all (the identifier fallback, unitless) → bare.
+    entry = offer_entry({"hole_count": 3.0}, None, "hole_count")
+    assert mm_value_str(entry) == "3"
+    assert offer_sentence(entry, None, [entry]) == (
+        "I assumed 3 for hole_count. Want it different?"
+    )
+    assert ack_sentence(entry) == "Got it — hole_count stays 3."
+    # A param_meta unit that is not "mm" → bare.
+    entry2 = offer_entry(
+        {"hole_count": 3.0},
+        {"hole_count": {"label": "Hole count", "unit": "count"}},
+        "hole_count",
+    )
+    entry2["param_meta"] = {"hole_count": {"label": "Hole count", "unit": "count"}}
+    assert mm_value_str(entry2) == "3"
+    assert offer_sentence(entry2, None, [entry2]) == (
+        "I assumed 3 for Hole count. Want it different?"
+    )
+    assert ack_sentence(entry2) == "Got it — Hole count stays 3."
+
+
+def test_tier3_offer_declared_axis_param_is_mm_even_without_unit_meta():
+    """The binding operator decision: a declared axis ALSO counts as mm
+    (a param_meta with axis "W" and no unit is still mm-formatted)."""
+    from d33d.confirm_offer import mm_value_str, offer_sentence
+
+    entry = offer_entry(
+        {"spacer_width": 40.0},
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        "spacer_width",
+    )
+    entry["param_meta"] = {"spacer_width": {"label": "Spacer width", "axis": "W"}}
+    assert mm_value_str(entry) == "40.0\u202fmm"
+    assert offer_sentence(entry, None, [entry]) == (
+        "I assumed 40.0\u202fmm for Spacer width. Want it different?"
+    )
+
+
+def test_tier3_model_sentence_bare_mm_and_decimal_spellings_accepted():
+    """The model ``confirm_sentence`` is accepted when it names the value
+    in EITHER the bare ("40") or the mm-formatted ("40.0 mm" — U+202F or
+    regular space) spelling. The test matrix: bare, mm (U+202F), mm
+    (regular space), decimal bare ("40.0")."""
+    from d33d.confirm_offer import offer_entry, offer_sentence
+
+    params = {"spacer_depth": 40.0}
+    meta = {"spacer_depth": {"label": "Spacer depth", "unit": "mm"}}
+    entry = offer_entry(params, meta, "spacer_depth")
+    entry["param_meta"] = meta
+    for sentence in (
+        "I assumed 40 for Spacer depth. Want it different?",
+        "I assumed 40.0\u202fmm for Spacer depth. Want it different?",
+        "I assumed 40.0 mm for Spacer depth. Want it different?",
+        "I assumed 40.0 for Spacer depth. Want it different?",
+    ):
+        assert offer_sentence(entry, sentence, [entry]) == sentence, sentence
+
+
+def test_tier3_model_sentence_wrong_value_still_falls_to_template():
+    """A model sentence that names the value in the mm spelling but a
+    DIFFERENT number than the param ("41.0 mm" when the param is 40)
+    fails the value-name check → the template with the mm spelling."""
+    from d33d.confirm_offer import offer_entry, offer_sentence
+
+    params = {"spacer_depth": 40.0}
+    meta = {"spacer_depth": {"label": "Spacer depth", "unit": "mm"}}
+    entry = offer_entry(params, meta, "spacer_depth")
+    entry["param_meta"] = meta
+    sentence = offer_sentence(
+        entry, "I assumed 41.0 mm for Spacer depth. Want it different?", [entry]
+    )
+    assert sentence == "I assumed 40.0\u202fmm for Spacer depth. Want it different?"
+
+
+def test_tier3_ack_mm_value_rides_done_frame(app_with_versions):
+    """Through the /chat acceptance route: the done frame's
+    ``confirm_ack_value`` and ``message`` are both mm-formatted for a
+    unit-"mm" param (issue #265 — the value the SPA renders in the mono
+    face is the same string as the ack sentence's)."""
+
+    async def _call(client):
+        svc = app_with_versions.state.versions
+        proj = await create_project(client)
+        pid = proj["id"]
+        v = await svc.create_version(
+            pid,
+            {"spacer_depth": 40.0},
+            param_meta={"spacer_depth": {"label": "Spacer depth", "unit": "mm"}},
+        )
+        svc.set_pending_offer(pid, {"version_id": v["id"], "param": "spacer_depth"})
+        app_with_versions.state.run_design_loop = None
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done[0].get("confirm_ack_value") == "40.0\u202fmm", done
+    assert done[0]["message"] == "Got it — Spacer depth stays 40.0\u202fmm.", done
 
 
 class _TierStubResult:
@@ -983,9 +1121,10 @@ def test_chat_yes_after_offer_confirms_param_no_new_version(app_with_versions):
     # face — a measurement must never hide inside a sentence).
     assert done[0].get("confirm_ack") is True, done
     assert done[0].get("confirm_ack_label") == "Wall thickness", done
-    assert done[0].get("confirm_ack_value") == "3", done
-    # The ack uses the deterministic template with the #248 label.
-    assert done[0]["message"] == "Got it — Wall thickness stays 3.", done
+    assert done[0].get("confirm_ack_value") == "3.0\u202fmm", done
+    # The ack uses the deterministic template with the #248 label, value
+    # mm-formatted (issue #265 — the param_meta carries unit "mm").
+    assert done[0]["message"] == "Got it — Wall thickness stays 3.0\u202fmm.", done
     # The version is user-confirmed (the ONLY writer is this flow).
     assert row["confirmed_params"] == {"wall_thickness": 3.0}, row
     # The design-state block renders it stated (rule (b)).
@@ -1161,10 +1300,10 @@ def test_offer_state_survives_reopen_round_trip(app_with_versions):
     assert status == 202
     done = [d for e, d in frames if e == "done"]
     assert done[0].get("kind") == "answer", done
-    assert done[0]["message"] == "Got it — Wall thickness stays 3."
+    assert done[0]["message"] == "Got it — Wall thickness stays 3.0\u202fmm."
     assert done[0].get("confirm_ack") is True, done
     assert done[0].get("confirm_ack_label") == "Wall thickness", done
-    assert done[0].get("confirm_ack_value") == "3", done
+    assert done[0].get("confirm_ack_value") == "3.0\u202fmm", done
     # The confirmation persisted on the version row.
     assert back["confirmed_params"] == {"wall_thickness": 3.0}
     # The offer is consumed.
@@ -1516,7 +1655,8 @@ def test_ack_label_falls_back_to_param_name(app_with_versions):
     # The ack label is the param's identifier (non-empty, never "").
     assert done[0].get("confirm_ack_label") == "wall_thickness", done
     assert done[0]["confirm_ack_label"] != ""
-    # The ack value is still correct.
+    # The ack value is BARE (the version has no param_meta — no unit, no
+    # axis — the identifier-fallback case keeps the ``:g`` spelling).
     assert done[0].get("confirm_ack_value") == "3", done
     # The message uses the identifier as the label.
     assert done[0]["message"] == "Got it — wall_thickness stays 3.", done
