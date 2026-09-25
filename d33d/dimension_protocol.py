@@ -366,8 +366,11 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
        ("M3 x 10 mm" — thread spec; "v2 is 60x45x20mm" — a version
        label) suppresses ("part3x4" likewise);
     3. feature-noun window (``_triple_suppressed_by_feature_noun``);
-    4. foreign unit: a cm/in/inches/inch/m anywhere in the match span, or
-       as a WHOLE WORD in the next whitespace-delimited token ("2 × 2
+    4. foreign unit (only when the match has NO explicit mm unit — an
+       explicit mm unit wins, so the "in" in "60 x 45 mm in the drawer"
+       is the preposition, not the inch unit): a cm/in/inches/inch/m
+       anywhere in the match span, or as a WHOLE WORD in the next
+       whitespace-delimited token ("2 × 2
        inch"/"6 x 4 cm" → nothing; "60 × 45 × 20 mm mirror" states);
     5. magnitude: an explicit mm unit ANYWHERE on the match (after the
        last number, after each number, or glued) NEVER magnitude-
@@ -386,6 +389,21 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
         ]
         if len(numbers) < 2:
             continue
+        span_text = message[m.start():m.end()]
+        # An explicit mm unit on the match span (glued or spaced, any of
+        # the shared ``MM_UNIT_ALTERNATION`` forms — "mm" glued as "45mm"
+        # or spaced as "45 mm", "millimetre(s)"/"millimeter(s)" spelled
+        # out; the glued "45mm" has no word boundary between the digit
+        # and the "m", so \bmm\b alone misses it) is computed FIRST and
+        # wins over the foreign-unit next-token check below: "60 x 45 mm
+        # in the drawer" states W60 D45 (the "in" is the preposition,
+        # the match already has its unit), and "60 x 45 mm in a
+        # 70x50x30 box" states the FIRST triple, not the second.
+        has_mm_unit = re.search(
+            r"mm|millimetres?|millimeters?",
+            span_text,
+            re.IGNORECASE,
+        ) is not None
         # Guard 1: letter-glued prefix — the character IMMEDIATELY before
         # the triple's first digit (a letter or digit directly adjacent →
         # suppress: "M3 x 10", "part3x4"). The (?<!\\d) lookbehind
@@ -397,34 +415,29 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
         # Guard 2: feature-noun window.
         if _triple_suppressed_by_feature_noun(message, m):
             continue
-        # Guard 3: foreign unit — anywhere in the match span, or as a
-        # whole word as the WHOLE NEXT whitespace-delimited token (the
-        # unit may follow the triple's end: "6 x 4 cm"). The next token
-        # must equal a unit word exactly: a 5-char prefix match would
-        # fire on "10 inch" via "10 in" (the \b between "in" and "c" is
-        # a boundary), which would suppress a legitimate "2 × 2 inch"-
-        # shaped statement — "2 × 2 inch" is itself foreign (the "inch"
-        # token) but must be rejected for the right reason.
-        span_text = message[m.start():m.end()]
-        if _FOREIGN_UNIT_RE.search(span_text):
-            continue
-        next_token = message[m.end():].lstrip().split()[:1]
-        if next_token and next_token[0].lower() in {
-            "cm", "in", "inches", "inch", "m",
-        }:
-            continue
+        # Guard 3: foreign unit — only when the match has NO explicit mm
+        # unit of its own (an explicit mm unit wins — the "in" in
+        # "60 x 45 mm in the drawer" is the preposition, not the inch
+        # unit). The unit is foreign when it sits anywhere in the match
+        # span, or as a whole word as the WHOLE NEXT
+        # whitespace-delimited token (the unit may follow the triple's
+        # end: "6 x 4 cm"). The next token must equal a unit word
+        # exactly: a 5-char prefix match would fire on "10 inch" via
+        # "10 in" (the \b between "in" and "c" is a boundary), which
+        # would suppress a legitimate "2 × 2 inch"-shaped statement —
+        # "2 × 2 inch" is itself foreign (the "inch" token) but must be
+        # rejected for the right reason.
+        if not has_mm_unit:
+            if _FOREIGN_UNIT_RE.search(span_text):
+                continue
+            next_token = message[m.end():].lstrip().split()[:1]
+            if next_token and next_token[0].lower() in {
+                "cm", "in", "inches", "inch", "m",
+            }:
+                continue
         # Guard 4: magnitude. An explicit mm unit ANYWHERE on the match
         # (after the last number, after each number, or glued) disables
-        # the bound; it applies only to a unit-less pair. The unit can
-        # be "mm" (glued or spaced), "millimetre(s)", or "millimeter(s)"
-        # — the glued "45mm" has no word boundary between the digit and
-        # the "m", so \bmm\b alone misses it; the unit alternation
-        # (\s*mm) catches it.
-        has_mm_unit = re.search(
-            r"mm|millimetres?|millimeters?",
-            span_text,
-            re.IGNORECASE,
-        ) is not None
+        # the bound; it applies only to a unit-less pair.
         if len(numbers) == 2 and not has_mm_unit and any(
             v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
         ):

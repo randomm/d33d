@@ -1028,6 +1028,50 @@ class TestTripleExtraction:
         axes = stated_axes_from_message("6 x 4 cm")
         assert axes == {}
 
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            # An explicit mm unit on the match wins over a following
+            # "in" (the preposition, not the inch unit):
+            pytest.param(
+                "60 x 45 mm in the drawer",
+                {"W": 60.0, "D": 45.0},
+                id="mm-unit-beats-following-in-preposition",
+            ),
+            # A second unit-less triple behind a clean first mm triple
+            # does NOT state (the first match states); the second
+            # triple's numbers are bare (not mm numbers) and stay
+            # unmapped/offerable — they are never mm numbers:
+            pytest.param(
+                "60 x 45 mm in a 70x50x30 box",
+                {"W": 60.0, "D": 45.0},
+                id="first-clean-match-states-second-unmapped",
+            ),
+            pytest.param(
+                "a 60x45x20mm tray in the kitchen",
+                {"W": 60.0, "D": 45.0, "H": 20.0},
+                id="glued-mm-triple-followed-by-in",
+            ),
+            # No mm unit at all: the next-token foreign check still
+            # applies — "in"/"inch" are inch units:
+            pytest.param("2 x 2 in", {}, id="in-preposition-no-mm-unit"),
+            pytest.param("2 × 2 inch", {}, id="inch-token-no-mm-unit"),
+        ],
+    )
+    def test_explicit_mm_unit_beats_following_in(self, message, expected):
+        """An explicit mm unit on the match wins over a following "in"
+        (issue #275 fix: the foreign-unit next-token check must not read
+        the preposition as the inch unit when the match already carries
+        an explicit mm unit)."""
+        assert stated_axes_from_message(message) == expected
+
+    def test_second_unmapped_triple_numbers_stay_unmapped(self):
+        """'60 x 45 mm in a 70x50x30 box' — the second triple's numbers
+        are unit-less and, since no mm unit ever attaches to them, they
+        are NOT mm numbers and stay out of the mm unmapped set (the
+        tier-2 offer only ever offers explicit-mm numbers)."""
+        assert user_quoted_unmapped_mm(["60 x 45 mm in a 70x50x30 box"]) == set()
+
     def test_feature_noun_after_window_suppresses(self):
         """'a 10 × 10 mm hole' → nothing (feature noun in after-window),
         with [10, 10] unmapped."""
