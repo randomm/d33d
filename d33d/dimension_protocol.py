@@ -329,6 +329,28 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
     if len(numbers) < 2:
         return {}, set()
 
+    # Letter-glued prefix (issue #275 round-1): a letter immediately
+    # before the first number ("M3 x 10 mm screw" — a thread spec; "v2 is
+    # 60x45" — a version label) makes the pair the thing's size, not the
+    # part's envelope → suppressed. A legitimate triple starts its match
+    # on a digit preceded by whitespace or punctuation, so this never
+    # fires on "60x45" or "60 × 45 × 20 mm".
+    if _LETTER_GLUED_RE.search(message[: m.start(1)]):
+        return {}, set(numbers)
+
+    # No-unit double magnitude guard (issue #275 round-1): "1920x1080"
+    # (pixels) / "5x5" (a count or a grid) without an explicit mm unit is
+    # not a millimetre envelope — an explicit mm unit ("60 × 45 mm") or
+    # the explicit 3-number triple form ("60x45x20") is the statement cue
+    # the unit-less reading requires. Values above the bound never state;
+    # a no-unit triple ("60x45x20") always states (it is explicit in all
+    # three edges).
+    has_mm_unit = re.search(r"\bmm\b", m.group(0), re.IGNORECASE) is not None
+    if len(numbers) == 2 and not has_mm_unit and any(
+        v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
+    ):
+        return {}, set(numbers)
+
     # Check for foreign unit in the triple's span AND the word immediately
     # after the triple (the foreign unit may follow the triple's end).
     span_text = message[m.start():m.end()]
@@ -428,6 +450,23 @@ def _mm_cue_values(message: str) -> set[float]:
     _, triple_numbers = _extract_triple(message)
     values |= triple_numbers
     return values
+
+
+# A letter glued to the digit immediately preceding a triple match
+# ("M" in "M3 x 10", "v" in "v2 is 60x45"): the token is a part number,
+# a thread spec, or a version label — the pair of numbers that follows is
+# a size of that thing, not the part's envelope, so the triple is
+# suppressed. A legitimate triple ("60x45", "60 × 45 × 20 mm") has a
+# non-digit (or nothing) immediately before its first number, so this
+# never fires on it.
+_LETTER_GLUED_RE = re.compile(r"[A-Za-z](?=\d)")
+
+#: A no-unit double ("60x45", "5x5") whose numbers exceed this value is
+#: a resolution or a count pair ("1920x1080" pixels, "2x4" pieces),
+#: not a millimetre envelope, and states nothing: an explicit mm unit
+#: ("60 × 45 mm") or the triple's 3-number form is the explicit cue the
+#: unit-less reading requires (issue #275 round-1 false-positive fix).
+_NO_UNIT_DOUBLE_MAX_MM = 100.0
 
 
 #: The tier-2 history scan bound (issue #261 fix batch): ``

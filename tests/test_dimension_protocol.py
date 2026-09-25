@@ -1106,3 +1106,57 @@ class TestTripleExtraction:
         """'60x45x80mm' — no-space form: numbers are triple-consumed
         and excluded from the tier-2 offer scan."""
         assert user_quoted_unmapped_mm(["60x45x80mm"]) == set()
+
+
+class TestTripleFalsePositives:
+    """Issue #275 round-1: the triple must not state axes on non-envelope
+    number pairs (screw specs, count×size pairs, grid/pixel pairs,
+    version labels). Each case states NOTHING — the carry-forward + gate
+    would otherwise enforce a fabricated envelope."""
+
+    def test_m3_screw_spec_does_not_state(self):
+        """'M3 x 10 mm screw' → nothing (thread spec; 'M3' is a
+        letter-glued token, 'screw' a feature noun)."""
+        assert stated_axes_from_message("M3 x 10 mm screw") == {}
+        assert stated_axes_from_message("M3x10mm screw") == {}
+
+    def test_count_times_size_pair_does_not_state(self):
+        """'add 2x magnets 6x3mm' / 'print 2 x 40 mm spacers' → nothing
+        (the pair is the count and the feature size, not the envelope;
+        'magnets'/'spacers' are feature nouns — issue #275 round-1)."""
+        assert stated_axes_from_message("add 2x magnets 6x3mm") == {}
+        assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
+
+    def test_grid_pair_does_not_state(self):
+        """'a 5x5 grid' → nothing (a cell count; 'grid' is a feature
+        noun and the no-unit double is below the mm scale)."""
+        assert stated_axes_from_message("a 5x5 grid") == {}
+
+    def test_pixel_resolution_does_not_state(self):
+        """'a 1920x1080 screen' → nothing (pixel dimensions without a
+        millimetre unit are not a part envelope — issue #275 round-1)."""
+        axes = stated_axes_from_message("a 1920x1080 screen")
+        assert axes == {}
+
+    def test_version_label_does_not_state(self):
+        """'v2 is 60x45' → nothing ('v2' is a letter-glued token — a
+        version label, not an envelope statement — issue #275 round-1).
+        """
+        assert stated_axes_from_message("v2 is 60x45") == {}
+
+    def test_no_unit_double_under_threshold_states(self):
+        """'60 × 45' (no unit, ≤ the mm-scale bound) still states W and D —
+        the magnitude guard only rejects large pixel/count pairs, not
+        ordinary no-unit doubles."""
+        axes = stated_axes_from_message("60 × 45")
+        assert axes == {"W": 60.0, "D": 45.0}
+
+    def test_followup_feature_triple_does_not_restate_envelope(self):
+        """A follow-up 'add a 6x3 mm magnet pocket' restates nothing —
+        the feature noun suppresses the pair, so W/D carry forward
+        unchanged (the gate keeps the carried envelope, not 6×3).
+        """
+        axes = stated_axes_from_message(
+            "add a 6x3 mm magnet pocket", chat_history=["a tray 60 × 45 × 20 mm"]
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}

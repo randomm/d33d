@@ -3148,3 +3148,44 @@ def test_chat_triple_message_gate_input_and_persisted_stated_dims(
     assert latest is not None
     raw = latest.get("stated_dims")
     assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end FINALIZE path (issue #275): the same tray triple as the
+    chat test, but delivered as the finalize message → the gate input is
+    (60, 45, 20) and stated_dims {W:60, D:45, H:20} are persisted on the
+    new version row (the finalize seam uses ``stated_axes_from_message``
+    on the request text — the chat test covers only the chat seam).
+    """
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={
+                "name": "the tray",
+                "message": "a tray 60 \u00d7 45 \u00d7 20 mm with a flared lip around the top",
+            },
+        )
+        assert r.status_code == 201, r.text
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+        return r
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20).
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the stated_dims.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}

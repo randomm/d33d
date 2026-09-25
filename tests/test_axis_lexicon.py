@@ -445,8 +445,9 @@ class TestFeatureNounAbstain:
             "hole", "holes", "groove", "slot", "pocket", "bore", "recess",
             "notch", "channel", "cutout", "cut-out", "counterbore",
             "countersink", "foot", "feet", "leg", "legs", "post", "tab",
-            "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
-            "magnet", "lid", "wall", "walls", "chamfer", "fillet", "text",
+            "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolts",
+            "magnet", "magnets", "spacer", "spacers", "grid", "grids",
+            "lid", "wall", "walls", "chamfer", "fillet", "text",
             "label", "logo",
         }
         assert words == _FEATURE_NOUNS, (
@@ -633,8 +634,48 @@ class TestSharedNumberToken:
 class TestTripleExtraction:
     """W×D×H triple extraction (issue #275 task-a).
 
-    Implemented in ``dimension_protocol``'s ``_extract_stated``; the
-    lexicon's role is to exclude triple-consumed numbers from
-    ``unmapped_mm_numbers`` via the shared helper.
+    The triple itself is extracted by ``dimension_protocol``'s
+    ``_extract_triple`` (tested in ``test_dimension_protocol``); this class
+    pins the LEXICON-side contract for triple-shaped messages: feature
+    nouns keep such numbers out of ``absolute`` (feature size, not part
+    envelope), and the lexicon's own ``unmapped_mm_numbers`` stays the
+    tier-2 offer's source (the protocol's ``user_quoted_unmapped_mm``
+    adds the triple-consumed exclusion on top — tested there).
     """
+
+    def test_feature_noun_double_stays_unmapped(self) -> None:
+        """'a 10 × 10 mm hole' → nothing stated; the 10s are feature
+        sizes in ``unmapped_mm_numbers`` (the lexicon does not map them).
+        """
+        result = classify("a 10 × 10 mm hole")
+        assert result.absolute == {}
+        assert 10.0 in result.unmapped_mm_numbers
+
+    def test_feature_noun_double_suppressed_in_protocol_too(self) -> None:
+        """The protocol's triple extractor suppresses the same double
+        (feature noun in the after-window) — the lexicon and the protocol
+        agree that '10 × 10 mm hole' states nothing."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        assert stated_axes_from_message("a 10 × 10 mm hole") == {}
+
+    def test_plural_feature_nouns_suppress(self) -> None:
+        """Plural feature nouns (magnets, spacers, grids) suppress the
+        triple double the same way the singulars do (issue #275 round-1
+        false-positive fix)."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        assert stated_axes_from_message("add 2x magnets 6x3mm") == {}
+        assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
+        assert stated_axes_from_message("a 5x5 grid") == {}
+
+    def test_tray_triple_states_axes(self) -> None:
+        """'a 60 × 45 × 20 mm tray' → the triple states W/D/H (no feature
+        noun near the numbers); the lexicon itself still sees the 60/45/20
+        as explicit-mm numbers the protocol triple maps — the tier-2
+        helper excludes them (asserted in test_dimension_protocol)."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        axes = stated_axes_from_message("a 60 × 45 × 20 mm tray")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
 
