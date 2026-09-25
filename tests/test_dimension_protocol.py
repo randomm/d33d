@@ -1138,10 +1138,13 @@ class TestTripleFalsePositives:
         assert axes == {}
 
     def test_version_label_does_not_state(self):
-        """'v2 is 60x45' → nothing ('v2' is a letter-glued token — a
-        version label, not an envelope statement — issue #275 round-1).
-        """
-        assert stated_axes_from_message("v2 is 60x45") == {}
+        """'v2 is 60x45' → the 'v2' is NOT immediately before the
+        triple's first digit (there's 'is ' in between), so the
+        letter-glued guard does not fire and the triple states W/D
+        (issue #275 round-3, item 4: check only the character
+        IMMEDIATELY before the first digit)."""
+        axes = stated_axes_from_message("v2 is 60x45")
+        assert axes == {"W": 60.0, "D": 45.0}
 
     def test_no_unit_double_under_threshold_states(self):
         """'60 × 45' (no unit, ≤ the mm-scale bound) still states W and D —
@@ -1159,3 +1162,195 @@ class TestTripleFalsePositives:
             "add a 6x3 mm magnet pocket", chat_history=["a tray 60 × 45 × 20 mm"]
         )
         assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+class TestTriplePerMatchEvaluation:
+    """Issue #275 round-3: per-match guards, clause-local assignment,
+    unit-aware guards, and the full acceptance table.
+
+    Every item below gets a regression test (table-driven where
+    natural). The principle: text only states a part size when it
+    clearly does. When in doubt, don't state; leave the number
+    unmapped so it can be offered. But never suppress a clean,
+    explicit statement.
+    """
+
+    # ------------------------------------------------------------------
+    # Item 1: clause-local assignment (HIGH: nearest-number crosses
+    # clauses)
+    # ------------------------------------------------------------------
+
+    def test_clause_local_deep_and_wide(self):
+        """'make it 10 mm deep and 40mm wide' → D=10, W=40 (each axis
+        word only sees numbers in its own sub-clause)."""
+        from d33d.axis_lexicon import classify
+
+        result = classify("make it 10 mm deep and 40mm wide")
+        assert result.absolute == {"D": 10.0, "W": 40.0}
+
+    def test_clause_local_three_axes(self):
+        """'40 mm wide, 10 mm deep and 12 mm tall' → all three axes.
+        Comma splits into clauses; 'and' splits the second clause
+        because each part has a number."""
+        from d33d.axis_lexicon import classify
+
+        result = classify("40 mm wide, 10 mm deep and 12 mm tall")
+        assert result.absolute == {"W": 40.0, "D": 10.0, "H": 12.0}
+
+    # ------------------------------------------------------------------
+    # Item 2: per-match evaluation (first match that passes all guards)
+    # ------------------------------------------------------------------
+
+    def test_triple_first_match_wins_slot_suppressed(self):
+        """'a 60x45x20mm tray with a 10x8mm slot' → W60 D45 H20, with
+        10 and 8 unmapped (the slot's pair is suppressed by the feature
+        noun 'slot' in the after-window; its numbers stay unmapped).
+        """
+        axes = stated_axes_from_message("a 60x45x20mm tray with a 10x8mm slot")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+        assert user_quoted_unmapped_mm(["a 60x45x20mm tray with a 10x8mm slot"]) == set()
+
+    def test_triple_first_match_wins_slot_suppressed_spaced(self):
+        """'a 60 x 45 x 20 mm tray with a 10 x 8 mm slot' → the same,
+        and 20 is NOT unmapped (consumed by the triple)."""
+        axes = stated_axes_from_message(
+            "a 60 x 45 x 20 mm tray with a 10 x 8 mm slot"
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+        unmapped = user_quoted_unmapped_mm(
+            ["a 60 x 45 x 20 mm tray with a 10 x 8 mm slot"]
+        )
+        assert 20.0 not in unmapped
+
+    def test_triple_second_match_states_when_first_suppressed(self):
+        """'a 10 × 10 mm hole in a 60 × 45 × 20 mm tray' → the tray
+        (the first match is suppressed by 'hole' in the after-window;
+        the second match states)."""
+        axes = stated_axes_from_message(
+            "a 10 × 10 mm hole in a 60 × 45 × 20 mm tray"
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    # ------------------------------------------------------------------
+    # Item 3: magnitude guard (HIGH: unit-aware)
+    # ------------------------------------------------------------------
+
+    def test_magnitude_guard_unit_after_last_number(self):
+        """'a 150x45mm tray' → W150 D45 (explicit mm unit disables the
+        >100 bound)."""
+        axes = stated_axes_from_message("a 150x45mm tray")
+        assert axes == {"W": 150.0, "D": 45.0}
+
+    def test_magnitude_guard_unit_glued(self):
+        """'a 105x45x20mm tray' → full triple (glued mm unit)."""
+        axes = stated_axes_from_message("a 105x45x20mm tray")
+        assert axes == {"W": 105.0, "D": 45.0, "H": 20.0}
+
+    def test_magnitude_guard_unitless_pair_over_100(self):
+        """'1920x1080' → nothing (unit-less pair >100)."""
+        axes = stated_axes_from_message("1920x1080")
+        assert axes == {}
+
+    def test_magnitude_guard_unitless_pair_150x45(self):
+        """'a 150x45 tray' → nothing (unit-less pair >100); 150 and 45
+        are unmapped (no mm unit, so not in the mm-only unmapped set).
+        """
+        axes = stated_axes_from_message("a 150x45 tray")
+        assert axes == {}
+
+    # ------------------------------------------------------------------
+    # Item 4: letter-glued guard (immediately-before only)
+    # ------------------------------------------------------------------
+
+    def test_letter_glued_version_label(self):
+        """'v2 is 60x45x20mm' → states (the 'v2' is not immediately
+        before the triple's first digit — there's 'is ' in between).
+        """
+        axes = stated_axes_from_message("v2 is 60x45x20mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_letter_glued_thread_spec(self):
+        """'M3 x 10 mm screw' → nothing ('M' is immediately before the
+        '3')."""
+        axes = stated_axes_from_message("M3 x 10 mm screw")
+        assert axes == {}
+
+    def test_no_partial_match_inside_longer_number(self):
+        r"""'123x45x67' → no partial match (the (?<!\d) lookbehind
+        prevents matching '23x45x67' starting inside '123')."""
+        from d33d.dimension_protocol import _extract_triple
+
+        axes, consumed = _extract_triple("123x45x67")
+        # The full triple matches (123, 45, 67) — not a partial (23, 45, 67).
+        assert axes == {"W": 123.0, "D": 45.0, "H": 67.0}
+
+    # ------------------------------------------------------------------
+    # Item 5: foreign-unit after-check (whole token, not 5-char slice)
+    # ------------------------------------------------------------------
+
+    def test_foreign_unit_after_check_mirror(self):
+        """'a 60 x 45 x 20 mm mirror' → states (the 'mirror' token is
+        not a foreign unit)."""
+        axes = stated_axes_from_message("a 60 x 45 x 20 mm mirror")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_foreign_unit_after_check_inch(self):
+        """'2 × 2 inch' → nothing (the 'inch' token is a foreign unit)."""
+        axes = stated_axes_from_message("2 × 2 inch")
+        assert axes == {}
+
+    def test_foreign_unit_after_check_cm(self):
+        """'6 x 4 cm' → nothing (the 'cm' token is a foreign unit)."""
+        axes = stated_axes_from_message("6 x 4 cm")
+        assert axes == {}
+
+    # ------------------------------------------------------------------
+    # Item 6: spelled-out units in triple and axis-letter paths
+    # ------------------------------------------------------------------
+
+    def test_spelled_out_triple(self):
+        """'60 millimeters x 45 millimeters x 20 millimeters' → full
+        triple."""
+        axes = stated_axes_from_message(
+            "60 millimeters x 45 millimeters x 20 millimeters"
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_spelled_out_axis_letter(self):
+        """'H 30 millimetres' → H30 (the axis-letter path accepts
+        spelled-out units)."""
+        axes = stated_axes_from_message("H 30 millimetres")
+        assert axes == {"H": 30.0}
+
+    # ------------------------------------------------------------------
+    # Item 7: before-window 3 words (was 2)
+    # ------------------------------------------------------------------
+
+    def test_before_window_three_words(self):
+        """'a 10 × 10 mm square hole in a 60 × 45 × 20 mm tray' → the
+        tray (the first triple is suppressed by 'hole' in the
+        3-word before-window of the second triple's context)."""
+        axes = stated_axes_from_message(
+            "a 10 × 10 mm square hole in a 60 × 45 × 20 mm tray"
+        )
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+    def test_before_window_three_words_square_hole(self):
+        """'a 10 x 10 mm square hole' → nothing (the feature noun
+        'hole' is in the after-window of the triple)."""
+        axes = stated_axes_from_message("a 10 x 10 mm square hole")
+        assert axes == {}
+
+    # ------------------------------------------------------------------
+    # Item 8: _has_number foreign-then-continue logic
+    # ------------------------------------------------------------------
+
+    def test_has_number_foreign_then_shared(self):
+        """'5 cm wide and 12mm tall' → _has_number returns True (the
+        foreign number is skipped, the shared-token number is found).
+        """
+        from d33d.axis_lexicon import _has_number
+
+        assert _has_number("5 cm wide and 12mm tall") is True
+        assert _has_number("5 cm wide") is False
+        assert _has_number("12mm tall") is True

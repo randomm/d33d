@@ -43,6 +43,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from d33d.axis_lexicon import (
+    _FEATURE_NOUNS,
+    _FOREIGN_UNIT_RE,
+    MM_UNIT_ALTERNATION,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -237,7 +243,8 @@ def _extract_stated(
                 if axis in out:
                     continue
                 m = re.search(
-                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:mm)?\b",
+                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)"
+                    rf"(?:{MM_UNIT_ALTERNATION})?\b",
                     text,
                     re.IGNORECASE,
                 )
@@ -289,86 +296,23 @@ def _extract_stated(
     return out
 
 
-def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
-    """Extract a W×D×H triple from a raw message (issue #275 task-a).
+def _triple_suppressed_by_feature_noun(message: str, m: re.Match[str]) -> bool:
+    """True if a feature noun sits in the triple's before- or after-window
+    (issue #275 round-1 feature-noun suppression; issue #275 round-3, item
+    2, moved into a helper so EVERY match runs the same guard).
 
-    Returns ``(axes, consumed_numbers)`` where ``axes`` maps W/D/H to mm
-    values (empty dict if no triple found) and ``consumed_numbers`` is the
-    set of numbers consumed by the triple (for exclusion from
-    ``unmapped_mm_numbers`` and ``_mm_cue_values``).
-
-    Joiners: "×" (U+00D7), "x", "X" with optional spaces. The unit goes
-    after the last number or after each number. No unit: states, unless
-    any number carries a foreign unit (cm/in/inches/inch/m). Two numbers
-    state W and D only.
-
-    Feature-noun suppression: a triple is suppressed (states nothing, its
-    numbers become unmapped) iff a feature noun occurs in EITHER of these
+    A triple is suppressed iff a feature noun occurs in EITHER of these
     windows: (a) the up-to-3 words immediately AFTER the triple's last
     number/unit, stopping early at a comma, ";", sentence punctuation, or
-    the words "with", "and", "in", "on", "for"; (b) the up-to-2 words
+    the words "with", "and", "in", "on", "for"; (b) the up-to-3 words
     immediately BEFORE the triple's first number, stopping early at the
     same separators. Words are whitespace tokens.
+
     """
-    triple_re = re.compile(
-        r"\b(\d+(?:\.\d+)?)\s*(?:mm)?\s*[×xX]"
-        r"\s*(\d+(?:\.\d+)?)\s*(?:mm)?"
-        r"(?:\s*[×xX]\s*(\d+(?:\.\d+)?)\s*(?:mm)?)?"
-    )
-    matches = list(triple_re.finditer(message))
-    if not matches:
-        return {}, set()
-    # Use the LAST match (the part's envelope, not a feature's size).
-    m = matches[-1]
-
-    numbers: list[float] = []
-    for g in m.groups():
-        if g:
-            numbers.append(float(g))
-
-    if len(numbers) < 2:
-        return {}, set()
-
-    # Letter-glued prefix (issue #275 round-1): a letter immediately
-    # before the first number ("M3 x 10 mm screw" — a thread spec; "v2 is
-    # 60x45" — a version label) makes the pair the thing's size, not the
-    # part's envelope → suppressed. A legitimate triple starts its match
-    # on a digit preceded by whitespace or punctuation, so this never
-    # fires on "60x45" or "60 × 45 × 20 mm".
-    if _LETTER_GLUED_RE.search(message[: m.start(1)]):
-        return {}, set(numbers)
-
-    # No-unit double magnitude guard (issue #275 round-1): "1920x1080"
-    # (pixels) / "5x5" (a count or a grid) without an explicit mm unit is
-    # not a millimetre envelope — an explicit mm unit ("60 × 45 mm") or
-    # the explicit 3-number triple form ("60x45x20") is the statement cue
-    # the unit-less reading requires. Values above the bound never state;
-    # a no-unit triple ("60x45x20") always states (it is explicit in all
-    # three edges).
-    has_mm_unit = re.search(r"\bmm\b", m.group(0), re.IGNORECASE) is not None
-    if len(numbers) == 2 and not has_mm_unit and any(
-        v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
-    ):
-        return {}, set(numbers)
-
-    # Check for foreign unit in the triple's span AND the word immediately
-    # after the triple (the foreign unit may follow the triple's end).
-    span_text = message[m.start():m.end()]
-    after_check = message[m.end():m.end()+5].strip()
-    foreign_unit_re = re.compile(r"\b(\d+(?:\.\d+)?)\s*(cm|in|inches|inch|m)\b")
-    if foreign_unit_re.search(span_text):
-        return {}, set()
-    if after_check and re.match(r"^(cm|inch|inches|in|m|mm)", after_check, re.IGNORECASE):
-        return {}, set()
-
-    # Feature-noun suppression.
-    from d33d.axis_lexicon import _FEATURE_NOUNS
-
     separators = {",", ";", ".", "!", "?", "with", "and", "in", "on", "for"}
 
     # After-window: up to 3 words after the triple's end.
-    after_text = message[m.end():]
-    after_words = after_text.split()
+    after_words = message[m.end():].split()
     after_window: list[str] = []
     for w in after_words[:3]:
         clean_w = w.strip(",;.!?:()[]{}\"'")
@@ -376,29 +320,125 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
             break
         after_window.append(clean_w.lower())
 
-    # Before-window: up to 2 words before the triple's start.
-    before_text = message[:m.start()]
-    before_words = before_text.split()
+    # Before-window: up to 3 words before the triple's start (issue #275
+    # round-3, item 7: was 2 — "a 10 × 10 mm square hole" needs 3: "square"
+    # stops the walk as a non-noun, then "hole" suppresses; "in" still
+    # cuts "hole in a 60 × 45 × 20 mm tray"'s before-window early).
+    before_words = message[: m.start()].split()
     before_window: list[str] = []
-    for w in reversed(before_words[-2:]):
+    for w in reversed(before_words[-3:]):
         clean_w = w.strip(",;.!?:()[]{}\"'")
         if clean_w.lower() in separators:
             break
         before_window.append(clean_w.lower())
 
-    if any(w in _FEATURE_NOUNS for w in after_window) or any(
+    return any(w in _FEATURE_NOUNS for w in after_window) or any(
         w in _FEATURE_NOUNS for w in before_window
-    ):
-        return {}, set(numbers)
+    )
 
-    # Assign axes: W, D, H order.
-    axes: dict[str, float] = {}
-    axis_order = ("W", "D", "H")
-    for i, axis in enumerate(axis_order):
-        if i < len(numbers):
-            axes[axis] = numbers[i]
 
-    return axes, set(numbers)
+def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
+    """Extract the W×D×H part-envelope triple from a raw message
+    (issue #275 task-a; restructured issue #275 round-3, items 2–7).
+
+    Returns ``(axes, consumed_numbers)`` where ``axes`` maps W/D/H to mm
+    values (empty dict when nothing is stated) and ``consumed_numbers`` is
+    the set of numbers CONSUMED by the triple (for exclusion from
+    ``unmapped_mm_numbers`` and ``_mm_cue_values``).
+
+    Per-match evaluation (issue #275 round-3, item 2): EVERY match is
+    evaluated against the per-match guards; the part's envelope is the
+    FIRST match that passes ALL guards (not the last); a match that fails
+    a guard states nothing and its numbers stay UNCONSUMED (still
+    unmapped/offerable, including feature-noun- and letter-glued
+    suppression) — consumption is uniform across all suppression paths:
+    a number is consumed only when a match states.
+
+    Joiners: "×" (U+00D7), "x", "X" with optional spaces. The unit may be
+    "mm" or a spelled-out "millimetre(s)"/"millimeter(s)" (the shared
+    ``MM_UNIT_ALTERNATION`` — one definition with the lexicon), after the
+    last number or after each number. Two numbers state W and D only.
+
+    Per-match guards, in order:
+    1. starts on the first digit of its number (``(?<!\\d)`` — no match
+       inside a longer number, "123x45x67" → nothing, not 23x45x67);
+    2. letter-glued prefix: a letter immediately before the first digit
+       ("M3 x 10 mm" — thread spec; "v2 is 60x45x20mm" — a version
+       label) suppresses ("part3x4" likewise);
+    3. feature-noun window (``_triple_suppressed_by_feature_noun``);
+    4. foreign unit: a cm/in/inches/inch/m anywhere in the match span, or
+       as a WHOLE WORD in the next whitespace-delimited token ("2 × 2
+       inch"/"6 x 4 cm" → nothing; "60 × 45 × 20 mm mirror" states);
+    5. magnitude: an explicit mm unit ANYWHERE on the match (after the
+       last number, after each number, or glued) NEVER magnitude-
+       suppresses ("a 150x45mm tray" → W150 D45); the >100 bound applies
+       only to a unit-less PAIR ("1920x1080", "a 150x45 tray" →
+       nothing).
+    """
+    triple_re = re.compile(
+        r"(?<!\d)\b(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?\s*[×xX]"
+        r"\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
+        r"(?:\s*[×xX]\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?)?"
+    )
+    for m in triple_re.finditer(message):
+        numbers: list[float] = [
+            float(g) for g in m.groups() if g
+        ]
+        if len(numbers) < 2:
+            continue
+        # Guard 1: letter-glued prefix — the character IMMEDIATELY before
+        # the triple's first digit (a letter or digit directly adjacent →
+        # suppress: "M3 x 10", "part3x4"). The (?<!\\d) lookbehind
+        # already keeps digit-adjacent starts out ("123x45x67"), so this
+        # check only needs the letter case.
+        before_char = message[m.start() - 1] if m.start() > 0 else ""
+        if before_char.isalpha():
+            continue  # letter-glued — this match states nothing
+        # Guard 2: feature-noun window.
+        if _triple_suppressed_by_feature_noun(message, m):
+            continue
+        # Guard 3: foreign unit — anywhere in the match span, or as a
+        # whole word as the WHOLE NEXT whitespace-delimited token (the
+        # unit may follow the triple's end: "6 x 4 cm"). The next token
+        # must equal a unit word exactly: a 5-char prefix match would
+        # fire on "10 inch" via "10 in" (the \b between "in" and "c" is
+        # a boundary), which would suppress a legitimate "2 × 2 inch"-
+        # shaped statement — "2 × 2 inch" is itself foreign (the "inch"
+        # token) but must be rejected for the right reason.
+        span_text = message[m.start():m.end()]
+        if _FOREIGN_UNIT_RE.search(span_text):
+            continue
+        next_token = message[m.end():].lstrip().split()[:1]
+        if next_token and next_token[0].lower() in {
+            "cm", "in", "inches", "inch", "m",
+        }:
+            continue
+        # Guard 4: magnitude. An explicit mm unit ANYWHERE on the match
+        # (after the last number, after each number, or glued) disables
+        # the bound; it applies only to a unit-less pair. The unit can
+        # be "mm" (glued or spaced), "millimetre(s)", or "millimeter(s)"
+        # — the glued "45mm" has no word boundary between the digit and
+        # the "m", so \bmm\b alone misses it; the unit alternation
+        # (\s*mm) catches it.
+        has_mm_unit = re.search(
+            r"mm|millimetres?|millimeters?",
+            span_text,
+            re.IGNORECASE,
+        ) is not None
+        if len(numbers) == 2 and not has_mm_unit and any(
+            v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
+        ):
+            continue
+        # The FIRST match that passes all guards states the part's
+        # envelope (W, D, H order; two numbers → W, D only) and its
+        # numbers are consumed. Any earlier match failed a guard and
+        # states nothing, its numbers stay unmapped/offerable.
+        axes: dict[str, float] = {}
+        for i, axis in enumerate(("W", "D", "H")):
+            if i < len(numbers):
+                axes[axis] = numbers[i]
+        return axes, set(numbers)
+    return {}, set()
 
 
 def _mm_cue_values(message: str) -> set[float]:
@@ -451,15 +491,6 @@ def _mm_cue_values(message: str) -> set[float]:
     values |= triple_numbers
     return values
 
-
-# A letter glued to the digit immediately preceding a triple match
-# ("M" in "M3 x 10", "v" in "v2 is 60x45"): the token is a part number,
-# a thread spec, or a version label — the pair of numbers that follows is
-# a size of that thing, not the part's envelope, so the triple is
-# suppressed. A legitimate triple ("60x45", "60 × 45 × 20 mm") has a
-# non-digit (or nothing) immediately before its first number, so this
-# never fires on it.
-_LETTER_GLUED_RE = re.compile(r"[A-Za-z](?=\d)")
 
 #: A no-unit double ("60x45", "5x5") whose numbers exceed this value is
 #: a resolution or a count pair ("1920x1080" pixels, "2x4" pieces),
