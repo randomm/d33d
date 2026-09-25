@@ -852,7 +852,7 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    block (y=22..34) projects to the RIGHT of the frame. The post
     #    (+X, closest) is at the centre; the short block (−X) is behind.
     rbbox, _rcent, _ = _pixel_bbox(view("view_03_right.png"))
-    rx0, _ry0, rx1, _ry1 = rbbox
+    _rx0, _ry0, rx1, _ry1 = rbbox
     # The +Y block is on the right, so the right edge of the silhouette
     # extends past centre. The post (closest) is near the centre.
     assert rx1 > 500, (
