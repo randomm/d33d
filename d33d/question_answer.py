@@ -515,20 +515,6 @@ def _normalise_noun(noun: str) -> str:
     return " ".join(noun.lower().split())
 
 
-def _is_part_noun(noun: str, version_name: str | None) -> bool:
-    """True iff the noun phrase after the axis word refers to the part
-    itself ("it", "the part", "the model", "the design", or the version's
-    name)."""
-    n = _normalise_noun(noun)
-    if n in _PART_NOUNS:
-        return True
-    if version_name is not None:
-        vn = _normalise_noun(version_name)
-        if vn and n == vn:
-            return True
-    return False
-
-
 def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
     """True iff the noun phrase (possibly with trailing adverbs or a
     leading "the") refers to the part itself.
