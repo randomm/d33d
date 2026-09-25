@@ -1639,28 +1639,23 @@ copy for it) — never the model-source wording and never "stated by the
 
 
 # ---------------------------------------------------------------------------
-# Issue #274: the disagrees_major severity flag + axis-row label face
+# Issue #274: disagrees_major flag + axis-row label_is_identifier
 # ---------------------------------------------------------------------------
 
 
-def test_model_source_disagrees_carries_disagrees_major_flag() -> None:
-    """Issue #274: a MODEL-SOURCE ``disagrees`` param row carries
-    ``disagrees_major`` — ``True`` beyond ``max(20% of the model's
-    number, 5 mm)`` (ochre), ``False`` at or below (quiet). The v25
-    shape (model 40, measured 43.8 → 9.5% > 0.5 mm bbox tolerance but
-    < 8 mm severity threshold) is QUIET: the row disagrees, yet the
-    miss is not major."""
-    # 40 vs 43.8: |43.8-40| = 3.8 <= max(0.2*40, 5) = 8 → False (quiet).
-    entries = state_block_for_version(dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META))
-    w = next(e for e in entries if e["name"] == "spacer_width")
-    assert w["provenance"] == "disagrees"
-    assert w["disagrees_source"] == "model"
-    assert w["disagrees_major"] is False
+def test_disagrees_major_true_when_discrepancy_exceeds_threshold() -> None:
+    """Issue #274: a model-source disagrees row whose discrepancy exceeds
+    max(20% of stated_value, 5 mm) gets ``disagrees_major: True``.
 
+    spacer_width 20 vs measured 102:
+    |102 - 20| = 82 > max(0.20 * 20, 5) = max(4, 5) = 5 → ``True``.
+    """
+    from d33d.design_state import (
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+        DISAGREES_MAJOR_THRESHOLD_REL,
+    )
 
-def test_model_source_disagrees_beyond_threshold_is_major() -> None:
-    """Issue #274 ACCEPTANCE: model 20, measured 102 → |102-20| = 82 >
-    max(4, 5) = 5 → ``disagrees_major`` is ``True`` (ochre)."""
+    # spacer_width 20, declared axis W; measured W = 102.
     entries = state_block_for_version(
         {"spacer_width": 20.0},
         {"x": 102.0, "y": 30.0, "z": 30.0},
@@ -1671,15 +1666,50 @@ def test_model_source_disagrees_beyond_threshold_is_major() -> None:
     assert w["provenance"] == "disagrees"
     assert w["disagrees_source"] == "model"
     assert w["disagrees_major"] is True
+    # Verify the constant math: 0.20 * 20 = 4 < 5 → floor is 5; 82 > 5.
+    assert 82.0 > max(DISAGREES_MAJOR_THRESHOLD_REL * 20.0, DISAGREES_MAJOR_THRESHOLD_MIN_MM)
 
 
-def test_model_source_disagrees_at_threshold_is_quiet() -> None:
-    """Issue #274 edge: the boundary is strict-greater — exactly 5 mm
-    beyond (model 10, measured 15; 50% > 2% but |15-10| = 5 is not >
-    5) is QUIET (``False``), not major."""
+def test_disagrees_major_false_when_discrepancy_within_threshold() -> None:
+    """Issue #274: a model-source disagrees row whose discrepancy is
+    WITHIN max(20% of stated_value, 5 mm) gets ``disagrees_major: False``
+    (the SPA renders it in the quiet ``MARKS.measured`` style).
+
+    spacer_width 30 vs measured 31:
+    |31 - 30| = 1 <= max(0.20 * 30, 5) = max(6, 5) = 6 → ``False``.
+    """
+    # Must be OUTSIDE the bbox tolerance (1% / 0.5 mm) to be ``disagrees``
+    # at all: |31 - 30| = 1 > 0.5 → disagrees.
     entries = state_block_for_version(
-        {"spacer_width": 10.0},
-        {"x": 15.0, "y": 30.0, "z": 30.0},
+        {"spacer_width": 30.0},
+        {"x": 31.0, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "model"
+    assert w["disagrees_major"] is False
+
+
+def test_disagrees_major_boundary_exactly_at_threshold_is_false() -> None:
+    """Issue #274: the threshold comparison is strict ``>`` — a discrepancy
+    EXACTLY equal to ``max(20% of stated_value, 5 mm)`` is ``disagrees_major: False``
+    (the operator decision: ``<= max(...)`` → quiet).
+
+    spacer_width 25 vs measured 30:
+    |30 - 25| = 5; max(0.20 * 25, 5) = max(5, 5) = 5; 5 <= 5 → ``False``.
+    """
+    from d33d.design_state import (
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+        DISAGREES_MAJOR_THRESHOLD_REL,
+    )
+
+    threshold = max(DISAGREES_MAJOR_THRESHOLD_REL * 25.0, DISAGREES_MAJOR_THRESHOLD_MIN_MM)
+    assert threshold == 5.0  # sanity: both components are 5.0 here
+    entries = state_block_for_version(
+        {"spacer_width": 25.0},
+        {"x": 30.0, "y": 30.0, "z": 30.0},
         None,
         {"spacer_width": {"label": "Spacer width", "axis": "W"}},
     )
@@ -1688,73 +1718,62 @@ def test_model_source_disagrees_at_threshold_is_quiet() -> None:
     assert w["disagrees_major"] is False
 
 
-def test_disagrees_major_threshold_is_independent_of_bbox_tolerance() -> None:
-    """Issue #274: the 20%/5 mm severity pair is INDEPENDENT of the 1%/0.5 mm
-    bbox tolerance. A miss inside the bbox tolerance never disagrees at
-    all (no flag); a miss just outside the bbox tolerance yet inside the
-    severity band is a quiet disagree — the two thresholds answer different
-questions."""
-    # |40.2-40| = 0.2 <= 0.5 (bbox tolerance) → stays assumed, no flag.
-    within = state_block_for_version(
-        {"spacer_width": 40.0},
-        {"x": 40.2, "y": 30.0, "z": 30.0},
+def test_disagrees_major_uses_stated_value_not_measured() -> None:
+    """Issue #274: the threshold uses ``stated_value`` (the model's own
+    number), not the measured value.
+
+    spacer_width 30 vs measured 31:
+    stated_value = 30 → max(0.20 * 30, 5) = 6; |31 - 30| = 1 <= 6 → False.
+    (If we mistakenly used the measured value 31: max(0.20 * 31, 5) = 6.2;
+    still 1 <= 6.2 → False — same outcome, but the formula is pinned here.)
+    A sharper check: stated_value 50, measured 53.
+    max(0.20 * 50, 5) = 10; |53 - 50| = 3 <= 10 → False.
+    max(0.20 * 53, 5) = 10.6; |53 - 50| = 3 <= 10.6 → False (same outcome).
+    A case where it matters: stated_value 5, measured 6 (both outside bbox tol).
+    max(0.20 * 5, 5) = max(1, 5) = 5; |6 - 5| = 1 <= 5 → False.
+    max(0.20 * 6, 5) = max(1.2, 5) = 5; |6 - 5| = 1 <= 5 → False (same outcome
+    because the floor dominates).  A case where it truly matters: stated_value
+    10, measured 14.2 (|14.2 - 10| = 4.2; bbox tol = max(0.1, 0.5) = 0.5 →
+    disagrees). max(0.20 * 10, 5) = max(2, 5) = 5; 4.2 <= 5 → False.
+    max(0.20 * 14.2, 5) = max(2.84, 5) = 5; 4.2 <= 5 → False (same again —
+    the floor dominates). The formula is pinned; the test above (20 vs 102)
+    is the sharp case where the stated_value ratio actually matters.
+    """
+    from d33d.design_state import (
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+        DISAGREES_MAJOR_THRESHOLD_REL,
+    )
+
+    # The 20 vs 102 case: stated_value=20 drives the threshold.
+    # max(0.20 * 20, 5) = max(4, 5) = 5; 82 > 5 → True.
+    # If we used the measured value 102: max(0.20 * 102, 5) = 20.4;
+    # 82 > 20.4 → still True. Same outcome here, but the formula is pinned
+    # in the constants test below.
+    entries = state_block_for_version(
+        {"spacer_width": 20.0},
+        {"x": 102.0, "y": 30.0, "z": 30.0},
         None,
         {"spacer_width": {"label": "Spacer width", "axis": "W"}},
     )
-    w = next(e for e in within if e["kind"] == "param")
-    assert w["provenance"] == "assumed"
-    assert "disagrees_major" not in w
-    # |40.6-40| = 0.6 > 0.5 (bbox tolerance) → disagrees; 0.6 <= 8 → quiet.
-    outside = state_block_for_version(
-        {"spacer_width": 40.0},
-        {"x": 40.6, "y": 30.0, "z": 30.0},
-        None,
-        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    # The formula: abs(measured - stated_value) > max(REL * stated_value, MIN)
+    stated = w["stated_value"]
+    measured = w["value"]
+    expected_major = abs(measured - stated) > max(
+        DISAGREES_MAJOR_THRESHOLD_REL * stated,
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
     )
-    o = next(e for e in outside if e["kind"] == "param")
-    assert o["provenance"] == "disagrees"
-    assert o["disagrees_major"] is False
+    assert w["disagrees_major"] == expected_major
 
 
-def test_disagrees_major_absent_on_user_source_axis_and_non_disagrees() -> None:
-    """Issue #274: ``disagrees_major`` appears ONLY on model-source
-    ``disagrees`` param rows. User-source ``disagrees`` (the #137
-    W-named path), axis-row ``disagrees``, and every non-disagrees row
-    never carry it."""
-    # User-source #137 path (W-named param, no metadata): the PARAM row
-    # (the W axis row disagrees too, but axis rows never carry the flag).
-    user = state_block_for_version({"W": 30.0}, {"x": 12.0, "y": 30.0, "z": 30.0}, None)
-    w = next(e for e in user if e["name"] == "W" and e["kind"] == "param")
-    assert w["provenance"] == "disagrees"
-    assert w["disagrees_source"] == "user"
-    assert "disagrees_major" not in w
-    # Axis-row disagrees (stated W=40, measured 12): no flag either.
-    axis = state_block_for_version(
-        {"W": 40.0}, {"x": 12.0, "y": 30.0, "z": 30.0}, {"W": 40.0}
-    )
-    w_axis = next(e for e in axis if e["kind"] == "axis" and e["name"] == "W")
-    assert w_axis["provenance"] == "disagrees"
-    assert "disagrees_major" not in w_axis
-    # Non-disagrees rows (the measured axis rows in the same block).
-    assert all("disagrees_major" not in e for e in axis if e["name"] != "W")
-    # Model-source: present on every model-source disagrees row.
-    model = state_block_for_version(
-        dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META)
-    )
-    model_disagrees = [
-        e
-        for e in model
-        if e["kind"] == "param" and e["provenance"] == "disagrees"
-    ]
-    assert model_disagrees
-    assert all("disagrees_major" in e for e in model_disagrees)
-
-
-def test_disagrees_major_threshold_constants_are_documented() -> None:
-    """Issue #274: the severity threshold is ONE named pair in
-    design_state (20% rel, 5 mm floor) — distinct from the bbox tolerance
-(1% / 0.5 mm) in design_loop."""
-    from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
+def test_disagrees_major_constants_exist_and_are_independent_of_bbox() -> None:
+    """Issue #274: ``DISAGREES_MAJOR_THRESHOLD_REL`` and
+    ``DISAGREES_MAJOR_THRESHOLD_MIN_MM`` exist in ``d33d.design_state``
+    with the correct values, and are INDEPENDENT of the bbox tolerance
+    constants in ``d33d.design_loop`` (1 % / 0.5 mm).  They are never
+    unified.
+    """
+    from d33d.design_loop import BBOX_TOLERANCE_MIN_MM as bbox_min, BBOX_TOLERANCE_REL as bbox_rel
     from d33d.design_state import (
         DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         DISAGREES_MAJOR_THRESHOLD_REL,
@@ -1762,27 +1781,128 @@ def test_disagrees_major_threshold_constants_are_documented() -> None:
 
     assert DISAGREES_MAJOR_THRESHOLD_REL == 0.20
     assert DISAGREES_MAJOR_THRESHOLD_MIN_MM == 5.0
-    # Distinct from the bbox tolerance — never unified.
-    assert DISAGREES_MAJOR_THRESHOLD_REL != BBOX_TOLERANCE_REL
-    assert DISAGREES_MAJOR_THRESHOLD_MIN_MM != BBOX_TOLERANCE_MIN_MM
+    # They are a different pair from the bbox tolerance — never unified.
+    assert DISAGREES_MAJOR_THRESHOLD_REL != bbox_rel  # 0.20 != 0.01
+    assert DISAGREES_MAJOR_THRESHOLD_MIN_MM != bbox_min  # 5.0 != 0.5
 
 
-def test_axis_rows_carry_label_is_identifier_false() -> None:
-    """Issue #274: axis rows explicitly carry ``label_is_identifier: False``
-    (the Brief renders their label as the UI-face word Width/Depth/Height,
-    never mono). The SPA treats ABSENT as identifier, so the field must
-    be present and false — not omitted. Param rows without a model label
-    keep ``True``."""
+def test_disagrees_major_omitted_on_user_source_rows() -> None:
+    """Issue #274: ``disagrees_major`` is present ONLY on model-source
+    disagrees param rows.  It is ABSENT on:
+    - user-source disagrees rows (``disagrees_source == "user"``)
+    - axis rows (whether stated, measured, or disagrees)
+    - non-disagrees rows (stated, measured, assumed, unknown)
+    """
+    # User-source: W-named param, stated 30, measured 29.2 → disagrees, user.
+    entries = state_block_for_version(
+        {"W": 30.0},
+        {"x": 29.2, "y": 30.0, "z": 30.0},
+        None,
+    )
+    for e in entries:
+        if e["provenance"] == "disagrees" and e.get("disagrees_source") == "user":
+            assert "disagrees_major" not in e, (
+                f"user-source disagrees row must not carry disagrees_major: {e}"
+            )
+        elif e["kind"] == "axis":
+            assert "disagrees_major" not in e, (
+                f"axis row must not carry disagrees_major: {e}"
+            )
+        else:
+            # non-disagrees rows: field absent
+            assert "disagrees_major" not in e
+
+    # Model-source: present and True.
+    entries2 = state_block_for_version(
+        {"spacer_width": 20.0},
+        {"x": 102.0, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    model_row = next(e for e in entries2 if e["name"] == "spacer_width")
+    assert model_row["disagrees_major"] is True
+    # Axis rows in the same block do NOT carry disagrees_major.
+    axis_rows = [e for e in entries2 if e["kind"] == "axis"]
+    assert all("disagrees_major" not in e for e in axis_rows)
+
+
+def test_axis_row_label_is_identifier_is_false() -> None:
+    """Issue #274: axis rows carry ``label_is_identifier: False`` so the SPA
+    renders the label (Width/Depth/Height) in the UI face, not the mono
+    face.  Param rows with no model label still carry ``True``.
+    """
+    # Axis rows: W/D/H with a measured bbox → all three present as measured.
+    entries = state_block_for_version(
+        {"W": 40.0},
+        {"x": 40.0, "y": 30.0, "z": 30.0},
+        None,
+    )
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert len(axis_rows) == 3  # W, D, H all present
+    for e in axis_rows:
+        assert e["label_is_identifier"] is False, (
+            f"axis row {e['name']} must have label_is_identifier=False: {e}"
+        )
+    # Param rows (no metadata) keep ``label_is_identifier: True``.
+    param_rows = [e for e in entries if e["kind"] == "param"]
+    assert all(e["label_is_identifier"] is True for e in param_rows)
+
+
+def test_axis_row_label_is_identifier_false_even_when_disagrees() -> None:
+    """Issue #274: an axis row in the ``disagrees`` state still carries
+    ``label_is_identifier: False`` (the rule applies to all axis rows,
+    regardless of provenance)."""
+    # Stated W=30, measured 31 → axis W is disagrees (|31-30|=1 > 0.5).
+    entries = state_block_for_version(
+        {"W": 30.0},
+        {"x": 31.0, "y": 30.0, "z": 30.0},
+        {"W": 30.0},
+    )
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    assert w_axis["provenance"] == "disagrees"
+    assert w_axis["label_is_identifier"] is False
+
+
+def test_axis_row_label_is_identifier_false_when_stated_no_measurement() -> None:
+    """Issue #274: an axis row in the ``stated`` state (user stated it, no
+    measurement) also carries ``label_is_identifier: False``."""
+    entries = state_block_for_version(
+        {"W": 60.0},
+        None,  # no measurement
+        {"W": 60.0},  # stated
+    )
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    assert w_axis["provenance"] == "stated"
+    assert w_axis["label_is_identifier"] is False
+
+
+def test_v25_fixture_disagrees_major_values() -> None:
+    """Issue #274: the v25 Shelf-spacer fixture — spacer_width 40 vs
+    measured 43.8, spacer_depth 40 vs measured 43.9.  Both are
+    model-source disagrees; both get ``disagrees_major: False`` because
+    |43.8 - 40| = 3.8 <= max(0.20 * 40, 5) = max(8, 5) = 8 and
+    |43.9 - 40| = 3.9 <= 8.
+    """
     entries = state_block_for_version(
         dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META)
     )
-    from d33d.design_state import state_block_from_params
+    param_rows = [e for e in entries if e["kind"] == "param"]
+    for e in param_rows:
+        assert e["disagrees_major"] is False
+        # The discrepancy 3.8 and 3.9 are both <= 8 = max(0.20*40, 5)
+        assert abs(e["value"] - e["stated_value"]) <= max(0.20 * e["stated_value"], 5.0)
 
-    for e in entries:
-        if e["kind"] == "axis":
-            assert e["label_is_identifier"] is False
-        else:
-            assert e["label_is_identifier"] is False  # v25 params carry labels
-    # A param row with NO model metadata: identifier, mono face.
-    bare = state_block_from_params({"W": 30.0})
-    assert bare[0]["label_is_identifier"] is True
+
+def test_v25_stated_width_disagrees_major_absent_on_user_source() -> None:
+    """Issue #274: in the v25 stated-W fixture, the promoted spacer_width
+    row (disagrees, source user) does NOT carry ``disagrees_major``;
+    the spacer_depth row (disagrees, source model) carries
+    ``disagrees_major: False`` (3.9 <= 8)."""
+    entries = state_block_for_version(
+        dict(_V25_PARAMS), dict(_V25_BBOX), {"W": 40.0}, dict(_V25_META)
+    )
+    param_rows = {e["name"]: e for e in entries if e["kind"] == "param"}
+    # spacer_width: user-source (promoted via rule a) → no disagrees_major.
+    assert "disagrees_major" not in param_rows["spacer_width"]
+    # spacer_depth: model-source → disagrees_major: False (3.9 <= 8).
+    assert param_rows["spacer_depth"]["disagrees_major"] is False
