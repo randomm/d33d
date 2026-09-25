@@ -395,7 +395,8 @@ export function Brief({
     // max(20% of the model value, 5 mm), issue #274) and the SPA reads
     // the flag, never recomputes it. User-source and axis disagreements
     // are always ochre; a model-source disagreement within the threshold
-    // renders the quiet neutral measured mark. #FF3300 is never used.
+    // renders the quiet neutral measured mark. The region marker colour is
+    // never used here (the tripwire pins the hex to lib/marker.ts).
     const mark =
       entry.provenance === "disagrees" &&
       entry.kind === "param" &&
