@@ -708,6 +708,33 @@ async def _resolve_offer(
         return None
     params: dict[str, Any] = dict(new_version["params"] or {})
     meta = new_version["param_meta"]
+    # The NEW version's FULL design-state block (issue #264): computed
+    # ONCE here — it feeds BOTH the offer-eligibility exclusion set and
+    # the tier-3 number guard (the ``block`` the sentence checks
+    # against). The block is the only place the measurement comparison
+    # runs, so it is also the single source of the disagree set below.
+    block = state_block_for_version(
+        params,
+        new_version["bbox"],
+        new_version["stated_dims"],
+        meta,
+        new_version["confirmed_params"],
+    )
+    # Issue #264 — offer eligibility must exclude any param the block
+    # renders ``disagrees`` (either source — user-stated or
+    # model-emitted): a value the measurement contradicts is never an
+    # assumption to confirm (offering it would ask the user to affirm a
+    # number the part itself disproves). The set is passed EXPLICITLY to
+    # ``select_offer_candidate`` — the helper itself is measurement-
+    # blind (it reads ``state_block_from_params``). Only param rows
+    # (``kind == "param"``) enter the set: an axis row's disagreement is
+    # the axis's own business (it is never offered — offers are params,
+    # not axes).
+    disagree_names = {
+        e["name"]
+        for e in block
+        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+    }
     # The confirmed set for SELECTION is the pre-pass latest version's
     # ``confirmed_params`` (the caller's ``prev_confirmed`` — read and
     # passed explicitly, never stashed in ``app.state`` where an
@@ -731,21 +758,6 @@ async def _resolve_offer(
         if name in prev_params and prev_params[name] != value
     }
     confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
-    block = state_block_for_version(
-        params, new_version["bbox"], new_version["stated_dims"], meta,
-        new_version["confirmed_params"],
-    )
-    # Issue #264's offer gate: a param whose FULL design-state row
-    # (the block that sees the measurement) renders ``disagrees`` — from
-    # either source — is NOT offerable (the offer sentence "I assumed X"
-    # is false: the measurement already contradicts the value). The set
-    # is computed from the NEW version's own row, from either source
-    # (user or model), and feeds the selection's exclusion.
-    disagreeing = {
-        e["name"]
-        for e in block
-        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
-    }
     # Issue #261's offer tiering — the two signals from ONE helper
     # (``offer_tier_signals`` — the offer's seam): TIER 1 (a released-
     # axis param) needs THIS turn's lexicon classification of the user's
@@ -761,7 +773,7 @@ async def _resolve_offer(
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
         released_axes=released_axes, user_quoted_mm=quoted,
-        disagreeing_param_names=disagreeing,
+        disagree_names=disagree_names,
     )
     if name is None:
         versions.set_pending_offer(project_id, None)

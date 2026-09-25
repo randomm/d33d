@@ -121,34 +121,44 @@ def _assumed_numeric_params(
     param_meta: dict[str, Any] | None,
     confirmed: dict[str, Any] | None,
     excluded: set[str],
-    disagreeing: set[str] | None = None,
+    disagree_names: set[str] | tuple[str, ...] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The version's assumed numeric params eligible for an offer: a
     numeric (non-bool, non-zero) value, NOT in ``confirmed_params`` (rule
     (b) evidence already recorded), NOT in ``excluded`` (the user's own
     change set), with the entry's design-state provenance ``assumed`` (a
     param already ``stated`` via the axis rule or ``measured`` is not an
-    offer — it is not an assumption anymore), and NOT in ``disagreeing``
-    (issue #264: a param whose FULL ``state_block_for_version`` row
-    renders ``disagrees`` — from either source — is a mismatch, never an
-    "I assumed" offer; this helper's ``state_block_from_params`` view
-    cannot see the measurement, so the caller supplies the excluded set).
+    offer — it is not an assumption anymore).
 
     ``excluded`` is the set of param names the user changed via the
     design loop (previous version's snapshot: values that differ, plus
     params newly introduced this version — those are not "assumed in
     place" values the model is inviting confirmation of; they are the
-    user's own moves)."""
+    user's own moves).
+
+    ``disagree_names`` (issue #264) is the EXPLICIT set of param names
+    whose ``state_block_for_version`` entry has provenance ``disagrees``
+    (either source — user-stated or model-emitted). A value the
+    measurement contradicts is never an assumption to confirm: offering
+    it would ask the user to affirm a number the part itself disproves.
+    The caller computes the set from the FULL ``state_block_for_version``
+    output (the only place the measurement comparison runs) and passes
+    it in — this helper itself is measurement-blind (it reads
+    ``state_block_from_params``), so the exclusion is always explicit,
+    never inferred. The default ``frozenset()`` keeps pre-#264 callers
+    (and the tier tests) exactly as they were: an empty set excludes
+    nothing."""
     from d33d.design_state import state_block_from_params
 
     confirmed = confirmed or {}
     changed = {name for name, value in params.items() if name in excluded}
     changed.update(excluded)
+    disagrees = set(disagree_names or ())
     entries = state_block_from_params(params, param_meta)
     by_name = {e["name"]: e for e in entries}
     out: list[dict[str, Any]] = []
     for name, value in params.items():
-        if name in changed or name in confirmed:
+        if name in changed or name in confirmed or name in disagrees:
             continue
         if not _is_number(value) or value == 0:
             continue
@@ -167,23 +177,15 @@ def select_offer_candidate(
     confirm_first: str | None,
     released_axes: set[str] | None = None,
     user_quoted_mm: set[float] | None = None,
-    disagreeing_param_names: set[str] | None = None,
+    disagree_names: set[str] | tuple[str, ...] = frozenset(),
 ) -> str | None:
     """The ONE assumed param to offer for this version, or ``None``.
-
-    ``disagreeing_param_names`` (issue #264) is the set of param names
-    whose FULL ``state_block_for_version`` row (the block that sees the
-    measurement) carries provenance ``disagrees`` — from either source.
-    A param on that set is NOT offerable (the offer sentence "I assumed
-    X" is false: the value's measurement already contradicts it). The
-    caller computes it from the NEW version's own row
-    (``kind == "param"`` rows with ``provenance == "disagrees"``); the
-    default ``None`` (the pre-#264 callers) changes nothing.
 
     Precedence (issue #261's operator decision — tiers in order, an empty
     tier falls through to the next, tier 3 is today's order and is
     terminal; still at most ONE offer, never a confirmed or changed
     param):
+
     1. an assumed numeric param with a declared axis ON AN AXIS RELEASED
        by this turn's relative/global cue (``released_axes`` — "make it
        taller" released H → the H-declared assumed param is the one the
@@ -200,11 +202,19 @@ def select_offer_candidate(
     ``released_axes`` / ``user_quoted_mm`` default to ``None`` — callers
     that do not run the #261 tiering (the pre-#261 behaviour) get exactly
     today's order.
+
+    ``disagree_names`` (issue #264) is the explicit set of param names
+    whose ``state_block_for_version`` entry has provenance ``disagrees``
+    (either source) — a value the measurement contradicts is never
+    offerable (offering it would ask the user to affirm a number the
+    part itself disproves). The caller computes it from the FULL
+    ``state_block_for_version`` output (the only place the measurement
+    comparison runs) and passes it in; the default ``frozenset()``
+    excludes nothing (the pre-#264 callers' behaviour, unchanged).
     """
     changed_set = set(changed or ())
-    excluded = changed_set | (set(disagreeing_param_names or ()))
     eligible = _assumed_numeric_params(
-        params, param_meta, confirmed, excluded, disagreeing=excluded - changed_set
+        params, param_meta, confirmed, changed_set, disagree_names
     )
     if not eligible:
         return None
@@ -240,14 +250,18 @@ def validate_confirm_first(
     param_meta: dict[str, Any] | None,
     confirmed: dict[str, Any] | None,
     changed: set[str] | tuple[str, ...],
+    disagree_names: set[str] | tuple[str, ...] = frozenset(),
 ) -> bool:
     """``confirm_first`` is valid iff it names an assumed numeric param of
     THIS version (in the eligible set — declared, non-zero numeric
-    value, not confirmed, not user-changed)."""
+    value, not confirmed, not user-changed, not a disagrees param —
+    see :func:`select_offer_candidate` for ``disagree_names``)."""
     if not isinstance(confirm_first, str) or not confirm_first:
         return False
     changed_set = set(changed or ())
-    eligible = _assumed_numeric_params(params, param_meta, confirmed, changed_set)
+    eligible = _assumed_numeric_params(
+        params, param_meta, confirmed, changed_set, disagree_names
+    )
     return any(e["name"] == confirm_first for e in eligible)
 
 
