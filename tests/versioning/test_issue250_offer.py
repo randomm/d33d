@@ -306,6 +306,319 @@ class _ExhaustedStub:
         )
 
 
+# ---------------------------------------------------------------------------
+# Issue #261 (task-d): offer priority tiers 1/2 — the released-axis and
+# user-quoted-unmapped-number offers, with mm()-formatted tier sentences
+# ---------------------------------------------------------------------------
+
+def test_tier1_released_axis_param_offered_first():
+    """Tier 1: an assumed numeric param with a declared axis ON AN AXIS
+    RELEASED by this turn's relative cue is offered BEFORE a different
+    declared-axis param (which would win under tier 3) and before
+    ``confirm_first``."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_height": 15.0, "width": 60.0}
+    meta = {
+        "lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"},
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+    }
+    # "make it taller" releases H (task-b's lexicon feed supplies this at
+    # the adapter seam — here the released set is passed directly).
+    name = select_offer_candidate(
+        params, meta, None, set(), "width", released_axes={"H"}
+    )
+    assert name == "lift_height"  # tier 1 beats tier 3's declaration order
+
+
+def test_tier1_global_release_covers_all_axes():
+    """Tier 1: a GLOBAL cue releases all three axes — an assumed
+    param declared on ANY axis is eligible (declaration order)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_height": 15.0, "width": 60.0}
+    meta = {
+        "lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"},
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+    }
+    # "make it bigger" → all three axes released.
+    name = select_offer_candidate(
+        params, meta, None, set(), None, released_axes={"W", "D", "H"}
+    )
+    assert name == "lift_height"  # first declared-axis param in order
+
+
+def test_tier1_empty_falls_through_to_tier3():
+    """Tier 1 EMPTY (the released axis has no assumed axis-declared
+    param) falls through to tier 3 (declared-axis declaration order)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_gap": 4.0, "width": 60.0}
+    meta = {"width": {"label": "Width", "unit": "mm", "axis": "W"}}
+    # H released, but only lift_gap (no axis) is assumed → tier 1 empty.
+    name = select_offer_candidate(
+        params, meta, None, set(), None, released_axes={"H"}
+    )
+    assert name == "width"  # tier 3: the declared-axis param
+
+
+def test_tier2_user_quoted_unmapped_number_offered():
+    """Tier 2: an assumed numeric param whose value equals (±1e-6) a
+    user-quoted UNMAPPED mm number is offered ("a spacer to lift a shelf
+    12 mm" → the 12-valued param). Beats tier 3's declaration order and
+    ``confirm_first`` when the quoted param is not a declared-axis param."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_gap": 12.0, "wall_thickness": 3.0}
+    meta = {"wall_thickness": {"label": "Wall thickness", "unit": "mm"}}
+    # "a spacer to lift a shelf 12 mm" → 12 is an unmapped mm number
+    # (lift is excluded from the lexicon; nothing else in the message).
+    name = select_offer_candidate(
+        params,
+        meta,
+        None,
+        set(),
+        "wall_thickness",
+        user_quoted_mm={12.0},
+    )
+    assert name == "lift_gap"
+
+
+def test_tier2_empty_falls_through_to_tier3():
+    """Tier 2 EMPTY (no user-quoted unmapped number matches an eligible
+    param's value) falls through to tier 3 (the #250 order — declared-
+    axis declaration order, else validated ``confirm_first``)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_gap": 12.0, "wall_thickness": 3.0}
+    meta = {"wall_thickness": {"label": "Wall thickness", "unit": "mm"}}
+    # 99.0 is quoted but no eligible param carries it → tier 2 empty.
+    assert (
+        select_offer_candidate(
+            params, meta, None, set(), "wall_thickness", user_quoted_mm={99.0}
+        )
+        == "wall_thickness"
+    )
+    # No quoted numbers at all → tier 3 unchanged.
+    assert (
+        select_offer_candidate(params, meta, None, set(), "wall_thickness")
+        == "wall_thickness"
+    )
+
+
+def test_tier1_beats_tier2():
+    """Tier precedence: tier 1 (a released-axis param) wins when BOTH
+    tiers have a candidate — the user's own relative words are the
+    stronger signal than a quoted number."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    params = {"lift_height": 15.0, "lift_gap": 12.0}
+    meta = {
+        "lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"},
+    }
+    # H released by a relative cue AND the user quoted an unmapped 12
+    # (tier 1 has lift_height, tier 2 has lift_gap).
+    name = select_offer_candidate(
+        params,
+        meta,
+        None,
+        set(),
+        None,
+        released_axes={"H"},
+        user_quoted_mm={12.0},
+    )
+    assert name == "lift_height"  # tier 1 first
+
+
+def test_tier_sentences_mm_formatted_exactly_as_mm():
+    """The tier-1/tier-2 sentences' ``{value}`` is ALWAYS the mm()-
+    formatted string when the param unit is mm — one decimal, the U+202F
+    narrow no-break space, ``mm`` — never the raw number, never ``:g``
+    (``12`` would diverge from the deck's ``12.0``). The template shapes
+    match copy.ts's ``tier1Offer``/``tier2Offer`` slot-for-slot (the
+    design-contract pin, the #250 way)."""
+    from d33d.confirm_offer import (
+        mm_formatted,
+        tier_1_sentence,
+        tier_1_sentence_template,
+        tier_2_sentence,
+        tier_2_sentence_template,
+    )
+
+    # mm()-formatted: 12 → "12.0\u202fmm" (the exact deck string).
+    assert mm_formatted(12) == "12.0\u202fmm"
+    entry = {"name": "lift_height", "label": "Lift height", "value": 12.0, "unit": "mm"}
+    assert tier_2_sentence(entry) == "You said 12.0\u202fmm — I used it for Lift height. Right?"
+    assert tier_1_sentence(entry, "taller") == "You asked for taller — I made Lift height 12.0\u202fmm. Right?"
+    # The templates (deck mirror) render the same sentences when the slots
+    # are filled with the same strings the backend uses.
+    assert (
+        tier_1_sentence_template()
+        .replace("{cue}", "taller")
+        .replace("{label}", "Lift height")
+        .replace("{value}", mm_formatted(12))
+        == tier_1_sentence(entry, "taller")
+    )
+    assert (
+        tier_2_sentence_template()
+        .replace("{value}", mm_formatted(12))
+        .replace("{label}", "Lift height")
+        == tier_2_sentence(entry)
+    )
+
+
+def test_tier1_cue_from_lexicon():
+    """Tier 1's ``{cue}`` is the FIRST entry of classify(message).cue_words
+    that belongs to the lexicon's relative or global word sets —
+    verbatim, lowercased — no second scan of the raw message."""
+    from d33d.confirm_offer import tier_1_cue
+
+    assert tier_1_cue("make it taller") == "taller"
+    assert tier_1_cue("make it wider, please") == "wider"
+    assert tier_1_cue("make it half the size") == "half the size"
+    # No relative/global cue → no tier-1 offer.
+    assert tier_1_cue("add a hole") is None
+    # An absolute-only cue is not a tier-1 cue ("how tall is it?" stays a
+    # question; "12 mm tall" sets H, it does not release it).
+    assert tier_1_cue("make it 12 mm tall") is None
+
+
+def test_tier2_user_quoted_unmapped_mm_helper():
+    """The tier-2 helper (task-b's ``user_quoted_unmapped_mm``) scans ALL
+    user messages: only explicit-mm numbers count; a number the lexicon
+    or an explicit protocol cue mapped to an axis is NOT eligible."""
+    from d33d.dimension_protocol import user_quoted_unmapped_mm
+
+    # "a 20 mm wide thing, lift it 12 mm" → 20 is mapped (W), 12 is not.
+    assert user_quoted_unmapped_mm(["a 20 mm wide thing, lift it 12 mm"]) == {12.0}
+    # Both mapped → nothing eligible.
+    assert user_quoted_unmapped_mm(["12 mm tall, 20 mm wide"]) == set()
+    # A bare number never counts (no explicit mm unit).
+    assert user_quoted_unmapped_mm(["spacer_height 12"]) == set()
+    # Cross-message union: a quoted number in ANY message is eligible.
+    assert (
+        user_quoted_unmapped_mm(["make it 12 mm tall", "and lift it 12 mm"])
+        == {12.0}
+    )
+    # An explicit protocol cue in the message consumes the number.
+    assert user_quoted_unmapped_mm(["H: 12 mm"]) == set()
+
+
+class _TierStubResult:
+    """A pass result whose ``best`` is a real ``IterationRecord`` for the
+    tier tests (the adapter's offer resolution runs against the NEW
+    version's row)."""
+
+    def __init__(self, params: dict[str, Any], meta: dict[str, Any] | None = None) -> None:
+        from d33d.design_loop import IterationRecord, Score
+        from tests.versioning.test_design_loop_finalize import _default_render
+
+        self.status = "pass"
+        self.failure_reason = None
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source="W = 10; cube([W, W, W]);",
+            render=_default_render(),
+            score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,) * 4),
+            params=dict(params),
+            param_meta=dict(meta) if meta else {},
+        )
+
+
+def test_chat_tier2_unmapped_mm_offer(app_with_versions):
+    """The acceptance case: "A spacer to lift a shelf 12 mm" states no
+    axis (lift is excluded from the lexicon). With an assumed param of
+    value 12, the offer is EXACTLY the tier-2 sentence with the value
+    spelled the way ``mm(12)`` renders it ("12.0\u202fmm") — never the
+    raw number, never the #250 template."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_gap": 12.0},
+            meta={"lift_gap": {"label": "Lift height", "unit": "mm"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "A spacer to lift a shelf 12 mm", "chat_history": []},
+        )
+        return r.status_code, frames, svc.latest_version(pid)
+
+    status, frames, latest = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[-1].get("confirm_offer") == "lift_gap", done
+    # The tier-2 sentence, mm()-formatted value, exact string.
+    assert done[-1].get("confirm_sentence") == (
+        "You said 12.0\u202fmm — I used it for Lift height. Right?"
+    ), done
+    # The new version persisted the carried (empty) stated_dims: the
+    # message stated no axis, so the effective set is {} → NULL.
+    assert latest["stated_dims"] is None, latest
+
+
+def test_chat_tier1_released_axis_offer(app_with_versions):
+    """Tier 1 through the chat route: v1 states H (the latest version's
+    persisted ``stated_dims`` {"H": 12}), then "make it taller" (a
+    relative H cue) RELEASES H — the offered param is the H-declared
+    assumed param of the NEW version, and the sentence is the tier-1
+    template with the mm()-formatted value."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_height": 15.0},
+            meta={"lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        await svc.create_version(
+            pid,
+            {"lift_height": 12.0},
+            param_meta={"lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"}},
+            stated_dims={"H": 12.0},
+        )
+        # v2 must exist before the chat POST so _resolve_offer can read it
+        # from the DB (the adapter's _resolve_version_create creates the
+        # version row from the stub's result, but _resolve_offer reads the
+        # row by id — the row must exist first). The stub loop's result
+        # carries the same params as v2; the adapter's create_version will
+        # create a third version (name collision → suffix), which is a test
+        # harness artifact. The offer resolution reads v2's row and builds
+        # the tier-1 sentence from it.
+        v2 = await svc.create_version(
+            pid,
+            {"lift_height": 15.0},
+            param_meta={"lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"}},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make it taller", "chat_history": []}
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[-1].get("confirm_offer") == "lift_height", done
+    assert done[-1].get("confirm_sentence") == (
+        "You asked for taller — I made Lift height 15.0\u202fmm. Right?"
+    ), done
+
+
 def _drive_chat(app, client, pid, body):
     """POST ``body`` to /chat and drive the event source to its terminal
     frame (the same pattern the issue #54 chat tests use). Returns a

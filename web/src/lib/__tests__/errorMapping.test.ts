@@ -212,4 +212,43 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
     expect(display.envelope).toBeUndefined();
     expect(display.detail).toBe("bbox_out_of_tolerance");
   });
+
+  it("a bbox failure with carried_axes says which held value was enforced (issue #261)", () => {
+    // The carried-axis variant: the frame's `carried_axes` carries the
+    // axis the gate enforced from the user's EARLIER statement (the
+    // carry-forward merge held it) — the failure copy names the held
+    // value (formatted by `mm`) instead of the generic "came out a
+    // different size" sentence.
+    const display = displayDesignLoopError(
+      {
+        message: "Design loop exhausted: bbox_out_of_tolerance",
+        reason: "bbox_out_of_tolerance",
+        carried_axes: { D: 12.0 },
+      },
+    );
+    expect(display.message).toBe(copy.failure.bboxCarried("depth", 12.0));
+    expect(display.message).toContain("12.0\u202Fmm");
+    // The raw reason is still present for part 4 (collapsed).
+    expect(display.detail).toBe("bbox_out_of_tolerance");
+  });
+
+  it("the generic bbox sentence stands alone when the frame carries no carried_axes", () => {
+    // No `carried_axes` on the frame → the reason-code sentence, not the
+    // carried variant (a value the SPA has not established is not
+    // rendered).
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+    });
+    expect(display.message).toBe(copy.failure.reasons.bbox_out_of_tolerance);
+  });
+
+  it("carried_axes is ignored for non-bbox reasons", () => {
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: empty_model",
+      reason: "empty_model",
+      carried_axes: { H: 12.0 },
+    });
+    expect(display.message).toBe(copy.failure.reasons.empty_model);
+  });
 });

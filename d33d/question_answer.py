@@ -75,6 +75,7 @@ except ImportError:  # pragma: no cover - httpx is a hard dep in production
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
+from d33d.axis_lexicon import GLOBAL_WORDS, RELATIVE_WORDS
 from d33d.design_state import (
     build_design_state_block,
     format_design_state_block,
@@ -96,6 +97,7 @@ __all__ = [
     "extract_written_numbers",
     "guard_answer_numbers",
     "is_candidate_question",
+    "is_interrogative",
     "parse_answer_reply",
     "route_chat_message",
     "state_block_for_chat",
@@ -168,16 +170,58 @@ _INTERROGATIVE_RE = re.compile(
 #: only its conjugated inflections are listed, never misspellings.
 #: The multi-word imperative forms ("can you set", …) are the cues
 #: below.
+#
+#: issue #261: the word list is the UNION of the original imperative
+#: words and the axis lexicon's relative + global sets ("taller",
+#: "wider", "bigger", "half the size", …). "Can it be 20 mm wider?" is
+#: a change request, not a question — the relative cue "wider" sends it
+#: to the design loop. Absolute words ("tall", "wide", "height") are NOT
+#: in this union: "how tall is it?" remains a candidate question.
+_BASE_IMPERATIVE_WORDS: frozenset[str] = frozenset(
+    [
+        "make", "makes", "made", "making",
+        "set", "sets", "setting",
+        "change", "changes", "changed", "changing",
+        "add", "adds", "added", "adding",
+        "remove", "removes", "removed", "removing",
+        "increase", "increases", "increased", "increasing",
+        "decrease", "decreases", "decreased", "decreasing",
+        "reduce", "reduces", "reduced", "reducing",
+        "move", "moves", "moved", "moving",
+        "widen", "widens", "widened", "widening",
+        "lengthen", "lengthens", "lengthened", "lengthening",
+        "shorten", "shortens", "shortened", "shortening",
+        "thicker", "thinner",
+        "round", "rounds", "rounded", "rounding",
+        "fillet", "fillets", "bore", "bores",
+        "drill", "drills", "drilled", "drilling",
+    ]
+)
+
+#: The lexicon's relative + global words join the imperative set (issue
+#: #261): "Can it be 20 mm wider?" is a change request, not a question.
+#: Multi-word phrases ("half the size", "twice the size") are escaped in
+#: the regex union below.
+_LEXICON_IMPERATIVE_WORDS: frozenset[str] = frozenset(RELATIVE_WORDS) | GLOBAL_WORDS
+_ALL_IMPERATIVE_WORDS: frozenset[str] = _BASE_IMPERATIVE_WORDS | _LEXICON_IMPERATIVE_WORDS
+
+# The comparison-question carve-out (issue #261 fix batch): a lexicon
+# imperative word immediately followed by "than" ("is it taller than the
+# shelf?"), which is a comparison, not an imperative. The multi-word
+# forms ("half the size") have no "than" carve-out. Stripping these from
+# an interrogative message before the single union scan below is the
+# entire carve-out: every remaining imperative hit — base word, lexicon
+# word not in comparison form, or multi-word form — wins and sends the
+# message to the design loop; a message whose only imperative hits are
+# lexicon words in comparison form stays a candidate.
+_COMPARISON_FORM_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_LEXICON_IMPERATIVE_WORDS))
+    + r")\s+than\b",
+    re.IGNORECASE,
+)
+
 _IMPERATIVE_RE = re.compile(
-    r"\b(?:"
-    "make|makes|made|making|set|sets|setting|change|changes|changed|changing"
-    "|add|adds|added|adding|remove|removes|removed|removing|increase|increases|increased|increasing"
-    "|decrease|decreases|decreased|decreasing|reduce|reduces|reduced|reducing"
-    "|move|moves|moved|moving|widen|widens|widened|widening"
-    "|lengthen|lengthens|lengthened|lengthening|shorten|shortens|shortened|shortening"
-    "|thicker|thinner|taller|bigger|smaller"
-    "|round|rounds|rounded|rounding|fillet|fillets|bore|bores|drill|drills|drilled|drilling"
-    r")\b",
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_ALL_IMPERATIVE_WORDS)) + r")\b",
     re.IGNORECASE,
 )
 #: The multi-word imperative cues the ticket lists explicitly ("can you
@@ -194,6 +238,21 @@ _MULTIWORD_IMPERATIVE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def is_interrogative(message: str) -> bool:
+    """True iff the message is interrogative in FORM: it ends with ``?``
+    or opens with an interrogative word (what/how/which/is/are/does/do/
+    can/will/why/where/when). Pure form check — no imperative scan.
+
+    The gate for the comparison-question carve-out in
+    :func:`is_candidate_question`: only an interrogative-in-form message
+    whose sole imperative hits are lexicon words in comparison form
+    ("…than") stays a candidate."""
+    m = message.strip()
+    if not m:
+        return False
+    return m.endswith("?") or _INTERROGATIVE_RE.match(m) is not None
 
 
 def is_candidate_question(message: str) -> bool:
@@ -218,15 +277,21 @@ def is_candidate_question(message: str) -> bool:
         return False
     # Interrogative form: the message ends with "?" OR starts with an
     # interrogative word (the two branches of the ticket's stage 1).
-    is_interrogative = m.endswith("?") or _INTERROGATIVE_RE.match(m) is not None
-    if not is_interrogative:
+    if not is_interrogative(m):
         return False
-    # The imperative scan runs over the WHOLE message and WINS over the
-    # interrogative form: "Is it tall enough for a 12 mm shelf? Make it
-    # 15." → not a candidate (the imperative is present).
-    if _IMPERATIVE_RE.search(m) is not None:
+    if _MULTIWORD_IMPERATIVE_RE.search(m) is not None:
         return False
-    return _MULTIWORD_IMPERATIVE_RE.search(m) is None
+    if _IMPERATIVE_RE.search(m) is None:
+        return True
+    # An imperative hit is present. The comparison-question carve-out:
+    # strip every lexicon-word-"than" comparison form, then run the
+    # single union scan on the stripped text. The scan is clean iff
+    # every imperative hit was a comparison form ("is it taller than
+    # the shelf?"); any base word ("make it taller than 30 mm"), any
+    # lexicon hit not in comparison form ("Can it be 20 mm wider?"), or
+    # any multi-word form ("half the size") survives the removal and
+    # sends the message to the design loop.
+    return _IMPERATIVE_RE.search(_COMPARISON_FORM_RE.sub("", m)) is None
 
 
 # ---------------------------------------------------------------------------

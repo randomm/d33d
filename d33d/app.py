@@ -1103,6 +1103,13 @@ def create_app(
           #247). There is deliberately no persisted fallback and no
           client override: the gate enforces only the axes the current
           run's input confirmed, and a region edit confirms nothing.
+        - ``stated_axes`` = the SAME carry-forward merge helper's output
+          the chat and finalize routes use (issue #261), computed with
+          NO cues: the latest version's persisted ``stated_dims`` carried
+          unchanged (no release — a region edit is a scoped directive,
+          not a dimension statement). The new version row persists that
+          carried set; the gate input above is the only thing this run
+          confirms, and nothing confirms anything.
         - ``chat_history`` = the empty tuple — a region edit is a scoped
           directive, not a chat turn.
         - ``request`` = the instruction prefixed with the ``view_id`` and,
@@ -1159,6 +1166,20 @@ def create_app(
         # candidate.
         stated_dims: tuple[float, float, float] | None = None
 
+        # The carried per-axis set (issue #261): the SAME merge helper
+        # the chat and finalize routes use, computed with NO cues — the
+        # latest version's persisted ``stated_dims`` comes back unchanged
+        # (a region edit releases nothing), and the new version row
+        # persists it instead of today's NULL. The gate input stays
+        # ``None`` regardless — the merge output here feeds persistence
+        # only, never the gate.
+        from d33d.dimension_protocol import (
+            effective_stated_dims,
+            latest_stated_dims_dict,
+        )
+
+        carried_axes = effective_stated_dims(latest_stated_dims_dict(app.state.versions, project_id))
+
         # The composed request text: the instruction prefixed with the view
         # id, and with the resolved module_ids only when the pick resolved
         # named modules (a streamed unnamed STL sends an empty list — the
@@ -1185,6 +1206,7 @@ def create_app(
             chat_history=(),
             photo=photo,
             request_text=request_text,
+            stated_axes=carried_axes,
         )
         # Register the event source SYNCHRONOUSLY before the 202 response
         # (else the client's GET /api/stream/{id} sees no active source).

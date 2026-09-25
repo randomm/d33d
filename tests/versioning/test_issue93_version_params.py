@@ -972,14 +972,13 @@ def test_latest_version_stated_dims_omitted_axes_yields_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_chat_follow_up_cueless_message_abstains(app_with_versions):
-    """FOLLOW-UP TURN (issue #247): a project that HAS a version whose
-    persisted ``stated_dims`` column carries a full W/D/H triple — a
-    follow-up message that states no dimensions confirms nothing, so the
-    gate ABSTAINS: the loop seam captures ``None`` (no carry-forward of
-    confirmed dimensions across turns — the operator decision that
-    superseded the persisted-set fallback; carry-forward is a separate
-    product decision)."""
+def test_chat_follow_up_cueless_message_carries_forward(app_with_versions):
+    """FOLLOW-UP TURN (issue #247/#261): a project that HAS a version
+    whose persisted ``stated_dims`` column carries a full W/D/H triple —
+    a follow-up message that states no dimensions CARRIES THE SET
+    FORWARD: the loop seam captures the persisted triple (issue #261's
+    carry-forward supersedes issue #247's no-carry-forward abstain;
+    only a relative/global cue releases an axis)."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -1021,10 +1020,10 @@ def test_chat_follow_up_cueless_message_abstains(app_with_versions):
 
     captured_turn2: dict = {}
     r2 = run_async(app_with_versions, _call)
-    # The cueless follow-up confirms nothing — None (abstain), not the
-    # stale persisted triple and never (0,0,0).
+    # The cueless follow-up carries the persisted triple forward
+    # (issue #261) — never (0,0,0).
     assert r2.status_code == 202, r2.text
-    assert captured_turn2["stated_dims"] is None
+    assert captured_turn2["stated_dims"] == (20.0, 20.0, 20.0)
     assert captured_turn2["stated_dims"] != (0.0, 0.0, 0.0)
 
 

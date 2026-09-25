@@ -37,10 +37,14 @@ from d33d.dimension_protocol import (
     DIMENSION_AXES,
     FDM_CLEARANCE_TABLE,
     DimensionClarification,
+    effective_stated_dims,
     emit_named_params,
+    latest_stated_dims_dict,
+    offer_tier_signals,
     require_dimensions_confirmed,
     resolution_questions,
     resolve_tolerance_mm,
+    user_quoted_unmapped_mm,
 )
 
 # ---------------------------------------------------------------------------
@@ -735,3 +739,246 @@ def test_numeric_string_ai_suggested_surfaces() -> None:
         ai_suggested={"W": 40.0, "D": "30", "H": 20},
     )
     assert c.suggested == {"W": 40.0, "D": 30.0, "H": 20.0}
+
+
+# ---------------------------------------------------------------------------
+# Issue #261 (task-b): the carry-forward merge helper and the tier-2
+# user-quoted helper (the two pure functions the three call sites share)
+# ---------------------------------------------------------------------------
+
+
+class TestEffectiveStatedDims:
+    """effective_stated_dims — the carry-forward merge (issue #261's
+    operator decision: ONE function, THREE call sites)."""
+
+    def test_cueless_carries_forward(self):
+        """No cues (the region-edit call site) → the carried set comes
+        back unchanged (a fresh project → {})."""
+        assert effective_stated_dims({"H": 12.0}) == {"H": 12.0}
+        assert effective_stated_dims({"W": 12.0, "D": 8.0, "H": 5.0}) == {
+            "W": 12.0,
+            "D": 8.0,
+            "H": 5.0,
+        }
+        assert effective_stated_dims(None) == {}
+        assert effective_stated_dims({"H": 12.0}, None) == {"H": 12.0}
+
+    def test_relative_cue_releases_its_axis_only(self):
+        """make it taller (relative H) on {H: 12, W: 30} → W carries,
+        H is released (never rendered stated)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it taller")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
+    def test_global_cue_releases_all_axes(self):
+        """make it bigger (global) on a full set → {} (the gate
+        abstains entirely)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it bigger")
+        assert effective_stated_dims(
+            {"W": 12.0, "D": 8.0, "H": 5.0}, cues
+        ) == {}
+
+    def test_absolute_cue_overrides_carried_value(self):
+        """H: 20 (explicit) on {H: 12} → {H: 20} (the cue OVERRIDES
+        the carried value — precedence)."""
+        assert effective_stated_dims({"H": 12.0}, {"H": 20.0}) == {"H": 20.0}
+
+    def test_absolute_cue_adds_uncarried_axis(self):
+        """make it 12 mm tall (lexicon absolute H) on a fresh project →
+        {H: 12} (the cue sets the axis)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 12 mm tall")
+        assert effective_stated_dims(None, cues) == {"H": 12.0}
+
+    def test_lexicon_absolute_and_relative_compose(self):
+        """make it 12 mm tall, 40 mm wide — the absolute cues SET H
+        and W; uncued D is absent (fresh project)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 12 mm tall, 40 mm wide")
+        assert effective_stated_dims(None, cues) == {"H": 12.0, "W": 40.0}
+
+    def test_explicit_set_overrides_and_carries(self):
+        """A caller's explicit set (the body field / protocol extraction)
+        is an ABSOLUTE OVERRIDING statement with no release semantics:
+        {W: 10} on {H: 12} → {W: 10, H: 12} (the cue sets W, the
+        uncued H carries forward — the explicit set does not release
+        axes it does not name)."""
+        assert effective_stated_dims({"H": 12.0}, {"W": 10.0}) == {
+            "H": 12.0,
+            "W": 10.0,
+        }
+
+    def test_non_positive_and_bad_values_are_dropped(self):
+        """A carried 0.0 / negative axis (the unconfirmed marker) is not
+        carried (the axes_to_gate_triple cleaning rule)."""
+        assert effective_stated_dims({"H": 0.0, "W": -5.0, "D": 8.0}) == {
+            "D": 8.0
+        }
+
+    def test_cues_with_no_absolute_no_relative_no_global(self):
+        """A lexicon classification of a cueless message (add a hole)
+        carries the set forward unchanged."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("add a hole")
+        assert effective_stated_dims({"H": 12.0}, cues) == {"H": 12.0}
+
+    def test_missed_relative_cue_word_releases_axis(self):
+        """The #247 regression class re-entering through the vocabulary
+        the closed set does not cover: 'increase the height' carries no
+        lexicon word, yet against a carried {H: 12} the gate must NOT
+        enforce the old H — the round-2 release fallback emits a relative
+        H cue so the carried axis is released, not enforced."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("increase the height")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
+    def test_foreign_unit_message_carries_forward(self):
+        """'make it 5 cm tall' abstains (no cm/in conversion) — the
+        carried H is neither overridden with the 10×-wrong 5.0 nor
+        released (no relative cue): the gate keeps the carried value,
+        which is the honest outcome for a statement the system cannot
+        measure."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 5 cm tall")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {
+            "H": 12.0,
+            "W": 30.0,
+        }
+
+    def test_percent_relative_releases(self):
+        """'make it 20% taller' releases H (the 20 is a percentage, not
+        a mm value — it never becomes H=20)."""
+        from d33d.axis_lexicon import classify
+
+        cues = classify("make it 20% taller")
+        assert effective_stated_dims({"H": 12.0, "W": 30.0}, cues) == {"W": 30.0}
+
+
+class TestUserQuotedUnmappedMm:
+    """user_quoted_unmapped_mm — the tier-2 helper (issue #261):
+    the full-history scan of explicit-mm numbers no axis was ever
+    assigned to."""
+
+    def test_unmapped_lexicon_and_protocol_cues(self):
+        """a 20 mm wide thing, lift it 12 mm → {12.0} (20 is mapped
+        to W by the lexicon; 12's clause holds no axis word)."""
+        assert user_quoted_unmapped_mm(
+            ["a 20 mm wide thing, lift it 12 mm"]
+        ) == {12.0}
+
+    def test_mapped_numbers_are_excluded(self):
+        """12 mm tall, 20 mm wide → {} (both mapped)."""
+        assert user_quoted_unmapped_mm(["12 mm tall, 20 mm wide"]) == set()
+
+    def test_bare_numbers_never_count(self):
+        """A bare number (no mm unit) is never eligible."""
+        assert user_quoted_unmapped_mm(["spacer_height 12"]) == set()
+
+    def test_no_unit_conversion(self):
+        """cm/in numbers are not mm numbers — never eligible."""
+        assert user_quoted_unmapped_mm(["1.5 cm wide"]) == set()
+
+    def test_unions_across_full_history(self):
+        """The scan covers ALL user messages (not just this turn): a
+        number from an earlier message is eligible on a later turn."""
+        assert user_quoted_unmapped_mm(
+            ["make a 15 mm shelf", "add a fillet"]
+        ) == {15.0}
+
+    def test_protocol_cue_consumed_number_is_mapped(self):
+        """W: 42 mm — the number an explicit protocol cue consumed is
+        mapped (never eligible), even though the lexicon has no W.
+        (The axis-prefixed form is the protocol's cue, not the
+        lexicon's.)"""
+        assert user_quoted_unmapped_mm(["W: 42 mm"]) == set()
+
+    def test_empty_history_is_empty(self):
+        assert user_quoted_unmapped_mm([]) == set()
+        assert user_quoted_unmapped_mm(("",)) == set()
+
+    def test_bare_axis_letter_followed_by_number_not_consumed(self):
+        """'H is the axis you want, 12 mm' — the axis letter with NO
+        ``:``/``=`` marker and NO mm unit immediately after it does NOT
+        consume the 12 (issue #261 round 2: the old ``[:=]?`` + optional
+        ``mm`` shape let a stray letter followed by any number suppress a
+        tier-2 offer — an offer miss, not a wrong offer)."""
+        assert user_quoted_unmapped_mm(["H is the axis you want, 12 mm"]) == {12.0}
+
+    def test_marker_form_still_consumes(self):
+        """'H = 20 mm' and 'W: 42' — the ``:``/``=`` marker forms
+        consume the number (unchanged behavior)."""
+        assert user_quoted_unmapped_mm(["H = 20 mm"]) == set()
+        assert user_quoted_unmapped_mm(["W: 42"]) == set()
+
+    def test_axis_letter_no_marker_not_consumed(self):
+        """'H 20 mm' (no ``:``/``=`` marker) — the tightened
+        ``_mm_cue_values`` regex does NOT match this shape (issue #261
+        round 2: a bare axis letter followed by a number is ambiguous —
+        "H is the axis you want, 12 mm somewhere" would otherwise mark
+        the 12 as consumed). The ``_extract_stated`` pass still reads
+        this form for the gate, but the offer helper errs on the side of
+        offering (a missed offer is cheaper than a wrong one)."""
+        assert user_quoted_unmapped_mm(["H 20 mm"]) == {20.0}
+
+    def test_history_scan_is_capped_at_last_50(self):
+        """The tier-2 scan covers at most the LAST
+        ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) user messages: a number
+        quoted in an older message does not make it eligible."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        assert QUOTED_UNMAPPED_MAX_MESSAGES == 50
+        old = "a 12 mm spacer"
+        recent = [f"filler message {i}" for i in range(50)]
+        # The old message sits OUTSIDE the last-50 window → not eligible.
+        assert user_quoted_unmapped_mm([old, *recent]) == set()
+        # The same message INSIDE the window → eligible.
+        assert user_quoted_unmapped_mm([*recent, old]) == {12.0}
+
+
+class TestOfferTierSignals:
+    """offer_tier_signals — the ONE offer-signal helper (issue #261 fix
+    batch): (released_axes, quoted_mm) for one turn, computed the same
+    way on the chat and the finalize seams (tier 2 sees the chat
+    history, not just the finalize message)."""
+
+    def test_tier1_released_axes(self):
+        """A relative cue on the current message releases its axis."""
+        released, quoted = offer_tier_signals("make it taller")
+        assert released == {"H"}
+        assert quoted == set()
+
+    def test_tier2_quoted_from_history(self):
+        """An unmapped number quoted in an EARLIER message (the chat
+        history) is eligible — this is what makes tier 2 behave the
+        same on finalize as on chat."""
+        released, quoted = offer_tier_signals(
+            "finalize the part", ["a spacer to lift a shelf 12 mm"]
+        )
+        assert released is None
+        assert quoted == {12.0}
+
+    def test_tier2_mapped_number_not_eligible(self):
+        """A number the lexicon mapped to an axis in the history is not
+        eligible (the 20 in "a 20 mm wide thing" is mapped to W)."""
+        released, quoted = offer_tier_signals(
+            "finalize", ["a 20 mm wide thing, lift it 12 mm"]
+        )
+        assert quoted == {12.0}
+
+    def test_global_cue_releases_all(self):
+        released, quoted = offer_tier_signals("make it bigger")
+        assert released == {"W", "D", "H"}
+        assert quoted == set()
+
+    def test_no_cues(self):
+        released, quoted = offer_tier_signals("make a part")
+        assert released is None
+        assert quoted == set()

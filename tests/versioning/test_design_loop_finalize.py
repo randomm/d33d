@@ -3036,3 +3036,64 @@ def test_render_reader_ast_with_reverted_field_name_goes_red():
         "the #89 defect (render_artifact_path) was not caught by the AST "
         "check — the verification layer is not catching the misspelling"
     )
+
+
+# ---------------------------------------------------------------------------
+# (7) The finalize seam's offer tier 2 (issue #261 fix batch)
+#
+# The finalize route's ``_resolve_offer`` call passes the project's chat
+# history (the body's ``chat_history``), so a tier-2 user-quoted unmapped
+# number from an EARLIER message ("lift it 12 mm") is eligible on finalize
+# exactly as on the chat route — not only when the number sits in the
+# finalize message itself. The finalize message here is a plain
+# instruction ("finalize the part" — no cue, no number); the 12 comes
+# from the history.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_tier2_offer_from_chat_history(app_with_versions):
+    """Finalize with an earlier user message quoting an unmapped number
+    ("lift it 12 mm") and a passing loop whose assumed param's value is
+    12 → the done-offer resolution names that param with the tier-2
+    sentence (the chat-history scan, not the finalize message, supplies
+    the 12)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda: _StubResult(
+            "pass", {"lift_gap": 12.0}
+        )
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={
+                "name": "the bracket",
+                "message": "finalize the part",
+                "chat_history": ["lift it 12 mm"],
+            },
+        )
+        assert r.status_code == 201, r.text
+        svc = app_with_versions.state.versions
+        pending = svc.get_pending_offer(pid)
+        latest = svc.latest_version(pid)
+        return pending, latest
+
+    pending, latest = run_async(app_with_versions, _call)
+    assert pending is not None, "no pending offer was recorded on finalize"
+    assert pending["param"] == "lift_gap", pending
+    # Tier 2 won: a param whose value equals the user-quoted unmapped
+    # number from the chat history ("lift it 12 mm" — the finalize
+    # message itself held no number) is the tier-2 candidate, and its
+    # sentence is the tier-2 template with the mm()-formatted value.
+    from d33d.confirm_offer import offer_entry, tier_2_sentence
+
+    entry = offer_entry(
+        dict(latest["params"]), latest["param_meta"], "lift_gap"
+    )
+    assert entry is not None
+    # The tier-2 sentence the resolve seam would have built for this
+    # entry (the wire sentence is persisted on the pending-offer state
+    # in the chat adapter; the finalize seam records the param +
+    # version, and the sentence is rendered from the same tier-2
+    # template the chat route renders — verify the template output):
+    assert tier_2_sentence(entry) == "You said 12.0\u202fmm — I used it for lift_gap. Right?"

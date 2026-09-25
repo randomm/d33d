@@ -100,6 +100,80 @@ class TestStage1Detector:
         assert not is_candidate_question("")
         assert not is_candidate_question("   ")
 
+    def test_relative_cue_wider_is_not_a_candidate(self) -> None:
+        # #261: "wider" is a relative cue in the lexicon and is now part
+        # of _IMPERATIVE_RE. "Can it be 20 mm wider?" is a change request,
+        # not a question — stage 1 rejects it.
+        assert not is_candidate_question("Can it be 20 mm wider?")
+
+    def test_relative_cue_taller_is_not_a_candidate(self) -> None:
+        assert not is_candidate_question("Can it be 20 mm taller?")
+
+    def test_relative_cue_deeper_is_not_a_candidate(self) -> None:
+        assert not is_candidate_question("make it deeper")
+
+    def test_global_cue_bigger_is_not_a_candidate(self) -> None:
+        assert not is_candidate_question("can it be bigger?")
+
+    def test_global_cue_half_the_size_is_not_a_candidate(self) -> None:
+        assert not is_candidate_question("resize to half the size")
+
+    def test_absolute_word_tall_is_still_a_candidate(self) -> None:
+        # #261: "tall" is an ABSOLUTE word, not relative — it must NOT be
+        # in _IMPERATIVE_RE. "how tall is it?" remains a candidate.
+        assert is_candidate_question("how tall is it?")
+        assert is_candidate_question("How tall is it now?")
+
+    def test_absolute_word_wide_is_still_a_candidate(self) -> None:
+        assert is_candidate_question("how wide is it?")
+
+    def test_absolute_word_height_is_still_a_candidate(self) -> None:
+        assert is_candidate_question("What is the height?")
+
+    def test_comparison_question_stays_a_candidate(self) -> None:
+        """Issue #261 fix batch: an interrogative message whose only
+        lexicon imperative hits are immediately followed by "than" is a
+        comparison question, not a change request — it stays a
+        candidate (stage 2 answers or classifies it; no wasted render).
+        The carve-out is lexicon-only: base imperative words (make,
+        set, change, …) and the multi-word global forms ("half the
+        size") still win and send the message to the loop."""
+        assert is_candidate_question("is it taller than the shelf?")
+        assert is_candidate_question("is it bigger than 20 mm?")
+
+    def test_change_request_with_relative_cue_is_not_a_candidate(self) -> None:
+        """"Can it be 20 mm wider?" is a change request — the relative
+        cue is NOT in comparison form (no "than"), so it is not a
+        candidate."""
+        assert not is_candidate_question("can it be 20 mm wider?")
+
+    def test_imperative_with_comparison_form_is_not_a_candidate(self) -> None:
+        """"make it taller than 30 mm" — the base imperative word wins
+        even though the relative word is in comparison form (the
+        carve-out requires EVERY lexicon hit to be followed by "than",
+        and base words are never carved out)."""
+        assert not is_candidate_question("make it taller than 30 mm")
+
+    def test_comparison_question_with_base_imperative_not_a_candidate(self) -> None:
+        """"is it wider than 30 mm, can we change it?" — the base
+        imperative word "change" is present: the carve-out only covers
+        lexicon words, so the imperative wins."""
+        assert not is_candidate_question("is it wider than 30 mm, can we change it?")
+
+    def test_multiword_global_form_has_no_comparison_carveout(self) -> None:
+        """The multi-word global forms ("half the size", …) have no
+        "than" carve-out: "is it half the size of the other one?" stays
+        non-candidate (accepted trade-off: distinguishing question-form
+        from change-form requires intent classification, which stage 1
+        is not). Pinned so a future change is a conscious decision."""
+        assert not is_candidate_question("is it half the size of the other one?")
+
+    def test_two_lexicon_hits_only_one_in_comparison_form(self) -> None:
+        """"is it wider than 30 mm or taller than 20 mm" — both lexicon
+        hits are in comparison form (each immediately followed by
+        "than"), so the message stays a candidate."""
+        assert is_candidate_question("is it wider than 30 mm or taller than 20 mm?")
+
 
 # ---------------------------------------------------------------------------
 # Stage 2 — the number guard (pure function)
@@ -340,11 +414,12 @@ class TestRouteChatMessage:
     def test_kind_request_returns_none_goes_to_loop(self) -> None:
         # #260: kind "request" → the design loop, exactly as a
         # non-question message (the model says the message asks for a
-        # change).
+        # change). The message must pass stage 1 (no imperative cue) so
+        # it reaches stage 2.
         latest = _latest({"H": 12.0})
         edge = self._answer_edge('{"kind": "request", "answer": ""}')
         result = run_async_safe(
-            route_chat_message("Can it be 20 mm wider?", latest, edge)
+            route_chat_message("What is the material?", latest, edge)
         )
         assert result is None
 
@@ -957,7 +1032,7 @@ def test_kind_request_goes_to_loop_exactly_as_non_question(app_with_versions) ->
             app_with_versions,
             client,
             pid,
-            {"message": "Can it be 20 mm wider?", "chat_history": []},
+            {"message": "What is the material?", "chat_history": []},
             answer_edge=_request_edge,
         )
         versions = app_with_versions.state.versions.list_versions(pid)
@@ -1136,7 +1211,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "Can it be 20 mm wider?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result is None  # request → the design loop

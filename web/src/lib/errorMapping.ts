@@ -129,11 +129,20 @@ export function parseEnvelopeGateDetail(
  * value is parsed from that string, the limit is the API's per-axis
  * value. When the raw string is absent (the current frame shape carries
  * the reason, not the gate output), NO number is rendered — it is not
- * invented. */
+ * invented.
+ *
+ * `carriedAxes` (the frame's `carried_axes`, present only on a
+ * bbox-gate failure) names the axes the gate enforced from the user's
+ * own earlier statements (issue #261 fix batch): a bbox failure whose
+ * enforced set is non-empty gets the carried-axis sentence (the held
+ * value, formatted by `mm`, in the message) instead of the generic
+ * "came out a different size" — the gate holds the user's earlier
+ * number, and the copy says which one and how to override it. */
 export function displayDesignLoopError(
   data: {
     message?: string;
     reason?: unknown;
+    carried_axes?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -141,6 +150,27 @@ export function displayDesignLoopError(
   const reason = typeof data.reason === "string" ? data.reason : undefined;
   if (reason !== undefined) {
     const mapped = (copy.failure.reasons as Record<string, string>)[reason];
+    let message = mapped ?? UNKNOWN_REASON_COPY;
+    // The carried-axis variant: the frame's `carried_axes` is the set the
+    // gate enforced (the user's earlier statements, held by the carry-
+    // forward merge). A bbox failure with at least one enforced axis says
+    // which value was held, in the axis's own words — the value is the
+    // user's own number, safe to render; `mm` decides the formatting.
+    if (reason === "bbox_out_of_tolerance" && typeof data.carried_axes === "object" && data.carried_axes !== null) {
+      const carried = data.carried_axes as Record<string, unknown>;
+      const axes: Array<[string, number]> = [
+        ["W", carried.W],
+        ["D", carried.D],
+        ["H", carried.H],
+      ]
+        .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
+        .sort((a, b) => b[1] - a[1]);
+      if (axes.length > 0) {
+        const axisLabels: Record<string, string> = { W: "width", D: "depth", H: "height" };
+        const label = axes.map(([a]) => axisLabels[a]).join(" and ");
+        message = copy.failure.bboxCarried(label, axes[0][1]);
+      }
+    }
     let detail = reason;
     let envelope: DisplayError["envelope"];
     if (reason === "bbox_out_of_tolerance" && envelopeLimits !== undefined) {
@@ -153,7 +183,7 @@ export function displayDesignLoopError(
       }
     }
     return {
-      message: mapped ?? UNKNOWN_REASON_COPY,
+      message,
       detail,
       retryable: true,
       reason,

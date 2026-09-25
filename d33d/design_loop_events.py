@@ -30,7 +30,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
-import json
 import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -496,6 +495,38 @@ def _structured_reason(result: Any) -> str | None:
     return None
 
 
+def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
+    """The axes the bbox gate ENFORCED on this turn (the caller's
+    per-axis set, ``{"H": 12.0, ...}`` — the carried-plus-cued effective
+    set, never just "cued this turn"), or ``None`` when the failing gate
+    is not the bbox gate (the field is then omitted — omit-not-null, the
+    frame policy).
+
+    Issue #261 fix batch: with ``carried_axes`` on the terminal error
+    frame, the SPA's failure copy can distinguish "the axis the user
+    stated earlier was held, and the candidate missed it" (carried) from
+    a value cued this turn — e.g. "raise it" enforces the carried H and
+    the failure turn now names the held value instead of the generic
+    "came out a different size" sentence.
+    """
+    reason = getattr(result, "failure_reason", None)
+    if reason != "bbox_out_of_tolerance":
+        return None
+    if not isinstance(gate_axes, dict) or not gate_axes:
+        return None
+    out: dict[str, float] = {}
+    for axis, value in gate_axes.items():
+        if isinstance(value, bool):  # bool is a subclass of int — exclude
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            out[str(axis)] = f
+    return out or None
+
+
 def _loop_takes_app(run_loop: Any) -> bool:
     """The injected design-loop seam's signature check (production
     ``_build_production_design_loop`` takes ``(app, **kwargs)``; test
@@ -613,6 +644,15 @@ def _version_confirm_hints(result: Any) -> tuple[str | None, str | None]:
     return first, sentence
 
 
+def _value_matches_quoted(entry: dict[str, Any], quoted: set[float]) -> bool:
+    """True iff the entry's value is a number (not bool) and equals any
+    of the quoted values within 1e-6 tolerance (issue #261 tier 2)."""
+    value = entry.get("value")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    return any(abs(float(value) - n) <= 1e-6 for n in quoted)
+
+
 async def _resolve_offer(
     app: Any,
     project_id: int,
@@ -620,6 +660,8 @@ async def _resolve_offer(
     result: Any,
     prev_version: Any,
     prev_confirmed: dict[str, Any] | None = None,
+    user_message: str = "",
+    chat_history: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """Resolve the pending offer for a passing design pass (issue #250).
 
@@ -689,7 +731,22 @@ async def _resolve_offer(
         if name in prev_params and prev_params[name] != value
     }
     confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
-    name = select_offer_candidate(params, meta, confirmed, changed, confirm_first)
+    # Issue #261's offer tiering — the two signals from ONE helper
+    # (``offer_tier_signals`` — the offer's seam): TIER 1 (a released-
+    # axis param) needs THIS turn's lexicon classification of the user's
+    # message (relative cues release their axis, global cues release
+    # all); TIER 2 (a user-quoted unmapped number) needs the recent-
+    # history scan over (*chat_history, user_message). The finalize seam
+    # passes the project's chat history here too, so tier 2 behaves the
+    # same on finalize as on chat (a number quoted in an EARLIER message
+    # is eligible, not only when it sits in the finalize message).
+    from d33d.dimension_protocol import offer_tier_signals
+
+    released_axes, quoted = offer_tier_signals(user_message, chat_history)
+    name = select_offer_candidate(
+        params, meta, confirmed, changed, confirm_first,
+        released_axes=released_axes, user_quoted_mm=quoted,
+    )
     if name is None:
         versions.set_pending_offer(project_id, None)
         return None
@@ -701,7 +758,24 @@ async def _resolve_offer(
         params, new_version["bbox"], new_version["stated_dims"], meta,
         new_version["confirmed_params"],
     )
-    sentence = offer_sentence(entry, confirm_sentence_raw, block)
+    # The sentence: the tier that WON picks its template (issue #261 —
+    # tier 1 "You asked for {cue}…", tier 2 "You said {value}…"); tier 3
+    # keeps the #250 machinery (the model's ``confirm_sentence`` when the
+    # number guard passes, else the deterministic template).
+    if released_axes and entry.get("axis") in released_axes:
+        from d33d.confirm_offer import tier_1_cue, tier_1_sentence
+
+        cue = tier_1_cue(user_message)
+        if cue is None:
+            sentence = offer_sentence(entry, confirm_sentence_raw, block)
+        else:
+            sentence = tier_1_sentence(entry, cue)
+    elif quoted and _value_matches_quoted(entry, quoted):
+        from d33d.confirm_offer import tier_2_sentence
+
+        sentence = tier_2_sentence(entry)
+    else:
+        sentence = offer_sentence(entry, confirm_sentence_raw, block)
     versions.set_pending_offer(project_id, {"version_id": version_id, "param": name})
     return {"param": name, "sentence": sentence}
 
@@ -865,7 +939,7 @@ async def _resolve_version_create(
     # lack its suffix, but the version is still created.
     try:
         existing_names = {v["name"] for v in app.state.versions.list_versions(project_id)}
-    except Exception:  # noqa: BLE001 — resilience: name may lack suffix, version still created
+    except Exception:
         logger.warning(
             "list_versions failed for project %s; creating the version "
             "without a collision baseline (the name may lack a suffix)",
@@ -961,12 +1035,12 @@ async def run_design_loop_with_events(
     than fabricates", which IS abstain semantics — the old hard-fail
     contradicted it.
     """
-    #: The per-view progress frames (``render-view-*``) land on this queue
-    #: as the drain thread enqueues them. The generator is the sole
-    #: consumer, so an ``asyncio.Queue`` needs no locking; frames are
-    #: yielded while the render is still running (see the ``asyncio.wait``
-    #: below), not after it completes.
-    _frame_queue: "asyncio.Queue[tuple[str, dict[str, Any]] | None]" = asyncio.Queue()
+    # The per-view progress frames (``render-view-*``) land on this queue
+    # as the drain thread enqueues them. The generator is the sole
+    # consumer, so an ``asyncio.Queue`` needs no locking; frames are
+    # yielded while the render is still running (see the ``asyncio.wait``
+    # below), not after it completes.
+    _frame_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
 
     run_loop = getattr(app.state, "run_design_loop", None)
     if run_loop is None:
@@ -1347,8 +1421,10 @@ async def run_design_loop_with_events(
                 result,
                 prev_version,
                 prev_confirmed=kwargs["state_confirmed"],
+                user_message=user_message,
+                chat_history=chat_history,
             )
-        except Exception:  # noqa: BLE001 — the offer must never kill the pass
+        except Exception:
             logger.exception(
                 "offer resolution failed for project %s — emitting the "
                 "pass without an offer",
@@ -1397,6 +1473,15 @@ async def run_design_loop_with_events(
         reason = _structured_reason(result)
         if reason is not None:
             error_data["reason"] = reason
+        # The gate's per-axis enforced set (issue #261 fix batch): lets
+        # the failure copy name the value that was HELD when a carried
+        # axis fails ("I kept the height you set earlier (12.0 mm)").
+        # Omitted for every non-bbox failure and when the gate set is
+        # empty (omit-not-null). The values are the user's own stated
+        # numbers — safe to render with the SPA's ``mm()`` formatter.
+        carried = _carried_axes(result, kwargs.get("stated_axes"))
+        if carried is not None:
+            error_data["carried_axes"] = carried
         yield ("error", error_data)
 
 

@@ -21,6 +21,7 @@ git identity.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,12 +31,21 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
+
+logger = logging.getLogger(__name__)
+
+# Issue #261 lexicon feed — the carry-forward merge's cues input.
+from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.design_loop_events import (
     axes_to_gate_triple,
     photo_data_uri,
     run_design_loop_with_events,
 )
-from d33d.dimension_protocol import stated_axes_from_message
+from d33d.dimension_protocol import (
+    effective_stated_dims,
+    latest_stated_dims_dict,
+    stated_axes_from_message,
+)
 from d33d.question_answer import route_chat_message
 
 # ---------------------------------------------------------------------------
@@ -436,7 +446,7 @@ def create_projects_router() -> APIRouter:
         # to the existing routes exactly as today.
         try:
             offer_route = await _confirm_offer_route(app, project_id, body.message)
-        except Exception:  # noqa: BLE001 — degrade to the normal route, never 500
+        except Exception:
             inflight.discard(project_id)
             raise
         if offer_route is not None:
@@ -510,9 +520,18 @@ def create_projects_router() -> APIRouter:
                 answer_edge=getattr(app.state, "answer_question", None),
             )
         except Exception:
-            # The pre-route must never take the project down with it:
-            # release the claim and degrade to the design loop (exactly
-            # as an un-wired answer edge would).
+            # The pre-route is best-effort but its failure is fatal to
+            # THIS request (re-raised below): release the claim so the
+            # next attempt can start clean, and log the failure (the
+            # request errors — there is no design-loop fallback for a
+            # pre-route crash). The warning carries lengths only (no
+            # message text — no PII in logs).
+            logger.warning(
+                "question-answer pre-route failed; the request errors "
+                "(inflight flag released, len(message)=%d)",
+                len(body.message),
+                exc_info=True,
+            )
             inflight.discard(project_id)
             raise
         if answer_route is not None:
@@ -533,17 +552,53 @@ def create_projects_router() -> APIRouter:
         # pipeline — partial statements count for the axes they state).
         # A statement that names no axis is ``{}`` → the version row
         # persists NULL (abstain, never a fabricated axis row).
-        per_axis_stated: dict[str, float] = {}
+        # The per-axis stated evidence (issue #246/#261) — the SINGLE
+        # value the carry-forward merge helper (``effective_stated_dims``)
+        # feeds BOTH the gate (``axes_to_gate_triple``) and the new
+        # version row's persisted ``stated_dims`` (never two divergent
+        # copies; the raw ``stated_axes_from_message`` result is not used
+        # directly here). The effective set starts as the latest
+        # version's persisted ``stated_dims`` and is adjusted by this
+        # turn's cues: the body's explicit ``stated_dims`` field OVERRIDES
+        # (precedence: body > explicit protocol cues > lexicon — no
+        # release semantics), else the protocol's explicit cues override,
+        # else the closed axis lexicon classifies the message (relative
+        # cues release their axis, global cues release all, absolute cues
+        # set — uncued axes carry forward). A statement that yields no
+        # axis is ``{}`` → the version row persists NULL (never a
+        # fabricated axis row).
+        explicit_body: dict[str, float] | None = None
         if body.stated_dims is not None:
             _w, _d, _h = body.stated_dims
-            if _w > 0:  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
-                per_axis_stated["W"] = float(_w)
-            if _d > 0:
-                per_axis_stated["D"] = float(_d)
-            if _h > 0:
-                per_axis_stated["H"] = float(_h)
+            # ``> 0`` (never truthiness): 0 is the unconfirmed marker
+            explicit_body = {
+                axis: float(value)
+                for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
+                if value > 0
+            } or None
+        if explicit_body is not None:
+            per_axis_stated = effective_stated_dims(
+                latest_stated_dims_dict(app.state.versions, project_id), explicit_body
+            )
         else:
-            per_axis_stated = stated_axes_from_message(body.message, chat_history)
+            _latest = latest_stated_dims_dict(app.state.versions, project_id)
+            try:
+                _am = stated_axes_from_message(body.message, chat_history)
+                _cues_arg = _am if _am else _classify_axis_cues(body.message)
+            except Exception:
+                # The lexicon feed must never take the project down with
+                # it: a classification failure degrades to the carried
+                # set unchanged (no release, no override — the conservative
+                # outcome). The warning carries lengths only (no message
+                # text — no PII in logs).
+                logger.warning(
+                    "dimension cue resolution failed; carrying the latest "
+                    "stated set unchanged (len(message)=%d)",
+                    len(body.message),
+                    exc_info=True,
+                )
+                _cues_arg = None
+            per_axis_stated = effective_stated_dims(_latest, _cues_arg)
 
         stated = axes_to_gate_triple(per_axis_stated)
 

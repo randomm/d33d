@@ -257,6 +257,18 @@ export const failure = {
     actions: { retry: "Try again", keep: "Keep it anyway" },
   },
 
+  /** The carried-axis variant of the bbox-gate failure (issue #261 fix
+   *  batch): the failing axis was CARRIED from an earlier statement, not
+   *  cued this turn — the held value is named (formatted by `mm`) and the
+   *  user is told how to override it. A dedicated sibling of `reasons`
+   *  (NOT inside it): `reasons` is the closed reason-code → string map
+   *  that `exportErrorCopy` spreads and `displayDesignLoopError` looks up
+   *  by reason code; this is a parameterized sentence selected by
+   *  `carried_axes` presence, not a reason code. Rendered ONLY when the
+   *  frame's `carried_axes` carries an axis the gate enforced. */
+  bboxCarried: (label: string, heldMm: number): string =>
+    `I kept the ${label.toLowerCase()} you set earlier (${mm(heldMm)}). If you meant to change it, say how ${label.toLowerCase()} it should be.`,
+
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value and
    *  every render ErrorClass value has an entry. */
@@ -412,11 +424,27 @@ export const firstRun = {
  * label with the raw identifier as the mono fallback.
  */
 export const confirmOffer = {
-  /** The deterministic offer template (deck mirror of the server's
-   *  `offer_sentence` template — the server is the writer of the wire
-   *  string; see the module docstring above for the full wiring). */
+  /** Tier 3 — the deterministic offer template (deck mirror of the
+   *  server's `offer_sentence` template — the server is the writer of the
+   *  wire string; see the module docstring above for the full wiring).
+   *  `offer` is an alias kept for the #250 wiring. */
   offer: (value: string, label: string): string =>
     `I assumed ${value} for ${label}. Want it different?`,
+
+  /** Tier 1 (issue #261): the user's message carried a relative or global
+   *  cue ("taller", "bigger", "half the size") — the axis was released this
+   *  turn, the new value lands assumed, and this is the first thing offered.
+   *  `cue` is the first matching lexicon token, verbatim, lowercased; `value`
+   *  is pre-formatted (mm() for millimetre params). */
+  offerReleasedAxis: (cue: string, label: string, value: string): string =>
+    `You asked for ${cue} — I made ${label} ${value}. Right?`,
+
+  /** Tier 2 (issue #261): the user quoted an explicit mm number the lexicon
+   *  did not map to an axis ("a 20 mm wide thing, lift it 12 mm" — the 12).
+   *  The machine used that number for this parameter; confirm it. `value`
+   *  is the mm()-formatted string of the number as the user quoted it. */
+  offerUserNumber: (value: string, label: string): string =>
+    `You said ${value} — I used it for ${label}. Right?`,
 
   /** The short acknowledgement after the user accepts the offer (no design
    *  run, no new version — the value is recorded as confirmed). */
