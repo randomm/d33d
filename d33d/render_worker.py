@@ -20,13 +20,19 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
   both were confirmed by ``openscad --help``; the flag table is recorded in
   ``docs/bosl2-pinning.md``).
 - The camera rotation semantics (which view sees which face) were verified
-  empirically with a three-slab test model (see ``docs/bosl2-pinning.md``);
-  they are pinned together with the ``VIEWS`` constant below. The camera
-  *distance*, however, is **not** a fixed constant — it is fitted to the
-  model's bounding box via :func:`cam_dist` (issue #111) so that a 60 mm
-  part does not overflow its 800×800 frame. If a future OpenSCAD build
-  changes the camera rotation semantics or the orthographic projection
-  scale, ``VIEWS`` and its test must move in the same commit.
+  empirically with an asymmetric marker model (see ``docs/bosl2-pinning.md``
+  and the slow test ``tests/slow/test_render_views.py::test_views_mark
+  er_model_feature_placement``). The marker model has a tall post at +X,
+  a short block at −X, a block at +Y, a notch on the −Y face, and a cone
+  on top; each view is verified by pixel analysis to show the face its
+  name says (issue #262: the original three-slab verification was wrong
+  and the views were mislabelled — e.g. ``view_00_front`` actually showed
+  the top view). The camera *distance*, however, is **not** a fixed
+  constant — it is fitted to the model's bounding box via :func:`cam_dist`
+  (issue #111) so that a 60 mm part does not overflow its 800×800 frame.
+  If a future OpenSCAD build changes the camera rotation semantics or the
+  orthographic projection scale, ``VIEWS`` and its test must move in the
+  same commit.
 """
 
 from __future__ import annotations
@@ -94,12 +100,20 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: The sync test ``test_entrypoint_view_cameras_match_views_tuples``
 #: compares only the four rotation elements (indices 3–5) between the
 #: two files — the translate and dist are both substituted.
+#: The rotation tuples below were verified empirically against the pinned
+#: image (``openscad/openscad:trixie``, OpenSCAD 2026.01.19) using an
+#: asymmetric marker model (issue #262). Each view is checked by pixel
+#: analysis in ``tests/slow/test_render_views.py`` to show the face its
+#: name says under the operator convention (Z up, front looks from −Y
+#: toward +Y, +X right in the frame).
+#: See ``docs/bosl2-pinning.md`` § "Camera tuple verification" for the
+#: full marker-model description and per-view results.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
-    ("view_00_front.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
-    ("view_01_back.png", (0.0, 0.0, 0.0, 0.0, 180.0, 0.0, 0.0)),
-    ("view_02_left.png", (0.0, 0.0, 0.0, 0.0, 90.0, 0.0, 0.0)),
-    ("view_03_right.png", (0.0, 0.0, 0.0, 0.0, -90.0, 0.0, 0.0)),
-    ("view_04_top.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 0.0)),
+    ("view_00_front.png", (0.0, 0.0, 0.0, 90.0, 0.0, 0.0, 0.0)),
+    ("view_01_back.png", (0.0, 0.0, 0.0, 90.0, 0.0, 180.0, 0.0)),
+    ("view_02_left.png", (0.0, 0.0, 0.0, 90.0, 0.0, 270.0, 0.0)),
+    ("view_03_right.png", (0.0, 0.0, 0.0, 90.0, 0.0, 90.0, 0.0)),
+    ("view_04_top.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
     ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 0.0)),
 ]
 

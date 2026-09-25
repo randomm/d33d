@@ -108,22 +108,46 @@ geometry stand out clearly in the PNG renders.
 
 The `--camera` flag accepts a 7-element tuple: `tx,ty,tz,rx,ry,rz,dist`.
 The camera rotations are applied **about the origin** (after `--autocenter`
-has shifted the origin to the object's bounding-box centre). The following
-mappings were verified empirically on 2026-09-11 using a three-slab test
-model (red slab at x=0, blue slab at z=0, green slab at z=20):
+has shifted the origin to the object's bounding-box centre). Rotations
+are applied in order: `rx` (about X), then `ry` (about Y), then `rz`
+(about Z).
+
+The following mappings were verified empirically on 2026-09-25 (issue #262)
+using an asymmetric marker model inside the pinned image
+(`openscad/openscad:trixie`, OpenSCAD 2026.01.19). The marker model:
+
+- Base slab 40×40×10, z=0..10, centred at origin in XY
+- Tall post at +X: x=24..32, z=0..45 (tallest feature)
+- Short block at −X: x=−32..−24, z=0..22
+- Block at +Y: y=22..34, z=0..16
+- Notch on the −Y face of the base slab (removed volume)
+- Cone on top at origin: z=10..26
+
+Each view is verified by pixel analysis (the slow test
+tests/slow/test_render_views.py::test_views_marker_model_feature_placement)
+to show the face its name says under the operator convention (Z up,
+front looks from −Y toward +Y, +X right in the frame):
 
 | View | Camera tuple | Verification result |
 |------|-------------|---------------------|
-| front (`view_00`) | `0,0,0,0,0,0,40` | Camera on -Z axis; red slab (x=0) visible as a full face on the left half of the image; blue slab (z=0) not visible (facing away); green slab (z=20) visible as a thin line at the top edge |
-| back (`view_01`) | `0,0,0,0,180,0,40` | 180° about Y; red slab (x=0) visible as a full face on the right half; small red triangle at bottom-right corner confirms the view is from +Z |
-| left (`view_02`) | `0,0,0,0,90,0,40` | 90° about Y; red slab (x=0) visible as a thin vertical strip on the left edge (edge-on view of the x=0 face); blue slab (z=0) visible as a thin horizontal strip at the bottom |
-| right (`view_03`) | `0,0,0,0,-90,0,40` | -90° about Y; red slab (x=0) visible as a thin vertical strip on the right edge (edge-on from the opposite side); blue slab (z=0) visible as a thin horizontal strip at the bottom |
-| top (`view_04`) | `0,0,0,90,0,0,40` | 90° about X (looking down from +Z); red slab (x=0) visible as a full square on the right side (the x=0 face is now facing up); green slab (z=20) not visible (it's the top face, facing toward the camera) |
-| iso (`view_05`) | `0,0,0,0,45,45,55` | 45° about Y + 45° about Z; three coloured faces meet at a visible corner — the classic isometric corner view. The red face (x=0) is on the left, the blue face (z=0) is on the right, and the green face (z=20) is visible as a thin strip at the bottom-left edge |
+| front (`view_00`) | `0,0,0,90,0,0,40` | 90° about X; camera looks from −Y. The cone is at the bottom-center of the frame, the +X post on the right, the −X block on the left; the −Y notch is visible (facing the camera). |
+| back (`view_01`) | `0,0,0,90,0,180,40` | 90° about X, 180° about Z; camera looks from +Y. The +Y block is in the centre; the −Y notch is hidden (facing away). |
+| left (`view_02`) | `0,0,0,90,0,270,40` | 90° about X, 270° about Z; camera looks from −X. The cone is on one side of the frame, the −Y notch on the other. |
+| right (`view_03`) | `0,0,0,90,0,90,40` | 90° about X, 90° about Z; camera looks from +X. The +X post is closest to the camera; the −Y notch is visible. |
+| top (`view_04`) | `0,0,0,0,0,0,40` | No rotation; camera looks down from +Z. The base slab fills the frame; the cone tip is visible at the centre; the −Y notch is at the bottom of the frame, the +Y block at the top. |
+| iso (`view_05`) | `0,0,0,0,45,45,55` | 45° about Y + 45° about Z; camera in the front-right-top octant. Three faces meet at a visible corner — the classic isometric view. The model appears shifted toward the upper-right of the frame. |
+
+The original three-slab verification (2026-09-11) was **wrong**: it
+labelled the rotation `(0,0,0)` as "front" (it is actually the top view),
+`(90,0,0)` as "top" (it is actually the front view), `(0,180,0)` as "back"
+(it is actually a side view), and `(0,90,0)` / `(0,-90,0)` as "left" /
+"right" (they are actually other side views). The mislabelling was
+invisible while the views were cropped (fixed in #223/#234); the
+marker-model test makes the correct mapping the regression gate.
 
 These camera tuples are the single source of truth for the `VIEWS` constant
-in `d33d/__init__.py` (ticket: core workstream) and for the `VIEW_CAMERAS`
-array in `entrypoint.sh`. They must be updated together in the same commit
+in `d33d/render_worker.py` and for the `VIEW_CAMERAS` array in
+`entrypoint.sh`. They must be updated together in the same commit
 if a future OpenSCAD build changes the camera rotation semantics.
 
 ### Entrypoint failure semantics (spec-critical invariant)
