@@ -14,7 +14,10 @@ This guard scans:
   2. Every ``.scad`` file under ``tests/fixtures/scad/``.
 
 and fails on any ``v=`` or ``v =`` argument inside a ``cube(``, ``cylinder(``,
-or ``sphere(`` call. The scan is deliberately scoped to those three primitives
+or ``sphere(`` call, OR any vector ``center=[…]`` argument (issue #269
+follow-up: OpenSCAD's ``center`` is a single boolean — a vector is silently
+ignored, leaving the geometry uncentred, which is exactly the #269 bug
+revisited). The scan is deliberately scoped to those three primitives
 because the ``v`` parameter does not exist on them; other primitives (e.g.
 ``translate(``, ``rotate(``, ``scale(``) legitimately use other arguments.
 
@@ -40,6 +43,11 @@ FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "scad"
 # ensuring the preceding char is not part of a longer identifier, e.g.
 # ``$v=`` or ``xv=`` would NOT match).
 _V_ARG_RE = re.compile(r"\bv\s*=")
+
+# A vector ``center=[…]`` argument (issue #269 follow-up: OpenSCAD's
+# ``center`` is a single boolean; a vector is silently ignored, leaving
+# the geometry uncentred — the exact bug the #269 fix was for).
+_CENTER_VECTOR_RE = re.compile(r"\bcenter\s*=\s*\[")
 
 # A line that contains any of the three primitives with an open paren.
 _PRIM_LINE_RE = re.compile(r"\b(cube|cylinder|sphere)\s*\(")
@@ -68,7 +76,10 @@ _MARKER_FEATURES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     (
         "cone",
-        re.compile(r"cylinder\(h\s*=\s*16,\s*r1\s*=\s*8,\s*r2\s*=\s*0,\s*\$fn\s*=\s*36\)"),
+        re.compile(
+            r"translate\(\[0,\s*0,\s*10\]\)\s*cylinder\(h\s*=\s*16,\s*"
+            r"r1\s*=\s*8,\s*r2\s*=\s*0,\s*\$fn\s*=\s*36\)"
+        ),
     ),
     (
         "difference-block",
@@ -94,13 +105,24 @@ def _has_v_arg(line: str) -> bool:
     return _PRIM_LINE_RE.search(line) is not None
 
 
+def _has_center_vector(line: str) -> bool:
+    """True if ``line`` contains a vector ``center=[…]`` argument AND one
+    of the three primitives (``cube``, ``cylinder``, ``sphere``) is called
+    on that line (issue #269 follow-up: OpenSCAD's ``center`` is a single
+    boolean; a vector is silently ignored, leaving the geometry uncentred).
+    """
+    if _CENTER_VECTOR_RE.search(line) is None:
+        return False
+    return _PRIM_LINE_RE.search(line) is not None
+
+
 def _scan_source(text: str) -> list[tuple[int, str]]:
     """Return ``(line_no, line_text)`` pairs for every line in ``text``
-    that contains a ``v=`` argument on a ``cube``/``cylinder``/``sphere``
-    call."""
+    that contains a ``v=`` argument OR a vector ``center=[…]`` argument on
+    a ``cube``/``cylinder``/``sphere`` call."""
     hits: list[tuple[int, str]] = []
     for lineno, line in enumerate(text.splitlines(), start=1):
-        if _has_v_arg(line):
+        if _has_v_arg(line) or _has_center_vector(line):
             hits.append((lineno, line.rstrip()))
     return hits
 
@@ -144,27 +166,33 @@ def _marker_scad_body(text: str) -> str:
 
 def test_no_v_arg_in_slow_test_file() -> None:
     """The full text of ``tests/slow/test_render_views.py`` must contain no
-    ``v=`` argument on a ``cube``/``cylinder``/``sphere`` call (issue #269).
+    ``v=`` argument AND no vector ``center=[…]`` argument on a
+    ``cube``/``cylinder``/``sphere`` call (issue #269 + follow-up).
 
     The #234 framing fixtures at lines ~495/502 and the ``_marker_scad``
     body both previously used ``v=`` — the bug that made the marker model
-    degenerate. The operator decision (issue #269) is that NO line may keep
-    ``v=``: the slab must really be centred, and every feature and the notch
-    cutter must use ``translate``.
+    degenerate. The follow-up to #269 found the slab still used
+    ``center=[true, true, false]`` — a vector OpenSCAD silently ignores
+    (``center`` is a single boolean) — so the slab was still uncentred.
+    The operator decision (issue #269 + follow-up) is that NO line may keep
+    ``v=`` OR a vector ``center=[…]``: the slab must really be centred via
+    ``translate``, and every feature and the notch cutter must use
+    ``translate``.
     """
     text = SLOW_TEST_FILE.read_text(encoding="utf-8")
     hits = _scan_source(text)
     assert hits == [], (
-        "v= argument found on a cube/cylinder/sphere call in "
-        f"{SLOW_TEST_FILE} (issue #269: OpenSCAD has no v= parameter; "
-        "use translate or center=true instead):\n"
+        "v= or center=[…] argument found on a cube/cylinder/sphere call in "
+        f"{SLOW_TEST_FILE} (issue #269: OpenSCAD has no v= parameter and "
+        "center is a boolean, not a vector — use translate instead):\n"
         + "\n".join(f"  line {n}: {line}" for n, line in hits)
     )
 
 
 def test_no_v_arg_in_scad_fixtures() -> None:
     """Every ``.scad`` file under ``tests/fixtures/scad/`` must contain no
-    ``v=`` argument on a ``cube``/``cylinder``/``sphere`` call (issue #269).
+    ``v=`` argument AND no vector ``center=[…]`` argument on a
+    ``cube``/``cylinder``/``sphere`` call (issue #269 + follow-up).
     """
     assert FIXTURES_DIR.is_dir(), (
         f"fixtures dir missing: {FIXTURES_DIR}"
@@ -175,8 +203,9 @@ def test_no_v_arg_in_scad_fixtures() -> None:
         for lineno, line in _scan_source(text):
             all_hits.append((scad.name, lineno, line))
     assert all_hits == [], (
-        "v= argument found on a cube/cylinder/sphere call in SCAD fixtures "
-        "(issue #269: OpenSCAD has no v= parameter): \n"
+        "v= or center=[…] argument found on a cube/cylinder/sphere call in "
+        "SCAD fixtures (issue #269: OpenSCAD has no v= parameter and center "
+        "is a boolean, not a vector): \n"
         + "\n".join(f"  {name}:{n}: {line}" for name, n, line in all_hits)
     )
 
@@ -196,18 +225,19 @@ def test_marker_scad_body_is_translate_based() -> None:
     text = SLOW_TEST_FILE.read_text(encoding="utf-8")
     body = _marker_scad_body(text)
 
-    # 1. No ``v=`` argument anywhere in the body (the file-wide scan above
-    #    already covers the whole file, but this one is scoped to the body
-    #    so it is precise about WHERE the violation would be).
+    # 1. No ``v=`` argument AND no vector ``center=[…]`` argument anywhere
+    #    in the body (the file-wide scan above already covers the whole
+    #    file, but this one is scoped to the body so it is precise about
+    #    WHERE the violation would be).
     v_hits = [
         (lineno, line)
         for lineno, line in enumerate(body.splitlines(), start=1)
-        if _has_v_arg(line)
+        if _has_v_arg(line) or _has_center_vector(line)
     ]
     assert v_hits == [], (
-        "v= argument found in the _marker_scad() body (issue #269: "
-        "OpenSCAD has no v= parameter — use translate or center=true "
-        "instead):\n"
+        "v= or center=[…] argument found in the _marker_scad() body "
+        "(issue #269: OpenSCAD has no v= parameter and center is a "
+        "boolean, not a vector — use translate instead):\n"
         + "\n".join(f"  body line {n}: {line}" for n, line in v_hits)
     )
 
@@ -236,6 +266,37 @@ def test_guard_detects_synthetic_v_arg() -> None:
     assert _has_v_arg("translate(v=[1,2,3]);") is False
 
 
+def test_guard_detects_synthetic_center_vector() -> None:
+    """The guard's helper must actually detect a vector ``center=[…]``
+    argument — a self-test that the regex is not vacuous (issue #269
+    follow-up: OpenSCAD's ``center`` is a single boolean; a vector is
+    silently ignored, leaving the geometry uncentred — exactly the #269
+    bug)."""
+    assert _has_center_vector(
+        "cube([40, 40, 10], center = [true, true, false]);"
+    ) is True
+    assert _has_center_vector(
+        "cube([40, 40, 10], center=[true, true, false]);"
+    ) is True
+    assert _has_center_vector(
+        "cylinder(h=16, center=[true, false, false]);"
+    ) is True
+    # center=true (a boolean, not a vector) is fine:
+    assert _has_center_vector("cube([40, 40, 10], center=true);") is False
+    assert _has_center_vector("cube([40, 40, 10], center = true);") is False
+    # center on a non-primitive line is fine (e.g. a variable named center):
+    assert (
+        _has_center_vector("translate([0, -20, 0]) center = [0, 0];") is False
+    )
+    # No center at all:
+    assert (
+        _has_center_vector(
+            "translate([-20, -20, 0]) cube([40, 40, 10]);"
+        )
+        is False
+    )
+
+
 def test_guard_detects_missing_feature() -> None:
     """The per-feature check must actually fail when a feature is missing
     from the ``_marker_scad()`` body (issue #269 self-test: the guard is
@@ -243,12 +304,12 @@ def test_guard_detects_missing_feature() -> None:
     # A body that is missing the post line:
     body_without_post = (
         'difference() {\n'
-        '  cube([40, 40, 10], center = [true, true, false]);\n'
-        '  translate([0, -24, -1]) cube([16, 8, 12]);\n'
+        '  translate([-20, -20, 0]) cube([40, 40, 10]);\n'
+        '  translate([-8, -21, -1]) cube([16, 6, 12]);\n'
         '}\n'
         'translate([-32, -4, 0]) cube([8, 8, 22]);\n'
         'translate([-6, 22, 0]) cube([12, 12, 16]);\n'
-        'cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n'
+        'translate([0, 0, 10]) cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n'
     )
     missing = [
         name
@@ -262,13 +323,13 @@ def test_guard_detects_missing_feature() -> None:
     # The full body (all five features) should have nothing missing:
     full_body = (
         'difference() {\n'
-        '  cube([40, 40, 10], center = [true, true, false]);\n'
-        '  translate([0, -24, -1]) cube([16, 8, 12]);\n'
+        '  translate([-20, -20, 0]) cube([40, 40, 10]);\n'
+        '  translate([-8, -21, -1]) cube([16, 6, 12]);\n'
         '}\n'
         'translate([24, -4, 0]) cube([8, 8, 45]);\n'
         'translate([-32, -4, 0]) cube([8, 8, 22]);\n'
         'translate([-6, 22, 0]) cube([12, 12, 16]);\n'
-        'cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n'
+        'translate([0, 0, 10]) cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n'
     )
     missing_full = [
         name

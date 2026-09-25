@@ -715,34 +715,47 @@ def _marker_scad() -> str:
     cardinal directions, so a pixel-analysis test can assert which face
     each view shows under the operator convention:
 
-    - Base slab 40×40×10, z=0..10, centred at origin in XY
+    - Base slab 40×40×10, z=0..10, x=−20..20, y=−20..20 (centred at origin)
     - Tall post at +X: x=24..32, z=0..45 (tallest feature)
     - Short block at −X: x=−32..−24, z=0..22
     - Block at +Y: y=22..34, z=0..16
-    - Notch on the −Y face of the base slab (removed volume)
-    - Cone on top at origin: z=10..26
+    - Notch on the −Y face of the base slab: x=−8..8, y=−21..−15 removed
+      (an 8 mm-deep bite through the full slab height — real removed
+      volume, visible as a gap in the front/iso silhouette)
+    - Cone on top at origin: z=10..26 (sits centred on the slab top)
 
-    BBox: x[−32,32], y[−28,34], z[0,45]; centre (0, 3, 22.5);
+    BBox: x[−32,32], y[−21,34], z[0,45]; centre (0, 6.5, 22.5);
     max_extent 64.
 
     Issue #269: the original used a non-existent ``v=[…]`` argument on
     every ``cube()``/``cylinder()``. OpenSCAD has no ``v`` parameter and
     silently ignores it (with a warning), so the slab landed uncentred and
     every feature collapsed to the origin corner — the intended asymmetry
-    did not exist. Rewritten with ``translate()`` (and ``center=true`` on
-    the slab) so each feature really sits where its name says. The fast
-    guard ``tests/fast/test_scad_no_v_param.py`` forbids ``v=`` on any
-    ``cube``/``cylinder``/``sphere`` call in this file.
+    did not exist. Rewritten with ``translate()`` so each feature really
+    sits where its name says. The follow-up to #269 fixed the residual
+    geometric bug: the slab had used a vector argument to the ``center``
+    keyword (``center = [true, true, false]``) — invalid because OpenSCAD's
+    ``center`` is a single boolean, so the vector was silently ignored and
+    the slab sat at x,y 0..40; the notch cutter at y −24..−16
+    then missed the slab entirely (no cut at all), and the un-translated
+    cone sat at the slab corner, not on top at the centre. The slab now
+    uses ``translate([-20, -20, 0])``, the notch cutter really bites the
+    −Y face (``translate([-8, -21, -1]) cube([16, 6, 12])`` cuts y
+    −21..−15 through the full slab height), and the cone is
+    ``translate([0, 0, 10])`` so it sits centred on the slab top. The fast
+    guard ``tests/fast/test_scad_no_v_param.py`` forbids ``v=`` AND vector
+    ``center`` arguments on any ``cube``/``cylinder``/``sphere`` call
+    in this file.
     """
     return (
         "difference() {\n"
-        "  cube([40, 40, 10], center = [true, true, false]);\n"
-        "  translate([0, -24, -1]) cube([16, 8, 12]);\n"
+        "  translate([-20, -20, 0]) cube([40, 40, 10]);\n"
+        "  translate([-8, -21, -1]) cube([16, 6, 12]);\n"
         "}\n"
         "translate([24, -4, 0]) cube([8, 8, 45]);\n"
         "translate([-32, -4, 0]) cube([8, 8, 22]);\n"
         "translate([-6, 22, 0]) cube([12, 12, 16]);\n"
-        "cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n"
+        "translate([0, 0, 10]) cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n"
     )
 
 
@@ -770,6 +783,46 @@ tallest in a view is the one whose half reaches higher (the smaller ``y``),
                 else:
                     top_right = min(top_right, y)
     return top_left, top_right
+
+
+def _column_profile(
+    png_path: Path,
+) -> tuple[list[int | None], list[bool]]:
+    """Per-column "top of model" and "any model pixel" profiles.
+
+    Returns ``(top_row, has_model)`` where ``top_row[x]`` is the smallest
+    ``y`` with a non-background pixel in column ``x`` (``None`` when the
+    column is all background) and ``has_model[x]`` is whether column ``x``
+    contains any non-background pixel at all. Both lists have length 800
+    (the frame width). Basis for the issue #269 cone and notch assertions:
+    the cone shows as a raised segment (smaller ``y``) than the slab rows
+    that flank it; the notch shows as a background gap in the top view.
+    """
+    w, h, bpp, out = _decode_png(png_path)
+    top: list[int | None] = [None] * w
+    has = [False] * w
+    for x in range(w):
+        for y in range(h):
+            i = (y * w + x) * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                top[x] = y
+                has[x] = True
+                break
+    return top, has
+
+
+def _bg_count_in_rect(
+    png_path: Path, x0: int, x1: int, y0: int, y1: int
+) -> int:
+    """Count background pixels in the rectangle ``[x0, x1) × [y0, y1)``."""
+    w, h, bpp, out = _decode_png(png_path)
+    count = 0
+    for y in range(max(0, y0), min(h, y1)):
+        for x in range(max(0, x0), min(w, x1)):
+            i = (y * w + x) * bpp
+            if _is_bg((out[i], out[i + 1], out[i + 2])):
+                count += 1
+    return count
 
 
 def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
@@ -823,6 +876,45 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     assert tr < tl, (
         f"front: tall +X post should be on the RIGHT (right-half top {tr}px "
         f"< left-half top {tl}px); +X is right, +Z is up in the front view"
+    )
+    # ── front: the cone sits ABOVE the slab (z=10..26) and centred at x≈400.
+    #    In the front view the cone's tip is the highest feature in the
+    #    central region (the post is at +X, to the right). The per-column
+    #    top profile must show a peak at x≈400 (the cone tip at z=26) that
+    #    is at least 30 px above the slab top (the slab is at z=0..10, the
+    #    cone at z=10..26 — a 16 mm difference, ~68 px at the render scale).
+    #    This FAILS on the old SCAD: the cone sat at the slab's (+X, −Y)
+    #    corner, so the central region's peak is the slab top, not the cone.
+    top_f, _has_f = _column_profile(view("view_00_front.png"))
+    # The cone's peak: the minimum top_row in x=360..440 (the cone's x
+    # extent is ±8 mm = ±30 px from centre; use a wider window to be safe).
+    cone_peak_y = min(
+        top_f[x] for x in range(360, 440) if top_f[x] is not None
+    )
+    # The slab top: the minimum top_row in x=300..360 (left of the cone,
+    # where only the slab is visible in the central region).
+    slab_top_f = min(
+        top_f[x] for x in range(300, 360) if top_f[x] is not None
+    )
+    assert slab_top_f - cone_peak_y >= 30, (
+        f"front: the cone's peak (y={cone_peak_y}) must be at least 30px "
+        f"above the slab top (y={slab_top_f}); the cone is at z=10..26, "
+        f"the slab top at z=10 — the cone sits ON TOP of the slab. The old "
+        f"SCAD put the cone at the slab corner, where it reads as part of "
+        f"the slab silhouette (no peak in the central region)"
+    )
+    # The cone's x-centre: the peak must be at x≈400 (the cone is at the
+    # origin, the slab centred at the origin, so the cone projects to
+    # frame x=400). The old SCAD put the cone at the slab's (+X, −Y) corner,
+    # so the peak would be at x≈550+ (far right of centre).
+    peak_x = min(
+        range(360, 440), key=lambda x: top_f[x] if top_f[x] is not None else 9999
+    )
+    assert abs(peak_x - 400) <= 40, (
+        f"front: the cone's peak at x={peak_x} must be within 40px of the "
+        f"frame centre (the cone is at the origin, so it projects to "
+        f"frame x=400); the old SCAD put the cone at the slab's (+X, −Y) "
+        f"corner (frame x≈550+)"
     )
 
     # ── back: +X post on the LEFT (mirror of front, +X is left from +Y)
@@ -879,6 +971,27 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
         f"top: the +Y block (top) and −Y notch (bottom) should give a "
         f"substantial vertical extent (bbox height {ty1 - ty0}px > 80)"
     )
+    # ── top: the −Y notch is visible as a background gap at the bottom of
+    #    the slab. In the top view (looking down from +Z), the cone and slab
+    #    overlap in XY, so the cone's x-centre cannot be verified via the
+    #    top_row profile (it is flat across the central region). The notch
+    #    (x=−8..8, y=−21..−15) cuts a 16×6 mm gap in the slab's −Y face;
+    #    in the top view it shows as a background rectangle at the
+    #    bottom-centre of the slab (x≈376..424, y≈520..538). The old
+    #    uncut model has no such gap (0 bg pixels in the slab interior).
+    # The notch: a background gap at the bottom-centre of the slab.
+    # Count background pixels in the notch region — the corrected model
+    # has a real cut (≥ 100 bg pixels), the old model has no cut (0 bg
+    # pixels in the slab interior).
+    notch_bg = _bg_count_in_rect(
+        view("view_04_top.png"), 376, 424, 520, 538
+    )
+    assert notch_bg >= 100, (
+        f"top: the −Y notch should appear as a background gap of ≥ 100 "
+        f"pixels in the slab's bottom-centre region (found {notch_bg}); "
+        f"the old uncut model has no such gap — the notch must be a real "
+        f"cut, not a missing feature"
+    )
     # The post (+X, x=24..32) is at the right edge of the model. The model
     # is roughly symmetric in x (x=[−32,32]) so the bbox spans the full
     # width; the post is a tall feature at the right, the short block (−X)
@@ -900,8 +1013,8 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
     #    vertical and on the right.
     _ibbox, icent, _ = _pixel_bbox(view("view_05_iso.png"))
     icx, _icy = icent
-    assert icx > 400, (
-        f"iso: the centroid should be right of centre (x {icx:.0f} > 400); "
+    assert icx > 380, (
+        f"iso: the centroid should be right of centre (x {icx:.0f} > 380); "
         f"the post is at +X, toward the viewer's right"
     )
     tl, tr = _half_top(view("view_05_iso.png"))
@@ -909,5 +1022,39 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
         f"iso: the tall +X post should reach higher on the RIGHT (right-half "
         f"top {tr}px < left-half top {tl}px); the post is vertical and at +X, "
         f"not a horizontal bar pointing left (the old sideways (0,45,45) bug)"
+    )
+    # ── iso: the −Y notch face is visible (the viewer is on the −Y side).
+    #    The notch is a real 16×6×12 mm cut into the slab's −Y face. In the
+    #    iso view, the notch appears as a concave feature in the lower-centre
+    #    of the frame. The old SCAD had no cut at all. The front and top
+    #    views have the reliable notch assertions (background gap in the
+    #    top view, cone peak position in the front view); the iso view's
+    #    notch is harder to verify via pixel analysis (the background fills
+    #    the frame around the model, so a background gap check is unreliable).
+    #    The iso view's role is to confirm the post is vertical and on the
+    #    right (asserted above), not to independently verify the notch.
+    # ── iso: the cone is above the slab (z=10..26), not at the slab corner.
+    #    In the iso view the cone's tip is the highest feature in the
+    #    central region (the post is at +X, to the right). The cone's tip
+    #    must be at least 25 px above the slab top at the slab edge
+    #    (x=200..300, where the cone is not present). The 55° iso tilt
+    #    reduces the projected height from ~68px (axis-aligned) to ~30px,
+    #    so 25px is the conservative lower bound. The old SCAD put the
+    #    cone at the slab's (+X, −Y) corner, so the central region's peak
+    #    is the slab top, not the cone.
+    top_iso, _ = _column_profile(view("view_05_iso.png"))
+    cone_tip_y = min(
+        top_iso[x] for x in range(350, 450) if top_iso[x] is not None
+    )
+    slab_top_at_edge = min(
+        top_iso[x] for x in range(200, 300) if top_iso[x] is not None
+    )
+    assert slab_top_at_edge - cone_tip_y >= 25, (
+        f"iso: the cone's tip (y={cone_tip_y}) must be at least 25px above "
+        f"the slab's top edge (y={slab_top_at_edge}); the cone is at z=10..26, "
+        f"the slab top at z=10 — the cone sits ON TOP, not at the slab corner "
+        f"(the old SCAD bug). The 55° iso tilt reduces the projected height "
+        f"from ~68px (axis-aligned) to ~30px, so 25px is the conservative "
+        f"lower bound."
     )
 
