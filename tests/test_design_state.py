@@ -578,7 +578,9 @@ def test_axis_row_stated_from_persisted_per_axis_set() -> None:
 def test_no_stated_axes_and_no_measurement_yields_no_axis_rows() -> None:
     """No stated axes persisted and no bbox: no axis rows appear (never
     a fabricated W/D/H entry) — only the model-emitted param rows
-    (``assumed``)."""
+    (``assumed``). (Issue #264: measured rows are driven by the
+    MEASUREMENT, not by the stated set — with no measurement there is
+    nothing to measure, so no axis rows.)"""
     entries = state_block_for_version(
         {"W": 30.0, "D": 30.0, "H": 30.0}, None, None
     )
@@ -594,10 +596,43 @@ def test_no_stated_axes_and_no_measurement_yields_no_axis_rows() -> None:
     assert entries2[0]["provenance"] == "assumed"
 
 
-def test_partial_stated_axes_omit_unstated_axis_entirely() -> None:
-    """Persisted stated {W: 60, H: 80} (partial): W and H axis rows show
-    ``stated``; the D axis row is OMITTED entirely (no row — not
-    "unknown", not a fabricated 0)."""
+def test_measurement_without_stated_evidence_yields_measured_axis_rows() -> None:
+    """Issue #264 ACCEPTANCE: a version with a persisted bbox but NO
+    stated dims → the block carries ALL THREE axis rows (W/D/H order)
+    with provenance ``measured`` and the measured value — the part's
+    real extents, never fabricated. The model's own W/D/H-named params
+    still render as param rows (the #137 comparison applies to them
+    independently)."""
+    # The v25 Shelf-spacer shape: params W/D/H 40/40/12-ish, bbox
+    # 43.80 × 43.90 × 12.0, no stated dims.
+    entries = state_block_for_version(
+        {"W": 40.0, "D": 40.0, "H": 12.0},
+        {"x": 43.80, "y": 43.90, "z": 12.0},
+        None,
+    )
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    # Three axis rows, W/D/H order, all ``measured``.
+    assert [e["name"] for e in axis_rows] == ["W", "D", "H"]
+    for e in axis_rows:
+        assert e["provenance"] == "measured"
+    by_name = {e["name"]: e for e in axis_rows}
+    assert by_name["W"]["value"] == 43.80
+    assert by_name["D"]["value"] == 43.90
+    assert by_name["H"]["value"] == 12.0
+    # Axis rows come FIRST (issue #264 operator decision — both the
+    # entry list and the Brief order), then the param rows.
+    assert entries[0]["kind"] == "axis"
+    assert entries[1]["kind"] == "axis"
+    assert entries[2]["kind"] == "axis"
+    assert {e["kind"] for e in entries[3:]} == {"param"}
+
+
+def test_partial_stated_axes_still_omit_unstated_unmeasured_axis() -> None:
+    """Persisted stated {W: 60, H: 80} (partial), NO measurement: W and H
+    axis rows show ``stated``; the D axis row is OMITTED entirely (no
+    measurement to carry a D row — no measurement, no row; a stated
+    axis without a measurement stays ``stated`` and never invents a
+    D)."""
     entries = state_block_for_version(
         {"spacer_width": 60.0, "spacer_depth": 45.0, "spacer_height": 80.0},
         None,
@@ -609,12 +644,35 @@ def test_partial_stated_axes_omit_unstated_axis_entirely() -> None:
     assert by_name["W"]["value"] == 60.0
     assert by_name["H"]["provenance"] == "stated"
     assert by_name["H"]["value"] == 80.0
-    # D: no axis row at all (omitted, not unknown, not 0).
+    # D: no axis row at all (no measurement → nothing to measure).
     assert "D" not in by_name
     # The model's own param rows still render (assumed).
     assert by_name["spacer_width"]["provenance"] == "assumed"
     assert by_name["spacer_depth"]["provenance"] == "assumed"
     assert by_name["spacer_height"]["provenance"] == "assumed"
+
+
+def test_partial_stated_axes_with_measurement_fill_unstated_axis_measured() -> None:
+    """Issue #264: stated {W: 60, H: 80} WITH a persisted bbox → the
+    stated axes keep today's rule (W measured, H measured) and the
+    UNSTATED D axis gets a ``measured`` row with the measured extent —
+    all three rows present, W/D/H order, axis-first."""
+    entries = state_block_for_version(
+        {"spacer_width": 60.0, "spacer_depth": 45.0, "spacer_height": 80.0},
+        {"x": 60.2, "y": 45.0, "z": 80.0},
+        {"W": 60.0, "H": 80.0},
+    )
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert [e["name"] for e in axis_rows] == ["W", "D", "H"]
+    assert all(e["provenance"] == "measured" for e in axis_rows)
+    by_name = {e["name"]: e for e in axis_rows}
+    # W: within tolerance of stated 60 (|60.2-60| = 0.2 <= 0.6) → measured.
+    assert by_name["W"]["value"] == 60.2
+    # D: NOT stated — the row is the measured extent (45.0), provenance
+    # ``measured`` (issue #264 — never a fabricated value).
+    assert by_name["D"]["value"] == 45.0
+    # H: exact match → measured.
+    assert by_name["H"]["value"] == 80.0
 
 
 def test_axis_named_param_stays_assumed_even_when_value_matches() -> None:
@@ -629,11 +687,12 @@ def test_axis_named_param_stays_assumed_even_when_value_matches() -> None:
     assumed_rows = [e for e in entries if e["provenance"] == "assumed"]
     assert len(assumed_rows) == 1
     assert assumed_rows[0]["value"] == 60.0
-    # The separate W axis row (appended after the param rows) carries the
-    # user's stated value.
+    # The separate W axis row (the FIRST entry — axis rows come first,
+    # issue #264) carries the user's stated value.
     stated_rows = [e for e in entries if e["provenance"] == "stated"]
     assert len(stated_rows) == 1
     assert stated_rows[0]["value"] == 60.0
+    assert entries[0] is stated_rows[0]
     assert len(entries) == 2  # param row + axis row, never collapsed
     # Mismatch → the param row stays assumed; the axis row carries the
     # user's stated value. Both render (never collapsed, never guessed).
@@ -667,14 +726,17 @@ def test_stated_axis_plus_bbox_within_tolerance_yields_measured() -> None:
     assert by_name["D"]["value"] == 30.0
     assert by_name["H"]["provenance"] == "measured"
     assert by_name["H"]["value"] == 30.0
-    # The SEPARATE axis rows (driven by the persisted stated set) are
-    # appended after the param rows — three more measured rows, one per
-    # axis (param rows and axis rows are independent surfaces).
-    axis_rows = entries[3:]
+    # The SEPARATE axis rows (driven by the persisted stated set) come
+    # FIRST (issue #264 — axis rows precede the param rows, W/D/H
+    # order), three more measured rows, one per axis (param rows and
+    # axis rows are independent surfaces).
+    axis_rows = entries[:3]
+    param_rows = entries[3:]
     assert len(axis_rows) == 3
     for axis in ("W", "D", "H"):
         assert axis_rows[AXIS_PARAM_NAMES.index(axis)]["name"] == axis
         assert axis_rows[AXIS_PARAM_NAMES.index(axis)]["provenance"] == "measured"
+    assert all(e["kind"] == "param" for e in param_rows)
     assert len(entries) == 6
 
 
@@ -689,22 +751,34 @@ def test_stated_axis_plus_bbox_outside_tolerance_yields_disagrees() -> None:
         {"x": 29.2, "y": 30.0, "z": 30.0},
         {"W": 30.0},
     )
+    # The W axis row (the persisted stated evidence vs the measurement)
+    # renders FIRST (issue #264) — also disagrees, same numbers (axis
+    # rows never carry ``disagrees_source`` — an axis-row disagreement
+    # is always user-stated).
+    w_axis = entries[0]
+    assert w_axis["kind"] == "axis"
+    assert w_axis["provenance"] == "disagrees"
+    assert w_axis["value"] == 29.2
+    assert w_axis["stated_value"] == 30.0
+    assert "disagrees_source" not in w_axis
+    # D and H are NOT stated but the measurement carries them → measured
+    # axis rows (issue #264 — measured rows always).
     by_name = {e["name"]: e for e in entries}
+    assert by_name["D"]["provenance"] == "measured"
+    assert by_name["H"]["provenance"] == "measured"
     # The model's own W param row is compared against the measurement —
     # outside tolerance → disagrees, carrying both numbers (the measured
     # one displayed, the stated one riding along).
-    w = by_name["W"]
-    assert w["provenance"] == "disagrees"
-    assert w["value"] == 29.2  # the measured value (the display)
-    assert w["stated_value"] == 30.0  # the stated value (the ride-along)
-    # The separate W axis row (the persisted stated evidence vs the
-    # measurement) renders alongside — also disagrees, same numbers.
-    axis_rows = [e for e in entries if e is not w]
-    assert len(axis_rows) == 1
-    assert axis_rows[0]["provenance"] == "disagrees"
-    assert axis_rows[0]["value"] == 29.2
-    assert axis_rows[0]["stated_value"] == 30.0
-    assert len(entries) == 2
+    w_param = next(e for e in entries if e["kind"] == "param")
+    assert w_param["provenance"] == "disagrees"
+    assert w_param["value"] == 29.2  # the measured value (the display)
+    assert w_param["stated_value"] == 30.0  # the stated value (the ride-along)
+    # The W/D/H-named param row here is user-sourced (no stated set for
+    # this axis): ``disagrees_source`` is ABSENT (the backward-compatible
+    # default — "user"), never "model" (the model did not declare the
+    # axis — #137's comparison is name-driven, not metadata-driven).
+    assert "disagrees_source" not in w_param
+    assert len(entries) == 4  # 3 axis rows + 1 param row
 
 
 def test_assumed_axis_name_without_stated_evidence_stays_assumed() -> None:
@@ -718,12 +792,13 @@ def test_assumed_axis_name_without_stated_evidence_stays_assumed() -> None:
     assumed = [e for e in entries if e["provenance"] == "assumed"]
     assert len(assumed) == 1
     assert assumed[0]["value"] == 99.0
-    # The axis row (H, the user's 12) is stated — the LAST entry (axis
-    # rows append after the param rows).
+    # The axis row (H, the user's 12) is stated — the FIRST entry (axis
+    # rows come first, issue #264; they used to append after the param
+    # rows).
     stated_rows = [e for e in entries if e["provenance"] == "stated"]
     assert len(stated_rows) == 1
     assert stated_rows[0]["value"] == 12.0
-    assert entries[-1] is stated_rows[0]
+    assert entries[0] is stated_rows[0]
     assert len(entries) == 2
 
 
@@ -773,7 +848,9 @@ def test_coexistence_block_entries_carry_distinct_kind_names() -> None:
     entries = state_block_for_version({"W": 60.0}, None, {"W": 60.0})
     assert len(entries) == 2
     ids = [(e["kind"], e["name"]) for e in entries]
-    assert ids == [("param", "W"), ("axis", "W")]
+    # Issue #264: axis rows come FIRST (both the entry list and the
+    # Brief) — ("axis", "W") precedes ("param", "W").
+    assert ids == [("axis", "W"), ("param", "W")]
     assert len(set(ids)) == 2
     # Every entry carries the discriminator.
     assert all(e["kind"] in ("param", "axis") for e in entries)
@@ -1160,3 +1237,287 @@ def test_confirmed_set_none_and_empty_never_promote() -> None:
             {"wall_thickness": 3.0}, None, None, None, confirmed
         )
         assert entries[0]["provenance"] == "assumed"
+
+
+# ---------------------------------------------------------------------------
+# Issue #264: always-measured axis rows + model-source disagreement
+# ---------------------------------------------------------------------------
+
+
+#: The v25 Shelf-spacer shape: Spacer width 40 / Spacer depth 40
+#: (assumed, declared axis W/D), bbox 43.80 × 43.90 × 12.0 (a flared
+#: lip adds 3.8 mm), no stated dims.
+_V25_PARAMS = {
+    "spacer_width": 40.0,
+    "spacer_depth": 40.0,
+}
+_V25_META = {
+    "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+    "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+}
+_V25_BBOX = {"x": 43.80, "y": 43.90, "z": 12.0}
+
+
+def test_v25_fixture_measured_axis_rows_first_then_model_disagrees() -> None:
+    """Issue #264 ACCEPTANCE: the v25 Shelf-spacer shape — params W/D 40
+    with declared axis W/D, bbox 43.8 × 43.9 × 12.0, NO stated dims →
+    three axis rows (W=43.8, D=43.9, H=12.0) all ``measured`` in W/D/H
+    order FIRST, then the Spacer width/depth param rows as ``disagrees``
+    with ``disagrees_source="model"`` (stated_value=40, value=43.8/43.9
+    — the measured extent is what will print)."""
+    entries = state_block_for_version(
+        dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META)
+    )
+    assert len(entries) == 5
+    # The three axis rows come first, W/D/H order, all ``measured``.
+    axis_rows = entries[:3]
+    assert [(e["kind"], e["name"]) for e in axis_rows] == [
+        ("axis", "W"),
+        ("axis", "D"),
+        ("axis", "H"),
+    ]
+    assert all(e["provenance"] == "measured" for e in axis_rows)
+    by_name = {e["name"]: e for e in axis_rows}
+    assert by_name["W"]["value"] == 43.80
+    assert by_name["D"]["value"] == 43.90
+    assert by_name["H"]["value"] == 12.0
+    # Axis rows never carry ``disagrees_source`` (they are ``measured``
+    # here, but the field is param-only in all cases).
+    assert all("disagrees_source" not in e for e in axis_rows)
+    # The two param rows: ``disagrees``, model-source, both numbers.
+    param_rows = entries[3:]
+    assert [e["name"] for e in param_rows] == ["spacer_width", "spacer_depth"]
+    w = param_rows[0]
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "model"
+    assert w["value"] == 43.80  # the MEASURED value is displayed
+    assert w["stated_value"] == 40.0  # the model's own number rides along
+    assert w["label"] == "Spacer width"  # the model's label, not the id
+    d = param_rows[1]
+    assert d["provenance"] == "disagrees"
+    assert d["disagrees_source"] == "model"
+    assert d["value"] == 43.90
+    assert d["stated_value"] == 40.0
+
+
+def test_v25_stated_width_axis_row_is_user_disagrees_today_copy() -> None:
+    """Issue #264 ACCEPTANCE: stated W=40 with the same bbox (43.8 × 43.9
+    × 12.0) → the W axis row is ``disagrees`` (source user — the field is
+    ABSENT, the backward-compatible default) with today's copy; the D and
+    H axis rows are ``measured``."""
+    entries = state_block_for_version(
+        dict(_V25_PARAMS), dict(_V25_BBOX), {"W": 40.0}, dict(_V25_META)
+    )
+    axis_rows = {e["name"]: e for e in entries if e["kind"] == "axis"}
+    # W: stated 40 vs measured 43.8 → disagrees (|43.8-40| = 3.8 > tol 0.5).
+    w = axis_rows["W"]
+    assert w["provenance"] == "disagrees"
+    assert w["value"] == 43.8
+    assert w["stated_value"] == 40.0
+    assert "disagrees_source" not in w  # user-sourced: absent, never "user"
+    # D and H: measured.
+    assert axis_rows["D"]["provenance"] == "measured"
+    assert axis_rows["H"]["provenance"] == "measured"
+    # Axis rows come first in W/D/H order.
+    assert [(e["kind"], e["name"]) for e in entries[:3]] == [
+        ("axis", "W"),
+        ("axis", "D"),
+        ("axis", "H"),
+    ]
+    # The param rows stay ``assumed`` (stated W is axis evidence — it does
+    # NOT promote the model's spacer_width, which is out of tolerance of
+    # the CONFIRMED 40? No: |40-40| = 0 <= 0.5 → the promotion seam fires.
+    # The operator decision: a param promoted to stated keeps today's
+    # comparison, source "user". spacer_width 40 vs stated W 40 is within
+    # tolerance → promoted to ``stated``.
+    param_rows = {e["name"]: e for e in entries if e["kind"] == "param"}
+    assert param_rows["spacer_width"]["provenance"] == "stated"
+    # spacer_depth: D was not stated → not promoted → measured 43.9 vs 40
+    # is outside tolerance → model-source disagrees.
+    assert param_rows["spacer_depth"]["provenance"] == "disagrees"
+    assert param_rows["spacer_depth"]["disagrees_source"] == "model"
+
+
+def test_within_tolerance_assumed_axis_param_stays_assumed() -> None:
+    """Issue #264 ACCEPTANCE: an assumed param with a declared axis whose
+    value is WITHIN tolerance of the measured extent stays ``assumed`` —
+    the measurement does not promote it, and does not mark it
+    ``disagrees``."""
+    # spacer_width 40 vs measured 40.2: |40.2-40| = 0.2 <= tol 0.5.
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 40.2, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "assumed"
+    assert w["value"] == 40.0  # the param's own value, untouched
+    assert "stated_value" not in w
+    assert "disagrees_source" not in w
+    # The W axis row is still emitted (measured 40.2).
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert len(axis_rows) == 3
+    assert axis_rows[0]["name"] == "W"
+    assert axis_rows[0]["value"] == 40.2
+
+
+def test_zero_extent_axes_produce_no_row() -> None:
+    """Issue #264 ACCEPTANCE: a zero or absent bbox axis produces no
+    axis row for that axis; positive-axis measurements still produce
+    their rows. ``persisted_bbox_extents`` stays all-or-nothing (a
+    bbox with ANY zero axis gives no measured rows at all) — but when
+    the measurement is present, every axis in it has a positive extent,
+    so all three rows appear."""
+    # The all-or-nothing abstain is preserved.
+    assert persisted_bbox_extents({"x": 43.8, "y": 43.9, "z": 0.0}) is None
+    assert persisted_bbox_extents({"x": 43.8, "y": 43.9}) is None
+    # With a valid measurement, all three axes are positive → three rows.
+    entries = state_block_for_version({"W": 40.0}, dict(_V25_BBOX), None)
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert [e["name"] for e in axis_rows] == ["W", "D", "H"]
+    # A NULL measurement → no axis rows (not even measured ones).
+    entries2 = state_block_for_version({"W": 40.0}, None, None)
+    assert [e["kind"] for e in entries2] == ["param"]
+
+
+def test_block_cap_keeps_all_three_axis_rows() -> None:
+    """Issue #264 ACCEPTANCE: 14 params + 3 axis rows → the block carries
+    12 entries (9 params + 3 axis rows) with dropped_count = 5, and the
+    three axis rows are ALWAYS present (params are trimmed first, from
+    the tail of the param section)."""
+    params = {f"p{i}": float(i + 1) for i in range(14)}
+    entries = state_block_for_version(
+        params, dict(_V25_BBOX), None
+    )
+    # 14 param rows + 3 axis rows = 17 total.
+    assert len(entries) == 17
+    block = build_design_state_block(entries)
+    assert len(block["entries"]) == MAX_STATE_BLOCK_ENTRIES
+    assert block["dropped_count"] == 5  # 14 - 9 = 5 params dropped
+    kept = block["entries"]
+    # All three axis rows present, FIRST, in W/D/H order.
+    axis_rows = [e for e in kept if e["kind"] == "axis"]
+    assert [e["name"] for e in axis_rows] == ["W", "D", "H"]
+    assert kept[:3] == axis_rows
+    # 9 param rows kept — the FIRST 9 (declaration order preserved).
+    kept_params = [e for e in kept if e["kind"] == "param"]
+    assert [e["name"] for e in kept_params] == [f"p{i}" for i in range(9)]
+    # The dropped params are the tail (p9..p13).
+    text = format_design_state_block(block)
+    assert "… 5 more parameters" in text
+    for i in range(9, 14):
+        assert f"p{i} = " not in text
+
+
+def test_model_source_disagrees_render_differs_from_user_source() -> None:
+    """Issue #264 ACCEPTANCE: the prompt text for a model-source
+    disagrees row says the model's value differs from the measured
+    value ("my value differs from the measurement"), never "stated by
+    the user"; a user-source disagrees row says "you stated this; the
+    measurement differs"."""
+    model_block = build_design_state_block(
+        state_block_for_version(dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META))
+    )
+    model_text = format_design_state_block(model_block)
+    assert "(my value differs from the measurement)" in model_text
+    # Never "you asked for" / "stated by the user" for the model's rows.
+    assert "stated by the user" not in model_text
+    # The axis rows (measured) carry no mark at all.
+    assert "Width (W) = 43.8" in model_text
+    # A user-source disagrees (the #137 W-named param path): the old
+    # wording, "you stated this; the measurement differs".
+    user_block = build_design_state_block(
+        state_block_for_version(
+            {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
+        )
+    )
+    user_text = format_design_state_block(user_block)
+    assert "(you stated this; the measurement differs)" in user_text
+    assert "my value differs" not in user_text
+    # The two renderings DIFFER (the operator: the prompt text for a
+    # model-source disagrees row must differ from the user-source one).
+    assert model_text != user_text
+    # The single-line variant carries the same marks.
+    from d33d.design_state import format_design_state_line
+
+    line = format_design_state_line(model_block["entries"])
+    assert "(my value differs from the measurement)" in line
+
+
+def test_disagrees_source_only_on_param_disagrees_rows() -> None:
+    """Issue #264 operator decision: ``disagrees_source`` appears ONLY on
+    param rows with provenance ``disagrees`` — never on axis rows, never
+    on non-disagrees rows; it is ``NotRequired`` (absent when the
+    disagreement is user-sourced, the backward-compatible default)."""
+    # Model-source: present on the param row, absent on the axis rows.
+    entries = state_block_for_version(dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META))
+    for e in entries:
+        if e["kind"] == "param" and e["provenance"] == "disagrees":
+            assert e["disagrees_source"] == "model"
+        else:
+            assert "disagrees_source" not in e
+    # User-source (no metadata, W-named param #137 path): ABSENT.
+    entries2 = state_block_for_version(
+        {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
+    )
+    for e in entries2:
+        if e["provenance"] == "disagrees":
+            assert "disagrees_source" not in e  # absent = user (default)
+    # No disagree at all (measured) → absent everywhere.
+    entries3 = state_block_for_version({"W": 30.0}, {"x": 30.0, "y": 30.0, "z": 30.0}, None)
+    assert all("disagrees_source" not in e for e in entries3)
+
+
+def test_zero_or_non_numeric_declared_axis_param_never_disagrees() -> None:
+    """Issue #264 edge case: a param with a declared axis whose value is
+    0 or non-numeric does NOT enter the model-source comparison — it
+    stays ``assumed``/``unknown``, never ``disagrees``."""
+    # Zero value → unknown, never disagrees.
+    entries = state_block_for_version(
+        {"spacer_width": 0},
+        dict(_V25_BBOX),
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "unknown"
+    # Non-numeric (string) → assumed, never disagrees.
+    entries2 = state_block_for_version(
+        {"spacer_width": "forty"},
+        dict(_V25_BBOX),
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w2 = next(e for e in entries2 if e["name"] == "spacer_width")
+    assert w2["provenance"] == "assumed"
+    assert "disagrees_source" not in w2
+
+
+def test_promoted_param_never_model_source() -> None:
+    """Issue #264 operator decision: a param promoted to ``stated`` (rule
+    (a) — declared axis + stated evidence within tolerance) keeps
+    today's comparison with source "user" — a measurement that
+    contradicts a CONFIRMED/promoted value is user-sourced, never
+    model-sourced."""
+    # spacer_width 40, declared W, stated W=40 → promoted to stated.
+    # Measured 45: |45-40| = 5 > tol 0.5 → disagrees, but the W-named
+    # path does NOT apply (the name is spacer_width, not W) — so the
+    # promoted param stays ``stated`` (the measurement comparison only
+    # applies to W/D/H-NAMED params and model-source assumed params).
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 45.0, "y": 30.0, "z": 30.0},
+        {"W": 40.0},
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "stated"
+    assert "disagrees_source" not in w
+    assert w["value"] == 40.0  # promotion never changes the value
+    # The W axis row: stated 40 vs measured 45 → disagrees (user-sourced,
+    # no ``disagrees_source`` key — axis rows never carry it).
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    assert w_axis["provenance"] == "disagrees"
+    assert w_axis["stated_value"] == 40.0
+    assert "disagrees_source" not in w_axis
