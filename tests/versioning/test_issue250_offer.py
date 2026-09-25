@@ -628,12 +628,14 @@ def test_tier3_offer_and_ack_use_the_same_mm_spelling(app_with_versions):
     """The documented #265 invariant, end-to-end: the tier-3 OFFER (the
     adapter's ``_resolve_offer`` — the offer path) and the ack (the
     ``/chat`` acceptance route — the ack path) render the SAME mm spelling
-    for the same param. Before the fix the offer path built the entry via
-    ``offer_entry`` WITHOUT the param_meta graft, so ``mm_value_str``
-    fell through to the bare ``:g`` spelling while the ack path (which
-    grafted ``param_meta``) rendered ``mm()`` — the offer said "I assumed
-    40 for Spacer depth" while the ack said "Got it — Spacer depth stays
-    40.0 mm."."""
+    for the same param. The binding seam (issue #265): the entry the
+    offer and ack formatters see carries the version's ``param_meta``
+    — resolved ONCE onto the entry by ``offer_entry`` (the adapter's
+    ``_resolve_offer`` and the ``/chat`` acceptance route both build it
+    via ``offer_entry`` from the same version row) — so ``mm_value_str``
+    sees the declared unit and both sentences render the SAME mm
+    spelling. A path that dropped the metadata would render "I assumed
+    40 for Spacer depth" while the ack rendered "… stays 40.0 mm."."""
 
     async def _body(client):
         svc = app_with_versions.state.versions
@@ -655,6 +657,8 @@ def test_tier3_offer_and_ack_use_the_same_mm_spelling(app_with_versions):
         from d33d.design_state import state_block_for_version
 
         latest = svc.latest_version(pid)
+        # The offer path (the adapter's ``_resolve_offer``): entry via
+        # ``offer_entry`` — the version's ``param_meta`` resolved onto it.
         offer_entry_ = offer_entry(dict(latest["params"]), latest["param_meta"], "spacer_depth")
         block = state_block_for_version(
             latest["params"], latest["bbox"], latest["stated_dims"],
@@ -814,6 +818,67 @@ def test_tier3_ack_mm_value_rides_done_frame(app_with_versions):
     done = [d for e, d in frames if e == "done"]
     assert done[0].get("confirm_ack_value") == "40.0\u202fmm", done
     assert done[0]["message"] == "Got it — Spacer depth stays 40.0\u202fmm.", done
+
+
+def test_chat_e2e_offer_then_yes_mm_spelling(app_with_versions):
+    """END-TO-END through the chat route (issue #265): a passing pass
+    whose param's ``param_meta`` carries an explicit unit "mm" AND a
+    declared axis produces a done-frame ``confirm_sentence`` of EXACTLY
+    "I assumed 40.0\u202fmm for Spacer depth. Want it different?" (the
+    template — no model sentence supplied — the value spelled with the
+    U+202F narrow no-break space, byte-for-byte the deck's ``mm(40)``),
+    and a clean "yes" on the next /chat request then produces an ack
+    frame whose ``confirm_ack_value`` is "40.0\u202fmm" (and whose
+    ``message`` carries the same spelling). Both frames ride the SAME
+    seam: the entry ``offer_entry`` resolves the version's
+    ``param_meta`` onto (the offer path — the adapter's
+    ``_resolve_offer`` — and the ack path — the /chat acceptance
+    route).
+
+    The two /chat requests run on the fixture app back to back. The
+    inflight design-loop flag is released in production by the SSE
+    stream's ``finally`` (``d33d.streaming._stream_events`` — the single
+    release point for every event source, on every exit path); a raw
+    generator driven directly by a test bypasses that endpoint, so the
+    test releases the flag between requests (a ``discard`` that mirrors
+    the endpoint's ``finally``) — otherwise the second request would
+    409 (the flag was claimed by the first)."""
+
+    async def _loop(app, **kwargs):
+        return _OfferStubResult(
+            {"spacer_depth": 40.0},
+            meta={"spacer_depth": {"axis": "D", "unit": "mm", "label": "Spacer depth"}},
+        )
+
+    async def _call(client):
+        app = app_with_versions
+        app.state.run_design_loop = _loop
+        proj = await create_project(client)
+        pid = proj["id"]
+        r1, frames1 = await _drive_chat(app, client, pid, {"message": "make a spacer"})
+        # Release the inflight flag — the SSE endpoint's ``finally`` does
+        # this in production; a test driving the raw generator must
+        # mirror it or the next request 409s.
+        inflight = getattr(app.state, "design_loop_inflight", None)
+        if inflight is not None:
+            inflight.discard(pid)
+        r2, frames2 = await _drive_chat(app, client, pid, {"message": "yes"})
+        return r1.status_code, r2.status_code, frames1, frames2
+
+    s1, s2, frames1, frames2 = run_async(app_with_versions, _call)
+    assert s1 == 202 and s2 == 202
+    done1 = [d for e, d in frames1 if e == "done"]
+    done2 = [d for e, d in frames2 if e == "done"]
+    assert done1 and done2
+    # The offer: the template with the mm spelling (the deck's mm(40),
+    # U+202F — the binding operator decision's exact string).
+    assert done1[-1].get("confirm_sentence") == (
+        "I assumed 40.0\u202fmm for Spacer depth. Want it different?"
+    ), done1
+    assert done1[-1].get("confirm_offer") == "spacer_depth"
+    # The ack: value and message both carry the same mm spelling.
+    assert done2[-1].get("confirm_ack_value") == "40.0\u202fmm", done2
+    assert done2[-1]["message"] == "Got it — Spacer depth stays 40.0\u202fmm.", done2
 
 
 class _TierStubResult:

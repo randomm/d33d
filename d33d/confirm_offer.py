@@ -286,9 +286,17 @@ def offer_entry(
 ) -> dict[str, Any] | None:
     """The chosen param's design-state entry (label + value from the
     shared block builder), with the param's own metadata grafted onto
-    the ``meta_unit`` / ``param_axis`` keys (see the module docstring's
-    tier rules) — or ``None`` when the name is not a declared param
-    (a guard — the caller should never reach here with a bad name)."""
+    resolved metadata (see the module docstring's tier rules) — or
+    ``None`` when the name is not a declared param (a guard — the caller
+    should never reach here with a bad name).
+
+    The param's metadata is normalised ONCE (``normalize_param_meta``) and
+    resolved onto the entry under ``meta_unit`` / ``param_axis`` (issue
+    #265): the value formatters (:func:`mm_value_str`, tiers 1 and 2) read
+    those keys and never re-normalise. The design-state entry's default
+    ``unit: "mm"`` (every numeric param) is the ENTRY's field, never the
+    graft — the metadata is the model's declared unit, and the entry's
+    default never counts."""
     from d33d.design_state import normalize_param_meta, state_block_from_params
 
     meta = normalize_param_meta(param_meta)
@@ -332,7 +340,12 @@ def mm_value_str(entry: dict[str, Any]) -> str:
     entry's default ``unit: "mm"`` does not count).
 
     A non-mm unit, no unit, or a non-numeric value keeps
-    :func:`format_param_value` verbatim — no unit is ever fabricated."""
+    :func:`format_param_value` verbatim — no unit is ever fabricated.
+
+    The evidence is read from the entry's resolved ``meta_unit`` /
+    ``param_axis`` keys (the single normalisation point is :func:
+    ``offer_entry`` — this function never re-normalises the row's raw
+    ``param_meta``)."""
     value = entry.get("value")
     if not _is_number(value):
         return _format_value(value)

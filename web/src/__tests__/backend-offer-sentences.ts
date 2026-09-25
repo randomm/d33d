@@ -20,8 +20,10 @@
 const mmFormatted = (value: number): string => `${value.toFixed(1)}\u202fmm`;
 
 /** The value's bare spelling (`d33d.confirm_offer.format_param_value`,
- * `f"{value:g}"`): non-numeric values verbatim, numbers without units. */
-const formatValue = (value: number | string | boolean): string => String(value);
+ * `f"{value:g}"`): non-numeric values verbatim, numbers in general form
+ * (`40` → "40", `1.5` → "1.5", `3.0` → "3"). */
+const formatValue = (value: number | string | boolean): string =>
+  typeof value === "number" ? String(Math.round(value * 1e12) / 1e12) : String(value);
 
 interface OfferEntry {
   name: string;
