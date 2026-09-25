@@ -93,9 +93,11 @@ __all__ = [
     "ANSWER_CALL_TIMEOUT_SECONDS",
     "ANSWER_DONE_KIND",
     "ANSWER_KINDS",
+    "COULD_NOT_ANSWER",
+    "DETERMINISTIC_AXIS_ADJECTIVES",
+    "DETERMINISTIC_AXIS_NOUNS",
     "DETERMINISTIC_AXIS_SENTENCES",
     "DETERMINISTIC_DIMENSION_LIST_RE",
-    "COULD_NOT_ANSWER",
     "NOT_ESTABLISHED",
     "AnswerOutcome",
     "ask_answer_call",
@@ -481,31 +483,27 @@ DETERMINISTIC_DIMENSION_LIST_FORMAT = "It measures {W} × {D} × {H}."
 #: by the Python tests here (the #250 way — both directions are checked
 #: against the same sentences).
 DETERMINISTIC_AXIS_SENTENCES = {
-    "stated+measured": {
-        "H": "It's {value} tall — you said that, and I measured it.",
-        "W": "It's {value} wide — you said that, and I measured it.",
-        "D": "It's {value} deep — you said that, and I measured it.",
-    },
-    "measured": {
-        "H": "It measures {value} tall.",
-        "W": "It measures {value} wide.",
-        "D": "It measures {value} deep.",
-    },
-    "stated": {
-        "H": "You said {value} tall. Nothing has measured it yet.",
-        "W": "You said {value} wide. Nothing has measured it yet.",
-        "D": "You said {value} deep. Nothing has measured it yet.",
-    },
-    "disagrees": {
-        "H": "You said {stated}; what came out measures {measured}.",
-        "W": "You said {stated}; what came out measures {measured}.",
-        "D": "You said {stated}; what came out measures {measured}.",
-    },
-    "not_established": {
-        "H": "The height isn't established yet.",
-        "W": "The width isn't established yet.",
-        "D": "The depth isn't established yet.",
-    },
+    "stated+measured": "It's {value} {axis} — you said that, and I measured it.",
+    "measured": "It measures {value} {axis}.",
+    "stated": "You said {value} {axis}. Nothing has measured it yet.",
+    "disagrees": "You said {stated}; what came out measures {measured}.",
+    "not_established": "The {axis_noun} isn't established yet.",
+}
+
+#: The axis adjective per axis (the ``{axis}`` slot of the templates
+#: above — matches copy.ts' ``${axis}`` parameterisation).
+DETERMINISTIC_AXIS_ADJECTIVES: dict[str, str] = {
+    "W": "wide",
+    "D": "deep",
+    "H": "tall",
+}
+
+#: The axis noun per axis (the ``{axis_noun}`` slot of the
+#: ``not_established`` template — matches copy.ts' ``${axisNoun}``).
+DETERMINISTIC_AXIS_NOUNS: dict[str, str] = {
+    "W": "width",
+    "D": "depth",
+    "H": "height",
 }
 
 
@@ -540,9 +538,8 @@ def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
             if n == vn:
                 return True
             # Strip a leading "the " from the noun and compare again.
-            if n.startswith("the "):
-                if n[4:] == vn:
-                    return True
+            if n.startswith("the ") and n[4:] == vn:
+                return True
             # Or the version name itself starts with "the " (unlikely
             # but symmetric): "the shelf bracket" == "the shelf bracket".
             if vn.startswith("the ") and n == vn[4:]:
@@ -551,10 +548,8 @@ def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
     # a time adverb. Only "it" + trailing adverbs is a valid part match
     # ("the post now" is a feature with an adverb, not the part).
     words = n.split()
-    if words and words[0] == "it" and len(words) > 1:
-        # "it now", "it currently" — the subject is "it" (the part).
-        return True
-    return False
+    # "it now", "it currently" — the subject is "it" (the part).
+    return bool(words and words[0] == "it" and len(words) > 1)
 
 
 def _deterministic_axis(message: str, version_name: str | None):
@@ -693,6 +688,79 @@ def _axis_value_for(
     return "not_established", None, None
 
 
+def _deterministic_decision(
+    message: str,
+    latest: dict[str, Any] | None,
+) -> tuple[str, str, str] | None:
+    """The deterministic stage's ONE derivation for ONE message, or
+    ``None`` (the stage does not take the message — fall through to
+    stage 2).
+
+    Returns ``(axis, provenance_class, answer)`` where ``axis`` is
+    ``"W"`` / ``"D"`` / ``"H"`` / ``"list"`` and ``provenance_class``
+    is one of the :data:`DETERMINISTIC_AXIS_SENTENCES` keys. Computing
+    the stage decision, the stage outcome (for the WARNING log) and the
+    wire answer in ONE place means :func:`deterministic_axis_answer`
+    and :func:`deterministic_axis_outcome` can never diverge (they
+    project different fields of the same tuple), and the design-state
+    block (:func:`state_block_for_chat`) is built exactly once per
+    message. The dimension-list case reports its per-axis provenance
+    classes joined by ``+`` in W/D/H order
+    (``"measured+measured+not_established"`` — a closed vocabulary,
+    never free text).
+    """
+    if latest is None:
+        return None
+    # Target-number guard (adversarial finding 1): a message carrying a
+    # number ("Can it be 15 mm tall?", "Is it 12 mm tall?") is a
+    # PROPOSED change or a yes/no check, not a plain size question — it
+    # falls through to stage 2 (where the model decides) instead of
+    # being answered with the part's CURRENT height. Conservative and
+    # closed: any digit anywhere in the message abstains.
+    if re.search(r"\d", message) is not None:
+        return None
+    entries = state_block_for_chat(latest)
+    what = _deterministic_axis(message, latest.get("name"))
+    if what is None:
+        return None
+    if what == "list":
+        parts: list[str] = []
+        classes: list[str] = []
+        for ax in ("W", "D", "H"):
+            cls, value, _ = _axis_value_for(ax, entries, latest)
+            classes.append(cls)
+            if cls == "not_established":
+                parts.append("—")
+            else:
+                # The list uses each axis's best value (the measured one
+                # when the block says disagrees; the stated one
+                # otherwise).
+                parts.append(mm_formatted(value))
+        return (
+            "list",
+            "+".join(classes),
+            DETERMINISTIC_DIMENSION_LIST_FORMAT.format(
+                W=parts[0], D=parts[1], H=parts[2]
+            ),
+        )
+    cls, value, stated = _axis_value_for(what, entries, latest)
+    if cls == "not_established":
+        answer = DETERMINISTIC_AXIS_SENTENCES["not_established"].format(
+            axis_noun=DETERMINISTIC_AXIS_NOUNS[what]
+        )
+    elif cls == "disagrees":
+        answer = DETERMINISTIC_AXIS_SENTENCES["disagrees"].format(
+            stated=mm_formatted(stated) if stated is not None else "?",
+            measured=mm_formatted(value) if value is not None else "?",
+        )
+    else:
+        answer = DETERMINISTIC_AXIS_SENTENCES[cls].format(
+            value=mm_formatted(value) if value is not None else "?",
+            axis=DETERMINISTIC_AXIS_ADJECTIVES[what],
+        )
+    return what, cls, answer
+
+
 def deterministic_axis_answer(
     message: str,
     latest: dict[str, Any] | None,
@@ -708,38 +776,14 @@ def deterministic_axis_answer(
     The stage outcome (the axis, or the dimension-list marker, plus the
     provenance class) is available to the caller via
     :func:`deterministic_axis_outcome` for the WARNING log (one record
-    naming the outcome, axis, provenance class — no message text).
+    naming the outcome, axis, provenance class — no message text); both
+    project the same :func:`_deterministic_decision`, so they cannot
+    diverge.
     """
-    if latest is None:
+    decision = _deterministic_decision(message, latest)
+    if decision is None:
         return None
-    version_name = latest.get("name")
-    entries = state_block_for_chat(latest)
-    what = _deterministic_axis(message, version_name)
-    if what == "list":
-        parts: list[str] = []
-        for ax in ("W", "D", "H"):
-            cls, value, _ = _axis_value_for(ax, entries, latest)
-            if cls == "not_established":
-                parts.append("—")
-            else:
-                # The list uses each axis's best value (the measured one
-                # when the block says disagrees; the stated one otherwise).
-                parts.append(mm_formatted(value))
-        return DETERMINISTIC_DIMENSION_LIST_FORMAT.format(
-            W=parts[0], D=parts[1], H=parts[2]
-        )
-    if what is None:
-        return None
-    cls, value, stated = _axis_value_for(what, entries, latest)
-    tmpl = DETERMINISTIC_AXIS_SENTENCES[cls][what]
-    if cls == "disagrees":
-        return tmpl.format(
-            stated=mm_formatted(stated) if stated is not None else "?",
-            measured=mm_formatted(value) if value is not None else "?",
-        )
-    if cls == "not_established":
-        return tmpl
-    return tmpl.format(value=mm_formatted(value) if value is not None else "?")
+    return decision[2]
 
 
 def deterministic_axis_outcome(
@@ -756,22 +800,16 @@ def deterministic_axis_outcome(
     text or the answer text (no PII in logs). The dimension-list case
     reports its per-axis provenance classes joined by ``+`` in W/D/H order
     (``"measured+measured+not_established"`` — a closed vocabulary, never
-    free text)."""
-    if latest is None:
+    free text).
+
+    Projects the same :func:`_deterministic_decision` as
+    :func:`deterministic_axis_answer`, so the log fields and the wire
+    answer are derived from one computation.
+    """
+    decision = _deterministic_decision(message, latest)
+    if decision is None:
         return None
-    version_name = latest.get("name")
-    entries = state_block_for_chat(latest)
-    what = _deterministic_axis(message, version_name)
-    if what == "list":
-        classes = [
-            _axis_value_for(ax, entries, latest)[0]
-            for ax in ("W", "D", "H")
-        ]
-        return "list", "+".join(classes)
-    if what is None:
-        return None
-    cls, _, _ = _axis_value_for(what, entries, latest)
-    return what, cls
+    return decision[0], decision[1]
 
 
 # ---------------------------------------------------------------------------
@@ -1081,12 +1119,14 @@ async def route_chat_message(
     # is answered from the design state with NO LLM call (no timeout,
     # no model call, no guard). It runs BEFORE the answer-edge check
     # (the deterministic answer needs no model). Anything it does not
-    # take falls through to stage 2 exactly as today. ONE WARNING names
-    # the outcome (axis, provenance class — no message text).
-    outcome = deterministic_axis_outcome(message, latest)
-    if outcome is not None:
-        deterministic = deterministic_axis_answer(message, latest)
-        axis, prov = outcome
+    # take falls through to stage 2 exactly as today. ONE derivation
+    # (:func:`_deterministic_decision`) yields the stage decision, the
+    # log fields and the wire answer at once, so they cannot diverge;
+    # ONE WARNING names the outcome (axis, provenance class — no
+    # message text).
+    decision = _deterministic_decision(message, latest)
+    if decision is not None:
+        axis, prov, deterministic = decision
         logger.warning(
             "question-answer: outcome=deterministic axis=%s "
             "provenance=%s (len(message)=%d)",

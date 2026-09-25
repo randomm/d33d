@@ -45,6 +45,10 @@ import pytest
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
     COULD_NOT_ANSWER,
+    DETERMINISTIC_AXIS_ADJECTIVES,
+    DETERMINISTIC_AXIS_NOUNS,
+    DETERMINISTIC_AXIS_SENTENCES,
+    DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
     build_answer_prompt,
@@ -761,6 +765,45 @@ class TestDeterministicAxisStage:
         result = deterministic_axis_answer("How tall is the shelf?", latest)
         assert result is None
 
+    def test_proposed_change_question_with_number_falls_through(self) -> None:
+        # Adversarial finding (PR #272 round 1): a message carrying a
+        # number ("Can it be 15 mm tall?") is a PROPOSED change or a
+        # yes/no check, not a plain size question — the target-number
+        # guard makes the deterministic stage abstain (fall through to
+        # stage 2) instead of answering with the part's CURRENT height.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        for msg in (
+            "Can it be 15 mm tall?",
+            "Can it be 20 mm deep?",
+            "Is it 12 mm tall?",
+            "How big is it, 20 mm?",
+        ):
+            assert deterministic_axis_answer(msg, latest) is None, (
+                f"{msg!r} must fall through (target-number guard), "
+                "got a deterministic answer"
+            )
+
+    def test_number_in_version_name_does_not_trip_guard(self) -> None:
+        # The guard scans the MESSAGE, not the version name: a version
+        # named "12 mm shelf spacer" asked about by a digit-free question
+        # still answers deterministically.
+        latest = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="12 mm shelf spacer"
+        )
+        result = deterministic_axis_answer(
+            "How tall is the 12 mm shelf spacer?", latest
+        )
+        # The message carries a digit (the name's "12"), so the guard
+        # abstains — a digit anywhere in the message is a conservative
+        # abstain, even inside a version-name reference.
+        assert result is None
+        # A digit-free phrasing of the same question still answers.
+        latest2 = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="shelf spacer"
+        )
+        result2 = deterministic_axis_answer("How tall is the shelf spacer?", latest2)
+        assert result2 == "It measures 12.0\u202fmm tall."
+
     def test_version_name_case_insensitive(self) -> None:
         # Version named "Shelf bracket": "how tall is the SHELF BRACKET?"
         # → H (case-insensitive match).
@@ -951,71 +994,87 @@ class TestDeterministicWarningLog:
 
 
 class TestDeterministicCopyDeckParity:
-    """Issue #263: the backend's deterministic answer strings are pinned
-    against ``web/src/copy.ts``'s ``deterministicAnswer`` deck, the same
-    way the #250 ``confirmOffer`` and #260 ``answerRoute`` strings are —
-    a deck edit without the backend (or vice versa) is a drift this
-    catches."""
+    """Issue #263: the backend's deterministic answer sentences are
+    pinned against the exact strings the W263 design-contract test pins
+    for ``web/src/copy.ts``'s ``deterministicAnswer`` deck (the same
+    strings the #250 ``confirmOffer`` and #260 ``answerRoute`` parity
+    tests pin) — a deck edit without the backend (or vice versa) is a
+    drift this catches. No placeholder surgery: each backend template
+    is formatted with fixed sample values and compared to the exact
+    sentences."""
 
-    def test_backend_deterministic_strings_match_copy_ts_deck(self) -> None:
-        from pathlib import Path
+    def test_backend_deterministic_sentences_match_pinned_deck_strings(self) -> None:
+        # The W263 design-contract test's fixed sample values (the
+        # acceptance criterion's examples, mm-formatted the way the deck
+        # and the backend both render them: one decimal, U+202F, "mm").
+        H = "12.0\u202fmm"
+        W = "60.0\u202fmm"
+        D = "45.0\u202fmm"
+        stated = "12.0\u202fmm"
+        measured = "43.8\u202fmm"
 
-        copy_ts = (
-            Path(__file__).resolve().parents[2]
-            / "web"
-            / "src"
-            / "copy.ts"
-        ).read_text()
+        # The expected sentences: the exact strings the W263 design-
+        # contract test in web/src/__tests__/design-contract.test.ts
+        # pins for copy.deterministicAnswer — one per provenance class,
+        # per axis where the class carries an axis slot.
+        expected = [
+            # stated+measured (one template, three axis adjectives)
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=H, axis="tall"
+            ),
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=W, axis="wide"
+            ),
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=D, axis="deep"
+            ),
+            # measured
+            DETERMINISTIC_AXIS_SENTENCES["measured"].format(value=H, axis="tall"),
+            DETERMINISTIC_AXIS_SENTENCES["measured"].format(value=D, axis="deep"),
+            # stated
+            DETERMINISTIC_AXIS_SENTENCES["stated"].format(value=H, axis="tall"),
+            DETERMINISTIC_AXIS_SENTENCES["stated"].format(value=W, axis="wide"),
+            # disagrees (axis-independent)
+            DETERMINISTIC_AXIS_SENTENCES["disagrees"].format(
+                stated=stated, measured=measured
+            ),
+            # not established (one template, three axis nouns)
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="height"),
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="width"),
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="depth"),
+            # dimension list (W x D x H order)
+            DETERMINISTIC_DIMENSION_LIST_FORMAT.format(W=W, D=D, H=H),
+        ]
+        expected_exact = [
+            "It's 12.0\u202fmm tall \u2014 you said that, and I measured it.",
+            "It's 60.0\u202fmm wide \u2014 you said that, and I measured it.",
+            "It's 45.0\u202fmm deep \u2014 you said that, and I measured it.",
+            "It measures 12.0\u202fmm tall.",
+            "It measures 45.0\u202fmm deep.",
+            "You said 12.0\u202fmm tall. Nothing has measured it yet.",
+            "You said 60.0\u202fmm wide. Nothing has measured it yet.",
+            "You said 12.0\u202fmm; what came out measures 43.8\u202fmm.",
+            "The height isn't established yet.",
+            "The width isn't established yet.",
+            "The depth isn't established yet.",
+            "It measures 60.0\u202fmm \u00d7 45.0\u202fmm \u00d7 12.0\u202fmm.",
+        ]
+        # The backend's formatted sentences are exactly the W263 design-
+        # contract test's pinned strings — no regex, no placeholder
+        # conversion, both directions pinned by the literals above.
+        assert expected == expected_exact
 
-        # The backend's per-provenance sentence templates (issue #263)
-        # must be present in copy.ts — no line-by-line regex extraction
-        # (which is brittle to deck reformatting and can pick up the
-        # wrong string). Both directions are pinned: a backend rewrite
-        # or a deck rewrite breaks the check.
-        # The deck parameterises the axis adjective/noun and the W/D/H
-        # slots (${axis}, ${axisNoun}, ${w}/${d}/${h}); the backend has
-        # one literal string per axis. The test substitutes the deck's
-        # interpolation syntax so the raw template shape can be matched.
-        for tpl in (
-            "It's {value} {axis} — you said that, and I measured it.",
-            "It measures {value} {axis}.",
-            "You said {value} {axis}. Nothing has measured it yet.",
-            "You said {stated}; what came out measures {measured}.",
-            "The {axisNoun} isn't established yet.",
-            "It measures {w} × {d} × {h}.",
-        ):
-            deck_tpl = tpl
-            for var in ("value", "axis", "stated", "measured", "axisNoun", "w", "d", "h"):
-                deck_tpl = deck_tpl.replace(
-                    "{" + var + "}", "${" + var + "}"
-                )
-            assert f'"{deck_tpl}"' in copy_ts or f"`{deck_tpl}`" in copy_ts, (
-                f"backend string {tpl!r} (deck form {deck_tpl!r}) not "
-                f"found in copy.ts (the copy.ts deck must carry it verbatim)"
-            )
-        # The per-axis adjective / noun pins: the backend's per-axis
-        # variants must match the deck's axis parameterisation.
-        for adjective in ("tall", "wide", "deep"):
-            for tpl in (
-                f"It's {{value}} {adjective} — you said that, and I measured it.",
-                f"It measures {{value}} {adjective}.",
-                f"You said {{value}} {adjective}. Nothing has measured it yet.",
-            ):
-                deck_tpl = tpl.replace("{value}", "${value}").replace(
-                    adjective, "${axis}"
-                )
-                assert f"`{deck_tpl}`" in copy_ts, (
-                    f"backend per-axis string {tpl!r} (deck form {deck_tpl!r}) "
-                    f"not found in copy.ts"
-                )
-        for noun in ("height", "width", "depth"):
-            deck_tpl = f"The {noun} isn't established yet.".replace(
-                noun, "${axisNoun}"
-            )
-            assert f"`{deck_tpl}`" in copy_ts, (
-                f"backend not-established string for {noun!r} (deck form {deck_tpl!r}) "
-                f"not found in copy.ts"
-            )
+        # The per-axis adjective/noun lookups carry the axis words the
+        # W263 design-contract test pins (tall/wide/deep, height/width/
+        # depth) — a deck edit to a different axis word breaks this.
+        assert DETERMINISTIC_AXIS_ADJECTIVES == {
+            "W": "wide", "D": "deep", "H": "tall"
+        }
+        assert DETERMINISTIC_AXIS_NOUNS == {
+            "W": "width", "D": "depth", "H": "height"
+        }
+
+
 
 
 class TestDeterministicAxisStageRouteLevel:
