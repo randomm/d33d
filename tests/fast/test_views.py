@@ -283,14 +283,17 @@ def test_views_rotation_semantics_unchanged() -> None:
     Convention (issue #262 operator decision): Z is up, front looks
     from −Y toward +Y (+X right, +Z up in the frame), back from +Y,
     left from −X, right from +X, top from +Z (+X right, +Y up),
-    iso from the front-right-top octant."""
+    iso from the front-right-top octant (issue #269 re-verified the
+    iso rotation: the original (0,45,45) rendered the model sideways;
+    (55,0,25) — OpenSCAD's GUI default — renders +Z up, the post
+    vertical on the right, and the −Y notch face visible)."""
     expected_rotations = [
         (0.0, 0.0, 0.0, 90.0, 0.0, 0.0),    # front:  90° about X
         (0.0, 0.0, 0.0, 90.0, 0.0, 180.0),  # back:   90° about X, 180° about Z
         (0.0, 0.0, 0.0, 90.0, 0.0, 270.0),  # left:   90° about X, 270° about Z
         (0.0, 0.0, 0.0, 90.0, 0.0, 90.0),   # right:  90° about X, 90° about Z
         (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),     # top:    no rotation
-        (0.0, 0.0, 0.0, 0.0, 45.0, 45.0),   # iso:    45° about Y, 45° about Z
+        (0.0, 0.0, 0.0, 55.0, 0.0, 25.0),   # iso:    55° about X, 25° about Z (issue #269)
     ]
     for (name, cam), expected in zip(rw.VIEWS, expected_rotations):
         assert cam[:6] == expected, (

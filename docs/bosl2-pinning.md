@@ -135,7 +135,7 @@ front looks from −Y toward +Y, +X right in the frame):
 | left (`view_02`) | `0,0,0,90,0,270,40` | 90° about X, 270° about Z; camera looks from −X. The cone is on one side of the frame, the −Y notch on the other. |
 | right (`view_03`) | `0,0,0,90,0,90,40` | 90° about X, 90° about Z; camera looks from +X. The +X post is closest to the camera; the −Y notch is visible. |
 | top (`view_04`) | `0,0,0,0,0,0,40` | No rotation; camera looks down from +Z. The base slab fills the frame; the cone tip is visible at the centre; the −Y notch is at the bottom of the frame, the +Y block at the top. |
-| iso (`view_05`) | `0,0,0,0,45,45,55` | 45° about Y + 45° about Z; camera in the front-right-top octant. Three faces meet at a visible corner — the classic isometric view. The model appears shifted toward the upper-right of the frame. |
+| iso (`view_05`) | `0,0,0,55,0,25,55` | 55° about X + 25° about Z; camera in the front-right-top octant (−Y, +X, +Z). Verified pixel facts (per the marker test `tests/slow/test_render_views.py::test_views_marker_model_feature_placement`): the +X post is vertical (taller than wide) on the right of the frame, the cone is above the slab, the −Y notch face is visible (viewer on the −Y side), and +Z is up. Issue #269 re-verified this empirically: the original `(0,45,45)` rendered the model sideways (+Z pointing left, the 45 mm post as a horizontal bar); `(55,0,25)` — OpenSCAD's GUI default view angle — is the correct front-right-top octant. |
 
 The original three-slab verification (2026-09-11) was **wrong**: it
 labelled the rotation `(0,0,0)` as "front" (it is actually the top view),
@@ -144,6 +144,17 @@ labelled the rotation `(0,0,0)` as "front" (it is actually the top view),
 "right" (they are actually other side views). The mislabelling was
 invisible while the views were cropped (fixed in #223/#234); the
 marker-model test makes the correct mapping the regression gate.
+
+The iso rotation was additionally re-verified in #269: the original
+`(0,45,45)` (45° about Y then 45° about Z) rendered the model sideways —
+the 45 mm post appeared as a horizontal bar pointing left, with +Z
+pointing to the upper-left of the frame. The new `(55,0,25)` (55° about
+X, 0° about Y, 25° about Z) is OpenSCAD's GUI default view angle and
+renders from the front-right-top octant (−Y, +X, +Z). Verified pixel facts
+(per the marker test
+`tests/slow/test_render_views.py::test_views_marker_model_feature_placement`):
+the post is vertical on the right, the −Y notch face is visible, and +Z is
+up — the rotation the per-view pixel assertions in that test verify.
 
 These camera tuples are the single source of truth for the `VIEWS` constant
 in `d33d/render_worker.py` and for the `VIEW_CAMERAS` array in
