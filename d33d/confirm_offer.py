@@ -52,18 +52,21 @@ acknowledgement on acceptance: "Got it — {label} stays {value}."
 The tier-3 ``{value}`` slot is the :func:`mm_value_str` spelling
 (issue #265): ``mm_formatted`` (one decimal + U+202F + ``mm`` — the
 deck's ``mm()``) ONLY when the param is genuinely an mm measurement —
-its ``param_meta`` carries ``unit: "mm"`` explicitly OR it declares an
-axis; the entry's default ``unit: "mm"`` (every numeric param) does not
-count, and a non-mm / unitless value keeps :func:`format_param_value`
-verbatim. The model-sentence value-name check accepts EITHER the bare
-or the mm-formatted spelling of the value.
+its metadata carries ``unit: "mm"`` explicitly OR it declares an axis
+(the evidence ``state_block_from_params`` carries onto the entry itself
+— an explicit ``unit`` key plus the ``axis`` key; the entry's default
+``unit: "mm"`` for every numeric param does NOT count); a non-mm /
+unitless value keeps :func:`format_param_value` verbatim. The
+model-sentence value-name check accepts EITHER the bare or the
+mm-formatted spelling of the value.
 
 Tier-1 (a released axis) and tier-2 (a user-quoted unmapped number)
 sentences (issue #261) render ``{value}`` via :func:`mm_formatted`
-when the param unit is ``mm`` — NEVER the raw number: the deck's
-``mm()`` (``toFixed(1)`` + U+202F + ``mm``) is the wire string, and
-Python's ``:g`` (``format_param_value``) would diverge (``12`` vs
-``12.0``).
+when the param's metadata unit is ``mm`` (the ``meta_unit`` seam of
+``state_block_from_params``'s join — the default ``unit: "mm"``
+does NOT count) — NEVER the raw number: the deck's ``mm()``
+(``toFixed(1)`` + U+202F + ``mm``) is the wire string, and Python's
+``:g`` (``format_param_value``) would diverge (``12`` vs ``12.0``).
 
 Import graph (acyclic by construction): this module is a LEAF of the
 design-state chain — ``design_state`` imports
@@ -282,14 +285,41 @@ def offer_entry(
     name: str,
 ) -> dict[str, Any] | None:
     """The chosen param's design-state entry (label + value from the
-    shared block builder), or ``None`` when the name is not a declared
-    param (a guard — the caller should never reach here with a bad name)."""
-    from d33d.design_state import state_block_from_params
+    shared block builder), with the param's own metadata grafted onto
+    the ``meta_unit`` / ``param_axis`` keys (see the module docstring's
+    tier rules) — or ``None`` when the name is not a declared param
+    (a guard — the caller should never reach here with a bad name)."""
+    from d33d.design_state import normalize_param_meta, state_block_from_params
 
+    meta = normalize_param_meta(param_meta)
     for entry in state_block_from_params(params, param_meta):
         if entry["name"] == name:
+            m = meta.get(name) or {}
+            unit = m.get("unit")
+            axis = m.get("axis")
+            entry["meta_unit"] = unit if isinstance(unit, str) and unit else None
+            entry["param_axis"] = (
+                axis if isinstance(axis, str) and axis else None
+            )
             return entry
     return None
+
+
+def _is_mm_evidence(entry: dict[str, Any]) -> bool:
+    """The single #265 mm-evidence predicate, shared by :func:`mm_value_str`
+    (tier 3) and :func:`_value_str_or_format` (tiers 1 and 2): ``True``
+    when the param's METADATA says ``unit: "mm"`` explicitly (the
+    ``meta_unit`` key — the model-declared unit, never the entry's
+    default) OR it declares an axis (the ``param_axis`` key — the
+    binding operator decision). The design-state entry's default
+    ``unit: "mm"`` (every numeric param) does NOT count — a count like
+    ``hole_count 3`` stays ``"3"``."""
+    unit = entry.get("meta_unit")
+    axis = entry.get("param_axis")
+    return (
+        (isinstance(unit, str) and unit == "mm")
+        or (isinstance(axis, str) and axis)
+    )
 
 
 def mm_value_str(entry: dict[str, Any]) -> str:
@@ -297,26 +327,16 @@ def mm_value_str(entry: dict[str, Any]) -> str:
     and ack (issue #265): the ``mm()``-formatted string (``12`` →
     ``"12.0\u202fmm"`` — one decimal, the U+202F narrow no-break space,
     ``mm`` — the deck's ``copy.ts mm()`` rendering, byte-for-byte) ONLY
-    when the param is genuinely an mm measurement — its ``param_meta``
-    carries an explicit ``unit: "mm"`` OR it declares an axis (the
-    binding operator decision; the design-state entry's default
-    ``unit: "mm"`` for every numeric param does NOT count — a count like
-    ``hole_count 3`` stays ``"3"``).
+    when the param is genuinely an mm measurement (:func:`_is_mm_evidence`
+    — metadata ``unit: "mm"`` explicitly, or a declared axis; the
+    entry's default ``unit: "mm"`` does not count).
 
     A non-mm unit, no unit, or a non-numeric value keeps
     :func:`format_param_value` verbatim — no unit is ever fabricated."""
-    from d33d.design_state import normalize_param_meta
-
     value = entry.get("value")
     if not _is_number(value):
         return _format_value(value)
-    name = entry.get("name") or ""
-    m = normalize_param_meta(entry.get("param_meta")).get(name) or {}
-    meta_unit = m.get("unit")
-    axis = m.get("axis")
-    if (isinstance(meta_unit, str) and meta_unit == "mm") or (
-        isinstance(axis, str) and axis
-    ):
+    if _is_mm_evidence(entry):
         return mm_formatted(value)
     return _format_value(value)
 
@@ -344,25 +364,130 @@ def offer_sentence(
     rendering ("40.0 mm" — U+202F or a regular space): a model sentence
     that says "I assumed 40 for …" is as valid as one that says "I
     assumed 40.0 mm for …". The template render always uses the mm
-    spelling for an mm param and the bare spelling otherwise."""
+    spelling for an mm param and the bare spelling otherwise.
+
+    The value-name check uses a token-exact match (not a substring ``in``):
+    the sentence's digit tokens are tokenized (``_tokenize_numbers``) and
+    the value names it if any token equals the bare ``:g`` rendering or
+    the numeric prefix of the mm-formatted rendering.  A substring match
+    would accept "I assumed 4 for Spacer depth" (a wrong value that
+    happens to equal another param in the block) when the chosen value is
+    40 — ``"4" in "40"`` is True — letting the wrong sentence through
+    verbatim."""
     from d33d.question_answer import guard_answer_numbers
 
     if isinstance(sentence, str) and sentence.strip():
-        bare = _format_value(entry.get("value"))
         label = entry.get("label") or entry.get("name") or ""
-        spellings: set[str] = {bare}
-        mm = mm_value_str(entry)
-        if mm != bare:
-            spellings.add(mm)
-            spellings.add(mm.replace("\u202F", " "))
-        names_value = any(sp in sentence for sp in spellings if sp)
-        if names_value and label and label in sentence and guard_answer_numbers(
-            sentence, block_entries
-        ):
+        if label and label in sentence and _sentence_names_value(
+            entry.get("value"), sentence
+        ) and guard_answer_numbers(sentence, block_entries):
             return sentence.strip()
     value_str = mm_value_str(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"I assumed {value_str} for {label}. Want it different?"
+
+
+#: Regex: a number — optional leading dot ("4" or ".5") or bare digits;
+#: one optional decimal fraction.  Splits on non-digit boundaries so that
+#: ``"40"`` and ``"4"`` are distinct tokens, while ``"40.0 mm"`` →
+#: ``["40.0"]`` (the trailing unit is a separate non-numeric token).
+_NUM_RE = "\\.?\\d+(?:\\.\\d+)?"
+
+
+def _tokenize_numbers(sentence: str) -> list[str]:
+    """Digit tokens in ``sentence`` (``re.findall`` with ``_NUM_RE``).
+
+    A substring ``in`` check (``"4" in "40"``) accepts a sentence that
+    names a WRONG value when the wrong number happens to be a digit
+    prefix of the correct one — the adversarial finding on issue #265.
+    Token-exact matching (``"4" in ["40"]`` → False) closes that gap
+    while keeping the operator-decided matrix: bare ("40"), mm-formatted
+    ("40.0"), and decimal ("40.0") spellings all name the value 40.
+    Non-numeric values (strings, bools) have no digit tokens → the bare
+    string ``in sentence`` substring check is retained (no regression —
+    the pre-#265 behaviour)."""
+    import re
+
+    return re.findall(_NUM_RE, sentence)
+
+
+def _sentence_names_value(value: Any, sentence: str) -> bool:
+    """Token-exact value-name check for :func:`offer_sentence` (issue #265).
+
+    True iff the sentence names the value — in either the bare ``:g``
+    spelling or the mm-formatted spelling — AND every number in the
+    sentence is accounted for by the token-exact rule.  For a numeric
+    value the check is:
+
+    - The sentence contains a token equal to the bare ``:g`` rendering
+      ("40"), OR
+    - The sentence contains a token equal to the numeric prefix of the
+      mm-formatted rendering ("40.0" — the part before the U+202F
+      ``mm``), which covers both ``"40.0\u202fmm"`` and ``"40.0 mm"``.
+
+    The two spellings may be the same string (value 40 → bare "40",
+    mm prefix "40.0") or differ (value 4 → bare "4", mm prefix "4.0");
+    either one matching is sufficient.  A token that TRUNCATES the bare
+    spelling's decimal fraction (value 1.23456 → the natural "1.2" or
+    "1.23" roundings) also names the value (see :func:
+    ``_token_truncates_bare``) — without it a value whose ``:g`` spelling
+    needs more than one decimal digit would demote every plausible model
+    rounding to the template.
+
+    A non-numeric value falls back to a plain ``in`` substring check (the
+    pre-#265 behaviour — strings and bools have no digit-token structure)."""
+    bare = _format_value(value)
+    if not bare:
+        return False
+    # Non-numeric values: no digit tokens to match; use the plain substring
+    # check (the pre-#265 behaviour — a string value like "matte" is named
+    # by its verbatim spelling in the sentence).
+    if not _is_number(value):
+        return bare in sentence
+    # Numeric value: token-exact match on the bare or mm numeric prefix,
+    # or a decimal truncation of the bare spelling.
+    tokens = set(_tokenize_numbers(sentence))
+    mm_prefix = mm_formatted(value).split("\u202f")[0]  # "40.0" (no U+202F, no mm)
+    return any(
+        tok == bare or tok == mm_prefix or _token_truncates_bare(tok, bare)
+        for tok in tokens
+    )
+
+
+def _token_truncates_bare(token: str, bare: str) -> bool:
+    """``True`` iff ``token`` is a decimal TRUNCATION of the bare ``:g``
+    spelling ``bare`` (the model rounding a value to fewer decimal digits
+    — value ``1.23456`` → the natural "1.2" or "1.23" roundings both name
+    it, issue #265's adversarial finding on the mm-prefix gap).
+
+    A token truncates ``bare`` iff it is a PROPER prefix of ``bare``
+    (any number of trailing digits dropped — "1.23" truncates "1.23456",
+    "1.2" truncates "1.23456"), the integer parts are identical, and
+    ``bare``'s digit at the truncation point (the first dropped one)
+    is either ``0`` (the rounding is exact — "1.2" truncates "1.20")
+    or was followed in ``bare`` by further fraction (the kept digits are
+    the truncated ones — "1.23" truncates "1.23456"). A token that
+    merely shares a prefix but rounds UP ("1.3" vs "1.23456") is NOT a
+    truncation — the mm-side check still catches the exact one-decimal
+    ``mm()`` rounding the wire always spells.
+
+    The sign is handled by the caller: the tokenizer produces unsigned
+    tokens, so the sign of ``bare`` (which may be negative) is stripped
+    before comparison."""
+    t = token.lstrip("-")
+    b = bare.lstrip("-")
+    if t == b:
+        return False
+    if not b.startswith(t):
+        return False
+    int_t, _, frac_t = t.partition(".")
+    int_b, _, frac_b = b.partition(".")
+    if int_t != int_b:
+        return False
+    first_dropped = frac_b[len(frac_t)] if len(frac_b) > len(frac_t) else "0"
+    if first_dropped == "0":
+        return True
+    return len(frac_b) > len(frac_t) + 1
 
 
 def _format_value(value: Any) -> str:  # alias — the private name predates the public one
@@ -422,11 +547,13 @@ def tier_1_cue(message: str) -> str | None:
 
 
 def _value_str_or_format(entry: dict[str, Any]) -> str:
-    """The entry's ``{value}`` slot: ``mm_formatted`` only for a numeric
-    value (``mm()`` needs a number to format); a non-numeric value falls
-    back to :func:`_format_value` (never a fabricated ``mm`` unit)."""
+    """The entry's ``{value}`` slot (tiers 1 and 2): ``mm_formatted``
+    only for a numeric value whose metadata declares ``unit: "mm"``
+    explicitly (the ``meta_unit`` key — the default ``unit: "mm"`` does
+    not count); a non-numeric or unitless value falls back to
+    :func:`_format_value` (never a fabricated ``mm`` unit)."""
     value = entry.get("value")
-    if entry.get("unit") == "mm" and _is_number(value):
+    if entry.get("meta_unit") == "mm" and _is_number(value):
         return mm_formatted(value)
     return _format_value(value)
 
@@ -434,8 +561,9 @@ def _value_str_or_format(entry: dict[str, Any]) -> str:
 def tier_1_sentence(entry: dict[str, Any], cue: str) -> str:
     """The tier-1 offer sentence (issue #261 — "You asked for {cue} — I
     made {label} {value}. Right?"): ``{value}`` is always the ``mm()``-
-    formatted string when the param unit is mm (``mm_formatted``), never
-    the raw number; the label per #248 (identifier fallback)."""
+    formatted string when the param's metadata unit is mm
+    (``meta_unit == "mm"``, ``mm_formatted``), never the raw number; the
+    label per #248 (identifier fallback)."""
     value_str = _value_str_or_format(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"You asked for {cue} — I made {label} {value_str}. Right?"
@@ -461,7 +589,7 @@ def tier_2_sentence(entry: dict[str, Any]) -> str:
     """The tier-2 offer sentence (issue #261 — "You said {value} — I used
     it for {label}. Right?"): the user-quoted unmapped mm number the
     param's value equals; ``{value}`` ``mm()``-formatted (``mm_formatted``)
-    when the param unit is mm."""
+    when the param's metadata unit is mm."""
     value_str = _value_str_or_format(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"You said {value_str} — I used it for {label}. Right?"

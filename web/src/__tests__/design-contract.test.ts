@@ -324,7 +324,7 @@ describe("design contract", () => {
     // The tier-3 offer (mm param, deterministic template):
     // "I assumed 40.0 mm for Spacer depth. Want it different?" — the value
     // slot is EXACTLY the mm(40) rendering.
-    const backendOffer = offer_sentence({ name: "depth", label: "Spacer depth", value: 40, unit: "mm" });
+    const backendOffer = offer_sentence({ name: "depth", label: "Spacer depth", value: 40, meta_unit: "mm" });
     expect(backendOffer).toBe(
       "I assumed " + mmValue + " for Spacer depth. Want it different?",
     );
@@ -337,7 +337,7 @@ describe("design contract", () => {
 
     // The accepted-offer acknowledgement: "Got it — Spacer depth stays
     // 40.0 mm." — the same mm spelling the offer used, so the pair agrees.
-    const backendAck = ack_sentence({ name: "depth", label: "Spacer depth", value: 40, unit: "mm" });
+    const backendAck = ack_sentence({ name: "depth", label: "Spacer depth", value: 40, meta_unit: "mm" });
     expect(backendAck).toBe("Got it — Spacer depth stays " + mmValue + ".");
     expect(copy.confirmOffer.acknowledged("Spacer depth", mmValue)).toBe(backendAck);
     expect(backendAck).not.toBe("Got it — Spacer depth stays 40."); // the bare `:g` spelling

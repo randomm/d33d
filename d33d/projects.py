@@ -241,17 +241,12 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     if not is_pending_offer_acceptance(message, offer, latest):
         return None
     name = offer["param"]
-    meta = latest["param_meta"]
-    entry = offer_entry(dict(latest["params"]), meta, name)
+    entry = offer_entry(dict(latest["params"]), latest["param_meta"], name)
     if entry is None or entry.get("provenance") != "assumed":
         # The param is gone or no longer assumed (confirmed/stated /
         # measured): the offer is stale — leave it be (the next pass
         # overwrites the pending-offer state) and route normally.
         return None
-    # The param's own metadata rides the entry: the ack's value spelling
-    # (issue #265 — ``mm_value_str``) reads the param's unit / axis from
-    # the row's ``param_meta``, the same way the offer sentence did.
-    entry["param_meta"] = meta
     versions.record_confirmation(project_id, latest["id"], name, entry.get("value"))
     versions.set_pending_offer(project_id, None)
     return {

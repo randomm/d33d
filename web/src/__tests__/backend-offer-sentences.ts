@@ -21,20 +21,21 @@ const mmFormatted = (value: number): string => `${value.toFixed(1)}\u202fmm`;
 
 /** The value's bare spelling (`d33d.confirm_offer.format_param_value`,
  * `f"{value:g}"`): non-numeric values verbatim, numbers without units. */
-const formatValue = (value: number | string | boolean): string =>
-  typeof value === "number" ? String(value) : String(value);
+const formatValue = (value: number | string | boolean): string => String(value);
 
 interface OfferEntry {
   name: string;
   label?: string;
   value: number | string | boolean;
   /**
-   * The param_meta unit / axis that makes the backend treat the param as
-   * genuinely mm (`unit: "mm"` explicitly, or an axis declared). Absent /
-   * non-mm → the bare `format_param_value` spelling (the #265 rule).
+   * The param's metadata unit / axis (the `offer_entry` graft: the
+   * model-declared `unit` — the design-state entry's default `"mm"`
+   * never counts — or a declared axis). `"mm"` / an axis → the
+   * mm-formatted spelling; absent / non-mm → the bare
+   * `format_param_value` spelling (the #265 rule).
    */
-  unit?: string;
-  axis?: string;
+  meta_unit?: string;
+  param_axis?: string;
 }
 
 /** Mirror of `d33d.confirm_offer.mm_value_str`: the mm-formatted spelling
@@ -42,8 +43,8 @@ interface OfferEntry {
 function mmValueStr(entry: OfferEntry): string {
   if (typeof entry.value !== "number") return formatValue(entry.value);
   const isMm =
-    (typeof entry.unit === "string" && entry.unit === "mm") ||
-    (typeof entry.axis === "string" && entry.axis !== "");
+    (typeof entry.meta_unit === "string" && entry.meta_unit === "mm") ||
+    (typeof entry.param_axis === "string" && entry.param_axis !== "");
   return isMm ? mmFormatted(entry.value) : formatValue(entry.value);
 }
 
