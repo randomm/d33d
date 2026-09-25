@@ -46,6 +46,7 @@ from __future__ import annotations
 from typing import Any
 
 from d33d.design_loop import BboxInfo, score
+from d33d.design_loop_events import _carried_axes
 from d33d.design_prompts import design_prompt
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
@@ -167,6 +168,42 @@ def test_chat_relative_cue_releases_carry_forward_axis(app_with_versions):
     assert captured["stated_dims"] is None
 
 
+def test_carried_axes_frame_field_bbox_only() -> None:
+    """The terminal error frame's ``carried_axes`` field (issue #261 fix
+    batch): the gate's enforced per-axis set is carried ONLY on a
+    bbox-gate failure (the SPA uses it to name the held value in the
+    failure copy) — omitted for every other failure reason and when the
+    gate set is empty (omit-not-null). The values are positive floats
+    (non-positive / non-numeric entries are dropped, as the merge
+    helper does)."""
+
+    class _R:
+        def __init__(self, failure_reason: str) -> None:
+            self.failure_reason = failure_reason
+
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"D": 12.0, "W": 20.0}) == {
+        "D": 12.0,
+        "W": 20.0,
+    }
+    # Non-bbox failure: no field (the SPA must not name a held value for
+    # an empty-model or syntax failure).
+    assert _carried_axes(_R("empty_model"), {"D": 12.0}) is None
+    assert _carried_axes(_R(None), {"D": 12.0}) is None
+    # No gate set / empty set: no field (nothing was enforced).
+    assert _carried_axes(_R("bbox_out_of_tolerance"), None) is None
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {}) is None
+    # Non-positive entries are dropped; an all-dropped (or empty) set →
+    # omit (a zero axis was abstained, not enforced). A numeric string
+    # coerces (the merge helper's rule) — kept, never a crash.
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"H": 0.0}) is None
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"H": -3.0}) is None
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"H": True}) is None
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"H": "12"}) == {"H": 12.0}
+    assert _carried_axes(_R("bbox_out_of_tolerance"), {"H": 12.0, "W": 0.0}) == {
+        "H": 12.0
+    }
+
+
 def test_chat_cueless_follow_up_carries_forward(app_with_versions):
     """CARRY-FORWARD (issue #261, one axis): a follow-up message with NO
     axis cue at all ("add a hole") on a project whose latest version row
@@ -193,6 +230,34 @@ def test_chat_cueless_follow_up_carries_forward(app_with_versions):
 
     captured = run_async(app_with_versions, _call)
     assert captured["stated_dims"] == (0.0, 0.0, 12.0)
+
+
+def test_chat_feature_clause_does_not_override_carried_axis(app_with_versions):
+    """CARRY-FORWARD (issue #261 fix batch, the feature-noun rule):
+    v1 has stated D=40 (persisted on the latest row). A follow-up that
+    contains a FEATURE NOUN — "add a 10 mm deep hole" — must NOT state
+    D=10 (the 10 is the hole's depth, a feature size, not the part's):
+    the clause states nothing, nothing releases or overrides the
+    carried axis, so the gate enforces the CARRIED D=40 (0.0, 40.0,
+    0.0). Pre-fix the lexicon stated D=10 from the feature clause and
+    the carry-forward merged it over the carried 40 — the gate then
+    enforced the hole's size against the whole part."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"base_depth": 40.0, "base_width": 20.0},
+            stated_dims={"D": 40.0},
+        )
+        return await _drive_chat_capture(
+            app_with_versions, client, pid,
+            {"message": "add a 10 mm deep hole", "chat_history": []},
+        )
+
+    captured = run_async(app_with_versions, _call)
+    assert captured["stated_dims"] == (0.0, 40.0, 0.0)
 
 
 def test_chat_global_cue_releases_all_axes(app_with_versions):

@@ -130,17 +130,49 @@ class TestStage1Detector:
     def test_absolute_word_height_is_still_a_candidate(self) -> None:
         assert is_candidate_question("What is the height?")
 
-    def test_relative_cue_in_question_form_is_a_known_tradeoff(self) -> None:
-        """Issue #261 round 2 (minor observation 3, accepted): the stage-1
-        union makes "is it higher than the shelf?" non-candidate ("higher"
-        is relative → imperative → routed to the design loop, a wasted
-        render instead of an answer). The trade-off is deliberate: the
-        COMMON case "Can it be 20 mm wider?" IS a change request and
-        must go to the loop; distinguishing question-form from
-        change-form requires intent classification, which stage 1 is not.
-        Pinned so a future change is a conscious decision."""
-        assert not is_candidate_question("is it higher than the shelf?")
+    def test_comparison_question_stays_a_candidate(self) -> None:
+        """Issue #261 fix batch: an interrogative message whose only
+        lexicon imperative hits are immediately followed by "than" is a
+        comparison question, not a change request — it stays a
+        candidate (stage 2 answers or classifies it; no wasted render).
+        The carve-out is lexicon-only: base imperative words (make,
+        set, change, …) and the multi-word global forms ("half the
+        size") still win and send the message to the loop."""
+        assert is_candidate_question("is it taller than the shelf?")
+        assert is_candidate_question("is it bigger than 20 mm?")
+
+    def test_change_request_with_relative_cue_is_not_a_candidate(self) -> None:
+        """"Can it be 20 mm wider?" is a change request — the relative
+        cue is NOT in comparison form (no "than"), so it is not a
+        candidate."""
+        assert not is_candidate_question("can it be 20 mm wider?")
+
+    def test_imperative_with_comparison_form_is_not_a_candidate(self) -> None:
+        """"make it taller than 30 mm" — the base imperative word wins
+        even though the relative word is in comparison form (the
+        carve-out requires EVERY lexicon hit to be followed by "than",
+        and base words are never carved out)."""
+        assert not is_candidate_question("make it taller than 30 mm")
+
+    def test_comparison_question_with_base_imperative_not_a_candidate(self) -> None:
+        """"is it wider than 30 mm, can we change it?" — the base
+        imperative word "change" is present: the carve-out only covers
+        lexicon words, so the imperative wins."""
+        assert not is_candidate_question("is it wider than 30 mm, can we change it?")
+
+    def test_multiword_global_form_has_no_comparison_carveout(self) -> None:
+        """The multi-word global forms ("half the size", …) have no
+        "than" carve-out: "is it half the size of the other one?" stays
+        non-candidate (accepted trade-off: distinguishing question-form
+        from change-form requires intent classification, which stage 1
+        is not). Pinned so a future change is a conscious decision."""
         assert not is_candidate_question("is it half the size of the other one?")
+
+    def test_two_lexicon_hits_only_one_in_comparison_form(self) -> None:
+        """"is it wider than 30 mm or taller than 20 mm" — both lexicon
+        hits are in comparison form (each immediately followed by
+        "than"), so the message stays a candidate."""
+        assert is_candidate_question("is it wider than 30 mm or taller than 20 mm?")
 
 
 # ---------------------------------------------------------------------------

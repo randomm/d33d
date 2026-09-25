@@ -370,6 +370,99 @@ class TestUnmappedMmNumbers:
 # ---------------------------------------------------------------------------
 
 
+class TestFeatureNounAbstain:
+    """A clause that contains a FEATURE NOUN (the closed
+    ``_FEATURE_NOUNS`` set) never produces an ABSOLUTE axis cue: its mm
+    number is a feature size ("a 10 mm deep hole" is a hole, not a
+    10 mm part), so it goes to ``unmapped_mm_numbers`` (tier-2 offer
+    territory) instead of setting an axis. Relative and global cues are
+    NOT affected ("make the hole deeper" still releases D)."""
+
+    def test_deep_groove_states_nothing(self) -> None:
+        """"a 5 mm deep groove" — the 5 is the groove's depth, not the
+        part's: no absolute axis, and the 5 is unmapped (eligible for
+        the tier-2 offer)."""
+        result = classify("a 5 mm deep groove")
+        assert result.absolute == {}
+        assert result.relative == set()
+        assert result.global_ is False
+        assert result.unmapped_mm_numbers == [5.0]
+
+    def test_deep_hole_states_nothing(self) -> None:
+        """"a hole 10 mm deep" — axis word after the number, same rule."""
+        result = classify("a hole 10 mm deep")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == [10.0]
+
+    def test_high_feet_states_nothing(self) -> None:
+        """"12 mm high feet" — a plural feature noun; the 12 is the
+        feet's height, not the part's."""
+        result = classify("12 mm high feet")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == [12.0]
+
+    def test_plain_axis_statement_still_states(self) -> None:
+        """"make it 12 mm tall" and "a box 40 mm wide" — no feature noun
+        in the clause: the absolute cue still states its axis."""
+        result = classify("make it 12 mm tall")
+        assert result.absolute == {"H": 12.0}
+        result = classify("a box 40 mm wide")
+        assert result.absolute == {"W": 40.0}
+
+    def test_mixed_part_and_feature_clause(self) -> None:
+        """"a 40 mm wide box with a 5 mm deep groove" — the comma or
+        "with" does not split on its own: both numbers are in ONE
+        clause, so the clause splits on "with" ONLY because every
+        resulting part has its own number (the same rule as "and").
+        The part's width states W=40; the groove's 5 is unmapped."""
+        result = classify("a 40 mm wide box with a 5 mm deep groove")
+        assert result.absolute == {"W": 40.0}
+        assert result.unmapped_mm_numbers == [5.0]
+
+    def test_relative_cue_in_feature_clause_still_releases(self) -> None:
+        """"make the hole deeper" — a feature noun does NOT block the
+        relative cue (a release only stops enforcement, so this is the
+        conservative choice): D is released, nothing is set."""
+        result = classify("make the hole deeper")
+        assert "D" in result.relative
+        assert result.absolute == {}
+
+    def test_feature_noun_is_a_whole_word(self) -> None:
+        """Whole-word matching: "depression" is not "recess", so the
+        clause holds no feature noun and the absolute cue states D=5
+        (the mm number with its axis word in the same clause)."""
+        result = classify("depression 5 mm deep")
+        assert result.absolute == {"D": 5.0}
+
+    def test_feature_noun_table_pins_the_closed_set(self) -> None:
+        """Table-driven pin of the closed feature-noun set: every word,
+        singular and plural as listed, makes "a 7 mm <word>" state
+        nothing (the 7 is unmapped), and a control clause with no
+        feature noun still states its axis."""
+        from d33d.axis_lexicon import _FEATURE_NOUNS
+
+        words = {
+            "hole", "holes", "groove", "slot", "pocket", "bore", "recess",
+            "notch", "channel", "cutout", "cut-out", "counterbore",
+            "countersink", "foot", "feet", "leg", "legs", "post", "tab",
+            "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
+            "magnet", "lid", "wall", "walls", "chamfer", "fillet", "text",
+            "label", "logo",
+        }
+        assert words == _FEATURE_NOUNS, (
+            f"set drifted: extra={words - _FEATURE_NOUNS}, "
+            f"missing={_FEATURE_NOUNS - words}"
+        )
+        for word in words:
+            result = classify(f"a 7 mm {word}")
+            assert result.absolute == {}, word
+            assert result.unmapped_mm_numbers == [7.0], word
+        # Control: no feature noun in the clause → the absolute cue
+        # states its axis ("post" absent, "7 mm" + "tall" in one
+        # single-axis-word clause).
+        assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
+
+
 class TestAxisForQuestionWord:
     """axis_for_question_word returns the axis for absolute words, None
     for relative/global/excluded words."""

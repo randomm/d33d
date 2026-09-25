@@ -17,9 +17,19 @@ Word sets (closed):
 Absolute cue: a number with an mm unit, or a bare number directly
 adjacent to the axis word, in the same clause as exactly one axis word.
 Clauses split on sentence punctuation, commas, and ";". Within a clause,
-split on "and" ONLY when every resulting part contains its own number;
-otherwise the clause stays whole, and a whole clause with two or more
-different axis words and one number maps nothing.
+split on "and" (or "with", under the same rule) ONLY when every resulting
+part contains its own number; otherwise the clause stays whole, and a
+whole clause with two or more different axis words and one number maps
+nothing.
+
+Feature nouns: a clause that contains a FEATURE NOUN (the closed
+``_FEATURE_NOUNS`` set — hole, groove, foot, …) never produces an
+ABSOLUTE axis cue: its number is a feature size ("a 10 mm deep hole" is
+a hole, not a 10 mm part), so it goes to ``unmapped_mm_numbers`` (tier-2
+offer territory) instead of setting an axis. Relative and global cues
+are NOT affected by feature nouns ("make the hole deeper" still
+releases D — a release only stops enforcement, so this is the
+conservative choice).
 
 Precedence (caller's responsibility, not the lexicon's):
   explicit stated_dims body field > explicit protocol cues > lexicon.
@@ -84,6 +94,59 @@ _EXCLUDED: frozenset[str] = frozenset(
         "reach",
         "clear",
     }
+)
+
+# Feature nouns (closed set, issue #261 fix batch): the parts of a design
+# that are NOT the part's envelope. A clause containing any of these words
+# (whole-word, case-insensitive; singular and plural as listed) never
+# produces an ABSOLUTE axis cue — "a 5 mm deep groove" states nothing
+# about the part's depth; the 5 is a feature size and belongs in
+# ``unmapped_mm_numbers`` (the tier-2 offer). Relative and global cues
+# still work in feature clauses ("make the hole deeper" releases D —
+# a release only stops enforcement, never sets a wrong value).
+_FEATURE_NOUNS: frozenset[str] = frozenset(
+    {
+        "hole",
+        "holes",
+        "groove",
+        "slot",
+        "pocket",
+        "bore",
+        "recess",
+        "notch",
+        "channel",
+        "cutout",
+        "cut-out",
+        "counterbore",
+        "countersink",
+        "foot",
+        "feet",
+        "leg",
+        "legs",
+        "post",
+        "tab",
+        "lip",
+        "rim",
+        "rib",
+        "boss",
+        "peg",
+        "pin",
+        "screw",
+        "bolt",
+        "magnet",
+        "lid",
+        "wall",
+        "walls",
+        "chamfer",
+        "fillet",
+        "text",
+        "label",
+        "logo",
+    }
+)
+
+_FEATURE_NOUN_RE = re.compile(
+    r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
 
 # All axis words (absolute + relative) for clause-level detection.
@@ -185,12 +248,17 @@ def _mm_numbers_in(text: str) -> list[float]:
     return [float(m) for m in _MM_NUMBER_RE.findall(text)]
 
 
+# The "and"/"with" joiners: split ONLY when every resulting part contains
+# its own number (the same rule for both — "a 40 mm wide box with a
+# 5 mm deep groove" splits into two single-number clauses; "20 mm wide
+# and tall" does not split because "tall" carries no number).
+_CLAUSE_JOINER_RE = re.compile(r"\b(?:and|with)\b", re.IGNORECASE)
+
+
 def _split_on_and(clause: str) -> list[str]:
-    """Split a clause on "and" ONLY when every resulting part contains
-    its own number. Otherwise the clause stays whole."""
-    # Find all "and" positions (word-boundary, case-insensitive).
-    and_re = re.compile(r"\band\b", re.IGNORECASE)
-    matches = list(and_re.finditer(clause))
+    """Split a clause on "and"/"with" ONLY when every resulting part
+    contains its own number. Otherwise the clause stays whole."""
+    matches = list(_CLAUSE_JOINER_RE.finditer(clause))
     if not matches:
         return [clause]
 
@@ -236,6 +304,17 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
         if _word_re(word).search(clause):
             relative.add(axis)
             cue_words.append(word)
+
+    # Feature-noun clauses (issue #261): "a 5 mm deep groove" / "a hole
+    # 10 mm deep" / "12 mm high feet" state nothing about the part's
+    # axes — the number is the feature's size, not the part's dimension.
+    # The clause still contributes its relative/global cues and cue words
+    # ("make the hole deeper" releases D — a release only stops
+    # enforcement, so keeping releases in feature clauses is the
+    # conservative choice); the mm number falls out into
+    # unmapped_mm_numbers via the normal unmapped scan below.
+    if _FEATURE_NOUN_RE.search(clause):
+        return ({}, relative, global_, cue_words)
 
     # Find all numbers in the clause.
     all_numbers = _numbers_in(clause)

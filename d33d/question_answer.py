@@ -97,6 +97,7 @@ __all__ = [
     "extract_written_numbers",
     "guard_answer_numbers",
     "is_candidate_question",
+    "is_interrogative",
     "parse_answer_reply",
     "route_chat_message",
     "state_block_for_chat",
@@ -191,6 +192,64 @@ _BASE_IMPERATIVE_WORDS: frozenset[str] = frozenset(
 _LEXICON_IMPERATIVE_WORDS: frozenset[str] = frozenset(_RELATIVE) | _GLOBAL
 _ALL_IMPERATIVE_WORDS: frozenset[str] = _BASE_IMPERATIVE_WORDS | _LEXICON_IMPERATIVE_WORDS
 
+#: The lexicon's single-word imperative cues (relative + single-word global)
+#: and the multi-word global phrases ("half the size", "twice the size").
+#: Used for the comparison-question carve-out: "is it taller than the
+#: shelf?" — a lexicon word immediately followed by "than" is a
+#: comparison, not an imperative. The multi-word forms have no such
+#: carve-out ("is it half the size of the other one?" stays non-candidate).
+#: NOTE: iterate the dicts by KEY (not sorted()) — ``sorted`` returns
+#: insertion order for a dict, so the multi-word phrases would slip into
+#: the single-word set and "bigger" would leave the base-only scan.
+_LEXICON_SINGLE_WORDS: frozenset[str] = {
+    word for word, _axis in _RELATIVE.items()
+} | {word for word in _GLOBAL if " " not in word}
+_LEXICON_MULTIWORDS: frozenset[str] = frozenset(_GLOBAL) - _LEXICON_SINGLE_WORDS
+
+# The lexicon-portion of the imperative scan: every word of the full
+# union that is NOT a base imperative word. A base word inside a
+# lexicon word (a future overlap) would be stripped from the full scan
+# and re-added via the base scan — the base scan is the conservative
+# default. The full scan (``_IMPERATIVE_RE``) and this set together
+# form a PARTITION of the union, so a message whose only imperative
+# hits are lexicon words in comparison form ("…taller than …") is the
+# ONLY case the carve-out admits.
+_LEXICON_PART_WORDS: frozenset[str] = _ALL_IMPERATIVE_WORDS - _BASE_IMPERATIVE_WORDS
+
+# A lexicon imperative word immediately followed by "than" — the
+# comparison form ("is it taller than the shelf?").
+_LEXIM_CMP_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_LEXICON_SINGLE_WORDS))
+    + r")\s+than\b",
+    re.IGNORECASE,
+)
+# The lexicon's multi-word forms ("half the size", …) — these have NO
+# "than" carve-out and still win.
+_LEXIM_MULTI_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_LEXICON_MULTIWORDS)) + r")\b",
+    re.IGNORECASE,
+)
+# The base-imperative scan: the base words only (make, set, change, …).
+# Runs on the message with every comparison form removed — a message
+# whose only imperative hits are lexicon words in comparison form
+# ("is it taller than the shelf?") passes this scan (the carve-out);
+# any base hit ("make it taller than 30 mm" → "make") or any multi-word
+# lexicon form ("half the size") sends it to the loop.
+_BASE_IMPERATIVE_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_BASE_IMPERATIVE_WORDS)) + r")\b",
+    re.IGNORECASE,
+)
+# The lexicon-part scan: every word of the full union that is NOT a base
+# imperative word (the lexicon's relative + global words). Runs on the
+# message with every comparison form removed: a lexicon hit NOT followed
+# by "than" ("Can it be 20 mm wider?" → "wider") survives the removal
+# and blocks the carve-out; a lexicon hit in comparison form ("is it
+# taller than the shelf?" → "taller than") is removed and does not.
+_LEXICON_PART_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(w) for w in sorted(_LEXICON_PART_WORDS)) + r")\b",
+    re.IGNORECASE,
+)
+
 _IMPERATIVE_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(w) for w in sorted(_ALL_IMPERATIVE_WORDS)) + r")\b",
     re.IGNORECASE,
@@ -209,6 +268,21 @@ _MULTIWORD_IMPERATIVE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+def is_interrogative(message: str) -> bool:
+    """True iff the message is interrogative in FORM: it ends with ``?``
+    or opens with an interrogative word (what/how/which/is/are/does/do/
+    can/will/why/where/when). Pure form check — no imperative scan.
+
+    The gate for the comparison-question carve-out in
+    :func:`is_candidate_question`: only an interrogative-in-form message
+    whose sole imperative hits are lexicon words in comparison form
+    ("…than") stays a candidate."""
+    m = message.strip()
+    if not m:
+        return False
+    return m.endswith("?") or _INTERROGATIVE_RE.match(m) is not None
 
 
 def is_candidate_question(message: str) -> bool:
@@ -233,15 +307,45 @@ def is_candidate_question(message: str) -> bool:
         return False
     # Interrogative form: the message ends with "?" OR starts with an
     # interrogative word (the two branches of the ticket's stage 1).
-    is_interrogative = m.endswith("?") or _INTERROGATIVE_RE.match(m) is not None
-    if not is_interrogative:
+    if not is_interrogative(m):
         return False
-    # The imperative scan runs over the WHOLE message and WINS over the
-    # interrogative form: "Is it tall enough for a 12 mm shelf? Make it
-    # 15." → not a candidate (the imperative is present).
-    if _IMPERATIVE_RE.search(m) is not None:
+    if _MULTIWORD_IMPERATIVE_RE.search(m) is not None:
         return False
-    return _MULTIWORD_IMPERATIVE_RE.search(m) is None
+    if _IMPERATIVE_RE.search(m) is None:
+        return True
+    # A lexicon imperative hit is present (the full-union scan hit; a
+    # base-only hit would have been caught by the base scan below, so
+    # we cannot distinguish here — the carve-out is conservative: it
+    # only fires when NO lexicon hit survives the comparison-form
+    # removal AND no base hit is present, which is the case for
+    # comparison questions and nothing else in practice).
+    #
+    # The comparison-question carve-out (issue #261 fix batch): an
+    # interrogative message whose ONLY lexicon imperative hits are
+    # immediately followed by "than" ("is it taller than the shelf?")
+    # is a comparison question, not a change request — it stays a
+    # candidate. Base imperative words (make, set, change, …) and the
+    # multi-word lexicon forms ("half the size", …) still win: the base
+    # scan below runs on the message with every comparison form removed,
+    # so "make it taller than 30 mm" (a base hit) is still non-candidate.
+    # "Can it be 20 mm wider?" (a lexicon hit NOT followed by "than")
+    # is also still non-candidate: the full-union scan hit it, and the
+    # comparison-form removal does NOT strip it (no "than" follows
+    # "wider"), so the base scan does not see it — but the lexicon hit
+    # is still present in the original message and the carve-out
+    # requires EVERY lexicon hit to be in comparison form.
+    stripped = _LEXIM_CMP_RE.sub("", m)
+    if _LEXIM_MULTI_RE.search(stripped) is not None:
+        return False
+    if _BASE_IMPERATIVE_RE.search(stripped) is not None:
+        return False
+    # The carve-out fires ONLY when no lexicon imperative word survives
+    # the comparison-form removal (i.e. every lexicon hit was in
+    # comparison form). A lexicon hit NOT followed by "than" ("Can it
+    # be 20 mm wider?") survives the removal and blocks the carve-out.
+    if _LEXICON_PART_RE.search(stripped) is not None:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------

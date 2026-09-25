@@ -193,6 +193,20 @@ def validate_frame(frame: tuple[Any, Any]) -> tuple[str, dict[str, Any]]:
             )
         if not isinstance(data["reason"], str):
             raise SeamError("D", "error frame 'reason' present but not a string")
+    # The gate's enforced per-axis set (issue #261 fix batch): present
+    # only on a bbox-gate failure (omit-not-null, like ``reason``); a
+    # map of axis letter → positive float.
+    if "carried_axes" in data:
+        if data["carried_axes"] is None:
+            raise SeamError(
+                "D", "error frame 'carried_axes' is null — the omit policy omits it, never emits null"
+            )
+        axes = data["carried_axes"]
+        if not isinstance(axes, dict) or not axes:
+            raise SeamError("D", "error frame 'carried_axes' present but not a non-empty dict")
+        for axis, value in axes.items():
+            if not isinstance(axis, str) or not (isinstance(value, (int, float)) and not isinstance(value, bool)):
+                raise SeamError("D", "error frame 'carried_axes' entry is not axis-letter → number")
     return frame
 
 

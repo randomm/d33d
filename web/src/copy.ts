@@ -257,6 +257,18 @@ export const failure = {
     actions: { retry: "Try again", keep: "Keep it anyway" },
   },
 
+  /** The carried-axis variant of the bbox-gate failure (issue #261 fix
+   *  batch): the failing axis was CARRIED from an earlier statement, not
+   *  cued this turn — the held value is named (formatted by `mm`) and the
+   *  user is told how to override it. A dedicated sibling of `reasons`
+   *  (NOT inside it): `reasons` is the closed reason-code → string map
+   *  that `exportErrorCopy` spreads and `displayDesignLoopError` looks up
+   *  by reason code; this is a parameterized sentence selected by
+   *  `carried_axes` presence, not a reason code. Rendered ONLY when the
+   *  frame's `carried_axes` carries an axis the gate enforced. */
+  bboxCarried: (label: string, heldMm: number): string =>
+    `I kept the ${label.toLowerCase()} you set earlier (${mm(heldMm)}). If you meant to change it, say how ${label.toLowerCase()} it should be.`,
+
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value and
    *  every render ErrorClass value has an entry. */

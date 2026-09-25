@@ -495,6 +495,38 @@ def _structured_reason(result: Any) -> str | None:
     return None
 
 
+def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
+    """The axes the bbox gate ENFORCED on this turn (the caller's
+    per-axis set, ``{"H": 12.0, ...}`` — the carried-plus-cued effective
+    set, never just "cued this turn"), or ``None`` when the failing gate
+    is not the bbox gate (the field is then omitted — omit-not-null, the
+    frame policy).
+
+    Issue #261 fix batch: with ``carried_axes`` on the terminal error
+    frame, the SPA's failure copy can distinguish "the axis the user
+    stated earlier was held, and the candidate missed it" (carried) from
+    a value cued this turn — e.g. "raise it" enforces the carried H and
+    the failure turn now names the held value instead of the generic
+    "came out a different size" sentence.
+    """
+    reason = getattr(result, "failure_reason", None)
+    if reason != "bbox_out_of_tolerance":
+        return None
+    if not isinstance(gate_axes, dict) or not gate_axes:
+        return None
+    out: dict[str, float] = {}
+    for axis, value in gate_axes.items():
+        if isinstance(value, bool):  # bool is a subclass of int — exclude
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            out[str(axis)] = f
+    return out or None
+
+
 def _loop_takes_app(run_loop: Any) -> bool:
     """The injected design-loop seam's signature check (production
     ``_build_production_design_loop`` takes ``(app, **kwargs)``; test
@@ -1016,11 +1048,11 @@ async def run_design_loop_with_events(
     than fabricates", which IS abstain semantics — the old hard-fail
     contradicted it.
     """
-    #: The per-view progress frames (``render-view-*``) land on this queue
-    #: as the drain thread enqueues them. The generator is the sole
-    #: consumer, so an ``asyncio.Queue`` needs no locking; frames are
-    #: yielded while the render is still running (see the ``asyncio.wait``
-    #: below), not after it completes.
+    # The per-view progress frames (``render-view-*``) land on this queue
+    # as the drain thread enqueues them. The generator is the sole
+    # consumer, so an ``asyncio.Queue`` needs no locking; frames are
+    # yielded while the render is still running (see the ``asyncio.wait``
+    # below), not after it completes.
     _frame_queue: asyncio.Queue[tuple[str, dict[str, Any]] | None] = asyncio.Queue()
 
     run_loop = getattr(app.state, "run_design_loop", None)
@@ -1454,6 +1486,15 @@ async def run_design_loop_with_events(
         reason = _structured_reason(result)
         if reason is not None:
             error_data["reason"] = reason
+        # The gate's per-axis enforced set (issue #261 fix batch): lets
+        # the failure copy name the value that was HELD when a carried
+        # axis fails ("I kept the height you set earlier (12.0 mm)").
+        # Omitted for every non-bbox failure and when the gate set is
+        # empty (omit-not-null). The values are the user's own stated
+        # numbers — safe to render with the SPA's ``mm()`` formatter.
+        carried = _carried_axes(result, kwargs.get("stated_axes"))
+        if carried is not None:
+            error_data["carried_axes"] = carried
         yield ("error", error_data)
 
 
