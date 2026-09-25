@@ -4,7 +4,7 @@
   "prompt": {
     "prompt_version": "v1",
     "path": "evals/prompts/question_answer_v1.md",
-    "sha256": "29c49d6e0aae3c5be03903a20e937ed6838f81cd442544bfe2033cb2172316bc"
+    "sha256": "029d84acc1518a253837fdfa18fe54d1a32162717387c265ca2142617980d409"
   },
   "request": "How tall is it now?",
   "design_state_block": {

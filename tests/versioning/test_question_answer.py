@@ -357,6 +357,17 @@ class TestBuildAnswerPrompt:
         assert "answerable: true" not in prompt
         assert "answerable: false" not in prompt
 
+    def test_prompt_distinguishes_user_and_model_source_disagreement(self) -> None:
+        # issue #264 task-c: the prompt must distinguish the two kinds
+        # of disagreement. User-source: "you said X, I measured Y".
+        # Model-source: "I set X, it measures Y".
+        entries = _entries(("H", 12.0))
+        prompt = build_answer_prompt("How tall is it?", entries)
+        assert "user-source disagreement" in prompt
+        assert "you said X, I measured Y" in prompt
+        assert "model-source disagreement" in prompt
+        assert "I set X, it measures Y" in prompt
+
 
 # ---------------------------------------------------------------------------
 # Stage 2 — the route seam (stub answer_fn, no app)
@@ -1744,13 +1755,14 @@ class TestPromptPairAgreement:
         # require every number to come from the block.
         assert "must come from the block" in prompt
         assert "Never invent" in evals_md
-        # The provenance citations: the same five provenance phrases.
+        # The provenance citations: the same provenance phrases.
         for phrase in (
             "you said that",
             "I measured",
             "I assumed",
             "not established",
             "you said X, I measured Y",
+            "I set X, it measures Y",
         ):
             assert phrase in prompt, f"phrase {phrase!r} missing from production prompt"
             assert phrase in evals_md, f"phrase {phrase!r} missing from evals md"
