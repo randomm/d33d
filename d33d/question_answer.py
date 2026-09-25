@@ -75,7 +75,12 @@ except ImportError:  # pragma: no cover - httpx is a hard dep in production
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
-from d33d.axis_lexicon import GLOBAL_WORDS, RELATIVE_WORDS
+from d33d.axis_lexicon import (
+    GLOBAL_WORDS,
+    RELATIVE_WORDS,
+    axis_for_question_word,
+)
+from d33d.confirm_offer import mm_formatted
 from d33d.design_state import (
     build_design_state_block,
     format_design_state_block,
@@ -88,11 +93,14 @@ __all__ = [
     "ANSWER_CALL_TIMEOUT_SECONDS",
     "ANSWER_DONE_KIND",
     "ANSWER_KINDS",
+    "DETERMINISTIC_AXIS_SENTENCES",
+    "DETERMINISTIC_DIMENSION_LIST_RE",
     "COULD_NOT_ANSWER",
     "NOT_ESTABLISHED",
     "AnswerOutcome",
     "ask_answer_call",
     "build_answer_prompt",
+    "deterministic_axis_answer",
     "extract_answer_numbers",
     "extract_written_numbers",
     "guard_answer_numbers",
@@ -432,6 +440,317 @@ def guard_answer_numbers(
 
 
 # ---------------------------------------------------------------------------
+# The deterministic axis-size stage (issue #263, between stage 1 and
+# stage 2)
+# ---------------------------------------------------------------------------
+
+#: The dimension-list triggers (operator decision — CLOSED list): any of
+#: these, in a stage-1 candidate message, answers deterministically with
+#: the full W × D × H list. A message matching a dimension-list trigger
+#: AND a single axis word answers the list (the operator decision).
+#: Case-insensitive, whole-message (the message is short — a question).
+DETERMINISTIC_DIMENSION_LIST_RE = re.compile(
+    r"what are the dimensions"
+    r"|what are its dimensions"
+    r"|what size is it"
+    r"|how big is it"
+    r"|how large is it"
+    r"|what's the size",
+    re.IGNORECASE,
+)
+
+#: The noun phrases that refer to THE PART itself — "how tall is it",
+#: "how tall is the part", "how tall is the model", "how tall is the
+#: design", or "how tall is the <version-name>". Any other noun after the
+#: axis word ("height of the hole", "how tall is the post") is a feature
+#: question: it falls through to stage 2 (the deterministic stage answers
+#: the PART's envelope only, never a feature's size).
+_PART_NOUNS: frozenset[str] = frozenset(
+    {"it", "the part", "the model", "the design"}
+)
+
+#: The dimension-list sentence ("It measures {W} × {D} × {H}."), with a
+#: dash for an unestablished axis (a blank, never a fabricated number).
+DETERMINISTIC_DIMENSION_LIST_FORMAT = "It measures {W} × {D} × {H}."
+
+#: The per-provenance answer sentences (issue #263; values mm()-formatted
+#: the way ``copy.ts mm()`` renders them — one decimal, U+202F, "mm").
+#: The sibling ``copy`` workstream pins the matching deck strings in
+#: ``web/src/copy.ts``; the backend's strings are the wire strings, pinned
+#: by the Python tests here (the #250 way — both directions are checked
+#: against the same sentences).
+DETERMINISTIC_AXIS_SENTENCES = {
+    "stated+measured": {
+        "H": "It's {value} tall — you said that, and I measured it.",
+        "W": "It's {value} wide — you said that, and I measured it.",
+        "D": "It's {value} deep — you said that, and I measured it.",
+    },
+    "measured": {
+        "H": "It measures {value} tall.",
+        "W": "It measures {value} wide.",
+        "D": "It measures {value} deep.",
+    },
+    "stated": {
+        "H": "You said {value} tall. Nothing has measured it yet.",
+        "W": "You said {value} wide. Nothing has measured it yet.",
+        "D": "You said {value} deep. Nothing has measured it yet.",
+    },
+    "disagrees": {
+        "H": "You said {stated}; what came out measures {measured}.",
+        "W": "You said {stated}; what came out measures {measured}.",
+        "D": "You said {stated}; what came out measures {measured}.",
+    },
+    "not_established": {
+        "H": "The height isn't established yet.",
+        "W": "The width isn't established yet.",
+        "D": "The depth isn't established yet.",
+    },
+}
+
+
+def _normalise_noun(noun: str) -> str:
+    """The noun phrase the part-noun rule matches on: lowercase,
+    whitespace-normalised (the version-name match is case-insensitive,
+    whitespace-normalised, exact equality — the operator decision)."""
+    return " ".join(noun.lower().split())
+
+
+def _is_part_noun(noun: str, version_name: str | None) -> bool:
+    """True iff the noun phrase after the axis word refers to the part
+    itself ("it", "the part", "the model", "the design", or the version's
+    name)."""
+    n = _normalise_noun(noun)
+    if n in _PART_NOUNS:
+        return True
+    if version_name is not None:
+        vn = _normalise_noun(version_name)
+        if vn and n == vn:
+            return True
+    return False
+
+
+def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
+    """True iff the noun phrase (possibly with trailing adverbs or a
+    leading "the") refers to the part itself.
+
+    The operator decision: the version-name match is case-insensitive,
+    whitespace-normalised, exact equality between the noun phrase after
+    the axis word (a leading "the" is optional) and ``latest["name"]``.
+    So "the shelf bracket" matches version "Shelf bracket" (the "the"
+    is stripped); "shelf bracket" also matches.
+    """
+    n = _normalise_noun(noun)
+    # Exact match against the fixed part nouns.
+    if n in _PART_NOUNS:
+        return True
+    # Version-name match: the noun (with or without a leading "the")
+    # must equal the version name exactly (case-insensitive, whitespace-
+    # normalised). "the shelf bracket" → "shelf bracket" == "shelf
+    # bracket" (version "Shelf bracket"). "shelf bracket" also matches.
+    if version_name is not None:
+        vn = _normalise_noun(version_name)
+        if vn:
+            if n == vn:
+                return True
+            # Strip a leading "the " from the noun and compare again.
+            if n.startswith("the "):
+                if n[4:] == vn:
+                    return True
+            # Or the version name itself starts with "the " (unlikely
+            # but symmetric): "the shelf bracket" == "the shelf bracket".
+            if vn.startswith("the ") and n == vn[4:]:
+                return True
+    # Trailing-adverb case: "it now" → "it" is the part; the "now" is
+    # a time adverb. Only "it" + trailing adverbs is a valid part match
+    # ("the post now" is a feature with an adverb, not the part).
+    words = n.split()
+    if words and words[0] == "it" and len(words) > 1:
+        # "it now", "it currently" — the subject is "it" (the part).
+        return True
+    return False
+
+
+def _deterministic_axis(message: str, version_name: str | None):
+    """The deterministic-stage decision for ONE message.
+
+    Returns ``"list"`` (the dimension-list answer), ``"W"|"D"|"H"`` (the
+    single-axis answer), or ``None`` (fall through to stage 2).
+
+    Rules (the operator decisions in issue #263):
+
+    * a dimension-list trigger (the CLOSED ``DETERMINISTIC_DIMENSION_LIST_RE``
+      set) → ``"list"`` — it wins even when a single axis word is also
+      present ("How wide is it, and what are the dimensions?" → the list).
+    * otherwise, exactly ONE absolute axis word via
+      ``axis_for_question_word`` (tall/high/height/wide/width/deep/depth)
+      → that axis, provided the noun immediately after the axis word
+      refers to the part itself ("it" / "the part" / "the model" /
+      "the design" / the version's name, case-insensitive,
+      whitespace-normalised, exact equality). Any other noun ("height
+      of the hole", "how tall is the post") → ``None``.
+    * more than one distinct axis word, or no axis word → ``None``.
+    """
+    if DETERMINISTIC_DIMENSION_LIST_RE.search(message) is not None:
+        return "list"
+
+    # Collect every distinct absolute axis word in the message. More than
+    # one distinct axis → not a single-axis size question (fall through).
+    axes: dict[str, str] = {}
+    for w in re.findall(r"\b\w+\b", message.lower()):
+        ax = axis_for_question_word(w)
+        if ax is not None and w not in axes:
+            axes[w] = ax
+    if len(axes) != 1:
+        return None
+    word = next(iter(axes))
+    axis = axes[word]
+    # The noun immediately after the axis word: everything from the word's
+    # end to the next clause boundary or the end. It must be the part
+    # itself, not a feature ("height of the hole" → the hole's height).
+    m = re.search(r"\b" + re.escape(word) + r"\b", message, re.IGNORECASE)
+    if m is None:
+        return None
+    tail = message[m.end():]
+    # Cut the tail at the first punctuation that closes the noun phrase
+    # (a comma, semicolon, question mark, or period — the list trigger is
+    # already handled above, so a conjunction like "and" is not a boundary
+    # for this stage: "how tall is it, and …" with a list trigger is the
+    # list; without one, the comma closes the noun phrase and "and…" is
+    # a new clause, not a noun).
+    cut = re.search(r"[,;?!.]", tail)
+    if cut is not None:
+        tail = tail[: cut.start()]
+    noun = tail.strip()
+    # An empty noun ("how tall?" — the word is the last token) is the
+    # part itself (the question's subject is implicit "it").
+    if noun == "":
+        return axis
+    # Strip the copula ("is", "are", "was", "were") that separates the
+    # axis word from the subject in the "how tall is it" / "how wide
+    # is the post" pattern — the noun phrase is what remains after the
+    # copula ("it", "the post", …). "is it" → "it" (the part); "is the
+    # post" → "the post" (a feature).
+    copula = re.match(r"^(?:is|are|was|were)\s+", noun, re.IGNORECASE)
+    if copula is not None:
+        noun = noun[copula.end():].strip()
+        if noun == "":
+            return axis
+    # The noun may carry a trailing adverb ("it now" — "now" is a time
+    # adverb, not part of the noun). Match the noun against the part
+    # phrases by PREFIX: if the noun starts with a part noun (and the
+    # rest is a trailing word, not a feature qualifier), it is the part.
+    # "it now" → "it" (part); "the post here" → "the post" (feature,
+    # not a part noun → fall through).
+    if _noun_refers_to_part(noun, version_name):
+        return axis
+    # The noun is a feature ("the hole", "the post", "the wall", …) or
+    # any other non-part noun: fall through to stage 2.
+    return None
+
+
+def _axis_value_for(
+    axis: str,
+    entries: list[dict[str, Any]],
+    latest: dict[str, Any] | None,
+) -> tuple[str, float | None, float | None]:
+    """The answer source for ONE axis, per the operator decision's
+    precedence: the design-state AXIS row first (``kind == "axis"``
+    explicitly — a param row named "H" is never an answer source), then
+    the version's measured bbox extent, then "not established".
+
+    Returns ``(class, value, stated_value)`` where ``class`` is one of
+    ``"stated+measured" | "measured" | "stated" | "disagrees" |
+    "not_established"`` and the values are floats (mm).
+
+    The ``measured`` provenance in the block is ambiguous: it can mean
+    "the user stated it AND the measurement confirmed it" (stated+
+    measured) or "the axis was never stated, just measured" (measured
+    only). The block does not carry this distinction, so we check
+    ``latest["stated_dims"]`` to disambiguate: if the axis was in the
+    stated set, the sentence is "you said that, and I measured it";
+    otherwise, "It measures...".
+    """
+    stated_dims = latest.get("stated_dims") if latest else None
+    for entry in entries:
+        if entry.get("kind") != "axis" or entry.get("name") != axis:
+            continue
+        prov = entry.get("provenance")
+        value = entry.get("value")
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if prov == "measured":
+            # Disambiguate: was this axis also stated? If so, the
+            # sentence is "you said that, and I measured it" (the
+            # stated+measured case). Otherwise, "It measures..."
+            if stated_dims and axis in stated_dims:
+                return "stated+measured", float(value), None
+            return "measured", float(value), None
+        if prov == "stated":
+            return "stated", float(value), None
+        if prov == "disagrees":
+            stated = entry.get("stated_value")
+            if not isinstance(stated, (int, float)) or isinstance(stated, bool):
+                stated = None
+            return "disagrees", float(value), (
+                float(stated) if stated is not None else None
+            )
+    # No axis row: the version's bbox extent (if it exists and is
+    # positive — a zero extent is the encoded absence, not a measurement).
+    if latest is not None:
+        bbox = latest.get("bbox")
+        if isinstance(bbox, dict):
+            key = {"W": "x", "D": "y", "H": "z"}[axis]
+            v = bbox.get(key)
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0:
+                return "measured", float(v), None
+    return "not_established", None, None
+
+
+def deterministic_axis_answer(
+    message: str,
+    latest: dict[str, Any] | None,
+) -> str | None:
+    """The deterministic axis-size answer for ONE message, or ``None``
+    (fall through to stage 2).
+
+    Only reachable for a stage-1 candidate with a version present — the
+    ``latest is None`` early exit runs first in :func:`route_chat_message`.
+    The answer rides the #249 plain-message path (``{"kind": "answer",
+    "answer": …}``), no version, no design run.
+    """
+    if latest is None:
+        return None
+    version_name = latest.get("name")
+    entries = state_block_for_chat(latest)
+    what = _deterministic_axis(message, version_name)
+    if what == "list":
+        parts: list[str] = []
+        for ax in ("W", "D", "H"):
+            cls, value, _ = _axis_value_for(ax, entries, latest)
+            if cls == "not_established":
+                parts.append("—")
+            else:
+                # The list uses each axis's best value (the measured one
+                # when the block says disagrees; the stated one otherwise).
+                parts.append(mm_formatted(value))
+        return DETERMINISTIC_DIMENSION_LIST_FORMAT.format(
+            W=parts[0], D=parts[1], H=parts[2]
+        )
+    if what is None:
+        return None
+    cls, value, stated = _axis_value_for(what, entries, latest)
+    tmpl = DETERMINISTIC_AXIS_SENTENCES[cls][what]
+    if cls == "disagrees":
+        return tmpl.format(
+            stated=mm_formatted(stated) if stated is not None else "?",
+            measured=mm_formatted(value) if value is not None else "?",
+        )
+    if cls == "not_established":
+        return tmpl
+    return tmpl.format(value=mm_formatted(value) if value is not None else "?")
+
+
+# ---------------------------------------------------------------------------
 # Stage 2 — the cheap single LLM call
 # ---------------------------------------------------------------------------
 
@@ -733,6 +1052,19 @@ async def route_chat_message(
             len(message),
         )
         return None
+    # The deterministic axis-size stage (issue #263): a stage-1 candidate
+    # that asks for exactly one axis's size — or the full dimension list —
+    # is answered from the design state with NO LLM call (no timeout,
+    # no model call, no guard). It runs BEFORE the answer-edge check
+    # (the deterministic answer needs no model). Anything it does not
+    # take falls through to stage 2 exactly as today.
+    deterministic = deterministic_axis_answer(message, latest)
+    if deterministic is not None:
+        logger.warning(
+            "question-answer: outcome=deterministic (len(message)=%d)",
+            len(message),
+        )
+        return {"kind": ANSWER_DONE_KIND, "answer": deterministic}
     entries = state_block_for_chat(latest)
     if answer_edge is None:
         logger.info(

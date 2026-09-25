@@ -120,6 +120,7 @@ describe("design contract", () => {
       "answerRoute",
       "brief",
       "confirmOffer",
+      "deterministicAnswer",
       "export3mf",
       "failure",
       "firstPass",
@@ -153,6 +154,92 @@ describe("design contract", () => {
     // question are different honest statements and must not read the
     // same.
     expect(copy.answerRoute.couldNotAnswer).not.toBe(copy.answerRoute.notEstablished);
+  });
+
+  /* ---------------------------------------- W263 */
+
+  it("the deterministic axis-size answer copy lives in the deck (issue #263)", () => {
+    // Issue #263: the new deterministic stage between stage 1 and stage 2
+    // in route_chat_message answers "how tall is it?" / "what's the depth?" /
+    // "how big is it?" with no LLM call. The backend builds the wire string
+    // using its own mm_formatted (which replicates mm() here) and emits it
+    // verbatim on the done frame's `answer` field. The deck carries the
+    // templates so the design-contract test can pin the exact strings and
+    // catch a wording drift between deck and server (the #260 / #250 way).
+
+    const H = "12.0\u202fmm";
+    const W = "60.0\u202fmm";
+    const D = "45.0\u202fmm";
+
+    // (1) Stated + measured agree — the acceptance criterion's exact sentence
+    //     for "How tall is it now?" with stated H=12 and matching bbox.
+    expect(copy.deterministicAnswer.statedAndMeasured(H, "tall")).toBe(
+      "It's 12.0\u202fmm tall — you said that, and I measured it.",
+    );
+    // Width variant.
+    expect(copy.deterministicAnswer.statedAndMeasured(W, "wide")).toBe(
+      "It's 60.0\u202fmm wide — you said that, and I measured it.",
+    );
+
+    // (2) Measured only — the acceptance criterion's exact sentence for
+    //     "How tall is it now?" on a version with bbox z=12.0 and no stated H.
+    expect(copy.deterministicAnswer.measuredOnly(H, "tall")).toBe(
+      "It measures 12.0\u202fmm tall.",
+    );
+    expect(copy.deterministicAnswer.measuredOnly(D, "deep")).toBe(
+      "It measures 45.0\u202fmm deep.",
+    );
+
+    // (3) Stated only (no measurement yet / zero-extent bbox).
+    expect(copy.deterministicAnswer.statedOnly(H, "tall")).toBe(
+      "You said 12.0\u202fmm tall. Nothing has measured it yet.",
+    );
+    expect(copy.deterministicAnswer.statedOnly(W, "wide")).toBe(
+      "You said 60.0\u202fmm wide. Nothing has measured it yet.",
+    );
+
+    // (4) Disagrees — both values are mm()-formatted, the operator decision.
+    const disagrees = copy.deterministicAnswer.disagrees("12.0\u202fmm", "43.8\u202fmm");
+    expect(disagrees).toBe("You said 12.0\u202fmm; what came out measures 43.8\u202fmm.");
+
+    // (5) Not established — uses the axis NOUN (height/width/depth), not the
+    //     adjective (tall/wide/deep).
+    expect(copy.deterministicAnswer.notEstablished("height")).toBe(
+      "The height isn't established yet.",
+    );
+    expect(copy.deterministicAnswer.notEstablished("width")).toBe(
+      "The width isn't established yet.",
+    );
+    expect(copy.deterministicAnswer.notEstablished("depth")).toBe(
+      "The depth isn't established yet.",
+    );
+
+    // (6) Dimension list — W × D × H order, each axis best value or dash.
+    const dimList = copy.deterministicAnswer.dimensionList(W, D, H);
+    expect(dimList).toBe("It measures 60.0\u202fmm × 45.0\u202fmm × 12.0\u202fmm.");
+    // Dash for a not-established axis.
+    expect(copy.deterministicAnswer.dimensionList(W, "-", H)).toBe(
+      "It measures 60.0\u202fmm × - × 12.0\u202fmm.",
+    );
+
+    // The six templates are all distinct — no two provenance classes read
+    // the same.
+    const all = [
+      copy.deterministicAnswer.statedAndMeasured(H, "tall"),
+      copy.deterministicAnswer.measuredOnly(H, "tall"),
+      copy.deterministicAnswer.statedOnly(H, "tall"),
+      disagrees,
+      copy.deterministicAnswer.notEstablished("height"),
+      dimList,
+    ];
+    for (let i = 0; i < all.length; i++) {
+      for (let j = i + 1; j < all.length; j++) {
+        expect(all[i]).not.toBe(all[j]);
+      }
+    }
+
+    // The dimension list carries the × character (U+00D7), not the letter x.
+    expect(dimList).toContain("\u00d7");
   });
 
   /* ----------------------------------------- W250 */
