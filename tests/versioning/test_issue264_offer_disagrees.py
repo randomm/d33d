@@ -195,10 +195,13 @@ def test_user_stated_v25_fixture_offer_selection_excludes_disagrees(app_with_ver
     (a value the measurement contradicts is never an assumption to
     confirm).
 
-    (The model-source case — an assumed param with a declared axis whose
-    value differs beyond tolerance — is task-a's scope; the exclusion
-    mechanism is identical for both sources, and this test pins the
-    user-source path that the current codebase renders.)"""
+    The declared-axis param ``spacer_depth`` is ALSO in the disagree
+    set: with issue #264's model-source comparison, an assumed
+    declared-axis param outside tolerance (40 vs 43.9) renders
+    ``disagrees`` with ``disagrees_source == "model"``. Both the
+    user-source (W) and model-source (spacer_depth) paths feed the same
+    explicit exclusion set — the mechanism is identical for both
+    sources."""
 
     async def _call(client):
         proj = await create_project(client)
@@ -239,24 +242,25 @@ def test_user_stated_v25_fixture_offer_selection_excludes_disagrees(app_with_ver
         return name, disagree_names, param_rows
 
     name, disagree_names, param_rows = run_async(app_with_versions, _call)
-    # The W param is in the disagree set (the measurement contradicts
-    # the stated value 40 vs measured 43.8).
-    assert disagree_names == {"W"}, disagree_names
-    # The offer selection excludes W → no offer (spacer_depth is
-    # assumed with a declared axis D; the D measurement (43.9) does
-    # NOT contradict 40 via the current codebase's W/D/H-named
-    # comparison — spacer_depth is not named D, so it stays assumed
-    # and IS offered (it is the only eligible param).
-    #
-    # So the offer IS emitted, for spacer_depth. The test asserts the
-    # CONTRAST: W is excluded (in the disagree set), but spacer_depth is
-    # still offered (not in the set).
-    assert name == "spacer_depth", name
-    # The block renders W as disagrees (the data the exclusion reads
-    # from).
+    # Both params are in the disagree set: W (user-source — the
+    # measurement contradicts the stated value 40 vs measured 43.8)
+    # and spacer_depth (model-source — the declared-axis comparison,
+    # 40 vs 43.9 beyond tolerance).
+    assert disagree_names == {"W", "spacer_depth"}, disagree_names
+    # The offer selection excludes BOTH → no offer: a v25-shaped
+    # fixture with every param in the disagree set offers nothing (the
+    # value the measurement contradicts is never an assumption to
+    # confirm — from either source).
+    assert name is None, name
+    # The block renders both params as disagrees (the data the
+    # exclusion reads from); the sources differ (user-source W is
+    # absent-by-default, model-source spacer_depth is "model").
     provs = {e["name"]: e["provenance"] for e in param_rows}
     assert provs["W"] == "disagrees", provs
-    assert provs["spacer_depth"] == "assumed", provs
+    assert provs["spacer_depth"] == "disagrees", provs
+    by_name = {e["name"]: e for e in param_rows}
+    assert "disagrees_source" not in by_name["W"]
+    assert by_name["spacer_depth"]["disagrees_source"] == "model"
 
 
 def test_v25_fixture_all_params_disagree_no_offer(app_with_versions):

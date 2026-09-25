@@ -1806,16 +1806,16 @@ class TestPromptPairAgreement:
     def test_build_answer_prompt_distinguishes_model_source_disagreement(
         self, app_with_versions
     ) -> None:
-        """Issue #264 ACCEPTANCE: the router's answer prompt distinguishes
-        the two kinds of disagreement. A block that carries a
-        model-source disagrees row (``disagrees_source == "model"`` —
-        the v25 Shelf-spacer shape) gets the "I set X, it measures Y"
-        instruction — never 'you said' for a value the user never
-        stated; a block with only a user-source disagrees row keeps
-        today's "you said X, I measured Y" instruction. The block text
-        rendered in the prompt also marks the model-source row
+        """Issue #264 ACCEPTANCE: the router's answer prompt names BOTH
+        kinds of disagreement — unconditionally (the instruction is the
+        same regardless of the block; the model picks the wording per
+        row from the block's own marks): user-source "you said X, I
+        measured Y" vs model-source "I set X, it measures Y" (the user
+        never stated that value — never 'you said'). A block that
+        carries a model-source disagrees row (``disagrees_source ==
+        "model"`` — the v25 Shelf-spacer shape) renders the row's mark
         "(my value differs from the measurement)" so the model can tell
-        the rows apart."""
+        the rows apart from user-source ones."""
         from d33d.question_answer import build_answer_prompt
 
         # v25-shaped: declared-axis params that contest the measurement
@@ -1849,8 +1849,12 @@ class TestPromptPairAgreement:
         assert "you said X, I measured Y" in model_prompt
 
         # User-source only: a #137 W-named param row outside tolerance
-        # (``disagrees_source`` absent) keeps today's instruction and
-        # renders the plain disagrees row — no model wording anywhere.
+        # (``disagrees_source`` absent) keeps today's user wording in
+        # the block text (the plain "you stated this" mark) and the
+        # instruction names the model-source wording too (it is
+        # unconditional) — but the BLOCK itself carries no model-source
+        # mark (the rows are user-source), so the model must answer
+        # with the user wording for them.
         user_entries = state_block_for_version(
             {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
         )
@@ -1859,5 +1863,8 @@ class TestPromptPairAgreement:
         ), user_entries
         user_prompt = build_answer_prompt("How wide is it?", user_entries)
         assert "you said X, I measured Y" in user_prompt
-        assert "I set X, it measures Y" not in user_prompt
-        assert "my value differs" not in user_prompt
+        assert "I set X, it measures Y" in user_prompt
+        # The block text carries the user-source mark, never the
+        # model-source mark (no model-source row exists in this block).
+        assert "you stated this; the measurement differs" in user_prompt
+        assert "my value differs from the measurement" not in user_prompt

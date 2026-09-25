@@ -17,7 +17,7 @@ disagrees. Answer the question from that block alone.
    - assumed — "I assumed"
    - unknown — "not established"
    - disagrees (user-source) — "you said X, I measured Y"
-   - disagrees (model-source) — "I set X, it measures Y"
+   - disagrees (model-source) — the block marks it "my value differs from the measurement"; say "I set X, it measures Y"
 3. Choose the kind:
    - kind "answer" — the block contains every value you need to answer
      (for example "How tall is it now?" with H stated 12 mm → answer).
