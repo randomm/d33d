@@ -302,22 +302,6 @@ def mm_formatted(value: Any) -> str:
     return f"{float(value):.1f}{_NB_SPACE}mm"
 
 
-def _tier_entry(
-    params: dict[str, Any],
-    param_meta: dict[str, Any] | None,
-    confirmed: dict[str, Any] | None,
-    excluded: set[str],
-    predicate,
-) -> dict[str, Any] | None:
-    """The FIRST eligible assumed numeric param (declaration order) whose
-    design-state entry satisfies ``predicate`` — or ``None`` (an empty
-    tier falls through to the next)."""
-    for entry in _assumed_numeric_params(params, param_meta, confirmed, excluded):
-        if predicate(entry):
-            return entry
-    return None
-
-
 # The closed relative + global word sets (built once, lazily —
 # ``d33d.axis_lexicon`` is a LEAF, so the import is cycle-safe, but the
 # set is built at first call to keep module import order free of d33d-
@@ -328,9 +312,9 @@ _REL_GLOBAL_SET: frozenset[str] | None = None
 def _rel_global_set() -> frozenset[str]:
     global _REL_GLOBAL_SET
     if _REL_GLOBAL_SET is None:
-        from d33d import axis_lexicon
+        from d33d.axis_lexicon import GLOBAL_WORDS, RELATIVE_WORDS
 
-        _REL_GLOBAL_SET = frozenset(axis_lexicon._RELATIVE) | axis_lexicon._GLOBAL
+        _REL_GLOBAL_SET = frozenset(RELATIVE_WORDS) | GLOBAL_WORDS
     return _REL_GLOBAL_SET
 
 

@@ -39,6 +39,8 @@ from d33d.dimension_protocol import (
     DimensionClarification,
     effective_stated_dims,
     emit_named_params,
+    latest_stated_dims_dict,
+    offer_tier_signals,
     require_dimensions_confirmed,
     resolution_questions,
     resolve_tolerance_mm,
@@ -925,3 +927,58 @@ class TestUserQuotedUnmappedMm:
         this form for the gate, but the offer helper errs on the side of
         offering (a missed offer is cheaper than a wrong one)."""
         assert user_quoted_unmapped_mm(["H 20 mm"]) == {20.0}
+
+    def test_history_scan_is_capped_at_last_50(self):
+        """The tier-2 scan covers at most the LAST
+        ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) user messages: a number
+        quoted in an older message does not make it eligible."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        assert QUOTED_UNMAPPED_MAX_MESSAGES == 50
+        old = "a 12 mm spacer"
+        recent = [f"filler message {i}" for i in range(50)]
+        # The old message sits OUTSIDE the last-50 window → not eligible.
+        assert user_quoted_unmapped_mm([old, *recent]) == set()
+        # The same message INSIDE the window → eligible.
+        assert user_quoted_unmapped_mm([*recent, old]) == {12.0}
+
+
+class TestOfferTierSignals:
+    """offer_tier_signals — the ONE offer-signal helper (issue #261 fix
+    batch): (released_axes, quoted_mm) for one turn, computed the same
+    way on the chat and the finalize seams (tier 2 sees the chat
+    history, not just the finalize message)."""
+
+    def test_tier1_released_axes(self):
+        """A relative cue on the current message releases its axis."""
+        released, quoted = offer_tier_signals("make it taller")
+        assert released == {"H"}
+        assert quoted == set()
+
+    def test_tier2_quoted_from_history(self):
+        """An unmapped number quoted in an EARLIER message (the chat
+        history) is eligible — this is what makes tier 2 behave the
+        same on finalize as on chat."""
+        released, quoted = offer_tier_signals(
+            "finalize the part", ["a spacer to lift a shelf 12 mm"]
+        )
+        assert released is None
+        assert quoted == {12.0}
+
+    def test_tier2_mapped_number_not_eligible(self):
+        """A number the lexicon mapped to an axis in the history is not
+        eligible (the 20 in "a 20 mm wide thing" is mapped to W)."""
+        released, quoted = offer_tier_signals(
+            "finalize", ["a 20 mm wide thing, lift it 12 mm"]
+        )
+        assert quoted == {12.0}
+
+    def test_global_cue_releases_all(self):
+        released, quoted = offer_tier_signals("make it bigger")
+        assert released == {"W", "D", "H"}
+        assert quoted == set()
+
+    def test_no_cues(self):
+        released, quoted = offer_tier_signals("make a part")
+        assert released is None
+        assert quoted == set()

@@ -463,6 +463,48 @@ class TestFeatureNounAbstain:
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
 
+class TestReleaseFallback:
+    """The #261 round-2 pure-direction-request fallback (extracted from
+    ``classify`` so it can be tested directly): a message that states NO
+    absolute value still releases its relative/absolute axes, and a
+    global word releases all three. ``unmapped_mm_numbers`` is
+    message-level by design (issue #261's "per number" decision)."""
+
+    def test_relative_word_releases_its_axis(self) -> None:
+        from d33d.axis_lexicon import _apply_release_fallback
+
+        released: set[str] = set()
+        assert _apply_release_fallback("make it taller", released) is False
+        assert released == {"H"}
+
+    def test_absolute_word_releases_its_axis(self) -> None:
+        from d33d.axis_lexicon import _apply_release_fallback
+
+        released: set[str] = set()
+        assert _apply_release_fallback("increase the height", released) is False
+        assert released == {"H"}
+
+    def test_global_word_releases_all(self) -> None:
+        from d33d.axis_lexicon import _apply_release_fallback
+
+        released: set[str] = set()
+        assert _apply_release_fallback("make it bigger", released) is True
+        assert released == set()
+
+    def test_multiword_global_phrase_releases_all(self) -> None:
+        from d33d.axis_lexicon import _apply_release_fallback
+
+        released: set[str] = set()
+        assert _apply_release_fallback("resize it to half the size", released) is True
+
+    def test_no_cue_releases_nothing(self) -> None:
+        from d33d.axis_lexicon import _apply_release_fallback
+
+        released: set[str] = set()
+        assert _apply_release_fallback("a spacer for the lid", released) is False
+        assert released == set()
+
+
 class TestAxisForQuestionWord:
     """axis_for_question_word returns the axis for absolute words, None
     for relative/global/excluded words."""

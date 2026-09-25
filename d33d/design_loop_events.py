@@ -731,31 +731,18 @@ async def _resolve_offer(
         if name in prev_params and prev_params[name] != value
     }
     confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
-    # Issue #261's offer tiering — the two new signals, computed here
-    # (the offer's seam): TIER 1 (a released-axis param) needs THIS
-    # turn's lexicon classification of the user's message (relative
-    # cues release their axis, global cues release all — the released
-    # set is what the user's words are about); TIER 2 (a user-quoted
-    # unmapped number) needs the full-history scan
-    # (``user_quoted_unmapped_mm`` — every explicit-mm number the
-    # lexicon and the explicit protocol cues never assigned to an axis,
-    # across ALL user messages, not just this turn).
-    from d33d.dimension_protocol import user_quoted_unmapped_mm
+    # Issue #261's offer tiering — the two signals from ONE helper
+    # (``offer_tier_signals`` — the offer's seam): TIER 1 (a released-
+    # axis param) needs THIS turn's lexicon classification of the user's
+    # message (relative cues release their axis, global cues release
+    # all); TIER 2 (a user-quoted unmapped number) needs the recent-
+    # history scan over (*chat_history, user_message). The finalize seam
+    # passes the project's chat history here too, so tier 2 behaves the
+    # same on finalize as on chat (a number quoted in an EARLIER message
+    # is eligible, not only when it sits in the finalize message).
+    from d33d.dimension_protocol import offer_tier_signals
 
-    released_axes: set[str] | None = None
-    quoted: set[float] | None = None
-    try:
-        from d33d.axis_lexicon import classify
-
-        _cues = classify(user_message)
-        if _cues.relative or _cues.global_:
-            released_axes = set(_cues.relative) | (
-                {"W", "D", "H"} if _cues.global_ else set()
-            )
-        quoted = user_quoted_unmapped_mm((*chat_history, user_message))
-    except Exception:
-        logger.debug("offer tier signals unavailable", exc_info=True)
-        released_axes, quoted = None, None
+    released_axes, quoted = offer_tier_signals(user_message, chat_history)
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
         released_axes=released_axes, user_quoted_mm=quoted,

@@ -38,18 +38,24 @@ single biggest divergence from the Meshy/Tripo-style "just guess" agents:
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "DIMENSION_AXES",
     "FDM_CLEARANCE_TABLE",
     "HOLES_PRINT_UNDERSIZE_MM",
+    "CuesLike",
     "DimensionClarification",
     "FitType",
     "effective_stated_dims",
     "emit_named_params",
+    "latest_stated_dims_dict",
+    "offer_tier_signals",
     "require_dimensions_confirmed",
     "resolution_questions",
     "resolve_tolerance_mm",
@@ -310,15 +316,25 @@ def _mm_cue_values(message: str) -> set[float]:
     return values
 
 
+#: The tier-2 history scan bound (issue #261 fix batch): ``
+#: user_quoted_unmapped_mm`` scans at most the LAST
+#: ``QUOTED_UNMAPPED_MAX_MESSAGES`` user messages — the offer cares about
+#: recent user intent, and an unbounded scan of a very long transcript is
+#: wasted work on a hot path. Messages older than the window do not make
+#: a number eligible.
+QUOTED_UNMAPPED_MAX_MESSAGES = 50
+
+
 def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]:
     """The user-quoted explicit-mm numbers no axis was ever assigned to
     (issue #261's tier-2 offer scan — the "user-quoted number the lexicon
     did not map is offered first" rule) — the tier-2 helper.
 
-    Scans ALL of the project's user messages (full history, not just this
-    turn). Only numbers written with an explicit ``mm`` unit count ("12
-    mm", "12mm", "12.5 mm" — no cm/in conversion, no bare numbers). A
-    number is MAPPED — and excluded — when the closed axis lexicon
+    Scans the project's recent user messages (the LAST
+    ``QUOTED_UNMAPPED_MAX_MESSAGES`` — 50 — not just this turn). Only
+    numbers written with an explicit ``mm`` unit count ("12 mm", "12mm",
+    "12.5 mm" — no cm/in conversion, no bare numbers). A number is MAPPED
+    — and excluded — when the closed axis lexicon
     (``d33d.axis_lexicon.classify``) or an explicit protocol cue in the
     SAME message assigned it to an axis; every other mm number is
     unmapped and eligible ("a 20 mm wide thing, lift it 12 mm" → {12.0} —
@@ -328,7 +344,7 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     from d33d.axis_lexicon import classify
 
     unmapped: set[float] = set()
-    for msg in messages:
+    for msg in list(messages)[-QUOTED_UNMAPPED_MAX_MESSAGES:]:
         text = str(msg)
         # Mapped by the lexicon: the mm numbers it assigned to an axis
         # (``classify(text).absolute`` — an axis-word clause with its
@@ -349,9 +365,85 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     return unmapped
 
 
+def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:
+    """The latest version's persisted per-axis ``stated_dims`` (a dict of
+    positive values), or ``None`` — the carry-forward merge's input
+    (issue #261). Read via ``latest_version`` (the row's column is
+    already JSON-decoded to a dict); values are filtered to positive
+    floats (``axes_to_gate_triple``'s cleaning rule — a 0.0 persisted
+    axis is unconfirmed, never a carried statement).
+
+    Moved here from ``d33d.projects`` (issue #261 fix batch) so it sits
+    next to :func:`effective_stated_dims`, the helper that consumes it;
+    the three call sites (chat ``post_chat``, finalize
+    ``versions_routes`` and region edit ``app``) import it from here.
+    """
+    latest = versions.latest_version(project_id)
+    if latest is None:
+        return None
+    raw = latest.get("stated_dims")
+    if not isinstance(raw, dict):
+        return None
+    axes: dict[str, float] = {}
+    for axis, value in raw.items():
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            axes[str(axis)] = f
+    return axes or None
+
+
+class CuesLike(Protocol):
+    """Structural type for the lexicon cue object
+    (``d33d.axis_lexicon.Cues``) — the ``cues`` input
+    :func:`effective_stated_dims` accepts (declared shape instead of
+    duck-typing via ``getattr``)."""
+
+    absolute: dict[str, float]
+    relative: set[str]
+    global_: bool
+
+
+def offer_tier_signals(
+    user_message: str, chat_history: list[str] | tuple[str, ...] = ()
+) -> tuple[set[str] | None, set[float] | None]:
+    """The offer's tier-1/tier-2 signals for ONE turn (issue #261 fix
+    batch — ONE helper for both seams: the chat pass and the finalize
+    pass use the same computation, so tier 2 behaves the same on
+    finalize as on chat — a user-quoted unmapped number from an EARLIER
+    message (``chat_history``) is eligible on finalize, not only when it
+    sits in the finalize message itself).
+
+    Returns ``(released_axes, quoted_mm)``:
+
+    * ``released_axes`` — the axes released by THIS message's
+      relative/global cue (None when the message carries no release cue);
+    * ``quoted_mm`` — the user-quoted unmapped mm numbers over
+      ``(*chat_history, user_message)`` (never None).
+
+    Either may degrade to None on a classification failure — the offer
+    falls back to tier 3 (never a hard failure).
+    """
+    try:
+        from d33d.axis_lexicon import classify
+
+        released: set[str] | None = None
+        quoted: set[float] | None = None
+        cues = classify(user_message)
+        if cues.relative or cues.global_:
+            released = set(cues.relative) | ({"W", "D", "H"} if cues.global_ else set())
+        quoted = user_quoted_unmapped_mm((*chat_history, user_message))
+        return released, quoted
+    except Exception:
+        logger.debug("offer tier signals unavailable", exc_info=True)
+        return None, None
+
+
 def effective_stated_dims(
     latest_stated: dict[str, float] | None,
-    cues: Any = None,
+    cues: CuesLike | dict[str, float] | None = None,
 ) -> dict[str, float]:
     """The carry-forward merge helper (issue #261's operator decision —
     ONE function, THREE call sites: chat ``post_chat``, finalize

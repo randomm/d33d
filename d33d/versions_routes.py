@@ -131,6 +131,7 @@ class FinalizeBody:
         photo: str | None = None,
         request: str | None = None,
         stated_dims: tuple[float, float, float] | None = None,
+        chat_history: tuple[str, ...] = (),
     ) -> None:
         self.params = params
         self.name = name
@@ -138,6 +139,7 @@ class FinalizeBody:
         self.photo = photo
         self.request = request
         self.stated_dims = stated_dims
+        self.chat_history = chat_history
 
 
 # ---------------------------------------------------------------------------
@@ -629,9 +631,9 @@ def create_versions_router() -> APIRouter:
         # fabricated axis row.
         from d33d.dimension_protocol import (
             effective_stated_dims,
+            latest_stated_dims_dict,
             stated_axes_from_message,
         )
-        from d33d.projects import _latest_stated_dict
 
         # The previous version BEFORE the create below (the offer
         # selection's changed-set baseline and the confirmed-set
@@ -657,12 +659,12 @@ def create_versions_router() -> APIRouter:
                     if value
                 } or None
                 per_axis_stated = effective_stated_dims(
-                    _latest_stated_dict(svc, project_id), explicit_axes
+                    latest_stated_dims_dict(svc, project_id), explicit_axes
                 )
             else:
-                _am = stated_axes_from_message(msg_text, chat_history=())
+                _am = stated_axes_from_message(msg_text, chat_history=body.chat_history)
                 per_axis_stated = effective_stated_dims(
-                    _latest_stated_dict(svc, project_id),
+                    latest_stated_dims_dict(svc, project_id),
                     _am if _am else _classify_axis_cues(msg_text),
                 )
             v = await svc.create_version(
@@ -705,6 +707,7 @@ def create_versions_router() -> APIRouter:
                     else None
                 ),
                 user_message=msg_text,
+                chat_history=body.chat_history,
             )
         except Exception:  # the offer must never kill the 201
             logger.debug(
@@ -766,9 +769,9 @@ def _finalize_loop_kwargs(
     from d33d.design_loop_events import axes_to_gate_triple
     from d33d.dimension_protocol import (
         effective_stated_dims,
+        latest_stated_dims_dict,
         stated_axes_from_message,
     )
-    from d33d.projects import _latest_stated_dict
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
@@ -824,12 +827,12 @@ def _finalize_loop_kwargs(
             if value > 0  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
         } or None
         current_axes = effective_stated_dims(
-            _latest_stated_dict(app.state.versions, project_id), _explicit
+            latest_stated_dims_dict(app.state.versions, project_id), _explicit
         )
     else:
         _am = stated_axes_from_message(body.request or body.message or "")
         current_axes = effective_stated_dims(
-            _latest_stated_dict(app.state.versions, project_id),
+            latest_stated_dims_dict(app.state.versions, project_id),
             _am if _am else _classify_axis_cues(body.request or body.message or ""),
         )
     stated_dims = axes_to_gate_triple(current_axes)
@@ -1068,6 +1071,17 @@ async def _parse_finalize_body(request: Request):
                 status_code=422, detail="'stated_dims' elements must be >= 0"
             )
         stated_dims = parsed
+    chat_history = data.get("chat_history")
+    if chat_history is not None:
+        if not isinstance(chat_history, list) or not all(
+            isinstance(item, str) for item in chat_history
+        ):
+            raise HTTPException(
+                status_code=422, detail="'chat_history' must be a string array"
+            )
+        chat_history = tuple(chat_history)
+    else:
+        chat_history = ()
     return FinalizeBody(
         params=params,
         name=name,
@@ -1075,6 +1089,7 @@ async def _parse_finalize_body(request: Request):
         photo=photo,
         request=request,
         stated_dims=stated_dims,
+        chat_history=chat_history,
     )
 
 

@@ -21,6 +21,7 @@ git identity.
 
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -31,6 +32,8 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 
+logger = logging.getLogger(__name__)
+
 # Issue #261 lexicon feed — the carry-forward merge's cues input.
 from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.design_loop_events import (
@@ -40,33 +43,10 @@ from d33d.design_loop_events import (
 )
 from d33d.dimension_protocol import (
     effective_stated_dims,
+    latest_stated_dims_dict,
     stated_axes_from_message,
 )
 from d33d.question_answer import route_chat_message
-
-
-def _latest_stated_dict(versions: Any, project_id: int) -> dict[str, float] | None:
-    """The latest version's persisted per-axis ``stated_dims`` (a dict of
-    positive values), or ``None`` — the carry-forward merge's input
-    (issue #261). Read via ``latest_version`` (the row's column is
-    already JSON-decoded to a dict); values are filtered to positive
-    floats (``axes_to_gate_triple``'s cleaning rule — a 0.0 persisted
-    axis is unconfirmed, never a carried statement)."""
-    latest = versions.latest_version(project_id)
-    if latest is None:
-        return None
-    raw = latest.get("stated_dims")
-    if not isinstance(raw, dict):
-        return None
-    axes: dict[str, float] = {}
-    for axis, value in raw.items():
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            continue
-        if f > 0:
-            axes[str(axis)] = f
-    return axes or None
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -542,7 +522,14 @@ def create_projects_router() -> APIRouter:
         except Exception:
             # The pre-route must never take the project down with it:
             # release the claim and degrade to the design loop (exactly
-            # as an un-wired answer edge would).
+            # as an un-wired answer edge would). The warning carries
+            # lengths only (no message text — no PII in logs).
+            logger.warning(
+                "question-answer pre-route failed; degrading to the design "
+                "loop (len(message)=%d)",
+                len(body.message),
+                exc_info=True,
+            )
             inflight.discard(project_id)
             raise
         if answer_route is not None:
@@ -589,12 +576,26 @@ def create_projects_router() -> APIRouter:
             } or None
         if explicit_body is not None:
             per_axis_stated = effective_stated_dims(
-                _latest_stated_dict(app.state.versions, project_id), explicit_body
+                latest_stated_dims_dict(app.state.versions, project_id), explicit_body
             )
         else:
-            _latest = _latest_stated_dict(app.state.versions, project_id)
-            _am = stated_axes_from_message(body.message, chat_history)
-            _cues_arg = _am if _am else _classify_axis_cues(body.message)
+            _latest = latest_stated_dims_dict(app.state.versions, project_id)
+            try:
+                _am = stated_axes_from_message(body.message, chat_history)
+                _cues_arg = _am if _am else _classify_axis_cues(body.message)
+            except Exception:
+                # The lexicon feed must never take the project down with
+                # it: a classification failure degrades to the carried
+                # set unchanged (no release, no override — the conservative
+                # outcome). The warning carries lengths only (no message
+                # text — no PII in logs).
+                logger.warning(
+                    "dimension cue resolution failed; carrying the latest "
+                    "stated set unchanged (len(message)=%d)",
+                    len(body.message),
+                    exc_info=True,
+                )
+                _cues_arg = None
             per_axis_stated = effective_stated_dims(_latest, _cues_arg)
 
         stated = axes_to_gate_triple(per_axis_stated)

@@ -40,7 +40,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-__all__ = ["Cues", "axis_for_question_word", "classify"]
+__all__ = [
+    "GLOBAL_WORDS",
+    "RELATIVE_WORDS",
+    "Cues",
+    "axis_for_question_word",
+    "classify",
+]
 
 # ---------------------------------------------------------------------------
 # Closed word sets
@@ -56,7 +62,7 @@ _ABSOLUTE: dict[str, str] = {
     "depth": "D",
 }
 
-_RELATIVE: dict[str, str] = {
+RELATIVE_WORDS: dict[str, str] = {
     "taller": "H",
     "shorter": "H",
     "higher": "H",
@@ -67,7 +73,7 @@ _RELATIVE: dict[str, str] = {
     "shallower": "D",
 }
 
-_GLOBAL: frozenset[str] = frozenset(
+GLOBAL_WORDS: frozenset[str] = frozenset(
     {
         "bigger",
         "smaller",
@@ -79,6 +85,9 @@ _GLOBAL: frozenset[str] = frozenset(
         "twice the size",
     }
 )
+
+_RELATIVE = RELATIVE_WORDS
+_GLOBAL = GLOBAL_WORDS
 
 # Words that must NOT trigger any axis (pinned by tests).
 _EXCLUDED: frozenset[str] = frozenset(
@@ -150,7 +159,7 @@ _FEATURE_NOUN_RE = re.compile(
 )
 
 # All axis words (absolute + relative) for clause-level detection.
-_ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(_RELATIVE)
+_ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(RELATIVE_WORDS)
 
 # ---------------------------------------------------------------------------
 # Compiled patterns
@@ -226,18 +235,6 @@ def _has_number(fragment: str) -> bool:
 _FOREIGN_UNIT_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:cm|in|inches|inch|m)\b")
 
 
-def _axis_words_in(text: str) -> set[str]:
-    """The set of axis words (absolute or relative) present in text."""
-    found: set[str] = set()
-    for word in _ABSOLUTE:
-        if _word_re(word).search(text):
-            found.add(word)
-    for word in _RELATIVE:
-        if _word_re(word).search(text):
-            found.add(word)
-    return found
-
-
 def _numbers_in(text: str) -> list[float]:
     """All numbers (with or without mm unit) in text."""
     return [float(m) for m in _BARE_NUMBER_RE.findall(text)]
@@ -289,7 +286,7 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     cue_words: list[str] = []
 
     # Check global cues (multi-word phrases first, then single words).
-    for phrase in sorted(_GLOBAL, key=len, reverse=True):
+    for phrase in sorted(GLOBAL_WORDS, key=len, reverse=True):
         if _word_re(phrase).search(clause):
             global_ = True
             cue_words.append(phrase)
@@ -300,7 +297,7 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
         if _word_re(word).search(clause):
             cue_words.append(word)
 
-    for word, axis in _RELATIVE.items():
+    for word, axis in RELATIVE_WORDS.items():
         if _word_re(word).search(clause):
             relative.add(axis)
             cue_words.append(word)
@@ -320,19 +317,12 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     all_numbers = _numbers_in(clause)
 
     # Determine the axis-word count in this clause.
-    # Count distinct axis words (absolute + relative).
-    axis_words_found: set[str] = set()
-    for word in _ABSOLUTE:
-        if _word_re(word).search(clause):
-            axis_words_found.add(word)
-    for word in _RELATIVE:
-        if _word_re(word).search(clause):
-            axis_words_found.add(word)
-    axis_count = len(axis_words_found)
+    # Count distinct axis words (absolute or relative).
+    axis_words_found = _ALL_AXIS_WORDS & set(cue_words)
 
     # If there are two or more different axis words and one number,
     # the clause maps nothing (the two-axes-one-number rule).
-    if axis_count >= 2 and len(all_numbers) <= 1:
+    if len(axis_words_found) >= 2 and len(all_numbers) <= 1:
         return ({}, set(), global_, cue_words)
 
     # A clause with a foreign-unit number (cm/in/m) does not assign an
@@ -431,25 +421,12 @@ def classify(message: str) -> Cues:
 
     # The #261 round-2 release: a pure direction request (no absolute
     # value assigned, no number present, or only a percentage number)
-    # still releases the carried axes via a relative cue — the closed
-    # word sets cover "taller"/"bigger" and the like, but English has
-    # other ways to say the same thing ("increase the height", "20% taller"
-    # without the axis word). Without this, such a message left the old
-    # carried value in place and the gate enforced it. The fallback only
-    # fires when the message did NOT state an absolute value: "increase
-    # the height to 30 mm" sets H=30 and carries the rest — it does not
-    # ALSO release H.
+    # still releases the carried axes via a named cue ("increase the
+    # height", "20% taller"). The fallback only fires when the message
+    # did NOT state an absolute value: "increase the height to 30 mm"
+    # sets H=30 and carries the rest — it does not ALSO release H.
     if not all_absolute and not (has_any_number and not has_percent):
-        for word, axis in _RELATIVE.items():
-            if _word_re(word).search(message):
-                all_relative.add(axis)
-        for word, axis in _ABSOLUTE.items():
-            if _word_re(word).search(message):
-                all_relative.add(axis)
-        for phrase in sorted(_GLOBAL, key=len, reverse=True):
-            if _word_re(phrase).search(message):
-                all_global = True
-                break
+        all_global = all_global or _apply_release_fallback(message, all_relative)
 
     # Collect all explicit-mm numbers in the message.
     all_mm_numbers = _mm_numbers_in(message)
@@ -470,6 +447,36 @@ def classify(message: str) -> Cues:
         cue_words=all_cue_words,
         unmapped_mm_numbers=unmapped,
     )
+
+
+def _global_release(message: str) -> bool:
+    """True if the message carries a global cue (any of ``GLOBAL_WORDS``)."""
+    for phrase in sorted(GLOBAL_WORDS, key=len, reverse=True):
+        if _word_re(phrase).search(message):
+            return True
+    return False
+
+
+def _apply_release_fallback(message: str, released: set[str]) -> bool:
+    """The #261 round-2 pure-direction-request release (extracted from
+    :func:`classify` so it can be tested directly).
+
+    When a message states NO absolute value, its relative and absolute
+    axis words still RELEASE their axes ("increase the height" releases
+    H — the gate must not enforce the carried H against a user who asked
+    to change it), and a global word releases all three. Returns True if
+    the global flag should be set. ``unmapped_mm_numbers`` is message-level
+    by design (issue #261's "per number" decision): an explicit-mm number
+    is eligible for the tier-2 offer if no clause in the message mapped it,
+    regardless of which clause it sits in.
+    """
+    for word, axis in RELATIVE_WORDS.items():
+        if _word_re(word).search(message):
+            released.add(axis)
+    for word, axis in _ABSOLUTE.items():
+        if _word_re(word).search(message):
+            released.add(axis)
+    return _global_release(message)
 
 
 def axis_for_question_word(word: str) -> str | None:

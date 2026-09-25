@@ -1173,10 +1173,12 @@ def create_app(
         # persists it instead of today's NULL. The gate input stays
         # ``None`` regardless — the merge output here feeds persistence
         # only, never the gate.
-        from d33d.dimension_protocol import effective_stated_dims
-        from d33d.projects import _latest_stated_dict
+        from d33d.dimension_protocol import (
+            effective_stated_dims,
+            latest_stated_dims_dict,
+        )
 
-        carried_axes = effective_stated_dims(_latest_stated_dict(app.state.versions, project_id))
+        carried_axes = effective_stated_dims(latest_stated_dims_dict(app.state.versions, project_id))
 
         # The composed request text: the instruction prefixed with the view
         # id, and with the resolved module_ids only when the pick resolved
