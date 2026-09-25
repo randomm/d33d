@@ -2196,9 +2196,12 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
         )
         import time
         t0 = time.monotonic()
+        # Uses a non-axis question so the #263 deterministic stage does
+        # not intercept it — this test exercises the stage-2 LLM timeout
+        # path specifically.
         r = await client.post(
             f"/api/projects/{pid}/chat",
-            json={"message": "How tall is it now?", "chat_history": []},
+            json={"message": "What is the material?", "chat_history": []},
         )
         elapsed = time.monotonic() - t0
         source = app_with_versions.state.event_sources.get(pid)

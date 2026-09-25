@@ -489,6 +489,54 @@ export const answerRoute = {
     "The design as it stands doesn't establish that — nothing was changed.",
 } as const;
 
+/**
+ * Deterministic axis-size answer copy (issue #263).
+ *
+ * The new stage between stage 1 and stage 2 in `route_chat_message`
+ * answers "how tall is it?" / "what's the depth?" / "how big is it?"
+ * deterministically from the design state — no LLM call. The backend
+ * builds the wire string using its own `mm_formatted` (which replicates
+ * `mm()` here) and emits it verbatim on the done frame's `answer` field.
+ *
+ * The deck carries the templates so the design-contract test can pin
+ * the exact strings and catch a wording drift between deck and server,
+ * the #260 / #250 way.
+ *
+ * `axis` is the adjective the question used: "tall" (H), "wide" (W),
+ * or "deep" (D). `value`, `stated`, and `measured` arrive pre-formatted
+ * via `mm()`. `w`, `d`, and `h` in the dimension-list sentence are
+ * each pre-formatted or the literal "-" (dash) when not established.
+ */
+export const deterministicAnswer = {
+  /** Stated + measured agree: "It's 12.0 mm tall — you said that, and I
+   *  measured it." */
+  statedAndMeasured: (value: string, axis: string): string =>
+    `It's ${value} ${axis} — you said that, and I measured it.`,
+
+  /** Measured only: "It measures 12.0 mm tall." */
+  measuredOnly: (value: string, axis: string): string =>
+    `It measures ${value} ${axis}.`,
+
+  /** Stated only (no measurement yet):
+   *  "You said 12.0 mm tall. Nothing has measured it yet." */
+  statedOnly: (value: string, axis: string): string =>
+    `You said ${value} ${axis}. Nothing has measured it yet.`,
+
+  /** Disagrees: "You said 12.0 mm; what came out measures 43.8 mm." */
+  disagrees: (stated: string, measured: string): string =>
+    `You said ${stated}; what came out measures ${measured}.`,
+
+  /** Not established: "The height isn't established yet." (width/depth)
+   *  `axisNoun` is the noun form: "height", "width", "depth". */
+  notEstablished: (axisNoun: string): string =>
+    `The ${axisNoun} isn't established yet.`,
+
+  /** Dimension list: "It measures 60.0 mm × 45.0 mm × 12.0 mm." Each
+   *  axis uses its best value (pre-formatted) or "-" when not established. */
+  dimensionList: (w: string, d: string, h: string): string =>
+    `It measures ${w} × ${d} × ${h}.`,
+} as const;
+
 export const shell = {
   addPhoto: "Add a reference photo",
   composerPlaceholder:
@@ -554,6 +602,7 @@ export const copy = {
   failure,
   confirmOffer,
   answerRoute,
+  deterministicAnswer,
   region,
   history,
   firstRun,

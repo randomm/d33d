@@ -45,8 +45,14 @@ import pytest
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
     COULD_NOT_ANSWER,
+    DETERMINISTIC_AXIS_ADJECTIVES,
+    DETERMINISTIC_AXIS_NOUNS,
+    DETERMINISTIC_AXIS_SENTENCES,
+    DETERMINISTIC_DIMENSION_LIST_FORMAT,
+    DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
     build_answer_prompt,
+    deterministic_axis_answer,
     guard_answer_numbers,
     is_candidate_question,
     parse_answer_reply,
@@ -392,13 +398,21 @@ class TestRouteChatMessage:
         return _edge
 
     def test_answered_question_returns_kind_answer(self) -> None:
+        # A non-axis-size question ("How tall is it now?" is now answered
+        # deterministically by the #263 stage — this test exercises the
+        # stage-2 LLM path, so it uses a question the deterministic stage
+        # does not take).
         latest = _latest({"H": 12.0, "W": 20.0})
         edge = self._answer_edge('{"answerable": true, "answer": "It is 12 mm tall."}')
-        result = run_async_safe(route_chat_message("How tall is it now?", latest, edge))
+        result = run_async_safe(route_chat_message("What is the material?", latest, edge))
         assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
 
     def test_no_versions_returns_none(self) -> None:
-        result = run_async_safe(route_chat_message("How tall is it now?", None))
+        # No version → the deterministic stage does not run (the existing
+        # early exit runs first). A non-axis question is used to make it
+        # clear the test is about the no-version path, not the
+        # deterministic stage.
+        result = run_async_safe(route_chat_message("What is the material?", None))
         assert result is None
 
     def test_non_question_returns_none(self) -> None:
@@ -436,16 +450,17 @@ class TestRouteChatMessage:
 
     def test_invented_number_guard_fails_returns_could_not_answer(self) -> None:
         # #260: a guard failure is a FAILED ANSWER — the fixed no-run
-        # reply, not a design run.
+        # reply, not a design run. Uses a non-axis question so the
+        # deterministic stage does not intercept it.
         latest = _latest({"H": 12.0})
         edge = self._answer_edge('{"answerable": true, "answer": "It is 15 mm tall."}')
-        result = run_async_safe(route_chat_message("How tall is it now?", latest, edge))
+        result = run_async_safe(route_chat_message("What is the material?", latest, edge))
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
     def test_malformed_reply_returns_could_not_answer(self) -> None:
         latest = _latest({"H": 12.0})
         edge = self._answer_edge("not json at all")
-        result = run_async_safe(route_chat_message("How tall is it now?", latest, edge))
+        result = run_async_safe(route_chat_message("What is the material?", latest, edge))
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
     def test_exception_from_edge_returns_could_not_answer(self) -> None:
@@ -455,7 +470,7 @@ class TestRouteChatMessage:
             raise RuntimeError("simulated stage-2 failure")
 
         result = run_async_safe(
-            route_chat_message("How tall is it now?", latest, _raise_edge)
+            route_chat_message("What is the material?", latest, _raise_edge)
         )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
@@ -470,20 +485,694 @@ class TestRouteChatMessage:
 
         result = run_async_safe(
             route_chat_message(
-                "How tall is it now?", latest, _hanging_edge, timeout=0.05
+                "What is the material?", latest, _hanging_edge, timeout=0.05
             )
         )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
     def test_no_answer_edge_returns_none(self) -> None:
+        # A non-axis question with no answer edge → None (the design
+        # loop). An axis-size question would be answered deterministically
+        # even with no edge (the deterministic stage does not need an
+        # edge), so this test uses a non-axis question to exercise the
+        # no-edge path.
         latest = _latest({"H": 12.0})
-        result = run_async_safe(route_chat_message("How tall is it now?", latest))
+        result = run_async_safe(route_chat_message("What is the material?", latest))
         assert result is None
 
 
 def run_async_safe(coro) -> Any:
     """Drive a coroutine under a fresh event loop (no app, no lifespan)."""
     return asyncio.run(coro)
+
+
+# ---------------------------------------------------------------------------
+# Issue #263 — the deterministic axis-size stage (no LLM, no app)
+# ---------------------------------------------------------------------------
+
+
+def _latest263(
+    params: dict | None = None,
+    stated: dict | None = None,
+    bbox: dict | None = None,
+    name: str | None = None,
+    param_meta: dict | None = None,
+) -> dict:
+    """Build a minimal version dict for the #263 deterministic-stage tests."""
+    out: dict = {
+        "params": params or {},
+        "stated_dims": stated,
+        "bbox": bbox,
+        "param_meta": param_meta,
+    }
+    if name is not None:
+        out["name"] = name
+    return out
+
+
+class TestDeterministicAxisStage:
+    """Issue #263: the deterministic axis-size stage — a stage-1 candidate
+    that asks for exactly one axis's size (or the full dimension list) is
+    answered from the design state with NO LLM call, NO timeout, NO
+    guard. The answer rides the #249 plain-message path.
+
+    Uses ``deterministic_axis_answer`` directly (the pure function the
+    route calls between stage 1 and stage 2) and ``route_chat_message``
+    for the integration cases (no LLM edge called, no version created).
+    """
+
+    def test_measured_only_bbox_z(self) -> None:
+        # "How tall is it now?" on a version with bbox z=12.0 and no
+        # stated H → "It measures 12.0 mm tall."
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "It measures 12.0\u202fmm tall."
+
+    def test_measured_only_bbox_x(self) -> None:
+        # "How wide is it?" → W (bbox x).
+        latest = _latest263(bbox={"x": 25.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("How wide is it?", latest)
+        assert result == "It measures 25.0\u202fmm wide."
+
+    def test_measured_only_bbox_y(self) -> None:
+        # "what's the depth?" → D (bbox y).
+        latest = _latest263(bbox={"x": 20.0, "y": 30.0, "z": 12.0})
+        result = deterministic_axis_answer("what's the depth?", latest)
+        assert result == "It measures 30.0\u202fmm deep."
+
+    def test_stated_and_measured_agree(self) -> None:
+        # Stated H=12 and matching bbox z=12 → the stated+measured
+        # sentence ("you said that, and I measured it").
+        latest = _latest263(stated={"H": 12.0}, bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "It's 12.0\u202fmm tall \u2014 you said that, and I measured it."
+
+    def test_stated_and_measured_disagree(self) -> None:
+        # Stated H=12 and mismatched bbox z=15 → the disagrees sentence
+        # (both numbers, mm()-formatted).
+        latest = _latest263(stated={"H": 12.0}, bbox={"x": 20.0, "y": 20.0, "z": 15.0})
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "You said 12.0\u202fmm; what came out measures 15.0\u202fmm."
+
+    def test_stated_only_no_measurement(self) -> None:
+        # Stated H=12, no bbox → the stated-only sentence.
+        latest = _latest263(stated={"H": 12.0})
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "You said 12.0\u202fmm tall. Nothing has measured it yet."
+
+    def test_zero_extent_bbox_stated_only(self) -> None:
+        # Stated H=12 with bbox z=0 (zero extent → abstain) → the
+        # stated-only sentence, not "not established" and not disagrees.
+        latest = _latest263(stated={"H": 12.0}, bbox={"x": 20.0, "y": 20.0, "z": 0})
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "You said 12.0\u202fmm tall. Nothing has measured it yet."
+
+    def test_not_established(self) -> None:
+        # No bbox, no stated → "not established".
+        latest = _latest263()
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        assert result == "The height isn't established yet."
+
+    def test_not_established_width(self) -> None:
+        latest = _latest263()
+        result = deterministic_axis_answer("How wide is it?", latest)
+        assert result == "The width isn't established yet."
+
+    def test_not_established_depth(self) -> None:
+        latest = _latest263()
+        result = deterministic_axis_answer("what's the depth?", latest)
+        assert result == "The depth isn't established yet."
+
+    def test_dimension_list(self) -> None:
+        # "How big is it?" → the full W × D × H list.
+        latest = _latest263(bbox={"x": 20.0, "y": 25.0, "z": 12.0})
+        result = deterministic_axis_answer("How big is it?", latest)
+        assert result == "It measures 20.0\u202fmm × 25.0\u202fmm × 12.0\u202fmm."
+
+    def test_dimension_list_with_unestablished_axis(self) -> None:
+        # W and D measured, H not established → dash for H.
+        latest = _latest263(bbox={"x": 20.0, "y": 25.0, "z": 0})
+        result = deterministic_axis_answer("How big is it?", latest)
+        # z=0 → the H axis row is omitted (zero extent abstains), so H
+        # falls to the bbox fallback which also abstains (z=0) → "not
+        # established" → dash.
+        assert result == "It measures 20.0\u202fmm × 25.0\u202fmm × \u2014."
+
+    def test_list_wins_over_single_axis_word(self) -> None:
+        # "How wide is it, and what are the dimensions?" → the list
+        # (the operator decision: a message matching BOTH a dimension-list
+        # trigger and a single axis word answers the list).
+        latest = _latest263(bbox={"x": 20.0, "y": 25.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How wide is it, and what are the dimensions?", latest
+        )
+        assert result == "It measures 20.0\u202fmm × 25.0\u202fmm × 12.0\u202fmm."
+
+    def test_dimension_list_triggers_closed_list(self) -> None:
+        # The dimension-list trigger list is CLOSED (operator decision).
+        # Every member of the closed set answers the list; any other
+        # phrasing falls through (None).
+        latest = _latest263(bbox={"x": 20.0, "y": 25.0, "z": 12.0})
+        expected = "It measures 20.0\u202fmm × 25.0\u202fmm × 12.0\u202fmm."
+        for trigger in (
+            "What are the dimensions?",
+            "what are its dimensions?",
+            "What size is it?",
+            "How big is it?",
+            "How large is it?",
+            "What's the size?",
+        ):
+            assert DETERMINISTIC_DIMENSION_LIST_RE.search(trigger) is not None, (
+                f"closed-list trigger {trigger!r} not matched"
+            )
+            result = deterministic_axis_answer(trigger, latest)
+            assert result == expected, f"trigger {trigger!r} → {result!r}"
+        # Anything else is NOT a dimension-list trigger: it falls through
+        # to the single-axis rule or to stage 2.
+        for non_trigger in (
+            "What are the measurements?",
+            "How large is the hole?",
+            "What is the size of the post?",
+            "What is the material?",
+            "How big is the shelf bracket?",
+        ):
+            result = deterministic_axis_answer(non_trigger, latest)
+            assert result is None, (
+                f"{non_trigger!r} must fall through, got {result!r}"
+            )
+
+    def test_param_row_never_an_answer_source(self) -> None:
+        # A param row named "H" (assumed) is NEVER an answer source —
+        # the deterministic stage filters on kind == "axis" explicitly.
+        # Param H=40 + bbox z=43.8 → the answer uses 43.8 (the axis row
+        # from the bbox), not 40 (the param row).
+        latest = _latest263(
+            params={"H": 40.0}, bbox={"x": 43.8, "y": 20.0, "z": 43.8}
+        )
+        result = deterministic_axis_answer("How tall is it now?", latest)
+        # The axis row (from the bbox) says 43.8 measured; the param row
+        # says 40 assumed. The answer must use 43.8.
+        assert result == "It measures 43.8\u202fmm tall."
+
+    def test_model_source_disagrees_param_row_never_an_answer_source(self) -> None:
+        # Issue #264: a param row with ``disagrees_source: "model"``
+        # (an assumed param whose declared axis contests the measurement)
+        # is NEVER an answer source — the deterministic stage filters on
+        # ``kind == "axis"`` explicitly. After #264, axis rows are
+        # measured or user-disagrees, so the axis-row answer is always
+        # correct even when a model-source param row also claims the
+        # axis. Here: spacer_width=40 (assumed, axis W) + bbox x=43.8 →
+        # the param row renders disagrees_source "model" with value 43.8
+        # (the measured extent) and stated_value 40; the W axis row is
+        # measured at 43.8. "How wide is it?" answers 43.8 (the axis
+        # row), never 40 (the model's value).
+        from d33d.design_state import state_block_for_version
+
+        entries = state_block_for_version(
+            {"spacer_width": 40.0},
+            {"x": 43.8, "y": 43.9, "z": 12.0},
+            None,
+            {"spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"}},
+        )
+        # Sanity: the block carries a model-source disagrees param row
+        # AND a W axis row (measured at 43.8).
+        model_rows = [
+            e
+            for e in entries
+            if e.get("kind") == "param"
+            and e.get("provenance") == "disagrees"
+            and e.get("disagrees_source") == "model"
+        ]
+        assert model_rows, f"expected a model-source disagrees row: {entries}"
+        w_axis_rows = [
+            e for e in entries if e.get("kind") == "axis" and e.get("name") == "W"
+        ]
+        assert w_axis_rows and w_axis_rows[0]["value"] == 43.8
+
+        latest = _latest263(
+            params={"spacer_width": 40.0},
+            bbox={"x": 43.8, "y": 43.9, "z": 12.0},
+            param_meta={
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"}
+            },
+        )
+        result = deterministic_axis_answer("How wide is it?", latest)
+        # The axis row (43.8) wins; the model's 40 never answers.
+        assert result == "It measures 43.8\u202fmm wide."
+
+    def test_feature_noun_falls_through(self) -> None:
+        # "How tall is the post?" → None (feature noun, not the part).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("How tall is the post?", latest)
+        assert result is None
+
+    def test_feature_noun_height_of_hole(self) -> None:
+        # "What is the height of the hole?" → None (feature noun).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("What is the height of the hole?", latest)
+        assert result is None
+
+    def test_thick_not_in_lexicon(self) -> None:
+        # "How thick is the wall?" → None ("thick" is excluded from the
+        # lexicon — not an absolute axis word).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("How thick is the wall?", latest)
+        assert result is None
+
+    def test_relative_cue_not_a_size_question(self) -> None:
+        # "Is it taller than 20 mm?" → None ("taller" is a relative cue;
+        # stage 1 already rejects it per #261, but the deterministic
+        # stage also does not take it).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer("Is it taller than 20 mm?", latest)
+        assert result is None
+
+    def test_version_name_match(self) -> None:
+        # Version named "Shelf bracket": "how tall is the shelf bracket?"
+        # → H (the version name matches the noun phrase).
+        latest = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="Shelf bracket"
+        )
+        result = deterministic_axis_answer("How tall is the shelf bracket?", latest)
+        assert result == "It measures 12.0\u202fmm tall."
+
+    def test_version_name_no_match(self) -> None:
+        # Version named "Shelf bracket": "how tall is the shelf?" → None
+        # (the noun "the shelf" does not match the version name).
+        latest = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="Shelf bracket"
+        )
+        result = deterministic_axis_answer("How tall is the shelf?", latest)
+        assert result is None
+
+    def test_proposed_change_question_with_number_falls_through(self) -> None:
+        # Adversarial finding (PR #272 round 1): a message carrying a
+        # number ("Can it be 15 mm tall?") is a PROPOSED change or a
+        # yes/no check, not a plain size question — the target-number
+        # guard makes the deterministic stage abstain (fall through to
+        # stage 2) instead of answering with the part's CURRENT height.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        for msg in (
+            "Can it be 15 mm tall?",
+            "Can it be 20 mm deep?",
+            "Is it 12 mm tall?",
+            "How big is it, 20 mm?",
+        ):
+            assert deterministic_axis_answer(msg, latest) is None, (
+                f"{msg!r} must fall through (target-number guard), "
+                "got a deterministic answer"
+            )
+
+    def test_number_in_version_name_does_not_trip_guard(self) -> None:
+        # The guard scans the MESSAGE, not the version name: a version
+        # named "12 mm shelf spacer" asked about by a digit-free question
+        # still answers deterministically.
+        latest = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="12 mm shelf spacer"
+        )
+        result = deterministic_axis_answer(
+            "How tall is the 12 mm shelf spacer?", latest
+        )
+        # The message carries a digit (the name's "12"), so the guard
+        # abstains — a digit anywhere in the message is a conservative
+        # abstain, even inside a version-name reference.
+        assert result is None
+        # A digit-free phrasing of the same question still answers.
+        latest2 = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="shelf spacer"
+        )
+        result2 = deterministic_axis_answer("How tall is the shelf spacer?", latest2)
+        assert result2 == "It measures 12.0\u202fmm tall."
+
+    def test_version_name_case_insensitive(self) -> None:
+        # Version named "Shelf bracket": "how tall is the SHELF BRACKET?"
+        # → H (case-insensitive match).
+        latest = _latest263(
+            bbox={"x": 20.0, "y": 20.0, "z": 12.0}, name="Shelf bracket"
+        )
+        result = deterministic_axis_answer("How tall is the SHELF BRACKET?", latest)
+        assert result == "It measures 12.0\u202fmm tall."
+
+    def test_no_version_returns_none(self) -> None:
+        # latest=None → the deterministic stage does not run (the
+        # existing early exit in route_chat_message runs first).
+        result = deterministic_axis_answer("How tall is it now?", None)
+        assert result is None
+
+    def test_route_deterministic_no_edge_called(self) -> None:
+        # Integration: "How tall is it now?" on a version with bbox
+        # z=12.0 and no stated H → answered deterministically, the
+        # answer-edge stub is NOT called, no version is created.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        result = run_async_safe(
+            route_chat_message("How tall is it now?", latest, _edge)
+        )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "It measures 12.0\u202fmm tall.",
+        }
+        assert not edge_called[0], "the answer edge must NOT be called for a deterministic answer"
+
+    def test_route_deterministic_no_version_created(self) -> None:
+        # Integration: the deterministic stage does not create a version
+        # (the answer is a plain message, no design run).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+
+        async def _edge(question: str, entries: list) -> str:
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        result = run_async_safe(
+            route_chat_message("How tall is it now?", latest, _edge)
+        )
+        # The result is a plain answer message (no version, no design run).
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        assert "12.0" in result["answer"]
+
+    def test_route_axis_question_no_edge_still_answered(self) -> None:
+        # An axis-size question with NO answer edge is still answered
+        # deterministically (the deterministic stage does not need an
+        # edge). A non-axis question with no edge returns None.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = run_async_safe(
+            route_chat_message("How tall is it now?", latest)
+        )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "It measures 12.0\u202fmm tall.",
+        }
+
+    def test_route_thick_wall_not_answered_deterministically(self) -> None:
+        # "How thick is the wall?" is NOT a size question for the
+        # deterministic stage ("thick" is excluded from the lexicon, and
+        # "wall" is a feature noun). It falls through to stage 2:
+        # with no answer edge, the route returns None (design loop).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = run_async_safe(
+            route_chat_message("How thick is the wall?", latest)
+        )
+        assert result is None
+
+
+class TestDeterministicWarningLog:
+    """Issue #263: every deterministic answer logs exactly ONE WARNING
+    naming the outcome ("deterministic"), the axis (or the dimension-list
+    marker), and the provenance class — NEVER the message text or the
+    answer text (no PII in logs)."""
+
+    def _latest(self, params: dict, stated: dict | None, bbox: dict | None) -> dict:
+        return {
+            "params": params,
+            "stated_dims": stated,
+            "bbox": bbox,
+            "param_meta": None,
+        }
+
+    def _warnings(self, caplog) -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    def test_single_axis_emits_one_warning_axis_and_provenance(self, caplog) -> None:
+        latest = self._latest({}, None, {"x": 20.0, "y": 20.0, "z": 12.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message("How tall is it now?", latest)
+            )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "It measures 12.0\u202fmm tall.",
+        }
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=measured" in msg
+        # Never the message or the answer text (no PII in logs).
+        assert "How tall is it now?" not in msg
+        assert "12.0" not in msg
+
+    def test_dimension_list_emits_one_warning_list_and_provenance_classes(
+        self, caplog
+    ) -> None:
+        latest = self._latest({}, None, {"x": 20.0, "y": 25.0, "z": 12.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How big is it?", latest))
+        assert result is not None
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=list" in msg
+        # The dimension list reports each axis's provenance class
+        # (W/D/H order, "+"-joined — a closed vocabulary, no free text).
+        assert "provenance=measured+measured+measured" in msg
+        assert "How big is it?" not in msg
+
+    def test_not_established_emits_one_warning(self, caplog) -> None:
+        latest = self._latest({}, None, None)
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How tall is it now?", latest))
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "The height isn't established yet.",
+        }
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=not_established" in msg
+        # No PII: no message text, no number.
+        assert "How tall is it now?" not in msg
+        assert "12.0" not in msg
+
+    def test_disagrees_emits_one_warning(self, caplog) -> None:
+        latest = self._latest({}, {"H": 12.0}, {"x": 20.0, "y": 20.0, "z": 15.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(route_chat_message("How tall is it now?", latest))
+        assert result is not None
+        warnings = self._warnings(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        msg = warnings[0].getMessage()
+        assert "outcome=deterministic" in msg
+        assert "axis=H" in msg
+        assert "provenance=disagrees" in msg
+        # No PII: neither the stated number nor the measured number
+        # (the provenance class is a closed vocabulary token, not a value).
+        assert "12.0" not in msg
+        assert "15.0" not in msg
+
+    def test_non_axis_question_falls_through_no_deterministic_warning(
+        self, caplog
+    ) -> None:
+        # A stage-1 candidate the deterministic stage does not take
+        # ("What is the material?" — no axis word) falls through to
+        # stage 2; no deterministic WARNING is emitted (the stage-2
+        # outcome logs its own WARNING via ask_answer_call).
+        latest = self._latest({"H": 12.0}, None, None)
+
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message("What is the material?", latest, _edge)
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
+        warnings = self._warnings(caplog)
+        # The only WARNING is the stage-2 outcome ("answer"), NOT
+        # a deterministic one.
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=answer" in warnings[0].getMessage()
+        assert "outcome=deterministic" not in warnings[0].getMessage()
+
+
+class TestDeterministicCopyDeckParity:
+    """Issue #263: the backend's deterministic answer sentences are
+    pinned against the exact strings the W263 design-contract test pins
+    for ``web/src/copy.ts``'s ``deterministicAnswer`` deck (the same
+    strings the #250 ``confirmOffer`` and #260 ``answerRoute`` parity
+    tests pin) — a deck edit without the backend (or vice versa) is a
+    drift this catches. No placeholder surgery: each backend template
+    is formatted with fixed sample values and compared to the exact
+    sentences."""
+
+    def test_backend_deterministic_sentences_match_pinned_deck_strings(self) -> None:
+        # The W263 design-contract test's fixed sample values (the
+        # acceptance criterion's examples, mm-formatted the way the deck
+        # and the backend both render them: one decimal, U+202F, "mm").
+        H = "12.0\u202fmm"
+        W = "60.0\u202fmm"
+        D = "45.0\u202fmm"
+        stated = "12.0\u202fmm"
+        measured = "43.8\u202fmm"
+
+        # The expected sentences: the exact strings the W263 design-
+        # contract test in web/src/__tests__/design-contract.test.ts
+        # pins for copy.deterministicAnswer — one per provenance class,
+        # per axis where the class carries an axis slot.
+        expected = [
+            # stated+measured (one template, three axis adjectives)
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=H, axis="tall"
+            ),
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=W, axis="wide"
+            ),
+            DETERMINISTIC_AXIS_SENTENCES["stated+measured"].format(
+                value=D, axis="deep"
+            ),
+            # measured
+            DETERMINISTIC_AXIS_SENTENCES["measured"].format(value=H, axis="tall"),
+            DETERMINISTIC_AXIS_SENTENCES["measured"].format(value=D, axis="deep"),
+            # stated
+            DETERMINISTIC_AXIS_SENTENCES["stated"].format(value=H, axis="tall"),
+            DETERMINISTIC_AXIS_SENTENCES["stated"].format(value=W, axis="wide"),
+            # disagrees (axis-independent)
+            DETERMINISTIC_AXIS_SENTENCES["disagrees"].format(
+                stated=stated, measured=measured
+            ),
+            # not established (one template, three axis nouns)
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="height"),
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="width"),
+            DETERMINISTIC_AXIS_SENTENCES["not_established"].format(axis_noun="depth"),
+            # dimension list (W x D x H order)
+            DETERMINISTIC_DIMENSION_LIST_FORMAT.format(W=W, D=D, H=H),
+        ]
+        expected_exact = [
+            "It's 12.0\u202fmm tall \u2014 you said that, and I measured it.",
+            "It's 60.0\u202fmm wide \u2014 you said that, and I measured it.",
+            "It's 45.0\u202fmm deep \u2014 you said that, and I measured it.",
+            "It measures 12.0\u202fmm tall.",
+            "It measures 45.0\u202fmm deep.",
+            "You said 12.0\u202fmm tall. Nothing has measured it yet.",
+            "You said 60.0\u202fmm wide. Nothing has measured it yet.",
+            "You said 12.0\u202fmm; what came out measures 43.8\u202fmm.",
+            "The height isn't established yet.",
+            "The width isn't established yet.",
+            "The depth isn't established yet.",
+            "It measures 60.0\u202fmm \u00d7 45.0\u202fmm \u00d7 12.0\u202fmm.",
+        ]
+        # The backend's formatted sentences are exactly the W263 design-
+        # contract test's pinned strings — no regex, no placeholder
+        # conversion, both directions pinned by the literals above.
+        assert expected == expected_exact
+
+        # The per-axis adjective/noun lookups carry the axis words the
+        # W263 design-contract test pins (tall/wide/deep, height/width/
+        # depth) — a deck edit to a different axis word breaks this.
+        assert DETERMINISTIC_AXIS_ADJECTIVES == {
+            "W": "wide", "D": "deep", "H": "tall"
+        }
+        assert DETERMINISTIC_AXIS_NOUNS == {
+            "W": "width", "D": "depth", "H": "height"
+        }
+
+
+
+
+class TestDeterministicAxisStageRouteLevel:
+    """Issue #263 route-level tests: the deterministic stage answers
+    axis-size questions with NO LLM call, NO design run, NO version.
+    Uses the real app fixture (``app_with_versions``)."""
+
+    def test_axis_question_deterministic_no_edge_no_version(
+        self, app_with_versions
+    ) -> None:
+        """"How tall is it now?" on a version with bbox z=12.0 and no
+        stated H → answered deterministically, the answer-edge stub is
+        NOT called, no version is created, ONE done frame."""
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        def _loop(app, **kwargs):
+            raise AssertionError("the design loop must NOT be called for a deterministic answer")
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            # A version with bbox z=12.0 and no stated_dims.
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"H": 12.0, "W": 20.0, "D": 20.0},
+                stated_dims=None,
+                bbox=(20.0, 20.0, 12.0),
+            )
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _edge
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "How tall is it now?", "chat_history": []},
+            )
+            versions = app_with_versions.state.versions.list_versions(pid)
+            return r, frames, len(versions), edge_called[0]
+
+        r, frames, version_count, was_edge_called = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not was_edge_called, "the answer edge must NOT be called for a deterministic answer"
+        assert version_count == 1, f"expected 1 version, got {version_count}"
+        # Exactly ONE frame: the terminal done frame with kind "answer".
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert "12.0" in data["message"]
+
+    def test_dimension_list_deterministic_no_edge(self, app_with_versions) -> None:
+        """"How big is it?" → the dimension list, no LLM call, no version."""
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "It is 20 x 20 x 12 mm."}'
+
+        def _loop(app, **kwargs):
+            raise AssertionError("the design loop must NOT be called for a deterministic answer")
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"H": 12.0, "W": 20.0, "D": 20.0},
+                stated_dims=None,
+                bbox=(20.0, 25.0, 12.0),
+            )
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _edge
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "How big is it?", "chat_history": []},
+            )
+            versions = app_with_versions.state.versions.list_versions(pid)
+            return r, frames, len(versions), edge_called[0]
+
+        r, frames, version_count, was_edge_called = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not was_edge_called, "the answer edge must NOT be called for a deterministic answer"
+        assert version_count == 1, f"expected 1 version, got {version_count}"
+        assert len(frames) == 1
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert "20.0" in data["message"]
+        assert "25.0" in data["message"]
+        assert "12.0" in data["message"]
 
 
 # ---------------------------------------------------------------------------
@@ -518,11 +1207,15 @@ async def _drive_chat_with_answer(
 
 
 def test_answered_question_emits_done_frame_no_version(app_with_versions) -> None:
-    """DECISIVE (issue #249): "How tall is it now?" against a project
-    whose latest version has H stated 12 → answered via ONE terminal
-    done frame (``kind: "answer"``), NO version created, NO
+    """DECISIVE (issue #249): a question the stage-2 LLM answers against
+    a project whose latest version has H stated 12 → answered via ONE
+    terminal done frame (``kind: "answer"``), NO version created, NO
     version-created frame, NO token frame. The design loop is never
-    called."""
+    called.
+
+    Uses a non-axis-size question ("What is the material?") so the
+    #263 deterministic stage does not intercept it — this test exercises
+    the stage-2 LLM answer path specifically."""
 
     captured_loop_called = False
 
@@ -546,7 +1239,7 @@ def test_answered_question_emits_done_frame_no_version(app_with_versions) -> Non
             app_with_versions,
             client,
             pid,
-            {"message": "How tall is it now?", "chat_history": []},
+            {"message": "What is the material?", "chat_history": []},
             answer_reply=reply,
         )
         # The version count is still 1 (no new version created).
@@ -713,7 +1406,10 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
 ) -> None:
     """#260: an LLM answer containing a number not in the block → guard
     fails → the fixed no-run copy. No design run, no version — the
-    design loop is never the fallback for a failed answer."""
+    design loop is never the fallback for a failed answer.
+
+    Uses a non-axis-size question so the #263 deterministic stage does
+    not intercept it."""
 
     loop_called = False
 
@@ -741,7 +1437,7 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
             app_with_versions,
             client,
             pid,
-            {"message": "How tall is it now?", "chat_history": []},
+            {"message": "What is the material?", "chat_history": []},
             answer_reply='{"kind": "answer", "answer": "It is 15 mm tall."}',
         )
         versions = app_with_versions.state.versions.list_versions(pid)
@@ -762,7 +1458,7 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
 
 
 def test_no_versions_goes_to_loop(app_with_versions) -> None:
-    """A fresh project (no versions) receiving "How tall is it now?" →
+    """A fresh project (no versions) receiving a question →
     stage 1 is skipped (no design state) → design loop, unchanged."""
 
     loop_called = False
@@ -787,7 +1483,7 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
             app_with_versions,
             client,
             pid,
-            {"message": "How tall is it now?", "chat_history": []},
+            {"message": "What is the material?", "chat_history": []},
             answer_reply='{"answerable": true, "answer": "It is 12 mm tall."}',
         )
         return r, frames
@@ -841,7 +1537,7 @@ def test_stage2_llm_timeout_gets_no_run_reply(app_with_versions, monkeypatch) ->
         app_with_versions.state.answer_question = _hanging_edge
         r = await client.post(
             f"/api/projects/{pid}/chat",
-            json={"message": "How tall is it now?", "chat_history": []},
+            json={"message": "What is the material?", "chat_history": []},
         )
         source = app_with_versions.state.event_sources.get(pid)
         frames = []
@@ -888,7 +1584,7 @@ def test_answer_done_frame_passes_seam_d_schema(app_with_versions) -> None:
             app_with_versions,
             client,
             pid,
-            {"message": "How tall is it now?", "chat_history": []},
+            {"message": "What is the material?", "chat_history": []},
             answer_reply=reply,
         )
         return r, frames
@@ -938,7 +1634,7 @@ def test_stage2_call_receives_state_block(app_with_versions) -> None:
         app_with_versions.state.answer_question = _capturing_edge
         r2 = await client.post(
             f"/api/projects/{pid}/chat",
-            json={"message": "How tall is it now?", "chat_history": []},
+            json={"message": "What is the material?", "chat_history": []},
         )
         source = app_with_versions.state.event_sources.get(pid)
         frames = []
@@ -1173,13 +1869,15 @@ class TestStage2OutcomeWarningLogs:
         # (issue #260: "log every stage-2 outcome at WARNING"). The
         # successful answer is no exception: the warning carries only
         # lengths — never the message or the answer text (no PII).
+        # Uses a non-axis question so the #263 deterministic stage does
+        # not intercept it.
         async def _edge(q, e):
             return '{"kind": "answer", "answer": "It is 12 mm tall."}'
 
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
@@ -1190,14 +1888,14 @@ class TestStage2OutcomeWarningLogs:
         assert "len(message)=" in warnings[0].getMessage()
         # Never the message or answer text (no PII in logs).
         for record in warnings:
-            assert "How tall is it now?" not in record.getMessage()
+            assert "What is the material?" not in record.getMessage()
             assert "It is 12 mm tall." not in record.getMessage()
         # The answered path also keeps its INFO record (lengths only).
         infos = [r for r in caplog.records if r.levelno == logging.INFO]
         assert len(infos) == 1, f"expected 1 INFO, got {len(infos)}"
         assert "answering from the design-state block" in infos[0].getMessage()
         for record in infos:
-            assert "How tall is it now?" not in record.getMessage()
+            assert "What is the material?" not in record.getMessage()
             assert "It is 12 mm tall." not in record.getMessage()
 
     def test_unanswerable_emits_one_warning(self, caplog) -> None:
@@ -1238,7 +1936,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge,
+                    "What is the material?", self._latest({"H": 12.0}), _edge,
                     timeout=0.05,
                 )
             )
@@ -1254,7 +1952,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
@@ -1272,7 +1970,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
@@ -1289,7 +1987,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
@@ -1302,8 +2000,12 @@ class TestStage2OutcomeWarningLogs:
     def test_stage1_short_circuit_emits_no_warning(self, caplog) -> None:
         # The stage-1 short-circuits (no versions / not a candidate /
         # no answer edge) stay at INFO: zero WARNING records.
+        # Uses a non-axis question so the #263 deterministic stage does
+        # not intercept it (an axis question with no version would be
+        # "not established" via the deterministic stage, not a stage-1
+        # short-circuit).
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
-            assert asyncio.run(route_chat_message("How tall is it now?", None)) is None
+            assert asyncio.run(route_chat_message("What is the material?", None)) is None
             assert (
                 asyncio.run(
                     route_chat_message(
@@ -1315,7 +2017,7 @@ class TestStage2OutcomeWarningLogs:
             assert (
                 asyncio.run(
                     route_chat_message(
-                        "How tall is it now?", self._latest({"H": 12.0})
+                        "What is the material?", self._latest({"H": 12.0})
                     )
                 )
                 is None
@@ -1327,14 +2029,15 @@ class TestStage2OutcomeWarningLogs:
         ``CancelledError`` — it is NEVER swallowed into a no-run
         ``COULD_NOT_ANSWER`` reply (a no-run reply would hide the
         cancellation from the caller's ``except CancelledError``
-        cleanup)."""
+        cleanup). Uses a non-axis question so the #263 deterministic
+        stage does not intercept it."""
 
         async def _canceling_edge(q, e):
             raise asyncio.CancelledError()
 
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             coro = route_chat_message(
-                "How tall is it now?", self._latest({"H": 12.0}), _canceling_edge
+                "What is the material?", self._latest({"H": 12.0}), _canceling_edge
             )
             with pytest.raises(asyncio.CancelledError):
                 asyncio.run(coro)
@@ -1345,7 +2048,8 @@ class TestStage2OutcomeWarningLogs:
         """An ``httpx.TimeoutException`` (the per-request client bound in
         ``_http_request_factory``) is a ``timeout`` outcome, not an
         ``exception`` — the classification is by exception class, never
-        by elapsed time."""
+        by elapsed time. Uses a non-axis question so the #263
+        deterministic stage does not intercept it."""
         import httpx
 
         async def _edge(q, e):
@@ -1354,7 +2058,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
@@ -1365,7 +2069,9 @@ class TestStage2OutcomeWarningLogs:
     def test_httpx_non_timeout_emits_exception_warning(self, caplog) -> None:
         """An ``httpx`` error that is NOT a timeout (e.g. a connection
         reset) is an ``exception``, not a ``timeout`` — the
-        httpx.TimeoutException check is specific to the timeout class."""
+        httpx.TimeoutException check is specific to the timeout class.
+        Uses a non-axis question so the #263 deterministic stage does
+        not intercept it."""
         import httpx
 
         async def _edge(q, e):
@@ -1374,7 +2080,7 @@ class TestStage2OutcomeWarningLogs:
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
             result = asyncio.run(
                 route_chat_message(
-                    "How tall is it now?", self._latest({"H": 12.0}), _edge
+                    "What is the material?", self._latest({"H": 12.0}), _edge
                 )
             )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
@@ -1450,12 +2156,12 @@ class TestConcurrentInflightClaim:
             # edge sleep; 0.3 s gap).
             first = client.post(
                 f"/api/projects/{pid}/chat",
-                json={"message": "How tall is it now?", "chat_history": []},
+                json={"message": "What is the material?", "chat_history": []},
             )
             await asyncio.sleep(0.3)
             second = client.post(
                 f"/api/projects/{pid}/chat",
-                json={"message": "How tall is it now?", "chat_history": []},
+                json={"message": "What is the material?", "chat_history": []},
             )
             r1, r2 = await asyncio.gather(first, second)
             # Drain the stream via the real SSE endpoint (the sole
@@ -1506,9 +2212,11 @@ class TestConcurrentInflightClaim:
             # The failing POST: the pre-route's edge raises → the claim
             # is released → the design loop runs (the stub returns a
             # pass result). 202 either way — the flag is what matters.
+            # Uses a non-axis question so the #263 deterministic stage
+            # does not intercept it.
             r_fail = await client.post(
                 f"/api/projects/{pid}/chat",
-                json={"message": "How tall is it now?", "chat_history": []},
+                json={"message": "What is the material?", "chat_history": []},
             )
             # Drain via the real SSE endpoint (the sole driver of the
             # generator — its ``finally`` clears the inflight flag).
