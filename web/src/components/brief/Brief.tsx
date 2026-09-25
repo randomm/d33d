@@ -23,13 +23,13 @@
  * re-measured shows `copy.brief.remeasuring` — never the stale number as if
  * fresh.
  *
- * The Brief is NOT a list that grows. When the count of COLLAPSIBLE rows
- * (settled, agreeing param rows — provenance stated/measured/assumed, kind
- * param) exceeds MAX_LIST_ROWS (7), those rows fold behind ONE honest count
- * (`copy.brief.moreParameters`), revealed by a disclosure button. Axis rows,
- * any disagrees row, and any unknown row NEVER fold — they always render as
- * rows above the collapsed group (issue #274). The unknowns are PROMOTED OUT
- * of the list — they are the thing to act on.
+ * The Brief is NOT a list that grows. When the number of COLLAPSIBLE rows
+ * (settled, agreeing param rows — provenance stated / measured / assumed,
+ * `kind: "param"`) exceeds MAX_LIST_ROWS (7), those rows fold into ONE
+ * honest disclosure (`copy.brief.moreParameters`), behind an expand
+ * button. Axis rows, disagrees rows, and unknowns are NEVER grouped —
+ * the unknowns are PROMOTED OUT of the list because they are the thing
+ * to act on.
  *
  * When a pass fails the Brief does NOT change (the failed candidate was
  * never accepted) — it gains one ochre footer (`copy.brief.failedFooter`),
@@ -204,23 +204,23 @@ export function Brief({
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
   const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
-  // Issue #274: only settled, agreeing PARAM rows are collapsible. Axis rows
-  // (W/D/H) and any disagrees row are never-grouped — they always render as
-  // rows, so a block of 3 axis rows + 5 settled params shows everything and
-  // only 3 axis + 8 settled params folds the params behind one line.
-  // (The "never group the param currently on offer" rule is not implemented:
-  // the design-state payload carries no pending-offer param field —
-  // DesignStateEntry has no such field and Brief receives no offer prop, so
-  // the SPA cannot know which param is on offer.)
+
+  // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows
+  // (stated / measured / assumed, `kind: "param"`, never disagrees). Axis
+  // rows, any disagrees row, and unknown rows always render as rows above
+  // the folded group (issue #274). The pending-offer param rule is not
+  // implemented: the design-state payload carries no pending-offer param
+  // field (DesignStateEntry has no such key and no pendingOffer prop is
+  // threaded in), so the rule is skipped per the ticket.
   const collapsible = resolved.filter(
     (e) =>
       e.kind === "param" &&
+      e.provenance !== "disagrees" &&
       (e.provenance === "stated" ||
         e.provenance === "measured" ||
         e.provenance === "assumed"),
   );
   const showGroups = !chip && collapsible.length > MAX_LIST_ROWS;
-
   const renderRow = (entry: DesignStateEntry) => {
     const label = rowLabel(entry);
     const name = entry.name;
@@ -390,14 +390,15 @@ export function Brief({
       </div>
     ) : null;
 
-    // Mark selection (issue #274): non-disagrees rows use their provenance's
-    // own mark. A disagrees row is ochre (the blocked token) unless it is a
-    // MODEL-source disagreement within the backend's major threshold — that
-    // case reuses the quiet measured mark. `disagrees_major` is read, never
-    // recomputed here; sentence selection (below) stays on disagrees_source
-    // alone, independent of the mark.
+    // The mark. A disagrees row is NOT always ochre: the backend decides
+    // its severity (`disagrees_major` — |measured − model| beyond
+    // max(20% of the model value, 5 mm), issue #274) and the SPA reads
+    // the flag, never recomputes it. User-source and axis disagreements
+    // are always ochre; a model-source disagreement within the threshold
+    // renders the quiet neutral measured mark. #FF3300 is never used.
     const mark =
       entry.provenance === "disagrees" &&
+      entry.kind === "param" &&
       entry.disagrees_source === "model" &&
       entry.disagrees_major !== true
         ? MARKS.measured

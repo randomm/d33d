@@ -131,8 +131,10 @@ export const brief = {
   refreshFailed:
     "Couldn't refresh — these values may be out of date.",
 
-  /** Above ~7 rows the Brief groups by part. Unknowns are never grouped away —
-   *  they are the thing to act on, so they surface out of the list. */
+  /** Above 7 COLLAPSIBLE rows the settled, agreeing param rows fold into one
+   *  honest count — the disclosure line for the hidden ones. Axis rows,
+   *  disagrees rows, and unknowns are never grouped away; the unknowns are
+   *  the thing to act on, so they surface out of the list. */
   unresolvedHeading: (count: number): string => `Unresolved · ${count}`,
   /** The collapsed-params disclosure line (issue #274): how many settled,
    *  agreeing param rows are hidden behind it. Singular-aware. */
