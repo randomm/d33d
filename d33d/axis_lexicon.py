@@ -141,6 +141,7 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
         "peg",
         "pin",
         "screw",
+        "bolt",
         "bolts",
         "magnet",
         "magnets",

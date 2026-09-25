@@ -445,7 +445,8 @@ class TestFeatureNounAbstain:
             "hole", "holes", "groove", "slot", "pocket", "bore", "recess",
             "notch", "channel", "cutout", "cut-out", "counterbore",
             "countersink", "foot", "feet", "leg", "legs", "post", "tab",
-            "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolts",
+            "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
+            "bolts",
             "magnet", "magnets", "spacer", "spacers", "grid", "grids",
             "lid", "wall", "walls", "chamfer", "fillet", "text",
             "label", "logo",
@@ -464,7 +465,7 @@ class TestFeatureNounAbstain:
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
 
-class TestReleaseFallback:
+class TestReleaseFallbackFunction:
     """The #261 round-2 pure-direction-request fallback (extracted from
     ``classify`` so it can be tested directly): a message that states NO
     absolute value still releases its relative/absolute axes, and a

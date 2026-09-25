@@ -39,7 +39,6 @@ from d33d.dimension_protocol import (
     DimensionClarification,
     effective_stated_dims,
     emit_named_params,
-    latest_stated_dims_dict,
     offer_tier_signals,
     require_dimensions_confirmed,
     resolution_questions,
@@ -970,7 +969,7 @@ class TestOfferTierSignals:
     def test_tier2_mapped_number_not_eligible(self):
         """A number the lexicon mapped to an axis in the history is not
         eligible (the 20 in "a 20 mm wide thing" is mapped to W)."""
-        released, quoted = offer_tier_signals(
+        _, quoted = offer_tier_signals(
             "finalize", ["a 20 mm wide thing, lift it 12 mm"]
         )
         assert quoted == {12.0}
