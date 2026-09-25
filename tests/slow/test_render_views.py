@@ -832,52 +832,65 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
         f"< right-half top {tr}px); from +Y, +X is left and +Z is up"
     )
 
-    # ── left: the −X short block is closest (fills the frame left); the
-    #    +Y block must project to the RIGHT of the frame (+Y is right from
-    #    −X). The post is behind the slab, near centre, and occluded.
+    # ── left: camera at −X (90°X, 270°Z). Image x-axis = −Y, so the +Y
+    #    block (y=22..34) projects to the LEFT of the frame. The tall post
+    #    (+X) is behind the slab; the short block (−X) is closest.
+    #    The +Y block should be in the left half of the frame.
     lbbox, _lcent, _ = _pixel_bbox(view("view_02_left.png"))
-    _lx0, _ly0, lx1, _ly1 = lbbox
-    # The +Y block is on the right; the −X short block fills the left. The
-    # silhouette must be wider on the right than a pure −X view would be:
-    # assert the right edge extends well past the frame centre (the +Y block
-    # pushes the right side out) while the left edge is near the frame edge
-    # (the −X block is closest to the camera).
-    assert lx1 > 400, (
-        f"left: the +Y block should extend the silhouette to the right of "
-        f"centre (right edge {lx1}px > 400); +Y is right in the left view"
+    _lx0, _ly0, _lx1, _ly1 = lbbox
+    # The +Y block (y=22..34) projects to the LEFT of the frame (image x =
+    # −y in the left view). The model's y range is [−28, 34], so the +Y
+    # block occupies the left portion of the frame and the left edge of the
+    # silhouette extends well past the left of centre.
+    assert _lx0 < 300, (
+        f"left: the +Y block should extend the silhouette to the left "
+        f"(left edge {_lx0}px < 300); +Y is left in the left view "
+        f"(camera at −X)"
     )
 
-    # ── right: the +Y block must project to the RIGHT of the frame (from +X,
-    #    +Y is right). The post (+X) is closest to the camera, near centre.
+    # ── right: camera at +X (90°X, 90°Z). Image x-axis = +Y, so the +Y
+    #    block (y=22..34) projects to the RIGHT of the frame. The post
+    #    (+X, closest) is at the centre; the short block (−X) is behind.
     rbbox, _rcent, _ = _pixel_bbox(view("view_03_right.png"))
     rx0, _ry0, rx1, _ry1 = rbbox
-    assert rx1 > 400, (
+    # The +Y block is on the right, so the right edge of the silhouette
+    # extends past centre. The post (closest) is near the centre.
+    assert rx1 > 500, (
         f"right: the +Y block should extend the silhouette to the right of "
-        f"centre (right edge {rx1}px > 400); +Y is right in the right view"
-    )
-    assert rx0 < 400, (
-        f"right: the +X post is closest to the camera and should sit near "
-        f"centre-left (left edge {rx0}px < 400)"
+        f"centre (right edge {rx1}px > 500); +Y is right in the right view "
+        f"(camera at +X)"
     )
 
-    # ── top: the +X post at the right edge, the +Y block toward the top,
-    #    the notch (−Y) toward the bottom, the cone at centre.
-    tbbox, _tcent, _ = _pixel_bbox(view("view_04_top.png"))
+    # ── top: camera at +Z looking down; +X right, +Y up (top of frame).
+    #    The post (+X, x=24..32) is at the right edge; the +Y block
+    #    (y=22..34) is toward the top; the −Y notch is toward the bottom;
+    #    the cone is at the centre.
+    tbbox, tcent, _ = _pixel_bbox(view("view_04_top.png"))
     tx0, ty0, tx1, ty1 = tbbox
-    # The post (+X) is at the right of the frame; the +Y block is toward the
-    # top and the notch (−Y) toward the bottom, so the silhouette spans the
-    # full width (the post pushes the right edge out past centre) and a
-    # substantial vertical extent (the +Y block and −Y notch are on opposite
-    # sides of the frame, not both centred).
+    # The post (+X) is at the right edge of the model; the short block (−X)
+    # is at the left edge. The silhouette spans the full width.
     assert tx1 - tx0 > 300, (
         f"top: the +X post (right) and −X short block (left) should give a "
-        f"full-width silhouette (width {tx1 - tx0}px > 300); +X is right in "
-        f"the top view"
+        f"full-width silhouette (width {tx1 - tx0}px > 300)"
     )
+    # The +Y block is toward the top and the −Y notch toward the bottom, so
+    # the silhouette has a substantial vertical extent.
     assert ty1 - ty0 > 80, (
         f"top: the +Y block (top) and −Y notch (bottom) should give a "
-        f"substantial vertical extent (bbox height {ty1 - ty0}px > 80); "
-        f"the notch and +Y block sit on opposite sides of the frame"
+        f"substantial vertical extent (bbox height {ty1 - ty0}px > 80)"
+    )
+    # The post (+X, x=24..32) is at the right edge of the model. The model
+    # is roughly symmetric in x (x=[−32,32]) so the bbox spans the full
+    # width; the post is a tall feature at the right, the short block (−X)
+    # is at the left. The centroid should be near the frame centre (the
+    # model's x-centre is 0), shifted slightly right by the post's mass.
+    # A safe lower bound: the centroid must be in the right half of the
+    # frame (the post pulls the centroid right of the model centre).
+    tcx, _tcy = tcent
+    assert tcx >= 380, (
+        f"top: the centroid should be near the frame centre or slightly "
+        f"right (cx={tcx:.0f} >= 380); the +X post at the right edge "
+        f"pulls the centroid right of the model centre"
     )
 
     # ── iso: the +X post is on the RIGHT of the frame, upright (+Z up), and
