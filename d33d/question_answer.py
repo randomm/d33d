@@ -449,13 +449,36 @@ def build_answer_prompt(
     The prompt forbids inventing values (every number must come from the
     block, each cited value naming its provenance in plain words: "you
     said that" / "I measured" / "I assumed" / "not established" / for a
-    disagreement, "you said X, I measured Y"), and — per the operator's
+    USER-sourced disagreement, "you said X, I measured Y" / for a
+    MODEL-sourced one (``disagrees_source == "model"`` — the model's own
+    assumed value versus the measurement), "I set X, it measures Y" —
+    the user never stated that value, so the answer must never claim the
+    user did (issue #264)). And — per the operator's
     decision — it does NOT ask the model to offer to set/confirm
     anything: the answer ends after the provenance citation.
     """
     if block is None:
         block = build_design_state_block(entries)
     state_text = format_design_state_block(block)
+    # The block text itself marks each model-source disagreement line
+    # "(my value differs from the measurement)" (the #264 renderer) —
+    # the instruction below names the two disagreement wordings the
+    # answer must pick from, and the model tells them apart from the
+    # block's own marks.
+    model_source = any(
+        e.get("provenance") == "disagrees"
+        and e.get("disagrees_source") == "model"
+        for e in block.get("entries", [])  # type: ignore[union-attr]
+    )
+    disagreement_rule = (
+        "when the block shows a disagreement, say 'you said X, I measured "
+        "Y' — but when the block marks the disagreement as the model's own "
+        "value (\"my value differs from the measurement\"), say 'I set X, it "
+        "measures Y' — never 'you said' for a value the user never stated"
+        if model_source
+        else "when the block shows a disagreement, say 'you said X, I "
+        "measured Y'"
+    )
     return (
         "You are answering a user's question about their current 3D "
         "design from the design-state block below. The block is the ONLY "
@@ -477,8 +500,8 @@ def build_answer_prompt(
         "invent, round to a different value, or combine values.\n"
         "- each value you cite must name its provenance in plain words: "
         "'you said that' (stated), 'I measured' (measured), 'I assumed' "
-        "(assumed), 'not established' (unknown); when the block shows a "
-        "disagreement, say 'you said X, I measured Y'.\n"
+        "(assumed), 'not established' (unknown); "
+        f"{disagreement_rule}.\n"
         "- do NOT offer to change, set, or confirm anything. The answer "
         "ends after the provenance citation.\n\n"
         f"{state_text}\n\n"

@@ -16,7 +16,10 @@ disagrees. Answer the question from that block alone.
    - measured — "I measured"
    - assumed — "I assumed"
    - unknown — "not established"
-   - disagrees — "you said X, I measured Y"
+    - disagrees — "you said X, I measured Y" — but when the block marks
+      the disagreement as the model's own value
+      (my value differs from the measurement), say "I set X, it measures Y" (the user never
+      stated that value — never "you said")
 3. Choose the kind:
    - kind "answer" — the block contains every value you need to answer
      (for example "How tall is it now?" with H stated 12 mm → answer).

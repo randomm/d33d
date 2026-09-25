@@ -731,6 +731,21 @@ async def _resolve_offer(
         if name in prev_params and prev_params[name] != value
     }
     confirm_first, confirm_sentence_raw = _version_confirm_hints(result)
+    block = state_block_for_version(
+        params, new_version["bbox"], new_version["stated_dims"], meta,
+        new_version["confirmed_params"],
+    )
+    # Issue #264's offer gate: a param whose FULL design-state row
+    # (the block that sees the measurement) renders ``disagrees`` — from
+    # either source — is NOT offerable (the offer sentence "I assumed X"
+    # is false: the measurement already contradicts the value). The set
+    # is computed from the NEW version's own row, from either source
+    # (user or model), and feeds the selection's exclusion.
+    disagreeing = {
+        e["name"]
+        for e in block
+        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+    }
     # Issue #261's offer tiering — the two signals from ONE helper
     # (``offer_tier_signals`` — the offer's seam): TIER 1 (a released-
     # axis param) needs THIS turn's lexicon classification of the user's
@@ -746,6 +761,7 @@ async def _resolve_offer(
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
         released_axes=released_axes, user_quoted_mm=quoted,
+        disagreeing_param_names=disagreeing,
     )
     if name is None:
         versions.set_pending_offer(project_id, None)
@@ -754,10 +770,6 @@ async def _resolve_offer(
     if entry is None:
         versions.set_pending_offer(project_id, None)
         return None
-    block = state_block_for_version(
-        params, new_version["bbox"], new_version["stated_dims"], meta,
-        new_version["confirmed_params"],
-    )
     # The sentence: the tier that WON picks its template (issue #261 —
     # tier 1 "You asked for {cue}…", tier 2 "You said {value}…"); tier 3
     # keeps the #250 machinery (the model's ``confirm_sentence`` when the

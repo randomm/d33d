@@ -1754,6 +1754,98 @@ class TestPromptPairAgreement:
         ):
             assert phrase in prompt, f"phrase {phrase!r} missing from production prompt"
             assert phrase in evals_md, f"phrase {phrase!r} missing from evals md"
+        # The model-source disagreement wording (issue #264): the
+        # evals prompt states BOTH disagreement wordings unconditionally
+        # (its block is part of the file, not a rendered argument); the
+        # production prompt states them on a block that carries a
+        # model-source row — so check the phrase in the evals md and in
+        # the production prompt built from a v25-shaped (model-source)
+        # block.
+        from d33d.design_state import state_block_for_version
+
+        model_entries = state_block_for_version(
+            {"spacer_width": 40.0, "spacer_depth": 40.0},
+            {"x": 43.80, "y": 43.90, "z": 12.0},
+            None,
+            {
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+                "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+            },
+        )
+        model_prompt = build_answer_prompt("How wide is it?", model_entries)
+        for phrase in ("I set X, it measures Y",):
+            assert phrase in model_prompt, (
+                f"phrase {phrase!r} missing from production prompt"
+            )
+            assert phrase in evals_md, f"phrase {phrase!r} missing from evals md"
+        # The block mark the instruction keys on ("my value differs from
+        # the measurement") is the DESIGN prompt's provenance suffix
+        # (``_provenance_suffix`` in ``d33d.design_state``) — the question
+        # router does not restate it in the instruction: the model reads
+        # the mark from the block text itself (the state block rendered
+        # into the prompt). The evals md references it verbatim inside
+        # the instruction.
+        assert "my value differs from the measurement" in model_prompt
+        assert "my value differs from the measurement" in evals_md
         # The no-offer rule: both forbid offering to set/confirm.
         assert "do NOT offer to change, set, or confirm" in prompt
         assert "Do not offer to set, change" in evals_md
+
+    def test_build_answer_prompt_distinguishes_model_source_disagreement(
+        self, app_with_versions
+    ) -> None:
+        """Issue #264 ACCEPTANCE: the router's answer prompt distinguishes
+        the two kinds of disagreement. A block that carries a
+        model-source disagrees row (``disagrees_source == "model"`` —
+        the v25 Shelf-spacer shape) gets the "I set X, it measures Y"
+        instruction — never 'you said' for a value the user never
+        stated; a block with only a user-source disagrees row keeps
+        today's "you said X, I measured Y" instruction. The block text
+        rendered in the prompt also marks the model-source row
+        "(my value differs from the measurement)" so the model can tell
+        the rows apart."""
+        from d33d.question_answer import build_answer_prompt
+
+        # v25-shaped: declared-axis params that contest the measurement
+        # render disagrees_source "model".
+        from d33d.design_state import state_block_for_version
+
+        model_entries = state_block_for_version(
+            {"spacer_width": 40.0, "spacer_depth": 40.0},
+            {"x": 43.80, "y": 43.90, "z": 12.0},
+            None,
+            {
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+                "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+            },
+        )
+        assert any(
+            e.get("provenance") == "disagrees"
+            and e.get("disagrees_source") == "model"
+            for e in model_entries
+        ), model_entries
+        model_prompt = build_answer_prompt("How wide is it?", model_entries)
+        # The model-source instruction is present and pins the block's
+        # own mark.
+        assert "I set X, it measures Y" in model_prompt
+        assert "my value differs from the measurement" in model_prompt
+        # The block text carries the mark on the param rows.
+        assert "Spacer width = 43.8 (my value differs from the measurement)" in model_prompt
+        assert "Spacer depth = 43.9 (my value differs from the measurement)" in model_prompt
+        # The user-source instruction remains (it applies to the axis
+        # rows / any user-source disagreement in the same block).
+        assert "you said X, I measured Y" in model_prompt
+
+        # User-source only: a #137 W-named param row outside tolerance
+        # (``disagrees_source`` absent) keeps today's instruction and
+        # renders the plain disagrees row — no model wording anywhere.
+        user_entries = state_block_for_version(
+            {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
+        )
+        assert all(
+            "disagrees_source" not in e for e in user_entries
+        ), user_entries
+        user_prompt = build_answer_prompt("How wide is it?", user_entries)
+        assert "you said X, I measured Y" in user_prompt
+        assert "I set X, it measures Y" not in user_prompt
+        assert "my value differs" not in user_prompt
