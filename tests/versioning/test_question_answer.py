@@ -1849,7 +1849,7 @@ class TestPromptPairAgreement:
         assert "you said X, I measured Y" in model_prompt
 
         # User-source only: a #137 W-named param row outside tolerance
-        # (``disagrees_source`` absent) keeps today's user wording in
+        # (``disagrees_source`` ``"user"``) keeps today's user wording in
         # the block text (the plain "you stated this" mark) and the
         # instruction names the model-source wording too (it is
         # unconditional) — but the BLOCK itself carries no model-source
@@ -1859,7 +1859,7 @@ class TestPromptPairAgreement:
             {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
         )
         assert all(
-            "disagrees_source" not in e for e in user_entries
+            e.get("disagrees_source") in (None, "user") for e in user_entries
         ), user_entries
         user_prompt = build_answer_prompt("How wide is it?", user_entries)
         assert "you said X, I measured Y" in user_prompt

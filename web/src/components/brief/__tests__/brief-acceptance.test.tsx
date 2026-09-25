@@ -47,6 +47,20 @@ const disagrees = (name: string, measuredMm: number, statedMm: number): DesignSt
   provenance: "disagrees",
   stated_value: statedMm,
 });
+/** A USER-source disagrees row: `disagrees_source === "user"` — the
+ *  user's stated value the measurement contradicts (a promoted axis
+ *  param measured out of tolerance, issue #264). Renders the USER
+ *  `disagreement` sentence, never the model sentence. */
+const disagreesUser = (name: string, label: string, statedMm: number, measuredMm: number): DesignStateEntry => ({
+  name,
+  kind: "param",
+  label,
+  value: measuredMm,
+  unit: "mm",
+  provenance: "disagrees",
+  stated_value: statedMm,
+  disagrees_source: "user",
+});
 /** A MODEL-source disagrees row (issue #264): an assumed param the
  *  measurement contradicts — `disagrees_source: "model"`, so the expanded
  *  sentence names the model's own value, never "you asked for". */
@@ -150,6 +164,31 @@ describe("Brief — provenance states", () => {
     expect(sentence.textContent).toContain("43.8");
     // The user-source phrasing must NOT appear — the user gave no value.
     expect(sentence.textContent).not.toContain("You asked for");
+  });
+
+  it("a user-source disagreeing param row (disagrees_source = 'user') renders the USER 'You asked for' sentence, never the model sentence (issue #264)", () => {
+    // A promoted axis param the measurement contradicts carries
+    // `disagrees_source: "user"` — the Brief must select the USER
+    // `disagreement` copy (the user gave the value), not the model copy.
+    render(
+      <Brief {...baseProps} entries={[disagreesUser("spacer_width", "Spacer width", 40, 43.8)]} />,
+    );
+    const row = screen.getByTestId("brief-row-spacer_width");
+    // The measured value is the PRIMARY (the number that will print).
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toBe("43.8\u202fmm");
+    // The sentence is hidden until expanded.
+    expect(screen.queryByTestId("brief-disagreement")).toBeNull();
+    const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const sentence = screen.getByTestId("brief-disagreement");
+    // The USER copy: the stated 40 first, the measured 43.8 second.
+    expect(sentence.textContent).toContain(copy.brief.disagreement(40, 43.8));
+    expect(sentence.textContent).toContain("You asked for 40.0\u202fmm");
+    expect(sentence.textContent).toContain("43.8");
+    // Never the model phrasing (the user DID give the value here).
+    expect(sentence.textContent).not.toContain("I set");
+    expect(sentence.textContent).toContain("You asked for");
   });
 
   it("an assumed parameter with a declared axis stays assumed within tolerance (issue #264)", () => {

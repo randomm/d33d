@@ -27,6 +27,22 @@ beyond the bbox tolerance (issue #264 — the Brief renders the model
 copy "I set X, it measures Y", never "You asked for"). Axis rows NEVER
 carry the field — an axis-row disagreement is always user-stated.
 
+What is compared (issue #264 — measurement honesty): every PARAM row
+whose provenance is ``stated`` with a positive numeric value is compared
+against its reference extent with the bbox tolerance (``max(
+BBOX_TOLERANCE_REL * stated, BBOX_TOLERANCE_MIN_MM)``, the #137 rule):
+a param literally named W/D/H against that letter's measured extent
+(the #137 path, unchanged), and an axis-DECLARED param (param_meta
+``axis``) against that axis's measured extent — including one promoted
+to ``stated`` (rule (a) axis match or rule (b) confirmed_params). Inside
+tolerance the row is ``measured`` (the measured extent displayed);
+outside it ``disagrees`` with the param's own value as ``stated_value``
+and source ``"user"`` (the user gave the evidence — the model's assumed
+number is the ride-along only via its own model-source path). A param is
+never compared twice; each param row's single comparison is the one
+above (``disagrees_source``'s semantics are pinned on
+``StateEntry.disagrees_source``).
+
 ``kind`` (issue #246 review): ``"param"`` — a row built from the version's
 params snapshot (the model emitted the value), ``"axis"`` — a row built
 from the persisted per-axis stated set (the dimension protocol's W/D/H
@@ -469,14 +485,16 @@ def state_block_for_version(
     promoted (DECISIONS.md: "key it on the protocol's confirmed set, not
     on parameter names").
 
-    The MEASUREMENT comparison (issue #137) still applies to a param
-    literally named W/D/H that the snapshot carries — regardless of the
-    persisted stated set (within the named tolerance the param row renders
-    ``measured`` with the measured value displayed; outside it ``disagrees``
-    with the stated value riding along — a user-sourced disagreement
-    ``disagrees_source`` is ABSENT, the backward-compatible default).
-    The persisted stated set only drives the SEPARATE axis rows; the
-    two surfaces are independent and never name-matched.
+    The MEASUREMENT comparison (issue #137) applies to a param literally
+    named W/D/H that the snapshot carries — regardless of the persisted
+    stated set (within the named tolerance the param row renders
+    ``measured`` with the measured value displayed; outside it
+    ``disagrees`` with the stated value riding along, source
+    ``disagrees_source: "user"`` — the #137 path always names ``"user"``
+    explicitly: the user's stated value is what the measurement
+    contradicts, never the model's own assumption). The persisted stated
+    set only drives the SEPARATE axis rows; the two surfaces are
+    independent and never name-matched.
 
     AXIS ROWS (issue #264 — "measured rows always"): for every axis whose
     measured extent is positive the block carries a W/D/H row, in W, D, H
@@ -513,12 +531,11 @@ def state_block_for_version(
     not promote it); OUTSIDE tolerance it renders ``disagrees`` with the
     MEASURED value displayed, the param's own value as ``stated_value``,
     and ``disagrees_source: "model"`` (the Brief renders the model copy
-    — the user never asked for the value). A param promoted to ``stated``
-    (rule (a) or (b)) is NEVER model-source: its disagreement, if the
-    measurement contradicts it, keeps today's comparison with source
-    ``user`` (the user gave the evidence). Only positive numeric values
-    enter the comparison (zero / non-numeric params with a declared axis
-    stay ``assumed``, never ``disagrees``).
+    — the user never asked for the value). This model-source path is the
+    only route for an ``assumed`` declared-axis param; the measurement
+    honesty comparison above is the only route for a promoted one, and
+    a param is never compared twice. Only positive numeric values enter
+    either comparison.
     """
     from d33d.confirm_offer import CONFIRMED_VALUE_TOLERANCE
 
@@ -598,6 +615,7 @@ def state_block_for_version(
                     e["value"] = extent
                     e["provenance"] = "disagrees"
                     e["stated_value"] = stated_value
+                    e["disagrees_source"] = "user"  # #137 path: user-sourced
                 out.append(e)
                 continue
             # The W/D/H-named param has no positive numeric value (it
@@ -618,14 +636,38 @@ def state_block_for_version(
         # the evidence); only positive numeric values enter the
         # comparison.
         axis = entry.get("axis")
-        if (
-            extents is not None
-            and entry.get("kind") == "param"
-            and entry.get("provenance") == "assumed"
-            and axis in _VALID_META_AXES
-        ):
+        if extents is not None and entry.get("kind") == "param":
             value = entry.get("value")
-            if _is_number(value) and value > 0:
+            if entry.get("provenance") == "stated":
+                # Measurement honesty (issue #264): a param promoted to
+                # ``stated`` (rule (a) or (b)) that declared an axis is
+                # compared against that axis's measured extent — the
+                # user's own evidence, so any disagreement is user-sourced
+                # (``disagrees_source`` pinned on StateEntry). A literal
+                # W/D/H-named param is handled by the #137 comparison
+                # above (the two paths never overlap — a param is never
+                # compared twice).
+                if axis in _VALID_META_AXES and _is_number(value) and value > 0:
+                    extent = extents[AXIS_PARAM_NAMES.index(axis)]
+                    tol = max(BBOX_TOLERANCE_REL * value, BBOX_TOLERANCE_MIN_MM)
+                    if abs(extent - value) <= tol:
+                        out.append(entry)  # stays stated, value unchanged
+                        continue
+                    e = dict(entry)
+                    e["value"] = extent
+                    e["provenance"] = "disagrees"
+                    e["stated_value"] = value
+                    e["disagrees_source"] = "user"
+                    out.append(e)
+                    continue
+            elif (
+                entry.get("provenance") == "assumed"
+                and axis in _VALID_META_AXES
+                and _is_number(value)
+                and value > 0
+            ):
+                # Model-source disagreement (issue #264 — see the module
+                # docstring for the full contract).
                 extent = extents[AXIS_PARAM_NAMES.index(axis)]
                 tol = max(BBOX_TOLERANCE_REL * value, BBOX_TOLERANCE_MIN_MM)
                 if abs(extent - value) > tol:

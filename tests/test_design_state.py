@@ -773,11 +773,9 @@ def test_stated_axis_plus_bbox_outside_tolerance_yields_disagrees() -> None:
     assert w_param["provenance"] == "disagrees"
     assert w_param["value"] == 29.2  # the measured value (the display)
     assert w_param["stated_value"] == 30.0  # the stated value (the ride-along)
-    # The W/D/H-named param row here is user-sourced (no stated set for
-    # this axis): ``disagrees_source`` is ABSENT (the backward-compatible
-    # default — "user"), never "model" (the model did not declare the
-    # axis — #137's comparison is name-driven, not metadata-driven).
-    assert "disagrees_source" not in w_param
+    # The W/D/H-named param row here is user-sourced (``disagrees_source``
+    # is ``"user"`` — the user's stated value; ``"model"`` is reserved for
+    # the assumed model-emitted value, which this is not).
     assert len(entries) == 4  # 3 axis rows + 1 param row
 
 
@@ -1303,8 +1301,15 @@ def test_v25_fixture_measured_axis_rows_first_then_model_disagrees() -> None:
 def test_v25_stated_width_axis_row_is_user_disagrees_today_copy() -> None:
     """Issue #264 ACCEPTANCE: stated W=40 with the same bbox (43.8 × 43.9
     × 12.0) → the W axis row is ``disagrees`` (source user — the field is
-    ABSENT, the backward-compatible default) with today's copy; the D and
-    H axis rows are ``measured``."""
+    ABSENT on axis rows) with today's copy; the D and H axis rows are
+    ``measured``. The param promoted via rule (a) (spacer_width, declared
+    W) is compared against the measured W extent (43.8) and is OUTSIDE
+    tolerance (|43.8-40| = 3.8 > 0.5) → ``disagrees`` with the param's
+    own 40 as ``stated_value`` and ``disagrees_source: "user"`` (the user
+    gave the evidence — measurement honesty, issue #264); spacer_depth
+    (declared D, D not stated) is never promoted → its model-source
+    comparison fires (40 vs 43.9, outside tolerance → ``disagrees``,
+    source ``model``)."""
     entries = state_block_for_version(
         dict(_V25_PARAMS), dict(_V25_BBOX), {"W": 40.0}, dict(_V25_META)
     )
@@ -1314,7 +1319,7 @@ def test_v25_stated_width_axis_row_is_user_disagrees_today_copy() -> None:
     assert w["provenance"] == "disagrees"
     assert w["value"] == 43.8
     assert w["stated_value"] == 40.0
-    assert "disagrees_source" not in w  # user-sourced: absent, never "user"
+    assert "disagrees_source" not in w  # axis rows never carry the field
     # D and H: measured.
     assert axis_rows["D"]["provenance"] == "measured"
     assert axis_rows["H"]["provenance"] == "measured"
@@ -1324,14 +1329,14 @@ def test_v25_stated_width_axis_row_is_user_disagrees_today_copy() -> None:
         ("axis", "D"),
         ("axis", "H"),
     ]
-    # The param rows stay ``assumed`` (stated W is axis evidence — it does
-    # NOT promote the model's spacer_width, which is out of tolerance of
-    # the CONFIRMED 40? No: |40-40| = 0 <= 0.5 → the promotion seam fires.
-    # The operator decision: a param promoted to stated keeps today's
-    # comparison, source "user". spacer_width 40 vs stated W 40 is within
-    # tolerance → promoted to ``stated``.
+    # The promoted param is measurement-checked against the declared axis's
+    # extent (issue #264): 40 vs 43.8 is outside tolerance → disagrees,
+    # user-sourced (the user gave the evidence for the promoted value).
     param_rows = {e["name"]: e for e in entries if e["kind"] == "param"}
-    assert param_rows["spacer_width"]["provenance"] == "stated"
+    assert param_rows["spacer_width"]["provenance"] == "disagrees"
+    assert param_rows["spacer_width"]["value"] == 43.8
+    assert param_rows["spacer_width"]["stated_value"] == 40.0
+    assert param_rows["spacer_width"]["disagrees_source"] == "user"
     # spacer_depth: D was not stated → not promoted → measured 43.9 vs 40
     # is outside tolerance → model-source disagrees.
     assert param_rows["spacer_depth"]["provenance"] == "disagrees"
@@ -1448,8 +1453,9 @@ def test_model_source_disagrees_render_differs_from_user_source() -> None:
 def test_disagrees_source_only_on_param_disagrees_rows() -> None:
     """Issue #264 operator decision: ``disagrees_source`` appears ONLY on
     param rows with provenance ``disagrees`` — never on axis rows, never
-    on non-disagrees rows; it is ``NotRequired`` (absent when the
-    disagreement is user-sourced, the backward-compatible default)."""
+    on non-disagrees rows; it is ``NotRequired`` (``"user"`` is the
+    user-sourced default, ``"model"`` only on the assumed model-emitted
+    path)."""
     # Model-source: present on the param row, absent on the axis rows.
     entries = state_block_for_version(dict(_V25_PARAMS), dict(_V25_BBOX), None, dict(_V25_META))
     for e in entries:
@@ -1457,13 +1463,13 @@ def test_disagrees_source_only_on_param_disagrees_rows() -> None:
             assert e["disagrees_source"] == "model"
         else:
             assert "disagrees_source" not in e
-    # User-source (no metadata, W-named param #137 path): ABSENT.
+    # User-source (no metadata, W-named param #137 path): ``"user"``.
     entries2 = state_block_for_version(
         {"W": 30.0}, {"x": 29.2, "y": 30.0, "z": 30.0}, None
     )
     for e in entries2:
         if e["provenance"] == "disagrees":
-            assert "disagrees_source" not in e  # absent = user (default)
+            assert e["disagrees_source"] == "user"
     # No disagree at all (measured) → absent everywhere.
     entries3 = state_block_for_version({"W": 30.0}, {"x": 30.0, "y": 30.0, "z": 30.0}, None)
     assert all("disagrees_source" not in e for e in entries3)
@@ -1496,15 +1502,12 @@ def test_zero_or_non_numeric_declared_axis_param_never_disagrees() -> None:
 
 def test_promoted_param_never_model_source() -> None:
     """Issue #264 operator decision: a param promoted to ``stated`` (rule
-    (a) — declared axis + stated evidence within tolerance) keeps
-    today's comparison with source "user" — a measurement that
-    contradicts a CONFIRMED/promoted value is user-sourced, never
-    model-sourced."""
-    # spacer_width 40, declared W, stated W=40 → promoted to stated.
-    # Measured 45: |45-40| = 5 > tol 0.5 → disagrees, but the W-named
-    # path does NOT apply (the name is spacer_width, not W) — so the
-    # promoted param stays ``stated`` (the measurement comparison only
-    # applies to W/D/H-NAMED params and model-source assumed params).
+    (a) — declared axis + stated evidence within tolerance) is compared
+    against its declared axis's measured extent (measurement honesty):
+    |45-40| = 5 > tol 0.5 → ``disagrees`` with source ``"user"`` (the user
+    gave the evidence — never ``model``)."""
+    # spacer_width 40, declared W, stated W=40 → promoted to stated;
+    # measured 45 → outside tolerance → disagrees, user-sourced.
     entries = state_block_for_version(
         {"spacer_width": 40.0},
         {"x": 45.0, "y": 30.0, "z": 30.0},
@@ -1512,12 +1515,124 @@ def test_promoted_param_never_model_source() -> None:
         {"spacer_width": {"label": "Spacer width", "axis": "W"}},
     )
     w = next(e for e in entries if e["name"] == "spacer_width")
-    assert w["provenance"] == "stated"
-    assert "disagrees_source" not in w
-    assert w["value"] == 40.0  # promotion never changes the value
-    # The W axis row: stated 40 vs measured 45 → disagrees (user-sourced,
-    # no ``disagrees_source`` key — axis rows never carry it).
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "user"
+    assert w["value"] == 45.0  # the MEASURED extent is displayed
+    assert w["stated_value"] == 40.0  # the user's evidence rides along
+    # The W axis row: stated 40 vs measured 45 → disagrees (axis rows
+    # never carry ``disagrees_source``).
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
     assert w_axis["provenance"] == "disagrees"
     assert w_axis["stated_value"] == 40.0
     assert "disagrees_source" not in w_axis
+
+
+# ---------------------------------------------------------------------------
+# Issue #264: measurement honesty for axis-DECLARED promoted params
+# ---------------------------------------------------------------------------
+
+
+def test_promoted_rule_a_param_mismatching_measurement_is_user_disagrees() -> None:
+    """A param with a declared axis W promoted via rule (a) (stated W=40)
+    whose measured W extent is 43.8 (outside the 0.5 mm tolerance) is
+    ``disagrees`` with source ``user``, ``stated_value`` the param's own
+    40 and the displayed value the measured 43.8 — measurement honesty.
+    It is excluded from offers (in ``disagree_names``)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 43.8, "y": 30.0, "z": 30.0},
+        {"W": 40.0},  # rule (a): the axis evidence promotes spacer_width
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "user"
+    assert w["stated_value"] == 40.0  # the param's value rides along
+    assert w["value"] == 43.8  # the measured extent is what prints
+    # The param is in the disagree set → offers exclude it.
+    disagree_names = {
+        e["name"] for e in entries
+        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+    }
+    assert disagree_names == {"spacer_width"}
+    assert select_offer_candidate(
+        {"spacer_width": 40.0},
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        None,
+        set(),
+        None,
+        disagree_names=disagree_names,
+    ) is None
+
+
+def test_promoted_rule_a_param_within_tolerance_stays_stated() -> None:
+    """The same promotion with a measured W of 40.2 (within the 0.5 mm
+tolerance) stays ``stated`` — the measurement confirms the user's value
+(no ``disagrees``, no displayed-value swap)."""
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 40.2, "y": 30.0, "z": 30.0},
+        {"W": 40.0},
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "stated"
+    assert w["value"] == 40.0
+    assert "stated_value" not in w
+    assert "disagrees_source" not in w
+
+
+def test_promoted_rule_b_param_mismatching_measurement_is_user_disagrees() -> None:
+    """A rule (b) confirmed param with a declared axis whose measurement
+    contradicts the confirmed value is ``disagrees`` with source ``user``
+(the confirmation is the user's evidence — never ``model``): the
+    confirmed 40 rides along as ``stated_value``, the measured 43.8 is
+    displayed, and the param enters the offer-exclusion set."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 43.8, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        {"spacer_width": 40.0},  # rule (b): explicit confirmation
+    )
+    w = next(e for e in entries if e["name"] == "spacer_width")
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "user"
+    assert w["stated_value"] == 40.0
+    assert w["value"] == 43.8
+    disagree_names = {
+        e["name"] for e in entries
+        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+    }
+    assert disagree_names == {"spacer_width"}
+    assert select_offer_candidate(
+        {"spacer_width": 40.0},
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        None,
+        set(),
+        None,
+        disagree_names=disagree_names,
+    ) is None
+
+
+def test_promoted_param_disagrees_renders_user_wording_in_prompt() -> None:
+    """The prompt line for a promoted-axis-param disagreement uses the
+    USER-sourced wording (the Brief renders the user ``disagreement``
+copy for it) — never the model-source wording and never "stated by the
+    user" (the row is no longer stated)."""
+    block = build_design_state_block(
+        state_block_for_version(
+            {"spacer_width": 40.0},
+            {"x": 43.8, "y": 30.0, "z": 30.0},
+            {"W": 40.0},
+            {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        )
+    )
+    text = format_design_state_block(block)
+    assert "Spacer width = 43.8 (you stated this; the measurement differs)" in text
+    assert "my value differs" not in text
+    assert "stated by the user" not in text

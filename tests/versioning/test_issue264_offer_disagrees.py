@@ -113,8 +113,9 @@ def test_disagree_names_default_empty_preserves_old_behaviour():
 
 
 def test_disagree_names_tuple_accepted():
-    """``disagree_names`` accepts a tuple (the caller may build a tuple
-    from a generator) — the helper coerces to a set internally."""
+    """``disagree_names`` accepts any ``Collection[str]`` — the test
+    passes a set here; the caller may pass a frozenset (the default)
+or a list."""
     from d33d.confirm_offer import select_offer_candidate
 
     params = {"width": 60.0, "wall_thickness": 3.0}
@@ -131,15 +132,15 @@ def test_disagree_names_tuple_accepted():
 
 
 def test_disagree_names_none_treated_as_empty():
-    """``disagree_names=None`` (a defensive caller) is treated as empty
-    (no exclusion) — the helper never crashes on a None set."""
+    """A defensive caller that passes an explicit empty set excludes
+    nothing (the default ``frozenset()`` is empty too — no exclusion)."""
     from d33d.confirm_offer import select_offer_candidate
 
     params = {"width": 60.0, "wall_thickness": 3.0}
     meta = {"width": {"label": "Width", "unit": "mm", "axis": "W"}}
     assert (
         select_offer_candidate(
-            params, meta, None, set(), "wall_thickness", disagree_names=None
+            params, meta, None, set(), "wall_thickness", disagree_names=set()
         )
         == "width"
     )
@@ -259,8 +260,71 @@ def test_user_stated_v25_fixture_offer_selection_excludes_disagrees(app_with_ver
     assert provs["W"] == "disagrees", provs
     assert provs["spacer_depth"] == "disagrees", provs
     by_name = {e["name"]: e for e in param_rows}
-    assert "disagrees_source" not in by_name["W"]
+    # W is user-sourced (the #137 path names it ``"user"`` explicitly);
+    # spacer_depth is model-sourced (the assumed declared-axis path).
+    assert by_name["W"]["disagrees_source"] == "user"
     assert by_name["spacer_depth"]["disagrees_source"] == "model"
+
+
+def test_promoted_rule_a_param_measured_mismatch_is_user_disagrees_and_excluded(
+    app_with_versions,
+) -> None:
+    """Measurement honesty (issue #264, end-to-end): a param with a
+declared axis W promoted via rule (a) (stated W=40) against a persisted
+bbox of 43.8 → the param row is ``disagrees`` with source ``user``
+(``stated_value`` 40, displayed value 43.8) and the offer selection —
+fed the block's disagree set, exactly as ``_resolve_offer`` computes it
+— excludes it (a promoted, measurement-contradicted param is never an
+assumption to confirm). The W axis row is likewise a user-sourced
+disagreement; the D/H axis rows are measured."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        v = await svc.create_version(
+            pid,
+            {"spacer_width": 40.0},
+            param_meta={
+                "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+            },
+            stated_dims={"W": 40.0},
+            bbox=(43.8, 40.0, 30.0),
+        )
+        row = svc.get_version(pid, v["id"])
+        from d33d.confirm_offer import select_offer_candidate
+        from d33d.design_state import state_block_for_version
+
+        block = state_block_for_version(
+            row["params"], row["bbox"], row["stated_dims"],
+            row["param_meta"], row["confirmed_params"],
+        )
+        disagree_names = {
+            e["name"] for e in block
+            if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+        }
+        name = select_offer_candidate(
+            row["params"], row["param_meta"], row["confirmed_params"],
+            set(), None, disagree_names=disagree_names,
+        )
+        return name, disagree_names, block
+
+    name, disagree_names, block = run_async(app_with_versions, _call)
+    # The promoted param is user-sourced disagrees — never model-source.
+    param_rows = {e["name"]: e for e in block if e.get("kind") == "param"}
+    w = param_rows["spacer_width"]
+    assert w["provenance"] == "disagrees"
+    assert w["disagrees_source"] == "user"
+    assert w["stated_value"] == 40.0
+    assert w["value"] == 43.8
+    # The offer excludes it (it is in the disagree set) → no offer.
+    assert disagree_names == {"spacer_width"}, disagree_names
+    assert name is None, name
+    # The W axis row is a user-sourced disagreement too; D/H measured.
+    axis_rows = {e["name"]: e for e in block if e.get("kind") == "axis"}
+    assert axis_rows["W"]["provenance"] == "disagrees"
+    assert axis_rows["D"]["provenance"] == "measured"
+    assert axis_rows["H"]["provenance"] == "measured"
 
 
 def test_v25_fixture_all_params_disagree_no_offer(app_with_versions):
@@ -301,23 +365,9 @@ def test_v25_fixture_all_params_disagree_no_offer(app_with_versions):
 
     name, disagree_names, param_rows = run_async(app_with_versions, _call)
     # W and D are disagrees (40 vs 43.8/43.9); H is measured (12.0
-    # vs 12.0, within tolerance).
+    # vs 12.0, within tolerance). W/D are excluded from the offer; H is
+    # ``measured`` (not ``assumed``), so nothing is offerable → no offer.
     assert disagree_names == {"W", "D"}, disagree_names
-    # H is measured (within tolerance) → NOT in the disagree set →
-    # offered (tier 3: H is a declared-axis param... wait, H has no
-    # declared axis in param_meta (param_meta is None) → H is a
-    # W/D/H-named param, not a declared-axis param. The offer's tier 3
-    # picks declared-axis params first; H has no declared axis. The
-    # confirm_first is None → no offer.
-    #
-    # Actually: H is assumed (stated? no — stated_dims has H=12.0, but
-    # the param's provenance comes from the W/D/H-named comparison:
-    # H=12.0 vs measured 12.0 → measured. So H is measured, not
-    # assumed → not offerable (the offer's provenance filter requires
-    # "assumed").
-    #
-    # So: W and D are disagrees (excluded), H is measured (not
-    # assumed → not offerable). No eligible params → no offer.
     assert name is None, name
     provs = {e["name"]: e["provenance"] for e in param_rows}
     assert provs == {"W": "disagrees", "D": "disagrees", "H": "measured"}, provs

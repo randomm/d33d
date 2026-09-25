@@ -495,6 +495,17 @@ def test_tier_sentences_mm_formatted_exactly_as_mm():
     )
 
 
+def test_tier_sentences_non_numeric_value_falls_back_to_format_value():
+    """A non-numeric value in an mm-labelled entry never reaches
+    ``mm_formatted`` (it needs a number): the tier sentences fall back
+    to the plain value formatter (verbatim, no fabricated ``mm``)."""
+    from d33d.confirm_offer import tier_1_sentence, tier_2_sentence
+
+    entry = {"name": "finish", "label": "Finish", "value": "matte", "unit": "mm"}
+    assert tier_2_sentence(entry) == "You said matte — I used it for Finish. Right?"
+    assert tier_1_sentence(entry, "taller") == "You asked for taller — I made Finish matte. Right?"
+
+
 def test_tier1_cue_from_lexicon():
     """Tier 1's ``{cue}`` is the FIRST entry of classify(message).cue_words
     that belongs to the lexicon's relative or global word sets —

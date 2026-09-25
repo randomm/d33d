@@ -67,6 +67,7 @@ import of ``d33d.design_state`` or ``d33d.question_answer`` here.
 from __future__ import annotations
 
 import logging
+from collections.abc import Collection
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ def _assumed_numeric_params(
     param_meta: dict[str, Any] | None,
     confirmed: dict[str, Any] | None,
     excluded: set[str],
-    disagree_names: set[str] | tuple[str, ...] = frozenset(),
+    disagree_names: Collection[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """The version's assumed numeric params eligible for an offer: a
     numeric (non-bool, non-zero) value, NOT in ``confirmed_params`` (rule
@@ -153,7 +154,7 @@ def _assumed_numeric_params(
     confirmed = confirmed or {}
     changed = {name for name, value in params.items() if name in excluded}
     changed.update(excluded)
-    disagrees = set(disagree_names or ())
+    disagrees = set(disagree_names)
     entries = state_block_from_params(params, param_meta)
     by_name = {e["name"]: e for e in entries}
     out: list[dict[str, Any]] = []
@@ -177,7 +178,7 @@ def select_offer_candidate(
     confirm_first: str | None,
     released_axes: set[str] | None = None,
     user_quoted_mm: set[float] | None = None,
-    disagree_names: set[str] | tuple[str, ...] = frozenset(),
+    disagree_names: Collection[str] = frozenset(),
 ) -> str | None:
     """The ONE assumed param to offer for this version, or ``None``.
 
@@ -250,7 +251,7 @@ def validate_confirm_first(
     param_meta: dict[str, Any] | None,
     confirmed: dict[str, Any] | None,
     changed: set[str] | tuple[str, ...],
-    disagree_names: set[str] | tuple[str, ...] = frozenset(),
+    disagree_names: Collection[str] = frozenset(),
 ) -> bool:
     """``confirm_first`` is valid iff it names an assumed numeric param of
     THIS version (in the eligible set — declared, non-zero numeric
@@ -368,16 +369,22 @@ def tier_1_cue(message: str) -> str | None:
     return None
 
 
+def _value_str_or_format(entry: dict[str, Any]) -> str:
+    """The entry's ``{value}`` slot: ``mm_formatted`` only for a numeric
+    value (``mm()`` needs a number to format); a non-numeric value falls
+    back to :func:`_format_value` (never a fabricated ``mm`` unit)."""
+    value = entry.get("value")
+    if entry.get("unit") == "mm" and _is_number(value):
+        return mm_formatted(value)
+    return _format_value(value)
+
+
 def tier_1_sentence(entry: dict[str, Any], cue: str) -> str:
     """The tier-1 offer sentence (issue #261 — "You asked for {cue} — I
     made {label} {value}. Right?"): ``{value}`` is always the ``mm()``-
     formatted string when the param unit is mm (``mm_formatted``), never
     the raw number; the label per #248 (identifier fallback)."""
-    value_str = (
-        mm_formatted(entry["value"])
-        if entry.get("unit") == "mm"
-        else _format_value(entry.get("value"))
-    )
+    value_str = _value_str_or_format(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"You asked for {cue} — I made {label} {value_str}. Right?"
 
@@ -403,11 +410,7 @@ def tier_2_sentence(entry: dict[str, Any]) -> str:
     it for {label}. Right?"): the user-quoted unmapped mm number the
     param's value equals; ``{value}`` ``mm()``-formatted (``mm_formatted``)
     when the param unit is mm."""
-    value_str = (
-        mm_formatted(entry["value"])
-        if entry.get("unit") == "mm"
-        else _format_value(entry.get("value"))
-    )
+    value_str = _value_str_or_format(entry)
     label = entry.get("label") or entry.get("name") or entry["name"]
     return f"You said {value_str} — I used it for {label}. Right?"
 
