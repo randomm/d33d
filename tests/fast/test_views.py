@@ -274,17 +274,23 @@ def test_cam_dist_frames_all_three_acceptance_sizes() -> None:
 
 def test_views_rotation_semantics_unchanged() -> None:
     """The first six elements of each camera tuple (translate + rotate)
-    must still be the empirically-verified values that pin *which* face
-    each view sees. Only the 7th element (dist) is now substituted at
-    render time — the rotation semantics are unchanged (issue #111 is
-    about framing, not about which face each view shows)."""
+    must be the empirically-verified values that pin *which* face each
+    view sees. The values were re-verified with an asymmetric marker
+    model (issue #262) after the original three-slab verification was
+    found to be wrong (the views were mislabelled — e.g. the rotation
+    that was labelled "back" actually showed the top view).
+
+    Convention (issue #262 operator decision): Z is up, front looks
+    from −Y toward +Y (+X right, +Z up in the frame), back from +Y,
+    left from −X, right from +X, top from +Z (+X right, +Y up),
+    iso from the front-right-top octant."""
     expected_rotations = [
-        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),   # front
-        (0.0, 0.0, 0.0, 0.0, 180.0, 0.0),  # back
-        (0.0, 0.0, 0.0, 0.0, 90.0, 0.0),   # left
-        (0.0, 0.0, 0.0, 0.0, -90.0, 0.0),  # right
-        (0.0, 0.0, 0.0, 90.0, 0.0, 0.0),   # top
-        (0.0, 0.0, 0.0, 0.0, 45.0, 45.0),  # iso
+        (0.0, 0.0, 0.0, 90.0, 0.0, 0.0),    # front:  90° about X
+        (0.0, 0.0, 0.0, 90.0, 0.0, 180.0),  # back:   90° about X, 180° about Z
+        (0.0, 0.0, 0.0, 90.0, 0.0, 270.0),  # left:   90° about X, 270° about Z
+        (0.0, 0.0, 0.0, 90.0, 0.0, 90.0),   # right:  90° about X, 90° about Z
+        (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),     # top:    no rotation
+        (0.0, 0.0, 0.0, 0.0, 45.0, 45.0),   # iso:    45° about Y, 45° about Z
     ]
     for (name, cam), expected in zip(rw.VIEWS, expected_rotations):
         assert cam[:6] == expected, (

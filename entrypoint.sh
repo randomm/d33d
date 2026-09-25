@@ -29,12 +29,12 @@
 #   (issue #223) — see the derivation below. The last four (rotate) are
 #   fixed constants that pin *which* face each view sees:
 #
-#   View 0 (front): <cx,cy,cz>,0,0,0,<dist>    — camera on -Z axis, no rotation
-#   View 1 (back):  <cx,cy,cz>,0,180,0,<dist>  — 180° about Y
-#   View 2 (left):  <cx,cy,cz>,0,90,0,<dist>   — 90° about Y  (red slab x=0 appears on the left of image)
-#   View 3 (right): <cx,cy,cz>,0,-90,0,<dist>  — -90° about Y (red slab x=0 appears on the right of image)
-#   View 4 (top):   <cx,cy,cz>,90,0,0,<dist>   — 90° about X  (looking down from +Z)
-#   View 5 (iso):   <cx,cy,cz>,0,45,45,<dist>  — 45° about Y then 45° about Z (isometric corner view)
+#   View 0 (front): <cx,cy,cz>,90,0,0,<dist>   — 90° about X (looking from -Y; +X right, +Z up)
+#   View 1 (back):  <cx,cy,cz>,90,0,180,<dist> — 90° about X, 180° about Z (looking from +Y)
+#   View 2 (left):  <cx,cy,cz>,90,0,270,<dist> — 90° about X, 270° about Z (looking from -X)
+#   View 3 (right): <cx,cy,cz>,90,0,90,<dist>  — 90° about X, 90° about Z (looking from +X)
+#   View 4 (top):   <cx,cy,cz>,0,0,0,<dist>    — no rotation (looking down from +Z; +X right, +Y up)
+#   View 5 (iso):   <cx,cy,cz>,0,45,45,<dist>  — 45° about Y then 45° about Z (front-right-top octant)
 #
 #   The <cx,cy,cz> substitution is the bbox-centre fix: with the camera
 #   tuple's translate hard-coded at (0,0,0), the camera looks at the
@@ -412,12 +412,12 @@ declare -a VIEW_NAMES=(
 # element (7) is substituted from the per-model bounding box computed above
 # (issue #111).
 declare -a VIEW_CAMERAS=(
-    "0,0,0,0,0,0,0"     # front:  camera on -Z, no rotation
-    "0,0,0,0,180,0,0"   # back:   180° about Y
-    "0,0,0,0,90,0,0"    # left:   90° about Y
-    "0,0,0,0,-90,0,0"   # right:  -90° about Y
-    "0,0,0,90,0,0,0"    # top:    90° about X (looking down from +Z)
-    "0,0,0,0,45,45,0"   # iso:    45° about Y + 45° about Z (isometric)
+    "0,0,0,90,0,0,0"     # front:  90° about X (looking from -Y; +X right, +Z up)
+    "0,0,0,90,0,180,0"   # back:   90° about X, 180° about Z (looking from +Y)
+    "0,0,0,90,0,270,0"   # left:   90° about X, 270° about Z (looking from -X)
+    "0,0,0,90,0,90,0"    # right:  90° about X, 90° about Z (looking from +X)
+    "0,0,0,0,0,0,0"      # top:    no rotation (looking down from +Z)
+    "0,0,0,0,45,45,0"    # iso:    45° about Y + 45° about Z (front-right-top)
 )
 
 for i in 0 1 2 3 4 5; do
