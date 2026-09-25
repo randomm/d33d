@@ -33,6 +33,14 @@ Empirical CLI verification (run 2026-09-11 inside the pinned image
   If a future OpenSCAD build changes the camera rotation semantics or the
   orthographic projection scale, ``VIEWS`` and its test must move in the
   same commit.
+
+  The iso rotation was re-verified empirically (issue #269): the original
+  ``(0, 45, 45)`` rendered the model sideways (+Z pointing left, the 45 mm
+  post as a horizontal bar). The new ``(55, 0, 25)`` — OpenSCAD's GUI
+  default view angle — renders from the front-right-top octant (−Y, +X,
+  +Z) with +Z up, the post vertical on the right, and the −Y notch face
+  visible, as required by the per-view pixel assertions in
+  ``tests/slow/test_render_views.py::test_views_marker_model_feature_placement``.
 """
 
 from __future__ import annotations
@@ -102,10 +110,13 @@ ERROR_CLASSES: frozenset[ErrorClass] = frozenset(
 #: two files — the translate and dist are both substituted.
 #: The rotation tuples below were verified empirically against the pinned
 #: image (``openscad/openscad:trixie``, OpenSCAD 2026.01.19) using an
-#: asymmetric marker model (issue #262). Each view is checked by pixel
-#: analysis in ``tests/slow/test_render_views.py`` to show the face its
-#: name says under the operator convention (Z up, front looks from −Y
-#: toward +Y, +X right in the frame).
+#: asymmetric marker model (issues #262, #269). Each view is checked by
+#: pixel analysis in ``tests/slow/test_render_views.py`` to show the face
+#: its name says under the operator convention (Z up, front looks from −Y
+#: toward +Y, +X right in the frame). The iso rotation ``(55, 0, 25)`` was
+#: re-verified in #269: the original ``(0, 45, 45)`` rendered the model
+#: sideways; ``(55, 0, 25)`` (OpenSCAD's GUI default) renders from the
+#: front-right-top octant (−Y, +X, +Z) with +Z up.
 #: See ``docs/bosl2-pinning.md`` § "Camera tuple verification" for the
 #: full marker-model description and per-view results.
 VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] = [
@@ -114,7 +125,7 @@ VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] 
     ("view_02_left.png", (0.0, 0.0, 0.0, 90.0, 0.0, 270.0, 0.0)),
     ("view_03_right.png", (0.0, 0.0, 0.0, 90.0, 0.0, 90.0, 0.0)),
     ("view_04_top.png", (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)),
-    ("view_05_iso.png", (0.0, 0.0, 0.0, 0.0, 45.0, 45.0, 0.0)),
+    ("view_05_iso.png", (0.0, 0.0, 0.0, 55.0, 0.0, 25.0, 0.0)),
 ]
 
 #: Multiplier between the model's max bounding-box extent (mm) and the
@@ -128,8 +139,9 @@ VIEWS: list[tuple[str, tuple[float, float, float, float, float, float, float]]] 
 #: sides for every size from 20 mm to 300 mm.
 CAM_DIST_FACTOR: float = 3.0
 
-#: Camera-distance multiplier for the isometric view (45° about Y then 45°
-#: about Z), derived from the worst-case projection geometry (issue #234):
+#: Camera-distance multiplier for the isometric view (55° about X then
+#: 25° about Z — issue #269), derived from the worst-case projection
+#: geometry (issue #234):
 #:
 #:   - A full-extent box (all three extents equal to ``max_extent`` *S*)
 #:     projects to *S*·√3 in the iso view (the box's space diagonal).

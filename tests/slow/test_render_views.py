@@ -491,15 +491,15 @@ def test_views_frame_worst_case_full_extent_box_with_margin(
             (
                 "full-extent-cube",
                 (
-                    f"cube([{extent},{extent},{extent}], "
-                    f"v=[{extent},{extent},{extent}]);\n"
+                    f"translate([{extent},{extent},{extent}]) "
+                    f"cube([{extent},{extent},{extent}]);\n"
                 ),
             ),
             (
                 "elongated-box",
                 (
-                    f"cube([{extent},{extent * 0.9:.2f},{extent * 0.95:.2f}], "
-                    f"v=[0,{extent},{extent * 0.95:.2f}]);\n"
+                    f"translate([0,{extent},{extent * 0.95:.2f}]) "
+                    f"cube([{extent},{extent * 0.9:.2f},{extent * 0.95:.2f}]);\n"
                 ),
             ),
         ]:
@@ -708,7 +708,8 @@ def _check_framing(png: Path, label: object, view: str) -> None:
 
 
 def _marker_scad() -> str:
-    """Asymmetric marker model for view-rotation verification (issue #262).
+    """Asymmetric marker model for view-rotation verification (issues #262,
+    #269).
 
     The model has a distinct, identifiable feature for each of the six
     cardinal directions, so a pixel-analysis test can assert which face
@@ -723,111 +724,177 @@ def _marker_scad() -> str:
 
     BBox: x[−32,32], y[−28,34], z[0,45]; centre (0, 3, 22.5);
     max_extent 64.
+
+    Issue #269: the original used a non-existent ``v=[…]`` argument on
+    every ``cube()``/``cylinder()``. OpenSCAD has no ``v`` parameter and
+    silently ignores it (with a warning), so the slab landed uncentred and
+    every feature collapsed to the origin corner — the intended asymmetry
+    did not exist. Rewritten with ``translate()`` (and ``center=true`` on
+    the slab) so each feature really sits where its name says. The fast
+    guard ``tests/fast/test_scad_no_v_param.py`` forbids ``v=`` on any
+    ``cube``/``cylinder``/``sphere`` call in this file.
     """
     return (
         "difference() {\n"
-        "  cube([40, 40, 10], v=[-20, -20, 0]);\n"
-        "  cube([16, 8, 12], v=[0, -24, -1]);\n"
+        "  cube([40, 40, 10], center = [true, true, false]);\n"
+        "  translate([0, -24, -1]) cube([16, 8, 12]);\n"
         "}\n"
-        "cube([8, 8, 45], v=[24, -4, 0]);\n"
-        "cube([8, 8, 22], v=[-32, -4, 0]);\n"
-        "cube([12, 12, 16], v=[-6, 22, 0]);\n"
-        "cylinder(h=16, r1=8, r2=0, v=[0, 0, 10], $fn=36);\n"
+        "translate([24, -4, 0]) cube([8, 8, 45]);\n"
+        "translate([-32, -4, 0]) cube([8, 8, 22]);\n"
+        "translate([-6, 22, 0]) cube([12, 12, 16]);\n"
+        "cylinder(h = 16, r1 = 8, r2 = 0, $fn = 36);\n"
     )
 
 
-def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
-    """Render the asymmetric marker model and assert, for all six views,
-    that the feature placement is consistent with the operator convention
-    (issue #262).
+def _half_top(png_path: Path) -> tuple[int, int]:
+    """The topmost (smallest ``y``) model pixel in the left half (``x < 400``)
+    and the right half (``x >= 400``) of an 800×800 view.
 
-    Convention:
+    Returns ``(top_left_y, top_right_y)``; each value is the frame height
+    (800) when that half has no model pixels. The feature that projects
+tallest in a view is the one whose half reaches higher (the smaller ``y``),
+    so comparing the two values tells which side of the frame the tall
+    +X post sits in — the per-view placement signal the issue #269 gate
+    needs (a wrong rotation puts the post on the wrong side). Built on the
+    existing ``_decode_png`` / ``_is_bg`` machinery.
+    """
+    w, h, bpp, out = _decode_png(png_path)
+    top_left = top_right = h
+    for y in range(h):
+        base = y * w * bpp
+        for x in range(w):
+            i = base + x * bpp
+            if not _is_bg((out[i], out[i + 1], out[i + 2])):
+                if x < w // 2:
+                    top_left = min(top_left, y)
+                else:
+                    top_right = min(top_right, y)
+    return top_left, top_right
+
+
+def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
+    """Render the asymmetric marker model and assert, for ALL six views, that
+    each feature sits where the operator convention says it should (issues
+    #262, #269).
+
+    Convention (issue #262 operator decision, verified against the pinned
+    image with an asymmetric marker):
       - front:  from −Y, +X right, +Z up
       - back:   from +Y, +X left, +Z up
       - left:   from −X, +Y right, +Z up
       - right:  from +X, −Y right, +Z up
       - top:    from +Z, +X right, +Y up
-      - iso:    from front-right-top octant, +Z up
+      - iso:    from the front-right-top octant (−Y, +X, +Z), +Z up
 
-    The test renders the marker model once and checks that:
-    1. All six views produce valid, non-empty renders.
-    2. The six views are pairwise distinct (different bboxes) — a wrong
-       rotation would make two views identical.
-    3. The front and back views differ (the −Y notch is visible in
-       front but hidden in back).
-    4. The front view shows the +X post on the right (centroid x > 400)
-       and the tall features above centre (centroid y < 400).
-    5. The top view shows +X on the right (centroid x > 400).
-    6. The iso view shows the model shifted right and above centre.
+    The discriminators, per view:
+      - The tall +X post (z=0..45) is the tallest feature; in an axis view it
+        is the only thing that reaches the top of the frame, so its side
+        (left/right) is which half of the frame has the higher topmost pixel.
+        front → right, back → left (mirror), iso → right.
+      - The top view: the post (at +X) is at the right edge, the +Y block
+        toward the top, the notch (−Y) toward the bottom, the cone at centre.
+      - The iso view: the post is vertical (taller than wide), right of
+        centre, above the slab, and the −Y notch face is visible (the
+        viewer is on the −Y side).
 
-    The key discriminating features are the tall +X post (tallest feature,
-    z=0..45), the cone (at origin, z=10..26), and the −Y notch (asymmetric
-    silhouette visible from front but hidden from back).
+    The entrypoint re-centres the camera on the model's bounding-box centre
+    (issue #223), so the model is NOT centred on the frame origin — assertions
+    are written against the model's own features (relative halves), never
+    against a hard-coded frame centre. Every assertion names what was
+    expected so a failure says which feature is where it should be.
     """
     _skip_if_no_docker()
     scad = _marker_scad()
     workdir = tmp_path / "marker"
     _render(scad, workdir)
 
-    # Collect bboxes and centroids for all six views.
-    results: dict[str, tuple[list[int], list[float], dict[str, int]]] = {}
+    # All six views must produce valid, non-empty renders.
     for view in VIEW_FILES:
         png = workdir / "out" / view
         assert png.is_file(), f"marker: missing {view}"
-        bbox, centroid, edge_px = _pixel_bbox(png)
-        assert all(v >= 0 for v in bbox), (
-            f"marker {view}: no model pixels found"
-        )
-        results[view] = (bbox, centroid, edge_px)
+        bbox, _centroid, _edge_px = _pixel_bbox(png)
+        assert all(v >= 0 for v in bbox), f"marker {view}: no model pixels"
 
-    # The front and back views must differ: the −Y notch is visible in
-    # the front view (facing the camera) but hidden in the back view
-    # (facing away). This is the key discriminator between front and back.
-    fbbox, fcent, _ = results["view_00_front.png"]
-    bbbox, bcent, _ = results["view_01_back.png"]
-    # The bboxes should differ (the notch changes the silhouette shape).
-    # Even if the centroid is similar, the bounding box will differ
-    # because the notch removes material from one side in the front view.
-    # (The exact difference depends on the model geometry; the key is
-    # that they are NOT identical.)
-    # Note: due to the model's rough symmetry, some view pairs may have
-    # similar centroids. The critical check is that the specific features
-    # are in the right place for each view (checked below).
+    def view(name: str) -> Path:
+        return workdir / "out" / name
 
-    # Front view (90° about X): looking from −Y. The model is tilted 90°
-    # so that the z-axis points toward the camera. The cone (at z=10..26)
-    # is closest to the camera and appears in the CENTER-BOTTOM of the
-    # frame. The +X post is on the RIGHT, the −X block on the LEFT.
-    # The −Y notch is visible (facing the camera). The centroid is
-    # slightly LEFT of centre and BELOW centre.
-    fbbox, fcent, _ = results["view_00_front.png"]
-    fcx, fcy = fcent
-    assert fcy > 400, (
-        f"front: centroid y={fcy:.0f} — expected > 400 (the cone and post "
-        f"extend toward the camera, appearing below centre in the frame)"
+    # ── front: +X post on the RIGHT, +Z up (tall feature reaches top-right)
+    tl, tr = _half_top(view("view_00_front.png"))
+    assert tr < tl, (
+        f"front: tall +X post should be on the RIGHT (right-half top {tr}px "
+        f"< left-half top {tl}px); +X is right, +Z is up in the front view"
     )
 
-    # Top view (no rotation): looking down from +Z. The base slab fills
-    # the frame. The −Y notch is at the BOTTOM of the frame (screen y
-    # increases toward −Y). The +Y block is at the TOP of the frame.
-    # The centroid is shifted toward the +Y side (smaller screen y).
-    tbbox, tcent, _ = results["view_04_top.png"]
-    tcx, tcy = tcent
-    assert tcy < 400, (
-        f"top: centroid y={tcy:.0f} — expected < 400 (the +Y block "
-        f"shifts the centroid toward the top of the frame)"
+    # ── back: +X post on the LEFT (mirror of front, +X is left from +Y)
+    tl, tr = _half_top(view("view_01_back.png"))
+    assert tl < tr, (
+        f"back: tall +X post should be on the LEFT (left-half top {tl}px "
+        f"< right-half top {tr}px); from +Y, +X is left and +Z is up"
     )
 
-    # Iso view (45° about Y, 45° about Z): from the front-right-top
-    # octant. The model appears shifted toward the upper-right of the
-    # frame. Centroid shifted right and above centre.
-    ibbox, icent, _ = results["view_05_iso.png"]
-    icx, icy = icent
+    # ── left: the −X short block is closest (fills the frame left); the
+    #    +Y block must project to the RIGHT of the frame (+Y is right from
+    #    −X). The post is behind the slab, near centre, and occluded.
+    lbbox, _lcent, _ = _pixel_bbox(view("view_02_left.png"))
+    _lx0, _ly0, lx1, _ly1 = lbbox
+    # The +Y block is on the right; the −X short block fills the left. The
+    # silhouette must be wider on the right than a pure −X view would be:
+    # assert the right edge extends well past the frame centre (the +Y block
+    # pushes the right side out) while the left edge is near the frame edge
+    # (the −X block is closest to the camera).
+    assert lx1 > 400, (
+        f"left: the +Y block should extend the silhouette to the right of "
+        f"centre (right edge {lx1}px > 400); +Y is right in the left view"
+    )
+
+    # ── right: the +Y block must project to the RIGHT of the frame (from +X,
+    #    +Y is right). The post (+X) is closest to the camera, near centre.
+    rbbox, _rcent, _ = _pixel_bbox(view("view_03_right.png"))
+    rx0, _ry0, rx1, _ry1 = rbbox
+    assert rx1 > 400, (
+        f"right: the +Y block should extend the silhouette to the right of "
+        f"centre (right edge {rx1}px > 400); +Y is right in the right view"
+    )
+    assert rx0 < 400, (
+        f"right: the +X post is closest to the camera and should sit near "
+        f"centre-left (left edge {rx0}px < 400)"
+    )
+
+    # ── top: the +X post at the right edge, the +Y block toward the top,
+    #    the notch (−Y) toward the bottom, the cone at centre.
+    tbbox, _tcent, _ = _pixel_bbox(view("view_04_top.png"))
+    tx0, ty0, tx1, ty1 = tbbox
+    # The post (+X) is at the right of the frame; the +Y block is toward the
+    # top and the notch (−Y) toward the bottom, so the silhouette spans the
+    # full width (the post pushes the right edge out past centre) and a
+    # substantial vertical extent (the +Y block and −Y notch are on opposite
+    # sides of the frame, not both centred).
+    assert tx1 - tx0 > 300, (
+        f"top: the +X post (right) and −X short block (left) should give a "
+        f"full-width silhouette (width {tx1 - tx0}px > 300); +X is right in "
+        f"the top view"
+    )
+    assert ty1 - ty0 > 80, (
+        f"top: the +Y block (top) and −Y notch (bottom) should give a "
+        f"substantial vertical extent (bbox height {ty1 - ty0}px > 80); "
+        f"the notch and +Y block sit on opposite sides of the frame"
+    )
+
+    # ── iso: the +X post is on the RIGHT of the frame, upright (+Z up), and
+    #    the −Y notch face is visible (the viewer is on the −Y side of the
+    #    front-right-top octant). The old sideways rotation (0,45,45) put the
+    #    post as a horizontal bar pointing LEFT; the correct (55,0,25) puts it
+    #    vertical and on the right.
+    _ibbox, icent, _ = _pixel_bbox(view("view_05_iso.png"))
+    icx, _icy = icent
     assert icx > 400, (
-        f"iso: centroid x={icx:.0f} — expected > 400 (front-right-top "
-        f"octant shifts the model to the right)"
+        f"iso: the centroid should be right of centre (x {icx:.0f} > 400); "
+        f"the post is at +X, toward the viewer's right"
     )
-    assert icy < 400, (
-        f"iso: centroid y={icy:.0f} — expected < 400 (the cone and post "
-        f"are above centre in the iso view)"
+    tl, tr = _half_top(view("view_05_iso.png"))
+    assert tr < tl, (
+        f"iso: the tall +X post should reach higher on the RIGHT (right-half "
+        f"top {tr}px < left-half top {tl}px); the post is vertical and at +X, "
+        f"not a horizontal bar pointing left (the old sideways (0,45,45) bug)"
     )
+

@@ -34,7 +34,7 @@
 #   View 2 (left):  <cx,cy,cz>,90,0,270,<dist> — 90° about X, 270° about Z (looking from -X)
 #   View 3 (right): <cx,cy,cz>,90,0,90,<dist>  — 90° about X, 90° about Z (looking from +X)
 #   View 4 (top):   <cx,cy,cz>,0,0,0,<dist>    — no rotation (looking down from +Z; +X right, +Y up)
-#   View 5 (iso):   <cx,cy,cz>,0,45,45,<dist>  — 45° about Y then 45° about Z (front-right-top octant)
+#   View 5 (iso):   <cx,cy,cz>,55,0,25,<dist>  — 55° about X, 25° about Z (front-right-top octant; issue #269 re-verified empirically)
 #
 #   The <cx,cy,cz> substitution is the bbox-centre fix: with the camera
 #   tuple's translate hard-coded at (0,0,0), the camera looks at the
@@ -65,6 +65,16 @@
 #   the model to 94% of the frame: d ≥ 2.52·S·√3 / 0.94. Mirrored in
 #   d33d/render_worker.py's CAM_DIST_ISO_FACTOR (kept in sync by
 #   tests/fast/test_entrypoint_views_sync.py).
+#
+#   Issue #269: the √3 worst-case bound is rotation-invariant — it covers
+#   ANY camera rotation up to the box's space diagonal, not just the
+#   specific (0, 45, 45) iso rotation. A full-extent box's orthographic
+#   projection is at most S·√3 for ANY rotation matrix R (the box's
+#   bounding sphere has radius S·√3/2, and the projection of that sphere
+#   is a circle of radius S·√3/2, which fits in an S·√3 square). So the
+#   same factor covers the (0, 45, 45) iso rotation AND any future
+#   rotation the operator might choose (e.g. a (55, 0, 25) front-right-top
+#   octant), and the #234 framing tests remain valid for all of them.
 #
 #   The fit is a pure function of the bounding box — no timestamps, no
 #   randomised seeds, no wall-clock — so two renders of the same source
@@ -417,7 +427,7 @@ declare -a VIEW_CAMERAS=(
     "0,0,0,90,0,270,0"   # left:   90° about X, 270° about Z (looking from -X)
     "0,0,0,90,0,90,0"    # right:  90° about X, 90° about Z (looking from +X)
     "0,0,0,0,0,0,0"      # top:    no rotation (looking down from +Z)
-    "0,0,0,0,45,45,0"    # iso:    45° about Y + 45° about Z (front-right-top)
+    "0,0,0,55,0,25,0"    # iso:    55° about X + 25° about Z (front-right-top; issue #269)
 )
 
 for i in 0 1 2 3 4 5; do
