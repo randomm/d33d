@@ -147,6 +147,17 @@ export interface DesignStateEntry {
    *  rows never carry it (an axis disagreement is always user-stated).
    *  The Brief selects its disagreement sentence on this field. */
   disagrees_source?: "model" | "user";
+  /** Issue #274: severity of a model-source `disagrees` row, computed by
+   *  the backend (d33d/design_state.py) as
+   *  `|measured − stated_value| > max(DISAGREES_MAJOR_THRESHOLD_REL ×
+   *  stated_value, DISAGREES_MAJOR_THRESHOLD_MIN_MM)` — 20% / 5 mm, a
+   *  threshold INDEPENDENT of BBOX_TOLERANCE (1% / 0.5 mm) which decides
+   *  measured-vs-disagrees. `true` or `false` ONLY on model-source
+   *  `provenance: "disagrees"` param rows; absent everywhere else (the
+   *  field cannot express user-source or axis-source rows). The Brief
+   *  reads the flag rather than recomputing it: `true` → ochre mark,
+   *  `false` (or absent) → the quiet neutral `MARKS.measured` style. */
+  disagrees_major?: boolean;
   /** Issue #248: true when the label is the raw SCAD identifier (no
    *  model label) — the UI renders it in the mono face (mono = machine
    *  value). Absent/legacy entries are treated as identifiers. */
