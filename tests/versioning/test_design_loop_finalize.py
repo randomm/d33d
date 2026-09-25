@@ -3108,3 +3108,43 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
     # tier-2 sentence is the bare-number form for a unitless param.
     assert entry.get("meta_unit") is None
     assert tier_2_sentence(entry) == "You said 12 — I used it for lift_gap. Right?"
+
+
+def test_chat_triple_message_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end: 'a tray 60 × 45 × 20 mm with a flared lip around the
+    top' → the gate input is (60, 45, 20) and stated_dims {W:60, D:45,
+    H:20} are persisted on the new version row (issue #275)."""
+    captured: dict = {}
+    proj_id: list[int] = []
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        proj_id.append(pid)
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 \u00d7 45 \u00d7 20 mm with a flared lip around the top"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20).
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the stated_dims.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}

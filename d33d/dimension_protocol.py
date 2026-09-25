@@ -256,7 +256,7 @@ def _extract_stated(
             # ≤2-word before-window (stopping at commas, sentence
             # punctuation, and the words with/and/in/on/for).
             if not all(a in out for a in DIMENSION_AXES):
-                triple_axes, triple_numbers = _extract_triple(text)
+                triple_axes, _ = _extract_triple(text)
                 if triple_axes:
                     for axis, value in triple_axes.items():
                         if axis not in out:

@@ -623,6 +623,12 @@ class TestSharedNumberToken:
         assert "W" in result.relative
         assert result.unmapped_mm_numbers == []
 
+    def test_spelled_out_mm_wide_states(self) -> None:
+        """"40 millimetres wide" → W 40 (spelled-out unit)."""
+        result = classify("40 millimetres wide")
+        assert result.absolute == {"W": 40.0}
+        assert result.relative == set()
+
 
 class TestTripleExtraction:
     """W×D×H triple extraction (issue #275 task-a).
