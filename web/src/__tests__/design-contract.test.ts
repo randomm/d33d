@@ -970,8 +970,10 @@ describe("design contract", () => {
     // The Brief selects the sentence on `disagrees_source`: "model" →
     // `disagreementModel` (label, model value, measured value); absent or
     // "user" → today's `disagreement` copy, unchanged. The value cell
-    // stays the MEASURED number (that is what prints), and the mark stays
-    // the `var(--color-blocked)` ochre token — never the #FF3300 marker.
+    // stays the MEASURED number (that is what prints), and a MAJOR
+    // model-source disagreement (`disagrees_major: true`, set by the
+    // backend when |43.8 − 40| > max(20% of 40, 5)) renders the
+    // `var(--color-blocked)` ochre token — never the #FF3300 marker.
     const modelEntry: import("../lib/api").DesignStateEntry = {
       name: "spacer_width",
       kind: "param",
@@ -981,6 +983,7 @@ describe("design contract", () => {
       provenance: "disagrees",
       stated_value: 40,
       disagrees_source: "model",
+      disagrees_major: true,
     };
     const { container } = render(
       createElement(Brief, {
@@ -1500,8 +1503,9 @@ describe("design contract", () => {
     // data-testid and the expanded state are keyed off. An index key would
     // silence the warning but re-attach row state to the wrong row on
     // reorder; no key at all is the shipped defect this pins.
-    // The >7 resolved entries hit the group-collapsed branch; the unknowns
-    // hit their own list — both maps must be warning-free.
+    // The 8 collapsible settled param entries (> 7) hit the group-collapsed
+    // branch; the unknowns hit their own list — both maps must be
+    // warning-free.
     const entries = [
       { name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated" as const },
       { name: "D", kind: "param" as const, label: "Depth", value: 45, unit: "mm", provenance: "stated" as const },
@@ -1539,10 +1543,8 @@ describe("design contract", () => {
     );
     expect(keyWarnings).toEqual([]);
     consoleErrorSpy.mockRestore();
-    // The stable identity is the row's own testid. Above MAX_LIST_ROWS the
-    // resolved rows hide behind the group count (they render in neither list),
-    // so the rows asserted here are the two promoted unknowns — always
-    // rendered, in both orders, in both containers.
+    // The stable identity is the row's own testid. The two promoted unknowns
+    // are always rendered, in both orders, in both containers.
     for (const name of ["u1", "u2"]) {
       expect(
         first.container.querySelector(`[data-testid='brief-row-${name}']`),
@@ -1553,12 +1555,88 @@ describe("design contract", () => {
         `row ${name} must resolve by its stable name identity in the reordered render`,
       ).not.toBeNull();
     }
-    // The group-collapsed branch was exercised (8 resolved > 7) in both
-    // renders — the resolved rows are behind the count, not unkeyed.
+    // The group-collapsed branch was exercised (8 collapsible > 7) in both
+    // renders — the collapsed rows hide behind the disclosure until it is
+    // clicked, so they render in neither list's default state.
     expect(first.container.querySelector("[data-testid='brief-groups-count']")).not.toBeNull();
     expect(second.container.querySelector("[data-testid='brief-groups-count']")).not.toBeNull();
     expect(first.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
     expect(second.container.querySelector("[data-testid='brief-row-W']")).toBeNull();
+  });
+
+  it("the W9 brief tripwire: collapsible rows fold behind the 'N more parameters' disclosure; axis and disagrees rows never hide (issue #274)", () => {
+    // Replaces the pre-#274 assertion that the resolved list hides behind
+    // a count line: the fold now covers ONLY the settled, agreeing param
+    // rows, and the never-grouped rows (axis, disagrees) always render as
+    // rows above the disclosure. The copy deck pins the exact string.
+    expect(copy.brief.moreParameters(10)).toBe("10 more parameters");
+    expect(copy.brief.moreParameters(1)).toBe("1 more parameter");
+    // The broken collapsed-copy helpers are gone from the deck.
+    const briefDeckKeys = Object.keys(copy.brief);
+    expect(briefDeckKeys).not.toContain("allParameters");
+    expect(briefDeckKeys).not.toContain("groupCount");
+    expect(briefDeckKeys).not.toContain("groupSummary");
+
+    // 3 axis + 10 settled params (> 7 → fold) + 1 disagrees + 1 unknown.
+    const entries = [
+      { name: "W", kind: "axis" as const, label: "W", value: 60, unit: "mm", provenance: "stated" as const },
+      { name: "D", kind: "axis" as const, label: "D", value: 45, unit: "mm", provenance: "stated" as const },
+      { name: "H", kind: "axis" as const, label: "H", value: 80, unit: "mm", provenance: "stated" as const },
+      { name: "p1", kind: "param" as const, label: "p1", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p2", kind: "param" as const, label: "p2", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p3", kind: "param" as const, label: "p3", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p4", kind: "param" as const, label: "p4", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p5", kind: "param" as const, label: "p5", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p6", kind: "param" as const, label: "p6", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p7", kind: "param" as const, label: "p7", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p8", kind: "param" as const, label: "p8", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p9", kind: "param" as const, label: "p9", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "p10", kind: "param" as const, label: "p10", value: 10, unit: "mm", provenance: "stated" as const },
+      { name: "lid_gap", kind: "param" as const, label: "Lid gap", value: 37.8, unit: "mm", provenance: "disagrees" as const, stated_value: 38 },
+      { name: "u1", kind: "param" as const, label: "u1", value: null, unit: null, provenance: "unknown" as const },
+    ];
+    const { container } = render(
+      createElement(Brief, { isChip: false, inset: 24, conversationCollapsed: false, entries }),
+    );
+    // The disclosure line pins the exact copy and the correct N (the
+    // collapsible count — not the resolved count, not the param count).
+    const count = container.querySelector("[data-testid='brief-groups-count']");
+    expect(count?.textContent).toBe("10 more parameters");
+    // It is an interactive disclosure, not a plain span.
+    expect(count?.getAttribute("aria-expanded")).toBe("false");
+    // Never-grouped rows render as rows; collapsible ones hide.
+    expect(container.querySelector("[data-testid='brief-row-axis-W']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='brief-row-axis-D']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='brief-row-axis-H']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='brief-row-lid_gap']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='brief-row-u1']")).not.toBeNull();
+    expect(container.querySelector("[data-testid='brief-row-p1']")).toBeNull();
+    // Expanding reveals the folded rows.
+    fireEvent.click(count as HTMLElement);
+    expect(container.querySelector("[data-testid='brief-row-p1']")).not.toBeNull();
+    expect(count?.getAttribute("aria-expanded")).toBe("true");
+
+    // And with 7 or fewer collapsible rows there is no group at all — even
+    // though the total resolved count (8) exceeds the old threshold.
+    const { container: small } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [
+          { name: "W", kind: "axis" as const, label: "W", value: 60, unit: "mm", provenance: "stated" as const },
+          { name: "D", kind: "axis" as const, label: "D", value: 45, unit: "mm", provenance: "stated" as const },
+          { name: "H", kind: "axis" as const, label: "H", value: 80, unit: "mm", provenance: "stated" as const },
+          { name: "p1", kind: "param" as const, label: "p1", value: 10, unit: "mm", provenance: "stated" as const },
+          { name: "p2", kind: "param" as const, label: "p2", value: 10, unit: "mm", provenance: "stated" as const },
+          { name: "p3", kind: "param" as const, label: "p3", value: 10, unit: "mm", provenance: "stated" as const },
+          { name: "p4", kind: "param" as const, label: "p4", value: 10, unit: "mm", provenance: "stated" as const },
+          { name: "p5", kind: "param" as const, label: "p5", value: 10, unit: "mm", provenance: "stated" as const },
+        ],
+      }),
+    );
+    expect(small.querySelector("[data-testid='brief-groups']")).toBeNull();
+    expect(small.querySelector("[data-testid='brief-row-p1']")).not.toBeNull();
   });
 
   /* --------------------------------------------------------------- W246 */

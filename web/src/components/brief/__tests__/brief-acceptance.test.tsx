@@ -139,9 +139,14 @@ describe("Brief — provenance states", () => {
     // Issue #264: an assumed axis param the measurement contradicts renders
     // the MODEL-source copy — the label named, the model's value first, the
     // measured one second, and never the user-source phrasing (the user
-    // gave no value). The mark stays the ochre blocked token.
+    // gave no value). 40 → 43.8 is 3.8 mm > max(20% of 40, 5) = 8 mm?
+    // No — 3.8 ≤ 8 would be quiet, so this row pins the MAJOR case by
+    // carrying `disagrees_major: true`: the ochre blocked token.
     render(
-      <Brief {...baseProps} entries={[disagreesModel("spacer_width", "Spacer width", 40, 43.8)]} />,
+      <Brief
+        {...baseProps}
+        entries={[{ ...disagreesModel("spacer_width", "Spacer width", 40, 43.8), disagrees_major: true }]}
+      />,
     );
     const row = screen.getByTestId("brief-row-spacer_width");
     // The measured value is the PRIMARY (the value cell); the model's 40
@@ -301,7 +306,7 @@ describe("Brief — in-flight states", () => {
 });
 
 describe("Brief — the list that does not grow", () => {
-  it("at twenty parameters the unknowns are promoted and the remainder collapses to one count", () => {
+  it("at twenty parameters the unknowns are promoted and the collapsible params fold behind one count", () => {
     const entries: DesignStateEntry[] = [
       stated("W", 60),
       stated("D", 45),
@@ -315,7 +320,7 @@ describe("Brief — the list that does not grow", () => {
       unknown("backplate_width"),
       unknown("screw_length"),
     ];
-    // 9 resolved (> 7 → grouped), 2 unknowns (promoted).
+    // 9 collapsible settled params (> 7 → grouped), 2 unknowns (promoted).
     // The 11 entries exercise BOTH list maps (the promoted unknowns and the
     // group-collapsed resolved list) — the console spy asserts neither emits
     // a React key warning (issue #196 regression tripwire).
@@ -331,14 +336,161 @@ describe("Brief — the list that does not grow", () => {
     const unknownsBlock = screen.getByTestId("brief-unknowns");
     expect(unknownsBlock.textContent).toContain("backplate_width");
     expect(unknownsBlock.textContent).toContain("screw_length");
-    // The resolved list collapses to one honest count.
+    // The 9 collapsible settled params fold behind one honest count
+    // (issue #274) — W/D/H are PARAM rows here (the axisStated helper is
+    // not used), so all nine fold and N = 9.
     expect(screen.getByTestId("brief-groups-count").textContent).toBe(
-      copy.brief.allParameters(9),
+      copy.brief.moreParameters(9),
     );
     // The individual resolved rows are NOT rendered in the list (they sit
-    // behind the count) — param row `W` and axis row `W` both hidden.
+    // behind the count) — param row `W` is hidden.
     expect(screen.queryByTestId("brief-row-W")).toBeNull();
-    expect(screen.queryByTestId("brief-row-axis-W")).toBeNull();
+    // Expanding the disclosure reveals the collapsed rows.
+    fireEvent.click(screen.getByTestId("brief-groups-count"));
+    expect(screen.getByTestId("brief-row-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-rod_bore")).toBeTruthy();
+  });
+
+  it("a block of 3 axis rows + 13 params (3 disagrees) shows all axis and disagrees rows; the rest fold as 'N more parameters' (issue #274)", () => {
+    // The acceptance criterion's exact shape: 3 axis rows, 13 params of
+    // which 3 disagree → 10 collapsible settled params (> 7 → folded),
+    // N = 10 (the collapsible count, not the resolved or param count).
+    const entries: DesignStateEntry[] = [
+      axisStated("W", 60),
+      axisStated("D", 45),
+      axisStated("H", 80),
+      stated("rod_bore", 34),
+      stated("wall_gap", 8),
+      stated("screw_1", 4),
+      stated("screw_2", 4),
+      stated("screw_3", 4),
+      stated("screw_4", 4),
+      stated("screw_5", 4),
+      stated("screw_6", 4),
+      stated("screw_7", 4),
+      stated("screw_8", 4),
+      disagrees("lid_gap", 37.8, 38.0),
+      disagreesUser("wall_thick", "Wall thickness", 4, 5.4),
+      disagreesModel("base_plate", "Base plate", 20, 102),
+    ];
+    render(<Brief {...baseProps} entries={entries} />);
+    // Every axis row and every disagrees row renders as a row.
+    expect(screen.getByTestId("brief-row-axis-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-axis-D")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-axis-H")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-lid_gap")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-wall_thick")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-base_plate")).toBeTruthy();
+    // The 10 settled params are hidden behind one line: "10 more parameters".
+    expect(screen.getByTestId("brief-groups-count").textContent).toBe(
+      copy.brief.moreParameters(10),
+    );
+    expect(screen.queryByTestId("brief-row-rod_bore")).toBeNull();
+    // Expanding restores the collapsed rows (all 10).
+    fireEvent.click(screen.getByTestId("brief-groups-count"));
+    expect(screen.getByTestId("brief-row-rod_bore")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-screw_8")).toBeTruthy();
+  });
+
+  it("a block of 3 axis rows + 5 params shows everything, with no collapse (issue #274)", () => {
+    // 5 collapsible settled params ≤ 7: no group, every row visible — even
+    // though the total resolved count (8) would exceed the old threshold.
+    const entries: DesignStateEntry[] = [
+      axisStated("W", 60),
+      axisStated("D", 45),
+      axisStated("H", 80),
+      stated("rod_bore", 34),
+      stated("wall_gap", 8),
+      measured("screw_1", 4),
+      assumed("screw_2", 4),
+      unknown("backplate_width"),
+    ];
+    render(<Brief {...baseProps} entries={entries} />);
+    expect(screen.queryByTestId("brief-groups")).toBeNull();
+    for (const id of [
+      "brief-row-axis-W",
+      "brief-row-axis-D",
+      "brief-row-axis-H",
+      "brief-row-rod_bore",
+      "brief-row-wall_gap",
+      "brief-row-screw_1",
+      "brief-row-screw_2",
+    ]) {
+      expect(screen.getByTestId(id), `${id} must be a visible row`).toBeTruthy();
+    }
+  });
+
+  it("unknown rows are never collapsed, whatever the collapsible count (issue #274)", () => {
+    // 9 collapsible settled params (> 7 → the group exists) + 2 unknowns:
+    // the unknowns render in their own block, never inside the group.
+    const entries: DesignStateEntry[] = [
+      ...Array.from({ length: 9 }, (_, i) => stated(`p${i}`, 10 + i)),
+      unknown("backplate_width"),
+      unknown("screw_length"),
+    ];
+    render(<Brief {...baseProps} entries={entries} />);
+    expect(screen.getByTestId("brief-groups-count").textContent).toBe(
+      copy.brief.moreParameters(9),
+    );
+    const unknownsBlock = screen.getByTestId("brief-unknowns");
+    expect(unknownsBlock.textContent).toContain("backplate_width");
+    expect(unknownsBlock.textContent).toContain("screw_length");
+    // Even with the group expanded, the unknowns stay in their own block.
+    fireEvent.click(screen.getByTestId("brief-groups-count"));
+    expect(screen.getByTestId("brief-unknowns").textContent).toContain(
+      "backplate_width",
+    );
+  });
+
+  it("a model-source 30 → 31 mm disagreement renders the quiet measured mark (issue #274)", () => {
+    // |30 − 31| = 1 mm ≤ max(20% of 30, 5) → the backend omits
+    // `disagrees_major`; the SPA renders the quiet MARKS.measured ring,
+    // never the ochre blocked token.
+    render(
+      <Brief
+        {...baseProps}
+        entries={[{ ...disagreesModel("spacer_width", "Spacer width", 30, 31) }]}
+      />,
+    );
+    const row = screen.getByTestId("brief-row-spacer_width");
+    const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).not.toContain("--color-blocked");
+    expect(markStyle).toContain("--color-faint");
+    expect(markStyle).not.toContain("#ff3300");
+    // The expanded sentence is STILL the model sentence — mark selection
+    // must not couple to sentence selection.
+    const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const sentence = screen.getByTestId("brief-disagreement");
+    expect(sentence.textContent).toContain(copy.brief.disagreementModel("Spacer width", 30, 31));
+  });
+
+  it("a model-source 20 → 102 mm disagreement (disagrees_major true) renders ochre (issue #274)", () => {
+    // |20 − 102| = 82 mm > max(20% of 20, 5) → the backend sets
+    // `disagrees_major: true`; the SPA renders the ochre blocked token.
+    render(
+      <Brief
+        {...baseProps}
+        entries={[{ ...disagreesModel("base_plate", "Base plate", 20, 102), disagrees_major: true }]}
+      />,
+    );
+    const row = screen.getByTestId("brief-row-base_plate");
+    const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("--color-blocked");
+    expect(markStyle).not.toContain("#ff3300");
+  });
+
+  it("a user-source 40 → 43.8 mm disagreement renders ochre, never quiet (issue #274)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[disagreesUser("spacer_width", "Spacer width", 40, 43.8)]}
+      />,
+    );
+    const row = screen.getByTestId("brief-row-spacer_width");
+    const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("--color-blocked");
+    expect(markStyle).not.toContain("#ff3300");
   });
 
   it("coexistence: a param W row and an axis W row render as TWO rows with distinct identities (issue #246 review)", () => {
