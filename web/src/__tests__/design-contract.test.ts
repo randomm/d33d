@@ -798,6 +798,141 @@ describe("design contract", () => {
     expect(expanded?.textContent).toContain(copy.brief.provenanceAssumed("3.0\u202Fmm"));
   });
 
+  /* --------------------------------------------------------------- W264 */
+
+  it("the model-source disagreement copy lives in the deck and never names the user as the source (issue #264)", () => {
+    // Issue #264: a `disagrees` row caused by the MODEL (an assumed param
+    // the measurement contradicts) uses a distinct sentence from the
+    // user-source `disagreement` — it names the model's own value, never
+    // "you asked for" (the user gave no value here).
+    const modelCopy = copy.brief.disagreementModel("Spacer width", 40, 43.8);
+    expect(modelCopy).toBe(
+      "I set Spacer width to 40.0\u202Fmm, but the part measures 43.8\u202Fmm — 3.8\u202Fmm over. The measured number is the one that will print.",
+    );
+    // The measured-vs-model delta renders the other direction too.
+    expect(copy.brief.disagreementModel("Spacer depth", 40, 39.2)).toBe(
+      "I set Spacer depth to 40.0\u202Fmm, but the part measures 39.2\u202Fmm — 0.8\u202Fmm short. The measured number is the one that will print.",
+    );
+    // The model copy NEVER claims the user asked — that is the lie the
+    // feature exists to remove. The user-source copy keeps the phrasing.
+    expect(modelCopy).not.toContain("You asked for");
+    expect(copy.brief.disagreement(40, 43.8)).toContain("You asked for");
+    // The two variants are distinct sentences.
+    expect(modelCopy).not.toBe(copy.brief.disagreement(40, 43.8));
+    // The legend keeps its single "disagrees" entry — no new legend row.
+    expect(copy.brief.legend.disagrees).toBe("disagrees");
+  });
+
+  it("a model-source disagrees row renders the model sentence, the measured value, and the blocked mark (issue #264)", () => {
+    // The Brief selects the sentence on `disagrees_source`: "model" →
+    // `disagreementModel` (label, model value, measured value); absent or
+    // "user" → today's `disagreement` copy, unchanged. The value cell
+    // stays the MEASURED number (that is what prints), and the mark stays
+    // the `var(--color-blocked)` ochre token — never the #FF3300 marker.
+    const modelEntry: import("../lib/api").DesignStateEntry = {
+      name: "spacer_width",
+      kind: "param",
+      label: "Spacer width",
+      value: 43.8,
+      unit: "mm",
+      provenance: "disagrees",
+      stated_value: 40,
+      disagrees_source: "model",
+    };
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [modelEntry],
+      }),
+    );
+    const row = container.querySelector("[data-testid='brief-row-spacer_width']");
+    expect(row, "the model-source disagrees row must be present").not.toBeNull();
+    // The measured number is the primary value cell.
+    const valueCell = row?.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toBe("43.8\u202Fmm");
+    expect(valueCell?.textContent).not.toContain("40.0");
+    // The mark is the blocked token — ochre, never the marker colour.
+    const markStyle = (row?.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("--color-blocked");
+    expect(markStyle).not.toContain("#ff3300");
+    expect(markStyle).not.toContain("255, 51, 0");
+    // Expand: the sentence is the MODEL copy with the label and both
+    // numbers, and never the user-source phrasing.
+    const inner = row?.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const sentence = container.querySelector("[data-testid='brief-disagreement']");
+    expect(sentence?.textContent).toBe(
+      copy.brief.disagreementModel("Spacer width", 40, 43.8),
+    );
+    expect(sentence?.textContent).toContain("I set Spacer width to 40.0\u202Fmm");
+    expect(sentence?.textContent).not.toContain("You asked for");
+  });
+
+  it('the user-source disagrees row keeps today\u2019s copy when disagrees_source is absent or "user" (issue #264)', () => {
+    // Backward compatibility: legacy entries carry no `disagrees_source`,
+    // and the user-stated case carries "user" — both must render the
+    // existing `disagreement` sentence unchanged.
+    const legacy: import("../lib/api").DesignStateEntry = {
+      name: "wall_gap",
+      kind: "param",
+      label: "Wall gap",
+      value: 37.8,
+      unit: "mm",
+      provenance: "disagrees",
+      stated_value: 38,
+    };
+    const { container } = render(
+      createElement(Brief, {
+        isChip: false,
+        inset: 24,
+        conversationCollapsed: false,
+        entries: [legacy],
+      }),
+    );
+    const inner = container
+      .querySelector("[data-testid='brief-row-wall_gap']")
+      ?.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
+    fireEvent.click(inner);
+    const sentence = container.querySelector("[data-testid='brief-disagreement']");
+    expect(sentence?.textContent).toBe(copy.brief.disagreement(38, 37.8));
+    expect(sentence?.textContent).toContain("You asked for");
+    expect(sentence?.textContent).not.toContain("I set");
+  });
+
+  it("the disagrees_source field sits only on disagrees param entries in the API contract (issue #264)", () => {
+    // The contract type carries the field as optional (absent on every
+    // non-disagrees row, mirroring `stated_value`); a literal `"model"` or
+    // `"user"` is accepted and so is an absent value — the source of truth
+    // for the field's presence is the provenance, and the type must not
+    // force it onto measured/stated/assumed/unknown rows.
+    const model: import("../lib/api").DesignStateEntry = {
+      name: "spacer_width",
+      kind: "param",
+      label: "Spacer width",
+      value: 43.8,
+      unit: "mm",
+      provenance: "disagrees",
+      stated_value: 40,
+      disagrees_source: "model",
+    };
+    expect(model.disagrees_source).toBe("model");
+    // A measured row type-checks WITHOUT the field — it is optional, not
+    // required, and non-disagrees rows must never be forced to carry it.
+    const plain: import("../lib/api").DesignStateEntry = {
+      name: "W",
+      kind: "axis",
+      label: "W",
+      value: 43.8,
+      unit: "mm",
+      provenance: "measured",
+    };
+    expect(plain.disagrees_source).toBeUndefined();
+    // The literal is closed: only "model" and "user" type-check.
+    expect(model.disagrees_source === "model" || model.disagrees_source === "user").toBe(true);
+  });
+
   it("the filmstrip is absent, not empty, when a project has no versions", () => {
     // W13: a project with zero versions (and no pass in flight) renders NO
     // filmstrip at all — not an empty rail, not a "No versions yet" branch.

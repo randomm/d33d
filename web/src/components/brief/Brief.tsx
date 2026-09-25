@@ -292,10 +292,16 @@ export function Brief({
             lineHeight: 1.5,
           }}
         >
-          {copy.brief.disagreement(
-            Number(entry.stated_value ?? 0),
-            Number(entry.value ?? 0),
-          )}
+          {entry.disagrees_source === "model"
+            ? copy.brief.disagreementModel(
+                label,
+                Number(entry.stated_value ?? 0),
+                Number(entry.value ?? 0),
+              )
+            : copy.brief.disagreement(
+                Number(entry.stated_value ?? 0),
+                Number(entry.value ?? 0),
+              )}
         </p>
       ) : null;
 

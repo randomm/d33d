@@ -92,6 +92,19 @@ export const brief = {
     return `You asked for ${mm(statedMm)}. What came out measures ${mm(measuredMm)} — ${mm(delta)} ${direction}, which is outside tolerance. The measured number is the one shown, because it is the one that will print.`;
   },
 
+  /** Shown on a `disagrees` row the MODEL caused (issue #264):
+   *  `disagrees_source === "model"` — the value nobody stated, the model
+   *  picked it, and the measurement contradicts it. Never "you asked
+   *  for": the user gave no value here, so the model is named as the
+   *  source. `label` is the parameter's user-facing label; the two
+   *  numbers are the model's value and the measured one, in that order.
+   *  Sibling of `disagreement` (the user-source variant, unchanged). */
+  disagreementModel: (label: string, modelMm: number, measuredMm: number): string => {
+    const delta = Math.abs(measuredMm - modelMm);
+    const direction = measuredMm < modelMm ? "short" : "over";
+    return `I set ${label} to ${mm(modelMm)}, but the part measures ${mm(measuredMm)} — ${mm(delta)} ${direction}. The measured number is the one that will print.`;
+  },
+
   /** One row expanded, provenance in a sentence — the user asked for a
    *  value with no measurement to compare it against. */
   provenanceNoMeasurement: (quoted: string): string =>
