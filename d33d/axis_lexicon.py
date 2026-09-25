@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 
 __all__ = [
     "GLOBAL_WORDS",
+    "MM_UNIT_ALTERNATION",
     "RELATIVE_WORDS",
     "Cues",
     "axis_for_question_word",
@@ -142,7 +143,13 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
         "pin",
         "screw",
         "bolt",
+        "bolts",
         "magnet",
+        "magnets",
+        "spacer",
+        "spacers",
+        "grid",
+        "grids",
         "lid",
         "wall",
         "walls",
@@ -165,15 +172,46 @@ _ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(RELATIVE_WORD
 # Compiled patterns
 # ---------------------------------------------------------------------------
 
+# The shared explicit-millimetre unit alternative (issue #275 round-3,
+# item 6): ONE definition of the mm unit — "mm" (glued or spaced) and
+# the spelled-out "millimetre(s)" / "millimeter(s)" — imported by
+# ``dimension_protocol`` for the W×D×H triple and the axis-letter pass
+# so the triple and the lexicon speak the same unit language.
+MM_UNIT_ALTERNATION = r"\s*mm|\s+millimetres?|\s+millimeters?"
+
 # An explicit-mm number: "12 mm", "12mm", "12.5 mm", "12.5mm".
 _MM_NUMBER_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*mm\b")
 
-# A bare number (no mm unit) for adjacency checks.
-_BARE_NUMBER_RE = re.compile(r"\b(\d+(?:\.\d+)?)\b")
+# The SHARED number token (issue #275 task-a): one number followed by an
+# OPTIONAL millimetre unit — the bare form ("20", "40.5") or an mm unit
+# ("40mm", "40 mm", "40.5mm", "40 millimetres", "40 millimeter").
+# Written as an explicit alternative (the unit part cannot start with a
+# digit, so the bare form never misfires on a unit-leading string):
+#   - "40mm wide" matches as (40, "mm") — the no-space mm bug that made
+#     the clause look number-less and tripped the release fallback;
+#   - a spelled-out unit ("42 millimeter thing") matches as
+#     (42, " millimeter") so it counts as a number AND as an explicit-mm
+#     number (the #91 guard: single number, no axis word → unmapped).
+#
+# Backs EVERY number-presence / number-extraction site in this module —
+# ``_has_number``, ``_numbers_in``, ``classify``'s ``has_any_number``
+# release guard, and the adjacency scan in ``_classify_clause`` — leaving
+# any site on the old bare pattern re-creates the no-space mm bug at that
+# site (a clause that looks number-less releases its axis instead of
+# stating it).
+# Note: the spelled-out unit deliberately does NOT touch
+# ``_FOREIGN_UNIT_RE`` — its "m" alternative requires the number to be
+# directly adjacent ("5 m"), and "5 millimetres" has a word boundary
+# between "m" and the "m" of "millimetres", so the foreign check never
+# fires on the new unit.
+_NUMBER_TOKEN_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)((?:" + MM_UNIT_ALTERNATION + r")?)"
+)
 
-# An absolute axis word at a word boundary (underscore is a word char,
-# so "height" inside "spacer_height" does NOT match).
+
 def _word_re(word: str) -> re.Pattern[str]:
+    """An absolute axis word at a word boundary (underscore is a word
+    char, so "height" inside "spacer_height" does NOT match)."""
     return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
 
 
@@ -216,14 +254,6 @@ def _split_clauses(message: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-def _has_number(fragment: str) -> bool:
-    """True if the fragment contains at least one number (with or without
-    an mm unit)."""
-    return _MM_NUMBER_RE.search(fragment) is not None or _BARE_NUMBER_RE.search(
-        fragment
-    ) is not None
-
-
 #: A foreign length unit (cm, inch/in, m) attached to a number (with a
 #: word boundary on both sides so "cmm"/"imm" does not match): a clause
 #: holding one does not assign an absolute axis (the operator decision
@@ -231,18 +261,54 @@ def _has_number(fragment: str) -> bool:
 #: a clause with "5 cm" neither maps an axis nor leaks its number into
 #: tier-2, which is mm-only). Issue #261 round 2: without this, a user
 #: writing "make it 5 cm tall" was assigned H=5 (a 10×-wrong statement)
-#: because the bare 5 was adjacent to the axis word.
+#: because the bare 5 was adjacent to the axis word. Imported by
+#: ``dimension_protocol`` (issue #275 round-3, item 5) instead of
+#: recompiling the same pattern there.
 _FOREIGN_UNIT_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:cm|in|inches|inch|m)\b")
 
 
+def _has_number(fragment: str) -> bool:
+    """True if the fragment contains at least one shared-token number —
+    a number with an mm unit (the shared token's unit group), or a bare
+    number that does NOT start a foreign-unit number.
+
+    Uses the shared number token (``_NUMBER_TOKEN_RE``) so a no-space mm
+    number like "40mm" counts — the old bare pattern missed "40mm" (no
+    word boundary between digit and m) and the clause looked number-less,
+    tripping the release fallback. A foreign-unit number ("5 cm") is NOT
+    a shared-token number (the operator decision for the release guard:
+    only shared-token numbers count), so the loop SKIPS the foreign
+    number and keeps scanning for a later shared-token number —
+    "make it 5 cm wider" has none and still releases W, while
+    "5 cm wide and 12mm tall" (a foreign first, a shared-token second)
+    counts the clause as number-bearing."""
+    for m in _NUMBER_TOKEN_RE.finditer(fragment):
+        if m.group(2):
+            return True  # mm unit → shared-token number
+        # No mm unit: if this number starts a foreign-unit number
+        # ("5 cm"), skip it and keep scanning; otherwise it is a
+        # shared-token bare number.
+        foreign_m = _FOREIGN_UNIT_RE.match(fragment[m.start():])
+        if foreign_m is not None and foreign_m.group(0).startswith(m.group(1)):
+            continue
+        return True
+    return False
+
+
 def _numbers_in(text: str) -> list[float]:
-    """All numbers (with or without mm unit) in text."""
-    return [float(m) for m in _BARE_NUMBER_RE.findall(text)]
+    """All numbers (with or without mm unit) in text, using the shared
+    number token."""
+    return [float(m.group(1)) for m in _NUMBER_TOKEN_RE.finditer(text)]
 
 
 def _mm_numbers_in(text: str) -> list[float]:
-    """All explicit-mm numbers in text."""
-    return [float(m) for m in _MM_NUMBER_RE.findall(text)]
+    """All explicit-mm numbers in text (the shared number token with a
+    spelled-out mm unit — "40mm", "40 mm", "40 millimetres")."""
+    out: list[float] = []
+    for m in _NUMBER_TOKEN_RE.finditer(text):
+        if m.group(2):
+            out.append(float(m.group(1)))
+    return out
 
 
 # The "and"/"with" joiners: split ONLY when every resulting part contains
@@ -320,45 +386,65 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     # Count distinct axis words (absolute or relative).
     axis_words_found = _ALL_AXIS_WORDS & set(cue_words)
 
-    # If there are two or more different axis words and one number,
-    # the clause maps nothing (the two-axes-one-number rule).
-    if len(axis_words_found) >= 2 and len(all_numbers) <= 1:
-        return ({}, set(), global_, cue_words)
-
     # A clause with a foreign-unit number (cm/in/m) does not assign an
     # absolute axis: no unit conversion is the operator decision, and
     # assigning the raw number would fabricate a 10×-wrong statement
-    # ("5 cm tall" → H=5). Relative/global cues in the same clause are
-    # kept (a "make it 5 cm taller"-style message still releases H).
+    # ("5 cm tall" → H=5). The relative/global cues in the same clause
+    # are KEPT (a "make it 5 cm taller"-style message still releases H)
+    # and fall out of the clause's absolute statement: the release
+    # fallback in ``classify`` is gated on ``_has_number``, which skips
+    # foreign-unit numbers, so a pure "make it 5 cm taller" still
+    # releases H while "make it 5 cm tall" abstains (neither sets nor
+    # releases H — the carried value carries forward, the honest outcome
+    # for a statement the system cannot measure). The return below keeps
+    # the clause's relative/global cues and its cue words; it only drops
+    # the absolute assignment, matching the #261 round-2 semantics.
     if axis_words_found & set(_ABSOLUTE) and _FOREIGN_UNIT_RE.search(clause):
         return ({}, relative, global_, cue_words)
 
-    # Assign numbers to absolute axes.
-    # An absolute axis word with an mm number or a bare number adjacent
-    # to it becomes an absolute cue.
+    # The two-axes-one-number rule — evaluated on the WHOLE clause BEFORE
+    # any "and"/"with" split, so a clause like "40 mm wide and 12 mm tall"
+    # (two numbers, two axes) does not trip it.
+    if len(axis_words_found) >= 2 and len(all_numbers) <= 1:
+        return ({}, set(), global_, cue_words)
+
+    # Assign numbers to absolute axes — CLAUSE-LOCAL (issue #275 round-3,
+    # item 1): before any nearest-number assignment, split the clause on
+    # "and"/"with" whenever every part has its own number (reusing
+    # ``_split_on_and``'s rule). Each axis word only sees the numbers in
+    # its OWN sub-clause, so "make it 10 mm deep and 40mm wide" maps
+    # D=10, W=40 — never W=10 (the nearest-number cross-clause leak the
+    # old code produced).
     absolute_result: dict[str, float] = {}
-    for word in axis_words_found:
-        if word not in _ABSOLUTE:
-            continue  # relative word, handled separately
-        axis = _ABSOLUTE[word]
-        if len(all_numbers) == 1:
-            # Single number: assign to this absolute axis word.
-            absolute_result[axis] = all_numbers[0]
-        else:
-            # Multiple numbers: look for the number closest to the word.
-            word_match = _word_re(word).search(clause)
-            if word_match is not None:
-                word_pos = word_match.start()
-                best_num: float | None = None
-                best_dist: float = float("inf")
-                for num_match in _BARE_NUMBER_RE.finditer(clause):
-                    num_pos = num_match.start()
-                    dist = abs(num_pos - word_pos)
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_num = float(num_match.group(1))
-                if best_num is not None and best_dist <= 10:
-                    absolute_result[axis] = best_num
+    for part in _split_on_and(clause):
+        part_numbers = _numbers_in(part)
+        for word in axis_words_found:
+            if word not in _ABSOLUTE:
+                continue  # relative word, handled separately
+            if not _word_re(word).search(part):
+                continue  # the axis word is in another sub-clause
+            axis = _ABSOLUTE[word]
+            if axis in absolute_result:
+                continue  # first assignment wins
+            if len(part_numbers) == 1:
+                # Single number in the sub-clause: assign to this axis.
+                absolute_result[axis] = part_numbers[0]
+            else:
+                # Multiple numbers in the sub-clause: the number closest
+                # to the word (within the same sub-clause).
+                word_match = _word_re(word).search(part)
+                if word_match is not None:
+                    word_pos = word_match.start()
+                    best_num: float | None = None
+                    best_dist: float = float("inf")
+                    for num_match in _NUMBER_TOKEN_RE.finditer(part):
+                        num_pos = num_match.start()
+                        dist = abs(num_pos - word_pos)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_num = float(num_match.group(1))
+                    if best_num is not None and best_dist <= 10:
+                        absolute_result[axis] = best_num
 
     return (absolute_result, relative, global_, cue_words)
 
@@ -408,7 +494,7 @@ def classify(message: str) -> Cues:
                 if w not in all_cue_words:
                     all_cue_words.append(w)
 
-    has_any_number = bool(_BARE_NUMBER_RE.search(message))
+    has_any_number = _has_number(message)
     has_percent: bool = False
     # Scan for a bare "%" (the number is already filtered out — a
     # percentage is not an axis measurement, "20% taller" must not
@@ -425,7 +511,22 @@ def classify(message: str) -> Cues:
     # height", "20% taller"). The fallback only fires when the message
     # did NOT state an absolute value: "increase the height to 30 mm"
     # sets H=30 and carries the rest — it does not ALSO release H.
-    if not all_absolute and not (has_any_number and not has_percent):
+    # A foreign-unit number (cm/in/m) does NOT count as a shared-token
+    # number (``_has_number`` skips it), so a foreign-unit message LOOKS
+    # number-less — but the fallback must NOT fire for foreign-unit
+    # messages ("make it 5 cm tall" abstains: H is neither set nor
+    # released). The clause classification already populates the relative
+    # set for relative-word foreign messages ("make it 5 cm taller" →
+    # relative H), so the fallback's cue scan would only add redundant
+    # releases. The ``has_foreign_unit`` guard keeps the fallback off
+    # for foreign-unit messages; the clause's relative set carries the
+    # honest release/abstention split.
+    has_foreign_unit = _FOREIGN_UNIT_RE.search(message) is not None
+    if (
+        not all_absolute
+        and not (has_any_number and not has_percent)
+        and not has_foreign_unit
+    ):
         all_global = all_global or _apply_release_fallback(message, all_relative)
 
     # Collect all explicit-mm numbers in the message.

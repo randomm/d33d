@@ -446,7 +446,9 @@ class TestFeatureNounAbstain:
             "notch", "channel", "cutout", "cut-out", "counterbore",
             "countersink", "foot", "feet", "leg", "legs", "post", "tab",
             "lip", "rim", "rib", "boss", "peg", "pin", "screw", "bolt",
-            "magnet", "lid", "wall", "walls", "chamfer", "fillet", "text",
+            "bolts",
+            "magnet", "magnets", "spacer", "spacers", "grid", "grids",
+            "lid", "wall", "walls", "chamfer", "fillet", "text",
             "label", "logo",
         }
         assert words == _FEATURE_NOUNS, (
@@ -463,7 +465,7 @@ class TestFeatureNounAbstain:
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
 
-class TestReleaseFallback:
+class TestReleaseFallbackFunction:
     """The #261 round-2 pure-direction-request fallback (extracted from
     ``classify`` so it can be tested directly): a message that states NO
     absolute value still releases its relative/absolute axes, and a
@@ -547,3 +549,134 @@ class TestAxisForQuestionWord:
     )
     def test_axis_for_question_word(self, word: str, expected: str | None):
         assert axis_for_question_word(word) == expected
+
+
+# ---------------------------------------------------------------------------
+# Issue #275 task-a: shared number token + release guard acceptance criteria
+# ---------------------------------------------------------------------------
+
+
+class TestSharedNumberToken:
+    """The shared number token (issue #275 task-a): one number + optional
+    mm unit, used by ``_numbers_in``, the has-number check, the release
+    guard, the absolute-cue assignment and ``unmapped_mm_numbers``.
+
+    Matches: "40mm", "40 mm", "40.5mm", "40 millimetres", "40 millimeter".
+    The #91 guard holds: "make me a 42 millimeter thing" states nothing;
+    42 is unmapped.
+    """
+
+    @pytest.mark.parametrize(
+        ("msg", "expected_abs", "expected_relative"),
+        [
+            # No-space mm: the core bug — "40mm wide" must state W=40,
+            # not release W.
+            ("40mm wide", {"W": 40.0}, set()),
+            ("12mm tall", {"H": 12.0}, set()),
+            ("40mm wide and 12mm tall", {"W": 40.0, "H": 12.0}, set()),
+            # Spelled-out unit: "40 millimetres wide" → W 40.
+            ("40 millimetres wide", {"W": 40.0}, set()),
+            ("40 millimeters wide", {"W": 40.0}, set()),
+            ("40.5mm deep", {"D": 40.5}, set()),
+            # #91 guard: spelled-out unit, no axis word → states nothing,
+            # 42 is unmapped.
+            ("make me a 42 millimeter thing", {}, set()),
+            # Foreign units stay foreign (abstain).
+            ("make it 5 cm wider", {}, {"W"}),
+            ("make it 5 cm taller", {}, {"H"}),
+            # No number → release.
+            ("increase the height", {}, {"H"}),
+            ("make it wider", {}, {"W"}),
+            # Relative cues with no-space mm.
+            ("12mm lower", {}, {"H"}),
+            ("12 mm lower", {}, {"H"}),
+            # Bare number still works.
+            ("20 wide", {"W": 20.0}, set()),
+            ("20 tall", {"H": 20.0}, set()),
+        ],
+    )
+    def test_shared_number_token_acceptance(
+        self, msg: str, expected_abs: dict, expected_relative: set
+    ) -> None:
+        result = classify(msg)
+        assert result.absolute == expected_abs, f"{msg!r}: absolute mismatch"
+        assert result.relative == expected_relative, f"{msg!r}: relative mismatch"
+
+    def test_40mm_wide_unmapped(self) -> None:
+        """"40mm wide" → W 40, and 40 is NOT in unmapped_mm_numbers
+        (it is mapped to W by the lexicon)."""
+        result = classify("40mm wide")
+        assert result.absolute == {"W": 40.0}
+        assert 40.0 not in result.unmapped_mm_numbers
+
+    def test_42_millimeter_unmapped(self) -> None:
+        """"make me a 42 millimeter thing" → nothing stated, 42 is
+        unmapped (the #91 guard: a single number with a spelled-out mm
+        unit and no axis word is unmapped, not stated)."""
+        result = classify("make me a 42 millimeter thing")
+        assert result.absolute == {}
+        assert 42.0 in result.unmapped_mm_numbers
+
+    def test_foreign_unit_not_in_unmapped(self) -> None:
+        """"make it 5 cm wider" → release W, 5 is NOT in unmapped
+        (cm is not mm)."""
+        result = classify("make it 5 cm wider")
+        assert result.absolute == {}
+        assert "W" in result.relative
+        assert result.unmapped_mm_numbers == []
+
+    def test_spelled_out_mm_wide_states(self) -> None:
+        """"40 millimetres wide" → W 40 (spelled-out unit)."""
+        result = classify("40 millimetres wide")
+        assert result.absolute == {"W": 40.0}
+        assert result.relative == set()
+
+
+class TestTripleExtraction:
+    """W×D×H triple extraction (issue #275 task-a).
+
+    The triple itself is extracted by ``dimension_protocol``'s
+    ``_extract_triple`` (tested in ``test_dimension_protocol``); this class
+    pins the LEXICON-side contract for triple-shaped messages: feature
+    nouns keep such numbers out of ``absolute`` (feature size, not part
+    envelope), and the lexicon's own ``unmapped_mm_numbers`` stays the
+    tier-2 offer's source (the protocol's ``user_quoted_unmapped_mm``
+    adds the triple-consumed exclusion on top — tested there).
+    """
+
+    def test_feature_noun_double_stays_unmapped(self) -> None:
+        """'a 10 × 10 mm hole' → nothing stated; the 10s are feature
+        sizes in ``unmapped_mm_numbers`` (the lexicon does not map them).
+        """
+        result = classify("a 10 × 10 mm hole")
+        assert result.absolute == {}
+        assert 10.0 in result.unmapped_mm_numbers
+
+    def test_feature_noun_double_suppressed_in_protocol_too(self) -> None:
+        """The protocol's triple extractor suppresses the same double
+        (feature noun in the after-window) — the lexicon and the protocol
+        agree that '10 × 10 mm hole' states nothing."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        assert stated_axes_from_message("a 10 × 10 mm hole") == {}
+
+    def test_plural_feature_nouns_suppress(self) -> None:
+        """Plural feature nouns (magnets, spacers, grids) suppress the
+        triple double the same way the singulars do (issue #275 round-1
+        false-positive fix)."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        assert stated_axes_from_message("add 2x magnets 6x3mm") == {}
+        assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
+        assert stated_axes_from_message("a 5x5 grid") == {}
+
+    def test_tray_triple_states_axes(self) -> None:
+        """'a 60 × 45 × 20 mm tray' → the triple states W/D/H (no feature
+        noun near the numbers); the lexicon itself still sees the 60/45/20
+        as explicit-mm numbers the protocol triple maps — the tier-2
+        helper excludes them (asserted in test_dimension_protocol)."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        axes = stated_axes_from_message("a 60 × 45 × 20 mm tray")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
+

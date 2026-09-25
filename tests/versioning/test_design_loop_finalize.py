@@ -431,7 +431,7 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         app_with_versions.state.run_design_loop = _loop
         return await client.post(
             f"/api/projects/{pid}/finalize",
-            json={"request": "make a 20mm wide bracket"},
+            json={"request": "make a bracket"},
         )
 
     r = run_async(app_with_versions, _call)
@@ -445,10 +445,13 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
         "prompt_version",
     ):
         assert key in captured, f"missing design-loop kwarg {key!r}"
-    # No confirmed axis anywhere (no stated_dims in the body, no dims in
-    # the message, no version yet) → None — the abstaining state (issue
-    # #247: the dead W/D/H param-key fallback that produced (0,0,0) is
-    # gone; the gate abstains and records it as Score.bbox_abstained).
+    # No confirmed axis anywhere (no stated_dims in the body, no stated
+    # dimensions in the message — "make a 20mm wide bracket" is a single
+    # number with no axis word, which the lexicon maps as a feature size,
+    # not a stated envelope — no version yet) → None — the abstaining
+    # state (issue #247: the dead W/D/H param-key fallback that produced
+    # (0,0,0) is gone; the gate abstains and records it as
+    # Score.bbox_abstained).
     assert captured["stated_dims"] is None
     assert callable(captured["render_fn"])
     assert callable(captured["llm_fn"])
@@ -456,7 +459,7 @@ def test_finalize_production_seam_supplies_full_kwargs(app_with_versions):
     # ``request`` is always a non-empty string (empty would make the
     # failures.jsonl hook silently drop the line for an exhausted loop).
     assert isinstance(captured["request"], str) and captured["request"]
-    assert captured["request"] == "make a 20mm wide bracket"
+    assert captured["request"] == "make a bracket"
 
 
 def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkeypatch):
@@ -3105,3 +3108,84 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
     # tier-2 sentence is the bare-number form for a unitless param.
     assert entry.get("meta_unit") is None
     assert tier_2_sentence(entry) == "You said 12 — I used it for lift_gap. Right?"
+
+
+def test_chat_triple_message_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end: 'a tray 60 × 45 × 20 mm with a flared lip around the
+    top' → the gate input is (60, 45, 20) and stated_dims {W:60, D:45,
+    H:20} are persisted on the new version row (issue #275)."""
+    captured: dict = {}
+    proj_id: list[int] = []
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        proj_id.append(pid)
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 \u00d7 45 \u00d7 20 mm with a flared lip around the top"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20).
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the stated_dims.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end FINALIZE path (issue #275): the same tray triple as the
+    chat test, but delivered as the finalize message → the gate input is
+    (60, 45, 20) and stated_dims {W:60, D:45, H:20} are persisted on the
+    new version row (the finalize seam uses ``stated_axes_from_message``
+    on the request text — the chat test covers only the chat seam).
+    """
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={
+                "name": "the tray",
+                "message": "a tray 60 \u00d7 45 \u00d7 20 mm with a flared lip around the top",
+            },
+        )
+        assert r.status_code == 201, r.text
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+        return r
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20).
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the stated_dims.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}

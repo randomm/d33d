@@ -43,6 +43,12 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
+from d33d.axis_lexicon import (
+    _FEATURE_NOUNS,
+    _FOREIGN_UNIT_RE,
+    MM_UNIT_ALTERNATION,
+)
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -206,29 +212,30 @@ def _extract_stated(
                 out[axis] = v
 
     # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
-    # plus an equal-axis size shorthand ("a 20 mm cube" / "a 10mm box"
-    # / "a 15mm sphere") — the ONLY chat text allowed to fill all three
-    # axes from ONE number, and ONLY when the text also names an
-    # equal-axis shape (cube/box/sphere/ball: all three edges equal),
-    # in explicit millimetres ("mm" required — a bare "m"/meters must
-    # never be read as mm). A single number with no equal-axis shape
-    # ("make a 20mm hole in the lid", "a 20mm tall vase", "add a 5mm
-    # fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE or a
-    # one-axis measurement — filling three axes from it would fabricate
-    # a part envelope the user never stated, the exact fabricate-don't-
-    # measure anti-pattern ticket #91 removes: the gate would then run
-    # against a wrong target (spurious FAIL, or worse, spurious PASS),
-    # instead of abstaining (None) and leaving the gate unmeasurable.
-    # A stated equal-axis shape is the only defensible ground truth the
-    # loop can compare a rendered bbox against on a bare "Create a 20mm
-    # cube" first turn (no latest version yet).
-    # Precedence inside this pass: the axis-prefixed form ("W: 42") wins
-    # over the shorthand — the shorthand only fills axes the axis pass
-    # left empty, and it does NOT run mid-turn once an axis-prefixed
-    # value was found (deliberate: a turn like "W is 30mm... make it a
-    # 20mm cube" keeps the axis-prefixed value and never completes the
-    # triple from the shorthand — the gate abstains rather than mixing
-    # sources within one turn).
+    # plus a W×D×H triple ("60 × 45 × 80 mm" / "60x45x80mm" / "60mm x
+    # 45mm x 20mm" — issue #275 task-a), plus an equal-axis size shorthand
+    # ("a 20 mm cube" / "a 10mm box" / "a 15mm sphere") — the ONLY chat
+    # text allowed to fill all three axes from ONE number, and ONLY when
+    # the text also names an equal-axis shape (cube/box/sphere/ball: all
+    # three edges equal), in explicit millimetres ("mm" required — a bare
+    # "m"/meters must never be read as mm). A single number with no
+    # equal-axis shape ("make a 20mm hole in the lid", "a 20mm tall vase",
+    # "add a 5mm fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE
+    # or a one-axis measurement — filling three axes from it would
+    # fabricate a part envelope the user never stated, the exact
+    # fabricate-don't-measure anti-pattern ticket #91 removes: the gate
+    # would then run against a wrong target (spurious FAIL, or worse,
+    # spurious PASS), instead of abstaining (None) and leaving the gate
+    # unmeasurable. A stated equal-axis shape is the only defensible
+    # ground truth the loop can compare a rendered bbox against on a
+    # bare "Create a 20mm cube" first turn (no latest version yet).
+    # Precedence inside this pass: axis-prefixed form ("W: 42") >
+    # W×D×H triple > shorthand — the triple only fills axes the axis pass
+    # left empty, and the shorthand only fills axes the axis pass and the
+    # triple left empty. A turn like "W is 30mm... make it a 20mm cube"
+    # keeps the axis-prefixed value and never completes the triple from
+    # the shorthand (the gate abstains rather than mixing sources within
+    # one turn).
     if not all(a in out for a in DIMENSION_AXES):
         for turn in chat_history or []:
             text = str(turn)
@@ -236,7 +243,8 @@ def _extract_stated(
                 if axis in out:
                     continue
                 m = re.search(
-                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)\s*(?:mm)?\b",
+                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)"
+                    rf"(?:{MM_UNIT_ALTERNATION})?\b",
                     text,
                     re.IGNORECASE,
                 )
@@ -244,6 +252,24 @@ def _extract_stated(
                     v = _coerce(m.group(1))
                     if v is not None:
                         out[axis] = v
+            # W×D×H triple (issue #275 task-a): explicit cue, W, D, H
+            # order. Joiners: "×" (U+00D7), "x", "X", optional spaces.
+            # The unit goes after the last number or after each number.
+            # No unit: it states, unless any of its numbers carries a
+            # foreign unit. Two numbers state W and D only. Matched on
+            # the RAW message before any clause/and/with splitting.
+            # Feature-noun suppression: a triple is suppressed iff a
+            # feature noun occurs in the ≤3-word after-window or
+            # ≤2-word before-window (stopping at commas, sentence
+            # punctuation, and the words with/and/in/on/for).
+            if not all(a in out for a in DIMENSION_AXES):
+                triple_axes, _ = _extract_triple(text)
+                if triple_axes:
+                    for axis, value in triple_axes.items():
+                        if axis not in out:
+                            out[axis] = value
+            # Equal-axis size shorthand (only if the axis pass and the
+            # triple left axes empty).
             if not out:
                 m = re.search(
                     r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm\b"
@@ -268,6 +294,164 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
     return out
+
+
+def _triple_suppressed_by_feature_noun(message: str, m: re.Match[str]) -> bool:
+    """True if a feature noun sits in the triple's before- or after-window
+    (issue #275 round-1 feature-noun suppression; issue #275 round-3, item
+    2, moved into a helper so EVERY match runs the same guard).
+
+    A triple is suppressed iff a feature noun occurs in EITHER of these
+    windows: (a) the up-to-3 words immediately AFTER the triple's last
+    number/unit, stopping early at a comma, ";", sentence punctuation, or
+    the words "with", "and", "in", "on", "for"; (b) the up-to-3 words
+    immediately BEFORE the triple's first number, stopping early at the
+    same separators. Words are whitespace tokens.
+
+    """
+    separators = {",", ";", ".", "!", "?", "with", "and", "in", "on", "for"}
+
+    # After-window: up to 3 words after the triple's end.
+    after_words = message[m.end():].split()
+    after_window: list[str] = []
+    for w in after_words[:3]:
+        clean_w = w.strip(",;.!?:()[]{}\"'")
+        if clean_w.lower() in separators:
+            break
+        after_window.append(clean_w.lower())
+
+    # Before-window: up to 3 words before the triple's start (issue #275
+    # round-3, item 7: was 2 — "a 10 × 10 mm square hole" needs 3: "square"
+    # stops the walk as a non-noun, then "hole" suppresses; "in" still
+    # cuts "hole in a 60 × 45 × 20 mm tray"'s before-window early).
+    before_words = message[: m.start()].split()
+    before_window: list[str] = []
+    for w in reversed(before_words[-3:]):
+        clean_w = w.strip(",;.!?:()[]{}\"'")
+        if clean_w.lower() in separators:
+            break
+        before_window.append(clean_w.lower())
+
+    return any(w in _FEATURE_NOUNS for w in after_window) or any(
+        w in _FEATURE_NOUNS for w in before_window
+    )
+
+
+def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
+    """Extract the W×D×H part-envelope triple from a raw message
+    (issue #275 task-a; restructured issue #275 round-3, items 2–7).
+
+    Returns ``(axes, consumed_numbers)`` where ``axes`` maps W/D/H to mm
+    values (empty dict when nothing is stated) and ``consumed_numbers`` is
+    the set of numbers CONSUMED by the triple (for exclusion from
+    ``unmapped_mm_numbers`` and ``_mm_cue_values``).
+
+    Per-match evaluation (issue #275 round-3, item 2): EVERY match is
+    evaluated against the per-match guards; the part's envelope is the
+    FIRST match that passes ALL guards (not the last); a match that fails
+    a guard states nothing and its numbers stay UNCONSUMED (still
+    unmapped/offerable, including feature-noun- and letter-glued
+    suppression) — consumption is uniform across all suppression paths:
+    a number is consumed only when a match states.
+
+    Joiners: "×" (U+00D7), "x", "X" with optional spaces. The unit may be
+    "mm" or a spelled-out "millimetre(s)"/"millimeter(s)" (the shared
+    ``MM_UNIT_ALTERNATION`` — one definition with the lexicon), after the
+    last number or after each number. Two numbers state W and D only.
+
+    Per-match guards, in order:
+    1. starts on the first digit of its number (``(?<!\\d)`` — no match
+       inside a longer number, "123x45x67" → nothing, not 23x45x67);
+    2. letter-glued prefix: a letter immediately before the first digit
+       ("M3 x 10 mm" — thread spec; "v2 is 60x45x20mm" — a version
+       label) suppresses ("part3x4" likewise);
+    3. feature-noun window (``_triple_suppressed_by_feature_noun``);
+    4. foreign unit (only when the match has NO explicit mm unit — an
+       explicit mm unit wins, so the "in" in "60 x 45 mm in the drawer"
+       is the preposition, not the inch unit): a cm/in/inches/inch/m
+       anywhere in the match span, or as a WHOLE WORD in the next
+       whitespace-delimited token ("2 × 2
+       inch"/"6 x 4 cm" → nothing; "60 × 45 × 20 mm mirror" states);
+    5. magnitude: an explicit mm unit ANYWHERE on the match (after the
+       last number, after each number, or glued) NEVER magnitude-
+       suppresses ("a 150x45mm tray" → W150 D45); the >100 bound applies
+       only to a unit-less PAIR ("1920x1080", "a 150x45 tray" →
+       nothing).
+    """
+    triple_re = re.compile(
+        r"(?<!\d)\b(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?\s*[×xX]"
+        r"\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
+        r"(?:\s*[×xX]\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?)?"
+    )
+    for m in triple_re.finditer(message):
+        numbers: list[float] = [
+            float(g) for g in m.groups() if g
+        ]
+        if len(numbers) < 2:
+            continue
+        span_text = message[m.start():m.end()]
+        # An explicit mm unit on the match span (glued or spaced, any of
+        # the shared ``MM_UNIT_ALTERNATION`` forms — "mm" glued as "45mm"
+        # or spaced as "45 mm", "millimetre(s)"/"millimeter(s)" spelled
+        # out; the glued "45mm" has no word boundary between the digit
+        # and the "m", so \bmm\b alone misses it) is computed FIRST and
+        # wins over the foreign-unit next-token check below: "60 x 45 mm
+        # in the drawer" states W60 D45 (the "in" is the preposition,
+        # the match already has its unit), and "60 x 45 mm in a
+        # 70x50x30 box" states the FIRST triple, not the second.
+        has_mm_unit = re.search(
+            r"mm|millimetres?|millimeters?",
+            span_text,
+            re.IGNORECASE,
+        ) is not None
+        # Guard 1: letter-glued prefix — the character IMMEDIATELY before
+        # the triple's first digit (a letter or digit directly adjacent →
+        # suppress: "M3 x 10", "part3x4"). The (?<!\\d) lookbehind
+        # already keeps digit-adjacent starts out ("123x45x67"), so this
+        # check only needs the letter case.
+        before_char = message[m.start() - 1] if m.start() > 0 else ""
+        if before_char.isalpha():
+            continue  # letter-glued — this match states nothing
+        # Guard 2: feature-noun window.
+        if _triple_suppressed_by_feature_noun(message, m):
+            continue
+        # Guard 3: foreign unit — only when the match has NO explicit mm
+        # unit of its own (an explicit mm unit wins — the "in" in
+        # "60 x 45 mm in the drawer" is the preposition, not the inch
+        # unit). The unit is foreign when it sits anywhere in the match
+        # span, or as a whole word as the WHOLE NEXT
+        # whitespace-delimited token (the unit may follow the triple's
+        # end: "6 x 4 cm"). The next token must equal a unit word
+        # exactly: a 5-char prefix match would fire on "10 inch" via
+        # "10 in" (the \b between "in" and "c" is a boundary), which
+        # would suppress a legitimate "2 × 2 inch"-shaped statement —
+        # "2 × 2 inch" is itself foreign (the "inch" token) but must be
+        # rejected for the right reason.
+        if not has_mm_unit:
+            if _FOREIGN_UNIT_RE.search(span_text):
+                continue
+            next_token = message[m.end():].lstrip().split()[:1]
+            if next_token and next_token[0].lower() in {
+                "cm", "in", "inches", "inch", "m",
+            }:
+                continue
+        # Guard 4: magnitude. An explicit mm unit ANYWHERE on the match
+        # (after the last number, after each number, or glued) disables
+        # the bound; it applies only to a unit-less pair.
+        if len(numbers) == 2 and not has_mm_unit and any(
+            v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
+        ):
+            continue
+        # The FIRST match that passes all guards states the part's
+        # envelope (W, D, H order; two numbers → W, D only) and its
+        # numbers are consumed. Any earlier match failed a guard and
+        # states nothing, its numbers stay unmapped/offerable.
+        axes: dict[str, float] = {}
+        for i, axis in enumerate(("W", "D", "H")):
+            if i < len(numbers):
+                axes[axis] = numbers[i]
+        return axes, set(numbers)
+    return {}, set()
 
 
 def _mm_cue_values(message: str) -> set[float]:
@@ -313,7 +497,20 @@ def _mm_cue_values(message: str) -> set[float]:
         v = _coerce(m.group(1))
         if v is not None:
             values.add(v)
+    # W×D×H triple-consumed numbers (issue #275 task-a): a triple's
+    # numbers are MAPPED (consumed by the triple) and never eligible
+    # for the tier-2 offer.
+    _, triple_numbers = _extract_triple(message)
+    values |= triple_numbers
     return values
+
+
+#: A no-unit double ("60x45", "5x5") whose numbers exceed this value is
+#: a resolution or a count pair ("1920x1080" pixels, "2x4" pieces),
+#: not a millimetre envelope, and states nothing: an explicit mm unit
+#: ("60 × 45 mm") or the triple's 3-number form is the explicit cue the
+#: unit-less reading requires (issue #275 round-1 false-positive fix).
+_NO_UNIT_DOUBLE_MAX_MM = 100.0
 
 
 #: The tier-2 history scan bound (issue #261 fix batch): ``
@@ -350,11 +547,23 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
         # (``classify(text).absolute`` — an axis-word clause with its
         # number). An mm number the lexicon saw but did NOT assign ("a
         # 15 mm hole") is unmapped either way.
-        lexicon_mapped: set[float] = set(classify(text).absolute.values())
+        lexicon_absolute = classify(text).absolute
+        lexicon_mapped: set[float] = set(lexicon_absolute.values())
         # Mapped by an explicit protocol cue in the SAME message
         # ("W: 42" / "a 20 mm cube" — the ``_extract_stated`` axis pass
         # and the equal-axis shorthand).
         mapped_by_protocol = _mm_cue_values(text)
+        # Triple override: when a triple assigns an axis, the lexicon's
+        # value for that axis (if different) is OVERRIDDEN and becomes
+        # unmapped ("a 60 × 45 × 20 mm tray 40 mm wide" → W=60 from the
+        # triple, so the lexicon's W=40 is unmapped and eligible for the
+        # tier-2 offer).
+        triple_axes, _ = _extract_triple(text)
+        if triple_axes:
+            for axis, tv in triple_axes.items():
+                lv = lexicon_absolute.get(axis)
+                if lv is not None and abs(lv - tv) > 1e-6:
+                    lexicon_mapped.discard(lv)
         for n in re.findall(r"\b(\d+(?:\.\d+)?)\s*mm\b", text):
             value = float(n)
             if value in lexicon_mapped:
