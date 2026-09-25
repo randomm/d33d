@@ -23,10 +23,13 @@
  * re-measured shows `copy.brief.remeasuring` — never the stale number as if
  * fresh.
  *
- * The Brief is NOT a list that grows. When `entries.length` exceeds
- * MAX_LIST_ROWS (7) the resolved rows are grouped by part behind ONE honest
- * count (`copy.brief.allParameters`) and the unknowns are PROMOTED OUT of
- * the list — they are the thing to act on.
+ * The Brief is NOT a list that grows. When the number of COLLAPSIBLE rows
+ * (settled, agreeing param rows — provenance stated / measured / assumed,
+ * `kind: "param"`) exceeds MAX_LIST_ROWS (7), those rows fold into ONE
+ * honest disclosure (`copy.brief.moreParameters`), behind an expand
+ * button. Axis rows, disagrees rows, and unknowns are NEVER grouped —
+ * the unknowns are PROMOTED OUT of the list because they are the thing
+ * to act on.
  *
  * When a pass fails the Brief does NOT change (the failed candidate was
  * never accepted) — it gains one ochre footer (`copy.brief.failedFooter`),
@@ -191,6 +194,9 @@ export function Brief({
   onShowOnModel,
 }: BriefProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
+  // Issue #274: the collapsed-params group is hidden behind a disclosure
+  // button; `groupsOpen` remembers whether the user opened it.
+  const [groupsOpen, setGroupsOpen] = useState(false);
 
   const safeEntries = entries ?? [];
   const chip = isChip || hasLivePin === true;
@@ -198,8 +204,23 @@ export function Brief({
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
   const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
-  const showGroups = !chip && resolved.length > MAX_LIST_ROWS;
 
+  // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows
+  // (stated / measured / assumed, `kind: "param"`, never disagrees). Axis
+  // rows, any disagrees row, and unknown rows always render as rows above
+  // the folded group (issue #274). The pending-offer param rule is not
+  // implemented: the design-state payload carries no pending-offer param
+  // field (DesignStateEntry has no such key and no pendingOffer prop is
+  // threaded in), so the rule is skipped per the ticket.
+  const collapsible = resolved.filter(
+    (e) =>
+      e.kind === "param" &&
+      e.provenance !== "disagrees" &&
+      (e.provenance === "stated" ||
+        e.provenance === "measured" ||
+        e.provenance === "assumed"),
+  );
+  const showGroups = !chip && collapsible.length > MAX_LIST_ROWS;
   const renderRow = (entry: DesignStateEntry) => {
     const label = rowLabel(entry);
     const name = entry.name;
@@ -369,7 +390,20 @@ export function Brief({
       </div>
     ) : null;
 
-    const mark = MARKS[entry.provenance];
+    // The mark. A disagrees row is NOT always ochre: the backend decides
+    // its severity (`disagrees_major` — |measured − model| beyond
+    // max(20% of the model value, 5 mm), issue #274) and the SPA reads
+    // the flag, never recomputes it. User-source and axis disagreements
+    // are always ochre; a model-source disagreement within the threshold
+    // renders the quiet neutral measured mark. The region marker colour is
+    // never used here (the tripwire pins the hex to lib/marker.ts).
+    const mark =
+      entry.provenance === "disagrees" &&
+      entry.kind === "param" &&
+      entry.disagrees_source === "model" &&
+      entry.disagrees_major !== true
+        ? MARKS.measured
+        : MARKS[entry.provenance];
 
     return (
       <div
@@ -512,24 +546,40 @@ export function Brief({
           )}
 
           {showGroups ? (
-            // Above MAX_LIST_ROWS the resolved list does not grow — it
-            // collapses to ONE honest count, grouped by part.
-            <div className="brief-groups" data-testid="brief-groups">
-              <span
-                className="brief-groups-count"
-                data-testid="brief-groups-count"
-                style={{ color: "var(--color-fg-2)", fontSize: 13 }}
-              >
-                {copy.brief.allParameters(resolved.length)}
-              </span>
-              <span
-                className="brief-groups-summary"
-                data-testid="brief-groups-summary"
-                style={{ color: "var(--color-muted)", fontSize: 12, marginLeft: 8 }}
-              >
-                {copy.brief.groupSummary(1, copy.brief.groupCount(1))}
-              </span>
-            </div>
+            // Above MAX_LIST_ROWS the collapsible rows do not grow — the
+            // never-grouped rows (axis, disagrees) always render, and the
+            // settled param rows fold behind ONE honest count that the
+            // disclosure button reveals (issue #274).
+            <>
+              <div className="brief-rows" data-testid="brief-rows">
+                {resolved
+                  .filter((e) => !collapsible.includes(e))
+                  .map((e) => renderRow(e))}
+              </div>
+              <div className="brief-groups" data-testid="brief-groups">
+                <button
+                  type="button"
+                  className="brief-groups-count"
+                  data-testid="brief-groups-count"
+                  aria-expanded={groupsOpen}
+                  aria-label={copy.brief.moreParameters(collapsible.length)}
+                  onClick={() => setGroupsOpen((open) => !open)}
+                  style={{
+                    border: "1px solid var(--color-hairline)",
+                    borderRadius: 6,
+                    background: "transparent",
+                    color: "var(--color-fg-2)",
+                    fontSize: 13,
+                    cursor: "pointer",
+                    padding: "2px 8px",
+                  }}
+                >
+                  {copy.brief.moreParameters(collapsible.length)}
+                </button>
+                {groupsOpen &&
+                  collapsible.map((e) => renderRow(e))}
+              </div>
+            </>
           ) : (
             <div className="brief-rows" data-testid="brief-rows">
               {resolved.map((e) => renderRow(e))}
