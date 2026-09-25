@@ -520,13 +520,15 @@ def create_projects_router() -> APIRouter:
                 answer_edge=getattr(app.state, "answer_question", None),
             )
         except Exception:
-            # The pre-route must never take the project down with it:
-            # release the claim and degrade to the design loop (exactly
-            # as an un-wired answer edge would). The warning carries
-            # lengths only (no message text — no PII in logs).
+            # The pre-route is best-effort but its failure is fatal to
+            # THIS request (re-raised below): release the claim so the
+            # next attempt can start clean, and log the failure (the
+            # request errors — there is no design-loop fallback for a
+            # pre-route crash). The warning carries lengths only (no
+            # message text — no PII in logs).
             logger.warning(
-                "question-answer pre-route failed; degrading to the design "
-                "loop (len(message)=%d)",
+                "question-answer pre-route failed; the request errors "
+                "(inflight flag released, len(message)=%d)",
                 len(body.message),
                 exc_info=True,
             )

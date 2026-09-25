@@ -662,7 +662,7 @@ def create_versions_router() -> APIRouter:
                     latest_stated_dims_dict(svc, project_id), explicit_axes
                 )
             else:
-                _am = stated_axes_from_message(msg_text, chat_history=body.chat_history)
+                _am = stated_axes_from_message(msg_text, chat_history=())
                 per_axis_stated = effective_stated_dims(
                     latest_stated_dims_dict(svc, project_id),
                     _am if _am else _classify_axis_cues(msg_text),
@@ -1078,6 +1078,12 @@ async def _parse_finalize_body(request: Request):
         ):
             raise HTTPException(
                 status_code=422, detail="'chat_history' must be a string array"
+            )
+        if len(chat_history) > 50:
+            chat_history = chat_history[-50:]
+        if any(len(item) > 4000 for item in chat_history):
+            raise HTTPException(
+                status_code=422, detail="'chat_history' items must be ≤ 4000 chars"
             )
         chat_history = tuple(chat_history)
     else:
