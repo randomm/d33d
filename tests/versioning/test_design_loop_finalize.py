@@ -4138,3 +4138,70 @@ def test_chat_label_inheritance_brand_new_param_keeps_own_label(
     assert latest["param_meta"]["wall_thickness"]["label"] == "Wall thickness"
     # The name-matched overall_height still inherits.
     assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+
+
+# ---------------------------------------------------------------------------
+# (issue #279, task-b) label inheritance: REGION-EDIT seam (the route
+# reaches the SAME chat adapter seam — ``run_design_loop_with_events`` →
+# ``_resolve_version_create`` → ``_version_param_meta(result, prev_meta)``
+# — but this test verifies it end-to-end through the /region-edits POST,
+# not just the /chat POST).
+# ---------------------------------------------------------------------------
+
+
+def test_region_edit_label_inheritance_keeps_previous_label(app_with_versions):
+    """Region edit with a previous version whose param_meta labels a param
+    and a passing loop whose new param_meta renames that label → the
+    PREVIOUS label is persisted on the new row (issue #279: region edits
+    follow the same label rule as chat and finalize)."""
+    from tests.versioning.test_design_loop_finalize import _REGION_EDIT_PNG_BASE64
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        # v1: seeded directly with a label the regeneration will rename.
+        await svc.create_version(
+            pid,
+            {"width": 60.0, "overall_height": 12.0},
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            },
+        )
+
+        async def _loop(app, **kwargs):
+            return _MetaStubResult(
+                {"width": 60.0, "overall_height": 18.0},
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json={
+                "module_ids": ["m1"],
+                "view_id": "front",
+                "marked_png_base64": _REGION_EDIT_PNG_BASE64,
+                "point": {"x": 1.0, "y": 1.0},
+                "instruction": "open this up",
+            },
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest = svc.latest_version(pid)
+        return r.status_code, latest
+
+    status, latest = run_async(app_with_versions, _call)
+    assert status == 202, status
+    # The region-edit path goes through the same _resolve_version_create
+    # seam — the inherited label persists.
+    assert latest is not None
+    assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+    assert latest["param_meta"]["overall_height"]["unit"] == "mm"

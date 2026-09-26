@@ -130,6 +130,33 @@ def test_selection_never_re_offers_user_changed_param():
     )
 
 
+def test_validate_confirm_first_keeps_plain_changed_exclusion():
+    """Issue #279: ``validate_confirm_first`` keeps the PLAIN changed-
+    exclusion — the tier-1 exemption (a changed param on a released axis
+    is eligible) does NOT apply to ``confirm_first`` validation. A
+    changed param is never a valid ``confirm_first`` target, even when
+    its axis is released."""
+    from d33d.confirm_offer import validate_confirm_first
+
+    meta = {"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}}
+    # The H param is changed AND on a released axis — tier-1-eligible via
+    # the exemption, but NOT a valid confirm_first target (the plain
+    # changed-exclusion applies here).
+    assert (
+        validate_confirm_first(
+            "lift_height", {"lift_height": 18.0}, meta, None, {"lift_height"}
+        )
+        is False
+    )
+    # A non-changed param is still valid.
+    assert (
+        validate_confirm_first(
+            "lift_height", {"lift_height": 18.0}, meta, None, set()
+        )
+        is True
+    )
+
+
 def test_selection_no_eligible_param_yields_no_offer():
     """String-only / zero / bool params: no numeric assumed candidate →
     no offer (never a fake one), regardless of the flag."""
@@ -375,6 +402,52 @@ def test_tier1_global_release_covers_all_axes():
         params, meta, None, set(), None, released_axes={"W", "D", "H"}
     )
     assert name == "lift_height"  # first declared-axis param in order
+
+
+def test_tier1_global_release_picks_in_w_d_h_order():
+    """Issue #279 (global cues, W/D/H order): when multiple released-axis
+    params are eligible after a global cue ("make it bigger"), the pick
+    is W first, then D, then H — declaration order of the params snapshot,
+    which for the standard W/D/H layout is the W param."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    # All three axes released (global cue "bigger"). The params dict
+    # lists W first → the W param wins tier 1 over D and H.
+    params = {"width": 60.0, "depth": 45.0, "height": 20.0}
+    meta = {
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        "depth": {"label": "Depth", "unit": "mm", "axis": "D"},
+        "height": {"label": "Height", "unit": "mm", "axis": "H"},
+    }
+    assert (
+        select_offer_candidate(
+            params, meta, None, set(), None, released_axes={"W", "D", "H"}
+        )
+        == "width"
+    )
+    # With the W param removed, D wins; with both W and D removed, H wins.
+    params_no_w = {"depth": 45.0, "height": 20.0}
+    meta_no_w = {
+        "depth": {"label": "Depth", "unit": "mm", "axis": "D"},
+        "height": {"label": "Height", "unit": "mm", "axis": "H"},
+    }
+    assert (
+        select_offer_candidate(
+            params_no_w, meta_no_w, None, set(), None, released_axes={"W", "D", "H"}
+        )
+        == "depth"
+    )
+    assert (
+        select_offer_candidate(
+            {"height": 20.0},
+            {"height": {"label": "Height", "unit": "mm", "axis": "H"}},
+            None,
+            set(),
+            None,
+            released_axes={"W", "D", "H"},
+        )
+        == "height"
+    )
 
 
 def test_tier1_empty_falls_through_to_tier3():
@@ -1219,6 +1292,52 @@ def test_chat_tier1_changed_released_axis_param_offered(app_with_versions):
     assert done[-1].get("confirm_sentence") == (
         "You asked for taller — I made Height 18.0\u202fmm. Right?"
     ), done
+
+
+def test_chat_tier1_user_stated_absolute_value_no_tier1_offer(app_with_versions):
+    """Issue #279 (user-stated axis): "make it 12 mm tall" states H
+    absolutely — the lexicon does NOT release the axis, so even a
+    changed H param is NOT tier-1 eligible. The offer (if any) comes
+    from tier 3 or is absent; never the tier-1 sentence."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_height": 12.0},
+            meta={"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        await svc.create_version(
+            pid,
+            {"lift_height": 15.0},
+            param_meta={"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "make it 12 mm tall", "chat_history": []},
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # "make it 12 mm tall" → H is SET (absolute), not released → no
+    # tier-1 sentence. The H param is in changed (15→12) and not
+    # released → the changed-exclusion applies → no tier-1 offer.
+    sentence = done[-1].get("confirm_sentence")
+    if sentence is not None:
+        # If an offer fires at all, it is NOT the tier-1 template.
+        assert not sentence.startswith("You asked for"), (
+            f"tier-1 sentence fired for a user-stated axis: {sentence!r}"
+        )
 
 
 def test_chat_pass_with_assumed_axis_param_offers_it(app_with_versions):
