@@ -3609,27 +3609,6 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
 # ---------------------------------------------------------------------------
 
 
-class _FinalizeMetaStubResult:
-    """A pass result whose best record carries a ``param_meta`` (the
-    declared ``IterationRecord`` field the finalize route's
-    ``_version_param_meta`` reads via the SAME helper the chat adapter
-    uses)."""
-
-    def __init__(self, params: dict, meta: dict) -> None:
-        from d33d.design_loop import IterationRecord, Score
-
-        self.status = "pass"
-        self.failure_reason = None
-        self.best = IterationRecord(
-            iteration=0,
-            scad_source="W = 60; cube([W, W, W]);",
-            render=_default_render(),
-            score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
-            params=dict(params),
-            param_meta=dict(meta),
-        )
-
-
 def test_finalize_label_inheritance_keeps_previous_label(app_with_versions):
     """Finalize with a previous version whose param_meta labels a param
     and a passing loop whose new param_meta renames that label → the
@@ -3650,7 +3629,7 @@ def test_finalize_label_inheritance_keeps_previous_label(app_with_versions):
                 "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
             },
         )
-        app_with_versions.state.run_design_loop = lambda **kw: _FinalizeMetaStubResult(
+        app_with_versions.state.run_design_loop = lambda **kw: _MetaStubResult(
             {"width": 60.0, "overall_height": 18.0},
             {
                 "width": {"label": "Width", "unit": "mm", "axis": "W"},

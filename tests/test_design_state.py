@@ -2048,6 +2048,29 @@ def test_label_inheritance_prev_without_label_no_inheritance() -> None:
     assert out["h"]["label"] == "Height"
 
 
+def test_label_inheritance_axis_match_with_labelless_predecessor_keeps_new_label() -> None:
+    """A unique axis match whose PREVIOUS entry declares an axis but has
+    no label must NOT crash (pre-#279-fix this raised a KeyError, since
+    the axis inventory held every axis-declaring param while the label
+    map only held labelled ones) — the new label stands. The name-matched
+    ``width`` sidesteps the label-map early-return so the axis pass
+    actually runs."""
+    out = _inherit(
+        {
+            "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+            "width": {"label": "W2", "unit": "mm"},
+        },
+        {
+            "h": {"unit": "mm", "axis": "H"},  # axis declared, no label
+            "width": {"label": "Width", "unit": "mm"},
+        },
+    )
+    # No predecessor label on the H axis → the new label stands.
+    assert out["height_mm"]["label"] == "Height"
+    # The name match is unaffected.
+    assert out["width"]["label"] == "Width"
+
+
 def test_label_inheritance_new_entry_without_label_receives_inherited() -> None:
     """A new entry with no label of its own (the model omitted it)
     receives the inherited label when a name match exists."""

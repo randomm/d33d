@@ -887,12 +887,16 @@ def _inherit_param_labels(
        case (the model keeps the param name, renames the label) and the
        rename-the-NAME case when the axis is declared on one side only.
     2. AXIS MATCH — the new param name is NEW to the previous version, it
-       declares an axis, EXACTLY ONE previous param declared that axis
-       and did not already match by name, and EXACTLY ONE new param with
-       that axis has no name match (issue #279's operator tie-break —
-       a rename of the param name with the axis unchanged inherits
-       through the axis; AMBIGUOUS (several previous or several new
-       params share the axis) does not inherit — the new label stands).
+       declares an axis, EXACTLY ONE previous param declared that axis and
+       has a label, and EXACTLY ONE new param with that axis has no name
+       match (issue #279's operator tie-break — a rename of the param name
+       with the axis unchanged inherits through the axis; AMBIGUOUS (several
+       previous or several new params share the axis) does not inherit — the
+       new label stands). A name-matched previous param on the axis DOES
+       make the axis ambiguous for the OTHER new params (the axis inventory
+       is the FULL previous inventory — the same tie-break that the binding
+       applies), and a label-less previous param on the axis is not a
+       source (the new label stands, never a fabricated or ``None`` one).
 
     ONLY the ``label`` field is inherited: ``unit`` / ``axis`` / ``reason``
     always come from the NEW metadata (the operator decision — a rename
@@ -903,8 +907,10 @@ def _inherit_param_labels(
     Degraded inputs never fail: a ``None`` / non-dict previous metadata
     (no previous version, or a version without metadata) inherits nothing;
     a previous entry without a usable string label leaves the new label
-    as-is; a new entry with no label of its own receives the inherited
-    one when a match exists. The result is the new metadata with labels
+    as-is — including on the axis path (a label-less predecessor is not a
+    source, so the new label stands, never a ``KeyError`` or a ``None``);
+    a new entry with no label of its own receives the inherited one when a
+    labelled match exists. The result is the new metadata with labels
     grafted — never a mutated input, never a fabricated label.
     """
     from d33d.design_state import normalize_param_meta
@@ -917,8 +923,10 @@ def _inherit_param_labels(
     }
     if not prev_labels:
         return dict(meta)
-    # Axis inventory of the PREVIOUS version (the name-match pass runs
-    # first; the axis pass sees only what the name pass did not claim).
+    # Axis inventory of the FULL previous version (including name-matched
+    # prev params — the binding tie-break: a name-matched prev entry on the
+    # same axis makes the axis ambiguous for the OTHER new params; the
+    # axis pass only looks at entries that also carry a label).
     prev_axis_names: dict[str, list[str]] = {}
     for name, m in prev.items():
         axis = m.get("axis")
@@ -930,30 +938,34 @@ def _inherit_param_labels(
     for name in meta:
         if name in prev_labels:
             matched[name] = prev_labels[name]
+    # Axis inventory of the NEW version among the UN-matched new params
+    # (precomputed once after the name pass — the axis pass is two length
+    # lookups, not a re-scan).
+    new_axis_names: dict[str, list[str]] = {}
+    for name, m in meta.items():
+        if name in matched or not isinstance(m, dict):
+            continue
+        axis = m.get("axis")
+        if axis:
+            new_axis_names.setdefault(axis, []).append(name)
     # Axis matches: a new param that did NOT name-match, declares an
-    # axis, and is the ONLY new param with that axis inherits from the
-    # previous version's ONLY param with that axis (the operator tie-break
-    # — ambiguity inherits nothing). Name-matched prev params are
-    # excluded: a new param with a name-matched prev entry keeps that
-    # entry's label, not a different entry's, even on the same axis
-    # (two prev params on one axis — one name-matched, one not — is
-    # ambiguous and inherits nothing, per the tie-break).
+    # axis, and is the ONLY un-matched new param with that axis inherits
+    # from the previous version's ONLY LABELED param with that axis (the
+    # operator tie-break — ambiguity inherits nothing). The inventory is
+    # the FULL previous axis inventory — including name-matched prev
+    # params (a name-matched prev entry on the same axis makes the axis
+    # ambiguous for the other new params, per the tie-break), so a
+    # label-less unique predecessor is not a source and the new label
+    # stands.
     for name, m in meta.items():
         if name in matched:
             continue
         axis = m.get("axis") if isinstance(m, dict) else None
         if not axis:
             continue
-        new_with_axis = [
-            n
-            for n, mm in meta.items()
-            if n not in matched
-            and isinstance(mm, dict)
-            and mm.get("axis") == axis
-        ]
-        if len(new_with_axis) != 1:
+        if len(new_axis_names.get(axis, [])) != 1:
             continue
-        prev_with_axis = list(prev_axis_names.get(axis, []))
+        prev_with_axis = [n for n in prev_axis_names.get(axis, []) if n in prev_labels]
         if len(prev_with_axis) != 1:
             continue
         matched[name] = prev_labels[prev_with_axis[0]]

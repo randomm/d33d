@@ -190,7 +190,8 @@ def _assumed_numeric_params(
             # released axis is still assumed (the model's own move this
             # turn) — everything else about the exemption is downstream
             # (the entry must still be numeric, non-zero, assumed).
-            if exempt_axes is not None and by_name[name].get("axis") in exempt_axes:
+            entry = by_name.get(name)
+            if exempt_axes is not None and entry is not None and entry.get("axis") in exempt_axes:
                 pass
             else:
                 continue
@@ -250,26 +251,15 @@ def select_offer_candidate(
     excludes nothing (the pre-#264 callers' behaviour, unchanged).
     """
     changed_set = set(changed or ())
-    if released_axes:
-        # Issue #279's tier-1 exemption: a changed param whose axis is
-        # released this turn (the model's own move in response to the
-        # cue) is eligible for tier 1 — pass the released set as the
-        # exemption so it survives the changed exclusion. The exemption
-        # only relaxes the changed rule: a released-axis param that is
-        # confirmed or a disagrees param is excluded BEFORE the
-        # exemption is consulted (inside ``_assumed_numeric_params``).
-        eligible = _assumed_numeric_params(
-            params,
-            param_meta,
-            confirmed,
-            changed_set,
-            disagree_names,
-            exempt_axes=released_axes,
-        )
-    else:
-        eligible = _assumed_numeric_params(
-            params, param_meta, confirmed, changed_set, disagree_names
-        )
+    # released_axes doubles as the tier-1 exemption set (an empty set exempts nothing).
+    eligible = _assumed_numeric_params(
+        params,
+        param_meta,
+        confirmed,
+        changed_set,
+        disagree_names,
+        exempt_axes=released_axes or None,
+    )
     if not eligible:
         return None
     if released_axes:
