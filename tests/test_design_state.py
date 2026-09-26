@@ -1906,3 +1906,189 @@ def test_v25_stated_width_disagrees_major_absent_on_user_source() -> None:
     assert "disagrees_major" not in param_rows["spacer_width"]
     # spacer_depth: model-source → disagrees_major: False (3.9 <= 8).
     assert param_rows["spacer_depth"]["disagrees_major"] is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #279 (task-b): label inheritance across versions
+#
+# When a new version's param_meta gives a label for a parameter that
+# already had a label in the previous version's param_meta (same name, or
+# the same declared axis when the name changed), the PREVIOUS label is
+# persisted. These tests exercise the pure helper directly — the
+# end-to-end persistence (chat + finalize seams) is covered in
+# tests/versioning/test_design_loop_finalize.py.
+# ---------------------------------------------------------------------------
+
+
+def _inherit(meta: dict, prev: object) -> dict:
+    from d33d.design_loop_events import _inherit_param_labels
+
+    return _inherit_param_labels(meta, prev)
+
+
+def test_label_inheritance_name_match_keeps_previous_label() -> None:
+    """v1 {overall_height: "Overall height", axis H} → v2
+    {overall_height: "Height", axis H} persists "Overall height". Only the
+    label is inherited — unit/axis/reason come from the new meta."""
+    out = _inherit(
+        {
+            "overall_height": {
+                "label": "Height",
+                "unit": "mm",
+                "axis": "H",
+                "reason": "user asked for taller",
+            },
+            "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        },
+    )
+    assert out["overall_height"]["label"] == "Overall height"
+    # Only the label is inherited — unit/axis/reason are the new meta's.
+    assert out["overall_height"]["unit"] == "mm"
+    assert out["overall_height"]["axis"] == "H"
+    assert out["overall_height"]["reason"] == "user asked for taller"
+    # The width name-match inherits too (same label — no visible change,
+    # but the mechanism is the same).
+    assert out["width"]["label"] == "Width"
+
+
+def test_label_inheritance_axis_match_when_name_changes() -> None:
+    """v1 {overall_height: "Overall height", axis H} → v2 {height_mm:
+    "Height", axis H} (the model renamed the param) → the label is
+    inherited through the unique-axis match (issue #279's operator
+    tie-break: exactly one prev and one new param share the axis)."""
+    out = _inherit(
+        {
+            "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+            "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        },
+    )
+    assert out["height_mm"]["label"] == "Overall height"
+    assert out["width"]["label"] == "Width"
+
+
+def test_label_inheritance_ambiguous_axis_does_not_inherit() -> None:
+    """Operator tie-break: when SEVERAL previous params declare the same
+    axis, the axis match is ambiguous — no inheritance (the new label
+    stands). Name matches still work."""
+    out = _inherit(
+        {
+            "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+            "lip": {"label": "Lip", "unit": "mm", "axis": "H"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            "lip_height": {"label": "Lip height", "unit": "mm", "axis": "H"},
+        },
+    )
+    # Two prev H params → ambiguous → no inheritance for height_mm.
+    assert out["height_mm"]["label"] == "Height"
+    # Two new H params → also ambiguous for lip (no inheritance).
+    assert out["lip"]["label"] == "Lip"
+
+
+def test_label_inheritance_ambiguous_new_side_does_not_inherit() -> None:
+    """Operator tie-break: when SEVERAL new params share an axis and
+    neither name-matches, the axis match is ambiguous — no inheritance
+    even if the previous version has exactly one param on that axis."""
+    out = _inherit(
+        {
+            "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+            "lip": {"label": "Lip", "unit": "mm", "axis": "H"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+        },
+    )
+    assert out["height_mm"]["label"] == "Height"
+    assert out["lip"]["label"] == "Lip"
+
+
+def test_label_inheritance_name_match_beats_axis_match() -> None:
+    """When a new param name-matches a previous param AND a different
+    previous param shares the same axis, the name match wins (the axis
+    match never fires for a name-matched param)."""
+    out = _inherit(
+        {
+            "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            "lip_height": {"label": "Lip height", "unit": "mm", "axis": "H"},
+        },
+    )
+    # Name match: overall_height keeps its own previous label.
+    assert out["overall_height"]["label"] == "Overall height"
+
+
+def test_label_inheritance_no_prev_meta_no_inheritance() -> None:
+    """No previous metadata (None, empty, non-dict) → no inheritance,
+    the new meta passes through unchanged."""
+    meta = {"h": {"label": "Height", "unit": "mm", "axis": "H"}}
+    assert _inherit(dict(meta), None) == meta
+    assert _inherit(dict(meta), {}) == meta
+    assert _inherit(dict(meta), "junk") == meta
+    assert _inherit(dict(meta), ["not", "a", "dict"]) == meta
+
+
+def test_label_inheritance_prev_without_label_no_inheritance() -> None:
+    """A previous entry without a usable label (or no previous entries
+    with labels at all) → no inheritance; the new label stands."""
+    out = _inherit(
+        {"h": {"label": "Height", "unit": "mm", "axis": "H"}},
+        {"h": {"unit": "mm", "axis": "H"}},  # prev h has no label
+    )
+    assert out["h"]["label"] == "Height"
+
+
+def test_label_inheritance_new_entry_without_label_receives_inherited() -> None:
+    """A new entry with no label of its own (the model omitted it)
+    receives the inherited label when a name match exists."""
+    out = _inherit(
+        {"overall_height": {"unit": "mm", "axis": "H"}},
+        {"overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"}},
+    )
+    assert out["overall_height"]["label"] == "Overall height"
+    assert out["overall_height"]["unit"] == "mm"
+    assert out["overall_height"]["axis"] == "H"
+
+
+def test_label_inheritance_brand_new_param_keeps_own_label() -> None:
+    """A brand-new param (no name match, no previous axis match) keeps
+    its own label — never a fabricated inheritance."""
+    out = _inherit(
+        {
+            "wall": {"label": "Wall thickness", "unit": "mm"},
+            "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+        },
+        {
+            "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+        },
+    )
+    assert out["wall"]["label"] == "Wall thickness"
+    assert out["overall_height"]["label"] == "Overall height"
+
+
+def test_label_inheritance_inputs_never_mutated() -> None:
+    """The helper never mutates its inputs: the new meta and the
+    previous meta are read-only, and the result is a fresh dict (no
+    shared references into the inputs)."""
+    meta = {"h": {"label": "Height", "unit": "mm", "axis": "H"}}
+    prev = {"h": {"label": "Overall height", "unit": "mm", "axis": "H"}}
+    meta_copy = {k: dict(v) for k, v in meta.items()}
+    prev_copy = {k: dict(v) for k, v in prev.items()}
+    out = _inherit(meta, prev)
+    # Inputs unchanged.
+    assert meta == meta_copy
+    assert prev == prev_copy
+    # The result's entry is a fresh dict (not the input's).
+    assert out["h"] is not meta["h"]
+    # The inherited label is present.
+    assert out["h"]["label"] == "Overall height"

@@ -136,6 +136,7 @@ def _assumed_numeric_params(
     confirmed: dict[str, Any] | None,
     excluded: set[str],
     disagree_names: Collection[str] = frozenset(),
+    exempt_axes: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """The version's assumed numeric params eligible for an offer: a
     numeric (non-bool, non-zero) value, NOT in ``confirmed_params`` (rule
@@ -149,6 +150,16 @@ def _assumed_numeric_params(
     params newly introduced this version — those are not "assumed in
     place" values the model is inviting confirmation of; they are the
     user's own moves).
+
+    ``exempt_axes`` (issue #279's tier-1 exemption) keeps the changed
+    exclusion for every param EXCEPT an excluded param whose model-
+    declared axis is in the set: a param the model changed in response
+    to THIS turn's relative/global cue ("taller" released H → the H
+    param) is exactly the value worth confirming. The exemption relaxes
+    ONLY the ``excluded`` rule — a param in ``confirmed_params`` or in
+    ``disagree_names`` stays excluded no matter what (and the exemption
+    never fires for a param the user stated absolutely, since an
+    absolute cue releases no axis).
 
     ``disagree_names`` (issue #264) is the EXPLICIT set of param names
     whose ``state_block_for_version`` entry has provenance ``disagrees``
@@ -172,8 +183,17 @@ def _assumed_numeric_params(
     by_name = {e["name"]: e for e in entries}
     out: list[dict[str, Any]] = []
     for name, value in params.items():
-        if name in changed or name in confirmed or name in disagrees:
+        if name in confirmed or name in disagrees:
             continue
+        if name in changed:
+            # Issue #279's tier-1 exemption: a changed param on a
+            # released axis is still assumed (the model's own move this
+            # turn) — everything else about the exemption is downstream
+            # (the entry must still be numeric, non-zero, assumed).
+            if exempt_axes is not None and by_name[name].get("axis") in exempt_axes:
+                pass
+            else:
+                continue
         if not _is_number(value) or value == 0:
             continue
         entry = by_name.get(name)
@@ -197,13 +217,16 @@ def select_offer_candidate(
 
     Precedence (issue #261's operator decision — tiers in order, an empty
     tier falls through to the next, tier 3 is today's order and is
-    terminal; still at most ONE offer, never a confirmed or changed
-    param):
+    terminal; still at most ONE offer, never a confirmed param):
 
     1. an assumed numeric param with a declared axis ON AN AXIS RELEASED
        by this turn's relative/global cue (``released_axes`` — "make it
        taller" released H → the H-declared assumed param is the one the
-       user's own words are about);
+       user's own words are about; issue #279's tier-1 exemption
+       includes a CHANGED param on a released axis — the model's
+       response to the cue is exactly the value worth confirming; a
+       changed param OFF the released axes stays excluded, and a
+       confirmed or disagrees param is never exempted);
     2. an assumed numeric param whose value equals (±1e-6) a user-quoted
        UNMAPPED mm number (``user_quoted_mm`` — the tier-2 helper's
        output; "a spacer to lift a shelf 12 mm" → the 12-valued param);
@@ -227,9 +250,26 @@ def select_offer_candidate(
     excludes nothing (the pre-#264 callers' behaviour, unchanged).
     """
     changed_set = set(changed or ())
-    eligible = _assumed_numeric_params(
-        params, param_meta, confirmed, changed_set, disagree_names
-    )
+    if released_axes:
+        # Issue #279's tier-1 exemption: a changed param whose axis is
+        # released this turn (the model's own move in response to the
+        # cue) is eligible for tier 1 — pass the released set as the
+        # exemption so it survives the changed exclusion. The exemption
+        # only relaxes the changed rule: a released-axis param that is
+        # confirmed or a disagrees param is excluded BEFORE the
+        # exemption is consulted (inside ``_assumed_numeric_params``).
+        eligible = _assumed_numeric_params(
+            params,
+            param_meta,
+            confirmed,
+            changed_set,
+            disagree_names,
+            exempt_axes=released_axes,
+        )
+    else:
+        eligible = _assumed_numeric_params(
+            params, param_meta, confirmed, changed_set, disagree_names
+        )
     if not eligible:
         return None
     if released_axes:

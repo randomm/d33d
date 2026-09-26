@@ -459,6 +459,165 @@ def test_tier1_beats_tier2():
     assert name == "lift_height"  # tier 1 first
 
 
+def test_tier1_exemption_changed_released_axis_param_is_offered():
+    """Issue #279 tier-1 exemption: a param the model changed in
+    response to THIS turn's relative cue (the H param went 12 → 18 on
+    "make it taller" — H in ``changed`` AND H released) is tier-1
+    ELIGIBLE despite the #250 changed-exclusion: the model's response
+    is exactly the value worth confirming. The tier-1 sentence is the
+    one with the mm()-formatted value (U+202F, byte-exact)."""
+    from d33d.confirm_offer import select_offer_candidate, tier_1_sentence
+
+    # "make it taller" → H released; the H param 12 → 18 (in changed).
+    name = select_offer_candidate(
+        {"lift_height": 18.0, "width": 60.0},
+        {
+            "lift_height": {"label": "Height", "unit": "mm", "axis": "H"},
+            "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        },
+        None,
+        {"lift_height"},
+        None,
+        released_axes={"H"},
+    )
+    assert name == "lift_height"
+    # The exact tier-1 sentence (the issue's acceptance string shape,
+    # U+202F narrow no-break space, one decimal).
+    entry = {
+        "name": "lift_height",
+        "label": "Height",
+        "value": 18.0,
+        "unit": "mm",
+        "meta_unit": "mm",
+    }
+    assert tier_1_sentence(entry, "taller") == (
+        "You asked for taller — I made Height 18.0\u202fmm. Right?"
+    )
+
+
+def test_tier1_exemption_changed_param_off_released_axis_stays_excluded():
+    """Issue #279: the exemption only relaxes the changed rule for a
+    released axis. A CHANGED param on an axis that is NOT released stays
+    excluded (the #250 rule is untouched for it) — the offer falls to a
+    non-changed param."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    # H released, but the only changed param is a W-declared one → the
+    # exemption does not fire for it; the untouched H param wins tier 1.
+    assert (
+        select_offer_candidate(
+            {"width": 60.0, "lift_height": 15.0},
+            {
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "lift_height": {"label": "Height", "unit": "mm", "axis": "H"},
+            },
+            None,
+            {"width"},
+            None,
+            released_axes={"H"},
+        )
+        == "lift_height"
+    )
+    # No released axis at all → the changed param is never offered (the
+    # plain #250 changed-exclusion, unchanged).
+    assert (
+        select_offer_candidate(
+            {"width": 60.0, "lift_height": 15.0},
+            {
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+            },
+            None,
+            {"width"},
+            None,
+        )
+        is None
+    )
+
+
+def test_tier1_exemption_never_exempted_confirmed_or_disagreeing():
+    """Issue #279: the exemption relaxes ONLY the changed rule. A param
+    on a released axis that is confirmed (``confirmed_params``) or a
+    disagrees param is excluded BEFORE the exemption is consulted — it
+    is never tier-1-eligible, no matter what the cue released."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    # Confirmed H param (changed AND confirmed) → excluded; the
+    # untouched W param (not released) falls to tier 3.
+    assert (
+        select_offer_candidate(
+            {"lift_height": 18.0, "width": 60.0},
+            {
+                "lift_height": {"label": "Height", "unit": "mm", "axis": "H"},
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+            },
+            {"lift_height": 18.0},
+            {"lift_height"},
+            None,
+            released_axes={"H"},
+        )
+        == "width"
+    )
+    # Disagrees H param (changed AND disagreeing) → excluded; no other
+    # eligible param → no offer.
+    assert (
+        select_offer_candidate(
+            {"lift_height": 18.0},
+            {"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+            None,
+            {"lift_height"},
+            None,
+            released_axes={"H"},
+            disagree_names={"lift_height"},
+        )
+        is None
+    )
+
+
+def test_tier1_exemption_beats_tier2_when_value_equals_quoted_mm():
+    """Issue #279 precedence pin: "make it 18 mm taller" releases H AND
+    quotes 18 — a changed H param whose value IS 18.0 matches BOTH
+    tier 1 (released axis) and tier 2 (quoted number). Tier 1 wins."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    name = select_offer_candidate(
+        {"lift_height": 18.0, "lift_gap": 18.0},
+        {"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+        None,
+        {"lift_height"},
+        None,
+        released_axes={"H"},
+        user_quoted_mm={18.0},
+    )
+    assert name == "lift_height"  # tier 1 first, not tier 2's lift_gap
+
+
+def test_tier1_exemption_renamed_param_eligible_through_axis():
+    """Issue #279 (renamed param): the changed set is name-keyed, so a
+    param the model RENAMED (overall_height → height_mm) is NOT in it
+    — it is already tier-1-eligible when its axis is released. The
+    offer names the new name; its label (inherited server-side, task-b)
+    is what the sentence renders."""
+    from d33d.confirm_offer import select_offer_candidate, tier_1_sentence
+
+    params = {"height_mm": 18.0, "width": 60.0}
+    meta = {
+        "height_mm": {"label": "Overall height", "unit": "mm", "axis": "H"},
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+    }
+    # v1 overall_height 12 → v2 height_mm 18 (name-keyed diff does not
+    # mark it changed) after "make it taller" (H released).
+    assert (
+        select_offer_candidate(
+            params, meta, None, set(), None, released_axes={"H"}
+        )
+        == "height_mm"
+    )
+    entry = offer_entry(params, meta, "height_mm")
+    assert tier_1_sentence(entry, "taller") == (
+        "You asked for taller — I made Overall height 18.0\u202fmm. Right?"
+    )
+
+
 def test_tier_sentences_mm_formatted_exactly_as_mm():
     """The tier-1/tier-2 sentences' ``{value}`` is ALWAYS the mm()-
     formatted string when the param's METADATA unit is mm (the
@@ -1014,6 +1173,52 @@ def _drive_chat(app, client, pid, body):
         return r, frames
 
     return _drive()
+
+
+def test_chat_tier1_changed_released_axis_param_offered(app_with_versions):
+    """Issue #279 ACCEPTANCE (end-to-end through the chat route): v1
+    carries H = 12 (``lift_height``), then "make it taller" (a relative
+    H cue — H released) produces v2 with ``lift_height`` = 18 — the H
+    param is in the changed set (12 → 18) AND on a released axis → the
+    tier-1 exemption fires: the offer is the tier-1 sentence for the
+    changed param ("You asked for taller — I made Height 18.0 mm.
+    Right?" — U+202F), never the pre-#279 fallthrough to an unchanged
+    param."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_height": 18.0},
+            meta={"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        await svc.create_version(
+            pid,
+            {"lift_height": 12.0},
+            param_meta={"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make it taller", "chat_history": []}
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The changed H param is the offer — not nothing, not an unchanged
+    # param — and the sentence is the tier-1 one, mm()-formatted
+    # (U+202F narrow no-break space, byte-exact).
+    assert done[-1].get("confirm_offer") == "lift_height", done
+    assert done[-1].get("confirm_sentence") == (
+        "You asked for taller — I made Height 18.0\u202fmm. Right?"
+    ), done
 
 
 def test_chat_pass_with_assumed_axis_param_offers_it(app_with_versions):
