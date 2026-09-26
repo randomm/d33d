@@ -285,6 +285,14 @@ export const failure = {
   bboxCarried: (label: string, heldMm: number): string =>
     `I kept the ${label.toLowerCase()} you set earlier (${mm(heldMm)}). If you meant to change it, say how ${label.toLowerCase()} it should be.`,
 
+  /** Part 2 line for an `axis_params_mismatch` failure (issue #276): the
+   *  mismatching parameter's declared value and the measured extent on its
+   *  axis, both mm-formatted (rendered in mono by the failure turn). One
+   *  line per mismatching parameter — the headline sentence (without
+   *  numbers) lives in `reasons`. */
+  axisMismatchLine: (label: string, modelMm: number, measuredMm: number): string =>
+    `${label}: ${mm(modelMm)} → ${mm(measuredMm)}`,
+
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value and
    *  every render ErrorClass value has an entry. */
@@ -295,6 +303,8 @@ export const failure = {
       "The dimensions you gave didn't end up as parameters, so the next change would not be able to hold them.",
     views_blank_or_missing: "It built, but the preview images came out blank.",
     error_class_not_ok: "The design step produced nothing usable.",
+    axis_params_mismatch:
+      "The part came out a different size from its own measurements.",
     ok: "The design step produced nothing usable.",
     syntax_error: "The generated design had a syntax error, so nothing was built.",
     empty_model: "The design produced an empty model — there is nothing to print.",

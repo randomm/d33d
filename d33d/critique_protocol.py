@@ -472,14 +472,28 @@ def deterministic_verdict(
     gates only (reusing ``d33d.design_loop.score``) and emit a *deterministic*
     verdict — no vision, no hallucinated judgement.
 
-    The verdict maps the deterministic-gate rank (the bitvector popcount) to a
-    relative judgement: ``better`` when every gate passes (rank == 4),
-    ``equivalent`` when some but not all pass (0 < rank < 4), ``worse`` when
-    no gate passes (rank == 0).  This is the deterministic-gate-only scoring
-    the spec requires when the tier has no vision — it never fabricates a
-    visual comparison.  The checklist carries the per-gate bitvector so the
-    result is auditable; ``deterministic`` is ``True`` so the caller can
-    distinguish this from a vision verdict.
+    The verdict maps the deterministic-gate rank (the bitvector popcount)
+    to a relative judgement: ``better`` when every gate passes (rank ==
+    len(bits)), ``equivalent`` when some but not all pass (0 < rank <
+    len(bits)), ``worse`` when no gate passes (rank == 0).  With five gate
+    bits, bit 5 is a pure function of ``param_meta`` / ``named_params`` —
+    which this function does not pass (it scores with the candidate's
+    render + stated dims only) — so it always abstains to True: ``worse``
+    is reachable only via a caller that scores a render failing every
+    other gate while bit 5's abstention still holds (rank 0 is then
+    ``error_class`` + ``views`` + ``bbox`` + ``named_params`` all False,
+    e.g. a failed render with no views and no measurement).  A syntax-
+    error render scores rank 1 (bit 4 is False, bit 5 abstains True), so
+    the fallback reports it as ``equivalent`` — the gate vector has no
+    "worse than the baseline" signal of its own: ``equivalent`` means
+    "the deterministic gates found a specific, non-total failure", which
+    is the honest reading of a render that compiled-to-nothing rather than
+    a candidate the gates positively judged inferior.  This is the
+    deterministic-gate-only scoring the spec requires when the tier has no
+    vision — it never fabricates a visual comparison.  The checklist
+    carries the per-gate bitvector so the result is auditable;
+    ``deterministic`` is ``True`` so the caller can distinguish this from
+    a vision verdict.
     """
     s = score(render, stated_dims, bbox=bbox, scad_source=scad_source)
     if s.perfect:

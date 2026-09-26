@@ -141,6 +141,29 @@ describe("design contract", () => {
     ]);
   });
 
+  /* ---------------------------------------- W276 */
+
+  it("the copy deck carries the axis_params_mismatch failure copy (issue #276)", () => {
+    // Issue #276: gate bit 5 (axis_params_mismatch) joins the closed
+    // reason set. The headline has NO numbers — the numbers ride in the
+    // failure detail, one line per mismatching parameter, mm-formatted
+    // (matching the deck's `mm`) and rendered in mono by the failure
+    // turn. The headline must stay number-free: a number in a reason
+    // sentence the SPA has not established is the house anti-pattern.
+    const headline = copy.failure.reasons.axis_params_mismatch;
+    expect(headline).toBeTruthy();
+    // No digit, no dimension: the numbers live in the detail lines.
+    expect(headline).not.toMatch(/\d/);
+    // The detail-line shape: label, declared value, measured extent —
+    // both values mm-formatted exactly as the deck formats them.
+    expect(copy.failure.axisMismatchLine("Tray height", 20, 102)).toBe(
+      `Tray height: ${mm(20)} → ${mm(102)}`,
+    );
+    expect(copy.failure.axisMismatchLine("Width", 40, 43.8)).toBe(
+      `Width: ${mm(40)} → ${mm(43.8)}`,
+    );
+  });
+
   /* ---------------------------------------- W260 */
 
   it("the question pre-route's no-run replies live in the deck (issue #260)", () => {

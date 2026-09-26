@@ -83,9 +83,9 @@ def test_repairable_and_non_repairable_are_disjoint() -> None:
 
 
 def test_repairable_plus_non_repairable_covers_all() -> None:
-    """REPAIRABLE + NON_REPAIRABLE covers all 17 FAILURE_CLASSES entries."""
+    """REPAIRABLE + NON_REPAIRABLE covers all 18 FAILURE_CLASSES entries."""
     assert fc.REPAIRABLE_CLASSES | fc.NON_REPAIRABLE_CLASSES == fc.FAILURE_CLASSES
-    assert len(fc.FAILURE_CLASSES) == 17
+    assert len(fc.FAILURE_CLASSES) == 18
 
 
 # ---------------------------------------------------------------------------

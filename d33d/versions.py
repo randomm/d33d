@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d import db as db_mod
+from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
 from d33d.projects import _sanitize_commit_message
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,155 @@ def _param_value_str(value: ParamValue) -> str:
     if isinstance(value, (int, float)):
         return f"{value:g}"
     return str(value)
+
+
+#: ``W × D × H`` dimension phrase in a version title — the three number-
+#: groups joined by ``x`` (no spaces: the design titles the model emits
+#: use the compact ``60x45x20`` form) or ``×``. Optional ``mm`` suffix
+#: allowed (``60x45x20mm``). Leading/trailing word boundaries keep the
+#: match from latching onto a longer digit run (``160x45`` does not match
+#: ``160x45x20``'s ``60x45`` tail).
+_DIM_TRIPLE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*mm)?\b")
+
+#: ``N mm`` — a number immediately followed by the ``mm`` unit (no spaces
+#: between number and unit; a space reads as prose, not a dimension —
+#: "a 20 mm tray" states a dimension in prose, not in a name badge).
+_DIM_MM_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*mm\b")
+
+
+def sanitize_dimension_phrase(
+    name: str, measured_bbox: tuple[float, float, float] | None
+) -> str:
+    """Strip dimension claims from a version title that the measured part
+    does not support (issue #276, operator decision) — a pure function.
+
+    A version name must never carry dimensions the part does not measure.
+    If ``measured_bbox`` (the whole-mesh extents of the render that became
+    the version) is ``None`` — no measurement was obtained — nothing can be
+    checked, so the name is returned untouched (an absent measurement
+    abstains; never a fabricated extent, the issue #91/#137 precedent).
+
+    Otherwise EVERY dimension-like number in the name — each number of an
+    ``N x N (x N)`` triple (``x`` or ``×`` join, optional ``mm`` suffix) and
+    every number of an ``N mm`` phrase — must match SOME measured extent
+    within the bbox tolerance ``max(BBOX_TOLERANCE_REL × extent,
+    BBOX_TOLERANCE_MIN_MM)`` (1% / 0.5 mm, the SAME tolerance as bit 3 —
+    deliberately not bit 5's disagrees-major threshold). If ANY such number
+    fails to match, the WHOLE matching dimension phrase is stripped (the
+    operator's worked example: "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray" — 20 does not match any extent, so the
+    entire ``60x45x20`` phrase goes, even though 60 and 45 are within
+    tolerance of 64 and 49). Whitespace is re-collapsed after the strip.
+
+    If the result is empty or has FEWER than 2 letters (a title that was
+    purely dimensions — "60x45x20" → "" — or a badge that left only a
+    fragment), ``""`` is returned: the caller falls back to
+    :func:`param_diff_name` (never an empty or meaningless name).
+    """
+    if measured_bbox is None:
+        return name
+    x, y, z = measured_bbox
+    extents = (x, y, z)
+
+    def _matches_extent(value: float) -> bool:
+        return any(
+            abs(value - extent)
+            <= max(BBOX_TOLERANCE_REL * extent, BBOX_TOLERANCE_MIN_MM)
+            for extent in extents
+        )
+
+    def _strip_triple(match: re.Match[str]) -> str:
+        try:
+            values = tuple(float(g) for g in match.groups())
+        except ValueError:
+            logger.debug(
+                "dimension triple %r in name %r did not parse — leaving it",
+                match.group(0),
+                name,
+            )
+            return match.group(0)  # unparseable — leave it, never mangle
+        if all(_matches_extent(v) for v in values):
+            return match.group(0)
+        return ""
+
+    def _strip_mm(match: re.Match[str]) -> str:
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            return match.group(0)
+        if _matches_extent(value):
+            return match.group(0)
+        return ""
+
+    # A measurement with a non-numeric extent is a malformed bbox, not a
+    # measurement the name can be checked against: return the name
+    # unchanged (the same honest abstain as ``None`` — never a strip
+    # based on a number the measurement did not establish).
+    if any(
+        not isinstance(e, (int, float)) or isinstance(e, bool)
+        for e in (x, y, z)
+    ):
+        return name
+
+    result = _DIM_TRIPLE_RE.sub(_strip_triple, name)
+    result = _DIM_MM_RE.sub(_strip_mm, result)
+    # A strip that removed a mid-name phrase leaves a dangling separator
+    # ("Tray 60x45x20, rev 2" → "Tray , rev 2"): collapse a separator that
+    # is stranded between two spaces before the whitespace re-collapse, so
+    # the user sees "Tray rev 2", never "Tray , rev 2" (issue #276
+    # adversarial finding 4 — cosmetic, but the name is user-facing).
+    result = re.sub(r"\s+([,;:])\s*\s+", " ", result)
+    result = _WS_RUN_RE.sub(" ", result).strip()
+    if not result or sum(c.isalpha() for c in result) < 2:
+        return ""
+    return result
+
+
+def resolve_version_name(
+    client_name: str | None,
+    scad_source: str | None,
+    *,
+    measured_bbox: tuple[float, float, float] | None,
+    prev_params: dict[str, ParamValue] | None,
+    new_params: dict[str, ParamValue],
+    existing_names: set[str] | None = None,
+) -> str:
+    """The version display name for a new version (issue #276) — one
+    resolver for BOTH version-creation paths (the chat adapter's
+    ``_resolve_version_create`` and the finalize route), so the two paths
+    can never diverge in naming precedence.
+
+    Name source, in strict precedence:
+
+    1. the client's ``name`` (the finalize route's body field — a user
+       statement wins over the model's title);
+    2. the model's ``// title:`` comment in the candidate's own SCAD
+       (``d33d.design_loop.scad_title``); the chat path (no client
+       ``name``) falls straight to this source;
+    3. a deterministic phrase from the param diff vs the previous
+       version's params (:func:`param_diff_name`).
+
+    Every non-empty candidate is first run through
+    :func:`sanitize_dimension_phrase` against ``measured_bbox`` (a name
+    must never carry dimensions the part does not measure — issue #276,
+    operator decision; ``None`` abstains — the name is used as-is). A
+    falsy result (a title that WAS the dimensions — the strip left
+    nothing meaningful) falls back to the param-diff phrase. The chosen
+    string is cleaned through :func:`clean_name` with the project's
+    existing version names as the collision baseline (the #245 follow-up
+    — two versions never share a name).
+    """
+    from d33d.design_loop import scad_title
+
+    source = client_name
+    if source is None or not source:
+        title = scad_title(scad_source) if scad_source else None
+        source = title if title else ""
+    if source:
+        sanitized = sanitize_dimension_phrase(source, measured_bbox)
+        if sanitized:
+            return clean_name(sanitized, existing_names)
+    return clean_name(param_diff_name(prev_params, new_params), existing_names)
 
 
 def param_diff_name(
@@ -1274,5 +1424,7 @@ __all__ = [
     "install_text_file_atomic",
     "migrate",
     "param_diff_name",
+    "resolve_version_name",
+    "sanitize_dimension_phrase",
     "validate_params",
 ]

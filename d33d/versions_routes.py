@@ -634,6 +634,7 @@ def create_versions_router() -> APIRouter:
             latest_stated_dims_dict,
             stated_axes_from_message,
         )
+        from d33d.versions import resolve_version_name
 
         # The previous version BEFORE the create below (the offer
         # selection's changed-set baseline and the confirmed-set
@@ -667,13 +668,36 @@ def create_versions_router() -> APIRouter:
                     latest_stated_dims_dict(svc, project_id),
                     _am if _am else _classify_axis_cues(msg_text),
                 )
+            # The version name (issue #276, operator decision): the
+            # SHARED resolver (the chat adapter's ``_resolve_version_create``
+            # uses the same one, so both paths name identically): client
+            # ``name`` → the model's ``// title:`` in the candidate's own
+            # source → the param-diff phrase; every candidate sanitised
+            # against the measured bbox (``_version_bbox_extents`` — the
+            # whole-mesh extents the loop measured for this exact
+            # candidate, the same numbers bit 5 gates on), cleaned with
+            # the project's existing names as the collision baseline.
+            # The measured bbox is computed ONCE (reused for the
+            # persistence below). Unlike the chat path, a falsy
+            # post-sanitise name falls back to ``create_version``'s
+            # message-derived auto-name (the existing honest fallback —
+            # the version is still created, never suppressed).
+            _measured_bbox = _version_bbox_extents(result)
+            _version_name = resolve_version_name(
+                body.name,
+                candidate_source,
+                measured_bbox=_measured_bbox,
+                prev_params=dict(prev_version["params"]) if prev_version is not None else None,
+                new_params=params,
+                existing_names={v["name"] for v in svc.list_versions(project_id)},
+            )
             v = await svc.create_version(
                 project_id,
                 params,
-                name=body.name,
+                name=_version_name or None,
                 message=body.message or "design finalize",
                 scad_source=(candidate_source or None),
-                bbox=_version_bbox_extents(result),
+                bbox=_measured_bbox,
                 render_artifact_dir=_version_render_artifact_dir(result),
                 stated_dims=per_axis_stated or None,
                 param_meta=_version_param_meta(result),

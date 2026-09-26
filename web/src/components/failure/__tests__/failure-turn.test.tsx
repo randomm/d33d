@@ -108,6 +108,63 @@ describe("FailureTurn", () => {
     expect(xRow.textContent).not.toMatch(/\d/);
   });
 
+  it("renders one line per mismatch in the mono face under the headline (issue #276)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.axis_params_mismatch,
+      detail: "axis_params_mismatch",
+      retryable: true,
+      reason: "axis_params_mismatch",
+      mismatches: [
+        { label: "Tray height", model: 20, measured: 102, axis: "H" },
+        { label: "Width", model: 60, measured: 64, axis: "W" },
+      ],
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    // The structured mismatches render as one line per entry, formatted by
+    // the SPA's own copy helper (the server never pre-formats them).
+    const list = screen.getByTestId("failure-turn-mismatches");
+    expect(list.textContent).toBe(
+      [
+        copy.failure.axisMismatchLine("Tray height", 20, 102),
+        copy.failure.axisMismatchLine("Width", 60, 64),
+      ].join(""),
+    );
+    // Each line renders the copy helper's output (the numbers are
+    // mm-formatted by the SPA, never the server's raw string — the
+    // "102" and "20" appear mm-formatted beside the label).
+    const lines = container.querySelectorAll(".failure-turn-mismatch-line");
+    expect(lines.length).toBe(2);
+    expect((lines[0] as HTMLElement).textContent).toBe(
+      copy.failure.axisMismatchLine("Tray height", 20, 102),
+    );
+    expect((lines[1] as HTMLElement).textContent).toBe(
+      copy.failure.axisMismatchLine("Width", 60, 64),
+    );
+    // The headline stays number-free — the numbers live only in the
+    // mismatch detail.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toBe(
+      copy.failure.reasons.axis_params_mismatch,
+    );
+    expect(screen.getByTestId("failure-turn-sentence").textContent).not.toMatch(
+      /\d/,
+    );
+  });
+
+  it("no mismatch detail renders when the frame carries no mismatches", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.axis_params_mismatch,
+      detail: "axis_params_mismatch",
+      retryable: true,
+      reason: "axis_params_mismatch",
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    expect(container.querySelector("[data-testid='failure-turn-mismatches']")).toBeNull();
+  });
+
   it("the surviving version is always named", () => {
     const error: DisplayError = {
       message: copy.failure.reasons.empty_model,

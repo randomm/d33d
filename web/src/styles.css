@@ -637,6 +637,24 @@ button.chat-send-btn:disabled {
   color: var(--color-fg-2);
 }
 
+/* The per-param mismatch detail (issue #276): one line per mismatching
+   parameter (label + declared value + measured extent), rendered in the
+   mono face under the number-free headline — a number must never hide in
+   a sentence. */
+.failure-turn-mismatches {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.failure-turn-mismatch-line {
+  font-family: var(--font-mono);
+  color: var(--color-fg-2);
+}
+
 .failure-turn-bars {
   display: flex;
   flex-direction: column;

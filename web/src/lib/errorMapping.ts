@@ -2,7 +2,7 @@
  * Plain-language mapping of design-loop failure reasons (issue #82, W12).
  *
  * The terminal `error` frame carries a STRUCTURED `reason` (from
- * `d33d/design_loop_events.py`) whose value is closed: the four
+ * `d33d/design_loop_events.py`) whose value is closed: the five
  * `GATE_REASON_BITS` from `d33d/design_loop.py` plus the seven render-worker
  * `ErrorClass` values plus the design-loop-level timeout reason
  * (`design_loop_timed_out`, emitted by the server-side loop deadline —
@@ -22,7 +22,7 @@
 
 import { copy } from "../copy";
 
-/** The four GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
+/** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
  *  the terminal error frame's `reason` field can hold.
  *  `copy.failure.reasons` holds the sentences; this is the key set totality
@@ -33,6 +33,7 @@ export const FAILURE_REASONS: readonly string[] = [
   "views_blank_or_missing",
   "bbox_out_of_tolerance",
   "stated_dims_not_named_parameters",
+  "axis_params_mismatch",
   // render-worker ErrorClass values (d33d/render_worker.py)
   "ok",
   "syntax_error",
@@ -70,6 +71,17 @@ export interface DisplayError {
   retryable: boolean;
   /** The structured reason code, when the frame carried one. */
   reason?: string;
+  /** The per-param mismatch detail for an `axis_params_mismatch` failure
+   *  (issue #276) — one entry per mismatching parameter, structured
+   *  (label + the model's declared value + the measured extent),
+   *  formatted client-side by `copy.failure.axisMismatchLine` (never a
+   *  raw server string). */
+  mismatches?: Array<{
+    label: string;
+    model: number;
+    measured: number;
+    axis: string;
+  }>;
   /** Part 2 — the measured number beside the limit. Present ONLY for the
    *  envelope gate; measured is parsed from the raw gate string (the
    *  frame's only source of the number — never invented). */
@@ -143,6 +155,7 @@ export function displayDesignLoopError(
     message?: string;
     reason?: unknown;
     carried_axes?: unknown;
+    mismatches?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -171,8 +184,53 @@ export function displayDesignLoopError(
         message = copy.failure.bboxCarried(label, axes[0][1]);
       }
     }
+    // The axis_params_mismatch detail (issue #276): the per-param numbers
+    // arrive STRUCTURED as `mismatches` (one entry per mismatching param —
+    // label + the model-declared value + the measured extent, all
+    // server-side gate numbers — the client never re-derives or invents
+    // an extent). The SPA owns the formatting:
+    // `copy.failure.axisMismatchLine(label, model, measured)`. Absent or
+    // malformed entries are dropped; no valid entries → the raw reason,
+    // as before (an honest headless detail).
     let detail = reason;
     let envelope: DisplayError["envelope"];
+    let mismatches: DisplayError["mismatches"];
+    if (reason === "axis_params_mismatch" && Array.isArray(data.mismatches)) {
+      const parsed = (data.mismatches as unknown[]).flatMap((m) => {
+        if (
+          typeof m !== "object" ||
+          m === null ||
+          Array.isArray(m)
+        ) {
+          return [];
+        }
+        const entry = m as Record<string, unknown>;
+        const label = entry.label;
+        const model = entry.model;
+        const measured = entry.measured;
+        if (
+          typeof label !== "string" ||
+          label.length === 0 ||
+          typeof model !== "number" ||
+          !Number.isFinite(model) ||
+          typeof measured !== "number" ||
+          !Number.isFinite(measured) ||
+          typeof entry.axis !== "string" ||
+          entry.axis.length === 0
+        ) {
+          return [];
+        }
+        return [{ label, model, measured, axis: entry.axis }];
+      });
+      if (parsed.length > 0) {
+        mismatches = parsed;
+        detail = parsed
+          .map((p) =>
+            copy.failure.axisMismatchLine(p.label, p.model, p.measured),
+          )
+          .join("\n");
+      }
+    }
     if (reason === "bbox_out_of_tolerance" && envelopeLimits !== undefined) {
       const parsed = parseEnvelopeGateDetail(rawMessage, envelopeLimits);
       if (parsed !== null) {
@@ -188,6 +246,7 @@ export function displayDesignLoopError(
       retryable: true,
       reason,
       ...(envelope !== undefined ? { envelope } : {}),
+      ...(mismatches !== undefined ? { mismatches } : {}),
     };
   }
   return {

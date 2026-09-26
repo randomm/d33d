@@ -50,10 +50,11 @@ from d33d.design_loop import (
     BboxInfo,
     DesignResult,
     Score,
+    _axis_param_mismatches,
     _scad_from_result,
+    extract_confirm_hints,
     extract_named_params,
     extract_param_meta,
-    extract_confirm_hints,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -192,8 +193,8 @@ def test_score_is_bitvector_rank_with_tiebreak():
     good = score(
         _render(), STATED, bbox=BboxInfo(20, 25, 30, 15000.0), scad_source=GOOD_SCAD
     )
-    assert good.bits == (True, True, True, True)
-    assert good.rank == 4
+    assert good.bits == (True, True, True, True, True)
+    assert good.rank == 5
     assert good.perfect
 
     bad = score(
@@ -204,16 +205,148 @@ def test_score_is_bitvector_rank_with_tiebreak():
     # The failed render still reports the six view filenames and the scad
     # still carries the named-parameter block — only the ok/ok-bbox gates
     # fail on a syntax error (the metric is a pure function of its inputs).
-    assert bad.rank == 2
-    assert bad.bits == (False, True, False, True)
+    assert bad.rank == 3
+    assert bad.bits == (False, True, False, True, True)
+
+
+def test_score_bit5_axis_params_mismatch():
+    """Issue #276 bit 5: a param with a declared axis whose SCAD value
+    differs from the measured bbox extent on that axis by more than
+    max(20% of the value, 5 mm) makes bit 5 False."""
+    # 20 vs 102: diff=82 > max(4, 5)=5 → bit 5 False
+    s = score(
+        _render(),
+        (20.0, 25.0, 30.0),
+        bbox=BboxInfo(20.0, 25.0, 102.0, 51000.0),
+        scad_source="H = 20;\ncube([20, 25, H]);\n",
+        param_meta={"H": {"label": "Tray height", "unit": "mm", "axis": "H"}},
+        named_params={"H": 20.0},
+    )
+    assert s.bits[4] is False
+    # Bit 3 (bbox) also fails: stated H=30 but measured z=102.
+    assert s.bits[2] is False
+    assert s.rank == 3  # 3 of 5 bits pass (ok, views, named_params)
+
+
+def test_score_bit5_lip_case_passes():
+    """Issue #276 lip case: body param 40, measured 43.8 → diff 3.8 <
+    max(8, 5)=8 → bit 5 True (the 5 mm margin is the pass/fail boundary)."""
+    s = score(
+        _render(),
+        (40.0, 40.0, 12.0),
+        bbox=BboxInfo(43.80, 43.90, 12.0, 2297.0),
+        scad_source="spacer_width = 40;\nspacer_depth = 40;\ncube([spacer_width, spacer_depth, 12]);\n",
+        param_meta={
+            "spacer_width": {"label": "Spacer width", "unit": "mm", "axis": "W"},
+            "spacer_depth": {"label": "Spacer depth", "unit": "mm", "axis": "D"},
+        },
+        named_params={"spacer_width": 40.0, "spacer_depth": 40.0},
+    )
+    assert s.bits[4] is True
+    # Bit 3 (bbox) fails: stated W=40/D=40 but measured 43.8/43.9.
+    assert s.bits[2] is False
+    assert s.rank == 4  # 4 of 5 bits pass (ok, views, named_params, axis_params)
+
+
+def test_score_bit5_no_axis_ignored():
+    """Issue #276: a param with no declared axis is ignored by bit 5."""
+    s = score(
+        _render(),
+        (20.0, 25.0, 30.0),
+        bbox=BboxInfo(102.0, 25.0, 30.0, 51000.0),
+        scad_source="H = 20;\ncube([102, 25, H]);\n",
+        param_meta={"H": {"label": "Tray height", "unit": "mm"}},  # no axis
+        named_params={"H": 20.0},
+    )
+    assert s.bits[4] is True  # no axis → ignored
+
+
+def test_score_bit5_zero_value_ignored():
+    """Issue #276: a param with a zero value is ignored by bit 5."""
+    s = score(
+        _render(),
+        (20.0, 25.0, 30.0),
+        bbox=BboxInfo(102.0, 25.0, 30.0, 51000.0),
+        scad_source="W = 0;\ncube([102, 25, 30]);\n",
+        param_meta={"W": {"label": "Width", "unit": "mm", "axis": "W"}},
+        named_params={"W": 0.0},
+    )
+    assert s.bits[4] is True  # zero value → ignored
+
+
+def test_score_bit5_exactly_at_threshold_passes():
+    """Issue #276 boundary: a diff exactly at the threshold passes (strict >).
+    25 mm param, measured 30 → diff 5 = max(5, 5) = 5 → passes."""
+    s = score(
+        _render(),
+        (25.0, 25.0, 25.0),
+        bbox=BboxInfo(30.0, 25.0, 25.0, 18750.0),
+        scad_source="W = 25;\ncube([W, 25, 25]);\n",
+        param_meta={"W": {"label": "Width", "unit": "mm", "axis": "W"}},
+        named_params={"W": 25.0},
+    )
+    assert s.bits[4] is True  # diff == threshold → passes
+
+
+def test_score_bit5_non_numeric_ignored():
+    """Issue #276: a non-numeric param value is ignored by bit 5."""
+    s = score(
+        _render(),
+        (20.0, 25.0, 30.0),
+        bbox=BboxInfo(102.0, 25.0, 30.0, 51000.0),
+        scad_source="H = 20;\ncube([102, 25, H]);\n",
+        param_meta={"H": {"label": "Tray height", "unit": "mm", "axis": "H"}},
+        named_params={"H": 20.0, "note": "some value"},
+    )
+    assert s.bits[4] is False  # H still fails, note is ignored
+
+
+def test_axis_param_mismatches_returns_per_param_evidence():
+    """Issue #276: ``_axis_param_mismatches`` returns one
+    ``(label, model, measured, axis)`` tuple per mismatching param, empty
+    when every declared-axis param matches (bit 5 passes)."""
+    # Two mismatching params, one matching param → two entries, the
+    # matching param is absent.
+    out = _axis_param_mismatches(
+        BboxInfo(80.0, 49.0, 102.0, 51000.0),
+        {"W": 60.0, "D": 45.0, "H": 20.0, "note": "a string"},
+        {
+            "W": {"label": "Tray width", "unit": "mm", "axis": "W"},
+            "D": {"label": "Tray depth", "unit": "mm", "axis": "D"},
+            "H": {"label": "Tray height", "unit": "mm", "axis": "H"},
+        },
+    )
+    # Order follows the named_params dict — compare as a set.
+    assert set(out) == {
+        ("Tray width", 60.0, 80.0, "W"),
+        ("Tray height", 20.0, 102.0, "H"),
+    }
+    # A matching param → empty (bit 5 passes).
+    assert (
+        _axis_param_mismatches(
+            BboxInfo(43.8, 43.9, 12.0, 2297.0),
+            {"w": 40.0},
+            {"w": {"label": "Spacer width", "unit": "mm", "axis": "W"}},
+        )
+        == []
+    )
+    # No bbox → empty (the caller abstains).
+    assert _axis_param_mismatches(None, {"H": 20.0}, {}) == []
+    # No label in the meta → the param name is the label fallback.
+    out = _axis_param_mismatches(
+        BboxInfo(25.0, 25.0, 30.0, 18750.0),
+        {"h": 20.0},
+        {"h": {"axis": "H"}},
+    )
+    assert out == [("h", 20.0, 30.0, "H")]
 
 
 def test_no_improvement_is_named_predicate_on_rank():
     low = Score(
-        bits=(False, False, False, False), rank=0, tiebreak=(False, False, False, False)
+        bits=(False, False, False, False, False), rank=0, tiebreak=(False, False, False, False, False)
     )
     high = Score(
-        bits=(True, False, False, False), rank=1, tiebreak=(True, False, False, False)
+        bits=(True, False, False, False, False), rank=1, tiebreak=(True, False, False, False, False)
     )
     assert no_improvement(high, low) is True  # non-increase
     assert no_improvement(low, high) is False  # increase
@@ -222,13 +355,13 @@ def test_no_improvement_is_named_predicate_on_rank():
 
 def test_is_best_rank_then_deterministic_tiebreak():
     a = Score(
-        bits=(True, True, False, False), rank=2, tiebreak=(True, True, False, False)
+        bits=(True, True, False, False, False), rank=2, tiebreak=(True, True, False, False, False)
     )
     b = Score(
-        bits=(True, False, True, False), rank=2, tiebreak=(True, False, True, False)
+        bits=(True, False, True, False, False), rank=2, tiebreak=(True, False, True, False, False)
     )
     c = Score(
-        bits=(False, False, False, False), rank=0, tiebreak=(False, False, False, False)
+        bits=(False, False, False, False, False), rank=0, tiebreak=(False, False, False, False, False)
     )
     assert is_best(a, c) is True
     assert is_best(c, a) is False
@@ -421,13 +554,13 @@ def test_early_stop_after_two_consecutive_no_improvements():
 
     result = _run_loop(llm_script=llm, render_script=renders, bbox_fn=bbox_fn)
     assert result.status == "exhausted"
-    # Declining rank trajectory: 3 (ok, views, params) → 1 (params only) → 1.
-    assert [r.score.rank for r in result.iterations] == [3, 1, 1]
+    # Declining rank trajectory: 4 (ok, views, params, axis-params) → 2 (views, params) → 2.
+    assert [r.score.rank for r in result.iterations] == [4, 2, 2]
     # Two consecutive non-improvements fired → early stop at iteration 3.
     assert result.iterations_used == NO_IMPROVEMENT_LIMIT + 1 == 3
-    # The best is iteration 1 (rank 3), NOT the last attempt (rank 1).
+    # The best is iteration 1 (rank 4), NOT the last attempt (rank 2).
     assert result.best.iteration == 1
-    assert result.best.score.rank == 3
+    assert result.best.score.rank == 4
 
 
 def test_pass_on_third_iteration_still_counts_within_cap():
@@ -488,6 +621,76 @@ def test_compile_failure_feeds_structured_repair_into_next_iteration():
     assert result.iterations[0].failure_class == "unclassified_syntax_error"
     assert result.iterations[0].repair is not None
     assert result.iterations[0].repair["failure_class"] == "unclassified_syntax_error"
+
+
+def test_axis_params_mismatch_feeds_repair_into_next_iteration():
+    """Issue #276: a design run whose first iteration has an axis-declared
+    param that contradicts the measured bbox (bit 5 fails) → the repair
+    prompt for iteration 2 contains the mismatch text naming the param
+    with both numbers. The second iteration's render matches → pass."""
+    seen_prompts: list[str] = []
+
+    # Iteration 1: H=20 declared with axis H, measured z=102 → bit 5 fails.
+    # Iteration 2: H=102 declared with axis H, measured z=102 → bit 5 passes.
+    scad1 = "H = 20;\ncube([20, 25, H]);\n"
+    scad2 = "H = 102;\ncube([20, 25, H]);\n"
+
+    def _scad_llm_with_meta(scad: str) -> LLMResult:
+        """A T1-shaped design response with a parameters metadata array."""
+        meta = [{"name": "H", "label": "Tray height", "unit": "mm", "axis": "H"}]
+        args: dict[str, Any] = {"scad": scad, "parameters": meta}
+        return LLMResult(
+            content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+            tool_calls=({"name": "emit_design", "arguments": args},),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        seen_prompts.append(text)
+        if "REPAIR directive" in text:
+            return _scad_llm_with_meta(scad2)
+        return _scad_llm_with_meta(scad1)
+
+    def render_fn(scad, defines):
+        return _render()
+
+    def bbox_fn(r: RenderResult) -> BboxInfo | None:
+        if r.error_class != "ok":
+            return None
+        # Both iterations measure z=102 (the model's H=20 is wrong,
+        # H=102 is correct).
+        return BboxInfo(x=20.0, y=25.0, z=102.0, volume=51000.0)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 25.0, 102.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    # First prompt: no repair directive. Second: the axis_params_mismatch
+    # directive naming the param with both numbers.
+    assert "REPAIR directive" not in seen_prompts[0]
+    assert "REPAIR directive" in seen_prompts[1]
+    assert "failure_class: axis_params_mismatch" in seen_prompts[1]
+    # The directive's evidence line — the declared vs measured pairing the
+    # instruction promises ("listed below with both numbers") — must itself
+    # reach the prompt: the previous_scad block only carries the SCAD's own
+    # numbers, never the measured extents, so without the evidence line the
+    # model cannot see the 102-vs-20 pairing on a line of its own.
+    assert "evidence: Tray height = 20 but the part measures 102 on H" in (
+        seen_prompts[1]
+    )
+    # The first iteration's recorded failure class is axis_params_mismatch.
+    assert result.iterations[0].failure_class == "axis_params_mismatch"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[0].repair["failure_class"] == "axis_params_mismatch"
 
 
 def test_oom_mid_loop_is_not_repair_and_does_not_crash():

@@ -47,7 +47,7 @@ class _ExhaustedResult:
             iteration=0,
             scad_source="W = 30;\ncube([W, W, W]);",
             render=render,
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = "bbox_out_of_tolerance"

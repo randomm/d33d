@@ -347,7 +347,7 @@ def test_loop_no_dims_reaches_pass_with_distinct_abstention() -> None:
         bbox_fn=lambda r: bbox,
     )
     assert result.status == "pass"
-    assert result.best.score.bits == (True, True, True, True)
+    assert result.best.score.bits == (True, True, True, True, True)
     # The abstention is recorded distinctly: the bbox bit is True ONLY
     # because no dimension was known.
     assert result.best.score.bbox_abstained is True
@@ -389,17 +389,18 @@ def test_score_abstained_bitvector_ordering_unchanged() -> None:
     )
     # Same 4-bit vector and rank — the ordering is unchanged.
     assert abstained.bits == measured_pass.bits
-    assert abstained.rank == measured_pass.rank == 4
+    assert abstained.rank == measured_pass.rank == 5
     assert abstained.tiebreak == measured_pass.tiebreak
     # And the flag is what distinguishes them.
     assert abstained.bbox_abstained is True
     assert measured_pass.bbox_abstained is False
-    # GATE_REASON_BITS is still the 4-name tuple in bit order.
+    # GATE_REASON_BITS is the 5-name tuple in bit order.
     assert GATE_REASON_BITS == (
         "error_class_not_ok",
         "views_blank_or_missing",
         "bbox_out_of_tolerance",
         "stated_dims_not_named_parameters",
+        "axis_params_mismatch",
     )
     # Comparison helpers are unaffected by the new field.
     assert is_best(measured_pass, abstained) is False
@@ -429,7 +430,7 @@ def test_score_partial_triple_measured_axes_pass_still_flagged() -> None:
     # reports an arbitrary y extent.
     s = score(r, (20.0, 0.0, 20.0), bbox=BboxInfo(20.0, 7.0, 20.0, 1.0),
               scad_source="x = 20; cube([x]);")
-    assert s.bits == (True, True, True, True)
+    assert s.bits == (True, True, True, True, True)
     assert s.bbox_abstained is True
     # All-known control: the same render against a complete triple is a
     # MEASURED pass, never flagged.
@@ -821,7 +822,7 @@ def test_region_edit_fresh_project_bbox_gate_abstains_not_fails(
     # could never pass on a fresh project).
     assert len(results) == 1
     assert results[0].status == "pass"
-    assert results[0].best.score.bits == (True, True, True, True)
+    assert results[0].best.score.bits == (True, True, True, True, True)
     assert results[0].best.score.bbox_abstained is True, (
         "the bbox bit is True ONLY because no axis is confirmed "
         "(the target is unknown) — the abstention must be recorded distinctly"

@@ -30,7 +30,7 @@ class _StubResult:
             iteration=0,
             scad_source="",
             render=_default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"

@@ -43,7 +43,7 @@ class _StubResult:
             iteration=0,
             scad_source=scad,
             render=render if render is not None else _default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
@@ -149,7 +149,7 @@ def _pass_result_with_bbox(
         iteration=0,
         scad_source=scad,
         render=render if render is not None else _default_render(),
-        score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+        score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
         params=params if params is not None else {"W": 30.0, "D": 30.0, "H": 30.0},
         bbox=bbox,
     )
@@ -373,6 +373,287 @@ def test_finalize_exhausted_does_not_create_version(app_with_versions):
     # No spurious version.
     assert timeline == []
     assert row["current_version"] is None
+
+
+def test_axis_params_mismatch_always_failing_exhausts_with_reason():
+    """Issue #276: an always-mismatched run (bit 5 fails every iteration)
+    → an exhausted failure with reason `axis_params_mismatch` (the first
+    failing bit is bit 5, since bits 1-4 all pass)."""
+    from d33d.design_llm import LLMResult
+    from d33d.design_loop import run_design_loop
+
+    def _scad_llm_with_meta(scad: str) -> LLMResult:
+        meta = [{"name": "H", "label": "Tray height", "unit": "mm", "axis": "H"}]
+        args: dict[str, object] = {"scad": scad, "parameters": meta}
+        return LLMResult(
+            content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+            tool_calls=({"name": "emit_design", "arguments": args},),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    def _render_ok() -> RenderResult:
+        return RenderResult(
+            ok=True,
+            exit_code=0,
+            duration_ms=1,
+            error_class="ok",
+            stderr="",
+            stl="model.stl",
+            csg="model.csg",
+            views=("v0.png", "v1.png", "v2.png", "v3.png", "v4.png", "v5.png"),
+        )
+
+    scad = "H = 20;\ncube([20, 25, H]);\n"
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=(20.0, 25.0, 102.0),
+        render_fn=lambda scad_source, defines: _render_ok(),
+        llm_fn=lambda role, messages, system: _scad_llm_with_meta(scad),
+        bbox_fn=lambda r: BboxInfo(x=20.0, y=25.0, z=102.0, volume=51000.0),
+        max_iterations=3,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "axis_params_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# (2b) Version-name dimension sanitisation (issue #276, operator decision)
+#
+# A version name must never carry dimensions the part does not measure.
+# The pure function ``sanitize_dimension_phrase`` strips a dimension
+# phrase (``N x N (x N)`` / ``N mm``) whose numbers don't all match a
+# measured bbox extent within the bbox tolerance (1% / 0.5 mm — bit 3's
+# tolerance, NOT bit 5's disagrees-major threshold); if the strip leaves
+# an empty or meaningless name it returns ``""`` (the caller falls back
+# to ``param_diff_name`` / the message-derived auto-name, never an empty
+# name). ``None`` (no measurement) abstains — the name is returned
+# untouched (issue #91/#137's honest-absence precedent).
+# ---------------------------------------------------------------------------
+
+
+def test_name_sanitization_worked_example_strips_dimension_phrase():
+    """The operator's worked example: "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray". 20 matches no extent (within tolerance:
+    20 vs 64 Δ44, vs 49 Δ29, vs 102 Δ82), so the WHOLE ``60x45x20`` phrase
+    is stripped even though 60 (Δ4 vs 64) and 45 (Δ4 vs 49) are within
+    tolerance of 64 and 49 — the operator's decision: strip the WHOLE
+    phrase if ANY number fails."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Flared lip tray 60x45x20", (64.0, 49.0, 102.0))
+        == "Flared lip tray"
+    )
+
+
+def test_name_sanitization_all_numbers_match_keeps_phrase():
+    """Every number of the triple matches a measured extent within
+    tolerance → the phrase is kept (no strip). "Box 40x45x20" with bbox
+    40×45×20 (exact) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 40x45x20", (40.0, 45.0, 20.0)) == "Box 40x45x20"
+
+
+def test_name_sanitization_all_match_with_tolerance_keeps():
+    """Numbers within the bbox tolerance (1% / 0.5 mm) of a measured
+    extent match → kept. "Box 40x45x20" with bbox 40.2×45.1×20.0 (Δ0.2,
+    Δ0.1, Δ0.0 — all within max(1%, 0.5 mm)) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Box 40x45x20", (40.2, 45.1, 20.0))
+        == "Box 40x45x20"
+    )
+
+
+def test_name_sanitization_pure_dimensions_falls_back_to_empty():
+    """A title that is PURELY dimensions ("60x45x20") with a measurement
+    → the strip leaves an empty name → ``""`` (the caller falls back to
+    ``param_diff_name``; never an empty or meaningless name is shown)."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("60x45x20", (64.0, 49.0, 102.0)) == ""
+
+
+def test_name_sanitization_pure_dimensions_no_measurement_kept():
+    """No measurement (``None``) → abstain: the name is returned untouched
+    (issue #91/#137's honest-absence precedent — an absent measurement
+    never strips, never fabricates an extent)."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("60x45x20", None) == "60x45x20"
+    assert sanitize_dimension_phrase("Flared lip tray 60x45x20", None) == (
+        "Flared lip tray 60x45x20"
+    )
+
+
+def test_name_sanitization_mm_phrase_stripped_when_number_fails():
+    """An ``N mm`` phrase whose number matches no measured extent is
+    stripped. "Box 38mm" with bbox 40×45×20 → 38 matches no extent (Δ2
+    vs 40 — max(0.4, 0.5)=0.5; Δ2 > 0.5 → fail) → "Box"."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 38mm", (40.0, 45.0, 20.0)) == "Box"
+
+
+def test_name_sanitization_mm_phrase_kept_when_number_matches():
+    """An ``N mm`` phrase whose number matches a measured extent (within
+    tolerance) is kept. "Box 20mm" with bbox 40×45×20 → 20 matches z=20
+    (Δ0) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 20mm", (40.0, 45.0, 20.0)) == "Box 20mm"
+
+
+def test_name_sanitization_times_symbol_triple():
+    """The ``×`` (U+00D7) join is also recognised as a dimension triple.
+    "Flared lip tray 60×45×20" with bbox 64×49×102 → 20 fails → whole
+    phrase stripped → "Flared lip tray"."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Flared lip tray 60\u00d745\u00d720", (64.0, 49.0, 102.0))
+        == "Flared lip tray"
+    )
+
+
+def test_name_sanitization_mm_suffix_triple():
+    """A triple with an ``mm`` suffix ("60x45x20mm") is recognised. With
+    bbox 64×49×102, 20 fails → whole phrase stripped."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20mm", (64.0, 49.0, 102.0)) == "Tray"
+    )
+
+
+# ---------------------------------------------------------------------------
+# (2c) The shared version-name resolver (issue #276)
+#
+# ``resolve_version_name`` owns the name precedence (client name →
+# ``scad_title`` → param-diff fallback), the ``sanitize_dimension_phrase``
+# pass, the ``clean_name`` pass, and the falsy fallback. Both creation
+# paths (the chat adapter and the finalize route) call it, so the two
+# paths name identically.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_version_name_chat_path_scad_title_worked_example():
+    """The chat path (no client name): the SCAD title wins, sanitised
+    against the measured bbox. "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray" (20 matches no extent — the WHOLE
+    dimension phrase is stripped, the operator's worked example)."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "Flared lip tray"
+
+
+def test_resolve_version_name_client_name_wins_over_scad_title():
+    """Client name (the finalize route's body field) beats the model's
+    title — the user's words win."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        "my bracket",
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "my bracket"
+
+
+def test_resolve_version_name_falsy_falls_back_to_param_diff_name():
+    """A title that IS the dimensions (the strip leaves nothing
+    meaningful) → the param-diff phrase ("First design" on a fresh
+    project), never an empty name."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "First design"
+
+
+def test_resolve_version_name_no_title_uses_param_diff_name():
+    """No ``// title:`` in the SCAD → the param-diff phrase."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "H = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params={"H": 10.0},
+        new_params={"H": 20.0},
+    )
+    assert name == "H 10 → 20"
+
+
+def test_resolve_version_name_none_bbox_abstains():
+    """No measurement → the title is used as-is (an absent measurement
+    abstains — never a strip based on a fabricated extent)."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=None,
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "Flared lip tray 60x45x20"
+
+
+def test_resolve_version_name_client_name_sanitize_falsy_falls_back_to_diff():
+    """A client name that IS the dimensions (the strip leaves nothing)
+    → the param-diff phrase, never an empty name."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        "60x45x20",
+        None,
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params={"H": 10.0},
+        new_params={"H": 20.0},
+    )
+    assert name == "H 10 → 20"
+
+
+def test_name_sanitization_strip_leaves_no_dangling_separator():
+    """A mid-name strip that removed a phrase must not leave a stranded
+    separator (issue #276 adversarial finding 4): "Tray 60x45x20, rev 2"
+    with bbox 64×49×102 → the triple fails (20 ≠ any extent) → stripped →
+    "Tray rev 2" — never "Tray , rev 2" (the dangling comma the user
+    would see through ``clean_name``). Non-dimension numbers ("rev 2")
+    are untouched: only ``N x N (x N)`` and ``N mm`` phrases are checked."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20, rev 2", (64.0, 49.0, 102.0))
+        == "Tray rev 2"
+    )
+    # A comma after a KEPT phrase is untouched (no stranded separator).
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20, rev 2", (60.0, 45.0, 20.0))
+        == "Tray 60x45x20, rev 2"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1020,6 +1301,119 @@ def test_region_edit_exhausted_emits_error_frame_and_no_version(app_with_version
     assert timeline == [], "exhausted loop must not create a version"
 
 
+def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatches(
+    app_with_versions,
+):
+    """Issue #276: an exhausted loop whose best candidate fails bit 5
+    (``axis_params_mismatch``) emits a terminal error frame whose
+    structured ``mismatches`` field carries the per-param detail
+    (``{label, model, measured, axis}`` — the server's own gate evidence,
+    one entry per mismatching param) so the SPA's failure turn renders
+    one line per mismatch via its own copy helper without re-deriving any
+    number. A stub whose best record carries no repair yields no
+    ``mismatches`` (omit-not-null, honest absence)."""
+    from d33d.design_loop import IterationRecord, Score
+
+    class _AxisStubResult:
+        def __init__(
+            self,
+            with_repair: bool,
+            evidence: str = "Tray height = 20 but the part measures 102 on H",
+        ) -> None:
+            self.status = "exhausted"
+            self.failure_reason = "axis_params_mismatch"
+            repair = None
+            if with_repair:
+                repair = {
+                    "failure_class": "axis_params_mismatch",
+                    "evidence": evidence,
+                }
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="H = 20;\ncube([20, 25, H]);\n",
+                render=_default_render(),
+                score=Score(
+                    bits=(True, True, True, True, False),
+                    rank=4,
+                    tiebreak=(True, True, True, True, False),
+                ),
+                params={"H": 20.0},
+                repair=repair,
+            )
+
+    async def _drive(client, with_repair: bool):
+        """One client, one loop call: project → stub swap → chat → drain."""
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _AxisStubResult(
+            with_repair
+        )
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 x 45 x 20"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    async def _drive_multi(client):
+        """Multi-param evidence: the stub's repair carries two lines."""
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _AxisStubResult(
+            True,
+            evidence=(
+                "Tray height = 20 but the part measures 102 on H; "
+                "Width = 60 but the part measures 64 on W"
+            ),
+        )
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 x 45 x 20"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    # All three cases drive under ONE event loop / one client: the app's
+    # DB connection is owned by the lifespan context, and a second
+    # ``run_async`` on the same app would operate on a closed DB.
+    async def _call_all(client):
+        # (a) repair evidence present → mismatches ride the error frame.
+        f_a = await _drive(client, True)
+        # (a2) multi-param evidence → one entry per mismatching param.
+        f_multi = await _drive_multi(client)
+        # (b) no repair on the record → the field is OMITTED (omit-not-null).
+        f_b = await _drive(client, False)
+        return f_a, f_multi, f_b
+
+    frames, frames_multi, frames_norepair = run_async(app_with_versions, _call_all)
+
+    assert frames[-1][0] == "error"
+    error_data = frames[-1][1]
+    assert error_data["reason"] == "axis_params_mismatch"
+    assert error_data["mismatches"] == [
+        {"label": "Tray height", "model": 20.0, "measured": 102.0, "axis": "H"}
+    ]
+
+    assert frames_multi[-1][0] == "error"
+    assert frames_multi[-1][1]["mismatches"] == [
+        {"label": "Tray height", "model": 20.0, "measured": 102.0, "axis": "H"},
+        {"label": "Width", "model": 60.0, "measured": 64.0, "axis": "W"},
+    ]
+
+    assert frames_norepair[-1][0] == "error"
+    assert "mismatches" not in frames_norepair[-1][1]
+
+
 def test_region_edit_unwired_loop_returns_202_and_terminates_with_error(
     app_with_versions,
 ):
@@ -1158,7 +1552,7 @@ class _StubResult:
             iteration=0,
             scad_source=scad,
             render=render if render is not None else _default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"

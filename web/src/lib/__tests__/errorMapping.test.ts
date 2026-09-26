@@ -1,7 +1,7 @@
 /**
  * errorMapping — totality and the envelope gate's measured number.
  *
- * The map must stay TOTAL: every GATE_REASON_BITS value and every
+ * The map must stay TOTAL: every GATE_REASON_BITS value (five) and every
  * render-worker ErrorClass value maps to copy (part 1) — a class with no
  * sentence renders nothing, the worst possible failure surface. The
  * envelope gate's part 2 (the measured value beside the limit) is parsed
@@ -18,12 +18,13 @@ import {
 } from "../errorMapping";
 import { copy } from "../../copy";
 
-/** The four GATE_REASON_BITS (d33d/design_loop.py, bit order). */
+/** The five GATE_REASON_BITS (d33d/design_loop.py, bit order). */
 const GATE_REASON_BITS = [
   "error_class_not_ok",
   "views_blank_or_missing",
   "bbox_out_of_tolerance",
   "stated_dims_not_named_parameters",
+  "axis_params_mismatch",
 ];
 
 /** The seven render-worker ErrorClass values (d33d/render_worker.py). */
@@ -44,7 +45,7 @@ const LOOP_FAILURE_REASONS = ["design_loop_timed_out"];
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];
 
 describe("errorMapping", () => {
-  it("every GATE_REASON_BITS value and every ErrorClass value maps to copy (totality)", () => {
+  it("every GATE_REASON_BITS value (five) and every ErrorClass value maps to copy (totality)", () => {
     for (const reason of CLOSED_SET) {
       // The exported closed set contains the reason.
       expect(FAILURE_REASONS).toContain(reason);
@@ -66,8 +67,72 @@ describe("errorMapping", () => {
     }
   });
 
-  it("the closed set is exactly the four bits plus the seven classes plus the loop timeout", () => {
+  it("the closed set is exactly the five bits plus the seven classes plus the loop timeout", () => {
     expect([...CLOSED_SET].sort()).toEqual([...FAILURE_REASONS].sort());
+  });
+
+  it("the axis_params_mismatch headline carries no numbers (issue #276)", () => {
+    // The headline is the reason-code sentence — the per-parameter numbers
+    // ride in the failure detail (copy.failure.axisMismatchLine), never in
+    // a headline the SPA cannot have established.
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+    });
+    expect(display.message).toBe(copy.failure.reasons.axis_params_mismatch);
+    expect(display.message).not.toMatch(/\d/);
+    expect(display.detail).toBe("axis_params_mismatch");
+    expect(display.retryable).toBe(true);
+  });
+
+  it("the axis_params_mismatch frame carries structured mismatches, one entry per param (issue #276)", () => {
+    // The per-param numbers ride in the error frame's `mismatches`
+    // (STRUCTURED — the server's own gate evidence: label + the model's
+    // declared value + the measured extent). The SPA owns the formatting:
+    // each entry renders via copy.failure.axisMismatchLine (the detail is
+    // the joined lines). The headline stays number-free.
+    const single = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatches: [{ label: "Tray height", model: 20, measured: 102, axis: "H" }],
+    });
+    expect(single.message).toBe(copy.failure.reasons.axis_params_mismatch);
+    expect(single.mismatches).toEqual([
+      { label: "Tray height", model: 20, measured: 102, axis: "H" },
+    ]);
+    expect(single.detail).toBe(copy.failure.axisMismatchLine("Tray height", 20, 102));
+
+    const multi = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatches: [
+        { label: "Tray height", model: 20, measured: 102, axis: "H" },
+        { label: "Width", model: 60, measured: 64, axis: "W" },
+      ],
+    });
+    expect(multi.mismatches).toHaveLength(2);
+    expect(multi.detail).toBe(
+      [
+        copy.failure.axisMismatchLine("Tray height", 20, 102),
+        copy.failure.axisMismatchLine("Width", 60, 64),
+      ].join("\n"),
+    );
+
+    // Malformed entries are dropped; no valid entries → the raw reason
+    // (an honest headless detail), as before.
+    const malformed = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatches: ["nope", { label: "H", model: "x", measured: 1 }],
+    });
+    expect(malformed.mismatches).toBeUndefined();
+    expect(malformed.detail).toBe("axis_params_mismatch");
+
+    const headless = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+    });
+    expect(headless.detail).toBe("axis_params_mismatch");
   });
 
   it("an unknown reason code maps to the generic sentence, raw code in detail", () => {
