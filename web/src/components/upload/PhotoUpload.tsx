@@ -12,6 +12,7 @@
  *   Max: 20 MB
  */
 
+import { shell as shellCopy } from "../../copy";
 import { useState, type ChangeEvent, type DragEvent } from "react";
 
 const MAX_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -20,6 +21,15 @@ const ALLOWED_TYPES = ["image/png", "image/jpeg"];
 interface PhotoUploadProps {
   /** Optional project ID — when absent, the component is in "no project yet" mode. */
   projectId?: number;
+  /**
+   * Issue #282: resolves the project the photo uploads to. Present in
+   * "no project yet" mode (projectId undefined): awaits the single-flight
+   * lazy creation (App's ensureProject) so a photo chosen before any
+   * message still creates exactly one project. A rejection means creation
+   * failed — the upload never fires and the caller's creation-failure
+   * copy is surfaced instead.
+   */
+  onEnsureProject?: () => Promise<number>;
   /**
    * Called once the photo is stored server-side. `width`/`height` are the
    * image's natural pixel dimensions (read client-side via `Image.onload`)
@@ -51,6 +61,7 @@ type UploadState = "idle" | "uploading" | "success" | "error";
 
 export function PhotoUpload({
   projectId,
+  onEnsureProject,
   onUploaded,
   onError,
 }: PhotoUploadProps) {
@@ -69,9 +80,31 @@ export function PhotoUpload({
   };
 
   const upload = async (file: File) => {
-    if (projectId === undefined) {
-      onError?.("No project selected");
-      return;
+    let effectiveProjectId = projectId;
+    if (effectiveProjectId === undefined) {
+      // No project yet — create one through the caller's single-flight
+      // latch (issue #282). Two rapid triggers (photo + send) share the
+      // same in-flight promise, so exactly one project results. A
+      // rejection means creation failed — surface the caller's failure
+      // copy and do NOT upload (there is no project to upload to).
+      if (onEnsureProject) {
+        try {
+          effectiveProjectId = await onEnsureProject();
+        } catch (e) {
+          // Creation failed — surface the caller's CREATION failure copy
+          // (App routes it to the shared project-creation card, the same
+          // card the send path uses), never an upload failure.
+          setState("error");
+          onError?.(shellCopy.projectCreationFailed(
+            e instanceof Error ? e.message : "unknown error",
+          ));
+          return;
+        }
+      } else {
+        setState("error");
+        onError?.(shellCopy.noProject);
+        return;
+      }
     }
     const error = validateFile(file);
     if (error) {
@@ -86,7 +119,7 @@ export function PhotoUpload({
       formData.append("file", file);
 
       const resp = await fetch(
-        `/api/projects/${projectId}/photos`,
+        `/api/projects/${effectiveProjectId}/photos`,
         { method: "POST", body: formData },
       );
 

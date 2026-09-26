@@ -78,6 +78,10 @@ interface ConversationPaneProps {
   photoDimensions: { width: number; height: number } | null;
   onPhotoUploaded: (photoPath: string, width: number, height: number) => void;
   onPhotoError: (msg: string) => void;
+  /** Issue #282: the single-flight lazy-creation latch (App's
+   *  ensureProject), routed to PhotoUpload so a photo chosen before any
+   *  message creates the project instead of bailing "No project selected". */
+  onEnsureProject: () => Promise<number>;
 }
 
 export function ConversationPane({
@@ -105,6 +109,7 @@ export function ConversationPane({
   photoDimensions,
   onPhotoUploaded,
   onPhotoError,
+  onEnsureProject,
 }: ConversationPaneProps) {
   return (
     <div
@@ -247,6 +252,7 @@ export function ConversationPane({
             <div style={{ flex: "0 0 auto" }}>
               <PhotoUpload
                 projectId={projectId ?? undefined}
+                onEnsureProject={onEnsureProject}
                 onUploaded={onPhotoUploaded}
                 onError={onPhotoError}
               />

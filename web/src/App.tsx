@@ -1256,6 +1256,23 @@ export default function App({ client }: AppProps) {
     [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, nextMsgId],
   );
 
+  // The shared project-creation failure path (issue #282): a photo chosen
+  // before any message routes through the SAME ensureProject latch as the
+  // first send, so its failure must surface the SAME app-level error copy
+  // (the FailureCard via streamError) — never a component-local "upload
+  // failed" for a failure that is not about the upload. A creation failure
+  // during photo upload releases the latch, so a later send can retry
+  // (handled by ensureProject itself).
+  const handleProjectCreationFailure = useCallback((e: unknown) => {
+    setStreamError({
+      message: copy.shell.projectCreationFailed(
+        e instanceof Error ? e.message : "unknown error"
+      ),
+      detail: e instanceof Error ? e.message : undefined,
+      retryable: false,
+    });
+  }, []);
+
   // The send entry point (issue #192): creates the project lazily on the
   // first explicit send (single-flight — a concurrent trigger shares the
   // in-flight POST) and routes the message through `continueSend` only once
@@ -1273,17 +1290,9 @@ export default function App({ client }: AppProps) {
       }
       void ensureProject()
         .then((id) => continueSend(text, id))
-        .catch((e) => {
-          setStreamError({
-            message: `Failed to create project: ${
-              e instanceof Error ? e.message : "unknown error"
-            }`,
-            detail: e instanceof Error ? e.message : undefined,
-            retryable: false,
-          });
-        });
+        .catch((e) => handleProjectCreationFailure(e));
     },
-    [projectId, continueSend, ensureProject],
+    [projectId, continueSend, ensureProject, handleProjectCreationFailure],
   );
 
   // The inline bar's submit path — routes the typed instruction through the
@@ -1581,6 +1590,7 @@ export default function App({ client }: AppProps) {
           photoSrc={photoSrc}
           photoDimensions={photoDimensions}
           onPhotoUploaded={handlePhotoUploaded}
+          onEnsureProject={ensureProject}
           onPhotoError={(msg) =>
             setStreamError({
               message: msg,

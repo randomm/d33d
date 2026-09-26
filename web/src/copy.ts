@@ -565,6 +565,14 @@ export const deterministicAnswer = {
 
 export const shell = {
   addPhoto: "Add a reference photo",
+  /** The photo surface's no-project state (issue #282): the photo is
+   *  chosen before any project exists — creation is in flight or failed. */
+  noProject: "No project selected",
+  /** The shared project-creation failure card (issue #282): send and
+   *  photo paths surface the SAME copy — the failure is about the
+   *  project, never about the upload itself. */
+  projectCreationFailed: (reason: string): string =>
+    `Failed to create project: ${reason}`,
   composerPlaceholder:
     "Ask for a change, or click the model to point at a part",
   send: "Send",
