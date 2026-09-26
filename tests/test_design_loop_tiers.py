@@ -1521,7 +1521,7 @@ def test_t0_question_role_unanswerable_call_flows_to_parse():
     outcome = parse_answer_reply(
         json.dumps({"kind": args["kind"], "answer": args["answer"]})
     )
-    assert outcome == ("unanswerable", "")
+    assert outcome == ("unanswerable", "", None)
 
 
 def test_t0_question_role_attaches_its_own_tool_and_passes_through():
@@ -1616,10 +1616,12 @@ def test_t0_question_role_legacy_answerable_call_still_accepted():
     assert parse_answer_reply('{"answerable": true, "answer": "It is 12 mm tall"}') == (
         "answer",
         "It is 12 mm tall",
+        None,
     )
     assert parse_answer_reply('{"answerable": false, "answer": ""}') == (
         "request",
         "",
+        None,
     )
 
 

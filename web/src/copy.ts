@@ -503,6 +503,19 @@ export const answerRoute = {
    *  loop either. */
   notEstablished:
     "The design as it stands doesn't establish that — nothing was changed.",
+  /** The stage-2 call succeeded and said the design state does not
+   *  establish what the question asks, AND named the unknown fact (issue
+   *  #278). The backend validates ``missing`` (a short noun phrase —
+   *  non-empty after trim, ≤ 60 chars, no digits, no sentence punctuation
+   *  other than an apostrophe) and builds the wire string from this
+   *  template; an invalid or absent ``missing`` falls back to the fixed
+   *  {@link notEstablished} above. Mirrors the backend's
+   *  ``UNANSWERABLE_MISSING_TEMPLATE`` in ``d33d/question_answer.py``
+   *  (pinned by the design-contract test) — the reply rides the done
+   *  frame's ``answer`` verbatim. Like {@link notEstablished}, it keeps
+   *  the "nothing was changed" close: no design run, no version. */
+  missingFact: (missing: string): string =>
+    `I don't know ${missing}. Tell me and I'll check — nothing was changed.`,
 } as const;
 
 /**
