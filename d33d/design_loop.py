@@ -56,6 +56,8 @@ import asyncio
 import functools
 import logging
 import re
+import subprocess
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -78,6 +80,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "MAX_ITERATIONS",
     "NO_IMPROVEMENT_LIMIT",
+    "RENDERER_PREFLIGHT_CACHE_SECONDS",
+    "RENDERER_UNAVAILABLE",
     "BboxInfo",
     "DesignResult",
     "IterationRecord",
@@ -87,6 +91,8 @@ __all__ = [
     "is_best",
     "make_llm_fn",
     "no_improvement",
+    "renderer_is_available",
+    "reset_renderer_preflight_cache",
     "run_design_loop",
     "run_design_loop_async",
     "scad_looks_valid",
@@ -103,6 +109,26 @@ MAX_ITERATIONS = 3
 #: Two consecutive iterations with a non-increasing score stop the loop
 #: early (spec stop condition 3).
 NO_IMPROVEMENT_LIMIT = 2
+
+#: The loop-level (NOT an error_class) failure reason emitted when the
+#: renderer pre-flight check finds the Docker daemon unreachable before
+#: the first iteration (issue #277). The run ends at once with this reason
+#: and NO LLM call.
+RENDERER_UNAVAILABLE = "renderer_unavailable"
+
+#: How long a SUCCESSFUL renderer pre-flight check is trusted before the
+#: next design-loop run re-checks (per-process cache; issue #277 operator
+#: decision). A FAILED check is NEVER cached — the next run re-probes, so
+#: a Docker start within the window is not masked by a stale failure.
+RENDERER_PREFLIGHT_CACHE_SECONDS = 30.0
+
+#: The wall-clock bound on the ``docker info`` probe's ``subprocess.run``
+#: (issue #277: "a short timeout (≤ 5 s)").
+_PREFLIGHT_PROBE_TIMEOUT_S = 5.0
+
+#: The per-process cache of the last SUCCESSFUL pre-flight probe: a
+#: timestamp (``time.monotonic``) or ``None`` (never cached / reset).
+_preflight_success_at: float | None = None
 
 #: Tolerance for the bbox gate: max(1% of the stated size, 0.5 mm) per
 #: axis (v1 FINALIZE gate — render-worker-level, per the issue's proposed
@@ -231,7 +257,11 @@ class IterationRecord:
 
     iteration: int
     scad_source: str
-    render: RenderResult
+    #: The render that produced this record. ``None`` for the synthetic
+    #: pre-flight :data:`RENDERER_UNAVAILABLE` result (issue #277) — no
+    #: render ever ran; the loop-level placeholder record carries no
+    #: render data rather than a fabricated one.
+    render: RenderResult | None
     score: Score
     #: Failure class routed from the render (None for a clean render).
     failure_class: str | None = None
@@ -248,7 +278,7 @@ class IterationRecord:
     #: BEST candidate's measurement from this field, and a stub loop
     #: result without it simply carries ``None`` (a missing field is not
     #: a fabricated measurement).
-    bbox: "BboxInfo | None" = None
+    bbox: BboxInfo | None = None
     #: The named dimension assignments THIS candidate's generated SCAD
     #: actually declares (issue #219): the ``name -> float`` dict from the
     #: shared extraction helper :func:`extract_named_params`, computed over
@@ -370,9 +400,7 @@ def best_match_component(
     return tuple(ranked[0][:3])
 
 
-def _bbox_within_tolerance(
-    bbox: BboxInfo, stated: tuple[float, ...]
-) -> bool:
+def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
     """True iff every rendered axis the user CONFIRMED is within
     max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).
 
@@ -566,9 +594,7 @@ def _named_params_present(
     stated_dimensions: dict[str, float] | None = {
         axis: value for axis, value in zip(("W", "D", "H"), stated_dims) if value > 0
     } or None
-    if detect_magic_numbers(
-        scad_source, stated_dimensions=stated_dimensions
-    ):
+    if detect_magic_numbers(scad_source, stated_dimensions=stated_dimensions):
         return False
     return bool(extract_named_params(scad_source))
 
@@ -711,9 +737,7 @@ def score(
     # other (measured) axes happened to pass — a partial triple whose known
     # axes match still carries an unmeasured axis (ticket #91 round-2: the
     # flag must be True, never left to bit 2's happenstance).
-    bbox_abstained = (
-        bbox is not None and bits[2] and any(t <= 0 for t in stated_dims)
-    )
+    bbox_abstained = bbox is not None and bits[2] and any(t <= 0 for t in stated_dims)
     return Score(
         bits=bits, rank=sum(bits), tiebreak=bits, bbox_abstained=bbox_abstained
     )
@@ -789,8 +813,7 @@ def _dim_axis_list(stated: tuple[float, float, float]) -> str:
     # the user never stated is never rendered as a number (it must not read
     # as a measured zero, ticket #91).
     return ", ".join(
-        f"{name}={_dim_axis(value)}"
-        for name, value in zip(("W", "D", "H"), stated)
+        f"{name}={_dim_axis(value)}" for name, value in zip(("W", "D", "H"), stated)
     )
 
 
@@ -938,7 +961,11 @@ def _design_messages(
     # never a fabricated dimension).
     lines.extend(
         _design_state_lines(
-            stated, state_params, state_bbox, state_stated, state_meta,
+            stated,
+            state_params,
+            state_bbox,
+            state_stated,
+            state_meta,
             state_confirmed,
         )
     )
@@ -949,9 +976,7 @@ def _design_messages(
     # the shared prompt builder, and ``design_source`` is supplied by
     # every caller that knows the project.
     lines.extend(_design_source_lines(design_source))
-    lines.append(
-        f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}"
-    )
+    lines.append(f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}")
     lines.append(
         "Emit parametric OpenSCAD. Start the file with one comment line "
         "`// title: <what this version is or what changed, at most 40 "
@@ -966,21 +991,21 @@ def _design_messages(
         '"label", "unit", "axis", "reason"}>]}} ``` where "parameters" '
         "lists every parameter you declared, one object each: "
         'the "name" is the exact identifier from the SCAD, the "label" '
-        'is a plain-language label a person would recognise (e.g. '
+        "is a plain-language label a person would recognise (e.g. "
         'fillet_size_top to "Top fillet size"), the "unit" is the unit '
         '("mm" for millimetres), the "axis" is "W" or "D" or "H" ONLY '
-        'when the parameter realises that overall dimension of the part '
-        "(omit it otherwise - never guess an axis), and the \"reason\" is "
+        "when the parameter realises that overall dimension of the part "
+        '(omit it otherwise - never guess an axis), and the "reason" is '
         "one short clause saying why you picked that value, for values the user did "
         "not give. In the SAME reply, optionally offer to confirm ONE of your own "
-        "assumed values (one the design state block marks \"assumed\") that most "
-        'affects fit: "confirm_first" is that parameter' + "'" + 's exact identifier '
+        'assumed values (one the design state block marks "assumed") that most '
+        'affects fit: "confirm_first" is that parameter' + "'" + "s exact identifier "
         'and "confirm_sentence" is one short plain sentence naming its value (e.g. '
         '"I assumed 3 mm walls. That is sturdy for a shelf spacer. Want it '
         'thinner?") — every number in confirm_sentence must come from the '
-        'design state block (never invent one), and omit BOTH fields when '
-        'you have no value to offer (never more than one offer, never a '
-        'value the state block already marks stated or measured).'
+        "design state block (never invent one), and omit BOTH fields when "
+        "you have no value to offer (never more than one offer, never a "
+        "value the state block already marks stated or measured)."
     )
     if repair is not None:
         lines.append("REPAIR directive (structured, not raw stderr):")
@@ -1249,6 +1274,7 @@ async def run_design_loop_async(
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
     on_progress_iteration: Any = "_current",
+    renderer_check: Callable[[], bool] | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1287,6 +1313,24 @@ async def run_design_loop_async(
     # triple (ticket #91).
     stated_dims = stated_dims if stated_dims is not None else (0.0, 0.0, 0.0)
     defines_map = _dim_params(stated_dims, defines or {})
+
+    # Pre-flight renderer reachability check (issue #277): a cheap ``docker
+    # info`` probe BEFORE the first iteration (and thus before any LLM
+    # call). A dead Docker daemon must not burn the design budget blaming
+    # the design — the run ends at once with the loop-level reason
+    # :data:`RENDERER_UNAVAILABLE`. The probe is injectable (``renderer_check``)
+    # so test harnesses default to "available" without shelling out; ``None``
+    # runs the real probe.
+    if renderer_check is None:
+        renderer_check = renderer_is_available
+    if not renderer_check():
+        return DesignResult(
+            status="exhausted",
+            best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
+            iterations=(),
+            failure_reason=RENDERER_UNAVAILABLE,
+            iterations_used=0,
+        )
 
     repair: dict[str, Any] | None = None
     best: IterationRecord | None = None
@@ -1337,9 +1381,7 @@ async def run_design_loop_async(
                 csg=None,
                 views=(),
             )
-            candidate_score = score(
-                empty_render, stated_dims, scad_source=scad_source
-            )
+            candidate_score = score(empty_render, stated_dims, scad_source=scad_source)
             record = IterationRecord(
                 iteration=iteration,
                 scad_source=scad_source,
@@ -1358,9 +1400,7 @@ async def run_design_loop_async(
             if best is None or is_best(candidate_score, best_score):
                 best = record
                 best_score = candidate_score
-            if prev_score is not None and no_improvement(
-                prev_score, candidate_score
-            ):
+            if prev_score is not None and no_improvement(prev_score, candidate_score):
                 consecutive_no_improvement += 1
             else:
                 consecutive_no_improvement = 0
@@ -1369,6 +1409,33 @@ async def run_design_loop_async(
                 return _exhausted(iterations, best, best_score)
             continue
         render = await _call(render_fn, scad_source, defines_map)
+        # container_error is a dead render ENVIRONMENT (daemon down, image
+        # gone — a new source can never fix it): stop the loop immediately
+        # after this iteration instead of burning the budget (issue #277).
+        # timeout/oom stay non-stopping (they can be source-dependent),
+        # and the synthetic empty-SCAD path above never reaches this check
+        # (it ``continue``s before any render call).
+        if render.error_class == "container_error":
+            _ce_score = score(render, stated_dims, scad_source=scad_source)
+            _ce_record = IterationRecord(
+                iteration=iteration,
+                scad_source=scad_source,
+                render=render,
+                score=_ce_score,
+                failure_class=None,
+                repair=None,
+                prompt_hashes={"design": design_hash},
+                bbox=None,
+                params=_scad_params(scad_source),
+                param_meta=extract_param_meta(scad),
+                confirm_first=_confirm_first,
+                confirm_sentence=_confirm_sentence,
+            )
+            iterations.append(_ce_record)
+            if best is None or is_best(_ce_score, best_score):
+                best = _ce_record
+                best_score = _ce_score
+            return _container_error_stop(iterations, best)
         bbox = bbox_fn(render) if bbox_fn is not None else None
         candidate_score = score(
             render,
@@ -1526,6 +1593,65 @@ def _stamp_on_progress_iteration(on_progress: Any, iteration: int) -> None:
             pass
 
 
+def renderer_is_available(probe: Callable[[], bool] | None = None) -> bool:
+    """Is the renderer (Docker daemon) reachable right now?
+
+    A cheap ``docker info`` probe via the same ``subprocess.run`` CLI
+    invocation the render worker uses (``["docker", "info"]``, a short
+    timeout — issue #277). A missing docker binary
+    (:class:`FileNotFoundError`), an unreachable daemon (non-zero exit),
+    or a hung daemon (``subprocess.TimeoutExpired``) all map to ``False``
+    — never a crash. A ``subprocess.run`` stub in a test that raises for
+    an unrecognised argv (the render-loop harnesses' convention) degrades
+    to ``False`` the same way — the loop's pre-flight then reports
+    :data:`RENDERER_UNAVAILABLE`.
+
+    ``probe`` is the injectable seam (issue #277): any zero-arg callable
+    returning ``bool`` (e.g. a test stub) replaces the ``docker info``
+    call; ``None`` (the default) runs the real probe.
+
+    The 30 s per-process cache (issue #277 operator decision) applies only
+    to SUCCESS: a ``True`` result is trusted for
+    :data:`RENDERER_PREFLIGHT_CACHE_SECONDS` and the probe is not run
+    again inside the window. A ``False`` result is never cached — the
+    next call re-probes, so a Docker start within the window is honoured.
+    """
+    global _preflight_success_at
+    if _preflight_success_at is not None and (
+        time.monotonic() - _preflight_success_at < RENDERER_PREFLIGHT_CACHE_SECONDS
+    ):
+        return True
+    if probe is None:
+        try:
+            completed = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                check=False,
+                timeout=_PREFLIGHT_PROBE_TIMEOUT_S,
+            )
+            available = completed.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            # Missing binary (FileNotFoundError is an OSError), daemon
+            # unreachable, or a hung daemon (TimeoutExpired) — uniformly
+            # "renderer unavailable", never a crash.
+            available = False
+    else:
+        available = bool(probe())
+    if available:
+        _preflight_success_at = time.monotonic()
+    return available
+
+
+def reset_renderer_preflight_cache() -> None:
+    """Drop the per-process pre-flight success cache (the test reset seam).
+
+    The next :func:`renderer_is_available` call re-probes even if a cached
+    success is still inside its 30 s window.
+    """
+    global _preflight_success_at
+    _preflight_success_at = None
+
+
 def run_design_loop(
     *,
     photo: str,
@@ -1544,6 +1670,7 @@ def run_design_loop(
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
+    renderer_check: Callable[[], bool] | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -1569,6 +1696,7 @@ def run_design_loop(
             state_meta=state_meta,
             state_confirmed=state_confirmed,
             design_source=design_source,
+            renderer_check=renderer_check,
         )
     )
 
@@ -1614,6 +1742,27 @@ def make_llm_fn(
     return llm_fn
 
 
+def _container_error_stop(
+    iterations: list[IterationRecord],
+    best: IterationRecord,
+) -> DesignResult:
+    """The immediate-stop result for a container_error render (issue #277).
+
+    A dead render environment (daemon down, image gone) cannot be fixed by
+    a new source, so the loop ends after the failing iteration: status
+    ``exhausted``, the container_error render as best, and the failure
+    reason ``container_error`` — never the generic ``error_class_not_ok``
+    that :func:`_exhausted`'s bit 0 name would otherwise report.
+    """
+    return DesignResult(
+        status="exhausted",
+        best=best,
+        iterations=tuple(iterations),
+        failure_reason="container_error",
+        iterations_used=len(iterations),
+    )
+
+
 def _exhausted(
     iterations: list[IterationRecord],
     best: IterationRecord,
@@ -1621,14 +1770,35 @@ def _exhausted(
 ) -> DesignResult:
     """Build the exhaustion result: best-scoring candidate + a STRUCTURED
     failure reason (weakest gate bit of the best, never free text, never
-    silently the last attempt)."""
+    silently the last attempt).
+
+    Issue #277: when the FIRST failing gate bit is bit 0
+    (``error_class_not_ok``) and the best render carries a NON-"ok"
+    error_class, the reason is that specific class (one of the closed
+    render-worker ErrorClasses) — never the generic ``error_class_not_ok``
+    that bit 0's name would otherwise report for every render failure. The
+    bit-0 names for every OTHER failing bit (views, bbox, named params,
+    axis params) are unchanged. A synthetic render-less record (``best.render
+    is None``) and a best render with error_class "ok" keep today's
+    behaviour.
+    """
     reason: str | None = None
     if best_score is not None:
         for bit, name in zip(best_score.bits, GATE_REASON_BITS):
             if not bit:
                 reason = name
                 break
-    if reason is None and best.render is not None:
+    # Issue #277: when the FIRST failing gate bit is bit 0 (the generic
+    # ``error_class_not_ok``) and the best render carries a NON-"ok"
+    # error_class, swap in that specific class — never the generic name.
+    # A render-less record (``best.render is None``) keeps today's
+    # behaviour; a best render with error_class "ok" that fails a LATER
+    # gate keeps that gate's name.
+    if (
+        best.render is not None
+        and best.render.error_class != "ok"
+        and (reason is None or reason == GATE_REASON_BITS[0])
+    ):
         reason = best.render.error_class
     return DesignResult(
         status="exhausted",
