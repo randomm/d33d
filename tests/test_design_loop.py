@@ -79,7 +79,7 @@ STATED = (20.0, 25.0, 30.0)
 
 
 @pytest.fixture(autouse=True)
-def _renderer_preflight_available():
+def _renderer_preflight_available(monkeypatch):
     """Default the design loop's renderer pre-flight to "available" so no
     test in this module shells out to ``docker info`` (issue #277). Tests
     that exercise the pre-flight failure path pass a ``renderer_check``
@@ -90,16 +90,12 @@ def _renderer_preflight_available():
     ``renderer_check`` parameter to the name at call time (default
     ``None`` → the module attribute) — the swap is the one seam that
     covers both the direct ``renderer_is_available()`` path and the
-    ``renderer_check=None`` default path.
+    ``renderer_check=None`` default path. ``monkeypatch.setattr`` (no
+    ``# type: ignore``) swaps and restores the attribute per test.
     """
     import d33d.design_loop as _dl
 
-    original = _dl.renderer_is_available
-    _dl.renderer_is_available = (  # type: ignore[assignment]
-        lambda *a, **kw: True
-    )
-    yield
-    _dl.renderer_is_available = original  # type: ignore[assignment]
+    monkeypatch.setattr(_dl, "renderer_is_available", lambda *a, **kw: True)
 
 
 GOOD_SCAD = "W = 20;\nD = 25;\nH = 30;\ncube([W, D, H]);\n"
@@ -1964,34 +1960,31 @@ def test_renderer_is_available_caches_success_only():
         reset_renderer_preflight_cache()
 
 
-def test_renderer_is_available_maps_probe_errors_to_unavailable():
+def test_renderer_is_available_maps_probe_errors_to_unavailable(
+    monkeypatch,
+):
     """Issue #277: a missing docker binary / hung daemon (the probe's
     ``subprocess.run`` raising OSError / TimeoutExpired) maps uniformly to
-    ``False`` (renderer unavailable), never a crash."""
+    ``False`` (renderer unavailable), never a crash. The probe's
+    ``subprocess.run`` is swapped via ``monkeypatch.setattr`` (no
+    ``# type: ignore``) — it is restored automatically at test end."""
     import subprocess
 
     import d33d.design_loop as dl
 
     reset_renderer_preflight_cache()
     try:
-        real_run = dl.subprocess.run
 
         def _explode(*a, **kw):
             raise FileNotFoundError("docker not found")
 
-        dl.subprocess.run = _explode  # type: ignore[assignment]
-        try:
-            assert renderer_is_available() is False
-        finally:
-            dl.subprocess.run = real_run  # type: ignore[assignment]
+        monkeypatch.setattr(dl.subprocess, "run", _explode)
+        assert renderer_is_available() is False
 
         def _hang(*a, **kw):
             raise subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=5.0)
 
-        dl.subprocess.run = _hang  # type: ignore[assignment]
-        try:
-            assert renderer_is_available() is False
-        finally:
-            dl.subprocess.run = real_run  # type: ignore[assignment]
+        monkeypatch.setattr(dl.subprocess, "run", _hang)
+        assert renderer_is_available() is False
     finally:
         reset_renderer_preflight_cache()
