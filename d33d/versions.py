@@ -226,6 +226,12 @@ def sanitize_dimension_phrase(
 
     result = _DIM_TRIPLE_RE.sub(_strip_triple, name)
     result = _DIM_MM_RE.sub(_strip_mm, result)
+    # A strip that removed a mid-name phrase leaves a dangling separator
+    # ("Tray 60x45x20, rev 2" → "Tray , rev 2"): collapse a separator that
+    # is stranded between two spaces before the whitespace re-collapse, so
+    # the user sees "Tray rev 2", never "Tray , rev 2" (issue #276
+    # adversarial finding 4 — cosmetic, but the name is user-facing).
+    result = re.sub(r"\s+([,;:])\s*\s+", " ", result)
     result = _WS_RUN_RE.sub(" ", result).strip()
     if not result or sum(c.isalpha() for c in result) < 2:
         return ""

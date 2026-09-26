@@ -144,6 +144,7 @@ export function displayDesignLoopError(
     message?: string;
     reason?: unknown;
     carried_axes?: unknown;
+    mismatch_lines?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -172,8 +173,26 @@ export function displayDesignLoopError(
         message = copy.failure.bboxCarried(label, axes[0][1]);
       }
     }
+    // The axis_params_mismatch detail (issue #276 operator decision): the
+    // per-param numbers arrive as `mismatch_lines` (one line per
+    // mismatching param — "Label = 20 but the part measures 102 on H"),
+    // one line per param, rendered in mono by the failure turn. The
+    // server's words are the only source of the numbers — the client
+    // never re-derives or invents an extent. Absent/empty → the raw
+    // reason, as before (no lines to show is an honest headless detail).
     let detail = reason;
     let envelope: DisplayError["envelope"];
+    if (
+      reason === "axis_params_mismatch" &&
+      Array.isArray(data.mismatch_lines)
+    ) {
+      const lines = (data.mismatch_lines as unknown[]).filter(
+        (l): l is string => typeof l === "string" && l.length > 0,
+      );
+      if (lines.length > 0) {
+        detail = lines.join("\n");
+      }
+    }
     if (reason === "bbox_out_of_tolerance" && envelopeLimits !== undefined) {
       const parsed = parseEnvelopeGateDetail(rawMessage, envelopeLimits);
       if (parsed !== null) {

@@ -533,6 +533,26 @@ def test_name_sanitization_mm_suffix_triple():
     )
 
 
+def test_name_sanitization_strip_leaves_no_dangling_separator():
+    """A mid-name strip that removed a phrase must not leave a stranded
+    separator (issue #276 adversarial finding 4): "Tray 60x45x20, rev 2"
+    with bbox 64×49×102 → the triple fails (20 ≠ any extent) → stripped →
+    "Tray rev 2" — never "Tray , rev 2" (the dangling comma the user
+    would see through ``clean_name``). Non-dimension numbers ("rev 2")
+    are untouched: only ``N x N (x N)`` and ``N mm`` phrases are checked."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20, rev 2", (64.0, 49.0, 102.0))
+        == "Tray rev 2"
+    )
+    # A comma after a KEPT phrase is untouched (no stranded separator).
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20, rev 2", (60.0, 45.0, 20.0))
+        == "Tray 60x45x20, rev 2"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (3) The design loop is injected (DI seam)
 # ---------------------------------------------------------------------------
@@ -1176,6 +1196,118 @@ def test_region_edit_exhausted_emits_error_frame_and_no_version(app_with_version
     assert event_names[-1] == "error", f"no terminal error frame: {event_names}"
     assert "error" in event_names, "no error frame emitted for exhausted loop"
     assert timeline == [], "exhausted loop must not create a version"
+
+
+def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatch_lines(
+    app_with_versions,
+):
+    """Issue #276: an exhausted loop whose best candidate fails bit 5
+    (``axis_params_mismatch``) emits a terminal error frame whose
+    ``mismatch_lines`` carries the per-param detail (label + both numbers,
+    the server's own gate evidence — one line per mismatching param) so
+    the SPA's failure turn renders the detail without re-deriving any
+    number. A stub whose best record carries no repair yields no
+    ``mismatch_lines`` (omit-not-null, honest absence)."""
+    from d33d.design_loop import IterationRecord, Score
+
+    class _AxisStubResult:
+        def __init__(
+            self,
+            with_repair: bool,
+            evidence: str = "Tray height = 20 but the part measures 102 on H",
+        ) -> None:
+            self.status = "exhausted"
+            self.failure_reason = "axis_params_mismatch"
+            repair = None
+            if with_repair:
+                repair = {
+                    "failure_class": "axis_params_mismatch",
+                    "evidence": evidence,
+                }
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="H = 20;\ncube([20, 25, H]);\n",
+                render=_default_render(),
+                score=Score(
+                    bits=(True, True, True, True, False),
+                    rank=4,
+                    tiebreak=(True, True, True, True, False),
+                ),
+                params={"H": 20.0},
+                repair=repair,
+            )
+
+    async def _drive(client, with_repair: bool):
+        """One client, one loop call: project → stub swap → chat → drain."""
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _AxisStubResult(
+            with_repair
+        )
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 x 45 x 20"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    async def _drive_multi(client):
+        """Multi-param evidence: the stub's repair carries two lines."""
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda **kw: _AxisStubResult(
+            True,
+            evidence=(
+                "Tray height = 20 but the part measures 102 on H; "
+                "Width = 60 but the part measures 64 on W"
+            ),
+        )
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a tray 60 x 45 x 20"},
+        )
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    # All three cases drive under ONE event loop / one client: the app's
+    # DB connection is owned by the lifespan context, and a second
+    # ``run_async`` on the same app would operate on a closed DB.
+    async def _call_all(client):
+        # (a) repair evidence present → mismatch_lines rides the error frame.
+        f_a = await _drive(client, True)
+        # (a2) multi-param evidence → one line per mismatching param.
+        f_multi = await _drive_multi(client)
+        # (b) no repair on the record → the field is OMITTED (omit-not-null).
+        f_b = await _drive(client, False)
+        return f_a, f_multi, f_b
+
+    frames, frames_multi, frames_norepair = run_async(app_with_versions, _call_all)
+
+    assert frames[-1][0] == "error"
+    error_data = frames[-1][1]
+    assert error_data["reason"] == "axis_params_mismatch"
+    assert error_data["mismatch_lines"] == [
+        "Tray height = 20 but the part measures 102 on H"
+    ]
+
+    assert frames_multi[-1][0] == "error"
+    assert frames_multi[-1][1]["mismatch_lines"] == [
+        "Tray height = 20 but the part measures 102 on H",
+        "Width = 60 but the part measures 64 on W",
+    ]
+
+    assert frames_norepair[-1][0] == "error"
+    assert "mismatch_lines" not in frames_norepair[-1][1]
 
 
 def test_region_edit_unwired_loop_returns_202_and_terminates_with_error(

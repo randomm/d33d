@@ -85,6 +85,39 @@ describe("errorMapping", () => {
     expect(display.retryable).toBe(true);
   });
 
+  it("the axis_params_mismatch detail lists each mismatching param, one line each (issue #276)", () => {
+    // The per-param numbers ride in the error frame's `mismatch_lines`
+    // (the server's own gate evidence — label + both numbers per line).
+    // The headline stays number-free; the detail is one line per
+    // mismatching param (never a blob, never an SPA-invented number).
+    const single = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatch_lines: ["Tray height = 20 but the part measures 102 on H"],
+    });
+    expect(single.message).toBe(copy.failure.reasons.axis_params_mismatch);
+    expect(single.detail).toBe("Tray height = 20 but the part measures 102 on H");
+
+    const multi = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatch_lines: [
+        "Tray height = 20 but the part measures 102 on H",
+        "Width = 60 but the part measures 64 on W",
+      ],
+    });
+    expect(multi.detail).toBe(
+      "Tray height = 20 but the part measures 102 on H\nWidth = 60 but the part measures 64 on W",
+    );
+
+    // Headless (no lines on the frame) → the raw reason, as before.
+    const headless = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+    });
+    expect(headless.detail).toBe("axis_params_mismatch");
+  });
+
   it("an unknown reason code maps to the generic sentence, raw code in detail", () => {
     const display = displayDesignLoopError({
       message: "Design loop exhausted: totally_unknown",

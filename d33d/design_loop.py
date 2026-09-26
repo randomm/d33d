@@ -965,6 +965,19 @@ def _design_messages(
         lines.append("REPAIR directive (structured, not raw stderr):")
         lines.append(f"failure_class: {repair.get('failure_class')}")
         lines.append(f"instruction: {repair.get('instruction')}")
+        # The directive's evidence (issue #276): server-built, structured
+        # data — for ``axis_params_mismatch`` it names every mismatching
+        # param with BOTH numbers ("declared = N but the part measures M on
+        # AXIS"). It is part of the directive contract, not optional
+        # dressing: rendering only the instruction would make the
+        # instruction's promise ("listed below with both numbers") false,
+        # because the previous_scad block carries only the SCAD's own
+        # numbers, never the measured extents. ``None``/blank renders no
+        # line (other classes' evidence is the raw gate class name, which
+        # the failure_class line already says).
+        evidence = repair.get("evidence")
+        if evidence:
+            lines.append(f"evidence: {evidence}")
         lines.append("previous_scad:")
         lines.append(str(repair.get("scad_source", "")))
 

@@ -495,6 +495,47 @@ def _structured_reason(result: Any) -> str | None:
     return None
 
 
+def _axis_mismatch_lines(result: Any) -> list[str] | None:
+    """The per-param mismatch lines for an ``axis_params_mismatch``
+    exhaustion (issue #276, operator decision) — or ``None`` when the
+    failure is a different reason (the field is then OMITTED, the
+    frame's omit-not-null policy).
+
+    The lines are the SAME server-built strings the repair directive
+    carried to the loop's next iteration (``_evidence`` in
+    ``run_design_loop_async``: ``"{label} = {model} but the part
+    measures {measured} on {axis}"`` — every mismatching param, both
+    numbers, no PII): the terminal error frame rides them in
+    ``mismatch_lines`` so the SPA's failure turn can render the
+    per-param detail without re-deriving any number client-side (the
+    measured extents are the server's own gate numbers, never invented
+    by the SPA). Derived from the BEST iteration's record (the same
+    candidate the loop returned), not re-run through the gate: a
+    stub loop result without the fields simply yields ``None`` (an
+    honest absence, the #91/#137 precedent).
+    """
+    reason = getattr(result, "failure_reason", None)
+    if reason != "axis_params_mismatch":
+        return None
+    best = getattr(result, "best", None)
+    repair = getattr(best, "repair", None)
+    if not isinstance(repair, dict):
+        return None
+    if repair.get("failure_class") != "axis_params_mismatch":
+        return None
+    evidence = repair.get("evidence")
+    if not isinstance(evidence, str) or not evidence:
+        return None
+    # The evidence is the "; "-join of one line per mismatching param
+    # (the loop's own builder). A non-empty join is always non-blank;
+    # the sentinel fallback the loop uses ("axis-params mismatch (see
+    # gate bit 5)") carries no per-param numbers — render it as a
+    # single line rather than suppressing it (the headline sentence
+    # still carries the plain-language copy).
+    lines = [part.strip() for part in evidence.split(";") if part.strip()]
+    return lines or None
+
+
 def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     """The axes the bbox gate ENFORCED on this turn (the caller's
     per-axis set, ``{"H": 12.0, ...}`` — the carried-plus-cued effective
@@ -1529,6 +1570,14 @@ async def run_design_loop_with_events(
         carried = _carried_axes(result, kwargs.get("stated_axes"))
         if carried is not None:
             error_data["carried_axes"] = carried
+        # The per-param mismatch detail (issue #276): one line per
+        # mismatching param (label + both numbers, the server's own
+        # gate evidence), so the SPA's failure turn renders the detail
+        # without re-deriving any number. Omitted for every other
+        # reason (omit-not-null).
+        mismatch_lines = _axis_mismatch_lines(result)
+        if mismatch_lines is not None:
+            error_data["mismatch_lines"] = mismatch_lines
         yield ("error", error_data)
 
 

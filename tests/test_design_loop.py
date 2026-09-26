@@ -638,9 +638,14 @@ def test_axis_params_mismatch_feeds_repair_into_next_iteration():
     assert "REPAIR directive" not in seen_prompts[0]
     assert "REPAIR directive" in seen_prompts[1]
     assert "failure_class: axis_params_mismatch" in seen_prompts[1]
-    # The repair instruction names the mismatching param with both numbers.
-    assert "20" in seen_prompts[1]
-    assert "102" in seen_prompts[1]
+    # The directive's evidence line — the declared vs measured pairing the
+    # instruction promises ("listed below with both numbers") — must itself
+    # reach the prompt: the previous_scad block only carries the SCAD's own
+    # numbers, never the measured extents, so without the evidence line the
+    # model cannot see the 102-vs-20 pairing on a line of its own.
+    assert "evidence: Tray height = 20 but the part measures 102 on H" in (
+        seen_prompts[1]
+    )
     # The first iteration's recorded failure class is axis_params_mismatch.
     assert result.iterations[0].failure_class == "axis_params_mismatch"
     assert result.iterations[0].repair is not None
