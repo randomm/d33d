@@ -65,6 +65,7 @@ from d33d.config.resolve import resolve_model
 from d33d.design_llm import LLMResult, send
 from d33d.failure_classes import (
     REPAIRABLE_CLASSES,
+    ClassifiedFailure,
     classify_failure,
     detect_magic_numbers,
     route_repair,
@@ -172,16 +173,17 @@ class BboxInfo:
 class Score:
     """The pinned improvement metric: a gate bitvector ranked by popcount.
 
-    ``bits`` is the 4-tuple ``(ok, non_blank_views, bbox, named_params)``.
+    ``bits`` is the 5-tuple ``(ok, non_blank_views, bbox, named_params,
+    axis_params_match)``.
     ``rank`` is the popcount — the monotone-comparable value the loop uses
     for stop conditions. ``tiebreak`` is the raw bitvector: two candidates
     with equal rank compare on it (earlier bits weigh more), so "best" is
     never ambiguous and the metric is unit-testable in isolation.
     """
 
-    bits: tuple[bool, bool, bool, bool]
+    bits: tuple[bool, bool, bool, bool, bool]
     rank: int
-    tiebreak: tuple[bool, bool, bool, bool]
+    tiebreak: tuple[bool, bool, bool, bool, bool]
     #: True iff the bbox bit is True and ANY stated axis is unknown
     #: (``<= 0``) and the gate ABSTAINED on it (ticket #91) — including
     #: partial triples where the known axes happen to match: an unknown
@@ -210,8 +212,12 @@ class Score:
         return self.bits[3]
 
     @property
+    def axis_params_match(self) -> bool:
+        return self.bits[4]
+
+    @property
     def perfect(self) -> bool:
-        """All four gates pass (v1 FINALIZE's "validation passes")."""
+        """All five gates pass (v1 FINALIZE's "validation passes")."""
         return self.rank == len(self.bits)
 
 
@@ -310,6 +316,7 @@ GATE_REASON_BITS: tuple[str, ...] = (
     "views_blank_or_missing",
     "bbox_out_of_tolerance",
     "stated_dims_not_named_parameters",
+    "axis_params_mismatch",
 )
 
 
@@ -562,12 +569,68 @@ def _named_params_present(
     return bool(extract_named_params(scad_source))
 
 
+def _axis_params_match_geometry(
+    bbox: BboxInfo,
+    named_params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> bool:
+    """Bit 5 (issue #276): True iff every NUMERIC param with a declared
+    axis (W/D/H) matches the measured bbox extent on that axis within the
+    disagrees-major threshold.
+
+    A param is checked only when ALL of the following hold:
+    - its ``param_meta`` entry declares an axis (``"W" | "D" | "H"``);
+    - its SCAD-declared value is numeric and strictly positive.
+
+    The comparison target is the WHOLE-MESH bbox extent on the declared
+    axis (``bbox.x`` / ``bbox.y`` / ``bbox.z``) — the same numbers the
+    Brief's axis rows show. The threshold is ``max(
+    DISAGREES_MAJOR_THRESHOLD_REL × param_value,
+    DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` — the 20% / 5 mm pair from
+    ``d33d.design_state``, NOT the 1% / 0.5 mm bbox tolerance. A diff
+    STRICTLY greater than the threshold fails (``>``); a diff exactly at
+    the threshold passes.
+
+    No params with a declared axis → True (nothing to check). No bbox →
+    the caller abstains (bit 5 is True). A param with no declared axis,
+    a non-numeric value, or a zero/negative value is ignored.
+    """
+    if bbox is None:
+        return True
+    from d33d.design_state import (
+        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+        DISAGREES_MAJOR_THRESHOLD_REL,
+    )
+
+    extents = {"W": bbox.x, "D": bbox.y, "H": bbox.z}
+    for name, value in named_params.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if value <= 0:
+            continue
+        meta = param_meta.get(name)
+        if not isinstance(meta, dict):
+            continue
+        axis = meta.get("axis")
+        if axis not in extents:
+            continue
+        tol = max(
+            DISAGREES_MAJOR_THRESHOLD_REL * value,
+            DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+        )
+        if abs(extents[axis] - value) > tol:
+            return False
+    return True
+
+
 def score(
     render: RenderResult,
     stated_dims: tuple[float, float, float],
     *,
     bbox: BboxInfo | None = None,
     scad_source: str = "",
+    param_meta: dict[str, Any] | None = None,
+    named_params: dict[str, float] | None = None,
 ) -> Score:
     """The pinned monotone-comparable improvement metric.
 
@@ -617,6 +680,11 @@ def score(
         _views_non_blank(render),
         bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
         _named_params_present(scad_source, stated_dims),
+        _axis_params_match_geometry(
+            bbox,
+            named_params if named_params is not None else {},
+            param_meta if param_meta is not None else {},
+        ),
     )
     # An abstained axis is ANY unknown target, independent of whether the
     # other (measured) axes happened to pass — a partial triple whose known
@@ -1268,7 +1336,14 @@ async def run_design_loop_async(
             continue
         render = await _call(render_fn, scad_source, defines_map)
         bbox = bbox_fn(render) if bbox_fn is not None else None
-        candidate_score = score(render, stated_dims, bbox=bbox, scad_source=scad_source)
+        candidate_score = score(
+            render,
+            stated_dims,
+            bbox=bbox,
+            scad_source=scad_source,
+            param_meta=extract_param_meta(scad),
+            named_params=_scad_params(scad_source),
+        )
 
         # Failure routing: tagged, structured, NEVER terminal. Compile
         # failures are a low-scoring iteration, not a loop stop.
@@ -1290,12 +1365,72 @@ async def run_design_loop_async(
         else:
             # ok-but-missing-gates: the vision-catchable class
             # (geometrically_wrong), routed the same way so the next
-            # iteration sees the mismatch.
+            # iteration sees the mismatch. Bit 5 (axis_params_mismatch,
+            # issue #276) gets a distinct directive that names each
+            # mismatching param with both numbers.
             if any(not bit for bit in candidate_score.bits[1:]):
-                failure_class = classified.failure_class
-                directive = route_repair(classified=classified, scad_source=scad_source)
-                if directive is not None:
-                    next_repair = directive.to_dict()
+                if not candidate_score.bits[4]:
+                    # Bit 5 fails: build an axis_params_mismatch directive
+                    # that names each mismatching param with both the
+                    # declared value and the measured extent.
+                    from d33d.design_state import (
+                        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+                        DISAGREES_MAJOR_THRESHOLD_REL,
+                    )
+
+                    _named_params = _scad_params(scad_source)
+                    _param_meta = extract_param_meta(scad)
+                    _extents = {
+                        "W": bbox.x,
+                        "D": bbox.y,
+                        "H": bbox.z,
+                    }
+                    mismatch_lines: list[str] = []
+                    for _pname, _pval in _named_params.items():
+                        if (
+                            isinstance(_pval, (int, float))
+                            and not isinstance(_pval, bool)
+                            and _pval > 0
+                        ):
+                            _meta = _param_meta.get(_pname)
+                            if not isinstance(_meta, dict):
+                                continue
+                            _axis = _meta.get("axis")
+                            if _axis not in _extents:
+                                continue
+                            _tol = max(
+                                DISAGREES_MAJOR_THRESHOLD_REL * _pval,
+                                DISAGREES_MAJOR_THRESHOLD_MIN_MM,
+                            )
+                            if abs(_extents[_axis] - _pval) > _tol:
+                                _label = _meta.get("label", _pname)
+                                mismatch_lines.append(
+                                    f"{_label} = {_pval:g} but the part measures "
+                                    f"{_extents[_axis]:g} on {_axis}"
+                                )
+                    _evidence = (
+                        "; ".join(mismatch_lines)
+                        if mismatch_lines
+                        else "axis-params mismatch (see gate bit 5)"
+                    )
+                    _ax_classified = ClassifiedFailure(
+                        failure_class="axis_params_mismatch",
+                        evidence=_evidence,
+                        repairable=True,
+                    )
+                    failure_class = "axis_params_mismatch"
+                    directive = route_repair(
+                        classified=_ax_classified, scad_source=scad_source
+                    )
+                    if directive is not None:
+                        next_repair = directive.to_dict()
+                else:
+                    failure_class = classified.failure_class
+                    directive = route_repair(
+                        classified=classified, scad_source=scad_source
+                    )
+                    if directive is not None:
+                        next_repair = directive.to_dict()
 
         record = IterationRecord(
             iteration=iteration,

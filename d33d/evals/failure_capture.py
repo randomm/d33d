@@ -122,6 +122,7 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
         "views_blank_or_missing",
         "bbox_out_of_tolerance",
         "stated_dims_not_named_parameters",
+        "axis_params_mismatch",
     }
 )
 

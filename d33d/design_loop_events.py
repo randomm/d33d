@@ -952,7 +952,11 @@ async def _resolve_version_create(
     prev_params: dict | None = dict(latest["params"]) if latest is not None else None
     # Lazy import: ``d33d.versions`` imports ``d33d.projects`` (which imports
     # this module), so the name helpers are pulled in at call time.
-    from d33d.versions import clean_name, param_diff_name
+    from d33d.versions import (
+        clean_name,
+        param_diff_name,
+        sanitize_dimension_phrase,
+    )
 
     # The collision-suffix baseline (#245 follow-up): the set of names the
     # project already carries — ``VersionService`` passes an explicit name
@@ -972,10 +976,29 @@ async def _resolve_version_create(
         )
         existing_names = set()
 
+    # The measured bbox of the best candidate (issue #276): the version
+    # name must never carry dimensions the part does not measure. The
+    # title is sanitised against these extents BEFORE ``clean_name`` —
+    # ``clean_name`` lowercases/trims/caps and would mangle the strip
+    # result, so the dimension check runs on the raw title. ``None`` (no
+    # measurement) is passed through untouched (an absent measurement
+    # abstains — never a fabricated extent).
+    measured_bbox = _version_bbox_extents(result)
+
     if candidate_source is not None:
         title = scad_title(candidate_source)
         if title is not None:
-            version_name = clean_name(title, existing_names)
+            # A falsy result (empty string — the title WAS the dimensions
+            # and the strip left nothing meaningful) falls back to the
+            # param-diff phrase (the existing name source), never an
+            # empty name.
+            sanitized = sanitize_dimension_phrase(title, measured_bbox)
+            if sanitized:
+                version_name = clean_name(sanitized, existing_names)
+            else:
+                version_name = clean_name(
+                    param_diff_name(prev_params, dict(named)), existing_names
+                )
         else:
             version_name = clean_name(
                 param_diff_name(prev_params, dict(named)), existing_names

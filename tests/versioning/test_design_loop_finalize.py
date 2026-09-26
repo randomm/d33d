@@ -43,7 +43,7 @@ class _StubResult:
             iteration=0,
             scad_source=scad,
             render=render if render is not None else _default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"
@@ -149,7 +149,7 @@ def _pass_result_with_bbox(
         iteration=0,
         scad_source=scad,
         render=render if render is not None else _default_render(),
-        score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+        score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
         params=params if params is not None else {"W": 30.0, "D": 30.0, "H": 30.0},
         bbox=bbox,
     )
@@ -373,6 +373,164 @@ def test_finalize_exhausted_does_not_create_version(app_with_versions):
     # No spurious version.
     assert timeline == []
     assert row["current_version"] is None
+
+
+def test_axis_params_mismatch_always_failing_exhausts_with_reason():
+    """Issue #276: an always-mismatched run (bit 5 fails every iteration)
+    → an exhausted failure with reason `axis_params_mismatch` (the first
+    failing bit is bit 5, since bits 1-4 all pass)."""
+    from d33d.design_loop import run_design_loop
+    from d33d.design_llm import LLMResult
+
+    def _scad_llm_with_meta(scad: str) -> LLMResult:
+        meta = [{"name": "H", "label": "Tray height", "unit": "mm", "axis": "H"}]
+        args: dict[str, Any] = {"scad": scad, "parameters": meta}
+        return LLMResult(
+            content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+            tool_calls=({"name": "emit_design", "arguments": args},),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    def _render_ok() -> RenderResult:
+        return RenderResult(
+            ok=True,
+            exit_code=0,
+            duration_ms=1,
+            error_class="ok",
+            stderr="",
+            stl="model.stl",
+            csg="model.csg",
+            views=("v0.png", "v1.png", "v2.png", "v3.png", "v4.png", "v5.png"),
+        )
+
+    scad = "H = 20;\ncube([20, 25, H]);\n"
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated_dims=(20.0, 25.0, 102.0),
+        render_fn=lambda scad_source, defines: _render_ok(),
+        llm_fn=lambda role, messages, system: _scad_llm_with_meta(scad),
+        bbox_fn=lambda r: BboxInfo(x=20.0, y=25.0, z=102.0, volume=51000.0),
+        max_iterations=3,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "axis_params_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# (2b) Version-name dimension sanitisation (issue #276, operator decision)
+#
+# A version name must never carry dimensions the part does not measure.
+# The pure function ``sanitize_dimension_phrase`` strips a dimension
+# phrase (``N x N (x N)`` / ``N mm``) whose numbers don't all match a
+# measured bbox extent within the bbox tolerance (1% / 0.5 mm — bit 3's
+# tolerance, NOT bit 5's disagrees-major threshold); if the strip leaves
+# an empty or meaningless name it returns ``""`` (the caller falls back
+# to ``param_diff_name`` / the message-derived auto-name, never an empty
+# name). ``None`` (no measurement) abstains — the name is returned
+# untouched (issue #91/#137's honest-absence precedent).
+# ---------------------------------------------------------------------------
+
+
+def test_name_sanitization_worked_example_strips_dimension_phrase():
+    """The operator's worked example: "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray". 20 matches no extent (within tolerance:
+    20 vs 64 Δ44, vs 49 Δ29, vs 102 Δ82), so the WHOLE ``60x45x20`` phrase
+    is stripped even though 60 (Δ4 vs 64) and 45 (Δ4 vs 49) are within
+    tolerance of 64 and 49 — the operator's decision: strip the WHOLE
+    phrase if ANY number fails."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Flared lip tray 60x45x20", (64.0, 49.0, 102.0))
+        == "Flared lip tray"
+    )
+
+
+def test_name_sanitization_all_numbers_match_keeps_phrase():
+    """Every number of the triple matches a measured extent within
+    tolerance → the phrase is kept (no strip). "Box 40x45x20" with bbox
+    40×45×20 (exact) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 40x45x20", (40.0, 45.0, 20.0)) == "Box 40x45x20"
+
+
+def test_name_sanitization_all_match_with_tolerance_keeps():
+    """Numbers within the bbox tolerance (1% / 0.5 mm) of a measured
+    extent match → kept. "Box 40x45x20" with bbox 40.2×45.1×20.0 (Δ0.2,
+    Δ0.1, Δ0.0 — all within max(1%, 0.5 mm)) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Box 40x45x20", (40.2, 45.1, 20.0))
+        == "Box 40x45x20"
+    )
+
+
+def test_name_sanitization_pure_dimensions_falls_back_to_empty():
+    """A title that is PURELY dimensions ("60x45x20") with no measurement
+    → the strip leaves an empty name → ``""`` (the caller falls back to
+    ``param_diff_name``; never an empty or meaningless name is shown)."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("60x45x20", (64.0, 49.0, 102.0)) == ""
+
+
+def test_name_sanitization_pure_dimensions_no_measurement_kept():
+    """No measurement (``None``) → abstain: the name is returned untouched
+    (issue #91/#137's honest-absence precedent — an absent measurement
+    never strips, never fabricates an extent)."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("60x45x20", None) == "60x45x20"
+    assert sanitize_dimension_phrase("Flared lip tray 60x45x20", None) == (
+        "Flared lip tray 60x45x20"
+    )
+
+
+def test_name_sanitization_mm_phrase_stripped_when_number_fails():
+    """An ``N mm`` phrase whose number matches no measured extent is
+    stripped. "Box 38mm" with bbox 40×45×20 → 38 matches no extent (Δ2
+    vs 40 — within 1%? no: max(0.4, 0.5)=0.5; Δ2 > 0.5 → fail) → "Box"."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 38mm", (40.0, 45.0, 20.0)) == "Box"
+
+
+def test_name_sanitization_mm_phrase_kept_when_number_matches():
+    """An ``N mm`` phrase whose number matches a measured extent (within
+    tolerance) is kept. "Box 20mm" with bbox 40×45×20 → 20 matches z=20
+    (Δ0) → unchanged."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert sanitize_dimension_phrase("Box 20mm", (40.0, 45.0, 20.0)) == "Box 20mm"
+
+
+def test_name_sanitization_times_symbol_triple():
+    """The ``×`` (U+00D7) join is also recognised as a dimension triple.
+    "Flared lip tray 60×45×20" with bbox 64×49×102 → 20 fails → whole
+    phrase stripped → "Flared lip tray"."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Flared lip tray 60\u00d745\u00d720", (64.0, 49.0, 102.0))
+        == "Flared lip tray"
+    )
+
+
+def test_name_sanitization_mm_suffix_triple():
+    """A triple with an ``mm`` suffix ("60x45x20mm") is recognised. With
+    bbox 64×49×102, 20 fails → whole phrase stripped."""
+    from d33d.versions import sanitize_dimension_phrase
+
+    assert (
+        sanitize_dimension_phrase("Tray 60x45x20mm", (64.0, 49.0, 102.0)) == "Tray"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1158,7 +1316,7 @@ class _StubResult:
             iteration=0,
             scad_source=scad,
             render=render if render is not None else _default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
         self.failure_reason = None if status == "pass" else "bbox_out_of_tolerance"

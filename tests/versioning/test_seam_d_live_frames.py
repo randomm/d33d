@@ -56,9 +56,9 @@ def _passing_result() -> Any:
         scad_source="W = 20;\ncube([W, W, W]);",
         render=_ok_render(),
         score=Score(
-            bits=(True, True, True, True),
-            rank=4,
-            tiebreak=(True, True, True, True),
+            bits=(True, True, True, True, True),
+            rank=5,
+            tiebreak=(True, True, True, True, True),
         ),
         params={"W": 20.0, "D": 20.0, "H": 20.0},
     )

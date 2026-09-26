@@ -521,7 +521,7 @@ def test_design_loop_adapter_threads_render_artifact_dir(
             views=("v0.png", "v1.png", "v2.png", "v3.png", "v4.png", "v5.png"),
             render_artifact_dir=str(rendir),
         ),
-        score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,)),
+        score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,)*5),
         params={"W": 20.0, "D": 20.0, "H": 20.0},
         bbox=BboxInfo(x=20.0, y=20.0, z=20.0, volume=8000.0),
     )

@@ -280,7 +280,7 @@ class _OfferStubResult:
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
             render=_default_render(),
-            score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,)*4),
+            score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,)*5),
             params=dict(params),
             param_meta=dict(meta) if meta else {},
             confirm_first=confirm_first,
@@ -306,7 +306,7 @@ class _V25PassStub:
             iteration=0,
             scad_source="x = 40; cube([x, x, 12]);",
             render=_default_render(),
-            score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,) * 4),
+            score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
             bbox=BboxInfo(x=43.80, y=43.90, z=12.0, volume=2297.0),
             params={"spacer_width": 40.0, "spacer_depth": 40.0},
             param_meta={
@@ -330,7 +330,7 @@ class _ExhaustedStub:
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
             render=_default_render(),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params=dict(params),
         )
 
@@ -896,7 +896,7 @@ class _TierStubResult:
             iteration=0,
             scad_source="W = 10; cube([W, W, W]);",
             render=_default_render(),
-            score=Score(bits=(True, True, True, True), rank=4, tiebreak=(True,) * 4),
+            score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
             params=dict(params),
             param_meta=dict(meta) if meta else {},
         )

@@ -381,7 +381,7 @@ def _measured_stub_status_result(params: dict):
             views=("v0.png",) * 6,
             render_artifact_dir="/tmp/render-artifacts/a1b2c3d4",
         ),
-        score=Score(bits=(True,) * 4, rank=4, tiebreak=(True,) * 4),
+        score=Score(bits=(True,) * 5, rank=5, tiebreak=(True,) * 5),
         params=dict(params),
         bbox=BboxInfo(x=30.4, y=30.0, z=30.0, volume=28350.0),
     )

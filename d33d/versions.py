@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any
 
 from d33d import db as db_mod
+from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
 from d33d.projects import _sanitize_commit_message
 
 logger = logging.getLogger(__name__)
@@ -148,6 +149,87 @@ def _param_value_str(value: ParamValue) -> str:
     if isinstance(value, (int, float)):
         return f"{value:g}"
     return str(value)
+
+
+#: ``W × D × H`` dimension phrase in a version title — the three number-
+#: groups joined by ``x`` (no spaces: the design titles the model emits
+#: use the compact ``60x45x20`` form) or ``×``. Optional ``mm`` suffix
+#: allowed (``60x45x20mm``). Leading/trailing word boundaries keep the
+#: match from latching onto a longer digit run (``160x45`` does not match
+#: ``160x45x20``'s ``60x45`` tail).
+_DIM_TRIPLE_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*mm)?\b")
+
+#: ``N mm`` — a number immediately followed by the ``mm`` unit (no spaces
+#: between number and unit; a space reads as prose, not a dimension —
+#: "a 20 mm tray" states a dimension in prose, not in a name badge).
+_DIM_MM_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*mm\b")
+
+
+def sanitize_dimension_phrase(
+    name: str, measured_bbox: tuple[float, float, float] | None
+) -> str:
+    """Strip dimension claims from a version title that the measured part
+    does not support (issue #276, operator decision) — a pure function.
+
+    A version name must never carry dimensions the part does not measure.
+    If ``measured_bbox`` (the whole-mesh extents of the render that became
+    the version) is ``None`` — no measurement was obtained — nothing can be
+    checked, so the name is returned untouched (an absent measurement
+    abstains; never a fabricated extent, the issue #91/#137 precedent).
+
+    Otherwise EVERY dimension-like number in the name — each number of an
+    ``N x N (x N)`` triple (``x`` or ``×`` join, optional ``mm`` suffix) and
+    every number of an ``N mm`` phrase — must match SOME measured extent
+    within the bbox tolerance ``max(BBOX_TOLERANCE_REL × extent,
+    BBOX_TOLERANCE_MIN_MM)`` (1% / 0.5 mm, the SAME tolerance as bit 3 —
+    deliberately not bit 5's disagrees-major threshold). If ANY such number
+    fails to match, the WHOLE matching dimension phrase is stripped (the
+    operator's worked example: "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray" — 20 does not match any extent, so the
+    entire ``60x45x20`` phrase goes, even though 60 and 45 are within
+    tolerance of 64 and 49). Whitespace is re-collapsed after the strip.
+
+    If the result is empty or has FEWER than 2 letters (a title that was
+    purely dimensions — "60x45x20" → "" — or a badge that left only a
+    fragment), ``""`` is returned: the caller falls back to
+    :func:`param_diff_name` (never an empty or meaningless name).
+    """
+    if measured_bbox is None:
+        return name
+    x, y, z = measured_bbox
+    extents = (x, y, z)
+
+    def _matches_extent(value: float) -> bool:
+        return any(
+            abs(value - extent)
+            <= max(BBOX_TOLERANCE_REL * extent, BBOX_TOLERANCE_MIN_MM)
+            for extent in extents
+        )
+
+    def _strip_triple(match: re.Match[str]) -> str:
+        try:
+            values = tuple(float(g) for g in match.groups())
+        except ValueError:
+            return match.group(0)  # unparseable — leave it, never mangle
+        if all(_matches_extent(v) for v in values):
+            return match.group(0)
+        return ""
+
+    def _strip_mm(match: re.Match[str]) -> str:
+        try:
+            value = float(match.group(1))
+        except ValueError:
+            return match.group(0)
+        if _matches_extent(value):
+            return match.group(0)
+        return ""
+
+    result = _DIM_TRIPLE_RE.sub(_strip_triple, name)
+    result = _DIM_MM_RE.sub(_strip_mm, result)
+    result = _WS_RUN_RE.sub(" ", result).strip()
+    if not result or sum(c.isalpha() for c in result) < 2:
+        return ""
+    return result
 
 
 def param_diff_name(
@@ -1274,5 +1356,6 @@ __all__ = [
     "install_text_file_atomic",
     "migrate",
     "param_diff_name",
+    "sanitize_dimension_phrase",
     "validate_params",
 ]

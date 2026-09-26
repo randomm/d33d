@@ -2,7 +2,7 @@
  * Plain-language mapping of design-loop failure reasons (issue #82, W12).
  *
  * The terminal `error` frame carries a STRUCTURED `reason` (from
- * `d33d/design_loop_events.py`) whose value is closed: the four
+ * `d33d/design_loop_events.py`) whose value is closed: the five
  * `GATE_REASON_BITS` from `d33d/design_loop.py` plus the seven render-worker
  * `ErrorClass` values plus the design-loop-level timeout reason
  * (`design_loop_timed_out`, emitted by the server-side loop deadline —
@@ -22,7 +22,7 @@
 
 import { copy } from "../copy";
 
-/** The four GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
+/** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
  *  the terminal error frame's `reason` field can hold.
  *  `copy.failure.reasons` holds the sentences; this is the key set totality
@@ -33,6 +33,7 @@ export const FAILURE_REASONS: readonly string[] = [
   "views_blank_or_missing",
   "bbox_out_of_tolerance",
   "stated_dims_not_named_parameters",
+  "axis_params_mismatch",
   // render-worker ErrorClass values (d33d/render_worker.py)
   "ok",
   "syntax_error",

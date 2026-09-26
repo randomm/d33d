@@ -148,7 +148,7 @@ def test_loop_pass_record_carries_numeric_stated_dims() -> None:
     assert isinstance(result.best.params["H"], float)
     # The loop itself is unchanged: the score bits and abstention are the
     # same as before the fix (the record just carries more data now).
-    assert result.best.score.bits == (True, True, True, True)
+    assert result.best.score.bits == (True, True, True, True, True)
 
 
 def test_loop_pass_record_carries_caller_defines_as_numeric() -> None:
@@ -487,7 +487,7 @@ def test_resolve_version_create_empty_params_creates_version(app_with_versions):
             iteration=0,
             scad_source="x = 20; cube([x]);",
             render=_ok_render("x = 20; cube([x]);"),
-            score=Score(bits=(False,)*4, rank=0, tiebreak=(False,)*4),
+            score=Score(bits=(False,)*5, rank=0, tiebreak=(False,)*5),
             params={},  # empty dict — the abstained case
         )
 
@@ -511,7 +511,7 @@ def _make_result(best_params):
                 iteration=0,
                 scad_source="x = 20; cube([x]);",
                 render=_ok_render("x = 20; cube([x]);"),
-                score=Score(bits=(False, False, False, False), rank=0, tiebreak=(False,)*4),
+                score=Score(bits=(False, False, False, False, False), rank=0, tiebreak=(False,)*5),
                 params=dict(best_params),
             )
             self.failure_reason = None

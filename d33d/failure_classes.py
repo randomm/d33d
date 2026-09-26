@@ -64,6 +64,7 @@ OpenSCADFailureClass = Literal[
     "text_missing_font",
     "hallucinated_bosl2",
     "geometrically_wrong",
+    "axis_params_mismatch",
     # Non-repairable render-worker classes
     "timeout",
     "oom",
@@ -89,6 +90,7 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "text_missing_font",
         "hallucinated_bosl2",
         "geometrically_wrong",
+        "axis_params_mismatch",
         "timeout",
         "oom",
         "container_error",
@@ -98,9 +100,11 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     }
 )
 
-#: The 12 classes that are repairable by the design loop.
+#: The 13 classes that are repairable by the design loop.
 #: ``unclassified_syntax_error`` is included because the LLM can fix
 #: generic syntax errors even when the specific cause is unknown.
+#: ``axis_params_mismatch`` (issue #276) is included because the LLM can
+#: correct an axis-declared parameter that the geometry contradicts.
 REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     {
         "trailing_semicolon",
@@ -114,6 +118,7 @@ REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "text_missing_font",
         "hallucinated_bosl2",
         "geometrically_wrong",
+        "axis_params_mismatch",
         "unclassified_syntax_error",
     }
 )
@@ -299,6 +304,13 @@ _REPAIR_INSTRUCTIONS: dict[OpenSCADFailureClass, str] = {
         "match the reference photo or the stated dimensions. Review the bounding "
         "box, shape, and features against the reference. This is a vision-critique "
         "failure — the code is syntactically correct but geometrically wrong."
+    ),
+    "axis_params_mismatch": (
+        "One or more axis-declared parameters do not match the measured geometry. "
+        "Each parameter whose declared value disagrees with the measured extent "
+        "on its declared axis is listed below with both numbers. Adjust the "
+        "parameter value (or the geometry that drives it) so that the measured "
+        "extent on that axis matches the declared value within tolerance."
     ),
     "unclassified_syntax_error": (
         "The render failed with a syntax error. Review the OpenSCAD source for "
