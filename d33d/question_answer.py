@@ -181,12 +181,15 @@ def _validate_missing_fact(missing: Any) -> str | None:
     """Validate an unanswerable reply's ``missing`` field (issue #278).
 
     Returns the trimmed noun phrase iff it is a string that is non-empty
-    after trim, at most 60 chars, carries no digits, and has no sentence
-    punctuation other than an apostrophe. Anything else — a non-string
-    (``None``, a number, a list, …), a blank, over-length, a digit, or
-    sentence punctuation (period, comma, semicolon, colon, question
-    mark, exclamation mark) — is ``None``: the route falls back to the
-    fixed ``NOT_ESTABLISHED`` copy. Never malformed (the reply was
+    after trim, at most 60 chars, carries no digits, has no sentence
+    punctuation other than an apostrophe, and carries no HTML / markup
+    characters (``< > = ' " ( ) [ ] { } `` and backtick — a short noun
+    phrase never needs them; see the digit / punctuation rule below).
+    Anything else — a non-string (``None``, a number, a list, …), a
+    blank, over-length, a digit, sentence punctuation (period, comma,
+    semicolon, colon, question mark, exclamation mark), or a markup
+    character — is ``None``: the route falls back to the fixed
+    ``NOT_ESTABLISHED`` copy. Never malformed (the reply was
     well-formed), never a crash. The validated text is what goes into
     ``UNANSWERABLE_MISSING_TEMPLATE``; it is never logged.
     """
@@ -200,6 +203,13 @@ def _validate_missing_fact(missing: Any) -> str | None:
     if re.search(r"\d", m):
         return None
     if re.search(r"[\.,;:!?]", m):
+        return None
+    # HTML / markup characters are rejected outright: the ``missing``
+    # text is model-suggested wire text interpolated into the reply
+    # verbatim; security must not depend on the SPA's rendering
+    # escaping it (a future markdown/HTML rendering of the done frame
+    # would otherwise turn model-influenced text into stored XSS).
+    if re.search(r'[<>=`"()[]{}]', m):
         return None
     return m
 
@@ -467,9 +477,8 @@ def _question_numbers(question: str) -> set[float]:
 def guard_answer_numbers(
     answer: str,
     entries: list[dict[str, Any]],
-    question: str | None = None,
-    tolerance: float = 1e-6,
     question_numbers: set[float] | None = None,
+    tolerance: float = 1e-6,
 ) -> bool:
     """The deterministic number guard: ``True`` iff every number in
     ``answer`` appears in the design-state block OR in the question's
@@ -477,20 +486,28 @@ def guard_answer_numbers(
     USER typed; the question is not a design-state source, but its
     numbers are not invented).
 
-    Question numbers are the user's question text extracted with the
-    SAME rules the guard uses for the answer (digit tokens plus
-    spelled-out forms — "thirty" → 30.0, "a dozen" → 12.0); supply
-    them via ``question`` (extracted here) or pre-extracted via
-    ``question_numbers`` (the caller's own :func:`_question_numbers`
-    — the production call site extracts once and reuses). When both
-    are ``None`` the guard behaves exactly as before (block only).
+    ``question_numbers`` is the user's question text pre-extracted with
+    :func:`_question_numbers` (the production call site extracts once
+    and reuses it); when it is ``None`` the guard behaves exactly as
+    before (block only). Callers that want to license question numbers
+    supply the pre-extracted set — the guard no longer takes the raw
+    question (the single entry point removes a hidden precedence rule
+    between two inputs that both fed the same allowed set).
+
+    The question's numbers license presence ONLY: the model may repeat
+    a number the user typed ("a 30 mm screw" → "30 mm") but may not
+    substitute it for a design-state value it did not state. When the
+    answer carries no number that the block licenses, a question-licensed
+    number is the exception: it is the user's own number echoed back, and
+    no fabricated value is introduced. Spelled-out forms are treated
+    identically to digit tokens ("thirty" in the question licenses
+    "30" and "thirty" in the answer).
 
     "Number" means a digit token (``12``, ``12.5``, ``20 × 20`` → …) OR
     a spelled-out form ("twelve", "fifteen", "a dozen", … — zero–twenty
     plus the tens up to ninety); both are held to the same presence
     rule, on both the answer's and the question's numbers (the same
-    extraction runs on both sides — "thirty" in the question licenses
-    "30" and "thirty" in the answer).
+    extraction runs on both sides).
 
     Presence-only (operator decision): citing another axis's number
     (e.g. "20 mm tall" when H=12, W=20) PASSES — the guard checks
@@ -507,8 +524,6 @@ def guard_answer_numbers(
     allowed = state_block_numbers(entries)
     if question_numbers is not None:
         allowed |= question_numbers
-    elif question is not None:
-        allowed |= _question_numbers(question)
     for n in extract_answer_numbers(answer):
         if not any(abs(n - a) <= tolerance for a in allowed):
             return False
@@ -937,8 +952,13 @@ def build_answer_prompt(
         "empty.\n"
         "- every number in your answer must come from the block or be a "
         "number the user's own question stated; the user's question may be "
-        "quoted in the answer — never invent, round to a different "
-        "value, or combine values, and no other number is allowed.\n"
+        "quoted in the answer — but only by REPEATING the number as the "
+        "user typed it: a number the user typed in the question is quoted "
+        "back exactly as typed (\"30 mm\" stays \"30 mm\") and never stands in "
+        "for a design-state value (it cannot confirm, deny, or round a "
+        "measurement the block does or does not make). Never invent, round "
+        "to a different value, or combine values, and no other number is "
+        "allowed.\n"
         "- each value you cite must name its provenance in plain words: "
         "'you said that' (stated), 'I measured' (measured), 'I assumed' "
         "(assumed), 'not established' (unknown); when the block shows a "
@@ -977,11 +997,15 @@ def parse_answer_reply(
       ``"unanswerable"`` reply may carry an ADDITIONAL ``missing``
       field (issue #278) — the short noun phrase naming the fact the
       block does not establish (e.g. "the shelf's height"). ``missing``
-      is returned as the raw value (string or not — the route
-      validates it and falls back to ``NOT_ESTABLISHED`` for anything
-      invalid; it is NEVER treated as malformed here), absent ``missing``
-      is ``None``, and the reply's ``answer`` field (empty or not)
-      is ignored in favour of the ``missing``-built copy.
+      is validated by :func:`_validate_missing_fact` in the parser (the
+      parser is the single point of truth for the reply's ``missing``
+      shape): a value that is not a trimmed, non-empty string of
+      ≤ 60 chars, free of digits, sentence punctuation (other than
+      apostrophes), and HTML / markup characters is returned as
+      ``None`` — the route then falls back to the fixed
+      ``NOT_ESTABLISHED``. Invalid ``missing`` is NEVER malformed here;
+      absent ``missing`` is ``None``, and the reply's ``answer`` field
+      (empty or not) is ignored in favour of the ``missing``-built copy.
     * the LEGACY ``{answerable: bool, answer}`` shape is still accepted
       and mapped (issue #260's pitfall): ``true`` → ``"answer"`` and
       ``false`` → ``"request"`` — preserving today's routing (an
@@ -1022,14 +1046,16 @@ def parse_answer_reply(
             return None
         if kind == "unanswerable":
             # Issue #278: the unanswerable reply may carry ``missing``
-            # (the noun phrase naming the unknown fact). The raw value
-            # is returned — any type; the route validates it (string,
-            # trimmed non-empty, <= 60 chars, no digits, no sentence
-            # punctuation but apostrophes) and falls back to
-            # NOT_ESTABLISHED otherwise. Never malformed, never a
-            # crash; the ``answer`` field (if non-empty) is ignored in
-            # favour of the missing-built copy.
-            return kind, answer.strip(), doc.get("missing")
+            # (the noun phrase naming the unknown fact). The parser is
+            # the single point of truth for the reply shape — ``missing``
+            # is validated HERE (string, trimmed non-empty, <= 60
+            # chars, no digits, no sentence punctuation but apostrophes,
+            # no HTML / markup characters); anything invalid is
+            # ``None`` so the route falls back to NOT_ESTABLISHED.
+            # Never malformed, never a crash; the ``answer`` field
+            # (if non-empty) is ignored in favour of the
+            # missing-built copy.
+            return kind, answer.strip(), _validate_missing_fact(doc.get("missing"))
         return kind, answer.strip(), None
     # The legacy shape: ``answerable`` bool → mapped, never a false
     # "unanswerable" (a legacy false routes to the design loop exactly
@@ -1056,7 +1082,7 @@ async def ask_answer_call(
     entries: list[dict[str, Any]],
     answer_fn: AnswerFn,
     timeout: float = ANSWER_CALL_TIMEOUT_SECONDS,
-) -> tuple[AnswerOutcome, str] | None:
+) -> tuple[AnswerOutcome, str, str | None] | None:
     """Stage 2: one cheap LLM call + the deterministic number guard.
 
     ``answer_fn`` is the injected single-shot completion
@@ -1292,6 +1318,10 @@ async def route_chat_message(
         # (issue #260). Deciding when a question is really a request is
         # the model's call via kind "request" — "unanswerable" never
         # defaults to the loop. The missing text is never logged.
+        # The parser (parse_answer_reply → _validate_missing_fact) has
+        # already validated ``missing``; the ``is not None`` check
+        # below is the passthrough (a None means the value was invalid
+        # or absent — the parser returned None for either case).
         validated = _validate_missing_fact(missing)
         reply = (
             UNANSWERABLE_MISSING_TEMPLATE.format(missing=validated)
