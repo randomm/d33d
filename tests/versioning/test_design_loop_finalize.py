@@ -3361,6 +3361,34 @@ def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_ve
     # The free-text message is preserved alongside it.
     assert "Design loop exhausted" in error_frames[0]["message"]
 
+    # Issue #277: the SAME ``renderer_unavailable`` result (``best.render is
+    # None``) must flow through the failures.jsonl hook without an
+    # AttributeError. The stub loop above returned a real ``DesignResult``
+    # (the one ``run_design_loop`` built above), so feed THAT result through
+    # the hook's real archive path — the hook's ``best.scad_source`` read on
+    # the render-less record must not raise, and the archived line must
+    # carry the loop-level ``renderer_unavailable`` class.
+    from d33d.evals.failure_capture import record_production_failure
+    from d33d.evals.failure_capture import read_failure_events
+
+    hook_path = Path(app_with_versions.state.db_path).parent / "failures.jsonl"
+    event = record_production_failure(
+        design_result=result,
+        photo="data:image/png;base64,REF",
+        region_mark=None,
+        request="hi",
+        model="model-x",
+        prompt_version="h" * 64,
+        output_scad=result.best.scad_source,
+        path=hook_path,
+    )
+    assert event is not None, "an exhausted loop must archive a failure line"
+    assert event.failure_class == RENDERER_UNAVAILABLE
+    events = read_failure_events(hook_path)
+    assert len(events) == 1
+    assert events[0].failure_class == RENDERER_UNAVAILABLE
+    assert events[0].request == "hi"
+
 
 def test_infra_error_frame_has_no_structured_reason(app_with_versions):
     """An infra-failure error frame (no DesignResult) carries NO ``reason``

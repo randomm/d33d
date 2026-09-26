@@ -257,12 +257,17 @@ class IterationRecord:
 
     iteration: int
     scad_source: str
-    #: The render that produced this record. ``None`` for the synthetic
+    #: The render that produced this record. ``None`` ONLY for the synthetic
     #: pre-flight :data:`RENDERER_UNAVAILABLE` result (issue #277) — no
-    #: render ever ran; the loop-level placeholder record carries no
-    #: render data rather than a fabricated one.
+    #: render ever ran; the loop-level placeholder record carries no render
+    #: data rather than a fabricated one. Every record built on the normal
+    #: iteration path carries a real :class:`RenderResult`.
     render: RenderResult | None
-    score: Score
+    #: The score for this record. ``None`` ONLY for the synthetic pre-flight
+    #: :data:`RENDERER_UNAVAILABLE` record (issue #277) — nothing was
+    #: scored because nothing rendered. Every normally-built record carries
+    #: a real :class:`Score`.
+    score: Score | None
     #: Failure class routed from the render (None for a clean render).
     failure_class: str | None = None
     #: The structured repair dict fed to the NEXT iteration (None when the
@@ -1321,9 +1326,17 @@ async def run_design_loop_async(
     # :data:`RENDERER_UNAVAILABLE`. The probe is injectable (``renderer_check``)
     # so test harnesses default to "available" without shelling out; ``None``
     # runs the real probe.
+    #
+    # The real probe shells out to ``docker info`` (blocking subprocess):
+    # run it off the event loop so a hung/slow daemon never stalls other
+    # SSE streams. An injected ``renderer_check`` is assumed to be a cheap
+    # test stub — a plain direct call keeps the stubs trivial (a sync
+    # zero-arg callable, no coroutine wiring needed).
     if renderer_check is None:
-        renderer_check = renderer_is_available
-    if not renderer_check():
+        renderer_ok = await asyncio.to_thread(renderer_is_available)
+    else:
+        renderer_ok = renderer_check()
+    if not renderer_ok:
         return DesignResult(
             status="exhausted",
             best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
@@ -1409,33 +1422,6 @@ async def run_design_loop_async(
                 return _exhausted(iterations, best, best_score)
             continue
         render = await _call(render_fn, scad_source, defines_map)
-        # container_error is a dead render ENVIRONMENT (daemon down, image
-        # gone — a new source can never fix it): stop the loop immediately
-        # after this iteration instead of burning the budget (issue #277).
-        # timeout/oom stay non-stopping (they can be source-dependent),
-        # and the synthetic empty-SCAD path above never reaches this check
-        # (it ``continue``s before any render call).
-        if render.error_class == "container_error":
-            _ce_score = score(render, stated_dims, scad_source=scad_source)
-            _ce_record = IterationRecord(
-                iteration=iteration,
-                scad_source=scad_source,
-                render=render,
-                score=_ce_score,
-                failure_class=None,
-                repair=None,
-                prompt_hashes={"design": design_hash},
-                bbox=None,
-                params=_scad_params(scad_source),
-                param_meta=extract_param_meta(scad),
-                confirm_first=_confirm_first,
-                confirm_sentence=_confirm_sentence,
-            )
-            iterations.append(_ce_record)
-            if best is None or is_best(_ce_score, best_score):
-                best = _ce_record
-                best_score = _ce_score
-            return _container_error_stop(iterations, best)
         bbox = bbox_fn(render) if bbox_fn is not None else None
         candidate_score = score(
             render,
@@ -1562,6 +1548,18 @@ async def run_design_loop_async(
             consecutive_no_improvement = 0
         prev_score = candidate_score
 
+        # container_error is a dead render ENVIRONMENT (daemon down, image
+        # gone — a new source can never fix it): stop the loop immediately
+        # after this iteration instead of burning the budget (issue #277).
+        # The record above already went through the normal post-render path
+        # (score, best and no-improvement bookkeeping) — this is the only
+        # container_error-specific step, sitting with the other terminal
+        # checks. timeout/oom stay non-stopping (they can be
+        # source-dependent), and the synthetic empty-SCAD path never
+        # reaches this check (it ``continue``s before any render call).
+        if render.error_class == "container_error":
+            return _container_error_stop(iterations, best)
+
         repair = next_repair
         if consecutive_no_improvement >= NO_IMPROVEMENT_LIMIT:
             return _exhausted(iterations, best, best_score)
@@ -1625,7 +1623,8 @@ def renderer_is_available(probe: Callable[[], bool] | None = None) -> bool:
         try:
             completed = subprocess.run(
                 ["docker", "info"],
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 check=False,
                 timeout=_PREFLIGHT_PROBE_TIMEOUT_S,
             )

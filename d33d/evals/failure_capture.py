@@ -438,7 +438,8 @@ def _exhausted_loop_event(
     ):
         raise ValueError(
             f"failure_class {failure_reason!r} is not in "
-            f"EVAL_FAILURE_CLASSES or GATE_REASON_CLASSES"
+            f"EVAL_FAILURE_CLASSES, GATE_REASON_CLASSES or "
+            f"LOOP_LEVEL_FAILURE_REASONS"
         )
     return make_failure_event(
         photo=_optional_str(photo),
