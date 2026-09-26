@@ -22,14 +22,21 @@
 #      (docker.sock readiness lags `colima start` completion).
 #
 # Exit codes: 0 healthy or healed, 1 not healed, 2 skipped because
-# containers were running (or the container probe failed — conservative).
+# containers were running (or the container probe failed — conservative),
+# 64 usage/environment error (unknown flag, garbage numeric override).
+# Any other non-zero code means the script aborted mid-run before
+# reaching a decision.
 #
 # POSIX sh only. No GNU `timeout` on stock macOS — uses gtimeout when
 # available, else a background-process + kill pattern. No flock on
-# stock macOS — a mkdir lock directory is the fence against overlapping
-# launchd ticks during a ~1 min restart.
+# stock macOS — a mkdir lock directory (with a recorded holder pid for
+# stale-lock recovery) is the fence against overlapping launchd ticks
+# during a ~1 min restart.
 #
-# --dry-run: logs the intended action instead of executing it.
+# --dry-run: logs the intended heal path instead of executing it. The
+# post-heal verification is deliberately skipped in dry-run (the stubs
+# never recover), so dry-run reports the intended action and exits 0
+# without waiting on docker.
 #
 # Overridable via env for the local test harness (tests/scripts/):
 #   D33D_WD_HOME         fake $HOME (log dir + colima dir point here)
@@ -42,6 +49,22 @@
 
 set -u
 
+# require_int NAME VALUE — validate a numeric override; exit 64 with a
+# stderr message on garbage (documented usage/env error, not a heal
+# failure). Unset/empty keeps the caller's default.
+require_int() {
+    _ri_name=$1
+    _ri_val=$2
+    case "$_ri_val" in
+    '' | *[!0-9]*)
+        if [ -n "$_ri_val" ]; then
+            echo "colima-watchdog: $_ri_name=$_ri_val is not a non-negative integer; aborting" >&2
+            exit 64
+        fi
+        ;;
+    esac
+}
+
 WD_HOME="${D33D_WD_HOME:-$HOME}"
 DOCKER_TIMEOUT="${D33D_WD_DOCTIMEOUT:-10}"
 RETRY_COUNT="${D33D_WD_RETRY_COUNT:-6}"
@@ -49,6 +72,10 @@ RETRY_SLEEP="${D33D_WD_RETRY_SLEEP:-5}"
 LOG_FILE="${D33D_WD_LOGFILE:-$WD_HOME/Library/Logs/d33d-colima-watchdog.log}"
 LOCK_DIR="${D33D_WD_LOCKDIR:-${TMPDIR:-/tmp}/d33d-colima-watchdog.lock}"
 DRY_RUN=0
+
+require_int D33D_WD_DOCTIMEOUT "$DOCKER_TIMEOUT"
+require_int D33D_WD_RETRY_COUNT "$RETRY_COUNT"
+require_int D33D_WD_RETRY_SLEEP "$RETRY_SLEEP"
 
 # ControlPath is read at runtime so the script never hard-codes a home
 # path. Empty when the ssh config is missing or has no ControlPath.
@@ -63,7 +90,8 @@ fi
 # ---------------------------------------------------------------- logging
 
 # log LEVEL message...
-# Log failures must never mask the real exit code.
+# Log failures must never mask the real exit code: every write attempt is
+# guarded and the function always returns 0.
 log() {
     {
         mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null \
@@ -75,29 +103,35 @@ log() {
 # ---------------------------------------------------------------- helpers
 
 # run_with_timeout SECS CMD [ARGS...] — run CMD under a wall-clock bound.
-# Exit status: the command's status if it finished in time, 124 if
-# killed by the bound (matching GNU timeout).
+# Exit status: the command's status if it finished in time, 124 if the
+# bound fired (matching GNU timeout). The backgrounded target pid is
+# waited on explicitly, so the timeout kill acts on the actual child,
+# and the function returns promptly either way.
 run_with_timeout() {
-    secs=$1
+    _wd_secs=$1
     shift
     if command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$secs" "$@"
+        gtimeout "$_wd_secs" "$@"
         return $?
     fi
     "$@" &
-    pid=$!
-    i=0
-    while [ "$i" -lt $((secs * 10)) ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            wait "$pid"
+    _wd_pid=$!
+    _wd_i=0
+    while [ "$_wd_i" -lt $((_wd_secs * 10)) ]; do
+        if ! kill -0 "$_wd_pid" 2>/dev/null; then
+            wait "$_wd_pid"
             return $?
         fi
+        # Fractional sleep is a platform convenience (macOS /bin/sleep
+        # accepts it); strict-POSIX implementations reject it and fall
+        # through to the integer 1 s sleep — the bound then holds at
+        # ~1 s granularity (up to ~1 s past the nominal bound).
         sleep 0.1 2>/dev/null || sleep 1
-        i=$((i + 1))
+        _wd_i=$((_wd_i + 1))
     done
-    kill "$pid" 2>/dev/null
-    kill -9 "$pid" 2>/dev/null
-    wait "$pid" 2>/dev/null
+    kill "$_wd_pid" 2>/dev/null
+    kill -9 "$_wd_pid" 2>/dev/null
+    wait "$_wd_pid" 2>/dev/null
     return 124
 }
 
@@ -105,25 +139,33 @@ docker_info_check() {
     run_with_timeout "$DOCKER_TIMEOUT" docker info >/dev/null 2>&1
 }
 
-# wait_for_docker — bounded retry loop for post-heal verification.
+# wait_for_docker — bounded retry loop for post-heal verification
+# (~RETRY_COUNT * RETRY_SLEEP seconds total by default, ~30 s).
 wait_for_docker() {
-    i=1
-    while [ "$i" -le "$RETRY_COUNT" ]; do
+    _wd_i=1
+    while [ "$_wd_i" -le "$RETRY_COUNT" ]; do
         if docker_info_check; then
             return 0
         fi
-        if [ "$i" -lt "$RETRY_COUNT" ]; then
+        if [ "$_wd_i" -lt "$RETRY_COUNT" ]; then
             sleep "$RETRY_SLEEP"
         fi
-        i=$((i + 1))
+        _wd_i=$((_wd_i + 1))
     done
     return 1
 }
 
 colima_status_running() {
-    out=$(colima status 2>/dev/null) || return 1
+    # colima writes its status message to stderr (logrus format:
+    # `time=... level=info msg="colima is running ..."`), NOT stdout.
+    # Capture both streams; a failed probe (non-zero exit) already returns 1.
+    out=$(colima status 2>&1) || return 1
+    # Negative check first: a probe that returns success with "not running"
+    # text must not be misrouted into the running-VM branch (the *running*
+    # substring match would swallow it).
     case "$out" in
-    *running*) return 0 ;;
+    *"not running"*) return 1 ;;
+    *"colima is running"*) return 0 ;;
     *) return 1 ;;
     esac
 }
@@ -140,33 +182,62 @@ running_container_count() {
     fi
     n=0
     for _ in $out; do
-        n=$((n + 1))
+        # Count only all-hex tokens of container-id length (6+). A header,
+        # warning word, or any non-id output from `docker ps -q` must not
+        # inflate the count (e.g. the word "WARNING" is 7 chars but
+        # contains ':', so it is excluded).
+        case "$_" in
+        *[!0-9a-f]*) continue ;;
+        esac
+        case "$_" in
+        ??????*) n=$((n + 1)) ;;
+        esac
     done
     echo "$n"
 }
 
 # ---------------------------------------------------------------- actions
 
-# act_restart / act_start / act_reforward log the intended action and
-# execute it (or no-op under --dry-run). All return 0; post-heal
-# verification is done by the caller via wait_for_docker.
+# act_restart / act_start execute the heal step (or no-op under
+# --dry-run) and report its exit status: 0 when the command ran and
+# succeeded, 1 when it failed. Post-heal verification (wait_for_docker)
+# is done by the caller; a heal step that failed AND leaves docker
+# unreachable is a "not healed" (exit 1) outcome, never a success.
 
 act_restart() {
     log ACTION "colima stop && colima start"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log RESULT "dry-run: restart not executed"
+        log RESULT "dry-run: restart would execute (verification skipped)"
         return 0
     fi
-    colima stop && colima start
+    colima stop
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log ERROR "colima stop failed (rc=$rc); restart aborted"
+        return 1
+    fi
+    colima start
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log ERROR "colima start failed (rc=$rc); restart incomplete"
+        return 1
+    fi
+    return 0
 }
 
 act_start() {
     log ACTION "colima start (VM was not running)"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log RESULT "dry-run: start not executed"
+        log RESULT "dry-run: start would execute (verification skipped)"
         return 0
     fi
     colima start
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log ERROR "colima start failed (rc=$rc)"
+        return 1
+    fi
+    return 0
 }
 
 # rebuild_forward — try to re-establish the forward through the existing
@@ -178,6 +249,8 @@ rebuild_forward() {
         log INFO "no usable ControlPath in colima ssh config; restart required"
         return 1
     fi
+    # The real colima ssh_config uses an absolute ControlPath; the ~
+    # expansion below is a defensive convenience for hand-written configs.
     case "$CONTROL_PATH" in
     "~"*) cp="${WD_HOME}${CONTROL_PATH#\~}" ;;
     *) cp="$CONTROL_PATH" ;;
@@ -186,18 +259,20 @@ rebuild_forward() {
         log INFO "ControlPath $cp not a socket; restart required"
         return 1
     fi
-    log ACTION "ssh -O forward via $cp"
+    log ACTION "re-forward: ssh -O forward via $cp"
     if [ "$DRY_RUN" -eq 1 ]; then
-        log RESULT "dry-run: re-forward not executed"
+        log RESULT "dry-run: re-forward would execute (verification skipped)"
         return 0
     fi
-    if ssh -S "$cp" -O forward -f -L \
+    ssh -S "$cp" -O forward -f -L \
         "$WD_HOME/.colima/default/docker.sock:/var/run/docker.sock" colima \
-        >/dev/null 2>&1; then
-        return 0
+        >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        log INFO "ssh -O forward via $cp failed (rc=$rc); restart required"
+        return 1
     fi
-    log INFO "ssh -O forward via $cp failed; restart required"
-    return 1
+    return 0
 }
 
 # ---------------------------------------------------------------- main
@@ -218,18 +293,55 @@ main() {
     if docker_info_check; then
         exit 0
     fi
-    log WARN "check failed: docker info did not succeed within ${DOCKER_TIMEOUT}s"
+    log WARN "check failed: docker info did not succeed within ~${DOCKER_TIMEOUT}s"
 
     # Fence against overlapping launchd ticks (a restart takes ~1 min,
     # the cadence is 60 s). mkdir is atomic; the loser skips this tick.
+    # A lock left by a killed run (SIGKILL, power loss) is reclaimed when
+    # its recorded pid no longer exists; kill -0 can at worst be fooled
+    # by pid reuse, which only defers recovery to the next tick.
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-        log WARN "another watchdog instance is active; skipping"
-        exit 1
+        _wd_holder=""
+        if [ -f "$LOCK_DIR/pid" ]; then
+            _wd_holder=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+        fi
+        case "$_wd_holder" in
+        '' | *[!0-9]*)
+            log WARN "another watchdog instance is active; skipping"
+            exit 1
+            ;;
+        *)
+            if kill -0 "$_wd_holder" 2>/dev/null; then
+                log WARN "another watchdog instance is active (pid $_wd_holder); skipping"
+                exit 1
+            fi
+            # Stale lock: the recorded holder is gone. Reclaim.
+            log WARN "reclaiming stale lock (pid $_wd_holder not alive)"
+            rm -f "$LOCK_DIR/pid" 2>/dev/null
+            if ! rmdir "$LOCK_DIR" 2>/dev/null; then
+                # Non-empty or vanished; do not fight it this tick.
+                log WARN "another watchdog instance is active; skipping"
+                exit 1
+            fi
+            if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+                log WARN "another watchdog instance is active; skipping"
+                exit 1
+            fi
+            printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null
+            ;;
+        esac
+    else
+        printf '%s\n' "$$" > "$LOCK_DIR/pid" 2>/dev/null
     fi
-    trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT INT TERM
+    # The pid file must go before the rmdir (rmdir refuses a non-empty
+    # directory); the trap fires on every exit path, including the
+    # safety-rule exits below.
+    trap 'rm -f "$LOCK_DIR/pid" 2>/dev/null; rmdir "$LOCK_DIR" 2>/dev/null' \
+        EXIT INT TERM
 
     if colima_status_running; then
-        # Running VM, dead forward. Safety rule first.
+        # Running VM, dead forward. Safety rule first: if the container
+        # probe fails or finds a RUNNING container, do not touch the VM.
         n=$(running_container_count)
         if [ "$n" = "error" ]; then
             log WARN "cannot probe container list (colima ssh failed); not touching VM"
@@ -242,6 +354,8 @@ main() {
         # Cheapest heal first: re-forward via the ControlMaster.
         if rebuild_forward; then
             if [ "$DRY_RUN" -eq 1 ]; then
+                # Dry-run: the intended heal is re-forward; verification
+                # is skipped because stubs never recover.
                 exit 0
             fi
             if wait_for_docker; then
@@ -253,13 +367,19 @@ main() {
         # Fallback: full stop/start.
         act_restart
         if [ "$DRY_RUN" -eq 1 ]; then
+            # Dry-run: re-forward was not possible, the intended heal is
+            # the stop/start restart; verification is skipped.
             exit 0
         fi
         if wait_for_docker; then
             log RESULT "restart succeeded; docker reachable"
             exit 0
         fi
-        log ERROR "restart attempted but docker still unreachable after ${RETRY_COUNT} tries"
+        # Not healed: docker is unreachable even after the heal command
+        # ran. If the heal command itself failed, act_restart has already
+        # logged the failing step and its rc; this line states the net
+        # outcome either way.
+        log ERROR "not healed: docker still unreachable after ${RETRY_COUNT} tries"
         exit 1
     fi
 
@@ -273,7 +393,7 @@ main() {
         log RESULT "start succeeded; docker reachable"
         exit 0
     fi
-    log ERROR "start attempted but docker still unreachable after ${RETRY_COUNT} tries"
+    log ERROR "not healed: docker still unreachable after ${RETRY_COUNT} tries"
     exit 1
 }
 

@@ -13,9 +13,5 @@
 	<integer>60</integer>
 	<key>RunAtLoad</key>
 	<true/>
-	<key>StandardOutPath</key>
-	<string>__HOME__/Library/Logs/d33d-colima-watchdog.launchd.out.log</string>
-	<key>StandardErrorPath</key>
-	<string>__HOME__/Library/Logs/d33d-colima-watchdog.launchd.err.log</string>
 </dict>
 </plist>

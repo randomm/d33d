@@ -13,7 +13,14 @@ restores the forward automatically, once a minute, with a full audit trail.
   event: check failed, action taken, result; a healthy tick writes nothing)
 - Exit codes: `0` healthy or healed, `1` not healed (or skipped — another
   watchdog instance is already healing), `2` skipped because containers were
-  running (the safety rule), `64` bad usage.
+  running (or the container probe failed — conservative; the safety rule),
+  `64` usage/environment error (unknown flag, non-numeric env override).
+  Any other non-zero code means the script aborted mid-run before reaching
+  a decision.
+
+The plist captures no stdout/stderr: the log file above is the single audit
+surface. Launchd's own captures would just duplicate (or silently lose) what
+the script already logs.
 
 ## Install
 
@@ -60,27 +67,53 @@ rm "$HOME/Library/Scripts/colima-watchdog.sh"   # optional: keep for manual use
 `launchctl bootout` is the modern equivalent of `launchctl unload`. The log
 file is left in place.
 
+## Troubleshooting
+
+- **Every tick logs "another watchdog instance is active; skipping" (exit 1).**
+  A prior run was killed hard (SIGKILL, power loss) and left its lock
+  directory behind. The watchdog reclaims a lock whose recorded holder pid is
+  no longer alive automatically; if it cannot (e.g. pid reuse, or a lock
+  directory that predates the pid-file scheme), remove it manually:
+  `rmdir "${TMPDIR:-/tmp}/d33d-colima-watchdog.lock"`.
+- **A `colima stop` or `colima start` failure during a heal** is logged with
+  its exit status (`colima stop failed (rc=N)`) and the tick ends as
+  "not healed" (exit 1) — the log line naming the failing step is the
+  diagnostic; the next tick retries.
+
 ## Manual use
 
-The script can be run by hand; `--dry-run` logs the intended action
-(re-forward, restart, or start) without executing it — useful for verifying
+The script can be run by hand; `--dry-run` logs the intended heal path
+(re-forward, restart, or start) without executing it — the post-heal
+verification loop is skipped in dry-run, so it exits 0 after recording the
+intended action, matching what a real run would attempt. Useful for verifying
 the script against a real (or stubbed) environment:
 
 ```sh
 $HOME/Library/Scripts/colima-watchdog.sh --dry-run
 ```
 
-The script is idempotent: overlapping ticks are fenced by a lock directory,
-a healthy socket exits 0 without touching anything, and the heal paths are
-safe to re-run.
+The script is idempotent: overlapping ticks are fenced by a lock directory
+(with stale-lock recovery), a healthy socket exits 0 without touching
+anything, and the heal paths are safe to re-run.
 
 ## Version baseline and the lima#5420 finding
 
-Recorded on the operator's Mac (2026-09-25):
+Recorded on the operator's Mac (2026-09-25), each line below is the actual
+command output (re-verified 2026-09-26):
 
-- `colima version`: **colima 0.10.1** (commit `ed905203afdbc6fd4eae6cc301918099ff31e86e`,
-  aarch64, docker runtime), docker client v29.4.1, docker server v29.2.1
-- `limactl --version`: **limactl 2.1.1**
+- `colima version`:
+
+  ```
+  colima version 0.10.1
+  git commit: ed905203afdbc6fd4eae6cc301918099ff31e86e
+
+  runtime: docker
+  arch: aarch64
+  client: v29.4.1
+  server: v29.2.1
+  ```
+
+- `limactl --version`: **limactl version 2.1.1**
 
 Upstream finding (checked once, 2026-09-25): **lima-vm/lima#5420** — "guest
 socket forwards die with the SSH ControlMaster and are never re-created
