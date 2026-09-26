@@ -50,10 +50,11 @@ from d33d.design_loop import (
     BboxInfo,
     DesignResult,
     Score,
+    _axis_param_mismatches,
     _scad_from_result,
+    extract_confirm_hints,
     extract_named_params,
     extract_param_meta,
-    extract_confirm_hints,
     is_best,
     make_llm_fn,
     no_improvement,
@@ -298,6 +299,46 @@ def test_score_bit5_non_numeric_ignored():
         named_params={"H": 20.0, "note": "some value"},
     )
     assert s.bits[4] is False  # H still fails, note is ignored
+
+
+def test_axis_param_mismatches_returns_per_param_evidence():
+    """Issue #276: ``_axis_param_mismatches`` returns one
+    ``(label, model, measured, axis)`` tuple per mismatching param, empty
+    when every declared-axis param matches (bit 5 passes)."""
+    # Two mismatching params, one matching param → two entries, the
+    # matching param is absent.
+    out = _axis_param_mismatches(
+        BboxInfo(80.0, 49.0, 102.0, 51000.0),
+        {"W": 60.0, "D": 45.0, "H": 20.0, "note": "a string"},
+        {
+            "W": {"label": "Tray width", "unit": "mm", "axis": "W"},
+            "D": {"label": "Tray depth", "unit": "mm", "axis": "D"},
+            "H": {"label": "Tray height", "unit": "mm", "axis": "H"},
+        },
+    )
+    # Order follows the named_params dict — compare as a set.
+    assert set(out) == {
+        ("Tray width", 60.0, 80.0, "W"),
+        ("Tray height", 20.0, 102.0, "H"),
+    }
+    # A matching param → empty (bit 5 passes).
+    assert (
+        _axis_param_mismatches(
+            BboxInfo(43.8, 43.9, 12.0, 2297.0),
+            {"w": 40.0},
+            {"w": {"label": "Spacer width", "unit": "mm", "axis": "W"}},
+        )
+        == []
+    )
+    # No bbox → empty (the caller abstains).
+    assert _axis_param_mismatches(None, {"H": 20.0}, {}) == []
+    # No label in the meta → the param name is the label fallback.
+    out = _axis_param_mismatches(
+        BboxInfo(25.0, 25.0, 30.0, 18750.0),
+        {"h": 20.0},
+        {"h": {"axis": "H"}},
+    )
+    assert out == [("h", 20.0, 30.0, "H")]
 
 
 def test_no_improvement_is_named_predicate_on_rank():

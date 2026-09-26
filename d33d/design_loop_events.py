@@ -31,11 +31,12 @@ import asyncio
 import base64
 import inspect
 import logging
+import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
-from d33d.design_loop import BboxInfo, scad_title
+from d33d.design_loop import BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -495,24 +496,30 @@ def _structured_reason(result: Any) -> str | None:
     return None
 
 
-def _axis_mismatch_lines(result: Any) -> list[str] | None:
-    """The per-param mismatch lines for an ``axis_params_mismatch``
-    exhaustion (issue #276, operator decision) — or ``None`` when the
-    failure is a different reason (the field is then OMITTED, the
-    frame's omit-not-null policy).
+def _axis_mismatches(result: Any) -> list[dict[str, Any]] | None:
+    """The STRUCTURED per-param mismatches for an ``axis_params_mismatch``
+    exhaustion (issue #276) — or ``None`` when the failure is a different
+    reason (the field is then OMITTED, the frame's omit-not-null policy).
 
-    The lines are the SAME server-built strings the repair directive
+    Each entry is ``{"label": str, "model": float, "measured": float,
+    "axis": str}`` — the same per-param evidence the repair directive
     carried to the loop's next iteration (``_evidence`` in
-    ``run_design_loop_async``: ``"{label} = {model} but the part
-    measures {measured} on {axis}"`` — every mismatching param, both
-    numbers, no PII): the terminal error frame rides them in
-    ``mismatch_lines`` so the SPA's failure turn can render the
-    per-param detail without re-deriving any number client-side (the
-    measured extents are the server's own gate numbers, never invented
-    by the SPA). Derived from the BEST iteration's record (the same
-    candidate the loop returned), not re-run through the gate: a
-    stub loop result without the fields simply yields ``None`` (an
-    honest absence, the #91/#137 precedent).
+    ``run_design_loop_async``, built from the shared
+    ``_axis_param_mismatches`` helper: every mismatching param, both
+    numbers, no PII). The terminal error frame rides them in
+    ``mismatches`` so the SPA's failure turn renders one line per
+    mismatch via ``copy.failure.axisMismatchLine(label, mm(model),
+    mm(measured))`` — the SPA owns the formatting; the numbers are the
+    server's own gate numbers, never invented by the SPA.
+
+    Derived from the BEST iteration's record (the same candidate the
+    loop returned), not re-run through the gate: a stub loop result
+    without the fields simply yields ``None`` (an honest absence, the
+    #91/#137 precedent). The evidence string is the "; "-join of one
+    line per mismatch; it is split back into entries by the known line
+    shape (``"{label} = {model:g} but the part measures {measured:g}
+    on {axis}"``) — malformed entries are dropped, never rendered as
+    numbers the SPA has not established.
     """
     reason = getattr(result, "failure_reason", None)
     if reason != "axis_params_mismatch":
@@ -526,14 +533,30 @@ def _axis_mismatch_lines(result: Any) -> list[str] | None:
     evidence = repair.get("evidence")
     if not isinstance(evidence, str) or not evidence:
         return None
-    # The evidence is the "; "-join of one line per mismatching param
-    # (the loop's own builder). A non-empty join is always non-blank;
-    # the sentinel fallback the loop uses ("axis-params mismatch (see
-    # gate bit 5)") carries no per-param numbers — render it as a
-    # single line rather than suppressing it (the headline sentence
-    # still carries the plain-language copy).
-    lines = [part.strip() for part in evidence.split(";") if part.strip()]
-    return lines or None
+    # One line per mismatching param (the loop's own builder). Split the
+    # "; "-join back into entries by the known line shape.
+    pattern = re.compile(
+        r"^(?P<label>.+?) = (?P<model>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?) "
+        r"but the part measures (?P<measured>\d+(?:\.\d+)?(?:[eE][+-]?\d+)?) "
+        r"on (?P<axis>W|D|H)$"
+    )
+    out: list[dict[str, Any]] = []
+    for part in evidence.split(";"):
+        line = part.strip()
+        if not line:
+            continue
+        m = pattern.match(line)
+        if m is None:
+            continue
+        out.append(
+            {
+                "label": m.group("label"),
+                "model": float(m.group("model")),
+                "measured": float(m.group("measured")),
+                "axis": m.group("axis"),
+            }
+        )
+    return out or None
 
 
 def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
@@ -993,11 +1016,7 @@ async def _resolve_version_create(
     prev_params: dict | None = dict(latest["params"]) if latest is not None else None
     # Lazy import: ``d33d.versions`` imports ``d33d.projects`` (which imports
     # this module), so the name helpers are pulled in at call time.
-    from d33d.versions import (
-        clean_name,
-        param_diff_name,
-        sanitize_dimension_phrase,
-    )
+    from d33d.versions import resolve_version_name
 
     # The collision-suffix baseline (#245 follow-up): the set of names the
     # project already carries — ``VersionService`` passes an explicit name
@@ -1017,37 +1036,19 @@ async def _resolve_version_create(
         )
         existing_names = set()
 
-    # The measured bbox of the best candidate (issue #276): the version
-    # name must never carry dimensions the part does not measure. The
-    # title is sanitised against these extents BEFORE ``clean_name`` —
-    # ``clean_name`` lowercases/trims/caps and would mangle the strip
-    # result, so the dimension check runs on the raw title. ``None`` (no
-    # measurement) is passed through untouched (an absent measurement
-    # abstains — never a fabricated extent).
-    measured_bbox = _version_bbox_extents(result)
-
-    if candidate_source is not None:
-        title = scad_title(candidate_source)
-        if title is not None:
-            # A falsy result (empty string — the title WAS the dimensions
-            # and the strip left nothing meaningful) falls back to the
-            # param-diff phrase (the existing name source), never an
-            # empty name.
-            sanitized = sanitize_dimension_phrase(title, measured_bbox)
-            if sanitized:
-                version_name = clean_name(sanitized, existing_names)
-            else:
-                version_name = clean_name(
-                    param_diff_name(prev_params, dict(named)), existing_names
-                )
-        else:
-            version_name = clean_name(
-                param_diff_name(prev_params, dict(named)), existing_names
-            )
-    else:
-        version_name = clean_name(
-            param_diff_name(prev_params, dict(named)), existing_names
-        )
+    # The version name (issue #276): the SHARED resolver (the finalize
+    # route uses the same one, so both paths name identically). The chat
+    # path passes no client name — the precedence falls straight to the
+    # model's ``// title:`` comment (sanitised against the measured bbox,
+    # ``None`` abstains), else the param-diff phrase.
+    version_name = resolve_version_name(
+        None,
+        candidate_source,
+        measured_bbox=_version_bbox_extents(result),
+        prev_params=prev_params,
+        new_params=dict(named),
+        existing_names=existing_names,
+    )
     # The thumbnail is the best render's iso view (the only view guaranteed
     # to frame the whole object — side views can be cropped per the
     # separately-tracked camera-fit issue). ``_artifact_bytes_from_path``
@@ -1575,9 +1576,14 @@ async def run_design_loop_with_events(
         # gate evidence), so the SPA's failure turn renders the detail
         # without re-deriving any number. Omitted for every other
         # reason (omit-not-null).
-        mismatch_lines = _axis_mismatch_lines(result)
-        if mismatch_lines is not None:
-            error_data["mismatch_lines"] = mismatch_lines
+        # The per-param mismatch detail (issue #276): structured
+        # ``mismatches`` entries (label + model + measured + axis, the
+        # server's own gate evidence) so the SPA renders one line per
+        # mismatch via its own copy helper without re-deriving any number.
+        # Omitted for every other reason (omit-not-null).
+        mismatches = _axis_mismatches(result)
+        if mismatches is not None:
+            error_data["mismatches"] = mismatches
         yield ("error", error_data)
 
 

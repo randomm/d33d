@@ -533,6 +533,109 @@ def test_name_sanitization_mm_suffix_triple():
     )
 
 
+# ---------------------------------------------------------------------------
+# (2c) The shared version-name resolver (issue #276)
+#
+# ``resolve_version_name`` owns the name precedence (client name →
+# ``scad_title`` → param-diff fallback), the ``sanitize_dimension_phrase``
+# pass, the ``clean_name`` pass, and the falsy fallback. Both creation
+# paths (the chat adapter and the finalize route) call it, so the two
+# paths name identically.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_version_name_chat_path_scad_title_worked_example():
+    """The chat path (no client name): the SCAD title wins, sanitised
+    against the measured bbox. "Flared lip tray 60x45x20" with bbox
+    64×49×102 → "Flared lip tray" (20 matches no extent — the WHOLE
+    dimension phrase is stripped, the operator's worked example)."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "Flared lip tray"
+
+
+def test_resolve_version_name_client_name_wins_over_scad_title():
+    """Client name (the finalize route's body field) beats the model's
+    title — the user's words win."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        "my bracket",
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "my bracket"
+
+
+def test_resolve_version_name_falsy_falls_back_to_param_diff_name():
+    """A title that IS the dimensions (the strip leaves nothing
+    meaningful) → the param-diff phrase ("First design" on a fresh
+    project), never an empty name."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "First design"
+
+
+def test_resolve_version_name_no_title_uses_param_diff_name():
+    """No ``// title:`` in the SCAD → the param-diff phrase."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "H = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params={"H": 10.0},
+        new_params={"H": 20.0},
+    )
+    assert name == "H 10 → 20"
+
+
+def test_resolve_version_name_none_bbox_abstains():
+    """No measurement → the title is used as-is (an absent measurement
+    abstains — never a strip based on a fabricated extent)."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        None,
+        "// title: Flared lip tray 60x45x20\nH = 20;\ncube([60, 45, H]);\n",
+        measured_bbox=None,
+        prev_params=None,
+        new_params={"H": 20.0},
+    )
+    assert name == "Flared lip tray 60x45x20"
+
+
+def test_resolve_version_name_client_name_sanitize_falsy_falls_back_to_diff():
+    """A client name that IS the dimensions (the strip leaves nothing)
+    → the param-diff phrase, never an empty name."""
+    from d33d.versions import resolve_version_name
+
+    name = resolve_version_name(
+        "60x45x20",
+        None,
+        measured_bbox=(64.0, 49.0, 102.0),
+        prev_params={"H": 10.0},
+        new_params={"H": 20.0},
+    )
+    assert name == "H 10 → 20"
+
+
 def test_name_sanitization_strip_leaves_no_dangling_separator():
     """A mid-name strip that removed a phrase must not leave a stranded
     separator (issue #276 adversarial finding 4): "Tray 60x45x20, rev 2"
@@ -1198,16 +1301,17 @@ def test_region_edit_exhausted_emits_error_frame_and_no_version(app_with_version
     assert timeline == [], "exhausted loop must not create a version"
 
 
-def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatch_lines(
+def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatches(
     app_with_versions,
 ):
     """Issue #276: an exhausted loop whose best candidate fails bit 5
     (``axis_params_mismatch``) emits a terminal error frame whose
-    ``mismatch_lines`` carries the per-param detail (label + both numbers,
-    the server's own gate evidence — one line per mismatching param) so
-    the SPA's failure turn renders the detail without re-deriving any
+    structured ``mismatches`` field carries the per-param detail
+    (``{label, model, measured, axis}`` — the server's own gate evidence,
+    one entry per mismatching param) so the SPA's failure turn renders
+    one line per mismatch via its own copy helper without re-deriving any
     number. A stub whose best record carries no repair yields no
-    ``mismatch_lines`` (omit-not-null, honest absence)."""
+    ``mismatches`` (omit-not-null, honest absence)."""
     from d33d.design_loop import IterationRecord, Score
 
     class _AxisStubResult:
@@ -1283,9 +1387,9 @@ def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatch_lines(
     # DB connection is owned by the lifespan context, and a second
     # ``run_async`` on the same app would operate on a closed DB.
     async def _call_all(client):
-        # (a) repair evidence present → mismatch_lines rides the error frame.
+        # (a) repair evidence present → mismatches ride the error frame.
         f_a = await _drive(client, True)
-        # (a2) multi-param evidence → one line per mismatching param.
+        # (a2) multi-param evidence → one entry per mismatching param.
         f_multi = await _drive_multi(client)
         # (b) no repair on the record → the field is OMITTED (omit-not-null).
         f_b = await _drive(client, False)
@@ -1296,18 +1400,18 @@ def test_chat_exhausted_axis_params_mismatch_error_frame_carries_mismatch_lines(
     assert frames[-1][0] == "error"
     error_data = frames[-1][1]
     assert error_data["reason"] == "axis_params_mismatch"
-    assert error_data["mismatch_lines"] == [
-        "Tray height = 20 but the part measures 102 on H"
+    assert error_data["mismatches"] == [
+        {"label": "Tray height", "model": 20.0, "measured": 102.0, "axis": "H"}
     ]
 
     assert frames_multi[-1][0] == "error"
-    assert frames_multi[-1][1]["mismatch_lines"] == [
-        "Tray height = 20 but the part measures 102 on H",
-        "Width = 60 but the part measures 64 on W",
+    assert frames_multi[-1][1]["mismatches"] == [
+        {"label": "Tray height", "model": 20.0, "measured": 102.0, "axis": "H"},
+        {"label": "Width", "model": 60.0, "measured": 64.0, "axis": "W"},
     ]
 
     assert frames_norepair[-1][0] == "error"
-    assert "mismatch_lines" not in frames_norepair[-1][1]
+    assert "mismatches" not in frames_norepair[-1][1]
 
 
 def test_region_edit_unwired_loop_returns_202_and_terminates_with_error(

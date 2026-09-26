@@ -71,6 +71,17 @@ export interface DisplayError {
   retryable: boolean;
   /** The structured reason code, when the frame carried one. */
   reason?: string;
+  /** The per-param mismatch detail for an `axis_params_mismatch` failure
+   *  (issue #276) — one entry per mismatching parameter, structured
+   *  (label + the model's declared value + the measured extent),
+   *  formatted client-side by `copy.failure.axisMismatchLine` (never a
+   *  raw server string). */
+  mismatches?: Array<{
+    label: string;
+    model: number;
+    measured: number;
+    axis: string;
+  }>;
   /** Part 2 — the measured number beside the limit. Present ONLY for the
    *  envelope gate; measured is parsed from the raw gate string (the
    *  frame's only source of the number — never invented). */
@@ -144,7 +155,7 @@ export function displayDesignLoopError(
     message?: string;
     reason?: unknown;
     carried_axes?: unknown;
-    mismatch_lines?: unknown;
+    mismatches?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -173,24 +184,51 @@ export function displayDesignLoopError(
         message = copy.failure.bboxCarried(label, axes[0][1]);
       }
     }
-    // The axis_params_mismatch detail (issue #276 operator decision): the
-    // per-param numbers arrive as `mismatch_lines` (one line per
-    // mismatching param — "Label = 20 but the part measures 102 on H"),
-    // one line per param, rendered in mono by the failure turn. The
-    // server's words are the only source of the numbers — the client
-    // never re-derives or invents an extent. Absent/empty → the raw
-    // reason, as before (no lines to show is an honest headless detail).
+    // The axis_params_mismatch detail (issue #276): the per-param numbers
+    // arrive STRUCTURED as `mismatches` (one entry per mismatching param —
+    // label + the model-declared value + the measured extent, all
+    // server-side gate numbers — the client never re-derives or invents
+    // an extent). The SPA owns the formatting:
+    // `copy.failure.axisMismatchLine(label, model, measured)`. Absent or
+    // malformed entries are dropped; no valid entries → the raw reason,
+    // as before (an honest headless detail).
     let detail = reason;
     let envelope: DisplayError["envelope"];
-    if (
-      reason === "axis_params_mismatch" &&
-      Array.isArray(data.mismatch_lines)
-    ) {
-      const lines = (data.mismatch_lines as unknown[]).filter(
-        (l): l is string => typeof l === "string" && l.length > 0,
-      );
-      if (lines.length > 0) {
-        detail = lines.join("\n");
+    let mismatches: DisplayError["mismatches"];
+    if (reason === "axis_params_mismatch" && Array.isArray(data.mismatches)) {
+      const parsed = (data.mismatches as unknown[]).flatMap((m) => {
+        if (
+          typeof m !== "object" ||
+          m === null ||
+          Array.isArray(m)
+        ) {
+          return [];
+        }
+        const entry = m as Record<string, unknown>;
+        const label = entry.label;
+        const model = entry.model;
+        const measured = entry.measured;
+        if (
+          typeof label !== "string" ||
+          label.length === 0 ||
+          typeof model !== "number" ||
+          !Number.isFinite(model) ||
+          typeof measured !== "number" ||
+          !Number.isFinite(measured) ||
+          typeof entry.axis !== "string" ||
+          entry.axis.length === 0
+        ) {
+          return [];
+        }
+        return [{ label, model, measured, axis: entry.axis }];
+      });
+      if (parsed.length > 0) {
+        mismatches = parsed;
+        detail = parsed
+          .map((p) =>
+            copy.failure.axisMismatchLine(p.label, p.model, p.measured),
+          )
+          .join("\n");
       }
     }
     if (reason === "bbox_out_of_tolerance" && envelopeLimits !== undefined) {
@@ -208,6 +246,7 @@ export function displayDesignLoopError(
       retryable: true,
       reason,
       ...(envelope !== undefined ? { envelope } : {}),
+      ...(mismatches !== undefined ? { mismatches } : {}),
     };
   }
   return {

@@ -210,6 +210,11 @@ def sanitize_dimension_phrase(
         try:
             values = tuple(float(g) for g in match.groups())
         except ValueError:
+            logger.debug(
+                "dimension triple %r in name %r did not parse — leaving it",
+                match.group(0),
+                name,
+            )
             return match.group(0)  # unparseable — leave it, never mangle
         if all(_matches_extent(v) for v in values):
             return match.group(0)
@@ -224,6 +229,16 @@ def sanitize_dimension_phrase(
             return match.group(0)
         return ""
 
+    # A measurement with a non-numeric extent is a malformed bbox, not a
+    # measurement the name can be checked against: return the name
+    # unchanged (the same honest abstain as ``None`` — never a strip
+    # based on a number the measurement did not establish).
+    if any(
+        not isinstance(e, (int, float)) or isinstance(e, bool)
+        for e in (x, y, z)
+    ):
+        return name
+
     result = _DIM_TRIPLE_RE.sub(_strip_triple, name)
     result = _DIM_MM_RE.sub(_strip_mm, result)
     # A strip that removed a mid-name phrase leaves a dangling separator
@@ -236,6 +251,53 @@ def sanitize_dimension_phrase(
     if not result or sum(c.isalpha() for c in result) < 2:
         return ""
     return result
+
+
+def resolve_version_name(
+    client_name: str | None,
+    scad_source: str | None,
+    *,
+    measured_bbox: tuple[float, float, float] | None,
+    prev_params: dict[str, ParamValue] | None,
+    new_params: dict[str, ParamValue],
+    existing_names: set[str] | None = None,
+) -> str:
+    """The version display name for a new version (issue #276) — one
+    resolver for BOTH version-creation paths (the chat adapter's
+    ``_resolve_version_create`` and the finalize route), so the two paths
+    can never diverge in naming precedence.
+
+    Name source, in strict precedence:
+
+    1. the client's ``name`` (the finalize route's body field — a user
+       statement wins over the model's title);
+    2. the model's ``// title:`` comment in the candidate's own SCAD
+       (``d33d.design_loop.scad_title``); the chat path (no client
+       ``name``) falls straight to this source;
+    3. a deterministic phrase from the param diff vs the previous
+       version's params (:func:`param_diff_name`).
+
+    Every non-empty candidate is first run through
+    :func:`sanitize_dimension_phrase` against ``measured_bbox`` (a name
+    must never carry dimensions the part does not measure — issue #276,
+    operator decision; ``None`` abstains — the name is used as-is). A
+    falsy result (a title that WAS the dimensions — the strip left
+    nothing meaningful) falls back to the param-diff phrase. The chosen
+    string is cleaned through :func:`clean_name` with the project's
+    existing version names as the collision baseline (the #245 follow-up
+    — two versions never share a name).
+    """
+    from d33d.design_loop import scad_title
+
+    source = client_name
+    if source is None or not source:
+        title = scad_title(scad_source) if scad_source else None
+        source = title if title else ""
+    if source:
+        sanitized = sanitize_dimension_phrase(source, measured_bbox)
+        if sanitized:
+            return clean_name(sanitized, existing_names)
+    return clean_name(param_diff_name(prev_params, new_params), existing_names)
 
 
 def param_diff_name(
@@ -1362,6 +1424,7 @@ __all__ = [
     "install_text_file_atomic",
     "migrate",
     "param_diff_name",
+    "resolve_version_name",
     "sanitize_dimension_phrase",
     "validate_params",
 ]

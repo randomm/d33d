@@ -114,6 +114,23 @@ export function FailureTurn({
         {body !== null && <span className="failure-turn-body">{body}</span>}
       </p>
 
+      {/* Part 1b — the per-param mismatch detail (issue #276): one line
+          per mismatching parameter, formatted by the SPA's own copy
+          helper (label + the model's declared value + the measured
+          extent, both mm-formatted), in the mono face, under the
+          number-free headline. The numbers are the server's own gate
+          evidence — structured on the frame, formatted here, never
+          re-derived. */}
+      {error.mismatches !== undefined && error.mismatches !== null && (
+        <ul className="failure-turn-mismatches" data-testid="failure-turn-mismatches">
+          {error.mismatches.map((m, i) => (
+            <li key={`${m.label}-${i}`} className="failure-turn-mismatch-line">
+              {copy.failure.axisMismatchLine(m.label, m.model, m.measured)}
+            </li>
+          ))}
+        </ul>
+      )}
+
       {/* Part 2 — the number that matters, shown. The per-axis bars: track
           is the limit, fill is the part, the failing axis in the blocked
           colour. One component at every severity — an axis without a

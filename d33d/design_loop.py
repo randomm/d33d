@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import logging
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -72,6 +73,8 @@ from d33d.failure_classes import (
 )
 from d33d.render_worker import RenderResult
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "MAX_ITERATIONS",
     "NO_IMPROVEMENT_LIMIT",
@@ -79,6 +82,7 @@ __all__ = [
     "DesignResult",
     "IterationRecord",
     "Score",
+    "_axis_param_mismatches",
     "extract_named_params",
     "is_best",
     "make_llm_fn",
@@ -569,14 +573,20 @@ def _named_params_present(
     return bool(extract_named_params(scad_source))
 
 
-def _axis_params_match_geometry(
-    bbox: BboxInfo,
+def _axis_param_mismatches(
+    bbox: BboxInfo | None,
     named_params: dict[str, float],
     param_meta: dict[str, Any],
-) -> bool:
-    """Bit 5 (issue #276): True iff every NUMERIC param with a declared
-    axis (W/D/H) matches the measured bbox extent on that axis within the
-    disagrees-major threshold.
+) -> list[tuple[str, float, float, str]]:
+    """Bit 5 (issue #276) — the per-param evidence behind the bit.
+
+    Returns one ``(label, model_value, measured_extent, axis)`` tuple per
+    NUMERIC param with a declared axis (W/D/H) whose SCAD-declared value
+    disagrees with the measured bbox extent on that axis by MORE than the
+    disagrees-major threshold ``max(DISAGREES_MAJOR_THRESHOLD_REL ×
+    param_value, DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` (the 20% / 5 mm pair
+    from ``d33d.design_state`` — deliberately NOT the 1% / 0.5 mm bbox
+    tolerance). Empty list → bit 5 passes.
 
     A param is checked only when ALL of the following hold:
     - its ``param_meta`` entry declares an axis (``"W" | "D" | "H"``);
@@ -584,25 +594,23 @@ def _axis_params_match_geometry(
 
     The comparison target is the WHOLE-MESH bbox extent on the declared
     axis (``bbox.x`` / ``bbox.y`` / ``bbox.z``) — the same numbers the
-    Brief's axis rows show. The threshold is ``max(
-    DISAGREES_MAJOR_THRESHOLD_REL × param_value,
-    DISAGREES_MAJOR_THRESHOLD_MIN_MM)`` — the 20% / 5 mm pair from
-    ``d33d.design_state``, NOT the 1% / 0.5 mm bbox tolerance. A diff
-    STRICTLY greater than the threshold fails (``>``); a diff exactly at
-    the threshold passes.
+    Brief's axis rows show. A diff STRICTLY greater than the threshold
+    mismatches (``>``); a diff exactly at the threshold passes.
 
-    No params with a declared axis → True (nothing to check). No bbox →
-    the caller abstains (bit 5 is True). A param with no declared axis,
-    a non-numeric value, or a zero/negative value is ignored.
+    No bbox → ``[]`` (the caller abstains — bit 5 reads as a pass). No
+    params with a declared axis → ``[]`` (nothing to check). A param
+    with no declared axis, a non-numeric value, or a zero/negative value
+    is ignored.
     """
     if bbox is None:
-        return True
+        return []
     from d33d.design_state import (
         DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         DISAGREES_MAJOR_THRESHOLD_REL,
     )
 
     extents = {"W": bbox.x, "D": bbox.y, "H": bbox.z}
+    out: list[tuple[str, float, float, str]] = []
     for name, value in named_params.items():
         if not isinstance(value, (int, float)) or isinstance(value, bool):
             continue
@@ -619,8 +627,21 @@ def _axis_params_match_geometry(
             DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         )
         if abs(extents[axis] - value) > tol:
-            return False
-    return True
+            raw_label = meta.get("label")
+            label = raw_label if isinstance(raw_label, str) and raw_label else name
+            out.append((label, float(value), float(extents[axis]), axis))
+    return out
+
+
+def _axis_params_match_geometry(
+    bbox: BboxInfo,
+    named_params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> bool:
+    """Bit 5 (issue #276): True iff every NUMERIC param with a declared
+    axis (W/D/H) matches the measured bbox extent on that axis within the
+    disagrees-major threshold — ``not _axis_param_mismatches(...)``."""
+    return not _axis_param_mismatches(bbox, named_params, param_meta)
 
 
 def score(
@@ -1382,49 +1403,27 @@ async def run_design_loop_async(
             # issue #276) gets a distinct directive that names each
             # mismatching param with both numbers.
             if any(not bit for bit in candidate_score.bits[1:]):
-                if not candidate_score.bits[4]:
-                    # Bit 5 fails: build an axis_params_mismatch directive
-                    # that names each mismatching param with both the
-                    # declared value and the measured extent.
-                    from d33d.design_state import (
-                        DISAGREES_MAJOR_THRESHOLD_MIN_MM,
-                        DISAGREES_MAJOR_THRESHOLD_REL,
+                _mismatches = (
+                    _axis_param_mismatches(
+                        bbox, _scad_params(scad_source), extract_param_meta(scad)
                     )
-
-                    _named_params = _scad_params(scad_source)
-                    _param_meta = extract_param_meta(scad)
-                    _extents = {
-                        "W": bbox.x,
-                        "D": bbox.y,
-                        "H": bbox.z,
-                    }
-                    mismatch_lines: list[str] = []
-                    for _pname, _pval in _named_params.items():
-                        if (
-                            isinstance(_pval, (int, float))
-                            and not isinstance(_pval, bool)
-                            and _pval > 0
-                        ):
-                            _meta = _param_meta.get(_pname)
-                            if not isinstance(_meta, dict):
-                                continue
-                            _axis = _meta.get("axis")
-                            if _axis not in _extents:
-                                continue
-                            _tol = max(
-                                DISAGREES_MAJOR_THRESHOLD_REL * _pval,
-                                DISAGREES_MAJOR_THRESHOLD_MIN_MM,
-                            )
-                            if abs(_extents[_axis] - _pval) > _tol:
-                                _label = _meta.get("label", _pname)
-                                mismatch_lines.append(
-                                    f"{_label} = {_pval:g} but the part measures "
-                                    f"{_extents[_axis]:g} on {_axis}"
-                                )
-                    _evidence = (
-                        "; ".join(mismatch_lines)
-                        if mismatch_lines
-                        else "axis-params mismatch (see gate bit 5)"
+                    if not candidate_score.axis_params_match
+                    else []
+                )
+                if not candidate_score.axis_params_match and _mismatches:
+                    # Bit 5 fails with per-param evidence (computed ONCE
+                    # per iteration above — no re-parsing of the SCAD).
+                    # axis_params_mismatch is produced OUTSIDE
+                    # ``classify_failure`` on purpose: ``classify_failure``
+                    # is a pure stderr/SCAD text classifier (it never
+                    # sees the measured bbox), so this gate-evidence class
+                    # is built inline here, where the numbers live, and
+                    # routed through the same ``route_repair`` as the
+                    # classified classes.
+                    _evidence = "; ".join(
+                        f"{label} = {model:g} but the part measures "
+                        f"{measured:g} on {axis}"
+                        for label, model, measured, axis in _mismatches
                     )
                     _ax_classified = ClassifiedFailure(
                         failure_class="axis_params_mismatch",
@@ -1437,8 +1436,24 @@ async def run_design_loop_async(
                     )
                     if directive is not None:
                         next_repair = directive.to_dict()
-                else:
-                    failure_class = classified.failure_class
+                elif not candidate_score.axis_params_match:
+                    # Bit 5 false but the mismatch list is empty — the
+                    # helper and the gate should never disagree. Log a
+                    # WARNING and fall back to the GENERIC classified
+                    # path, never the vague "see gate bit 5" evidence.
+                    logger.warning(
+                        "bit 5 (axis_params_match) is False for "
+                        "iteration %s but the per-param mismatch list is "
+                        "empty — falling back to the generic classified "
+                        "path",
+                        iteration,
+                    )
+                failure_class = (
+                    failure_class
+                    if failure_class is not None
+                    else classified.failure_class
+                )
+                if failure_class != "axis_params_mismatch":
                     directive = route_repair(
                         classified=classified, scad_source=scad_source
                     )

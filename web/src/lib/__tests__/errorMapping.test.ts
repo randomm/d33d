@@ -85,32 +85,49 @@ describe("errorMapping", () => {
     expect(display.retryable).toBe(true);
   });
 
-  it("the axis_params_mismatch detail lists each mismatching param, one line each (issue #276)", () => {
-    // The per-param numbers ride in the error frame's `mismatch_lines`
-    // (the server's own gate evidence — label + both numbers per line).
-    // The headline stays number-free; the detail is one line per
-    // mismatching param (never a blob, never an SPA-invented number).
+  it("the axis_params_mismatch frame carries structured mismatches, one entry per param (issue #276)", () => {
+    // The per-param numbers ride in the error frame's `mismatches`
+    // (STRUCTURED — the server's own gate evidence: label + the model's
+    // declared value + the measured extent). The SPA owns the formatting:
+    // each entry renders via copy.failure.axisMismatchLine (the detail is
+    // the joined lines). The headline stays number-free.
     const single = displayDesignLoopError({
       message: "Design loop exhausted: axis_params_mismatch",
       reason: "axis_params_mismatch",
-      mismatch_lines: ["Tray height = 20 but the part measures 102 on H"],
+      mismatches: [{ label: "Tray height", model: 20, measured: 102, axis: "H" }],
     });
     expect(single.message).toBe(copy.failure.reasons.axis_params_mismatch);
-    expect(single.detail).toBe("Tray height = 20 but the part measures 102 on H");
+    expect(single.mismatches).toEqual([
+      { label: "Tray height", model: 20, measured: 102, axis: "H" },
+    ]);
+    expect(single.detail).toBe(copy.failure.axisMismatchLine("Tray height", 20, 102));
 
     const multi = displayDesignLoopError({
       message: "Design loop exhausted: axis_params_mismatch",
       reason: "axis_params_mismatch",
-      mismatch_lines: [
-        "Tray height = 20 but the part measures 102 on H",
-        "Width = 60 but the part measures 64 on W",
+      mismatches: [
+        { label: "Tray height", model: 20, measured: 102, axis: "H" },
+        { label: "Width", model: 60, measured: 64, axis: "W" },
       ],
     });
+    expect(multi.mismatches).toHaveLength(2);
     expect(multi.detail).toBe(
-      "Tray height = 20 but the part measures 102 on H\nWidth = 60 but the part measures 64 on W",
+      [
+        copy.failure.axisMismatchLine("Tray height", 20, 102),
+        copy.failure.axisMismatchLine("Width", 60, 64),
+      ].join("\n"),
     );
 
-    // Headless (no lines on the frame) → the raw reason, as before.
+    // Malformed entries are dropped; no valid entries → the raw reason
+    // (an honest headless detail), as before.
+    const malformed = displayDesignLoopError({
+      message: "Design loop exhausted: axis_params_mismatch",
+      reason: "axis_params_mismatch",
+      mismatches: ["nope", { label: "H", model: "x", measured: 1 }],
+    });
+    expect(malformed.mismatches).toBeUndefined();
+    expect(malformed.detail).toBe("axis_params_mismatch");
+
     const headless = displayDesignLoopError({
       message: "Design loop exhausted: axis_params_mismatch",
       reason: "axis_params_mismatch",
