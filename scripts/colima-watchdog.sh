@@ -52,10 +52,12 @@ DRY_RUN=0
 
 # ControlPath is read at runtime so the script never hard-codes a home
 # path. Empty when the ssh config is missing or has no ControlPath.
+# The real colima ssh_config indents and double-quotes the ControlPath
+# line, so the parse tolerates both (awk field match + quote strip).
 CONTROL_PATH=""
 if [ -r "$WD_HOME/.colima/ssh_config" ]; then
-    CONTROL_PATH=$(sed -n 's/^[Cc]ontrolPath[[:space:]]\{1,\}//p' \
-        "$WD_HOME/.colima/ssh_config" | head -n 1)
+    CONTROL_PATH=$(awk 'tolower($1)=="controlpath"{print $2; exit}' \
+        "$WD_HOME/.colima/ssh_config" | sed -e 's/^"//' -e 's/"$//')
 fi
 
 # ---------------------------------------------------------------- logging

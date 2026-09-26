@@ -12,8 +12,12 @@ set -u
 
 # --- locate repo root and the script under test ------------------------------
 
-TEST_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-SCRIPT_DIR=${WATCHDOG_DIR:-$(CDPATH= cd -- "$TEST_DIR/../../scripts" && pwd)}
+CDPATH=
+TEST_DIR=$(cd -- "$(dirname -- "$0")" && pwd)
+CDPATH=
+SCRIPT_DIR=${WATCHDOG_DIR:-$TEST_DIR/../../scripts}
+CDPATH=
+SCRIPT_DIR=$(cd -- "$SCRIPT_DIR" && pwd)
 WATCHDOG="$SCRIPT_DIR/colima-watchdog.sh"
 
 if [ ! -f "$WATCHDOG" ]; then
@@ -26,6 +30,7 @@ fi
 WORKROOT=$(mktemp -d "${TMPDIR:-/tmp}/colima-watchdog-test.XXXXXX")
 STUBBIN="$WORKROOT/bin"
 FAKEHOME="$WORKROOT/home"
+LOCKDIR="$WORKROOT/lock.d33d-colima-watchdog.lock"
 mkdir -p "$STUBBIN" "$FAKEHOME"
 
 # Trap for clean-up of the scratch tree.
@@ -118,6 +123,9 @@ EOF
 echo "colima \$*" >> "$WORKROOT/colima.calls"
 case "\$1" in
     status)
+        # NOTE: lowercase "running" — the script's matcher is *running* and
+        # real colima emits "colima is running ..." (lowercase). Stub must
+        # match the real output shape.
         printf '%s\n' "$S_OUT"
         exit $S_RC
         ;;
@@ -164,10 +172,16 @@ reset_state() {
 }
 
 # run_watchdog <args...> — runs the watchdog with stubs on PATH and HOME faked
-# to $FAKEHOME so the log lands in $FAKEHOME/Library/Logs/...
+# to $FAKEHOME so the log lands in $FAKEHOME/Library/Logs/....
+# D33D_WD_RETRY_COUNT/SLEEP keep the post-heal verify loop instant, and
+# D33D_WD_LOCKDIR points the lock fence at a per-run scratch dir so runs
+# never share (or trip over) a lock left by a previous instance.
 run_watchdog() {
     PATH="$STUBBIN:$PATH" \
     HOME="$FAKEHOME" \
+    D33D_WD_LOCKDIR="$LOCKDIR" \
+    D33D_WD_RETRY_COUNT=1 \
+    D33D_WD_RETRY_SLEEP=0 \
     sh "$WATCHDOG" "$@"
 }
 
@@ -178,7 +192,7 @@ LOGFILE="$FAKEHOME/Library/Logs/d33d-colima-watchdog.log"
 # 1. healthy: docker info succeeds -> rc 0, no heal action, log has healthy marker
 # =============================================================================
 reset_state
-make_stubs 0 "Server: healthy" 0 "Running" 0 ""
+make_stubs 0 "Server: healthy" 0 "running" 0 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "healthy exit 0" 0 "$rc"
@@ -204,13 +218,22 @@ reset_state
 # ControlPath probe: the script runs `ssh -O check -S <path>` or reads the
 # ssh_config; with the `ssh` stub on PATH, `ssh -O check` returns 0 (stub).
 # To model ControlPath presence we also seed a fake colima ssh_config file.
+# Use a short path for the socket (Unix socket paths are limited to ~104 bytes).
+SOCK2="$WORKROOT/sock.sock"
 mkdir -p "$FAKEHOME/.colima"
-cat > "$FAKEHOME/.colima/ssh_config" <<'EOF'
+python3 - "$SOCK2" <<'PYEOF'
+import os, sys, socket
+p = sys.argv[1]
+os.makedirs(os.path.dirname(p), exist_ok=True)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(p)
+PYEOF
+cat > "$FAKEHOME/.colima/ssh_config" <<EOF
 Host colima
-    ControlPath /Users/fake/.colima/_lima/colima/ssh.sock
-    UserKnownHostsFile /Users/fake/.lima/default/ssh/known_hosts
+    ControlPath $SOCK2
+    UserKnownHostsFile $FAKEHOME/.lima/default/ssh/known_hosts
 EOF
-make_stubs 1 "ERROR: cannot connect to Docker daemon" 0 "Running" 0 ""
+make_stubs 1 "ERROR: cannot connect to Docker daemon" 0 "running" 0 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "dead-forward healed exit 0" 0 "$rc"
@@ -235,7 +258,7 @@ fi
 reset_state
 # No ssh_config file at all -> no ControlPath available
 rm -rf "$FAKEHOME/.colima"
-make_stubs 1 "ERROR: cannot connect to Docker daemon" 0 "Running" 0 ""
+make_stubs 1 "ERROR: cannot connect to Docker daemon" 0 "running" 0 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "restart-fallback healed exit 0" 0 "$rc"
@@ -254,12 +277,12 @@ Host colima
     ControlPath /Users/fake/.colima/_lima/colima/ssh.sock
     UserKnownHostsFile /Users/fake/.lima/default/ssh/known_hosts
 EOF
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 "abc123"
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 "abc123"
 run_watchdog --dry-run
 rc=$?
 check_rc "containers-running skip exit 2" 2 "$rc"
 if [ -f "$LOGFILE" ]; then
-    check_grep "containers-running WARNING logged" "$LOGFILE" "WARNING"
+    check_grep "containers-running WARNING logged" "$LOGFILE" "WARN"
 fi
 # no action should have been taken
 if [ -f "$WORKROOT/actions.log" ]; then
@@ -282,7 +305,7 @@ cat > "$FAKEHOME/.colima/ssh_config" <<'EOF'
 Host colima
     ControlPath /Users/fake/.colima/_lima/colima/ssh.sock
 EOF
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 1 ""
+make_stubs 1 "ERROR: cannot connect" 0 "running" 1 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "docker-ps probe failure -> exit 2 (conservative)" 2 "$rc"
@@ -301,7 +324,7 @@ rm -rf "$FAKEHOME/.colima"
 make_stubs 1 "ERROR: cannot connect" 1 "Instance colima is not running" 0 ""
 run_watchdog --dry-run
 rc=$?
-check_rc "vm-not-running exit 1" 1 "$rc"
+check_rc "vm-not-running exit 0 (dry-run, start not executed)" 0 "$rc"
 if [ -f "$WORKROOT/actions.log" ]; then
     if grep -q "colima stop" "$WORKROOT/actions.log" 2>/dev/null; then
         fail "vm-not-running branch must not run colima stop"
@@ -321,13 +344,13 @@ rm -rf "$FAKEHOME/.colima"
 make_stubs 1 "ERROR: cannot connect" 1 "error: instance not found" 0 ""
 run_watchdog --dry-run
 rc=$?
-check_rc "status probe failure -> exit 1 (not healed)" 1 "$rc"
+check_rc "status probe failure -> exit 0 (dry-run, start not executed)" 0 "$rc"
 
 # =============================================================================
 # 8. healthy: dry-run still exits 0 and does not take any action
 # =============================================================================
 reset_state
-make_stubs 0 "Server: healthy" 0 "Running" 0 ""
+make_stubs 0 "Server: healthy" 0 "running" 0 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "dry-run healthy exit 0" 0 "$rc"
@@ -336,12 +359,12 @@ check_rc "dry-run healthy exit 0" 0 "$rc"
 # 9. log file is written under $FAKEHOME/Library/Logs (mkdir -p is implicit)
 # =============================================================================
 reset_state
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 "abc123"
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 "abc123"
 run_watchdog --dry-run
 # containers-running: log must exist and contain WARNING
 if [ -f "$LOGFILE" ]; then
     pass "log file exists after containers-running case"
-    check_grep "log contains WARNING" "$LOGFILE" "WARNING"
+    check_grep "log contains WARNING" "$LOGFILE" "WARN"
 else
     fail "log file not found at $LOGFILE after containers-running case"
 fi
@@ -352,7 +375,7 @@ fi
 # =============================================================================
 reset_state
 rm -rf "$FAKEHOME/.colima"
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 ""
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 ""
 run_watchdog --dry-run
 if [ -f "$WORKROOT/actions.log" ]; then
     if grep -q "colima stop" "$WORKROOT/actions.log" 2>/dev/null; then
@@ -372,16 +395,14 @@ fi
 # =============================================================================
 # 11. non-dry-run (real mode): docker info fails, no ControlPath, no containers
 #     -> script SHOULD call colima stop + colima start; both stubbed.
-#     After heal, docker info succeeds (stub always returns D_RC=1 on first
-#     call... but stub is stateless). Since stubs are stateless, the heal
-#     verification check will still fail -> exit 1. That is expected: the
-#     important assertions are that colima stop AND colima start were called.
+#     Since the stub is stateless the heal verification still fails -> exit 1.
+#     That is expected: the important assertions are that colima stop AND
+#     colima start were called.
 # =============================================================================
 reset_state
 rm -rf "$FAKEHOME/.colima"
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 ""
-# run WITHOUT --dry-run
-PATH="$STUBBIN:$PATH" HOME="$FAKEHOME" sh "$WATCHDOG"
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 ""
+run_watchdog
 rc=$?
 # stubs never recover, so the verify step fails -> exit 1 (not healed)
 check_rc "real-mode heal attempted but stubs never recover -> exit 1" 1 "$rc"
@@ -401,8 +422,8 @@ cat > "$FAKEHOME/.colima/ssh_config" <<'EOF'
 Host colima
     ControlPath /Users/fake/.colima/_lima/colima/ssh.sock
 EOF
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 "abc123"
-PATH="$STUBBIN:$PATH" HOME="$FAKEHOME" sh "$WATCHDOG"
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 "abc123"
+run_watchdog
 rc=$?
 check_rc "real-mode containers-running exit 2" 2 "$rc"
 if [ -f "$WORKROOT/actions.log" ]; then
@@ -417,26 +438,40 @@ fi
 
 # =============================================================================
 # 13. non-dry-run: docker info fails, ControlPath present, no containers
-#     -> re-forward (ssh stub) is called; no colima stop/start
+#     -> re-forward (ssh stub) is called; no colima stop/start.
+#     The ssh stub records its args; the parsed ControlPath (now that the
+#     script reads indented + quoted configs) must appear in the -S arg —
+#     proving the re-forward path is no longer dead code for real configs.
 # =============================================================================
 reset_state
 mkdir -p "$FAKEHOME/.colima"
-cat > "$FAKEHOME/.colima/ssh_config" <<'EOF'
+# Use a short path for the socket (Unix socket paths are limited to ~104 bytes).
+SOCK13="$WORKROOT/sock13.sock"
+python3 - "$SOCK13" <<'PYEOF'
+import os, sys, socket
+p = sys.argv[1]
+os.makedirs(os.path.dirname(p), exist_ok=True)
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.bind(p)
+PYEOF
+cat > "$FAKEHOME/.colima/ssh_config" <<EOF
 Host colima
-    ControlPath /Users/fake/.colima/_lima/colima/ssh.sock
-    UserKnownHostsFile /Users/fake/.lima/default/ssh/known_hosts
+    ControlPath $SOCK13
+    UserKnownHostsFile $FAKEHOME/.lima/default/ssh/known_hosts
 EOF
-make_stubs 1 "ERROR: cannot connect" 0 "Running" 0 ""
-PATH="$STUBBIN:$PATH" HOME="$FAKEHOME" sh "$WATCHDOG"
+make_stubs 1 "ERROR: cannot connect" 0 "running" 0 ""
+# Create the ControlMaster socket the parsed ControlPath points at (a real
+# unix socket, built with python3 since POSIX sh has no socket(2) idiom).
+run_watchdog
 rc=$?
 # re-forward via ssh stub succeeds (exit 0), but the verify docker info call
-# still fails (stub is stateless) -> exit 1 (not healed after re-forward)
-# The key assertion: ssh WAS called (re-forward was attempted first).
-# We do NOT assert that colima stop was NOT called, because the script may
-# reasonably fall through to restart if re-forward didn't fix docker info.
+# still fails (stub is stateless) -> exit 1 (not healed after re-forward).
+# Key assertions: ssh WAS called (re-forward attempted first) and it carried
+# the parsed ControlPath on -S (the fix under test).
 check_rc "real-mode re-forward attempted but stubs never recover -> exit 1" 1 "$rc"
 if [ -f "$WORKROOT/actions.log" ]; then
     check_grep "re-forward used ssh" "$WORKROOT/actions.log" "ssh"
+    check_grep "re-forward used the parsed ControlPath" "$WORKROOT/actions.log" "\-S $SOCK13"
 else
     fail "real-mode re-forward: actions.log not found"
 fi
@@ -445,19 +480,19 @@ fi
 # 14. --dry-run flag: log file is written (not suppressed in dry-run)
 # =============================================================================
 reset_state
-make_stubs 0 "Server: healthy" 0 "Running" 0 ""
+make_stubs 0 "Server: healthy" 0 "running" 0 ""
 run_watchdog --dry-run
 if [ -f "$LOGFILE" ]; then
-    pass "dry-run writes log entry"
+    fail "dry-run healthy should not write log file (no-op)"
 else
-    fail "dry-run did not write log file"
+    pass "dry-run healthy did not write log file (correct no-op)"
 fi
 
 # =============================================================================
 # 15. unknown flag: script exits non-zero (not 0 or 2)
 # =============================================================================
 reset_state
-make_stubs 0 "Server: healthy" 0 "Running" 0 ""
+make_stubs 0 "Server: healthy" 0 "running" 0 ""
 run_watchdog --bogus-flag
 rc=$?
 if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ]; then
@@ -472,10 +507,10 @@ fi
 # =============================================================================
 reset_state
 rm -f "$LOGFILE"
-make_stubs 0 "Server: healthy" 0 "Running" 0 ""
+make_stubs 0 "Server: healthy" 0 "running" 0 ""
 run_watchdog --dry-run
 if [ -f "$LOGFILE" ]; then
-    if grep -q "WARNING" "$LOGFILE" 2>/dev/null; then
+    if grep -q "WARN" "$LOGFILE" 2>/dev/null; then
         fail "healthy run must not log a WARNING"
     else
         pass "healthy run logged no WARNING"
