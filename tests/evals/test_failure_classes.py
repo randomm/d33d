@@ -55,9 +55,9 @@ E5 = {
     "empty_model",
 }
 
-#: The 17 entries of ``failure_classes.FAILURE_CLASSES`` (11 + 5 + 1
+#: The 18 entries of ``failure_classes.FAILURE_CLASSES`` (12 + 5 + 1
 #: fallback).
-E17 = E11 | E5 | {"unclassified_syntax_error"}  # 11 + 5 + 1 = 17
+E17 = E11 | E5 | {"unclassified_syntax_error", "axis_params_mismatch"}  # 12 + 5 + 1 = 18
 
 #: The two eval outcome classes.
 OUTCOMES = {"graceful_refusal", "clearance_applied"}
@@ -76,18 +76,18 @@ def test_superset_contains_both_outcome_classes():
     assert OUTCOMES.issubset(eg.EVAL_FAILURE_CLASSES)
 
 
-def test_superset_is_exactly_19_classes():
-    """17 (failure_classes) + 2 (outcomes) = 19. No extras, no forks."""
-    assert len(eg.EVAL_FAILURE_CLASSES) == 19
+def test_superset_is_exactly_20_classes():
+    """18 (failure_classes) + 2 (outcomes) = 20. No extras, no forks."""
+    assert len(eg.EVAL_FAILURE_CLASSES) == 20
     assert eg.EVAL_FAILURE_CLASSES == E17 | OUTCOMES
 
 
-def test_design_loop_classes_are_the_17():
-    """``DESIGN_LOOP_CLASSES`` is the #5 vocabulary — the 17 entries of
-    ``failure_classes.FAILURE_CLASSES`` (the 11 named LLM classes +
+def test_design_loop_classes_are_the_18():
+    """``DESIGN_LOOP_CLASSES`` is the #5 vocabulary — the 18 entries of
+    ``failure_classes.FAILURE_CLASSES`` (the 12 named LLM classes +
     5 non-repairable + 1 fallback)."""
     assert eg.DESIGN_LOOP_CLASSES == fc.FAILURE_CLASSES
-    assert len(eg.DESIGN_LOOP_CLASSES) == 17
+    assert len(eg.DESIGN_LOOP_CLASSES) == 18
 
 
 def test_outcome_classes_are_exactly_two():
@@ -142,22 +142,22 @@ def test_map_adversarial_outcomes_never_compile_failures():
 # ---------------------------------------------------------------------------
 
 
-def test_gate1_tags_all_16_except_geometrically_wrong():
-    """Gate 1 tags the 16 classes of ``FAILURE_CLASSES`` minus
+def test_gate1_tags_all_17_except_geometrically_wrong():
+    """Gate 1 tags the 17 classes of ``FAILURE_CLASSES`` minus
     ``geometrically_wrong`` (an output that fails to compile is not a
     "compiles cleanly but geometrically wrong" outcome)."""
     taggable = eg.GATE_TAGGABLE_CLASSES["compile"]
     assert "geometrically_wrong" not in taggable
     assert (E17 - {"geometrically_wrong"}).issubset(taggable)
-    assert len(taggable) == 16
+    assert len(taggable) == 17
 
 
-def test_gates_2_3_5_tag_all_16_except_geometrically_wrong():
+def test_gates_2_3_5_tag_all_17_except_geometrically_wrong():
     for gate in ("stl_export", "watertight", "volume"):
         taggable = eg.GATE_TAGGABLE_CLASSES[gate]
         assert "geometrically_wrong" not in taggable
         assert (E17 - {"geometrically_wrong"}).issubset(taggable)
-        assert len(taggable) == 16
+        assert len(taggable) == 17
 
 
 def test_gate4_tags_geometrically_wrong():
@@ -167,7 +167,7 @@ def test_gate4_tags_geometrically_wrong():
     taggable = eg.GATE_TAGGABLE_CLASSES["bbox"]
     assert "geometrically_wrong" in taggable
     assert (E17 - {"geometrically_wrong"}).issubset(taggable)
-    assert len(taggable) == 17
+    assert len(taggable) == 18
 
 
 def test_no_gate_tags_outcome_classes():

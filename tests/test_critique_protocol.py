@@ -344,14 +344,17 @@ def test_non_vision_fallback_scores_deterministic_only() -> None:
     assert all(item.present for item in verdict.checklist)
 
 
-def test_non_vision_fallback_worse_when_render_not_ok() -> None:
-    # Render not ok + no views + no bbox + no named params -> rank 0 -> "worse".
+def test_non_vision_fallback_equivalent_when_render_not_ok() -> None:
+    # Render not ok + no views + no bbox + no named params.
+    # With 5 gate bits, a syntax error with empty scad_source has bit 5
+    # True (no params to check — deterministic_verdict does not pass
+    # param_meta/named_params to score), so rank=1 → "equivalent".
     render = _render(error_class="syntax_error", stderr="ERROR: syntax", views=())
     verdict = deterministic_verdict(
         render=render, stated_dims=STATED, bbox=None, scad_source=""
     )
     assert verdict.deterministic is True
-    assert verdict.verdict == "worse"
+    assert verdict.verdict == "equivalent"
 
 
 def test_critique_degrades_to_deterministic_on_no_tools_supported() -> None:

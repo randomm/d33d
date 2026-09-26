@@ -472,14 +472,18 @@ def deterministic_verdict(
     gates only (reusing ``d33d.design_loop.score``) and emit a *deterministic*
     verdict — no vision, no hallucinated judgement.
 
-    The verdict maps the deterministic-gate rank (the bitvector popcount) to a
-    relative judgement: ``better`` when every gate passes (rank == 4),
-    ``equivalent`` when some but not all pass (0 < rank < 4), ``worse`` when
-    no gate passes (rank == 0).  This is the deterministic-gate-only scoring
-    the spec requires when the tier has no vision — it never fabricates a
-    visual comparison.  The checklist carries the per-gate bitvector so the
-    result is auditable; ``deterministic`` is ``True`` so the caller can
-    distinguish this from a vision verdict.
+    The verdict maps the deterministic-gate rank (the bitvector popcount)
+    to a relative judgement: ``better`` when every gate passes (rank ==
+    len(bits)), ``equivalent`` when some but not all pass (0 < rank <
+    len(bits)), ``worse`` when no gate passes (rank == 0).  With five gate
+    bits, rank 0 requires the render to fail error_class AND to have no
+    views, no bbox, no named params, and no axis-declared params to check
+    (bit 5 abstains to True when there is nothing to check).  This is the
+    deterministic-gate-only scoring the spec requires when the tier has no
+    vision — it never fabricates a visual comparison.  The checklist
+    carries the per-gate bitvector so the result is auditable;
+    ``deterministic`` is ``True`` so the caller can distinguish this from
+    a vision verdict.
     """
     s = score(render, stated_dims, bbox=bbox, scad_source=scad_source)
     if s.perfect:

@@ -379,12 +379,12 @@ def test_axis_params_mismatch_always_failing_exhausts_with_reason():
     """Issue #276: an always-mismatched run (bit 5 fails every iteration)
     → an exhausted failure with reason `axis_params_mismatch` (the first
     failing bit is bit 5, since bits 1-4 all pass)."""
-    from d33d.design_loop import run_design_loop
     from d33d.design_llm import LLMResult
+    from d33d.design_loop import run_design_loop
 
     def _scad_llm_with_meta(scad: str) -> LLMResult:
         meta = [{"name": "H", "label": "Tray height", "unit": "mm", "axis": "H"}]
-        args: dict[str, Any] = {"scad": scad, "parameters": meta}
+        args: dict[str, object] = {"scad": scad, "parameters": meta}
         return LLMResult(
             content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
             tool_calls=({"name": "emit_design", "arguments": args},),
@@ -473,7 +473,7 @@ def test_name_sanitization_all_match_with_tolerance_keeps():
 
 
 def test_name_sanitization_pure_dimensions_falls_back_to_empty():
-    """A title that is PURELY dimensions ("60x45x20") with no measurement
+    """A title that is PURELY dimensions ("60x45x20") with a measurement
     → the strip leaves an empty name → ``""`` (the caller falls back to
     ``param_diff_name``; never an empty or meaningless name is shown)."""
     from d33d.versions import sanitize_dimension_phrase
@@ -496,7 +496,7 @@ def test_name_sanitization_pure_dimensions_no_measurement_kept():
 def test_name_sanitization_mm_phrase_stripped_when_number_fails():
     """An ``N mm`` phrase whose number matches no measured extent is
     stripped. "Box 38mm" with bbox 40×45×20 → 38 matches no extent (Δ2
-    vs 40 — within 1%? no: max(0.4, 0.5)=0.5; Δ2 > 0.5 → fail) → "Box"."""
+    vs 40 — max(0.4, 0.5)=0.5; Δ2 > 0.5 → fail) → "Box"."""
     from d33d.versions import sanitize_dimension_phrase
 
     assert sanitize_dimension_phrase("Box 38mm", (40.0, 45.0, 20.0)) == "Box"

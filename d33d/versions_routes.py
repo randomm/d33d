@@ -667,10 +667,46 @@ def create_versions_router() -> APIRouter:
                     latest_stated_dims_dict(svc, project_id),
                     _am if _am else _classify_axis_cues(msg_text),
                 )
+            # The version name (issue #276, operator decision): a pass's
+            # name must never carry dimensions the part does not measure.
+            # The chosen name is the client's ``name`` field when present,
+            # else the model's ``// title:`` in the candidate's own source
+            # (``scad_title`` — the same title precedence the chat adapter's
+            # ``_resolve_version_create`` uses), else ``None`` (the
+            # ``create_version`` path then derives from the message). Each
+            # candidate is sanitised against the measured bbox
+            # (``_version_bbox_extents`` — the whole-mesh extents the loop
+            # measured for this exact candidate, the same numbers bit 5
+            # gates on): ``sanitize_dimension_phrase`` strips a dimension
+            # phrase (``N x N (x N)`` / ``N mm``) whose numbers don't all
+            # match a measured extent within the bbox tolerance, returning
+            # ``""`` when the strip leaves an empty or meaningless name
+            # (a title that WAS the dimensions). A falsy result means
+            # ``create_version`` falls back to its message-derived
+            # auto-name (``derive_auto_name``) — the existing honest
+            # fallback, so the version is still created, never suppressed.
+            _measured_bbox = _version_bbox_extents(result)
+            if body.name:
+                _version_name = versions_mod.sanitize_dimension_phrase(
+                    body.name, _measured_bbox
+                )
+            elif candidate_source is not None:
+                from d33d.design_loop import scad_title
+
+                _title = scad_title(candidate_source)
+                _version_name = (
+                    versions_mod.sanitize_dimension_phrase(
+                        _title, _measured_bbox
+                    )
+                    if _title is not None
+                    else None
+                )
+            else:
+                _version_name = None
             v = await svc.create_version(
                 project_id,
                 params,
-                name=body.name,
+                name=_version_name or None,
                 message=body.message or "design finalize",
                 scad_source=(candidate_source or None),
                 bbox=_version_bbox_extents(result),
