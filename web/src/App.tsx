@@ -1581,6 +1581,7 @@ export default function App({ client }: AppProps) {
           photoSrc={photoSrc}
           photoDimensions={photoDimensions}
           onPhotoUploaded={handlePhotoUploaded}
+          onEnsureProject={ensureProject}
           onPhotoError={(msg) =>
             setStreamError({
               message: msg,

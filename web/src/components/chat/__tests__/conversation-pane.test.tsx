@@ -85,6 +85,7 @@ function renderPane(overrides: PaneOverrides = {}) {
   const onOpenSheet = vi.fn();
   const onPhotoUploaded = vi.fn();
   const onPhotoError = vi.fn();
+  const onEnsureProject = vi.fn().mockResolvedValue(7);
   const result = render(
     <ConversationPane
       docked={overrides.docked ?? false}
@@ -111,6 +112,7 @@ function renderPane(overrides: PaneOverrides = {}) {
       photoDimensions={overrides.photoDimensions ?? null}
       onPhotoUploaded={onPhotoUploaded}
       onPhotoError={onPhotoError}
+      onEnsureProject={onEnsureProject}
     />,
   );
   return { onCollapsedChange, onSend, onCompareSelect, onOpenSheet, onPhotoUploaded, onPhotoError, ...result };
