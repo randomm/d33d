@@ -472,3 +472,69 @@ def test_harvest_helper_removed_on_timeout_path() -> None:
     # The TIMED-OUT harvest helper (first) was killed and removed, not leaked.
     assert fake.cleaned(get_names[0])
     assert fake.cleaned(get_names[1])
+
+
+# ---------------------------------------------------------------------------
+# Issue #280 — spawn failure (OSError) must not raise UnboundLocalError
+# ---------------------------------------------------------------------------
+
+
+def test_populate_helper_spawn_failure_records_container_error_and_cleans_up() -> None:
+    """If ``subprocess.run`` fails to spawn at all (OSError — e.g. the
+    docker CLI is missing or the daemon refuses the exec), the populate
+    helper must degrade to a ``container_error`` failure record (the
+    pre-#280 behaviour: the exception propagated and the caller caught
+    ``RuntimeError``) — never an ``UnboundLocalError`` on the unbound
+    ``proc`` — and the helper container must still be cleaned up."""
+    stl_bytes = _box_stl_bytes()
+
+    def _populate(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("docker CLI refused to start")
+        return _completed(0)
+
+    fake = _RecordingRun(
+        populate=_populate,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "container_error"
+    assert result.failures[0].site.name == "base"
+    assert result.registry_names == ("cap",)
+    put_names = fake.started_names(_is_populate)
+    assert len(put_names) == 2
+    assert fake.cleaned(put_names[0])
+    assert fake.cleaned(put_names[1])
+
+
+def test_harvest_helper_spawn_failure_records_empty_model_and_cleans_up() -> None:
+    """If ``subprocess.run`` fails to spawn at all (OSError) during the
+    harvest step, the helper must degrade exactly as the pre-#280 code
+    did — return ``None`` (so the call-site classifies ``empty_model``)
+    — never an ``UnboundLocalError`` on the unbound ``proc``, and the
+    helper container must still be cleaned up."""
+    stl_bytes = _box_stl_bytes()
+
+    def _harvest(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("docker CLI refused to start")
+        return _completed(0, stdout=stl_bytes)
+
+    fake = _RecordingRun(harvest=_harvest)
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "empty_model"
+    assert result.registry_names == ("cap",)
+    get_names = fake.started_names(_is_harvest)
+    assert len(get_names) == 2
+    assert fake.cleaned(get_names[0])
+    assert fake.cleaned(get_names[1])

@@ -5,11 +5,15 @@
 # Defaults to DRY-RUN: it lists what it would remove without removing it.
 # Pass --yes to actually delete.
 #
-# Scope (strict, by name prefix only — never touches other projects):
-#   * Exited (non-running) containers named d33d-* , render-*, registry-*
-#     — the render worker's and module registry's leaked containers.
-#   * d33d-* and registry-* volumes that no container is attached to
-#     (dangling by d33d prefix).
+# Scope (strict, exact patterns only — never touches other projects):
+#   Containers:
+#     * render-<8 lowercase hex>  (e.g. render-0123abcd)
+#     * registry-get-<8 hex>      (e.g. registry-get-0123abcd)
+#     * registry-put-<8 hex>      (e.g. registry-put-0123abcd)
+#   Volumes:
+#     * d33d-render-render-*
+#     * d33d-*
+#     * registry-<hex>
 #
 #   docker-prune-d33d.sh          # dry-run (default)
 #   docker-prune-d33d.sh --yes    # actually delete
@@ -39,27 +43,28 @@ if ! command -v docker >/dev/null 2>&1; then
     exit 1
 fi
 
-# A container is in scope when its name matches one of the d33d project's
-# name prefixes. The render worker names its containers render-* and
-# d33d-render-*; the module registry names its helpers registry-get-* and
-# registry-put-* and its per-run containers registry-*. d33d-* is a
-# catch-all for anything else the project has named d33d.
-is_in_scope_name() {
+# Exact container-name patterns (POSIX case):
+#   render-<8 lowercase hex>
+#   registry-get-<8 hex>
+#   registry-put-<8 hex>
+is_in_scope_container() {
     case "$1" in
-        d33d-*) return 0 ;;
-        render-*) return 0 ;;
-        registry-*) return 0 ;;
+        render-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) return 0 ;;
+        registry-get-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
+        registry-put-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
         *) return 1 ;;
     esac
 }
 
-# A volume is in scope for dangling removal when its name starts with
-# d33d- or registry- (the render worker's d33d-render-* / d33d-* volumes
-# and the module registry's registry-* volumes).
+# Exact volume-name patterns (POSIX case):
+#   d33d-render-render-*
+#   d33d-*
+#   registry-<hex+>
 is_in_scope_volume() {
     case "$1" in
+        d33d-render-render-*) return 0 ;;
         d33d-*) return 0 ;;
-        registry-*) return 0 ;;
+        registry-[0-9a-fA-F]*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -67,65 +72,57 @@ is_in_scope_volume() {
 removed=0
 would_remove=0
 
+# Shared dry-run / remove / WARN block for a single name.
+# $1 = label (e.g. "container", "volume"), $2 = name, $3 = remove command
+process_one() {
+    label=$1
+    name=$2
+    rm_cmd=$3
+    if [ "$DRY_RUN" = 1 ]; then
+        echo "  would remove $label: $name"
+        would_remove=$((would_remove + 1))
+    else
+        if $rm_cmd >/dev/null 2>&1; then
+            echo "  removed $label: $name"
+            removed=$((removed + 1))
+        else
+            echo "  WARN: could not remove $label: $name" >&2
+        fi
+    fi
+}
+
 echo "== d33d docker prune (dry-run: $( [ "$DRY_RUN" = 1 ] && echo yes || echo no ) ) =="
 
 # ── Containers ─────────────────────────────────────────────────────────────
-# Exited (not running) in-scope containers: docker ps -a filtered to
-# non-running, in-scope names. For each, `docker rm -f` (force, best-effort).
-# We iterate names, not IDs, so the report is human-readable.
-for name in $(docker ps -a --filter "status=exited" --format '{{.Names}}'); do
-    is_in_scope_name "$name" || continue
-    if [ "$DRY_RUN" = 1 ]; then
-        echo "  would remove container: $name"
-        would_remove=$((would_remove + 1))
-    else
-        if docker rm -f "$name" >/dev/null 2>&1; then
-            echo "  removed container: $name"
-            removed=$((removed + 1))
-        else
-            echo "  WARN: could not remove container: $name" >&2
-        fi
-    fi
-done
-# Also catch paused / created (never-started) in-scope containers — the
-# "exited" filter above misses them and a leaked container in created/paused
-# state is still a leak.
+# Exited (not running) in-scope containers.
+while IFS= read -r name; do
+    [ -z "$name" ] && continue
+    is_in_scope_container "$name" || continue
+    process_one "container" "$name" "docker rm -f $name"
+done <<EOF
+$(docker ps -a --filter "status=exited" --format '{{.Names}}')
+EOF
+
+# Also catch paused / created (never-started) in-scope containers.
 for state in created paused; do
-    for name in $(docker ps -a --filter "status=$state" --format '{{.Names}}'); do
-        is_in_scope_name "$name" || continue
-        if [ "$DRY_RUN" = 1 ]; then
-            echo "  would remove container ($state): $name"
-            would_remove=$((would_remove + 1))
-        else
-            if docker rm -f "$name" >/dev/null 2>&1; then
-                echo "  removed container ($state): $name"
-                removed=$((removed + 1))
-            else
-                echo "  WARN: could not remove container ($state): $name" >&2
-            fi
-        fi
-    done
+    while IFS= read -r name; do
+        [ -z "$name" ] && continue
+        is_in_scope_container "$name" || continue
+        process_one "container ($state)" "$name" "docker rm -f $name"
+    done <<EOF
+$(docker ps -a --filter "status=$state" --format '{{.Names}}')
+EOF
 done
 
 # ── Volumes ────────────────────────────────────────────────────────────────
-# Dangling by d33d prefix: a d33d-*/registry-* volume not attached to any
-# container. `docker volume ls --filter dangling=true` only catches volumes
-# with no *container* referencing them at all; we additionally restrict to
-# in-scope prefixes so we never touch another project's dangling volume.
-for vol in $(docker volume ls --filter "dangling=true" --format '{{.Name}}'); do
+# Dangling in-scope volumes.
+while IFS= read -r vol; do
+    [ -z "$vol" ] && continue
     is_in_scope_volume "$vol" || continue
-    if [ "$DRY_RUN" = 1 ]; then
-        echo "  would remove volume: $vol"
-        would_remove=$((would_remove + 1))
-    else
-        if docker volume rm "$vol" >/dev/null 2>&1; then
-            echo "  removed volume: $vol"
-            removed=$((removed + 1))
-        else
-            echo "  WARN: could not remove volume: $vol" >&2
-        fi
-    fi
-done
+    process_one "volume" "$vol" "docker volume rm $vol"
+done <<EOF
+$(docker volume ls --filter "dangling=true" --format '{{.Name}}')
+EOF
 
 echo "== done: $removed removed, $would_remove would be removed (dry-run) =="
 exit 0

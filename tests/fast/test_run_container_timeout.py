@@ -179,3 +179,63 @@ def test_argv_container_name_extracts_name_from_build_docker_argv_output() -> No
     right container."""
     argv = rw.build_docker_argv("openscad/openscad:trixie", "render-abcdef01")
     assert rw._argv_container_name(argv) == "render-abcdef01"
+
+
+def test_cleanup_container_no_such_container_is_debug_not_warning() -> None:
+    """A ``docker rm -f`` that exits non-zero with 'No such container'
+    in stderr is a clean no-op (the container is already gone) — it
+    must log at DEBUG, not WARNING, so the timeout path's second
+    ``rm -f`` (after the container was already removed by the first)
+    does not emit a false leak warning."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: No such container: render-12345678",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" not in err.getvalue()
+
+
+def test_cleanup_container_no_such_object_is_debug_not_warning() -> None:
+    """A ``docker rm -f`` that exits non-zero with 'No such object'
+    in stderr (volume-style error) is also a clean no-op — DEBUG,
+    not WARNING."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: No such object: render-12345678",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" not in err.getvalue()
+
+
+def test_cleanup_container_real_failure_still_warns() -> None:
+    """A ``docker rm -f`` that exits non-zero with a genuine error
+    (neither 'No such container' nor 'No such object') must still
+    log a WARNING naming the possibly-leaked container."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: device /dev/null is mounted on.",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" in err.getvalue()
+    assert "render-12345678" in err.getvalue()

@@ -1045,11 +1045,19 @@ def _cleanup_container(name: str) -> None:
         )
         return
     if proc.returncode != 0:
-        print(
-            f"[render_worker] WARNING: 'docker rm -f {name}' exited {proc.returncode}; "
-            f"container may be leaked",
-            file=sys.stderr,
-        )
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        if "No such container" in stderr or "No such object" in stderr:
+            logger.debug(
+                "[render_worker] 'docker rm -f %s' skipped: container "
+                "already gone (clean no-op)",
+                name,
+            )
+        else:
+            print(
+                f"[render_worker] WARNING: 'docker rm -f {name}' exited {proc.returncode}; "
+                f"container may be leaked",
+                file=sys.stderr,
+            )
         return
 
 

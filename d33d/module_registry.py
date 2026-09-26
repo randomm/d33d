@@ -506,14 +506,14 @@ def _write_file_into_volume(
     classification.
 
     The helper container is removed in a ``finally`` on EVERY path —
-    success, non-zero exit and timeout — not just on timeout (issue #280):
-    the helper is started without ``--rm`` (``build_docker_argv``), so on
-    a plain successful exit the container stays on the Docker host and
-    the exited ``registry-put-*`` containers accumulate in the live VM
-    alongside the render container leak. Removal reuses
-    ``render_worker._cleanup_container``'s existing best-effort contract
-    (bounded ``docker kill`` then ``docker rm``, WARNING log on failure,
-    never raises) so cleanup can never mask the original outcome.
+    success, non-zero exit, timeout, and spawn failure — not just on
+    timeout (issue #280). The helper is started without ``--rm``
+    (``build_docker_argv``), so without explicit removal the exited
+    ``registry-put-*`` containers accumulate in the live VM. Removal
+    reuses ``render_worker._cleanup_container``'s single
+    ``docker rm -f`` contract (bounded, best-effort, WARNING log on
+    failure, never raises) so cleanup can never mask the original
+    outcome.
     """
     name = f"registry-put-{uuid.uuid4().hex[:8]}"
     argv = _helper_argv(image, name, volume, f"cat > /work/{filename}")
@@ -526,11 +526,15 @@ def _write_file_into_volume(
             raise HelperTimeoutError(
                 f"populating {filename} into volume {volume} timed out after {timeout_s}s"
             ) from None
+        except OSError:
+            proc = None  # spawn failed; degrade as before (raise below)
     finally:
         _cleanup_container(name)
-    if proc.returncode != 0:
+    if proc is not None and proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace")
         raise RuntimeError(f"failed to populate {filename} into volume {volume}: {stderr}")
+    if proc is None:
+        raise RuntimeError(f"failed to populate {filename} into volume {volume}")
 
 
 def _read_file_from_volume(
@@ -550,16 +554,17 @@ def _read_file_from_volume(
     """
     name = f"registry-get-{uuid.uuid4().hex[:8]}"
     argv = _helper_argv(image, name, volume, f"cat /work/{filename}")
+    proc = None
     try:
         try:
             proc = subprocess.run(
                 argv, timeout=timeout_s, capture_output=True, check=False
             )
-        except subprocess.TimeoutExpired:
-            return None
+        except (subprocess.TimeoutExpired, OSError):
+            proc = None
     finally:
         _cleanup_container(name)
-    if proc.returncode != 0:
+    if proc is None or proc.returncode != 0:
         return None
     return proc.stdout
 
