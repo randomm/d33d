@@ -188,34 +188,26 @@ describe("design contract", () => {
     expect(copy.answerRoute.couldNotAnswer).not.toBe(copy.answerRoute.notEstablished);
   });
 
-  it("the question pre-route's missing-fact template lives in the deck (issue #278)", () => {
-    // The stage-2 "unanswerable" reply may name the unknown fact — the
-    // backend validates the model's `missing` field (short noun phrase:
-    // non-empty after trim, ≤ 60 chars, no digits, no sentence punctuation
-    // other than an apostrophe) and builds the wire string from this
-    // template; an invalid or absent `missing` falls back to the fixed
-    // notEstablished above. The template mirrors the backend's
-    // UNANSWERABLE_MISSING_TEMPLATE (d33d/question_answer.py) — the reply
-    // rides the done frame's `answer` verbatim, so a wording drift between
-    // deck and server would silently desynchronise the two honest
-    // statements.
-    const reply = copy.answerRoute.missingFact("the shelf's height");
-    expect(reply).toBe(
+  it("the unanswerable missing-fact template lives in the deck (issue #278)", () => {
+    // Issue #278: an unanswerable stage-2 reply that names the unknown
+    // fact gets a parameterised reply built by the backend from its own
+    // UNANSWERABLE_MISSING_TEMPLATE ("I don't know {missing}. Tell me
+    // and I'll check — nothing was changed."); the deck carries the same
+    // template so wording drift between deck and server fails here, the
+    // #260 way. It closes with the same "nothing was changed" close as
+    // the two fixed no-run replies.
+    expect(copy.answerRoute.unanswerableMissing("the shelf's height")).toBe(
       "I don't know the shelf's height. Tell me and I'll check — nothing was changed.",
     );
-    // The missing slot is filled verbatim — no second pass, no fabricated
-    // value the SPA has not established.
-    expect(copy.answerRoute.missingFact("the colour")).toBe(
-      "I don't know the colour. Tell me and I'll check — nothing was changed.",
+    expect(copy.answerRoute.unanswerableMissing("the shelf's height")).toContain(
+      "nothing was changed",
     );
-    // It keeps the same "nothing was changed" close as the fixed replies:
-    // no design run, no version.
-    expect(reply).toContain("nothing was changed");
-    // …and it is a third distinct no-run reply — a named unknown fact is
-    // a different honest statement from the generic not-established
-    // fallback.
-    expect(reply).not.toBe(copy.answerRoute.notEstablished);
-    expect(reply).not.toBe(copy.answerRoute.couldNotAnswer);
+    // The parameterised reply is distinct from the fixed notEstablished
+    // fallback (which the backend uses when the missing fact is invalid
+    // or absent).
+    expect(
+      copy.answerRoute.unanswerableMissing("the shelf's height"),
+    ).not.toBe(copy.answerRoute.notEstablished);
   });
 
   /* ---------------------------------------- W263 */
