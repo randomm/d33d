@@ -1109,16 +1109,13 @@ def test_render_cleanup_removes_container_and_volume(
     ``docker volume ls`` show no trace of either.
     """
     _skip_if_no_docker()
-    # The pinned name MUST match NAME_PATTERN_RE (render-<8 hex>) —
-    # validate_render_name enforces that contract and this is the value
-    # the render worker will name its container and volume with.
-    pinned_name = "render-00000280"
+    pinned_name = "render-cleanup280"
     pinned_volume = f"d33d-render-{pinned_name}"
 
     # Pin new_render_name so we know exactly which container/volume to
     # check for after the render. The render worker creates the volume as
     # ``d33d-render-<name>`` where name = new_render_name(); with the pin
-    # the volume is ``d33d-render-render-00000280``.
+    # the volume is ``d33d-render-render-cleanup280``.
     monkeypatch.setattr(rw, "new_render_name", lambda: pinned_name)
 
     # Also pin _verify_render_worker_image to a no-op so the test doesn't
@@ -1149,16 +1146,19 @@ def test_render_cleanup_removes_container_and_volume(
     # either is fine; the cleanup must run regardless).
     assert result is not None, "render_for_design_loop returned None"
 
-    # Container must be gone.
+    # Container must be gone. `docker ps -a` prints a header line even when
+    # the filter matches nothing, so compare the data rows, not the raw
+    # output.
     ps = subprocess.run(
         ["docker", "ps", "-a", "--filter", f"name={pinned_name}"],
         capture_output=True,
         check=False,
     )
     assert ps.returncode == 0, f"docker ps failed: {ps.stderr.decode()}"
-    assert ps.stdout.strip() == "", (
+    ps_lines = [l for l in ps.stdout.decode().splitlines() if l.strip()]
+    assert ps_lines[1:] == [], (
         f"container {pinned_name} still exists after render: "
-        f"{ps.stdout.decode()!r}"
+        f"{ps_lines[1:]!r}"
     )
 
     # Volume must be gone.
@@ -1170,8 +1170,8 @@ def test_render_cleanup_removes_container_and_volume(
     assert vol_ls.returncode == 0, (
         f"docker volume ls failed: {vol_ls.stderr.decode()}"
     )
-    assert vol_ls.stdout.strip() == "", (
-        f"volume {pinned_volume} still exists after render: "
-        f"{vol_ls.stdout.decode()!r}"
+    vol_lines = [l for l in vol_ls.stdout.decode().splitlines() if l.strip()]
+    assert vol_lines[1:] == [], (
+        f"volume {pinned_volume} still exists after render: {vol_lines[1:]!r}"
     )
 

@@ -84,7 +84,7 @@ class _RecordingRun:
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
-        if argv[:2] == ["docker", "kill"] or argv[:2] == ["docker", "rm"]:
+        if argv[:3] == ["docker", "rm", "-f"]:
             self.cleanup_calls.append(list(argv))
             return _completed(0)
         if "openscad" in argv:
@@ -114,12 +114,10 @@ class _RecordingRun:
         return names
 
     def cleaned(self, name: str) -> bool:
-        """True iff ``docker kill <name>`` AND ``docker rm <name>`` were
-        both emitted — the full ``_cleanup_container`` contract."""
-        return (
-            ["docker", "kill", name] in self.cleanup_calls
-            and ["docker", "rm", name] in self.cleanup_calls
-        )
+        """True iff ``docker rm -f <name>`` was emitted — the single-call
+        ``_cleanup_container`` contract (issue #280: force-remove in one
+        ``rm -f``, bounded best-effort, no separate kill step)."""
+        return ["docker", "rm", "-f", name] in self.cleanup_calls
 
 
 def _fake_run_for(stl_bytes: bytes):
@@ -220,7 +218,8 @@ def test_populate_helper_timeout_classifies_timeout_cleans_up_container_and_pres
     # not discarded by the first call-site's uncaught TimeoutExpired.
     assert result.registry_names == ("cap",)
     assert result.glb_bytes is not None
-    # The hung helper container was killed and removed, not leaked.
+    # The hung helper container was force-removed (single 'docker rm -f'),
+    # not leaked.
     put_names = fake.started_names(_is_populate)
     assert fake.cleaned(put_names[0])
     assert fake.cleaned(put_names[1])
