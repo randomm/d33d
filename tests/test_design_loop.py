@@ -82,13 +82,22 @@ STATED = (20.0, 25.0, 30.0)
 def _renderer_preflight_available():
     """Default the design loop's renderer pre-flight to "available" so no
     test in this module shells out to ``docker info`` (issue #277). Tests
-    that exercise the pre-flight failure path monkeypatch
-    ``renderer_is_available`` directly (they pass a ``renderer_check`` stub
-    or override the module function)."""
+    that exercise the pre-flight failure path pass a ``renderer_check``
+    stub or override the module function.
+
+    The module attribute is swapped (a lambda with ``*a, **kw`` arity)
+    because ``run_design_loop_async`` binds the DEFAULT of its
+    ``renderer_check`` parameter to the name at call time (default
+    ``None`` → the module attribute) — the swap is the one seam that
+    covers both the direct ``renderer_is_available()`` path and the
+    ``renderer_check=None`` default path.
+    """
     import d33d.design_loop as _dl
 
     original = _dl.renderer_is_available
-    _dl.renderer_is_available = lambda probe=None: True  # type: ignore[assignment]
+    _dl.renderer_is_available = (  # type: ignore[assignment]
+        lambda *a, **kw: True
+    )
     yield
     _dl.renderer_is_available = original  # type: ignore[assignment]
 

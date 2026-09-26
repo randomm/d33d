@@ -3292,6 +3292,76 @@ def test_exhausted_error_frame_carries_structured_reason(app_with_versions):
     assert "Design loop exhausted" in error_frames[0]["message"]
 
 
+def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_versions):
+    """A renderer pre-flight failure (Docker daemon down before the first
+    iteration — issue #277) travels the SAME terminal error-frame shape
+    the SPA's ``displayDesignLoopError`` reads: an ``error`` frame whose
+    ``reason`` field is ``renderer_unavailable`` (plus the free-text
+    ``message``). A different frame type or a missing ``reason`` would
+    drop the SPA into generic infra copy — the structured reason is the
+    contract.
+
+    The stub replaces ``app.state.run_design_loop`` (the DI seam) with a
+    loop that already returned the pre-flight's exhausted result — the
+    adapter's frame logic is exercised end to end (``_result_message`` /
+    ``_structured_reason``), which is where the reason key lands.
+    """
+    from d33d.design_loop import RENDERER_UNAVAILABLE, run_design_loop
+
+    # Production-shape proof: a failing ``renderer_check`` (no LLM, no
+    # render — both stubbed so nothing shells out or hits the network)
+    # yields exactly the reason the frame below carries.
+    llm_calls = {"n": 0}
+
+    async def _never_called_llm(*a, **kw):
+        llm_calls["n"] += 1
+        raise AssertionError("the pre-flight must short-circuit before the LLM")
+
+    result = run_design_loop(
+        photo="data:image/png;base64,REF",
+        stated_dims=(20.0, 25.0, 30.0),
+        render_fn=lambda scad, defines: _default_render(),
+        llm_fn=_never_called_llm,
+        renderer_check=lambda: False,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == RENDERER_UNAVAILABLE
+    assert llm_calls["n"] == 0
+
+    class _PreflightResult:
+        def __init__(self, r):
+            self.status = r.status
+            self.failure_reason = r.failure_reason
+            self.best = r.best
+
+    async def _loop(app, **kwargs):
+        return _PreflightResult(result)
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    # The structured reason key — the exact field the SPA maps by.
+    assert error_frames[0].get("reason") == RENDERER_UNAVAILABLE, (
+        f"pre-flight frame must carry reason={RENDERER_UNAVAILABLE!r}; got "
+        f"{error_frames[0]!r}"
+    )
+    # The free-text message is preserved alongside it.
+    assert "Design loop exhausted" in error_frames[0]["message"]
+
+
 def test_infra_error_frame_has_no_structured_reason(app_with_versions):
     """An infra-failure error frame (no DesignResult) carries NO ``reason``
     field — the SPA treats a missing ``reason`` as an infra failure and

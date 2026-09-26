@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from d33d.evals.failure_capture import (
     EVAL_FAILURE_CLASSES,
     GATE_REASON_CLASSES,
+    LOOP_LEVEL_FAILURE_REASONS,
     MAX_LINE_BYTES,
     RENDER_WORKER_CLASSES,
     FailureEvent,
@@ -153,6 +154,27 @@ def test_hook_appends_line_for_each_failure_class(tmp_path: Path):
         events = read_failure_events(out)
         assert len(events) == 1, fc
         assert events[0].failure_class == fc
+
+
+def test_loop_level_preflight_reason_is_accepted_failure_class(tmp_path: Path):
+    """The loop-level pre-flight reason ``renderer_unavailable`` (issue
+    #277) is an accepted ``failure_class`` — a Docker-down design turn
+    archives a real line instead of raising in the hook (a silent drop
+    would lose a real failure, and the old closed set rejected the reason
+    with ``ValueError`` on every such turn)."""
+    for reason in sorted(LOOP_LEVEL_FAILURE_REASONS):
+        out = tmp_path / f"{reason}.jsonl"
+        record_production_failure(
+            design_result=_exhausted_result(reason),
+            request="do something",
+            model="model-x",
+            prompt_version="deadbeef",
+            output_scad="cube();",
+            path=out,
+        )
+        events = read_failure_events(out)
+        assert len(events) == 1, reason
+        assert events[0].failure_class == reason
 
 
 def test_hook_rejects_unknown_failure_class(tmp_path: Path):

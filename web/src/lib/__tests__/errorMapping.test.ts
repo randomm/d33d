@@ -1,9 +1,10 @@
 /**
  * errorMapping — totality and the envelope gate's measured number.
  *
- * The map must stay TOTAL: every GATE_REASON_BITS value (five) and every
- * render-worker ErrorClass value maps to copy (part 1) — a class with no
- * sentence renders nothing, the worst possible failure surface. The
+ * The map must stay TOTAL: every GATE_REASON_BITS value (five), every
+ * render-worker ErrorClass value, and the loop-level pre-flight reason
+ * (`renderer_unavailable`, issue #277) maps to copy (part 1) — a reason
+ * with no sentence renders nothing, the worst possible failure surface. The
  * envelope gate's part 2 (the measured value beside the limit) is parsed
  * from the raw gate string produced by d33d/print_validation.py
  * (_GATE7_ENVELOPE_PREFIX) — the actual format, never a hand-typed
@@ -40,12 +41,18 @@ const ERROR_CLASSES = [
 
 /** The design-loop-level timeout reason (d33d/design_loop_events.py, issue
  *  #221) — distinct from the render-worker "timeout" ErrorClass. */
-const LOOP_FAILURE_REASONS = ["design_loop_timed_out"];
+const LOOP_FAILURE_REASONS = [
+  "design_loop_timed_out",
+  // Loop-level pre-flight reason (d33d/design_loop.py, issue #277) — the
+  // renderer reachability check failed before the first iteration; NOT a
+  // render-worker ErrorClass (the render never ran).
+  "renderer_unavailable",
+];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];
 
 describe("errorMapping", () => {
-  it("every GATE_REASON_BITS value (five) and every ErrorClass value maps to copy (totality)", () => {
+  it("every GATE_REASON_BITS value (five), every ErrorClass value, and the loop-level pre-flight reason maps to copy (totality)", () => {
     for (const reason of CLOSED_SET) {
       // The exported closed set contains the reason.
       expect(FAILURE_REASONS).toContain(reason);
@@ -67,7 +74,7 @@ describe("errorMapping", () => {
     }
   });
 
-  it("the closed set is exactly the five bits plus the seven classes plus the loop timeout", () => {
+  it("the closed set is exactly the five bits plus the seven classes plus the loop-level reasons", () => {
     expect([...CLOSED_SET].sort()).toEqual([...FAILURE_REASONS].sort());
   });
 
