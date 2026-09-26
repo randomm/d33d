@@ -1088,3 +1088,87 @@ def test_views_marker_model_feature_placement(tmp_path: Path) -> None:
         f"lower bound."
     )
 
+
+# ── Gate 5: render cleanup — container and volume must not leak (issue #280)
+
+
+def test_render_cleanup_removes_container_and_volume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a real render via ``render_for_design_loop``, the render
+    container (``render-<8hex>``) and its volume (``d33d-render-<8hex>``)
+    must both be gone.
+
+    The no-``--rm`` design keeps the container inspectable between run and
+    rm; ``render_for_design_loop``'s ``finally`` must therefore run
+    ``docker rm -f`` and ``docker volume rm -f`` on every path (success,
+    error, timeout, unexpected exception). This slow test exercises the
+    success path with a real Docker render: it pins the render name via
+    ``monkeypatch`` so the exact container and volume names are known,
+    runs one real render, then asserts that ``docker ps -a`` and
+    ``docker volume ls`` show no trace of either.
+    """
+    _skip_if_no_docker()
+    pinned_name = "render-cleanup280"
+    pinned_volume = f"d33d-render-{pinned_name}"
+
+    # Pin new_render_name so we know exactly which container/volume to
+    # check for after the render. The render worker creates the volume as
+    # ``d33d-render-<name>`` where name = new_render_name(); with the pin
+    # the volume is ``d33d-render-render-cleanup280``.
+    monkeypatch.setattr(rw, "new_render_name", lambda: pinned_name)
+
+    # Also pin _verify_render_worker_image to a no-op so the test doesn't
+    # depend on the image being freshly built (it only checks the render
+    # pipeline, not the image).
+    monkeypatch.setattr(
+        rw, "_verify_render_worker_image", lambda *a, **kw: None
+    )
+
+    # Clean up any prior artefacts from a previous run of this test.
+    subprocess.run(
+        ["docker", "rm", "-f", pinned_name], capture_output=True, check=False
+    )
+    subprocess.run(
+        ["docker", "volume", "rm", "-f", pinned_volume],
+        capture_output=True,
+        check=False,
+    )
+
+    scad = "cube([10,10,10], center=true);\n"
+    result = rw.render_for_design_loop(
+        scad_source=scad,
+        defines={},
+        renders_dir=tmp_path,
+    )
+
+    # The render itself must have completed (ok or a classified error —
+    # either is fine; the cleanup must run regardless).
+    assert result is not None, "render_for_design_loop returned None"
+
+    # Container must be gone.
+    ps = subprocess.run(
+        ["docker", "ps", "-a", "--filter", f"name={pinned_name}"],
+        capture_output=True,
+        check=False,
+    )
+    assert ps.returncode == 0, f"docker ps failed: {ps.stderr.decode()}"
+    assert ps.stdout.strip() == "", (
+        f"container {pinned_name} still exists after render: "
+        f"{ps.stdout.decode()!r}"
+    )
+
+    # Volume must be gone.
+    vol_ls = subprocess.run(
+        ["docker", "volume", "ls", "--filter", f"name={pinned_volume}"],
+        capture_output=True,
+        check=False,
+    )
+    assert vol_ls.returncode == 0, (
+        f"docker volume ls failed: {vol_ls.stderr.decode()}"
+    )
+    assert vol_ls.stdout.strip() == "", (
+        f"volume {pinned_volume} still exists after render: "
+        f"{vol_ls.stdout.decode()!r}"
+    )
+

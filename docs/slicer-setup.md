@@ -101,3 +101,7 @@ level on the root logger) suppresses INFO lines. To see them, pass
 before the server starts. The FastAPI app (`d33d/app.py`) already
 configures its own logger; the slicer logger is independent and follows
 the root logger's level.
+
+## Docker prune (one-off cleanup, issue #280)
+
+`scripts/docker-prune-d33d.sh` is a one-off cleanup script that removes leaked d33d render/registry containers and dangling `d33d-*`/`registry-*` volumes. It defaults to dry-run; pass `--yes` to actually delete.
