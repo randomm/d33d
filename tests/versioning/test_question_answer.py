@@ -699,6 +699,34 @@ class TestRouteChatMessage:
                 "kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED
             }, bad
 
+    def test_kind_unanswerable_missing_markup_returns_not_established(
+        self,
+    ) -> None:
+        # issue #278 adversarial finding: HTML / markup characters in
+        # ``missing`` must be rejected (the validation is the security
+        # boundary — the SPA renders the done frame verbatim; a future
+        # markdown/HTML rendering must not turn model-influenced text
+        # into stored XSS). The character class regex had an unescaped
+        # ``[`` that closed the class early, matching nothing — this is
+        # the regression pin.
+        latest = _latest({"H": 12.0})
+        for bad in (
+            "<b>x</b>",
+            "the <script> height",
+            "the [shelf] height",
+            "the {shelf} height",
+            "the (shelf) height",
+        ):
+            edge = self._answer_edge(
+                '{"kind": "unanswerable", "answer": "", "missing": "' + bad + '"}'
+            )
+            result = run_async_safe(
+                route_chat_message("Is it taller than the shelf?", latest, edge)
+            )
+            assert result == {
+                "kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED
+            }, bad
+
     def test_kind_unanswerable_missing_non_string_returns_not_established(self) -> None:
         # A ``missing`` that is not a string (number, null, array) →
         # NOT_ESTABLISHED. Never malformed (no COULD_NOT_ANSWER), never
