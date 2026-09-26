@@ -1019,35 +1019,76 @@ def run_container(
 
 
 def _cleanup_container(name: str) -> None:
-    """``docker kill`` then ``docker rm`` a named container, each bounded
-    by ``_CLEANUP_TIMEOUT_S``.
+    """``docker rm -f <name>`` — bounded by ``_CLEANUP_TIMEOUT_S``.
 
-    Both calls are best-effort: a hung daemon (correlated failure with the
-    stuck render) or a failed removal must not propagate — the run still
-    classifies as ``timeout`` either way. A hung or failed cleanup leaves
-    the container leaked, so each failure path logs a warning naming the
-    container so the leak is discoverable in logs.
+    Force-removal in a single call (issue #280): a hung render can
+    ignore ``docker kill`` (and a plain ``docker rm`` of a still-running
+    container fails), so the removal is ``rm -f`` and there is no
+    separate kill step. Best-effort: a hung daemon (correlated failure
+    with the stuck render) or a failed removal must not propagate — the
+    run still classifies as ``timeout`` either way, and the render
+    ``finally`` must never raise out of a render. A hung or failed
+    cleanup leaves the container leaked, so each failure path logs a
+    warning naming the container so the leak is discoverable in logs.
     """
-    for verb in ("kill", "rm"):
-        argv = ["docker", verb, name]
-        try:
-            proc = subprocess.run(
-                argv, timeout=_CLEANUP_TIMEOUT_S, capture_output=True, check=False
+    argv = ["docker", "rm", "-f", name]
+    try:
+        proc = subprocess.run(
+            argv, timeout=_CLEANUP_TIMEOUT_S, capture_output=True, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        print(
+            f"[render_worker] WARNING: 'docker rm -f {name}' failed "
+            f"(timed out or could not start) after {_CLEANUP_TIMEOUT_S}s; "
+            f"container may be leaked",
+            file=sys.stderr,
+        )
+        return
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")
+        if "No such container" in stderr or "No such object" in stderr:
+            logger.debug(
+                "[render_worker] 'docker rm -f %s' skipped: container "
+                "already gone (clean no-op)",
+                name,
             )
-        except subprocess.TimeoutExpired:
+        else:
             print(
-                f"[render_worker] WARNING: 'docker {verb} {name}' timed out after "
-                f"{_CLEANUP_TIMEOUT_S}s; container may be leaked",
-                file=sys.stderr,
-            )
-            return
-        if proc.returncode != 0:
-            print(
-                f"[render_worker] WARNING: 'docker {verb} {name}' exited {proc.returncode}; "
+                f"[render_worker] WARNING: 'docker rm -f {name}' exited {proc.returncode}; "
                 f"container may be leaked",
                 file=sys.stderr,
             )
-            return
+        return
+
+
+def _remove_render_volume(volume: str) -> None:
+    """``docker volume rm -f <volume>`` — bounded by ``_CLEANUP_TIMEOUT_S``.
+
+    Best-effort, mirroring :func:`_cleanup_container`: the volume is
+    removed in the render ``finally`` on every path, so a failure here
+    must log a WARNING naming the volume (never raise, never leak
+    secrets) and let the render return its classified result.
+    """
+    argv = ["docker", "volume", "rm", "-f", volume]
+    try:
+        proc = subprocess.run(
+            argv, timeout=_CLEANUP_TIMEOUT_S, capture_output=True, check=False
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        print(
+            f"[render_worker] WARNING: 'docker volume rm -f {volume}' failed "
+            f"(timed out or could not start) after {_CLEANUP_TIMEOUT_S}s; "
+            f"volume may be leaked",
+            file=sys.stderr,
+        )
+        return
+    if proc.returncode != 0:
+        print(
+            f"[render_worker] WARNING: 'docker volume rm -f {volume}' exited "
+            f"{proc.returncode}; volume may be leaked",
+            file=sys.stderr,
+        )
+        return
 
 
 def _argv_container_name(argv: list[str]) -> str | None:
@@ -1643,11 +1684,15 @@ def render_for_design_loop(
             views=(),
         )
     finally:
-        try:
-            subprocess.run(
-                ["docker", "volume", "rm", "-f", volume],
-                capture_output=True,
-                check=False,
-            )
-        except OSError:
-            pass
+        # Issue #280: caller-side removal on EVERY path. The render
+        # container runs without ``--rm`` (inspect needs the exited
+        # container between run and rm), so without this the success and
+        # non-timeout error paths leaked every ``render-*`` container; the
+        # ``rm -f`` (via _cleanup_container) is force-able so it also
+        # covers a still-running container when an unexpected exception
+        # escaped the run, and the bounded best-effort contract means a
+        # hung daemon never masks the render's own result. Container
+        # first, volume after (the harvest above already copied the
+        # artifacts out of the volume).
+        _cleanup_container(name)
+        _remove_render_volume(volume)

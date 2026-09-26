@@ -7,6 +7,12 @@ Exercises every branch ``_classify_isolated_render`` and the populate/
 harvest helpers can take: populate failure, non-zero openscad exit,
 timeout, oom, empty STL, and the "one bad module never discards the
 whole registry" partial-success guarantee.
+
+Issue #280 workstream: also pins that the ``registry-put-*`` /
+``registry-get-*`` helper containers are removed in a ``finally`` on
+EVERY path — success, non-zero exit and timeout — not only on timeout
+(previously the populate helper was cleaned only on timeout and the
+harvest helper never).
 """
 
 from __future__ import annotations
@@ -42,19 +48,95 @@ def _box_stl_bytes() -> bytes:
     return mesh.export(file_type="stl")
 
 
-def test_all_call_sites_succeed_assembles_full_registry() -> None:
-    stl_bytes = _box_stl_bytes()
+def _name_of(argv) -> str | None:
+    """The ``-n``/``--name`` value of a ``docker run`` argv, or ``None``
+    for non-run argv (``volume create``/``rm``, ``kill``, ``rm``)."""
+    for i, tok in enumerate(argv[:-1]):
+        if tok in ("--name", "-n"):
+            return argv[i + 1]
+    return None
+
+
+def _is_populate(argv) -> bool:
+    return any("cat > /work/" in a for a in argv)
+
+
+def _is_harvest(argv) -> bool:
+    return any("cat /work/" in a for a in argv) and not _is_populate(argv)
+
+
+class _RecordingRun:
+    """A fake ``subprocess.run`` recording every invocation in ``.calls``
+    and every ``docker kill``/``docker rm`` invocation in ``.cleanup_calls``.
+
+    Per-argv-shape behaviour is overridable with ``on_*`` hooks: each
+    receives ``(argv, state)`` and returns either a ``CompletedProcess``
+    or raises. Defaults make everything succeed.
+    """
+
+    def __init__(self, **overrides):
+        self.calls: list = []
+        self.cleanup_calls: list = []
+        self.on_populate = overrides.get("populate")
+        self.on_harvest = overrides.get("harvest")
+        self.on_openscad = overrides.get("openscad")
+        self.state: dict = {"n": 0}
+
+    def __call__(self, argv, **kwargs):
+        self.calls.append(list(argv))
+        if argv[:3] == ["docker", "rm", "-f"]:
+            self.cleanup_calls.append(list(argv))
+            return _completed(0)
+        if "openscad" in argv:
+            if self.on_openscad:
+                return self.on_openscad(argv, self.state)
+            return _completed(0)
+        if _is_populate(argv):
+            if self.on_populate:
+                return self.on_populate(argv, self.state)
+            return _completed(0)
+        if _is_harvest(argv):
+            if self.on_harvest:
+                return self.on_harvest(argv, self.state)
+            return _completed(0)
+        return _completed(0)
+
+    # --- helpers for assertions ---------------------------------------
+
+    def started_names(self, predicate) -> list[str]:
+        """Names of ``docker run`` calls matching ``predicate(argv)``."""
+        names = []
+        for argv in self.calls:
+            if argv[:2] == ["docker", "run"] and predicate(argv):
+                name = _name_of(argv)
+                if name is not None:
+                    names.append(name)
+        return names
+
+    def cleaned(self, name: str) -> bool:
+        """True iff ``docker rm -f <name>`` was emitted — the single-call
+        ``_cleanup_container`` contract (issue #280: force-remove in one
+        ``rm -f``, bounded best-effort, no separate kill step)."""
+        return ["docker", "rm", "-f", name] in self.cleanup_calls
+
+
+def _fake_run_for(stl_bytes: bytes):
+    """The minimal fake used by the pre-existing (non-#280) tests below."""
 
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(0)
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             return _completed(0)
-        if any("cat /work/" in a for a in argv):
+        if _is_harvest(argv):
             return _completed(0, stdout=stl_bytes)
         return _completed(0)
 
-    with patch("subprocess.run", side_effect=_fake_run):
+    return _fake_run
+
+
+def test_all_call_sites_succeed_assembles_full_registry() -> None:
+    with patch("subprocess.run", side_effect=_fake_run_for(_box_stl_bytes())):
         result = build_registry_glb(TWO_MODULE_SCAD)
 
     assert result.failures == ()
@@ -69,12 +151,12 @@ def test_populate_failure_is_recorded_as_container_error_and_other_sites_still_r
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(0)
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             populate_calls["count"] += 1
             if populate_calls["count"] == 1:
                 return _completed(1, stderr=b"disk full")
             return _completed(0)
-        if any("cat /work/" in a for a in argv):
+        if _is_harvest(argv):
             return _completed(0, stdout=stl_bytes)
         return _completed(0)
 
@@ -93,7 +175,7 @@ def test_nonzero_openscad_exit_classifies_container_error() -> None:
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(1, stderr=b"ERROR: parse error")
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             return _completed(0)
         return _completed(0)
 
@@ -114,24 +196,19 @@ def test_populate_helper_timeout_classifies_timeout_cleans_up_container_and_pres
     succeeded call-site and never reach the route's error classification
     at all."""
     stl_bytes = _box_stl_bytes()
-    cleanup_calls: list[list[str]] = []
 
-    def _fake_run(argv, **kwargs):
-        if argv[:2] == ["docker", "kill"] or argv[:2] == ["docker", "rm"]:
-            cleanup_calls.append(argv)
-            return _completed(0)
-        if any("cat > /work/" in a for a in argv):
-            # First call-site's populate helper hangs; second succeeds.
-            if not any(c[:2] == ["docker", "kill"] for c in cleanup_calls):
-                raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
-            return _completed(0)
-        if "openscad" in argv:
-            return _completed(0)
-        if any("cat /work/" in a for a in argv):
-            return _completed(0, stdout=stl_bytes)
+    def _populate(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
         return _completed(0)
 
-    with patch("subprocess.run", side_effect=_fake_run):
+    fake = _RecordingRun(
+        populate=_populate,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    with patch("subprocess.run", side_effect=fake):
         result = build_registry_glb(TWO_MODULE_SCAD)
 
     assert len(result.failures) == 1
@@ -141,18 +218,18 @@ def test_populate_helper_timeout_classifies_timeout_cleans_up_container_and_pres
     # not discarded by the first call-site's uncaught TimeoutExpired.
     assert result.registry_names == ("cap",)
     assert result.glb_bytes is not None
-    # The hung helper container was killed and removed, not leaked.
-    assert any(c[:2] == ["docker", "kill"] for c in cleanup_calls)
-    assert any(c[:2] == ["docker", "rm"] for c in cleanup_calls)
-    killed_name = next(c[2] for c in cleanup_calls if c[:2] == ["docker", "kill"])
-    assert killed_name.startswith("registry-put-")
+    # The hung helper container was force-removed (single 'docker rm -f'),
+    # not leaked.
+    put_names = fake.started_names(_is_populate)
+    assert fake.cleaned(put_names[0])
+    assert fake.cleaned(put_names[1])
 
 
 def test_openscad_timeout_classifies_as_timeout() -> None:
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(124)
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             return _completed(0)
         return _completed(0)
 
@@ -167,7 +244,7 @@ def test_openscad_oom_classifies_as_oom() -> None:
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(137)
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             return _completed(0)
         return _completed(0)
 
@@ -182,9 +259,9 @@ def test_empty_stl_harvest_classifies_empty_model() -> None:
     def _fake_run(argv, **kwargs):
         if "openscad" in argv:
             return _completed(0)
-        if any("cat > /work/" in a for a in argv):
+        if _is_populate(argv):
             return _completed(0)
-        if any("cat /work/" in a for a in argv):
+        if _is_harvest(argv):
             return _completed(0, stdout=b"")  # empty harvest
         return _completed(0)
 
@@ -225,16 +302,7 @@ def test_exactly_max_call_sites_is_allowed() -> None:
     MAX_CALL_SITES, not the limit value itself."""
     source = "module m(){cube([1,1,1]);}\n" + "m();\n" * MAX_CALL_SITES
 
-    def _fake_run(argv, **kwargs):
-        if "openscad" in argv:
-            return _completed(0)
-        if any("cat > /work/" in a for a in argv):
-            return _completed(0)
-        if any("cat /work/" in a for a in argv):
-            return _completed(0, stdout=_box_stl_bytes())
-        return _completed(0)
-
-    with patch("subprocess.run", side_effect=_fake_run):
+    with patch("subprocess.run", side_effect=_fake_run_for(_box_stl_bytes())):
         result = build_registry_glb(source)
 
     assert len(result.registry_names) == MAX_CALL_SITES
@@ -254,15 +322,6 @@ def test_scene_export_exception_isolates_bad_mesh_and_preserves_rest_of_registry
     remaining geometries must still assemble into a GLB."""
     stl_bytes = _box_stl_bytes()
 
-    def _fake_run(argv, **kwargs):
-        if "openscad" in argv:
-            return _completed(0)
-        if any("cat > /work/" in a for a in argv):
-            return _completed(0)
-        if any("cat /work/" in a for a in argv):
-            return _completed(0, stdout=stl_bytes)
-        return _completed(0)
-
     def _fake_scene_export(self, *args, **kwargs):
         # Whole-scene export (both meshes present) always fails; the
         # per-mesh isolation probe fails ONLY for the scene containing
@@ -272,7 +331,7 @@ def test_scene_export_exception_isolates_bad_mesh_and_preserves_rest_of_registry
             raise ValueError("corrupt geometry, cannot triangulate")
         return b"stub-glb-bytes"
 
-    with patch("subprocess.run", side_effect=_fake_run), patch(
+    with patch("subprocess.run", side_effect=_fake_run_for(stl_bytes)), patch(
         "trimesh.Scene.export", new=_fake_scene_export
     ):
         result = build_registry_glb(TWO_MODULE_SCAD)
@@ -294,16 +353,7 @@ def test_trimesh_load_exception_classifies_artifact_error_without_aborting_regis
     never abort the whole registry build with an unhandled exception."""
     stl_bytes = _box_stl_bytes()
 
-    def _fake_run(argv, **kwargs):
-        if "openscad" in argv:
-            return _completed(0)
-        if any("cat > /work/" in a for a in argv):
-            return _completed(0)
-        if any("cat /work/" in a for a in argv):
-            return _completed(0, stdout=stl_bytes)
-        return _completed(0)
-
-    with patch("subprocess.run", side_effect=_fake_run), patch(
+    with patch("subprocess.run", side_effect=_fake_run_for(stl_bytes)), patch(
         "trimesh.load", side_effect=[ValueError("corrupt STL"), trimesh.creation.box()]
     ):
         result = build_registry_glb(TWO_MODULE_SCAD)
@@ -313,3 +363,178 @@ def test_trimesh_load_exception_classifies_artifact_error_without_aborting_regis
     assert result.failures[0].site.name == "base"
     assert result.registry_names == ("cap",)
     assert result.glb_bytes is not None
+
+
+# ---------------------------------------------------------------------------
+# Issue #280 — helper containers removed on EVERY path, not just timeout
+# ---------------------------------------------------------------------------
+
+
+def test_populate_helper_removed_on_success_path() -> None:
+    """A SUCCESSFUL ``registry-put-*`` helper (exit 0) must still be
+    removed — the helper is started without ``--rm`` (``build_docker_argv``),
+    so without the fix every successful populate leaks an exited
+    ``registry-put-*`` container and the live VM accumulates them
+    alongside the render container leak."""
+    stl_bytes = _box_stl_bytes()
+    fake = _RecordingRun(
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes)
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert result.failures == ()
+    put_names = fake.started_names(_is_populate)
+    assert len(put_names) == 2  # two call-sites -> two populate helpers
+    for name in put_names:
+        assert name.startswith("registry-put-")
+        assert fake.cleaned(name), f"registry-put container {name} was not removed"
+
+
+def test_harvest_helper_removed_on_success_path() -> None:
+    """A SUCCESSFUL ``registry-get-*`` helper (exit 0, stdout = the STL)
+    must still be removed — before the fix the harvest helper was never
+    removed on the success path at all, so every isolated render leaked
+    an exited ``registry-get-*`` container."""
+    stl_bytes = _box_stl_bytes()
+    fake = _RecordingRun(
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes)
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert result.failures == ()
+    get_names = fake.started_names(_is_harvest)
+    assert len(get_names) == 2  # two call-sites -> two harvest helpers
+    for name in get_names:
+        assert name.startswith("registry-get-")
+        assert fake.cleaned(name), f"registry-get container {name} was not removed"
+
+
+def test_populate_helper_removed_on_nonzero_exit_path() -> None:
+    """A FAILED ``registry-put-*`` helper (non-zero exit -> ``RuntimeError``
+    -> ``container_error``) must be removed too — the success-path fix
+    alone would still leak it here, because the non-zero-exit branch is a
+    distinct path from timeout."""
+    stl_bytes = _box_stl_bytes()
+
+    def _populate(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            return _completed(1, stderr=b"disk full")
+        return _completed(0)
+
+    fake = _RecordingRun(
+        populate=_populate,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "container_error"
+    assert result.registry_names == ("cap",)
+    # The FAILED populate helper (first call-site) was still removed.
+    put_names = fake.started_names(_is_populate)
+    assert len(put_names) == 2
+    assert fake.cleaned(put_names[0])
+    assert fake.cleaned(put_names[1])
+
+
+def test_harvest_helper_removed_on_timeout_path() -> None:
+    """A TIMED-OUT ``registry-get-*`` helper (harvest hangs -> returns
+    ``None`` -> ``empty_model``) must be removed — before the fix the
+    timeout branch simply returned ``None`` and leaked the hung helper
+    container outright."""
+    stl_bytes = _box_stl_bytes()
+
+    def _harvest(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+        return _completed(0, stdout=stl_bytes)
+
+    fake = _RecordingRun(harvest=_harvest)
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    # First call-site's harvest hung -> empty_model for that site only.
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "empty_model"
+    assert result.registry_names == ("cap",)
+
+    get_names = fake.started_names(_is_harvest)
+    assert len(get_names) == 2
+    # The TIMED-OUT harvest helper (first) was killed and removed, not leaked.
+    assert fake.cleaned(get_names[0])
+    assert fake.cleaned(get_names[1])
+
+
+# ---------------------------------------------------------------------------
+# Issue #280 — spawn failure (OSError) must not raise UnboundLocalError
+# ---------------------------------------------------------------------------
+
+
+def test_populate_helper_spawn_failure_records_container_error_and_cleans_up() -> None:
+    """If ``subprocess.run`` fails to spawn at all (OSError — e.g. the
+    docker CLI is missing or the daemon refuses the exec), the populate
+    helper must degrade to a ``container_error`` failure record (the
+    pre-#280 behaviour: the exception propagated and the caller caught
+    ``RuntimeError``) — never an ``UnboundLocalError`` on the unbound
+    ``proc`` — and the helper container must still be cleaned up."""
+    stl_bytes = _box_stl_bytes()
+
+    def _populate(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("docker CLI refused to start")
+        return _completed(0)
+
+    fake = _RecordingRun(
+        populate=_populate,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "container_error"
+    assert result.failures[0].site.name == "base"
+    assert result.registry_names == ("cap",)
+    put_names = fake.started_names(_is_populate)
+    assert len(put_names) == 2
+    assert fake.cleaned(put_names[0])
+    assert fake.cleaned(put_names[1])
+
+
+def test_harvest_helper_spawn_failure_records_empty_model_and_cleans_up() -> None:
+    """If ``subprocess.run`` fails to spawn at all (OSError) during the
+    harvest step, the helper must degrade exactly as the pre-#280 code
+    did — return ``None`` (so the call-site classifies ``empty_model``)
+    — never an ``UnboundLocalError`` on the unbound ``proc``, and the
+    helper container must still be cleaned up."""
+    stl_bytes = _box_stl_bytes()
+
+    def _harvest(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("docker CLI refused to start")
+        return _completed(0, stdout=stl_bytes)
+
+    fake = _RecordingRun(harvest=_harvest)
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "empty_model"
+    assert result.registry_names == ("cap",)
+    get_names = fake.started_names(_is_harvest)
+    assert len(get_names) == 2
+    assert fake.cleaned(get_names[0])
+    assert fake.cleaned(get_names[1])

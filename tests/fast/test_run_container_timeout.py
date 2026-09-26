@@ -4,10 +4,10 @@ No Docker required — ``subprocess.run`` is patched with
 ``unittest.mock``. Proves the HIGH-severity review finding that a runaway
 ``.scad`` (infinite loop under the pid limit) is actually killed:
 ``run_container`` wraps ``subprocess.run`` with ``timeout=timeout_s`` and,
-on ``TimeoutExpired``, runs ``docker kill`` + ``docker rm`` (the container
-is never started with ``--rm``) before returning a sentinel result that
-``classify(timed_out=True)`` maps to the ``timeout`` row of the closed
-``ErrorClass`` enum.
+on ``TimeoutExpired``, force-removes the container with a single
+``docker rm -f`` (the container is never started with ``--rm``) before
+returning a sentinel result that ``classify(timed_out=True)`` maps to the
+``timeout`` row of the closed ``ErrorClass`` enum.
 """
 
 from __future__ import annotations
@@ -56,23 +56,20 @@ def test_run_container_success_passes_through_completed_process() -> None:
     assert proc is sentinel
 
 
-def test_run_container_timeout_kills_and_removes_container() -> None:
-    """On ``TimeoutExpired`` the wrapper kills AND removes the named
-    container (no ``--rm`` is used at start, so nothing else cleans up),
-    in that order."""
+def test_run_container_timeout_removes_container() -> None:
+    """On ``TimeoutExpired`` the wrapper force-removes the named container
+    (no ``--rm`` is used at start, so nothing else cleans up) with a
+    single ``docker rm -f``."""
     with patch("d33d.render_worker.subprocess.run") as mock_run:
         mock_run.side_effect = [
             subprocess.TimeoutExpired(cmd=ARGV, timeout=120),
-            _completed(0),  # docker kill
-            _completed(0),  # docker rm
+            _completed(0),  # docker rm -f
         ]
         proc = rw.run_container(ARGV, timeout_s=120)
 
-    assert mock_run.call_count == 3
-    kill_call = mock_run.call_args_list[1]
-    rm_call = mock_run.call_args_list[2]
-    assert kill_call.args[0] == ["docker", "kill", "render-12345678"]
-    assert rm_call.args[0] == ["docker", "rm", "render-12345678"]
+    assert mock_run.call_count == 2
+    rm_call = mock_run.call_args_list[1]
+    assert rm_call.args[0] == ["docker", "rm", "-f", "render-12345678"]
     assert proc.returncode == 124
 
 
@@ -83,8 +80,7 @@ def test_run_container_timeout_maps_to_classify_timeout_row() -> None:
     with patch("d33d.render_worker.subprocess.run") as mock_run:
         mock_run.side_effect = [
             subprocess.TimeoutExpired(cmd=ARGV, timeout=120),
-            _completed(0),
-            _completed(0),
+            _completed(0),  # docker rm -f
         ]
         proc = rw.run_container(ARGV, timeout_s=120)
         timed_out = proc.returncode == 124
@@ -108,8 +104,8 @@ def test_run_container_timeout_without_name_skips_cleanup() -> None:
     assert proc.returncode == 124
 
 
-def test_run_container_cleanup_kill_timeout_does_not_raise() -> None:
-    """A hung ``docker kill`` (daemon itself stuck) must not escape the
+def test_run_container_cleanup_rm_timeout_does_not_raise() -> None:
+    """A hung ``docker rm -f`` (daemon itself stuck) must not escape the
     timeout path — the run still returns the 124 sentinel and classifies
     as ``timeout``, and a warning names the possibly-leaked container."""
     with (
@@ -119,16 +115,16 @@ def test_run_container_cleanup_kill_timeout_does_not_raise() -> None:
         mock_run.side_effect = [
             subprocess.TimeoutExpired(cmd=ARGV, timeout=120),
             subprocess.TimeoutExpired(
-                cmd=["docker", "kill", "render-12345678"], timeout=15
+                cmd=["docker", "rm", "-f", "render-12345678"], timeout=15
             ),
         ]
         proc = rw.run_container(ARGV, timeout_s=120)
 
     assert proc.returncode == 124
-    kill_call = mock_run.call_args_list[1]
-    assert kill_call.args[0] == ["docker", "kill", "render-12345678"]
-    assert kill_call.kwargs["timeout"] == 15
-    # rm was never attempted after the kill hang.
+    rm_call = mock_run.call_args_list[1]
+    assert rm_call.args[0] == ["docker", "rm", "-f", "render-12345678"]
+    assert rm_call.kwargs["timeout"] == 15
+    # Only one cleanup call (the force rm) — it hung, nothing retried.
     assert mock_run.call_count == 2
     assert "render-12345678" in err.getvalue()
     assert "WARNING" in err.getvalue()
@@ -137,29 +133,28 @@ def test_run_container_cleanup_kill_timeout_does_not_raise() -> None:
 
 
 def test_run_container_cleanup_rm_nonzero_warns_but_still_times_out() -> None:
-    """A non-zero ``docker rm`` exit must be logged as a warning and must
-    not raise — the run still returns the 124 sentinel."""
+    """A non-zero ``docker rm -f`` exit must be logged as a warning and
+    must not raise — the run still returns the 124 sentinel."""
     with (
         patch("d33d.render_worker.subprocess.run") as mock_run,
         patch("sys.stderr", new_callable=StringIO) as err,
     ):
         mock_run.side_effect = [
             subprocess.TimeoutExpired(cmd=ARGV, timeout=120),
-            _completed(0),  # docker kill
-            _completed(1),  # docker rm failed
+            _completed(1),  # docker rm -f failed
         ]
         proc = rw.run_container(ARGV, timeout_s=120)
 
     assert proc.returncode == 124
-    rm_call = mock_run.call_args_list[2]
-    assert rm_call.args[0] == ["docker", "rm", "render-12345678"]
+    rm_call = mock_run.call_args_list[1]
+    assert rm_call.args[0] == ["docker", "rm", "-f", "render-12345678"]
     assert rm_call.kwargs["timeout"] == 15
-    assert "docker rm render-12345678" in err.getvalue()
+    assert "docker rm -f render-12345678" in err.getvalue()
     assert "WARNING" in err.getvalue()
 
 
 def test_run_container_cleanup_happy_path_emits_no_warning() -> None:
-    """Both cleanup calls succeed: run still returns 124 and nothing is
+    """The cleanup call succeeds: run still returns 124 and nothing is
     logged — a healthy cleanup is silent."""
     with (
         patch("d33d.render_worker.subprocess.run") as mock_run,
@@ -167,13 +162,12 @@ def test_run_container_cleanup_happy_path_emits_no_warning() -> None:
     ):
         mock_run.side_effect = [
             subprocess.TimeoutExpired(cmd=ARGV, timeout=120),
-            _completed(0),  # docker kill
-            _completed(0),  # docker rm
+            _completed(0),  # docker rm -f
         ]
         proc = rw.run_container(ARGV, timeout_s=120)
 
     assert proc.returncode == 124
-    assert mock_run.call_count == 3
+    assert mock_run.call_count == 2
     for call in mock_run.call_args_list[1:]:
         assert call.kwargs["timeout"] == 15
     assert err.getvalue() == ""
@@ -185,3 +179,63 @@ def test_argv_container_name_extracts_name_from_build_docker_argv_output() -> No
     right container."""
     argv = rw.build_docker_argv("openscad/openscad:trixie", "render-abcdef01")
     assert rw._argv_container_name(argv) == "render-abcdef01"
+
+
+def test_cleanup_container_no_such_container_is_debug_not_warning() -> None:
+    """A ``docker rm -f`` that exits non-zero with 'No such container'
+    in stderr is a clean no-op (the container is already gone) — it
+    must log at DEBUG, not WARNING, so the timeout path's second
+    ``rm -f`` (after the container was already removed by the first)
+    does not emit a false leak warning."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: No such container: render-12345678",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" not in err.getvalue()
+
+
+def test_cleanup_container_no_such_object_is_debug_not_warning() -> None:
+    """A ``docker rm -f`` that exits non-zero with 'No such object'
+    in stderr (volume-style error) is also a clean no-op — DEBUG,
+    not WARNING."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: No such object: render-12345678",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" not in err.getvalue()
+
+
+def test_cleanup_container_real_failure_still_warns() -> None:
+    """A ``docker rm -f`` that exits non-zero with a genuine error
+    (neither 'No such container' nor 'No such object') must still
+    log a WARNING naming the possibly-leaked container."""
+    with (
+        patch("d33d.render_worker.subprocess.run") as mock_run,
+        patch("sys.stderr", new_callable=StringIO) as err,
+    ):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=["docker", "rm", "-f", "render-12345678"],
+            returncode=1,
+            stdout=b"",
+            stderr=b"Error response from daemon: device /dev/null is mounted on.",
+        )
+        rw._cleanup_container("render-12345678")
+
+    assert "WARNING" in err.getvalue()
+    assert "render-12345678" in err.getvalue()

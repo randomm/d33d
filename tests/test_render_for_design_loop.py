@@ -205,6 +205,199 @@ def test_render_for_design_loop_harvests_view_glob(
     assert "view$i.png" not in harvest_scripts[0]
 
 
+# --- Issue #280: caller-side container + volume removal on every path ----
+
+
+def test_render_for_design_loop_removes_container_and_volume_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A fully ``ok`` render removes BOTH the named render container and
+    the ``d33d-render-*`` volume (the caller removes after ``docker
+    inspect`` / harvest — the render runs without ``--rm``), and
+    ``docker rm -f`` is issued AFTER the harvest helper (the harvested
+    files must still be in the volume when copied out)."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if "cp /work/model.stl /host/" in " ".join(argv):
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    _harvest_side_effect(argv, Path(tok.rsplit(":", 1)[0]))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000d1")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    class _FakeTrimesh:
+        load = staticmethod(lambda *a, **kw: _FakeMesh())
+
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "trimesh", _FakeTrimesh)
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, renders_dir=tmp_path / "renders"
+    )
+
+    assert result.ok is True, "the stubbed render must land in the ok row"
+    name = "render-000000d1"
+    volume = f"d33d-render-{name}"
+    rm_calls = [c for c in calls if c == ["docker", "rm", "-f", name]]
+    vol_rm_calls = [
+        c for c in calls if c == ["docker", "volume", "rm", "-f", volume]
+    ]
+    assert len(rm_calls) == 1, (
+        f"expected exactly one 'docker rm -f {name}', got: {rm_calls}"
+    )
+    assert len(vol_rm_calls) == 1, (
+        f"expected exactly one volume rm, got: {vol_rm_calls}"
+    )
+    # Sequencing: container removal happens AFTER the harvest helper ran.
+    harvest_idx = next(
+        i for i, c in enumerate(calls) if "cp /work/model.stl /host/" in " ".join(c)
+    )
+    rm_idx = calls.index(rm_calls[0])
+    vol_rm_idx = calls.index(vol_rm_calls[0])
+    assert rm_idx > harvest_idx, "rm -f must run after the harvest"
+    # Container first, volume after.
+    assert vol_rm_idx > rm_idx, "volume rm must run after the container rm"
+
+
+def test_render_for_design_loop_removes_container_and_volume_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-timeout render failure (worker exits non-zero) still removes
+    the container AND the volume in the ``finally`` — the pre-#280 leak
+    was on exactly this path."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if any(tok.endswith("render-worker:local") for tok in argv):
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b"ERROR: syntax"
+            )
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000d2")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    assert result.ok is False
+    assert result.error_class in rw.ERROR_CLASSES
+    name = "render-000000d2"
+    volume = f"d33d-render-{name}"
+    assert ["docker", "rm", "-f", name] in calls, (
+        f"no 'docker rm -f {name}' in: {calls}"
+    )
+    assert [
+        "docker",
+        "volume",
+        "rm",
+        "-f",
+        volume,
+    ] in calls, f"no 'docker volume rm -f {volume}' in: {calls}"
+
+
+def test_render_for_design_loop_removes_container_and_volume_on_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A wall-clock timeout: the render run itself raises
+    ``TimeoutExpired`` (the legacy blocking path of ``run_container``),
+    whose own cleanup issues a ``docker rm -f``; the outer ``finally``
+    then issues the volume rm (and a second, idempotent container rm) —
+    so every created resource is covered by a removal on this path too."""
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout", 120))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000d3")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+
+    result = rw.render_for_design_loop("cube(10);", {})
+
+    assert result.ok is False
+    assert result.error_class == "timeout"
+    name = "render-000000d3"
+    volume = f"d33d-render-{name}"
+    rm_calls = [c for c in calls if c == ["docker", "rm", "-f", name]]
+    vol_rm_calls = [
+        c for c in calls if c == ["docker", "volume", "rm", "-f", volume]
+    ]
+    assert len(rm_calls) == 2, (
+        f"expected the run's own rm -f plus the finally's rm -f, got: {rm_calls}"
+    )
+    assert len(vol_rm_calls) == 1, (
+        f"expected exactly one volume rm, got: {vol_rm_calls}"
+    )
+
+
+def test_render_for_design_loop_removes_container_and_volume_on_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An exception OUTSIDE the pipeline's ``except`` tuple (here an
+    ``AttributeError`` mid-volume-setup) must NOT leak the volume: the
+    ``finally``'s ``docker volume rm -f`` still runs and, per the #280
+    hardening, a ``TimeoutExpired`` escaping that ``docker volume rm``
+    must be caught (cleanup never raises out of a render) — the
+    unexpected exception still propagates."""
+    calls: list[list[str]] = []
+    state = {"rm_count": 0}
+
+    def _explode(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:3] == ["docker", "volume", "create"]:
+            raise AttributeError("simulated unexpected failure mid-pipeline")
+        if argv[:4] == ["docker", "volume", "rm", "-f"]:
+            state["rm_count"] += 1
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=15)
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _explode)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-000000d4")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+
+    with pytest.raises(AttributeError, match="simulated unexpected failure"):
+        rw.render_for_design_loop("cube(10);", {})
+
+    # The volume rm WAS attempted in the finally (the TimeoutExpired from
+    # it was swallowed by the cleanup, not propagated).
+    assert state["rm_count"] == 1
+    assert [
+        "docker",
+        "volume",
+        "rm",
+        "-f",
+        "d33d-render-render-000000d4",
+    ] in calls
+
+
 def test_render_for_design_loop_pipeline_exception_returns_container_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
