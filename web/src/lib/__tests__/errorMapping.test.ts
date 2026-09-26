@@ -78,6 +78,21 @@ describe("errorMapping", () => {
     expect([...CLOSED_SET].sort()).toEqual([...FAILURE_REASONS].sort());
   });
 
+  it("the renderer_unavailable frame maps to the pre-flight sentence (issue #277)", () => {
+    // The pre-flight failure travels the standard SSE error-frame shape:
+    // a `reason` field the SPA maps like any other closed-set reason.
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_unavailable",
+      reason: "renderer_unavailable",
+    });
+    expect(display.message).toBe(copy.failure.reasons.renderer_unavailable);
+    expect(display.message).toBe(
+      "The renderer isn't running, so nothing was designed. Start Docker and try again.",
+    );
+    expect(display.detail).toBe("renderer_unavailable");
+    expect(display.retryable).toBe(true);
+  });
+
   it("the axis_params_mismatch headline carries no numbers (issue #276)", () => {
     // The headline is the reason-code sentence — the per-parameter numbers
     // ride in the failure detail (copy.failure.axisMismatchLine), never in
