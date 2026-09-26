@@ -871,9 +871,130 @@ async def _resolve_offer(
     return {"param": name, "sentence": sentence}
 
 
-def _version_param_meta(result: Any) -> dict[str, Any] | None:
+def _inherit_param_labels(
+    meta: dict[str, Any], prev_meta: Any
+) -> dict[str, Any]:
+    """Inherit parameter labels from the previous version's metadata
+    (issue #279, task-b): where the previous version declared a label
+    for a parameter that also appears in the new version's metadata, the
+    PREVIOUS label is kept — a regeneration that renames "Overall height"
+    to "Height" must not move or relabel the row under the user's eye.
+
+    Match, in strict precedence (name first, axis only as a fallback):
+
+    1. NAME MATCH — the new param's name was a key in the previous
+       metadata; inherit that entry's label. This covers the common
+       case (the model keeps the param name, renames the label) and the
+       rename-the-NAME case when the axis is declared on one side only.
+    2. AXIS MATCH — the new param name is NEW to the previous version, it
+       declares an axis, EXACTLY ONE previous param declared that axis and
+       has a label, and EXACTLY ONE new param with that axis has no name
+       match (issue #279's operator tie-break — a rename of the param name
+       with the axis unchanged inherits through the axis; AMBIGUOUS (several
+       previous or several new params share the axis) does not inherit — the
+       new label stands). A name-matched previous param on the axis DOES
+       make the axis ambiguous for the OTHER new params (the axis inventory
+       is the FULL previous inventory — the same tie-break that the binding
+       applies), and a label-less previous param on the axis is not a
+       source (the new label stands, never a fabricated or ``None`` one).
+
+    ONLY the ``label`` field is inherited: ``unit`` / ``axis`` / ``reason``
+    always come from the NEW metadata (the operator decision — a rename
+    keeps the label, the rest is the new version's own declaration). The
+    previous label is kept UNCONDITIONALLY: a user rename in chat is
+    explicitly out of scope, so the previous label wins even then.
+
+    Degraded inputs never fail: a ``None`` / non-dict previous metadata
+    (no previous version, or a version without metadata) inherits nothing;
+    a previous entry without a usable string label leaves the new label
+    as-is — including on the axis path (a label-less predecessor is not a
+    source, so the new label stands, never a ``KeyError`` or a ``None``);
+    a new entry with no label of its own receives the inherited one when a
+    labelled match exists. The result is the new metadata with labels
+    grafted — never a mutated input, never a fabricated label.
+    """
+    from d33d.design_state import normalize_param_meta
+
+    if not isinstance(prev_meta, dict) or not prev_meta:
+        return dict(meta)
+    prev = normalize_param_meta(prev_meta)
+    prev_labels = {
+        name: m["label"] for name, m in prev.items() if m.get("label")
+    }
+    if not prev_labels:
+        return dict(meta)
+    # Axis inventory of the FULL previous version (including name-matched
+    # prev params — the binding tie-break: a name-matched prev entry on the
+    # same axis makes the axis ambiguous for the OTHER new params; the
+    # axis pass only looks at entries that also carry a label).
+    prev_axis_names: dict[str, list[str]] = {}
+    for name, m in prev.items():
+        axis = m.get("axis")
+        if axis:
+            prev_axis_names.setdefault(axis, []).append(name)
+    # Name matches: a new param whose name was in the previous version
+    # inherits that param's label (when the previous one had one).
+    matched: dict[str, str] = {}
+    for name in meta:
+        if name in prev_labels:
+            matched[name] = prev_labels[name]
+    # Axis inventory of the NEW version among the UN-matched new params
+    # (precomputed once after the name pass — the axis pass is two length
+    # lookups, not a re-scan).
+    new_axis_names: dict[str, list[str]] = {}
+    for name, m in meta.items():
+        if name in matched or not isinstance(m, dict):
+            continue
+        axis = m.get("axis")
+        if axis:
+            new_axis_names.setdefault(axis, []).append(name)
+    # Axis matches: a new param that did NOT name-match, declares an
+    # axis, and is the ONLY un-matched new param with that axis inherits
+    # from the previous version's ONLY LABELED param with that axis (the
+    # operator tie-break — ambiguity inherits nothing). The inventory is
+    # the FULL previous axis inventory — including name-matched prev
+    # params (a name-matched prev entry on the same axis makes the axis
+    # ambiguous for the other new params, per the tie-break), so a
+    # label-less unique predecessor is not a source and the new label
+    # stands.
+    for name, m in meta.items():
+        if name in matched:
+            continue
+        axis = m.get("axis") if isinstance(m, dict) else None
+        if not axis:
+            continue
+        if len(new_axis_names.get(axis, [])) != 1:
+            continue
+        prev_with_axis = [n for n in prev_axis_names.get(axis, []) if n in prev_labels]
+        if len(prev_with_axis) != 1:
+            continue
+        matched[name] = prev_labels[prev_with_axis[0]]
+    # Graft the inherited labels onto a COPY of the new metadata (the
+    # inputs are never mutated): a matched entry keeps its own
+    # unit/axis/reason, receives the previous ``label``, and is stored
+    # back as a fresh dict. An unmatched entry is copied through
+    # verbatim (a non-dict entry — a malformed row — keeps its shape; a
+    # dict entry is copied so a later caller never sees a shared
+    # reference into the loop record's metadata).
+    out: dict[str, Any] = {}
+    for name, entry in meta.items():
+        if isinstance(entry, dict):
+            entry = dict(entry)
+        if name in matched:
+            if isinstance(entry, dict):
+                entry["label"] = matched[name]
+            else:
+                entry = {"label": matched[name]}
+        out[name] = entry
+    return out
+
+
+def _version_param_meta(
+    result: Any, prev_meta: Any = None
+) -> dict[str, Any] | None:
     """The best candidate's per-parameter metadata for persistence
-    (issue #248), or ``None``.
+    (issue #248), with labels inherited from the previous version's
+    metadata (issue #279, task-b), or ``None``.
 
     The version OWNS its metadata: the render that becomes the version is
     the BEST candidate (``result.best``), and the metadata is that
@@ -883,6 +1004,14 @@ def _version_param_meta(result: Any) -> dict[str, Any] | None:
     and a missing field both persist ``None`` (the row stores NULL — an
     honest absence; an empty dict is not a metadata set, never a
     fabricated label).
+
+    ``prev_meta`` (the previous version's row ``param_meta`` — ``None``
+    when there is no previous version or the row carries no metadata) is
+    the label-inheritance source: where it declares a label for the same
+    param (by name, or by a unique axis match for a renamed param), that
+    label is kept so a regeneration's relabel does not move the row
+    (issue #279's operator decision). The rest of each entry — unit,
+    axis, reason — is never inherited: the new version declares its own.
     """
     best = getattr(result, "best", None)
     if best is None:
@@ -890,7 +1019,7 @@ def _version_param_meta(result: Any) -> dict[str, Any] | None:
     meta = getattr(best, "param_meta", None)
     if not isinstance(meta, dict) or not meta:
         return None
-    return dict(meta)
+    return _inherit_param_labels(meta, prev_meta)
 
 
 def _version_render_artifact_dir(result: Any) -> str | None:
@@ -1077,7 +1206,9 @@ async def _resolve_version_create(
         bbox=_version_bbox_extents(result),
         render_artifact_dir=_version_render_artifact_dir(result),
         stated_dims=stated_axes,
-        param_meta=_version_param_meta(result),
+        param_meta=_version_param_meta(
+            result, prev_meta=(latest.get("param_meta") if latest is not None else None)
+        ),
     )
     return int(version["id"])
 

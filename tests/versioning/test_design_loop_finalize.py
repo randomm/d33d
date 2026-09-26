@@ -3602,6 +3602,57 @@ def test_finalize_tier2_offer_from_chat_history(app_with_versions):
     assert tier_2_sentence(entry) == "You said 12 — I used it for lift_gap. Right?"
 
 
+# ---------------------------------------------------------------------------
+# (issue #279, task-b) label inheritance: FINALIZE seam (the route's
+# ``_version_param_meta(result, prev_meta=...)`` call — the second of the
+# two persistence points; the chat seam is covered by the tests above).
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_label_inheritance_keeps_previous_label(app_with_versions):
+    """Finalize with a previous version whose param_meta labels a param
+    and a passing loop whose new param_meta renames that label → the
+    PREVIOUS label is persisted on the new row (issue #279's operator
+    decision — the label inherits, unit/axis/reason are the new meta's
+    own)."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        # v1: seeded directly (the finalize seam is the SECOND version's
+        # writer; v1 establishes the label baseline).
+        await svc.create_version(
+            pid,
+            {"width": 60.0, "overall_height": 12.0},
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            },
+        )
+        app_with_versions.state.run_design_loop = lambda **kw: _MetaStubResult(
+            {"width": 60.0, "overall_height": 18.0},
+            {
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+            },
+        )
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "taller bracket", "message": "finalize it"},
+        )
+        assert r.status_code == 201, r.text
+        latest = svc.latest_version(pid)
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # The inherited label persists on the finalize-created row.
+    assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+    # Only the label is inherited — unit/axis are the new meta's own.
+    assert latest["param_meta"]["overall_height"]["unit"] == "mm"
+    assert latest["param_meta"]["overall_height"]["axis"] == "H"
+
+
 def test_chat_triple_message_gate_input_and_persisted_stated_dims(
     app_with_versions,
 ):
@@ -3828,3 +3879,308 @@ def test_chat_render_class_reasons_flow_the_standard_reason_field(app_with_versi
             f"terminal error frame must carry reason {reason!r}, "
             f"got {error_frames[0].get('reason')!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# (issue #279, task-b) label inheritance: a regenerated parameter keeps the
+# previous version's label (chat path, end-to-end through the loop seam)
+#
+# The operator decision: when a new version's param_meta gives a label for a
+# parameter that already had a label in the previous version's param_meta
+# (same param name, or the same declared axis when the name changed), the
+# PREVIOUS label is persisted. Only the label is inherited — unit/axis/
+# reason come from the new metadata. These tests drive the CHAT seam
+# (``_resolve_version_create`` → ``_version_param_meta(result, prev_meta)``)
+# with a stubbed loop result whose best record carries a ``param_meta``
+# (the finalize seam is covered by the finalize test below; the region-edit
+# route reaches the SAME chat seam, so the chat path IS the region-edit
+# path — both flow through ``run_design_loop_with_events`` →
+# ``_resolve_version_create``).
+# ---------------------------------------------------------------------------
+
+
+class _MetaStubResult:
+    """A pass result whose best record carries a ``param_meta`` (the
+    declared ``IterationRecord`` field — issue #248's persistence seam the
+    chat adapter's ``_version_param_meta`` reads)."""
+
+    def __init__(self, params: dict, meta: dict) -> None:
+        from d33d.design_loop import IterationRecord, Score
+
+        self.status = "pass"
+        self.failure_reason = None
+        self.best = IterationRecord(
+            iteration=0,
+            scad_source="W = 60; cube([W, W, W]);",
+            render=_default_render(),
+            score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
+            params=dict(params),
+            param_meta=dict(meta),
+        )
+
+
+async def _chat_frames(app, client, pid: int, message: str):
+    """POST one chat message and drain the SSE stream to a terminal
+    frame; return the project's latest version row (read AFTER the pass
+    has written it) and the done frame's data."""
+    await client.post(f"/api/projects/{pid}/chat", json={"message": message})
+    source = app.state.event_sources.get(pid)
+    if source is not None:
+        async for _event, _data in source:
+            if _event in ("done", "error"):
+                break
+    return app.state.versions.latest_version(pid)
+
+
+def test_chat_label_inheritance_name_match_keeps_previous_label(
+    app_with_versions,
+):
+    """v1 {overall_height: label "Overall height", axis H} → v2
+    {overall_height: label "Height", axis H} persists "Overall height"
+    (issue #279's name-match rule). The new meta's unit/axis are NOT
+    inherited — only the label."""
+
+    v1_params = {"width": 60.0, "overall_height": 12.0}
+    v1_meta = {
+        "width": {"label": "Width", "unit": "mm", "axis": "W"},
+        "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+    }
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        # v1: seeded directly via the service (the loop stub is only the
+        # second turn's writer; the first version establishes the label
+        # baseline the second one must inherit).
+        await svc.create_version(pid, dict(v1_params), param_meta=v1_meta)
+
+        async def _loop(app, **kwargs):
+            # v2: the model renames the label to "Height" (the drift the
+            # operator decision forbids).
+            return _MetaStubResult(
+                {"width": 60.0, "overall_height": 18.0},
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        latest = await _chat_frames(app_with_versions, client, pid, "make it taller")
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # The inherited label persists on the row the SPA reads.
+    assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+    # Only the label is inherited — unit/axis are the new meta's own.
+    assert latest["param_meta"]["overall_height"]["unit"] == "mm"
+    assert latest["param_meta"]["overall_height"]["axis"] == "H"
+    # The width label (also name-matched) inherits too.
+    assert latest["param_meta"]["width"]["label"] == "Width"
+
+
+def test_chat_label_inheritance_axis_match_when_name_changes(
+    app_with_versions,
+):
+    """v1 {overall_height: label "Overall height", axis H} → v2
+    {height_mm: label "Height", axis H} (the model renamed the param) →
+    the label is inherited through the unique-axis match (issue #279's
+    operator tie-break: exactly one prev and one new param share the
+    axis)."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {"width": 60.0, "overall_height": 12.0},
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            },
+        )
+
+        async def _loop(app, **kwargs):
+            return _MetaStubResult(
+                {"width": 60.0, "height_mm": 18.0},
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        latest = await _chat_frames(app_with_versions, client, pid, "make it taller")
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # Axis match: height_mm inherits "Overall height" from overall_height.
+    assert latest["param_meta"]["height_mm"]["label"] == "Overall height"
+    # The width name-match is unaffected.
+    assert latest["param_meta"]["width"]["label"] == "Width"
+
+
+def test_chat_label_inheritance_ambiguous_axis_does_not_inherit(
+    app_with_versions,
+):
+    """Issue #279's operator tie-break: when TWO previous params declare
+    the same axis (e.g. two H params), the axis match is ambiguous —
+    the new label stands (no inheritance). Name matches still work."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {
+                "width": 60.0,
+                "overall_height": 12.0,
+                "lip_height": 3.0,
+            },
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+                "lip_height": {"label": "Lip height", "unit": "mm", "axis": "H"},
+            },
+        )
+
+        async def _loop(app, **kwargs):
+            # overall_height is renamed to height_mm (no name match),
+            # lip_height keeps its name (name match wins for it).
+            return _MetaStubResult(
+                {
+                    "width": 60.0,
+                    "height_mm": 18.0,
+                    "lip_height": 3.0,
+                },
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "height_mm": {"label": "Height", "unit": "mm", "axis": "H"},
+                    "lip_height": {"label": "Lip", "unit": "mm", "axis": "H"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        latest = await _chat_frames(app_with_versions, client, pid, "make it taller")
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # Ambiguous axis match (two prev H params) → no inheritance for
+    # height_mm; the new label stands.
+    assert latest["param_meta"]["height_mm"]["label"] == "Height"
+    # The name match still works for lip_height (its previous label is
+    # inherited even though the model renamed it to "Lip").
+    assert latest["param_meta"]["lip_height"]["label"] == "Lip height"
+
+
+def test_chat_label_inheritance_brand_new_param_keeps_own_label(
+    app_with_versions,
+):
+    """A parameter NEW to this version (no name match, no previous axis
+    match) keeps its own label — never a fabricated inheritance."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {"width": 60.0, "overall_height": 12.0},
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            },
+        )
+
+        async def _loop(app, **kwargs):
+            # wall_thickness is a brand-new param (no name match, no
+            # previous D-declared param) → keeps its own label.
+            return _MetaStubResult(
+                {"width": 60.0, "overall_height": 18.0, "wall_thickness": 4.0},
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+                    "wall_thickness": {"label": "Wall thickness", "unit": "mm"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        latest = await _chat_frames(app_with_versions, client, pid, "make it taller")
+        return latest
+
+    latest = run_async(app_with_versions, _call)
+    assert latest is not None
+    # Brand-new param keeps its own label.
+    assert latest["param_meta"]["wall_thickness"]["label"] == "Wall thickness"
+    # The name-matched overall_height still inherits.
+    assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+
+
+# ---------------------------------------------------------------------------
+# (issue #279, task-b) label inheritance: REGION-EDIT seam (the route
+# reaches the SAME chat adapter seam — ``run_design_loop_with_events`` →
+# ``_resolve_version_create`` → ``_version_param_meta(result, prev_meta)``
+# — but this test verifies it end-to-end through the /region-edits POST,
+# not just the /chat POST).
+# ---------------------------------------------------------------------------
+
+
+def test_region_edit_label_inheritance_keeps_previous_label(app_with_versions):
+    """Region edit with a previous version whose param_meta labels a param
+    and a passing loop whose new param_meta renames that label → the
+    PREVIOUS label is persisted on the new row (issue #279: region edits
+    follow the same label rule as chat and finalize)."""
+    from tests.versioning.test_design_loop_finalize import _REGION_EDIT_PNG_BASE64
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        # v1: seeded directly with a label the regeneration will rename.
+        await svc.create_version(
+            pid,
+            {"width": 60.0, "overall_height": 12.0},
+            param_meta={
+                "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                "overall_height": {"label": "Overall height", "unit": "mm", "axis": "H"},
+            },
+        )
+
+        async def _loop(app, **kwargs):
+            return _MetaStubResult(
+                {"width": 60.0, "overall_height": 18.0},
+                {
+                    "width": {"label": "Width", "unit": "mm", "axis": "W"},
+                    "overall_height": {"label": "Height", "unit": "mm", "axis": "H"},
+                },
+            )
+
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json={
+                "module_ids": ["m1"],
+                "view_id": "front",
+                "marked_png_base64": _REGION_EDIT_PNG_BASE64,
+                "point": {"x": 1.0, "y": 1.0},
+                "instruction": "open this up",
+            },
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest = svc.latest_version(pid)
+        return r.status_code, latest
+
+    status, latest = run_async(app_with_versions, _call)
+    assert status == 202, status
+    # The region-edit path goes through the same _resolve_version_create
+    # seam — the inherited label persists.
+    assert latest is not None
+    assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
+    assert latest["param_meta"]["overall_height"]["unit"] == "mm"

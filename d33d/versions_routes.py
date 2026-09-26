@@ -700,7 +700,20 @@ def create_versions_router() -> APIRouter:
                 bbox=_measured_bbox,
                 render_artifact_dir=_version_render_artifact_dir(result),
                 stated_dims=per_axis_stated or None,
-                param_meta=_version_param_meta(result),
+                # Label inheritance (issue #279, task-b): the previous
+                # version's metadata (read above, before the create) is the
+                # source — a regenerated label that renames a known param
+                # keeps the previous label, so the row does not move under
+                # the user's eye. ``None`` on the first version (nothing to
+                # inherit).
+                param_meta=_version_param_meta(
+                    result,
+                    prev_meta=(
+                        prev_version["param_meta"]
+                        if prev_version is not None
+                        else None
+                    ),
+                ),
             )
         except (LookupError, ValueError, versions_mod.VersionConflictError) as e:
             _raise_mapped(e)
