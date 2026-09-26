@@ -209,7 +209,7 @@ def _validate_missing_fact(missing: Any) -> str | None:
     # verbatim; security must not depend on the SPA's rendering
     # escaping it (a future markdown/HTML rendering of the done frame
     # would otherwise turn model-influenced text into stored XSS).
-    if re.search(r'[<>=`"()\[\]{}]', m):
+    if re.search(r'[<>=`"()&\[\]{}]', m):
         return None
     return m
 

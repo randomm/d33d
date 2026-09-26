@@ -716,6 +716,7 @@ class TestRouteChatMessage:
             "the [shelf] height",
             "the {shelf} height",
             "the (shelf) height",
+            "the & shelf height",
         ):
             edge = self._answer_edge(
                 '{"kind": "unanswerable", "answer": "", "missing": "' + bad + '"}'
