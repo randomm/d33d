@@ -29,6 +29,7 @@ from pydantic import ValidationError
 from d33d.evals.failure_capture import (
     EVAL_FAILURE_CLASSES,
     GATE_REASON_CLASSES,
+    LOOP_LEVEL_FAILURE_REASONS,
     MAX_LINE_BYTES,
     RENDER_WORKER_CLASSES,
     FailureEvent,
@@ -153,6 +154,27 @@ def test_hook_appends_line_for_each_failure_class(tmp_path: Path):
         events = read_failure_events(out)
         assert len(events) == 1, fc
         assert events[0].failure_class == fc
+
+
+def test_loop_level_preflight_reason_is_accepted_failure_class(tmp_path: Path):
+    """The loop-level pre-flight reason ``renderer_unavailable`` (issue
+    #277) is an accepted ``failure_class`` — a Docker-down design turn
+    archives a real line instead of raising in the hook (a silent drop
+    would lose a real failure, and the old closed set rejected the reason
+    with ``ValueError`` on every such turn)."""
+    for reason in sorted(LOOP_LEVEL_FAILURE_REASONS):
+        out = tmp_path / f"{reason}.jsonl"
+        record_production_failure(
+            design_result=_exhausted_result(reason),
+            request="do something",
+            model="model-x",
+            prompt_version="deadbeef",
+            output_scad="cube();",
+            path=out,
+        )
+        events = read_failure_events(out)
+        assert len(events) == 1, reason
+        assert events[0].failure_class == reason
 
 
 def test_hook_rejects_unknown_failure_class(tmp_path: Path):
@@ -825,6 +847,124 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
     events = read_failure_events(app.state.failures_jsonl_path)
     assert len(events) == 1
     assert events[0].failure_class == "empty_model"
+    assert events[0].model == "model-x"
+    assert events[0].request == "make it a cube"
+
+
+def test_hooked_loop_preflight_failure_archives_renderer_unavailable(
+    tmp_path: Path, monkeypatch
+):
+    """Issue #277 e2e pin: a production-shape renderer pre-flight failure
+    (the REAL ``run_design_loop_async`` returns the loop's exhausted
+    ``renderer_unavailable`` result — ``best.render is None``, zero LLM
+    calls) flows through the app's hooked production loop and the
+    failures.jsonl hook FIRES (appends one correctly-shaped line with the
+    loop-level ``renderer_unavailable`` class and the RESOLVED string
+    model id) without raising — the hook's ``best.scad_source`` read on
+    the ``render is None`` record must not break the archive."""
+    import asyncio as _asyncio
+
+    from d33d.app import create_app
+    from d33d.config import catalogue as cat_mod
+    from d33d.config import probes as probe_mod
+    from d33d.config import resolve as resolve_mod
+    from d33d.evals.failure_capture import read_failure_events
+
+    class _Entry:
+        model = "model-x"
+
+    class _Provider:
+        base = "http://127.0.0.1:1"
+        key = "k"
+
+    class _Cat:
+        def __init__(self) -> None:
+            self.providers = {"p": _Provider()}
+
+    class _Res:
+        entry = _Entry()
+        provider = _Provider()
+
+    llm_calls = {"n": 0}
+
+    monkeypatch.setattr(cat_mod, "load_catalogue", lambda *a, **k: _Cat())
+    monkeypatch.setattr(resolve_mod, "resolve_model", lambda *a, **k: _Res())
+
+    async def _fake_probe(**kwargs):
+        from d33d.config.probes import CapabilityResult
+
+        return CapabilityResult(
+            tools=True, json_schema=True, vision=False, max_images=0
+        )
+
+    monkeypatch.setattr(probe_mod, "probe_capabilities", _fake_probe)
+
+    # The real loop runs: the failing pre-flight stub short-circuits it
+    # before any LLM/render call (no ``docker info`` probe — that seam is
+    # the ``renderer_is_available`` module attribute, patched to return
+    # False). The closure builds its ``llm_fn`` via the module-level
+    # ``make_llm_fn``; the stub's ``__call__`` (a pre-flight regression)
+    # increments the counter.
+    from d33d import design_loop as dl
+    from d33d.design_llm import LLMResult
+
+    def _passing_llm(*a, **k):
+        llm_calls["n"] += 1
+        return LLMResult(
+            content="cube();",
+            tool_calls=(
+                {"name": "emit_design", "arguments": {"scad": "cube();"}},
+            ),
+            prompt_hash="h" * 64,
+            tier="T1",
+            status="ok",
+            request_body={},
+        )
+
+    monkeypatch.setattr(dl, "make_llm_fn", lambda *a, **k: _passing_llm)
+    monkeypatch.setattr(dl, "renderer_is_available", lambda *a, **k: False)
+
+    monkeypatch.delenv("D33D_FAILURES_JSONL", raising=False)
+    app = create_app(
+        tmp_path / "d33d.sqlite3",
+        master_key_path=tmp_path / "master.key",
+        catalogue_path=tmp_path / "models.yaml",
+        spa_dist_dir=tmp_path / "no-dist",
+    )
+    app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+    # ``create_app`` wires the hooked production closure; use the ALREADY-WIRED
+    # one. Its closure resolves ``make_llm_fn`` (module-level, patched above)
+    # and the hook's ``real_run`` from the ``d33d.design_loop`` module at call
+    # time, so the monkeypatches are in force. The production closure does not
+    # forward ``renderer_check`` (it forwards a fixed set of kwargs), so the
+    # failing pre-flight is driven through the loop's ``renderer_is_available``
+    # module attribute (the ``None`` default path — the loop resolves it by
+    # name at call time, so the monkeypatch above is in force). The closure's
+    # own kwargs do not set it, so the loop's default (the patched attribute)
+    # is used.
+    from d33d.design_loop_events import bbox_from_render
+
+    loop = app.state.run_design_loop
+
+    async def _drive():
+        return await loop(
+            app=app,
+            photo="/photos/ref.png",
+            request="make it a cube",
+            stated_dims=(10, 10, 10),
+            bbox_fn=bbox_from_render,
+        )
+
+    result = _asyncio.run(_drive())
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert llm_calls["n"] == 0
+    # The hook fired (did not raise) on the ``render is None`` record.
+    events = read_failure_events(app.state.failures_jsonl_path)
+    assert len(events) == 1
+    assert events[0].failure_class == "renderer_unavailable"
+    # The hook's ``model`` is the RESOLVED model id (a plain string the
+    # production closure supplies from ``resolve_model``).
     assert events[0].model == "model-x"
     assert events[0].request == "make it a cube"
 

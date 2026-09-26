@@ -6,7 +6,11 @@
  * `GATE_REASON_BITS` from `d33d/design_loop.py` plus the seven render-worker
  * `ErrorClass` values plus the design-loop-level timeout reason
  * (`design_loop_timed_out`, emitted by the server-side loop deadline —
- * distinct from the render-worker `timeout` ErrorClass). `displayDesignLoopError` maps that closed set to the
+ * distinct from the render-worker `timeout` ErrorClass) plus the
+ * loop-level pre-flight reason (`renderer_unavailable`, issue #277 —
+ * emitted when the renderer reachability check fails before the first
+ * iteration; a loop-level reason, NOT a render-worker `ErrorClass`).
+ * `displayDesignLoopError` maps that closed set to the
  * failure turn's part 1 — a sentence a person would say — plus the raw
  * detail for the turn's part 4.
  *
@@ -46,6 +50,10 @@ export const FAILURE_REASONS: readonly string[] = [
   // the overall loop's wall-clock deadline fired; distinct from the
   // render-worker "timeout" ErrorClass above.
   "design_loop_timed_out",
+  // loop-level pre-flight reason (d33d/design_loop.py, issue #277) —
+  // the renderer (Docker daemon) was unreachable before the first
+  // iteration; NOT a render-worker ErrorClass (the render never ran).
+  "renderer_unavailable",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */

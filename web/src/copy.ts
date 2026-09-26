@@ -294,8 +294,9 @@ export const failure = {
     `${label}: ${mm(modelMm)} → ${mm(measuredMm)}`,
 
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
-   *  holds the words. The map must stay total — every GATE_REASON_BITS value and
-   *  every render ErrorClass value has an entry. */
+   *  holds the words. The map must stay total — every GATE_REASON_BITS value,
+   *  every render ErrorClass value, and the loop-level pre-flight reason
+   *  (`renderer_unavailable`, issue #277) has an entry. */
   reasons: {
     bbox_out_of_tolerance:
       "It came out a different size from the one you asked for.",
@@ -315,6 +316,8 @@ export const failure = {
     oom: "The model was too heavy to render. A simpler shape will get through.",
     container_error:
       "The render environment failed. That is temporary — try again.",
+    renderer_unavailable:
+      "The renderer isn't running, so nothing was designed. Start Docker and try again.",
     load_error: "The finished model could not be loaded back for checking.",
     watertight:
       "The model has holes in its surface, so a slicer can't tell inside from outside.",

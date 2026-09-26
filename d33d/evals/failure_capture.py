@@ -126,6 +126,17 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
     }
 )
 
+#: The loop-level pre-flight reason (issue #277) the design loop emits
+#: when the renderer reachability check fails before the first iteration.
+#: ``renderer_unavailable`` is NOT a render-worker ``ErrorClass`` (the
+#: closed render enum is untouched) and NOT a ``GATE_REASON_BITS`` bit
+#: (it never scored a candidate) — it is a third, loop-level vocabulary
+#: that also lands in ``failure_class``, so the hook admits it here
+#: alongside the gate bits. Without this, a Docker-down design turn
+#: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
+#: archive would log an exception on EVERY such turn.
+LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset({"renderer_unavailable"})
+
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM
 #: runaway source would otherwise dominate the file. Mirrors the design
 #: loop's ``MAX_SCAD_SOURCE_BYTES`` intent (bounded LLM output) without
@@ -231,13 +242,18 @@ class FailureEvent(BaseModel):
 def _validate_failure_class(failure_class: str, *, allow_gate_reasons: bool = False) -> str:
     """Validate a ``failure_class`` against the closed enum.
 
-    With ``allow_gate_reasons`` (the hook path), the 4 structured
-    ``GATE_REASON_BITS`` names are admitted in addition to
-    :data:`EVAL_FAILURE_CLASSES`. Without it (the eval-harness / fold
-    path), only :data:`EVAL_FAILURE_CLASSES` is accepted.
+    With ``allow_gate_reasons`` (the hook path), the 5 structured
+    ``GATE_REASON_BITS`` names AND the loop-level pre-flight reason
+    (:data:`LOOP_LEVEL_FAILURE_REASONS`, issue #277) are admitted in
+    addition to :data:`EVAL_FAILURE_CLASSES`. Without it (the
+    eval-harness / fold path), only :data:`EVAL_FAILURE_CLASSES` is
+    accepted.
     """
     if failure_class not in EVAL_FAILURE_CLASSES:
-        if allow_gate_reasons and failure_class in GATE_REASON_CLASSES:
+        if allow_gate_reasons and (
+            failure_class in GATE_REASON_CLASSES
+            or failure_class in LOOP_LEVEL_FAILURE_REASONS
+        ):
             return failure_class
         raise ValueError(
             f"failure_class {failure_class!r} is not in "
@@ -400,9 +416,9 @@ def _exhausted_loop_event(
     """Build the :class:`FailureEvent` for an exhausted design loop.
 
     The failure class is the loop's tagged ``failure_reason`` (a
-    render-worker class, a gate-reason bit, or a named LLM class) — the
-    structured class the loop already computed, never a re-derivation
-    from raw stderr.
+    render-worker class, a gate-reason bit, a loop-level pre-flight
+    reason — issue #277 — or a named LLM class) — the structured class
+    the loop already computed, never a re-derivation from raw stderr.
     """
     failure_reason = getattr(design_result, "failure_reason", None)
     if not isinstance(failure_reason, str) or not failure_reason:
@@ -415,10 +431,15 @@ def _exhausted_loop_event(
     # The loop's ``failure_reason`` is either a render-worker class,
     # a gate-reason bit, or a named LLM class — validate against the
     # union of those three sets (never free text).
-    if failure_reason not in EVAL_FAILURE_CLASSES and failure_reason not in GATE_REASON_CLASSES:
+    if (
+        failure_reason not in EVAL_FAILURE_CLASSES
+        and failure_reason not in GATE_REASON_CLASSES
+        and failure_reason not in LOOP_LEVEL_FAILURE_REASONS
+    ):
         raise ValueError(
             f"failure_class {failure_reason!r} is not in "
-            f"EVAL_FAILURE_CLASSES or GATE_REASON_CLASSES"
+            f"EVAL_FAILURE_CLASSES, GATE_REASON_CLASSES or "
+            f"LOOP_LEVEL_FAILURE_REASONS"
         )
     return make_failure_event(
         photo=_optional_str(photo),
@@ -579,6 +600,7 @@ __all__ = [
     "DEFAULT_FAILURES_FILENAME",
     "EVAL_FAILURE_CLASSES",
     "GATE_REASON_CLASSES",
+    "LOOP_LEVEL_FAILURE_REASONS",
     "MAX_LINE_BYTES",
     "MAX_OUTPUT_SCAD_CHARS",
     "RENDER_WORKER_CLASSES",

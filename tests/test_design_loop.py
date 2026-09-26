@@ -47,6 +47,7 @@ from d33d.design_loop import (
     MAX_SCAD_SOURCE_BYTES,
     MAX_SCAD_VALIDATION_CHARS,
     NO_IMPROVEMENT_LIMIT,
+    RENDERER_UNAVAILABLE,
     BboxInfo,
     DesignResult,
     Score,
@@ -58,6 +59,8 @@ from d33d.design_loop import (
     is_best,
     make_llm_fn,
     no_improvement,
+    renderer_is_available,
+    reset_renderer_preflight_cache,
     run_design_loop,
     run_design_loop_async,
     scad_looks_valid,
@@ -73,6 +76,27 @@ from d33d.render_worker import RenderResult
 
 PHOTO = "data:image/png;base64,REF"
 STATED = (20.0, 25.0, 30.0)
+
+
+@pytest.fixture(autouse=True)
+def _renderer_preflight_available(monkeypatch):
+    """Default the design loop's renderer pre-flight to "available" so no
+    test in this module shells out to ``docker info`` (issue #277). Tests
+    that exercise the pre-flight failure path pass a ``renderer_check``
+    stub or override the module function.
+
+    The module attribute is swapped (a lambda with ``*a, **kw`` arity)
+    because ``run_design_loop_async`` binds the DEFAULT of its
+    ``renderer_check`` parameter to the name at call time (default
+    ``None`` → the module attribute) — the swap is the one seam that
+    covers both the direct ``renderer_is_available()`` path and the
+    ``renderer_check=None`` default path. ``monkeypatch.setattr`` (no
+    ``# type: ignore``) swaps and restores the attribute per test.
+    """
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(_dl, "renderer_is_available", lambda *a, **kw: True)
+
 
 GOOD_SCAD = "W = 20;\nD = 25;\nH = 30;\ncube([W, D, H]);\n"
 MAGIC_SCAD = "cube([20, 25, 30]);\n"
@@ -343,10 +367,14 @@ def test_axis_param_mismatches_returns_per_param_evidence():
 
 def test_no_improvement_is_named_predicate_on_rank():
     low = Score(
-        bits=(False, False, False, False, False), rank=0, tiebreak=(False, False, False, False, False)
+        bits=(False, False, False, False, False),
+        rank=0,
+        tiebreak=(False, False, False, False, False),
     )
     high = Score(
-        bits=(True, False, False, False, False), rank=1, tiebreak=(True, False, False, False, False)
+        bits=(True, False, False, False, False),
+        rank=1,
+        tiebreak=(True, False, False, False, False),
     )
     assert no_improvement(high, low) is True  # non-increase
     assert no_improvement(low, high) is False  # increase
@@ -355,13 +383,19 @@ def test_no_improvement_is_named_predicate_on_rank():
 
 def test_is_best_rank_then_deterministic_tiebreak():
     a = Score(
-        bits=(True, True, False, False, False), rank=2, tiebreak=(True, True, False, False, False)
+        bits=(True, True, False, False, False),
+        rank=2,
+        tiebreak=(True, True, False, False, False),
     )
     b = Score(
-        bits=(True, False, True, False, False), rank=2, tiebreak=(True, False, True, False, False)
+        bits=(True, False, True, False, False),
+        rank=2,
+        tiebreak=(True, False, True, False, False),
     )
     c = Score(
-        bits=(False, False, False, False, False), rank=0, tiebreak=(False, False, False, False, False)
+        bits=(False, False, False, False, False),
+        rank=0,
+        tiebreak=(False, False, False, False, False),
     )
     assert is_best(a, c) is True
     assert is_best(c, a) is False
@@ -406,7 +440,9 @@ def test_loop_stops_at_exactly_three_when_always_failing():
     assert result.status == "exhausted"
     assert result.iterations_used == MAX_ITERATIONS == 3
     assert len(result.iterations) == 3
-    assert result.failure_reason == GATE_REASON_BITS[0]  # error_class_not_ok
+    # Issue #277: the reason is the specific render error_class, not the
+    # generic bit-0 name that used to shadow it.
+    assert result.failure_reason == "syntax_error"
 
 
 def test_exhaustion_returns_best_not_last_when_last_scores_lower():
@@ -684,8 +720,8 @@ def test_axis_params_mismatch_feeds_repair_into_next_iteration():
     # reach the prompt: the previous_scad block only carries the SCAD's own
     # numbers, never the measured extents, so without the evidence line the
     # model cannot see the 102-vs-20 pairing on a line of its own.
-    assert "evidence: Tray height = 20 but the part measures 102 on H" in (
-        seen_prompts[1]
+    assert (
+        "evidence: Tray height = 20 but the part measures 102 on H" in (seen_prompts[1])
     )
     # The first iteration's recorded failure class is axis_params_mismatch.
     assert result.iterations[0].failure_class == "axis_params_mismatch"
@@ -914,7 +950,13 @@ def test_extract_param_meta_present_joined_by_name() -> None:
     ``{name: {label, unit, axis, reason}}`` keeping only valid fields."""
     result = _llm_result_with_params(
         [
-            {"name": "W", "label": "Width", "unit": "mm", "axis": "W", "reason": "user said 60"},
+            {
+                "name": "W",
+                "label": "Width",
+                "unit": "mm",
+                "axis": "W",
+                "reason": "user said 60",
+            },
             {"name": "fillet_size_top", "label": "Top fillet size", "unit": "mm"},
         ]
     )
@@ -932,11 +974,14 @@ def test_extract_param_meta_malformed_degrades_to_empty_never_raises() -> None:
     # A dict-instead-of-list payload degrades to no metadata (the
     # "parameters" field present but malformed is "no metadata", never a
     # partial parse).
-    assert extract_param_meta(_llm_result_with_params({"name": "W", "label": "Width"})) == {}
+    assert (
+        extract_param_meta(_llm_result_with_params({"name": "W", "label": "Width"}))
+        == {}
+    )
     for bad in (
-        [{"label": "no name"}],                    # missing name
+        [{"label": "no name"}],  # missing name
         ["not-a-dict", {"name": 1, "label": "x"}],  # junk items
-        None,                                        # absent
+        None,  # absent
     ):
         result = _llm_result_with_params(bad)
         assert extract_param_meta(result) == {}
@@ -986,8 +1031,17 @@ def test_extract_confirm_hints_paired_from_same_tool_call() -> None:
     result = LLMResult(
         content=GOOD_SCAD,
         tool_calls=(
-            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_first": "wall_thickness"}},
-            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_sentence": "I assumed 4 mm walls."}},
+            {
+                "name": "emit_design",
+                "arguments": {"scad": GOOD_SCAD, "confirm_first": "wall_thickness"},
+            },
+            {
+                "name": "emit_design",
+                "arguments": {
+                    "scad": GOOD_SCAD,
+                    "confirm_sentence": "I assumed 4 mm walls.",
+                },
+            },
         ),
         prompt_hash="h" * 64,
         tier="T1",
@@ -1006,8 +1060,21 @@ def test_extract_confirm_hints_second_call_ignored_even_when_first_blank() -> No
     result = LLMResult(
         content=GOOD_SCAD,
         tool_calls=(
-            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_first": "fillet", "confirm_sentence": "  "}},
-            {"name": "emit_design", "arguments": {"scad": GOOD_SCAD, "confirm_sentence": "I assumed 2 grooves."}},
+            {
+                "name": "emit_design",
+                "arguments": {
+                    "scad": GOOD_SCAD,
+                    "confirm_first": "fillet",
+                    "confirm_sentence": "  ",
+                },
+            },
+            {
+                "name": "emit_design",
+                "arguments": {
+                    "scad": GOOD_SCAD,
+                    "confirm_sentence": "I assumed 2 grooves.",
+                },
+            },
         ),
         prompt_hash="h" * 64,
         tier="T1",
@@ -1066,8 +1133,14 @@ def test_loop_record_carries_param_meta_from_tool_call() -> None:
 
     async def _render(scad_source, defines):
         return RenderResult(
-            ok=True, exit_code=0, duration_ms=1, error_class="ok",
-            stderr="", stl=None, csg=None, views=("v" * 1,) * 6,
+            ok=True,
+            exit_code=0,
+            duration_ms=1,
+            error_class="ok",
+            stderr="",
+            stl=None,
+            csg=None,
+            views=("v" * 1,) * 6,
         )
 
     async def llm_fn(role, messages, system):
@@ -1233,7 +1306,9 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
     def _t0_factory(sent_list, tool_call):
         async def factory(request):
             sent_list.append(request)
-            return _FakeResponse({"choices": [{"message": {"tool_calls": [tool_call]}}]})
+            return _FakeResponse(
+                {"choices": [{"message": {"tool_calls": [tool_call]}}]}
+            )
 
         return factory
 
@@ -1286,6 +1361,7 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
     # Per-role selection: the critique role through the same closure carries
     # emit_critique, never emit_design.
     asyncio.run(llm_fn("critique", [{"role": "user", "content": "hi"}], "sys"))
+
     def make_factory():
         sent: list[dict[str, Any]] = []
 
@@ -1317,7 +1393,9 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
 
     sent, factory = make_factory()
     llm_fn = make_llm_fn(
-        catalogue, {"design": factory, "critique": factory}, capabilities={"design": t0, "critique": t0}
+        catalogue,
+        {"design": factory, "critique": factory},
+        capabilities={"design": t0, "critique": t0},
     )
     out = asyncio.run(llm_fn("design", [{"role": "user", "content": "hi"}], "sys"))
     assert isinstance(out, LLMResult)
@@ -1380,7 +1458,9 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
             }
         )
 
-    llm = make_llm_fn(catalogue, {"critique": crit_factory}, capabilities={"critique": t0})
+    llm = make_llm_fn(
+        catalogue, {"critique": crit_factory}, capabilities={"critique": t0}
+    )
     asyncio.run(llm("critique", [{"role": "user", "content": "hi"}], "sys"))
     crit_body = sent[0]
     assert crit_body["tools"][0]["function"]["name"] == "emit_critique"
@@ -1412,7 +1492,9 @@ def test_make_llm_fn_non_t0_and_missing_capability_send_no_tools():
                 "choices": [
                     {
                         "message": {
-                            "content": _t1_tool_call_payload("emit_design", {"scad": GOOD_SCAD})
+                            "content": _t1_tool_call_payload(
+                                "emit_design", {"scad": GOOD_SCAD}
+                            )
                         }
                     }
                 ]
@@ -1617,7 +1699,9 @@ def test_scad_source_at_cap_is_accepted():
     source at exactly the boundary and documents the interaction."""
     header = "W = 20;\n"
     body = "cube([20, 25, 30]);\n"
-    total = MAX_SCAD_SOURCE_BYTES - len(header.encode("utf-8")) - len(body.encode("utf-8"))
+    total = (
+        MAX_SCAD_SOURCE_BYTES - len(header.encode("utf-8")) - len(body.encode("utf-8"))
+    )
     at_cap = header + body + ("// pad\n" * total)[: total - 1] + " "
     assert len(at_cap.encode("utf-8")) == MAX_SCAD_SOURCE_BYTES
     # The source is exactly at the byte-cap boundary (not over it).
@@ -1643,9 +1727,7 @@ def test_scad_fallback_rejects_prose_in_fence_as_empty():
     # Tool-call path: prose delivered as arguments.scad.
     result = _llm_result(
         content="",
-        tool_calls=(
-            {"name": "emit_design", "arguments": {"scad": prose.rstrip()}},
-        ),
+        tool_calls=({"name": "emit_design", "arguments": {"scad": prose.rstrip()}},),
     )
     assert _scad_from_result(result) == ""
 
@@ -1666,3 +1748,243 @@ def test_scad_looks_valid_heuristic():
     assert not scad_looks_valid("Wait — that top() call is invalid; try again.")
     # 'if' in English prose does NOT count as the keyword (token-bounded).
     assert not scad_looks_valid("if you want; I can help")
+
+
+# ---------------------------------------------------------------------------
+# Issue #277: per-class reason, container_error stop, renderer pre-flight
+# ---------------------------------------------------------------------------
+
+
+def test_exhausted_reason_is_specific_error_class():
+    """Issue #277: an exhausted run whose best render has error_class
+    ``X`` reports reason ``X`` (never the generic ``error_class_not_ok``
+    that bit 0's name would otherwise report for every render failure)."""
+    for cls in (
+        "syntax_error",
+        "timeout",
+        "oom",
+        "empty_model",
+        "artifact_error",
+        "container_error",
+    ):
+        result = _run_loop(
+            llm_script=[_scad_llm(BAD_SCAD)],
+            render_script=[_render(error_class=cls, stderr=f"ERROR: {cls}")],
+        )
+        assert result.status == "exhausted", cls
+        assert result.failure_reason == cls, cls
+
+
+def test_exhausted_ok_render_keeps_gate_bit_reason():
+    """Issue #277: the per-class swap applies ONLY when the first failing
+    bit is bit 0 AND the best render is non-ok. An ok render that fails a
+    LATER gate keeps that gate's name (the bit-0 special-case is exact).
+    """
+    llm = [_scad_llm(GOOD_SCAD), _scad_llm(BAD_SCAD), _scad_llm(GOOD_SCAD)]
+    renders = [_render(), _render(error_class="syntax_error", stderr="x"), _render()]
+
+    def bbox_fn(r):
+        if r.error_class != "ok":
+            return None
+        return BboxInfo(99.0, 25.0, 30.0, 1.0)  # bbox gate fails
+
+    result = _run_loop(llm_script=llm, render_script=renders, bbox_fn=bbox_fn)
+    assert result.status == "exhausted"
+    assert result.best.render.error_class == "ok"
+    assert result.failure_reason == GATE_REASON_BITS[2]  # bbox_out_of_tolerance
+
+
+def test_container_error_stops_loop_after_one_iteration():
+    """Issue #277: a container_error render ends the loop after that
+    iteration (exactly 1 render call, reason container_error) — a dead
+    daemon cannot be fixed by a new source."""
+    render_calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        render_calls["n"] += 1
+        return _render(error_class="container_error", stderr="docker: not running")
+
+    llm = [_scad_llm(BAD_SCAD)]
+
+    def llm_fn(role, messages, system):
+        return llm[0]
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "container_error"
+    assert result.iterations_used == 1
+    assert render_calls["n"] == 1
+
+
+def test_container_error_after_prior_ok_render_stops_loop():
+    """Issue #277 edge case: a passing render in iteration 1 followed by a
+    container_error in iteration 2 → the loop still ends immediately after
+    iteration 2 (reason container_error), even though the earlier ok render
+    is the best-scoring candidate."""
+    llm = [_scad_llm(GOOD_SCAD), _scad_llm(GOOD_SCAD)]
+    calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            return _render(error_class="container_error", stderr="docker: down")
+        return _render()
+
+    def bbox_fn(r):
+        if r.error_class != "ok":
+            return None
+        return BboxInfo(99.0, 25.0, 30.0, 1.0)  # ok render fails bbox gate
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=render_fn,
+        llm_fn=lambda role, m, s: llm[0],
+        bbox_fn=bbox_fn,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "container_error"
+    assert result.iterations_used == 2
+
+
+def test_timeout_and_oom_do_not_stop_loop():
+    """Issue #277: only container_error stops the loop immediately. timeout
+    and oom can be source-dependent, so they keep today's behaviour (the
+    loop continues until the cap/no-improvement stop), and the per-class
+    reason still applies when one of them is the best exhausted candidate."""
+    for cls in ("timeout", "oom"):
+        result = _run_loop(
+            llm_script=[_scad_llm(BAD_SCAD)],
+            render_script=[_render(error_class=cls, stderr=f"ERROR: {cls}")],
+        )
+        # Three always-failing iterations reach the cap (the pre-existing
+        # always-failing test pins this trajectory).
+        assert result.status == "exhausted", cls
+        assert result.iterations_used == MAX_ITERATIONS == 3, cls
+        assert result.failure_reason == cls, cls
+
+
+def test_synthetic_empty_scad_path_reports_empty_model():
+    """Issue #277: the fail-fast empty-SCAD path (a synthetic
+    ``RenderResult(error_class="empty_model")`` with NO render call)
+    reports reason ``empty_model`` when it is the best exhausted candidate,
+    and does NOT stop the loop (it is an LLM issue, repairable)."""
+    # An LLM response with no SCAD at all → the empty-scad fail-fast path.
+    result = _run_loop(
+        llm_script=[_llm_result(content="no code here", tool_calls=())],
+        render_script=[_render()],
+    )
+    assert result.status == "exhausted"
+    # The loop proceeded to the cap (3 iterations), did not stop early.
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    # The synthetic render's error_class is the reason (per-class swap).
+    assert result.best.render.error_class == "empty_model"
+    assert result.failure_reason == "empty_model"
+
+
+def test_preflight_failure_reports_renderer_unavailable_no_llm_call():
+    """Issue #277: a failing pre-flight → the run ends at once with reason
+    ``renderer_unavailable`` and NO LLM call."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: False,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == RENDERER_UNAVAILABLE
+    assert result.iterations_used == 0
+    assert result.iterations == ()
+    assert llm_calls["n"] == 0
+
+
+def test_preflight_success_runs_normal_loop():
+    """Issue #277: a passing pre-flight → the normal loop (LLM call made)."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+        renderer_check=lambda: True,
+    )
+    assert result.status == "pass"
+    assert llm_calls["n"] == 1
+
+
+def test_renderer_is_available_caches_success_only():
+    """Issue #277: a SUCCESSFUL probe is cached for the 30 s window (the
+    probe is NOT re-run inside it); a FAILURE is never cached (the next
+    call re-probes). The cache is resettable via
+    :func:`reset_renderer_preflight_cache`."""
+
+    reset_renderer_preflight_cache()
+    try:
+        calls = {"n": 0}
+
+        def probe():
+            calls["n"] += 1
+            return calls["n"] > 1  # first call False, then True
+
+        # First call: probe returns False → not cached, re-probed next.
+        assert renderer_is_available(probe) is False
+        assert calls["n"] == 1
+        assert renderer_is_available(probe) is True  # re-probed (not cached)
+        assert calls["n"] == 2
+        # Now True is cached → probe NOT re-run.
+        assert renderer_is_available(probe) is True
+        assert calls["n"] == 2  # no new probe call
+        # Reset → probe re-runs.
+        reset_renderer_preflight_cache()
+        assert renderer_is_available(probe) is True
+        assert calls["n"] == 3
+    finally:
+        reset_renderer_preflight_cache()
+
+
+def test_renderer_is_available_maps_probe_errors_to_unavailable(
+    monkeypatch,
+):
+    """Issue #277: a missing docker binary / hung daemon (the probe's
+    ``subprocess.run`` raising OSError / TimeoutExpired) maps uniformly to
+    ``False`` (renderer unavailable), never a crash. The probe's
+    ``subprocess.run`` is swapped via ``monkeypatch.setattr`` (no
+    ``# type: ignore``) — it is restored automatically at test end."""
+    import subprocess
+
+    import d33d.design_loop as dl
+
+    reset_renderer_preflight_cache()
+    try:
+
+        def _explode(*a, **kw):
+            raise FileNotFoundError("docker not found")
+
+        monkeypatch.setattr(dl.subprocess, "run", _explode)
+        assert renderer_is_available() is False
+
+        def _hang(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd=["docker", "info"], timeout=5.0)
+
+        monkeypatch.setattr(dl.subprocess, "run", _hang)
+        assert renderer_is_available() is False
+    finally:
+        reset_renderer_preflight_cache()

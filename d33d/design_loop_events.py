@@ -486,9 +486,12 @@ def _result_message(result: Any) -> str:
 def _structured_reason(result: Any) -> str | None:
     """The loop's ``DesignResult.failure_reason`` as a plain string, or
     ``None`` — the SPA maps it to plain-language copy WITHOUT string-matching
-    the free-text message (issue #82). The value is one of the four
-    ``GATE_REASON_BITS`` or a render-worker ``ErrorClass``; ``None`` (absent
-    from the frame) is the "no reason" case.
+    the free-text message (issue #82). The value is one of the
+    ``GATE_REASON_BITS``, a render-worker ``ErrorClass`` (syntax_error,
+    empty_model, artifact_error, timeout, oom, container_error), or a
+    loop-level reason (``renderer_unavailable`` — the pre-flight failed
+    before any LLM call, issue #277); ``None`` (absent from the frame) is
+    the "no reason" case.
     """
     reason = getattr(result, "failure_reason", None)
     if isinstance(reason, str) and reason:
