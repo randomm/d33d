@@ -477,7 +477,7 @@ def _question_numbers(question: str) -> set[float]:
 def guard_answer_numbers(
     answer: str,
     entries: list[dict[str, Any]],
-    question_numbers: set[float] | None = None,
+    question: str | None = None,
     tolerance: float = 1e-6,
 ) -> bool:
     """The deterministic number guard: ``True`` iff every number in
@@ -486,22 +486,16 @@ def guard_answer_numbers(
     USER typed; the question is not a design-state source, but its
     numbers are not invented).
 
-    ``question_numbers`` is the user's question text pre-extracted with
-    :func:`_question_numbers` (the production call site extracts once
-    and reuses it); when it is ``None`` the guard behaves exactly as
-    before (block only). Callers that want to license question numbers
-    supply the pre-extracted set — the guard no longer takes the raw
-    question (the single entry point removes a hidden precedence rule
-    between two inputs that both fed the same allowed set).
+    ``question`` is the user's question text; when supplied, its numbers
+    are extracted (with the same extraction the guard uses for the answer —
+    digit tokens and spelled-out forms) and added to the allowed set.
+    When it is ``None`` the guard behaves exactly as before (block only).
 
     The question's numbers license presence ONLY: the model may repeat
     a number the user typed ("a 30 mm screw" → "30 mm") but may not
-    substitute it for a design-state value it did not state. When the
-    answer carries no number that the block licenses, a question-licensed
-    number is the exception: it is the user's own number echoed back, and
-    no fabricated value is introduced. Spelled-out forms are treated
-    identically to digit tokens ("thirty" in the question licenses
-    "30" and "thirty" in the answer).
+    substitute it for a design-state value it did not state. Spelled-out
+    forms are treated identically to digit tokens ("thirty" in the
+    question licenses "30" and "thirty" in the answer).
 
     "Number" means a digit token (``12``, ``12.5``, ``20 × 20`` → …) OR
     a spelled-out form ("twelve", "fifteen", "a dozen", … — zero–twenty
@@ -522,8 +516,9 @@ def guard_answer_numbers(
     word-only answer.
     """
     allowed = state_block_numbers(entries)
-    if question_numbers is not None:
-        allowed |= question_numbers
+    if question is not None:
+        # Operator decision (issue #278): question numbers license answer numbers.
+        allowed |= _question_numbers(question)
     for n in extract_answer_numbers(answer):
         if not any(abs(n - a) <= tolerance for a in allowed):
             return False
@@ -1120,7 +1115,6 @@ async def ask_answer_call(
     # so the guard below licenses them on every attempt path (the
     # answer may quote the user's own numbers; a number in neither the
     # question nor the block is invented).
-    question_numbers = _question_numbers(question)
 
     def _warn(outcome: str, elapsed_ms: float) -> None:
         logger.warning(
@@ -1174,9 +1168,7 @@ async def ask_answer_call(
     # question (issue #278 — the answer may quote the user's own
     # numbers, e.g. the "30" of "a 30 mm screw"); a number in neither
     # is invented → a failed answer of the ``guard`` class.
-    if not guard_answer_numbers(
-        answer, entries, question_numbers=question_numbers
-    ):
+    if not guard_answer_numbers(answer, entries, question=question):
         _warn("guard", (time.monotonic() - started) * 1000)
         return None
     _warn("answer", (time.monotonic() - started) * 1000)

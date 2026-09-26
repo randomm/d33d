@@ -60,7 +60,7 @@ from d33d.question_answer import (
     route_chat_message,
     state_block_numbers,
 )
-from d33d.question_answer import _question_numbers
+
 from tests.seam_schemas_d import validate_frames_stream
 from tests.versioning.helpers import create_project, run_async
 
@@ -232,7 +232,7 @@ class TestNumberGuard:
         assert guard_answer_numbers(
             "Yes — it's 43.9 mm deep, more than the 30 mm screw needs.",
             entries,
-            question_numbers=_question_numbers("Is it deep enough for a 30 mm screw?"),
+            question="Is it deep enough for a 30 mm screw?",
         )
 
     def test_number_in_neither_question_nor_block_fails(self) -> None:
@@ -242,7 +242,7 @@ class TestNumberGuard:
         assert not guard_answer_numbers(
             "Yes — it's 43.9 mm deep, more than the 25 mm screw needs.",
             entries,
-            question_numbers=_question_numbers("Is it deep enough for a 30 mm screw?"),
+            question="Is it deep enough for a 30 mm screw?",
         )
 
     def test_spelled_out_question_number_licenses_answer(self) -> None:
@@ -252,12 +252,12 @@ class TestNumberGuard:
         assert guard_answer_numbers(
             "Yes, a thirty mm screw fits.",
             entries,
-            question_numbers=_question_numbers("Is it deep enough for a thirty mm screw?"),
+            question="Is it deep enough for a thirty mm screw?",
         )
         assert guard_answer_numbers(
             "Yes — it's 43.9 mm deep, more than the thirty mm screw needs.",
             entries,
-            question_numbers=_question_numbers("Is it deep enough for a thirty mm screw?"),
+            question="Is it deep enough for a thirty mm screw?",
         )
 
     def test_question_number_exact_tolerance(self) -> None:
@@ -269,15 +269,15 @@ class TestNumberGuard:
         # ``test_float_block_value_does_not_license_integer``).
         entries2 = _entries(("D", 30.0))
         assert not guard_answer_numbers(
-            "It's 30.5 mm.", entries2, question_numbers=_question_numbers("a 30 mm screw")
+            "It's 30.5 mm.", entries2, question="a 30 mm screw"
         )
         assert guard_answer_numbers(
-            "It's 30 mm.", entries2, question_numbers=_question_numbers("a 30 mm screw")
+            "It's 30 mm.", entries2, question="a 30 mm screw"
         )
         # The question's "30.0" licenses the block's 30 (symmetric):
         # question "a 30.0 mm screw" + block D 30.0 + answer "30.0".
         assert guard_answer_numbers(
-            "It's 30.0 mm.", entries2, question_numbers=_question_numbers("a 30.0 mm screw")
+            "It's 30.0 mm.", entries2, question="a 30.0 mm screw"
         )
         # The float-block direction with a question present: a block of
         # 30.5 does not license the answer's "30" (the question's "a 30
@@ -287,13 +287,13 @@ class TestNumberGuard:
         # the invented middle "It's 30.2 mm." fails via both).
         entries = _entries(("D", 30.5))
         assert guard_answer_numbers(
-            "It's 30 mm.", entries, question_numbers=_question_numbers("a 30 mm screw")
+            "It's 30 mm.", entries, question="a 30 mm screw"
         )
         assert guard_answer_numbers(
-            "It's 30.5 mm.", entries, question_numbers=_question_numbers("a 30 mm screw")
+            "It's 30.5 mm.", entries, question="a 30 mm screw"
         )
         assert not guard_answer_numbers(
-            "It's 30.2 mm.", entries, question_numbers=_question_numbers("a 30 mm screw")
+            "It's 30.2 mm.", entries, question="a 30 mm screw"
         )
 
     def test_question_numbers_not_added_to_block(self) -> None:
@@ -304,7 +304,7 @@ class TestNumberGuard:
         allowed = state_block_numbers(entries)
         assert 30.0 not in allowed
         assert guard_answer_numbers(
-            "30 mm.", entries, question_numbers=_question_numbers("a 30 mm screw")
+            "30 mm.", entries, question="a 30 mm screw"
         )
         # Without the question, the same answer fails.
         assert not guard_answer_numbers("30 mm.", entries)
@@ -346,20 +346,19 @@ class TestNumberGuard:
             entries,
         )
 
-    def test_precomputed_question_numbers_kwarg(self) -> None:
-        # The production seam extracts once and passes the set via the
-        # ``question_numbers`` kwarg (the guard's only entry point for
-        # question numbers — the raw-question path is gone).
+    def test_question_kwarg(self) -> None:
+        # The production seam passes the raw question via the ``question``
+        # kwarg (the guard extracts its numbers internally).
         entries = _entries(("D", 43.9))
         answer = "Yes — it's 43.9 mm deep, more than the 30 mm screw needs."
         q = "Is it deep enough for a 30 mm screw?"
         assert guard_answer_numbers(
-            answer, entries, question_numbers=_question_numbers(q)
+            answer, entries, question=q
         )
         assert not guard_answer_numbers(
             answer.replace("30", "25"),
             entries,
-            question_numbers=_question_numbers(q),
+            question=q,
         )
 
 
