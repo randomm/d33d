@@ -1521,6 +1521,143 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
   });
 
+  // Issue #282: the photo path routes through the SAME single-flight latch
+  // as the first send. A photo chosen on the first-run screen (before any
+  // message) creates exactly one project and uploads to it; a photo and a
+  // message in quick succession share one project; a creation failure
+  // during the photo path surfaces the existing app-level copy and the
+  // latch is released.
+
+  it("a photo chosen before any message creates exactly one project and uploads to it (issue #282)", async () => {
+    // The photo upload wiring describe replaces the global fetch with a
+    // URL-keyed stub that answers only /photos URLs. Here we need a
+    // createProject spy AND a fetch that answers the photo upload POST,
+    // so we set up a URL-keyed fetch stub inline (the same pattern the
+    // photo-wiring block uses below).
+    const client = makeClient();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      if (url.includes("/photos")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    }));
+
+    render(<App client={client} />);
+    // Issue #192: no project on mount — the photo IS the first action.
+    await waitFor(() => {
+      expect(screen.getByTestId("first-run")).toBeTruthy();
+    });
+    expect(client.createProject).not.toHaveBeenCalled();
+
+    // Pick a photo on the first-run screen (the same path the user takes
+    // — the file input in the left pane, which is the photo surface
+    // regardless of which screen is up).
+    const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
+    fireEvent.change(screen.getByTestId("photo-file-input"), {
+      target: { files: [file] },
+    });
+
+    // Exactly one createProject — the photo triggered the lazy creation
+    // through the same latch as the first send.
+    await waitFor(() => expect(client.createProject).toHaveBeenCalledTimes(1));
+
+    // The upload POSTed to the created project's photos endpoint.
+    await waitFor(() => {
+      expect(screen.getByTestId("dimension-canvas-container")).toBeTruthy();
+    });
+    // The photo shows as today — DimensionCanvas is mounted with the
+    // uploaded photo (the upload succeeded against the created project).
+  });
+
+  it("a photo and a message sent in quick succession create exactly one project (issue #282)", async () => {
+    const client = makeClient();
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : (input as Request).url;
+      if (url.includes("/photos")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
+        });
+      }
+      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+    }));
+
+    render(<App client={client} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("first-run")).toBeTruthy();
+    });
+
+    // Photo first, then a message — back-to-back before the creation
+    // resolves. Both must share ONE in-flight createProject call.
+    const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
+    fireEvent.change(screen.getByTestId("photo-file-input"), {
+      target: { files: [file] },
+    });
+    sendFirstComposerMessage("make a box");
+
+    await waitFor(() => expect(client.createProject).toHaveBeenCalledTimes(1));
+    // The photo upload succeeded (the shared latch resolved).
+    await waitFor(() => {
+      expect(screen.getByTestId("dimension-canvas-container")).toBeTruthy();
+    });
+  });
+
+  it("a creation failure during photo upload surfaces the existing error copy and releases the latch (issue #282)", async () => {
+    const client = new ApiClient();
+    let resolveCreate: (p: { id: number; name: string }) => void = () => {};
+    let createAttempts = 0;
+    vi.spyOn(client, "createProject").mockImplementation(() => {
+      createAttempts += 1;
+      if (createAttempts === 1) return Promise.reject(new Error("boom"));
+      return new Promise((res) => {
+        resolveCreate = () => res(PROJECT);
+      });
+    });
+    vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+
+    render(<App client={client} />);
+    await waitFor(() => {
+      expect(screen.getByTestId("first-run")).toBeTruthy();
+    });
+
+    // Pick a photo — the creation fails, the existing app-level error
+    // copy surfaces (the FailureCard via streamError, same as the send
+    // path), and the latch releases.
+    const file = new File([new ArrayBuffer(10)], "a.png", { type: "image/png" });
+    fireEvent.change(screen.getByTestId("photo-file-input"), {
+      target: { files: [file] },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("app-error")).toBeTruthy();
+    });
+    // The existing failure copy — "Failed to create project" (the same
+    // copy the send path uses; not a component-local "upload failed").
+    expect(screen.getByTestId("app-error").textContent).toContain(
+      "Failed to create project",
+    );
+
+    // The latch released — the next action (a send) retries.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    sendFirstComposerMessage("second attempt");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(createAttempts).toBe(2));
+    await act(async () => {
+      resolveCreate(PROJECT);
+      await new Promise((r) => setTimeout(r, 10));
+    });
+    await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+  });
+
   it("wires the filmstrip's compare-select through to App's compare fetch (issue #117)", async () => {
     // The per-component filmstrip test proves the slot calls its onCompareSelect
     // prop; this test proves APP's callback does real work end-to-end: a slot
