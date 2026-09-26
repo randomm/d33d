@@ -1109,13 +1109,16 @@ def test_render_cleanup_removes_container_and_volume(
     ``docker volume ls`` show no trace of either.
     """
     _skip_if_no_docker()
-    pinned_name = "render-cleanup280"
+    # The pinned name MUST match NAME_PATTERN_RE (render-<8 hex>) —
+    # validate_render_name enforces that contract and this is the value
+    # the render worker will name its container and volume with.
+    pinned_name = "render-00000280"
     pinned_volume = f"d33d-render-{pinned_name}"
 
     # Pin new_render_name so we know exactly which container/volume to
     # check for after the render. The render worker creates the volume as
     # ``d33d-render-<name>`` where name = new_render_name(); with the pin
-    # the volume is ``d33d-render-render-cleanup280``.
+    # the volume is ``d33d-render-render-00000280``.
     monkeypatch.setattr(rw, "new_render_name", lambda: pinned_name)
 
     # Also pin _verify_render_worker_image to a no-op so the test doesn't
