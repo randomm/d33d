@@ -503,6 +503,16 @@ export const answerRoute = {
    *  loop either. */
   notEstablished:
     "The design as it stands doesn't establish that — nothing was changed.",
+  /** The unanswerable reply that names the missing fact (issue #278).
+   *  `missing` is the short noun phrase naming the unknown fact (the
+   *  backend validates it and falls back to `notEstablished` when it is
+   *  invalid or absent). The backend builds the wire string from its own
+   *  `UNANSWERABLE_MISSING_TEMPLATE` (the server is the writer of the
+   *  wire string — the SPA renders the done frame's `answer` verbatim);
+   *  the deck carries the template so the design-contract test can pin
+   *  that the deck's and the server's templates match. */
+  unanswerableMissing: (missing: string): string =>
+    `I don't know ${missing}. Tell me and I'll check — nothing was changed.`,
 } as const;
 
 /**

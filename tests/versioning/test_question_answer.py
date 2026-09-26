@@ -51,13 +51,16 @@ from d33d.question_answer import (
     DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
+    UNANSWERABLE_MISSING_TEMPLATE,
     build_answer_prompt,
     deterministic_axis_answer,
     guard_answer_numbers,
     is_candidate_question,
     parse_answer_reply,
     route_chat_message,
+    state_block_numbers,
 )
+
 from tests.seam_schemas_d import validate_frames_stream
 from tests.versioning.helpers import create_project, run_async
 
@@ -210,7 +213,8 @@ def _entries(*rows: tuple[str, float | str | bool | None]) -> list[dict[str, Any
 
 
 class TestNumberGuard:
-    """``guard_answer_numbers`` — the deterministic presence-only check."""
+    """``guard_answer_numbers`` — the deterministic presence-only check
+    (block numbers + the user's question numbers, issue #278)."""
 
     def test_number_in_block_passes(self) -> None:
         entries = _entries(("H", 12.0), ("W", 20.0))
@@ -219,6 +223,91 @@ class TestNumberGuard:
     def test_invented_number_fails(self) -> None:
         entries = _entries(("H", 12.0), ("W", 20.0))
         assert not guard_answer_numbers("It is 15 mm tall.", entries)
+
+    def test_question_number_licenses_answer(self) -> None:
+        # issue #278 repro: "30" comes from the QUESTION, not the block
+        # (the block carries only 43.9) — the answer that quotes 30
+        # passes; 43.9 is licensed by the block.
+        entries = _entries(("D", 43.9))
+        assert guard_answer_numbers(
+            "Yes — it's 43.9 mm deep, more than the 30 mm screw needs.",
+            entries,
+            question="Is it deep enough for a 30 mm screw?",
+        )
+
+    def test_number_in_neither_question_nor_block_fails(self) -> None:
+        # The same screw question, answer citing 25 (in neither the
+        # question nor the block) → the guard still rejects.
+        entries = _entries(("D", 43.9))
+        assert not guard_answer_numbers(
+            "Yes — it's 43.9 mm deep, more than the 25 mm screw needs.",
+            entries,
+            question="Is it deep enough for a 30 mm screw?",
+        )
+
+    def test_spelled_out_question_number_licenses_answer(self) -> None:
+        # The SAME extraction runs on both sides: "thirty" in the
+        # question licenses both "30" and "thirty" in the answer.
+        entries = _entries(("D", 43.9))
+        assert guard_answer_numbers(
+            "Yes, a thirty mm screw fits.",
+            entries,
+            question="Is it deep enough for a thirty mm screw?",
+        )
+        assert guard_answer_numbers(
+            "Yes — it's 43.9 mm deep, more than the thirty mm screw needs.",
+            entries,
+            question="Is it deep enough for a thirty mm screw?",
+        )
+
+    def test_question_number_exact_tolerance(self) -> None:
+        # The question's "30" licenses exactly 30 — an answer of
+        # "30.5" fails (30.5 is in neither the question nor a 30.0
+        # block; the block value of 30.5 does not license 30, and the
+        # question's 30 does not license 30.5 — the same exact-match
+        # within 1e-6 rule the block values get, mirroring
+        # ``test_float_block_value_does_not_license_integer``).
+        entries2 = _entries(("D", 30.0))
+        assert not guard_answer_numbers(
+            "It's 30.5 mm.", entries2, question="a 30 mm screw"
+        )
+        assert guard_answer_numbers(
+            "It's 30 mm.", entries2, question="a 30 mm screw"
+        )
+        # The question's "30.0" licenses the block's 30 (symmetric):
+        # question "a 30.0 mm screw" + block D 30.0 + answer "30.0".
+        assert guard_answer_numbers(
+            "It's 30.0 mm.", entries2, question="a 30.0 mm screw"
+        )
+        # The float-block direction with a question present: a block of
+        # 30.5 does not license the answer's "30" (the question's "a 30
+        # mm screw" licenses 30, but the answer's 30 must match a
+        # LICENSED number within 1e-6 — 30 IS licensed by the question,
+        # so "It's 30 mm." passes; "It's 30.5 mm." passes via the block;
+        # the invented middle "It's 30.2 mm." fails via both).
+        entries = _entries(("D", 30.5))
+        assert guard_answer_numbers(
+            "It's 30 mm.", entries, question="a 30 mm screw"
+        )
+        assert guard_answer_numbers(
+            "It's 30.5 mm.", entries, question="a 30 mm screw"
+        )
+        assert not guard_answer_numbers(
+            "It's 30.2 mm.", entries, question="a 30 mm screw"
+        )
+
+    def test_question_numbers_not_added_to_block(self) -> None:
+        # ``state_block_numbers`` is the block's own set — the question's
+        # numbers never leak into it (the question is not a design-state
+        # source; only the guard's allowed set unions them).
+        entries = _entries(("D", 43.9))
+        allowed = state_block_numbers(entries)
+        assert 30.0 not in allowed
+        assert guard_answer_numbers(
+            "30 mm.", entries, question="a 30 mm screw"
+        )
+        # Without the question, the same answer fails.
+        assert not guard_answer_numbers("30 mm.", entries)
 
     def test_two_axis_numbers_pass(self) -> None:
         entries = _entries(("W", 20.0), ("D", 20.0))
@@ -248,6 +337,30 @@ class TestNumberGuard:
         assert not guard_answer_numbers("It is 12 mm.", entries)
         assert guard_answer_numbers("It is left-handed.", entries)
 
+    def test_block_only_call_still_rejects_question_number(self) -> None:
+        # Without a ``question`` argument the guard behaves exactly as
+        # before: the 30 is not in the block → fails.
+        entries = _entries(("D", 43.9))
+        assert not guard_answer_numbers(
+            "Yes — it's 43.9 mm deep, more than the 30 mm screw needs.",
+            entries,
+        )
+
+    def test_question_kwarg(self) -> None:
+        # The production seam passes the raw question via the ``question``
+        # kwarg (the guard extracts its numbers internally).
+        entries = _entries(("D", 43.9))
+        answer = "Yes — it's 43.9 mm deep, more than the 30 mm screw needs."
+        q = "Is it deep enough for a 30 mm screw?"
+        assert guard_answer_numbers(
+            answer, entries, question=q
+        )
+        assert not guard_answer_numbers(
+            answer.replace("30", "25"),
+            entries,
+            question=q,
+        )
+
 
 class TestParseAnswerReply:
     """``parse_answer_reply`` — the stage-2 reply codec (the #260
@@ -257,17 +370,61 @@ class TestParseAnswerReply:
     def test_valid_json_kind_answer(self) -> None:
         assert parse_answer_reply(
             '{"kind": "answer", "answer": "It is 12 mm tall."}'
-        ) == ("answer", "It is 12 mm tall.")
+        ) == ("answer", "It is 12 mm tall.", None)
 
     def test_kind_unanswerable(self) -> None:
         assert parse_answer_reply(
             '{"kind": "unanswerable", "answer": ""}'
-        ) == ("unanswerable", "")
+        ) == ("unanswerable", "", None)
+
+    def test_kind_unanswerable_with_missing_carries_it(self) -> None:
+        # issue #278: an unanswerable reply may carry ``missing`` (the
+        # noun phrase naming the unknown fact) — the parser validates it
+        # (single point of truth for the missing shape); the ``answer``
+        # field is ignored in favour of the missing-built copy downstream.
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": "", '
+            '"missing": "the shelf\'s height"}'
+        ) == ("unanswerable", "", "the shelf's height")
+        # A non-empty ``answer`` on an unanswerable reply is still
+        # well-formed (not malformed) — its value rides the tuple but
+        # the route never uses it.
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": "ignored", '
+            '"missing": "the shelf\'s height"}'
+        ) == ("unanswerable", "ignored", "the shelf's height")
+
+    def test_kind_unanswerable_missing_non_string_returns_none(self) -> None:
+        # A ``missing`` that is not a string (number, null, array) is
+        # NOT malformed — it is invalid, the parser returns None and
+        # the route falls back to NOT_ESTABLISHED. Never a crash, never
+        # malformed.
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": "", "missing": 42}'
+        ) == ("unanswerable", "", None)
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": "", "missing": null}'
+        ) == ("unanswerable", "", None)
+        assert parse_answer_reply(
+            '{"kind": "unanswerable", "answer": "", "missing": ["a", "b"]}'
+        ) == ("unanswerable", "", None)
 
     def test_kind_request(self) -> None:
         assert parse_answer_reply(
             '{"kind": "request", "answer": ""}'
-        ) == ("request", "")
+        ) == ("request", "", None)
+
+    def test_kind_answer_extra_missing_field_ignored(self) -> None:
+        # A kind "answer" or "request" reply carrying an extra
+        # ``missing`` field must not break the closed-shape contract —
+        # ``missing`` is only honoured for unanswerable replies.
+        assert parse_answer_reply(
+            '{"kind": "answer", "answer": "It is 12 mm tall.", '
+            '"missing": "ignored"}'
+        ) == ("answer", "It is 12 mm tall.", None)
+        assert parse_answer_reply(
+            '{"kind": "request", "answer": "", "missing": "x"}'
+        ) == ("request", "", None)
 
     def test_kind_must_be_closed_set(self) -> None:
         assert parse_answer_reply('{"kind": "maybe", "answer": "x"}') is None
@@ -282,14 +439,22 @@ class TestParseAnswerReply:
         # mapped, never a false "unanswerable".
         assert parse_answer_reply(
             '{"answerable": true, "answer": "It is 12 mm tall."}'
-        ) == ("answer", "It is 12 mm tall.")
+        ) == ("answer", "It is 12 mm tall.", None)
 
     def test_legacy_answerable_false_maps_to_request(self) -> None:
         # Preserving today's routing: a legacy false reply is a change
         # REQUEST to the design loop, never a false "unanswerable".
         assert parse_answer_reply(
             '{"answerable": false, "answer": ""}'
-        ) == ("request", "")
+        ) == ("request", "", None)
+
+    def test_legacy_answerable_true_missing_field_not_honoured(self) -> None:
+        # The legacy shape has no missing field: a legacy reply carrying
+        # ``missing`` still maps onto the closed set and the missing
+        # value is ignored (never an unanswerable outcome).
+        assert parse_answer_reply(
+            '{"answerable": false, "answer": "", "missing": "x"}'
+        ) == ("request", "", None)
 
     def test_legacy_answerable_true_empty_answer_is_malformed(self) -> None:
         assert parse_answer_reply('{"answerable": true, "answer": ""}') is None
@@ -311,10 +476,10 @@ class TestParseAnswerReply:
     def test_json_in_surrounding_prose(self) -> None:
         assert parse_answer_reply(
             'Here is the answer: {"answerable": true, "answer": "12 mm"}'
-        ) == ("answer", "12 mm")
+        ) == ("answer", "12 mm", None)
         assert parse_answer_reply(
             'Sure: {"kind": "request", "answer": ""}'
-        ) == ("request", "")
+        ) == ("request", "", None)
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +516,11 @@ class TestBuildAnswerPrompt:
         assert "\"request\" — the message asks for a change" in prompt
         # One example per kind (the operator decision).
         assert "\"How tall is it now?\" with the height stated 12 mm" in prompt
-        assert "colour, material or finish" in prompt
+        # The unanswerable example now carries the ``missing`` field
+        # (issue #278): "Is it taller than the shelf?" → "the shelf's
+        # height" — the worked example the operator decision pins.
+        assert "Is it taller than the shelf?" in prompt
+        assert "the shelf\'s height" in prompt
         assert "\"Can it be 20 mm wider?\"" in prompt
 
     def test_prompt_no_longer_speaks_the_answerable_bool(self) -> None:
@@ -435,6 +604,142 @@ class TestRouteChatMessage:
             route_chat_message("What colour is it?", latest, edge)
         )
         assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+
+    def test_kind_unanswerable_valid_missing_builds_reply(self) -> None:
+        # issue #278: an unanswerable reply with a valid ``missing``
+        # field → the reply built from the parameterised template
+        # (exact text), not NOT_ESTABLISHED and not COULD_NOT_ANSWER.
+        latest = _latest({"H": 12.0})
+        edge = self._answer_edge(
+            '{"kind": "unanswerable", "answer": "", '
+            '"missing": "the shelf\'s height"}'
+        )
+        result = run_async_safe(
+            route_chat_message("Is it taller than the shelf?", latest, edge)
+        )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": UNANSWERABLE_MISSING_TEMPLATE.format(
+                missing="the shelf's height"
+            ),
+        }
+        assert result["answer"] == (
+            "I don't know the shelf's height. Tell me and I'll check — "
+            "nothing was changed."
+        )
+
+    def test_kind_unanswerable_missing_whitespace_returns_not_established(
+        self,
+    ) -> None:
+        # A ``missing`` that is blank/whitespace-only → the fixed
+        # NOT_ESTABLISHED fallback (never an empty template fill).
+        latest = _latest({"H": 12.0})
+        for reply in (
+            '{"kind": "unanswerable", "answer": "", "missing": "  "}',
+            '{"kind": "unanswerable", "answer": "", "missing": ""}',
+        ):
+            edge = self._answer_edge(reply)
+            result = run_async_safe(
+                route_chat_message("What colour is it?", latest, edge)
+            )
+            assert result == {
+                "kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED
+            }, reply
+
+    def test_kind_unanswerable_missing_too_long_returns_not_established(
+        self,
+    ) -> None:
+        # A ``missing`` of 61+ chars (after trim) → NOT_ESTABLISHED.
+        long_fact = "the " + "x" * 58  # 62 chars
+        latest = _latest({"H": 12.0})
+        edge = self._answer_edge(
+            '{"kind": "unanswerable", "answer": "", "missing": "' + long_fact + '"}'
+        )
+        result = run_async_safe(
+            route_chat_message("What colour is it?", latest, edge)
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+        # 60 chars is the bound: a 60-char missing is valid.
+        edge60 = self._answer_edge(
+            '{"kind": "unanswerable", "answer": "", "missing": "' + "y" * 60 + '"}'
+        )
+        result60 = run_async_safe(
+            route_chat_message("What colour is it?", latest, edge60)
+        )
+        assert result60 == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": UNANSWERABLE_MISSING_TEMPLATE.format(missing="y" * 60),
+        }
+
+    def test_kind_unanswerable_missing_digit_returns_not_established(self) -> None:
+        # A ``missing`` containing a digit → NOT_ESTABLISHED.
+        latest = _latest({"H": 12.0})
+        edge = self._answer_edge(
+            '{"kind": "unanswerable", "answer": "", "missing": "the 2nd shelf\'s height"}'
+        )
+        result = run_async_safe(
+            route_chat_message("Is it taller than the shelf?", latest, edge)
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+
+    def test_kind_unanswerable_missing_sentence_punctuation_returns_not_established(
+        self,
+    ) -> None:
+        # Sentence punctuation other than an apostrophe (period, comma,
+        # semicolon, colon, question mark, exclamation) → NOT_ESTABLISHED.
+        latest = _latest({"H": 12.0})
+        for bad in ("the shelf's height.", "the shelf, if any", "the shelf;", "the shelf?", "the shelf!", "the shelf: "):
+            edge = self._answer_edge(
+                '{"kind": "unanswerable", "answer": "", "missing": "' + bad + '"}'
+            )
+            result = run_async_safe(
+                route_chat_message("Is it taller than the shelf?", latest, edge)
+            )
+            assert result == {
+                "kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED
+            }, bad
+
+    def test_kind_unanswerable_missing_non_string_returns_not_established(self) -> None:
+        # A ``missing`` that is not a string (number, null, array) →
+        # NOT_ESTABLISHED. Never malformed (no COULD_NOT_ANSWER), never
+        # a crash.
+        latest = _latest({"H": 12.0})
+        for reply in (
+            '{"kind": "unanswerable", "answer": "", "missing": 42}',
+            '{"kind": "unanswerable", "answer": "", "missing": null}',
+            '{"kind": "unanswerable", "answer": "", "missing": ["a", "b"]}',
+            '{"kind": "unanswerable", "answer": "", "missing": true}',
+        ):
+            edge = self._answer_edge(reply)
+            result = run_async_safe(
+                route_chat_message("What colour is it?", latest, edge)
+            )
+            assert result == {
+                "kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED
+            }, reply
+
+    def test_kind_unanswerable_nonempty_answer_ignored_in_favour_of_missing(
+        self,
+    ) -> None:
+        # A non-empty ``answer`` on an unanswerable reply is well-formed
+        # and IGNORED in favour of the missing-built copy (operator
+        # decision: the wire shape is
+        # {"kind":"unanswerable","answer":"","missing":"..."} but a
+        # non-empty answer never becomes malformed).
+        latest = _latest({"H": 12.0})
+        edge = self._answer_edge(
+            '{"kind": "unanswerable", "answer": "some prose", '
+            '"missing": "the shelf\'s height"}'
+        )
+        result = run_async_safe(
+            route_chat_message("Is it taller than the shelf?", latest, edge)
+        )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": UNANSWERABLE_MISSING_TEMPLATE.format(
+                missing="the shelf's height"
+            ),
+        }
 
     def test_kind_request_returns_none_goes_to_loop(self) -> None:
         # #260: kind "request" → the design loop, exactly as a
@@ -1401,6 +1706,64 @@ def test_unanswerable_kind_gets_no_run_reply_not_loop(app_with_versions) -> None
     assert data["message"] == NOT_ESTABLISHED
 
 
+def test_unanswerable_valid_missing_gets_no_run_reply_not_loop(
+    app_with_versions,
+) -> None:
+    """issue #278: kind "unanswerable" with a valid ``missing`` → the
+    done frame carries exactly "I don't know the shelf's height. Tell me
+    and I'll check — nothing was changed." (built from the
+    parameterised copy) — NO design run, NO version, ONE WARNING with
+    outcome=unanswerable that does NOT carry the missing text."""
+
+    loop_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"H": 12.0},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "Is it taller than the shelf?", "chat_history": []},
+            answer_reply=(
+                '{"kind": "unanswerable", "answer": "", '
+                '"missing": "the shelf\'s height"}'
+            ),
+        )
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
+
+    r, frames, version_count = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert not loop_called, "the design loop was called for an unanswerable question"
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == (
+        "I don't know the shelf's height. Tell me and I'll check — "
+        "nothing was changed."
+    )
+
+
 def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
     app_with_versions,
 ) -> None:
@@ -1450,6 +1813,123 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
         "(the design loop is never the fallback for a failed answer)"
     )
     assert version_count == 1, f"expected 1 version, got {version_count}"
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == COULD_NOT_ANSWER
+
+
+def test_screw_question_guard_licenses_question_number(app_with_versions) -> None:
+    """issue #278 REPRO: "Is it deep enough for a 30 mm screw?" with a
+    design-state block carrying D 43.9 (measured): the stage-2 answer
+    that quotes the question's "30" PASSES the guard → the done frame
+    carries the answer text (kind "answer"), not COULD_NOT_ANSWER.
+    No design run, no new version.
+
+    The question contains a digit, so the #263 deterministic stage
+    already abstains (the target-number guard) — this exercises the
+    stage-2 guard at the route level."""
+
+    loop_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"D": 43.9},
+            bbox=(20.0, 43.9, 12.0),
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "Is it deep enough for a 30 mm screw?",
+             "chat_history": []},
+            answer_reply=(
+                '{"kind": "answer", "answer": "Yes — it\'s 43.9 mm deep, '
+                'more than the 30 mm screw needs."}'
+            ),
+        )
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
+
+    r, frames, version_count = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert not loop_called, "the design loop must not run on the answer path"
+    assert version_count == 1, f"expected 1 version, got {version_count}"
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == (
+        "Yes — it's 43.9 mm deep, more than the 30 mm screw needs."
+    )
+
+
+def test_screw_question_answer_citing_25_still_guard_failure(
+    app_with_versions,
+) -> None:
+    """issue #278 negative control: the same screw question with an
+    answer citing 25 (in neither the question nor the block) still
+    fails the guard → COULD_NOT_ANSWER, no design run."""
+
+    loop_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"D": 43.9},
+            bbox=(20.0, 43.9, 12.0),
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "Is it deep enough for a 30 mm screw?",
+             "chat_history": []},
+            answer_reply=(
+                '{"kind": "answer", "answer": "Yes — it\'s 43.9 mm deep, '
+                'more than the 25 mm screw needs."}'
+            ),
+        )
+        versions = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, len(versions)
+
+    r, frames, version_count = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert not loop_called, (
+        "the design loop was called for a guard-failing answer (the design "
+        "loop is never the fallback for a failed answer)"
+    )
+    assert version_count == 1
     assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
     event, data = frames[0]
     assert event == "done"
@@ -1913,6 +2393,41 @@ class TestStage2OutcomeWarningLogs:
         assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
         assert "outcome=unanswerable" in warnings[0].getMessage()
 
+    def test_unanswerable_valid_missing_emits_one_warning_no_missing_text(
+        self, caplog
+    ) -> None:
+        # issue #278: the unanswerable-with-missing path keeps the ONE
+        # WARNING contract (outcome=unanswerable, elapsed ms, message
+        # length) and NEVER logs the missing text (no PII in logs).
+        async def _edge(q, e):
+            return (
+                '{"kind": "unanswerable", "answer": "", '
+                '"missing": "the shelf\'s height"}'
+            )
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "Is it taller than the shelf?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                )
+            )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": UNANSWERABLE_MISSING_TEMPLATE.format(
+                missing="the shelf's height"
+            ),
+        }
+        warnings = self._outcome_warning(caplog)
+        assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
+        assert "outcome=unanswerable" in warnings[0].getMessage()
+        assert "elapsed_ms=" in warnings[0].getMessage()
+        assert "len(message)=" in warnings[0].getMessage()
+        for record in warnings:
+            assert "the shelf's height" not in record.getMessage()
+            assert "Is it taller than the shelf?" not in record.getMessage()
+
     def test_request_emits_one_warning(self, caplog) -> None:
         async def _edge(q, e):
             return '{"kind": "request", "answer": ""}'
@@ -2117,6 +2632,22 @@ class TestCopyDeckParity:
         # The two strings are distinct (a failure and an unanswerable
         # question are different honest statements).
         assert COULD_NOT_ANSWER != NOT_ESTABLISHED
+
+    def test_unanswerable_missing_template_renders_acceptance_text(self) -> None:
+        # issue #278: the parameterised template renders the exact
+        # acceptance text for the shelf's height, and the template's
+        # {missing} slot is the only interpolation point.
+        rendered = UNANSWERABLE_MISSING_TEMPLATE.format(
+            missing="the shelf's height"
+        )
+        assert rendered == (
+            "I don't know the shelf's height. Tell me and I'll check — "
+            "nothing was changed."
+        )
+        # The template closes with the same "nothing was changed" as the
+        # two fixed no-run replies (the done frame carries the text in
+        # the existing ``answer`` field — no new wire field).
+        assert rendered.endswith("nothing was changed.")
 
 
 class TestConcurrentInflightClaim:
@@ -2459,10 +2990,18 @@ class TestPromptPairAgreement:
         assert "\"answerable\": true|false" not in prompt
         assert "\"answerable\": true|false" not in evals_md
 
-        # The value-integrity contract: both forbid inventing values and
-        # require every number to come from the block.
-        assert "must come from the block" in prompt
-        assert "Never invent" in evals_md
+        # The value-integrity contract: both forbid inventing values —
+        # every number must come from the block OR be a number the user's
+        # own question stated (issue #278: question numbers are licensed;
+        # all other numbers are forbidden). The production prompt's
+        # invariant and the evals prompt's Rule 2 state this in
+        # lockstep — a drift in either direction (the model withholding
+        # question-quoted numbers, or inventing others) is a test failure.
+        assert "the user's question" in prompt
+        assert "a number the user's own question stated" in prompt
+        assert "the user's question" in evals_md
+        assert "may be quoted in the answer" in prompt
+        assert "may be quoted in the answer" in evals_md
         # The provenance citations: the same provenance phrases.
         for phrase in (
             "you said that",

@@ -167,24 +167,47 @@ describe("design contract", () => {
   /* ---------------------------------------- W260 */
 
   it("the question pre-route's no-run replies live in the deck (issue #260)", () => {
-    // The two no-run replies (stage-2 failed; design state doesn't
-    // establish the answer) are fixed copy.ts strings — the backend
-    // emits the same strings verbatim, so the wire and the deck are one
-    // sentence. They ride the existing done-frame path verbatim.
+    // The no-run replies (stage-2 failed; design state doesn't establish
+    // the answer) are fixed copy.ts strings — the backend emits the same
+    // strings verbatim, so the wire and the deck are one sentence. They
+    // ride the existing done-frame path verbatim.
     expect(copy.answerRoute.couldNotAnswer).toBe(
       "I couldn't answer that just now — nothing was changed.",
     );
     expect(copy.answerRoute.notEstablished).toBe(
       "The design as it stands doesn't establish that — nothing was changed.",
     );
-    // Both say the invariant: nothing was changed. A no-run reply that
-    // implied a version was created would be the house anti-pattern.
+    // Both fixed replies say the invariant: nothing was changed. A no-run
+    // reply that implied a version was created would be the house
+    // anti-pattern.
     expect(copy.answerRoute.couldNotAnswer).toContain("nothing was changed");
     expect(copy.answerRoute.notEstablished).toContain("nothing was changed");
     // The two replies are distinct — a failure and an unanswerable
     // question are different honest statements and must not read the
     // same.
     expect(copy.answerRoute.couldNotAnswer).not.toBe(copy.answerRoute.notEstablished);
+  });
+
+  it("the unanswerable missing-fact template lives in the deck (issue #278)", () => {
+    // Issue #278: an unanswerable stage-2 reply that names the unknown
+    // fact gets a parameterised reply built by the backend from its own
+    // UNANSWERABLE_MISSING_TEMPLATE ("I don't know {missing}. Tell me
+    // and I'll check — nothing was changed."); the deck carries the same
+    // template so wording drift between deck and server fails here, the
+    // #260 way. It closes with the same "nothing was changed" close as
+    // the two fixed no-run replies.
+    expect(copy.answerRoute.unanswerableMissing("the shelf's height")).toBe(
+      "I don't know the shelf's height. Tell me and I'll check — nothing was changed.",
+    );
+    expect(copy.answerRoute.unanswerableMissing("the shelf's height")).toContain(
+      "nothing was changed",
+    );
+    // The parameterised reply is distinct from the fixed notEstablished
+    // fallback (which the backend uses when the missing fact is invalid
+    // or absent).
+    expect(
+      copy.answerRoute.unanswerableMissing("the shelf's height"),
+    ).not.toBe(copy.answerRoute.notEstablished);
   });
 
   /* ---------------------------------------- W263 */
