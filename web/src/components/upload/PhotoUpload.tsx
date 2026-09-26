@@ -12,6 +12,7 @@
  *   Max: 20 MB
  */
 
+import { shell as shellCopy } from "../../copy";
 import { useState, type ChangeEvent, type DragEvent } from "react";
 
 const MAX_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -89,14 +90,19 @@ export function PhotoUpload({
       if (onEnsureProject) {
         try {
           effectiveProjectId = await onEnsureProject();
-        } catch {
+        } catch (e) {
+          // Creation failed — surface the caller's CREATION failure copy
+          // (App routes it to the shared project-creation card, the same
+          // card the send path uses), never an upload failure.
           setState("error");
-          onError?.("No project selected");
+          onError?.(shellCopy.projectCreationFailed(
+            e instanceof Error ? e.message : "unknown error",
+          ));
           return;
         }
       } else {
         setState("error");
-        onError?.("No project selected");
+        onError?.(shellCopy.noProject);
         return;
       }
     }

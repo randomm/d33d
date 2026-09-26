@@ -1265,9 +1265,9 @@ export default function App({ client }: AppProps) {
   // (handled by ensureProject itself).
   const handleProjectCreationFailure = useCallback((e: unknown) => {
     setStreamError({
-      message: `Failed to create project: ${
+      message: copy.shell.projectCreationFailed(
         e instanceof Error ? e.message : "unknown error"
-      }`,
+      ),
       detail: e instanceof Error ? e.message : undefined,
       retryable: false,
     });

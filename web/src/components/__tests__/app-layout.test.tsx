@@ -1545,6 +1545,11 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
       }
       return Promise.resolve({ ok: true, status: 200, json: async () => [] });
     }));
+    // makeClient's listVersions stub returns one version — that would hide
+    // the first-run screen (isFirstRun needs zero versions). The photo IS
+    // the first action, so the project must start empty.
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue([]);
 
     render(<App client={client} />);
     // Issue #192: no project on mount — the photo IS the first action.
