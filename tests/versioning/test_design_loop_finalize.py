@@ -3653,3 +3653,150 @@ def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
     assert latest is not None
     raw = latest.get("stated_dims")
     assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+# ---------------------------------------------------------------------------
+# (issue #277, task-b) renderer_unavailable + per-class render reasons flow
+# the standard SSE ``reason`` field
+#
+# Issue #277 turns the render failure reason from the shadowed
+# ``error_class_not_ok`` into the SPECIFIC closed-enum ``ErrorClass``
+# (task-a, the loop) and adds the loop-level pre-flight reason
+# ``renderer_unavailable`` (emitted when the renderer reachability check
+# fails before any LLM call). The SSE adapter (``design_loop_events.
+# _structured_reason``) passes ``failure_reason`` through as the terminal
+# error frame's ``reason`` field unchanged — these tests pin that the
+# NEW reason values ride the SAME standard frame the SPA's
+# ``displayDesignLoopError`` reads (the ``reason`` key, never a new frame
+# shape, never the free-text ``message``), through the full
+# route → adapter → frame path via ``run_design_loop_with_events``.
+# ---------------------------------------------------------------------------
+
+
+def _exhausted_result_with_reason(reason: str) -> object:
+    """A duck-typed exhausted loop result carrying an arbitrary
+    ``failure_reason`` (the value the adapter's ``_structured_reason``
+    reads off ``result.failure_reason``). The ``best`` is a minimal
+    ``IterationRecord`` (the adapter reads ``best.render`` for the pass
+    branch only — the exhausted branch reads ``failure_reason`` and
+    ``best.render`` for artifact bytes, both of which this shape provides).
+    """
+    from d33d.design_loop import IterationRecord, Score
+    from d33d.render_worker import RenderResult
+
+    render = RenderResult(
+        ok=False,
+        exit_code=1,
+        duration_ms=0,
+        error_class=reason if reason != "renderer_unavailable" else "ok",
+        stderr="",
+        stl=None,
+        csg=None,
+        views=(),
+    )
+    record = IterationRecord(
+        iteration=0,
+        scad_source="",
+        render=render,
+        score=Score(bits=(False,) * 5, rank=0, tiebreak=(False,) * 5),
+        params={},
+    )
+
+    class _Result:
+        status = "exhausted"
+        best = record
+        failure_reason = reason
+
+    return _Result()
+
+
+def test_chat_renderer_unavailable_error_frame_carries_reason(app_with_versions):
+    """Issue #277 operator decision (frame shape): a loop result whose
+    ``failure_reason`` is ``renderer_unavailable`` (the pre-flight failed
+    before any LLM call — task-a's loop emits it) reaches the SPA as a
+    terminal ``error`` frame whose ``reason`` field is
+    ``renderer_unavailable`` — the SAME frame shape
+    ``displayDesignLoopError`` maps (the ``reason`` key, never a different
+    frame type or a missing field). The free-text ``message`` carries the
+    reason verbatim for backward compatibility, and no version is created.
+    """
+
+    async def _loop(app, **kwargs):
+        return _exhausted_result_with_reason("renderer_unavailable")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "renderer_unavailable", (
+        f"terminal error frame must carry reason 'renderer_unavailable', "
+        f"got {error_frames[0].get('reason')!r}"
+    )
+    # The free-text message preserves the reason verbatim (issue #82
+    # backward compatibility — the SPA maps ``reason``, never string-matches
+    # the message, but the message must not lie about the failure).
+    assert error_frames[0]["message"] == (
+        "Design loop exhausted: renderer_unavailable"
+    ), f"message must carry the reason verbatim: {error_frames[0]['message']!r}"
+    # No version is created for a pre-flight failure (no LLM call happened).
+    assert timeline == []
+
+
+def test_chat_render_class_reasons_flow_the_standard_reason_field(app_with_versions):
+    """Issue #277: every per-class render reason (the closed ``ErrorClass``
+    values task-a's ``_exhausted`` now emits instead of the shadowed
+    ``error_class_not_ok``) reaches the SPA through the SAME terminal
+    error frame's ``reason`` field — the adapter must not filter or
+    rewrite any reason, since ``displayDesignLoopError`` maps each one to
+    its own ``copy.failure.reasons`` sentence. Drives the full
+    route → adapter path for each class in one app session (same pattern
+    as the mismatches test — one client, multiple drives)."""
+
+    REASONS = (
+        "syntax_error",
+        "empty_model",
+        "artifact_error",
+        "timeout",
+        "oom",
+        "container_error",
+    )
+
+    async def _call_all(client):
+        out = []
+        for reason in REASONS:
+            def _make_stub(r=reason):
+                return _exhausted_result_with_reason(r)
+            app_with_versions.state.run_design_loop = lambda **kw: _make_stub()
+            proj = await create_project(client)
+            pid = proj["id"]
+            await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+            source = app_with_versions.state.event_sources[pid]
+            frames = []
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+            out.append((reason, [d for e, d in frames if e == "error"]))
+        return out
+
+    results = run_async(app_with_versions, _call_all)
+    assert len(results) == len(REASONS)
+    for reason, error_frames in results:
+        assert error_frames, f"no error frame for reason {reason!r}"
+        assert error_frames[0]["reason"] == reason, (
+            f"terminal error frame must carry reason {reason!r}, "
+            f"got {error_frames[0].get('reason')!r}"
+        )
