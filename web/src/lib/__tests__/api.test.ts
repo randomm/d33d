@@ -641,6 +641,73 @@ describe("SSE stream demux", () => {
     expect(got).toEqual(["ok", "done"]);
   });
 
+  it("the notice frame demuxes to onNotice, in order with other frames (issue #295)", async () => {
+    // Issue #295: the server emits a `notice` frame (a non-terminal frame
+    // carrying a fixed copy.ts sentence, e.g. the lost-photo notice)
+    // BEFORE the terminal done/error frame. The demux must deliver the
+    // full notice payload to onNotice (so the App can render it as a
+    // plain assistant message in the transcript), in the correct order
+    // relative to other frames.
+    const noticeMessage =
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone";
+    const payload = [
+      sseFrame("progress", { step: "render.view_00_front" }),
+      sseFrame("notice", { message: noticeMessage }),
+      sseFrame("done", { message: "Design loop passed validation" }),
+    ].join("");
+    fake.enqueue(makeSseResponse(payload));
+
+    const events: Array<{ kind: string; value: string }> = [];
+    await client.streamEvents(1, {
+      onToken: () => {},
+      onProgress: (step) => events.push({ kind: "progress", value: step ?? "" }),
+      onNotice: (d) =>
+        events.push({ kind: "notice", value: typeof d.message === "string" ? d.message : "" }),
+      onDone: () => events.push({ kind: "done", value: "" }),
+    });
+
+    // The notice frame arrives AFTER the progress frame and BEFORE the
+    // terminal done frame — the server defers the notice until just
+    // before the terminal frame on every exit path, but the demux must
+    // preserve the order.
+    expect(events).toEqual([
+      { kind: "progress", value: "render.view_00_front" },
+      { kind: "notice", value: noticeMessage },
+      { kind: "done", value: "" },
+    ]);
+  });
+
+  it("the notice frame's payload is the full message string (issue #295)", async () => {
+    // The notice frame carries the full fixed copy.ts string as the
+    // `message` field. The demux must deliver the full payload (including
+    // the `message` field) to onNotice so the App can render it verbatim
+    // (the same pattern as the done frame's `confirm_sentence` and the
+    // answer frame's `message`).
+    const noticeMessage =
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone";
+    const payload = sseFrame("notice", { message: noticeMessage }) + sseFrame("done", {});
+    fake.enqueue(makeSseResponse(payload));
+
+    let noticeData: Record<string, unknown> | null = null;
+    await client.streamEvents(1, {
+      onToken: () => {},
+      onProgress: () => {},
+      onNotice: (d) => { noticeData = d; },
+      onDone: () => {},
+    });
+
+    // The notice frame carried the full payload including the message.
+    expect(noticeData).toEqual({ message: noticeMessage });
+    // The message is a string (the fixed copy.ts sentence).
+    const noticePayload = noticeData as { message?: string } | null;
+    expect(noticePayload?.message).toBe(noticeMessage);
+    if (noticePayload) {
+      expect(typeof noticePayload.message).toBe("string");
+    }
+  });
+
   it("malformed JSON in a data frame is dispatched as an error, not dropped", async () => {
     const payload = "event: token\ndata: {not json\n\n" + sseFrame("done", {});
     fake.enqueue(makeSseResponse(payload));
@@ -909,5 +976,93 @@ describe("ApiError error_class preservation", () => {
       errorClass: "export_error",
       detail: "validation failed — no 3MF produced: no 3MF in render dir",
     });
+  });
+
+  // -----------------------------------------------------------------------
+  // Issue #295: the 409 `source_missing` mapping (real Response →
+  // `apiClient.restoreVersion` → `throwFor`). The server emits the 409
+  // body `{"detail": {"code": "source_missing", "message": "…"}}`
+  // (d33d/versions_routes.py, `_raise_mapped`). The SPA must map the CODE
+  // to copy.ts text (never the raw detail message, never the generic
+  // `API 409: …` string); every other 409 (the no-op dedupe keeps its
+  // legacy string detail) keeps its existing message.
+  // -----------------------------------------------------------------------
+
+  it("restoreVersion on a 409 `source_missing` carries the structured detail (issue #295, d5)", async () => {
+    // Build a real 409 Response with the exact body the server emits
+    // (d33d/versions_routes.py, `_raise_mapped`).
+    fake.enqueue(
+      json(409, {
+        detail: {
+          code: "source_missing",
+          message: "the saved design source is missing from disk",
+        },
+      }),
+    );
+    const err = await client.restoreVersion(1, 5).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as ApiError;
+    expect(e.status).toBe(409);
+    // The detail is the FastAPI envelope `{ detail: { code, message } }` —
+    // the App reads `detail.detail.code` to map to copy.ts text. The
+    // `throwFor` function only unwraps when `d.detail` is a string; for a
+    // structured `{ code, message }` object, it keeps the full envelope
+    // (the App handles both shapes).
+    expect(e.detail).toEqual({
+      detail: {
+        code: "source_missing",
+        message: "the saved design source is missing from disk",
+      },
+    });
+    // The inner object is accessible as `e.detail.detail` — the App reads
+    // `detail.code` (where `detail` is the inner object) to map to
+    // copy.ts text.
+    const inner = (e.detail as { detail: { code: string; message: string } }).detail;
+    expect(inner.code).toBe("source_missing");
+    expect(inner.message).toBe("the saved design source is missing from disk");
+    // The generic `API 409: …` message shape is preserved for every
+    // caller (the App maps the code, not the message). The message may
+    // contain the raw detail (the App reads `detail.code`, not `e.message`),
+    // but the user-facing text is the copy.ts sentence.
+    expect(e.message).toMatch(/^API 409:/);
+  });
+
+  it("restoreVersion on a legacy no-op 409 (string detail) keeps the legacy message (issue #295)", async () => {
+    // The no-op 409 (the dedupe: restoring the current latest) keeps the
+    // legacy string detail shape `{"detail": "…"}`. The App must map this
+    // to its own generic message (never the raw string).
+    fake.enqueue(
+      json(409, {
+        detail: "the version is already the current version",
+      }),
+    );
+    const err = await client.restoreVersion(1, 5).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as ApiError;
+    expect(e.status).toBe(409);
+    // The legacy string detail is preserved (not collapsed to an object).
+    expect(e.detail).toBe("the version is already the current version");
+    // The generic `API 409: …` message shape is preserved.
+    expect(e.message).toBe(
+      "API 409: the version is already the current version",
+    );
+    // The detail has no `code` field (it's a string, not an object) — the
+    // App's mapping reads `detail.code`, which is `undefined` for a
+    // string, so it falls through to the generic path.
+    const d = e.detail as unknown;
+    expect(typeof d).toBe("string");
+  });
+
+  it("restoreVersion on a 409 with no detail body falls back to the generic message (issue #295)", async () => {
+    // A 409 with an empty body (no detail at all) falls back to the
+    // generic `HTTP 409` message — the App maps this to its own generic
+    // message (never a raw HTTP status).
+    fake.enqueue(new Response("", { status: 409 }));
+    const err = await client.restoreVersion(1, 5).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    const e = err as ApiError;
+    expect(e.status).toBe(409);
+    expect(e.detail).toBe("HTTP 409");
+    expect(e.message).toBe("API 409: HTTP 409");
   });
 });

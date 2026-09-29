@@ -649,15 +649,34 @@ export const export3mf = {
 } as const;
 
 /**
- * Missing-storage copy (issue #295). The single sentence the restore /
- * branch 409 with detail code `source_missing` maps to — the SPA maps the
- * 409 body's `{ code: "source_missing" }` to this text (never the raw
- * detail message), the same deck-home pattern as the #260 no-run replies.
+ * Missing-storage copy (issue #295). Two distinct sentences:
+ * - `photoMissing`: the fixed copy.ts string the backend emits on the
+ *   SSE `notice` frame (a non-terminal frame before the terminal
+ *   done/error frame) when the project's stored reference photo was lost
+ *   out-of-band (path set, file gone — never a photo-LESS project). The
+ *   SPA renders it as a plain assistant message in the transcript.
+ * - `sourceMissing`: the sentence the restore / branch 409 with detail
+ *   code `source_missing` maps to — the SPA maps the 409 body's
+ *   `{ code: "source_missing" }` to this text (never the raw detail
+ *   message), the same deck-home pattern as the #260 no-run replies.
+ *
  * The chat pre-route's saved-design-missing reply is the backend's own
  * wire string (emitted verbatim on the done frame — the SPA never
- * substitutes its own copy for it), so only the 409 mapping lives here.
+ * substitutes its own copy for it), so only the 409 mapping and the
+ * notice live here.
  */
 export const missingStorage = {
+  /** The SSE `notice` frame's fixed string (issue #295): the backend
+   *  emits this verbatim when the project's stored reference photo is
+   *  lost out-of-band (path set, file gone). The SPA renders it as a
+   *  plain assistant message in the transcript, before the pass/failure
+   *  turn. The design-contract tripwire pins the two-way agreement with
+   *  the backend's `PHOTO_MISSING_NOTICE` (d33d/projects.py).
+   *  Never a fabricated value, never a digit. */
+  photoMissing:
+    "Your reference photo for this project is missing, so I'm designing " +
+    "from your words alone",
+
   /** The 409 `source_missing` 409 detail code (restore / branch-from): the
    *  target version's recorded design source — or the project's git repo —
    *  is absent from disk. Same honest statement the chat pre-route makes.

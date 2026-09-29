@@ -10,7 +10,7 @@
  *   PATCH  /api/projects/{id}                 — update name / tags / notes
  *   DELETE /api/projects/{id}                 — delete project (204)
  *   POST   /api/projects/{id}/photos          — multipart photo upload
- *   GET    /api/stream/{id}                   — SSE: progress | token | done | error
+ *   GET    /api/stream/{id}                   — SSE: progress | token | notice | done | error
  *   GET    /api/config/models                 — model catalogue (keys redacted)
  *   PUT    /api/config/models                 — full-YAML catalogue replacement
  *   GET    /api/settings/credentials          — names-only credential list
@@ -278,9 +278,17 @@ export interface PhotoUploadResult {
   size: number;
 }
 
-/** The four SSE event kinds the backend emits (d33d/streaming.py).
- *  Payloads are open-ended dicts keyed by event kind. */
-export type StreamEventKind = "progress" | "token" | "done" | "error";
+/** The SSE event kinds the backend emits (d33d/streaming.py).
+ *  Payloads are open-ended dicts keyed by event kind. `notice` (issue
+ *  #295) is a non-terminal frame the server emits before the terminal
+ *  frame to carry a fixed copy.ts sentence (the lost-photo notice);
+ *  the SPA renders it as a plain assistant message in the transcript. */
+export type StreamEventKind =
+  | "progress"
+  | "token"
+  | "notice"
+  | "done"
+  | "error";
 
 export interface StreamEvent<T extends StreamEventKind = StreamEventKind> {
   event: T;
@@ -296,7 +304,11 @@ export interface StreamEvent<T extends StreamEventKind = StreamEventKind> {
         // legacy frames — a missing `reason` means "not a mapped design-loop
         // gate failure", never a gate reason.
         ? { message?: string; reason?: string }
-        : { message?: string });
+        : T extends "notice"
+          // Issue #295: the notice frame's fixed copy.ts sentence
+          // (the lost-photo notice) — verbatim from the server.
+          ? { message: string }
+          : { message?: string });
 }
 
 export interface ModelCatalogue {
@@ -932,6 +944,10 @@ export class ApiClient {
     handlers: {
       onToken: (text: string, data: Record<string, unknown>) => void;
       onProgress: (step: string | undefined, data: Record<string, unknown>) => void;
+      /** Issue #295: the notice frame (a fixed copy.ts sentence the
+       *  server emits before the terminal frame, e.g. the lost-photo
+       *  notice). The SPA renders it as a plain assistant message. */
+      onNotice?: (data: Record<string, unknown>) => void;
       onDone?: (data: Record<string, unknown>) => void;
       onError?: (data: Record<string, unknown>) => void;
     },
@@ -1075,6 +1091,7 @@ function dispatch(
   handlers: {
     onToken: (text: string, data: Record<string, unknown>) => void;
     onProgress: (step: string | undefined, data: Record<string, unknown>) => void;
+    onNotice?: (data: Record<string, unknown>) => void;
     onDone?: (data: Record<string, unknown>) => void;
     onError?: (data: Record<string, unknown>) => void;
   },
@@ -1088,6 +1105,14 @@ function dispatch(
         typeof payload.step === "string" ? payload.step : undefined,
         payload,
       );
+      return;
+    case "notice":
+      // Issue #295: the notice frame is non-terminal — the run's frames
+      // (progress, version-created, tokens) have already landed; the
+      // terminal frame (done | error) arrives right after. Dispatch to
+      // the notice handler (the SPA renders it as a plain assistant
+      // message in the transcript) rather than dropping it.
+      handlers.onNotice?.(payload);
       return;
     case "done":
       handlers.onDone?.(payload);

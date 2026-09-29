@@ -58,6 +58,8 @@ import { Filmstrip } from "../components/versions/Filmstrip";
 import { BranchGraph } from "../components/versions/BranchGraph";
 import { HistorySheet } from "../components/versions/HistorySheet";
 import { CompareView } from "../components/versions/CompareView";
+import { ChatPanel, type ChatMessage } from "../components/chat/ChatPanel";
+import { ApiClient } from "../lib/api";
 import { VariantGallery } from "../components/versions/VariantGallery";
 import { Brief } from "../components/brief/Brief";
 import type { VersionCompare, VersionTimelineEntry } from "../lib/api";
@@ -379,6 +381,46 @@ describe("design contract", () => {
     const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
     expect(appSrc).toMatch(/code === "source_missing"/);
     expect(appSrc).toMatch(/copy\.missingStorage\.sourceMissing/);
+  });
+
+  it("the lost-photo notice string pins the backend's `PHOTO_MISSING_NOTICE` (issue #295, fix batch)", () => {
+    // Issue #295 (fix batch): the backend emits an SSE `notice` frame
+    // carrying the fixed string `PHOTO_MISSING_NOTICE` (d33d/projects.py)
+    // when the project's stored reference photo was lost out-of-band
+    // (path set, file gone — never a photo-LESS project). The SPA renders
+    // it as a plain assistant message in the transcript, before the
+    // pass/failure turn. The design-contract tripwire pins the two-way
+    // agreement: the copy.ts string must equal the backend's wire string
+    // (the same pattern as the #260 no-run replies — the wire and the
+    // deck are one sentence).
+    const notice = copy.missingStorage.photoMissing;
+    expect(notice).toBeTruthy();
+    // No digit: a number in the sentence the SPA has not established is
+    // the house anti-pattern.
+    expect(notice).not.toMatch(/\d/);
+    // The backend's `PHOTO_MISSING_NOTICE` (d33d/projects.py) is the
+    // exact wire string the server emits on the `notice` frame. The
+    // tripwire pins the two-way agreement: a wording drift between the
+    // deck and the server would fail here (the #260 way).
+    expect(notice).toBe(
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone",
+    );
+    // The App.tsx renders the notice as a plain assistant message in the
+    // transcript — the tripwire reads the handler's source so a wiring
+    // change that drops the notice rendering fails here (the #250 way).
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(appSrc).toMatch(/onNotice/);
+    expect(appSrc).toMatch(/"notice"/);
+  });
+
+  it("the lost-photo notice is distinct from the restore 409 copy (issue #295, fix batch)", () => {
+    // Issue #295 (fix batch): the lost-photo notice (the SSE `notice`
+    // frame's string) and the restore/branch 409 `source_missing` copy
+    // are two DIFFERENT sentences — the notice is about the PHOTO being
+    // lost, the 409 copy is about the DESIGN SOURCE being lost. They
+    // must never read the same.
+    expect(copy.missingStorage.photoMissing).not.toBe(copy.missingStorage.sourceMissing);
   });
 
   it("the storage copy keys exist for Brief and PassCard (issue #295, d6)", () => {
@@ -1853,5 +1895,117 @@ describe("design contract", () => {
       }),
     );
     expect(fullRender.container.querySelector("[data-testid='brief-chip-assumed']")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #295 (fix batch): the lost-photo notice reaches the user.
+//
+// The backend emits an SSE `notice` frame carrying the fixed copy.ts string
+// `PHOTO_MISSING_NOTICE` (d33d/projects.py) when the project's stored
+// reference photo was lost out-of-band. The SPA must render it as a plain
+// assistant message in the transcript, before the pass/failure turn.
+//
+// The test below feeds a REAL SSE byte stream (containing a notice frame)
+// through the real stream parser (ApiClient.streamEvents) and the real
+// ChatPanel, and asserts the notice text is VISIBLE in the rendered chat.
+// ---------------------------------------------------------------------------
+
+describe("the lost-photo notice reaches the user (issue #295, fix batch)", () => {
+  it("a real SSE byte stream containing a notice frame renders the notice as a visible assistant message in the ChatPanel", async () => {
+    // Build a real SSE byte stream containing a notice frame. The stream
+    // parser (ApiClient.streamEvents) reads the byte stream and demuxes
+    // frames to handlers. The notice frame is a non-terminal frame that
+    // the server emits before the terminal done frame.
+    const noticeMessage =
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone";
+    const ssePayload =
+      `event: notice\ndata: ${JSON.stringify({ message: noticeMessage })}\n\n` +
+      `event: done\ndata: ${JSON.stringify({ message: "Design loop passed validation" })}\n\n`;
+
+    // Build a real Response with the SSE byte stream (split into chunks of
+    // 7 bytes to guarantee mid-frame chunking, proving the reader is
+    // byte-offset safe).
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(ssePayload);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += 7) {
+      chunks.push(bytes.subarray(i, i + 7));
+    }
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      },
+    });
+    const sseResponse = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    // A fake fetch that returns the SSE response for the stream endpoint.
+    let sseCalled = false;
+    const fakeFetch = (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+      sseCalled = true;
+      return Promise.resolve(sseResponse);
+    };
+
+    // Create a real ApiClient with the fake fetch.
+    const client = new ApiClient({
+      baseUrl: "http://api.test",
+      fetch: fakeFetch,
+    });
+
+    // The messages array that the App would build. The notice handler
+    // appends a plain assistant message to the transcript.
+    const messages: ChatMessage[] = [];
+
+    // Feed the real SSE byte stream through the real stream parser.
+    // The onNotice handler appends the notice as a plain assistant message
+    // (exactly what App.tsx does).
+    await client.streamEvents(1, {
+      onToken: () => {},
+      onProgress: () => {},
+      onNotice: (data) => {
+        const msg = typeof data.message === "string" ? data.message : "";
+        if (msg.length > 0) {
+          messages.push({
+            id: "notice-1",
+            role: "assistant",
+            content: msg,
+          });
+        }
+      },
+      onDone: () => {},
+    });
+
+    // The stream parser must have called the fake fetch.
+    expect(sseCalled).toBe(true);
+    // The notice must have been appended to the messages array.
+    expect(messages.length).toBe(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].content).toBe(noticeMessage);
+
+    // Render the ChatPanel with the notice message and assert the notice
+    // text is VISIBLE in the rendered chat.
+    const { container } = render(
+      createElement(ChatPanel, {
+        messages,
+        onSend: () => {},
+      }),
+    );
+
+    // The notice text must be visible in the rendered chat.
+    const noticeEl = container.textContent;
+    expect(noticeEl).toContain(noticeMessage);
+
+    // The notice must be rendered as a plain assistant message (not a
+    // PassCard, not a failure turn).
+    const noticeMsgEl = container.querySelector(
+      '[data-testid="chat-msg-assistant"]',
+    );
+    expect(noticeMsgEl).not.toBeNull();
+    expect(noticeMsgEl?.textContent).toContain(noticeMessage);
   });
 });

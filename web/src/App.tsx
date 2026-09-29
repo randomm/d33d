@@ -293,7 +293,19 @@ export default function App({ client }: AppProps) {
     apiClient
       .getProject(effectiveProjectId)
       .then((p) => setProjectStorage(p.storage))
-      .catch(() => {});
+      .catch((e) => {
+        // Issue #295 (fix batch): the storage refetch must not silently
+        // swallow a failure. The "don't flip to present on failure"
+        // behaviour is preserved (a failed GET must never make the Brief
+        // show a present value the SPA has not established), but the
+        // failure is no longer a silent `.catch(() => {})`: a
+        // `console.warn` names the project id so a lost refetch is
+        // diagnosable in the console without changing the UI.
+        console.warn(
+          `d33d: storage refetch failed for project ${effectiveProjectId}:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      });
     designStateReqRef.current = { seq: designStateReqRef.current.seq + 1, projectId: effectiveProjectId };
     const { seq, projectId: latestProjectId } = designStateReqRef.current;
     const isStale = () =>
@@ -1119,6 +1131,31 @@ export default function App({ client }: AppProps) {
                 // guard in refetchDesignState ensures that only the latest
                 // response is applied.
                 refetchDesignState(effectiveProjectId);
+              }
+            },
+            onNotice: (data) => {
+              // Issue #295 (fix batch): the notice frame is a non-terminal
+              // frame the server emits before the terminal done/error frame
+              // to carry a fixed copy.ts sentence (e.g. the lost-photo
+              // notice). The SPA renders it as a plain assistant message in
+              // the transcript, before the pass/failure turn.
+              //
+              // The wire string is the backend's own `PHOTO_MISSING_NOTICE`
+              // (d33d/projects.py) — the SPA renders it verbatim (the same
+              // pattern as the done frame's `confirm_sentence` and the
+              // answer frame's `message`). The design-contract tripwire
+              // pins the two-way agreement with copy.missingStorage.photoMissing.
+              const message = typeof data.message === "string" ? data.message : "";
+              if (message.length > 0) {
+                const noticeId = nextMsgId("notice");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: noticeId,
+                    role: "assistant" as const,
+                    content: message,
+                  },
+                ]);
               }
             },
             onDone: (data) => {
