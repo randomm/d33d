@@ -1145,8 +1145,18 @@ async function throwFor(res: Response): Promise<never> {
   if (detail && typeof detail === "object") {
     const d = detail as Record<string, unknown>;
     if (typeof d.error_class === "string") errorClass = d.error_class;
-    if (typeof d.detail === "string") detail = d.detail;
-    else if (typeof d.error === "string") detail = d.error;
+    if (typeof d.detail === "string") {
+      detail = d.detail;
+    } else if (d.detail && typeof d.detail === "object") {
+      // Issue #295: the restore / branch-from 409 carries a STRUCTURED detail
+      // `{ detail: { code, message } }` (d33d/versions_routes.py, `_raise_mapped`).
+      // Unwrap the envelope so `ApiError.detail` IS the inner `{ code, message }`
+      // object — the SPA maps `detail.code` to copy.ts text. The legacy string
+      // detail (`{ detail: "…" }`) keeps its today's flattening above.
+      detail = d.detail;
+    } else if (typeof d.error === "string") {
+      detail = d.error;
+    }
   }
   throw new ApiError(res.status, detail ?? `HTTP ${res.status}`, errorClass);
 }

@@ -29,6 +29,7 @@ import type {
   DesignStateEntry,
   Project,
   RegionEditResult,
+  VersionTimelineEntry,
 } from "../../lib/api";
 import type { ModelViewerHandle, LoadResult } from "../viewer/ModelViewer";
 import type { PointSelectedEvent } from "../viewer/PickLayer";
@@ -855,6 +856,114 @@ describe("App layout", () => {
     expect(client.createProject).not.toHaveBeenCalled();
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1024 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 768 });
+  });
+});
+
+describe("App restore 409 wiring (issue #295)", () => {
+  let client: ApiClient;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  // The real `throwFor` (no mock of restoreVersion): the ApiClient is
+  // CONSTRUCTED with a stubbed fetch (its `fetchImpl` is captured in the
+  // constructor, so stubbing the global fetch afterwards would be inert),
+  // fed a 409 Response with the EXACT body the server emits (d33d/
+  // versions_routes.py `_raise_mapped`). Everything downstream of
+  // `res.text()` in the client is production code.
+  async function driveRestore409(body: unknown): Promise<void> {
+    const entries: VersionTimelineEntry[] = [
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+      {
+        id: 2,
+        name: "v2",
+        params: {},
+        created_by_message: "",
+        parent: 1,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-02T00:00:00Z",
+        diff_count: 1,
+        exported_at: null,
+      },
+    ];
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(body), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    // Construct AFTER the fetch stub exists so the client's `fetchImpl` IS
+    // the stub (the upload-wiring block above replaces the global fetch with
+    // a bare vi.fn(), so relying on the global would be nondeterministic).
+    client = makeClient({});
+    vi.spyOn(client, "listVersions").mockResolvedValue(entries);
+    // The storage refetch (issue #295: getProject alongside the design state)
+    // must not hit the stubbed fetch — keep it mocked exactly as makeClient's
+    // siblings are (the 409 stub is for the restore POST alone).
+    vi.spyOn(client, "getProject").mockResolvedValue({
+      ...PROJECT,
+      storage: { repo_present: true, photo_present: null },
+    });
+    // The design-state fetch must not hit the stubbed fetch either.
+    vi.spyOn(client, "getDesignState").mockResolvedValue([]);
+    (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = fetchMock;
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByTestId("version-filmstrip")).toBeTruthy());
+    // The filmstrip's expand mark opens the history sheet (the same path
+    // the existing restore tests drive: expand → timeline restore button).
+    fireEvent.click(screen.getByTestId("filmstrip-expand-1"));
+    await waitFor(() => expect(screen.getByTestId("history-sheet")).toBeTruthy());
+    fireEvent.click(screen.getByTestId("timeline-restore-1"));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+  }
+
+  it("a 409 source_missing restore shows the restore copy — no API 409, no raw JSON (issue #295)", async () => {
+    await driveRestore409({
+      detail: { code: "source_missing", message: "the saved design source is missing from disk" },
+    });
+    // The restore copy is visible in the conversation (the error turn).
+    const turn = await screen.findByText(copy.missingStorage.restoreSourceMissing);
+    expect(turn).toBeTruthy();
+    // And NOT the generic message: nowhere in the document does the
+    // "API 409" envelope or the raw JSON detail survive to the UI.
+    const all = Array.from(document.querySelectorAll("*")).map((el) => el.textContent).join("\n");
+    expect(all).not.toContain("API 409");
+    expect(all).not.toContain("\"code\":\"source_missing\"");
+    expect(all).not.toContain("source_missing");
+  });
+
+  it("a legacy no-op 409 (string detail) restore keeps the generic Restore failed message (issue #295)", async () => {
+    await driveRestore409({
+      detail: "the version is already the current version",
+    });
+    const err = await screen.findByTestId("app-error");
+    expect(err.textContent).toContain(
+      "Restore failed: API 409: the version is already the current version",
+    );
+    // The restore-specific copy is NOT shown for the legacy 409.
+    expect(screen.queryByText(copy.missingStorage.restoreSourceMissing)).toBeNull();
   });
 });
 

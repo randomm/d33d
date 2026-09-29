@@ -360,11 +360,12 @@ describe("design contract", () => {
     // Issue #295 (d5): the restore / branch-from seam 409s with the
     // detail body `{ code: "source_missing", message: … }` when the
     // target version's recorded design source — or the project's git
-    // repo — is absent from disk. The SPA maps the CODE to this copy.ts
-    // sentence (never the raw detail message, never the generic
-    // `API 409: …` string); every other 409 (the no-op dedupe keeps its
-    // legacy string detail) keeps its existing message.
-    const sentence = copy.missingStorage.sourceMissing;
+    // repo — is absent from disk. The SPA maps the CODE to the RESTORE
+    // sentence (`restoreSourceMissing`, never the raw detail message,
+    // never the generic `API 409: …` string); every other 409 (the no-op
+    // dedupe keeps its legacy string detail) keeps its existing message.
+    // The chat and Brief keep `sourceMissing` (their own surface sentence).
+    const sentence = copy.missingStorage.restoreSourceMissing;
     expect(sentence).toBeTruthy();
     // No digit: a number in the sentence the SPA has not established is
     // the house anti-pattern.
@@ -380,7 +381,29 @@ describe("design contract", () => {
     // here (the #250 way: the tripwire reads both sides).
     const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
     expect(appSrc).toMatch(/code === "source_missing"/);
-    expect(appSrc).toMatch(/copy\.missingStorage\.sourceMissing/);
+    expect(appSrc).toMatch(/copy\.missingStorage\.restoreSourceMissing/);
+  });
+
+  it("pins both storage-missing sentences verbatim (issue #295, fix batch)", () => {
+    // Issue #295: the two storage-missing sentences are distinct honest
+    // statements for distinct surfaces — the chat/Brief sentence ("I can't
+    // change it") and the restore sentence ("I can't restore it"; the
+    // versions list and its measurements survive). Pin both verbatim so a
+    // wording drift on either side fails here (the #260 way).
+    expect(copy.missingStorage.sourceMissing).toBe(
+      "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+    );
+    expect(copy.missingStorage.restoreSourceMissing).toBe(
+      "The saved design for that version is missing, so I can't restore it. The versions list and its measurements are still here",
+    );
+    // The two sentences are distinct (the restore action cannot recreate
+    // the source; the design loop can).
+    expect(copy.missingStorage.restoreSourceMissing).not.toBe(copy.missingStorage.sourceMissing);
+    // Neither carries a digit or the wire string.
+    for (const s of [copy.missingStorage.sourceMissing, copy.missingStorage.restoreSourceMissing]) {
+      expect(s).not.toMatch(/\d/);
+      expect(s).not.toContain("design source is missing from disk");
+    }
   });
 
   it("the lost-photo notice string pins the backend's `PHOTO_MISSING_NOTICE` (issue #295, fix batch)", () => {

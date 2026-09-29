@@ -683,6 +683,14 @@ export const missingStorage = {
    *  Never the raw backend message, never a fabricated value. */
   sourceMissing:
     "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+
+  /** The restore-specific 409 `source_missing` sentence (issue #295): the
+   *  restore action cannot recreate the missing source, so the sentence says
+   *  what the user can still keep (the versions list + its measurements).
+   *  Distinct from `sourceMissing` (chat + Brief) by design — the two
+   *  surfaces make two different honest statements. */
+  restoreSourceMissing:
+    "The saved design for that version is missing, so I can't restore it. The versions list and its measurements are still here",
 } as const;
 
 export const copy = {

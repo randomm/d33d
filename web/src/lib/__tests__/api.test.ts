@@ -1003,21 +1003,16 @@ describe("ApiError error_class preservation", () => {
     expect(err).toBeInstanceOf(ApiError);
     const e = err as ApiError;
     expect(e.status).toBe(409);
-    // The detail is the FastAPI envelope `{ detail: { code, message } }` —
-    // the App reads `detail.detail.code` to map to copy.ts text. The
-    // `throwFor` function only unwraps when `d.detail` is a string; for a
-    // structured `{ code, message }` object, it keeps the full envelope
-    // (the App handles both shapes).
+    // Issue #295: `throwFor` unwraps the FastAPI envelope when the detail is
+    // a structured `{ code, message }` object — `ApiError.detail` IS the
+    // inner object, so the App's `e.detail.code === "source_missing"` read
+    // works directly (no `detail.detail` double-unwrap).
     expect(e.detail).toEqual({
-      detail: {
-        code: "source_missing",
-        message: "the saved design source is missing from disk",
-      },
+      code: "source_missing",
+      message: "the saved design source is missing from disk",
     });
-    // The inner object is accessible as `e.detail.detail` — the App reads
-    // `detail.code` (where `detail` is the inner object) to map to
-    // copy.ts text.
-    const inner = (e.detail as { detail: { code: string; message: string } }).detail;
+    // The inner code is accessible directly on the detail object.
+    const inner = e.detail as { code: string; message: string };
     expect(inner.code).toBe("source_missing");
     expect(inner.message).toBe("the saved design source is missing from disk");
     // The generic `API 409: …` message shape is preserved for every

@@ -807,7 +807,7 @@ export default function App({ client }: AppProps) {
         if (e instanceof ApiError) {
           const d = e.detail as { code?: unknown; message?: unknown } | null;
           if (e.status === 409 && d && d.code === "source_missing") {
-            message = copy.missingStorage.sourceMissing;
+            message = copy.missingStorage.restoreSourceMissing;
             detail = typeof d.message === "string" ? d.message : undefined;
           } else {
             message = `Restore failed: ${e.message}`;
