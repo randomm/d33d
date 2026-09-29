@@ -342,13 +342,38 @@ async def _lifespan(app: FastAPI):
     state = app.state
     if state.conn is None:
         state.conn = db.connect(state.db_path)
-        versions_mod.migrate(state.conn)
-        state.versions = versions_mod.VersionService(state.conn)
+    if state.conn.closed:
+        # A test-owned connection a previous ``run_async`` lifespan closed
+        # before this app re-enters its lifespan — reconnect, do not reuse
+        # the dead handle (production never reaches this: one lifespan per
+        # app, the connection is alive until the ``yield`` below).
+        state.conn = db.connect(state.db_path)
+    # Issue #294: steer the repo default and the startup migration off the
+    # app's data dir (the DB path's parent), not a leftover ``D33D_DATA_DIR``
+    # env var. A pre-set ``state.conn`` (tests that seed rows before the
+    # lifespan) is NOT replaced — the migration reads its base from
+    # ``conn.data_dir`` and the test-owned connection survives.
+    state.conn.data_dir = Path(state.db_path).parent
+    # The repo default resolves through the module-level ``APP_DATA_DIR``
+    # (issue #294): set it so the seam's unpatched path lands under this
+    # app's data dir, not a leftover ``D33D_DATA_DIR`` env var. Restored
+    # on the way out of the lifespan so a test app doesn't leak the steer
+    # into later env-based tests.
+    prior_app_data_dir = db.APP_DATA_DIR
+    db.APP_DATA_DIR = state.conn.data_dir
+    # One migration run per lifespan, idempotent across restarts (a
+    # already-moved row sits under the base and is skipped); whether the
+    # connection was produced by the ``db.connect`` above or pre-set by a
+    # test, the migration runs — production startup never skips it.
+    db.migrate_project_repos(state.conn, state.conn.data_dir / "projects")
+    versions_mod.migrate(state.conn)
+    state.versions = versions_mod.VersionService(state.conn)
     if state.master_key is None:
         state.master_key = cred.get_or_create_master_key(state.master_key_path)
     if state.credential_store is None:
         state.credential_store = cred.CredentialStore(state.conn, state.master_key)
     yield
+    db.APP_DATA_DIR = prior_app_data_dir
     if state.conn is not None:
         state.conn.close()
 
