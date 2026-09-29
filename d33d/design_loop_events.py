@@ -92,6 +92,9 @@ def photo_data_uri(source_photo_path: str | None) -> str:
 
     ``None`` / missing file → :data:`EMPTY_PHOTO_DATA_URI` (never ``None`` —
     the design loop's LLM message builder requires a data URI/URL string).
+    The URI contract stays EMPTY for ALL THREE photo states (issue #295:
+    the notice / WARNING logic lives at the ``post_chat`` caller —
+    :func:`photo_lost` — never here).
     """
     if not source_photo_path:
         return EMPTY_PHOTO_DATA_URI
@@ -101,6 +104,23 @@ def photo_data_uri(source_photo_path: str | None) -> str:
     mime = _PHOTO_MIME_BY_SUFFIX.get(p.suffix.lower(), "image/png")
     b64 = base64.b64encode(p.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{b64}"
+
+
+def photo_lost(row: dict[str, Any]) -> bool:
+    """Whether the project's stored photo was LOST out-of-band (issue
+    #295): ``source_photo_path`` is set AND the file is gone.
+
+    The three-way photo state, exactly as the operator decided it:
+    ``source_photo_path`` NULL (photo-LESS project) → ``False`` (the run
+    proceeds identically to today — no notice, no WARNING); path set +
+    file present → ``False``; path set + file missing → ``True`` (the
+    stream carries the copy.ts notice and the WARNING fires — project id
+    only, never a file path).
+    """
+    photo_path = row.get("source_photo_path")
+    if not photo_path:
+        return False
+    return not Path(photo_path).is_file()
 
 
 def axes_to_gate_triple(
@@ -1390,6 +1410,38 @@ async def run_design_loop_with_events(
     if design_source is not None:
         kwargs["design_source"] = design_source
 
+    # Issue #295 — the lost-photo notice (the post_chat caller's photo
+    # state, carried into the stream): when the project's stored photo
+    # was LOST out-of-band (path set, file gone — never a photo-LESS
+    # project), the terminal stream carries ONE plain copy.ts notice
+    # BEFORE the done/error frame. The design proceeds photo-less with
+    # the EMPTY_PHOTO_DATA_URI constant, unchanged behaviour — only the
+    # notice and the WARNING (project id only, no file path) are new.
+    # The notice is deferred until just before the terminal frame on
+    # every exit path (pass, exhausted, exception, deadline): the run's
+    # own frames (progress, version-created, tokens) always land first,
+    # so the notice never precedes the run's progress — and the terminal
+    # frame always carries the notice's last word right before it.
+    _photo_notice: str | None = None
+    if row is not None and photo_lost(row):
+        logger.warning(
+            "design loop for project %s: the stored reference photo is "
+            "missing on disk — the design proceeds photo-less; the "
+            "stream carries the copy.ts notice",
+            project_id,
+        )
+        from d33d.projects import PHOTO_MISSING_NOTICE
+
+        _photo_notice = PHOTO_MISSING_NOTICE
+
+    def _yield_notice() -> list[tuple[str, dict[str, Any]]]:
+        nonlocal _photo_notice
+        if _photo_notice is None:
+            return []
+        frames = [("notice", {"message": _photo_notice})]
+        _photo_notice = None
+        return frames
+
     # The design-state block's inputs (issue #120/#137/#246/#248 — the
     # SAME values ``_finalize_loop_kwargs`` passes on the finalize path):
     # the latest version's full params snapshot, persisted measured bbox,
@@ -1484,16 +1536,23 @@ async def run_design_loop_with_events(
                         project_id,
                         DESIGN_LOOP_TIMEOUT_SECONDS,
                     )
-                    yield (
-                        "error",
-                        {
-                            "message": (
-                                "Design loop timed out after "
-                                f"{int(DESIGN_LOOP_TIMEOUT_SECONDS)}s"
-                            ),
-                            "reason": DESIGN_LOOP_TIMED_OUT_REASON,
-                        },
+                    _deadline_frames: list[tuple[str, dict[str, Any]]] = (
+                        _yield_notice()
                     )
+                    _deadline_frames.append(
+                        (
+                            "error",
+                            {
+                                "message": (
+                                    "Design loop timed out after "
+                                    f"{int(DESIGN_LOOP_TIMEOUT_SECONDS)}s"
+                                ),
+                                "reason": DESIGN_LOOP_TIMED_OUT_REASON,
+                            },
+                        )
+                    )
+                    for _f in _deadline_frames:
+                        yield _f
                     # Cancel the ``to_thread`` render task AFTER the frame
                     # has been yielded. CANCELLING IT BEFORE the yield
                     # deadlocks the executor thread-pool: the ``to_thread
@@ -1561,14 +1620,20 @@ async def run_design_loop_with_events(
         # AssertionError/LookupError after deletion. Emit a terminal
         # error frame + release the flag, not a 500.
         logger.exception("design loop infra error for project %s", project_id)
+        for _f in _yield_notice():
+            yield _f
         yield ("error", {"message": f"design loop infra failure: {e}"})
         return
     except (OSError, RuntimeError, TypeError, ValueError) as e:
         logger.exception("design loop failed for project %s", project_id)
+        for _f in _yield_notice():
+            yield _f
         yield ("error", {"message": f"design loop failed: {e}"})
         return
     except Exception as e:  # broad by contract — every exit is a terminal frame
         logger.exception("design loop unexpected error for project %s", project_id)
+        for _f in _yield_notice():
+            yield _f
         yield ("error", {"message": f"design loop unexpected error: {e}"})
         return
     if getattr(result, "status", None) == "pass":
@@ -1676,6 +1741,8 @@ async def run_design_loop_with_events(
         if offer_field is not None:
             done_data["confirm_offer"] = offer_field["param"]
             done_data["confirm_sentence"] = offer_field["sentence"]
+        for _f in _yield_notice():
+            yield _f
         yield ("done", done_data)
     else:
         # Exhausted (or otherwise non-pass): a failed run can carry no
@@ -1718,6 +1785,8 @@ async def run_design_loop_with_events(
         mismatches = _axis_mismatches(result)
         if mismatches is not None:
             error_data["mismatches"] = mismatches
+        for _f in _yield_notice():
+            yield _f
         yield ("error", error_data)
 
 
@@ -1727,5 +1796,6 @@ __all__ = [
     "bbox_from_render",
     "latest_version_stated_dims",
     "photo_data_uri",
+    "photo_lost",
     "run_design_loop_with_events",
 ]

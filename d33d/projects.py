@@ -56,6 +56,18 @@ MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 _READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB — bounded read chunk size
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
 
+# Issue #295 — the two fixed copy.ts strings the missing-storage chat
+# pre-routes reply with (verbatim copies of the SPA's copy deck — the
+# design-contract tripwire pins the two-way agreement, the #260 way).
+SAVED_DESIGN_MISSING_REPLY = (
+    "The saved design for this project is missing, so I can't change it. "
+    "Start a new design, or describe it again and I'll make it fresh"
+)
+PHOTO_MISSING_NOTICE = (
+    "Your reference photo for this project is missing, so I'm designing "
+    "from your words alone"
+)
+
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
 
@@ -301,12 +313,37 @@ async def _answered_frames(
     # ``finally`` is the single release point).
 
 
+def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
+    """The project's live storage signal (issue #295), computed server-side
+    from live file checks — the SPA reads it and never recomputes presence
+    in the client.
+
+    ``{"repo_present": bool, "photo_present": true | false | null}`` — the
+    field is ALWAYS present on the project GET response, never omitted.
+    ``photo_present`` is a three-way value (JSON ``null`` for a project
+    that never had a photo, ``false`` for a lost photo, ``true`` when the
+    stored file is on disk) — a photo-LESS project must never read as a
+    LOST one (no marker, no notice, no WARNING).
+
+    Git invisibility: the raw repo path is consumed here, never carried
+    into the response (the caller already strips it).
+    """
+    repo_present = Path(row["git_repo_path"]).is_dir()
+    photo_path = row.get("source_photo_path")
+    if photo_path is None:
+        photo_present: bool | None = None
+    else:
+        photo_present = Path(photo_path).is_file()
+    return {"repo_present": repo_present, "photo_present": photo_present}
+
+
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
     """A project row with the raw git-repo path removed (git invisibility
     — the on-disk path names a git repo and is never exposed in an API
-    response)."""
+    response), plus the live ``storage`` signal (issue #295)."""
     out = dict(row)
     out.pop("git_repo_path", None)
+    out["storage"] = _storage_field(row)
     return out
 
 
@@ -429,6 +466,34 @@ def create_projects_router() -> APIRouter:
         # keep the flag — streaming.py's ``finally`` clears it when the
         # stream is drained.
         inflight.add(project_id)
+
+        # Issue #295 — the missing-source pre-route (BEFORE the offer
+        # pre-route, consistent with every other pre-route running after
+        # the in-flight claim — the flag is claimed immediately on entry
+        # and released here via ``inflight.discard`` on this exit path,
+        # so the net effect is "the flag is never observed as held by a
+        # design loop"). When the project's saved design is missing
+        # (``source_expected`` — the repo gone, or the current version's
+        # recorded design.scad lost out-of-band), the reply is the fixed
+        # copy.ts text as a plain ``kind: "answer"`` done frame via the
+        # existing ``_answered_frames`` pattern: 202, ONE done frame, no
+        # design run, no version, no version row, and the flag released
+        # by the stream drain (the same contract as the #249/#260
+        # no-run replies). A project that never had a version is NOT the
+        # missing state (turn one proceeds to the design loop unchanged).
+        from d33d.design_source import source_expected
+
+        if source_expected(row, app.state.versions):
+            logger.warning(
+                "chat for project %s: the saved design is missing on "
+                "disk — replying with the missing-source notice, no "
+                "design run",
+                project_id,
+            )
+            app.state.event_sources[project_id] = _answered_frames(
+                SAVED_DESIGN_MISSING_REPLY
+            )
+            return {"status": "accepted"}
 
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
