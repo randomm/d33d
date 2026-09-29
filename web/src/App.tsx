@@ -51,6 +51,7 @@ import { ConversationPane } from "./components/chat/ConversationPane";
 import { RegionEditBar } from "./components/region/RegionEditBar";
 import {
   ApiClient,
+  ApiError,
   type RegionEditViewId,
   type VersionTimelineEntry,
   type VersionCompare,
@@ -771,11 +772,29 @@ export default function App({ client }: AppProps) {
         const vs = await apiClient.listVersions(projectId);
         setVersions(vs);
       } catch (e) {
+        // Issue #295: a 409 whose detail body carries the code
+        // `source_missing` (the repo — or the target version's recorded
+        // design source — is absent from disk) maps to the copy.ts
+        // sentence; every other 409 (the no-op dedupe) and every other
+        // failure keeps the existing message.
+        let message: string;
+        let detail: string | undefined;
+        if (e instanceof ApiError) {
+          const d = e.detail as { code?: unknown; message?: unknown } | null;
+          if (e.status === 409 && d && d.code === "source_missing") {
+            message = copy.missingStorage.sourceMissing;
+            detail = typeof d.message === "string" ? d.message : undefined;
+          } else {
+            message = `Restore failed: ${e.message}`;
+            detail = e.message;
+          }
+        } else {
+          message = `Restore failed: ${e instanceof Error ? e.message : "unknown error"}`;
+          detail = e instanceof Error ? e.message : undefined;
+        }
         setStreamError({
-          message: `Restore failed: ${
-            e instanceof Error ? e.message : "unknown error"
-          }`,
-          detail: e instanceof Error ? e.message : undefined,
+          message,
+          detail,
           retryable: false,
         });
       }

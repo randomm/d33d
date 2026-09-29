@@ -70,6 +70,36 @@ def source_path_for_version(repo_dir: Path, version_id: int) -> Path:
     return Path(repo_dir) / "versions" / str(version_id) / SOURCE_FILENAME
 
 
+def source_expected_for_version(
+    repo_dir: Path, version_id: int
+) -> bool:
+    """Whether version ``version_id``'s recorded design source is expected
+    on disk but absent (issue #295) — the per-version form of
+    :func:`source_expected`.
+
+    The restore / branch-from seams restore the target version's geometry
+    (``versions/{id}/design.scad``), so the "was it ever WRITTEN" marker
+    (the version's own commit containing the file — a pre-#105 version's
+    commit contains no design.scad and is therefore NOT lost) applies to
+    the TARGET version, not the project's current one. A project whose
+    CURRENT version carries no source may legitimately hold an older
+    version whose source IS recorded — and a restore of that version must
+    still 409 when the file has since been lost.
+    """
+    path = source_path_for_version(Path(repo_dir), int(version_id))
+    if path.is_file():
+        return False
+    if not repo_dir.is_dir():
+        # The repo is gone: the file's presence cannot be established —
+        # the missing treatment is the safe one (the caller 409s on this
+        # alone, see ``_check_source_not_lost``); the commit scan below
+        # needs a live repo, so a lost repo short-circuits here.
+        return True
+    # The file is absent: was it ever written? Same persistent marker as
+    # :func:`source_expected` (the version's commit file list).
+    return _commit_recorded_source(repo_dir, {"id": int(version_id)})
+
+
 def source_expected(
     row: dict[str, Any], versions_svc: Any
 ) -> bool:
@@ -261,6 +291,7 @@ def store_version_source(
 __all__ = [
     "SOURCE_FILENAME",
     "source_expected",
+    "source_expected_for_version",
     "TRUNCATION_MARKER",
     "current_version_source",
     "design_source_lines",

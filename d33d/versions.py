@@ -764,14 +764,23 @@ class VersionService:
         assert project_row is not None
         from d33d.design_source import source_path_for_version
 
-        source_path = source_path_for_version(
-            Path(project_row["git_repo_path"]), version_id
-        )
+        repo_dir = Path(project_row["git_repo_path"])
+        source_path = source_path_for_version(repo_dir, version_id)
         target_source = (
             source_path.read_text(encoding="utf-8")
             if source_path.is_file()
             else None
         )
+
+        # Issue #295 — the missing-source 409 (the repo gone, or the
+        # target version's recorded design.scad lost out-of-band): the
+        # restore carries the target's geometry, so a target whose source
+        # is EXPECTED but absent (the same "was it ever written" marker
+        # the chat pre-route and the storage field use) cannot restore a
+        # design — the 409 carries the detail code ``"source_missing"``.
+        # A pre-#105 target (a commit that never recorded a design.scad)
+        # restores params only, exactly as today.
+        await self._check_source_not_lost(project_row, version_id)
 
         async def _restore() -> dict[str, Any]:
             latest = self.latest_version(project_id)
@@ -789,6 +798,24 @@ class VersionService:
             )
 
         return await self._with_project_lock(project_id, _restore)
+
+    async def _check_source_not_lost(
+        self, project_row: dict[str, Any], version_id: int
+    ) -> None:
+        """Raise ``VersionConflictError(code="source_missing")`` when the
+        project's repo is absent from disk OR the version's recorded design
+        source is expected but lost (issue #295) — the shared pre-check
+        for the restore and branch-from seams. A pre-#105 version (a
+        commit that never recorded a design.scad) is NOT lost: params-only
+        restore/branch proceeds, exactly as today."""
+        from d33d.design_source import source_expected_for_version
+
+        repo_dir = Path(project_row["git_repo_path"])
+        if not repo_dir.is_dir() or source_expected_for_version(repo_dir, version_id):
+            raise VersionConflictError(
+                "the saved design source is missing from disk",
+                code="source_missing",
+            )
 
     async def set_as_main(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Set as main: re-point ``current_version`` in place AND write a
@@ -1061,6 +1088,16 @@ class VersionService:
         if target is None:
             raise LookupError(f"version {version_id} not found")
 
+        # Issue #295 — a fork seeds the new project from the source
+        # version's design source, so the same missing-source check as
+        # restore applies: repo absent, or the target's recorded
+        # design.scad lost → 409 with the detail code
+        # ``"source_missing"``; a pre-#105 target forks params-only, as
+        # today.
+        src_project_row = self.conn.get_project(project_id)
+        assert src_project_row is not None
+        await self._check_source_not_lost(src_project_row, version_id)
+
         async def _branch() -> dict[str, Any]:
             src_project = self.conn.get_project(project_id)
             assert src_project is not None
@@ -1274,7 +1311,19 @@ class VersionConflictError(Exception):
     """A version mutation lost its race (stale target / no-op restore).
 
     The HTTP layer maps this to 409 — the chain stays linear and the
-    loser's request is rejected rather than forking the history."""
+    loser's request is rejected rather than forking the history.
+
+    ``code`` (issue #295) is a machine-readable detail code (the 409 body
+    is ``{"detail": {"code": …, "message": …}}``): ``"source_missing"``
+    when the project's repo — or the target version's recorded design
+    source — is absent from disk; ``None`` keeps the legacy string detail
+    (the no-op 409 and every other conflict, unchanged)."""
+
+    def __init__(
+        self, message: str, code: str | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def _ensure_column(

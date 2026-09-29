@@ -980,13 +980,22 @@ def _raise_mapped(e: Exception) -> None:
 
     Raises ``HTTPException`` for every known type (and re-raises unknown
     types) — every path raises, so a caller never returns from here with a
-    mapped error left unhandled.
+    mapped error left unhandled. A ``VersionConflictError`` carrying a
+    detail ``code`` (issue #295, ``"source_missing"``) rides the 409 body
+    as ``{"detail": {"code": …, "message": …}}`` — the SPA maps the code to
+    copy.ts text — while a code-less conflict keeps the legacy string
+    detail (the no-op 409 and every other conflict, unchanged).
     """
     if isinstance(e, LookupError):
         raise HTTPException(status_code=404, detail=str(e))
     if isinstance(e, ValueError):
         raise HTTPException(status_code=422, detail=str(e))
     if isinstance(e, versions_mod.VersionConflictError):
+        if e.code is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": e.code, "message": str(e)},
+            )
         raise HTTPException(status_code=409, detail=str(e))
     raise e
 

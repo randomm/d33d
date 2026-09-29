@@ -628,6 +628,24 @@ export const export3mf = {
   failed: "The 3MF couldn't be exported.",
 } as const;
 
+/**
+ * Missing-storage copy (issue #295). The single sentence the restore /
+ * branch 409 with detail code `source_missing` maps to — the SPA maps the
+ * 409 body's `{ code: "source_missing" }` to this text (never the raw
+ * detail message), the same deck-home pattern as the #260 no-run replies.
+ * The chat pre-route's saved-design-missing reply is the backend's own
+ * wire string (emitted verbatim on the done frame — the SPA never
+ * substitutes its own copy for it), so only the 409 mapping lives here.
+ */
+export const missingStorage = {
+  /** The 409 `source_missing` 409 detail code (restore / branch-from): the
+   *  target version's recorded design source — or the project's git repo —
+   *  is absent from disk. Same honest statement the chat pre-route makes.
+   *  Never the raw backend message, never a fabricated value. */
+  sourceMissing:
+    "The saved design for this project is missing, so it can't be restored.",
+} as const;
+
 export const copy = {
   brief,
   passCard,
@@ -642,6 +660,7 @@ export const copy = {
   firstRun,
   shell,
   export3mf,
+  missingStorage,
 } as const;
 
 export default copy;

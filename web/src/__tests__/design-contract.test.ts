@@ -134,6 +134,7 @@ describe("design contract", () => {
       "firstPass",
       "firstRun",
       "history",
+      "missingStorage",
       "passCard",
       "progress",
       "region",
@@ -349,6 +350,35 @@ describe("design contract", () => {
     // the exact-match assertion at the top of this file's W250 block.
     const deck = copy.confirmOffer.offer("V", "L");
     expect(deck).toBe("I assumed V for L. Want it different?");
+  });
+
+  /* ----------------------------------------- W278 */
+
+  it("the 409 `source_missing` 409 detail code maps to copy.ts text (issue #295, d5)", () => {
+    // Issue #295 (d5): the restore / branch-from seam 409s with the
+    // detail body `{ code: "source_missing", message: … }` when the
+    // target version's recorded design source — or the project's git
+    // repo — is absent from disk. The SPA maps the CODE to this copy.ts
+    // sentence (never the raw detail message, never the generic
+    // `API 409: …` string); every other 409 (the no-op dedupe keeps its
+    // legacy string detail) keeps its existing message.
+    const sentence = copy.missingStorage.sourceMissing;
+    expect(sentence).toBeTruthy();
+    // No digit: a number in the sentence the SPA has not established is
+    // the house anti-pattern.
+    expect(sentence).not.toMatch(/\d/);
+    // No raw backend wording: the sentence is plain user-facing copy,
+    // never the wire string ("the saved design source is missing from
+    // disk").
+    expect(sentence).not.toContain("design source is missing from disk");
+    expect(sentence).not.toContain("source_missing");
+    // The restore handler in App.tsx reads the code off the 409 detail
+    // object and maps it to this sentence — the tripwire reads the
+    // handler's source so a wiring change that drops the mapping fails
+    // here (the #250 way: the tripwire reads both sides).
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(appSrc).toMatch(/code === "source_missing"/);
+    expect(appSrc).toMatch(/copy\.missingStorage\.sourceMissing/);
   });
 
   /* ----------------------------------------- W265 */
