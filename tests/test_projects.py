@@ -31,7 +31,11 @@ from d33d.projects import ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES
 
 
 def _run_async(app: Any, coro_factory) -> Any:
-    """Drive an async app under a fresh event loop, running the lifespan."""
+    """Drive an async app under a fresh event loop, running the lifespan.
+
+    Re-enters the lifespan for a FRESH connection on every call (the
+    versioning tests' ``run_async`` does the same — the lifespan closes
+    the app's connection on teardown, and the next run reconnects)."""
 
     async def _run():
         async with app.router.lifespan_context(app):
@@ -42,6 +46,26 @@ def _run_async(app: Any, coro_factory) -> Any:
                 return await coro_factory(client)
 
     return asyncio.run(_run())
+
+
+def _svc(app: Any):
+    """The app's version service on a LIVE connection (reconnect after a
+    previous ``_run_async`` teardown closed the handle — the versioning
+    tests' ``_reopen_conn`` pattern)."""
+    svc = app.state.versions
+    try:
+        svc.conn.raw.execute("SELECT 1")
+        return svc
+    except Exception:  # noqa: BLE001 - any closed-handle state means "reconnect"
+        import d33d.db as db_mod
+        from d33d import versions as versions_mod
+
+        fresh = db_mod.connect(app.state.db_path)
+        versions_mod.migrate(fresh)
+        app.state.conn = fresh
+        fresh_svc = versions_mod.VersionService(fresh)
+        app.state.versions = fresh_svc
+        return fresh_svc
 
 
 def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
@@ -594,3 +618,136 @@ def test_max_upload_bytes_is_20mb():
 def test_allowed_content_types():
     """The allowed set is exactly png + jpeg."""
     assert ALLOWED_CONTENT_TYPES == {"image/png", "image/jpeg"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #300 — the offer-acceptance pre-route reads the same single-source
+# block the Brief shows (``state_block_for_version`` — rule (a) axis
+# promotion, rule (b) confirmed, the measurement comparison): a "yes" is
+# accepted only when the offered param row is EXACTLY ``assumed`` there.
+# A param the Brief renders stated / measured / disagrees is never
+# confirmed — the offer lapses and normal routing applies.
+# ---------------------------------------------------------------------------
+
+_TRAY_PARAMS = {
+    "tray_width": 60.0,
+    "tray_depth": 45.0,
+    "tray_height": 20.0,
+    "wall_thickness": 3.0,
+}
+
+_TRAY_META = {
+    "tray_width": {"label": "Tray width", "unit": "mm", "axis": "W"},
+    "tray_depth": {"label": "Tray depth", "unit": "mm", "axis": "D"},
+    "tray_height": {"label": "Tray height", "unit": "mm", "axis": "H"},
+    "wall_thickness": {"label": "Wall thickness", "unit": "mm"},
+}
+
+
+def _drive_event_source(app, client, pid):
+    """Drive a registered event source to its terminal frame (the same
+    pattern the versioning tests' ``_drive_chat`` uses)."""
+
+    async def _drive():
+        source = app.state.event_sources.get(pid)
+        frames = []
+        assert source is not None, "event source not registered before 202"
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    return _drive()
+
+
+def test_offer_acceptance_rejects_stated_axis_param_via_single_source_block(
+    app_with_projects,
+):
+    """Issue #300 (acceptance path): a pending offer for ``tray_depth`` on
+    a version whose ``stated_dims`` = {W: 60, D: 45, H: 20} — the Brief
+    (``state_block_for_version``) renders ``tray_depth`` ``stated`` via
+    rule (a) — must NOT be confirmed on a clean "yes": the pre-route
+    reads the same single-source block the Brief shows, the row is not
+    ``assumed``, so the offer lapses and the message routes normally
+    (no design run — the flag is released, no version, no confirmation
+    recorded).
+
+    The pre-fix code read ``state_block_from_params`` here (stated-
+    blind — the row read ``assumed``) and recorded the confirmation;
+    this test pins the single-source read."""
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        svc = app_with_projects.state.versions
+        r = await client.post("/api/projects", json={"name": "tray"})
+        pid = r.json()["id"]
+        v = await svc.create_version(
+            pid,
+            dict(_TRAY_PARAMS),
+            param_meta=dict(_TRAY_META),
+            stated_dims={"W": 60.0, "D": 45.0, "H": 20.0},
+        )
+        svc.set_pending_offer(pid, {"version_id": v["id"], "param": "tray_depth"})
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "yes"}
+        )
+        return r2.status_code, pid
+
+    status, _pid = _run_async(app_with_projects, _call)
+    assert status == 202, status  # routed normally (not an acceptance)
+    svc = _svc(app_with_projects)
+    # The offer was NOT consumed: it is still pending.
+    offer = svc.get_pending_offer(_pid)
+    assert offer is not None and offer["param"] == "tray_depth"
+    # And no confirmation was recorded for the stated param.
+    latest = svc.latest_version(_pid)
+    assert latest["confirmed_params"] in (None, {})
+
+
+def test_offer_acceptance_accepts_still_assumed_param_via_same_block(
+    app_with_projects,
+):
+    """Issue #300 (acceptance path, the control case): the SAME tray
+    version with a pending offer for ``wall_thickness`` — a param with
+    no axis, no stated evidence — renders ``assumed`` in the same
+    single-source block the Brief shows, so a clean "yes" IS accepted:
+    the value is recorded as user-confirmed, the pending offer is
+    cleared, and the acknowledgement frame rides the chat stream.
+
+    The pre-fix code accepted this too (via ``state_block_from_params``);
+    the test pins that switching to the single-source block did not
+    over-narrow the acceptance (a genuinely assumed param is still
+    confirmable)."""
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        svc = app_with_projects.state.versions
+        r = await client.post("/api/projects", json={"name": "tray"})
+        pid = r.json()["id"]
+        v = await svc.create_version(
+            pid,
+            dict(_TRAY_PARAMS),
+            param_meta=dict(_TRAY_META),
+            stated_dims={"W": 60.0, "D": 45.0, "H": 20.0},
+        )
+        svc.set_pending_offer(pid, {"version_id": v["id"], "param": "wall_thickness"})
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "yes"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, _pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer"
+    assert done[0]["message"] == "Got it — Wall thickness stays 3.0\u202fmm.", done
+    assert done[0].get("confirm_ack_label") == "Wall thickness"
+    assert done[0].get("confirm_ack_value") == "3.0\u202fmm"
+    # The confirmation was recorded; the offer was consumed.
+    latest = svc.latest_version(_pid)
+    assert latest["confirmed_params"] == {"wall_thickness": 3.0}
+    assert svc.get_pending_offer(_pid) is None

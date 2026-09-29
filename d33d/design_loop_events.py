@@ -807,20 +807,25 @@ async def _resolve_offer(
         meta,
         new_version["confirmed_params"],
     )
+    # The single-source seam (issue #300): the block's PARAM rows — the
+    # SAME rows the Brief shows — feed the selection, the entry lookup
+    # and the sentence guard; the block is built ONCE (above) and is
+    # never recomputed per tier, per param, or per ``offer_entry`` call
+    # (``state_block_from_params`` must not run again on the selection
+    # path). Only param rows (``kind == "param"``) enter any set below:
+    # an axis row is never an offer target, and its name never enters an
+    # exclusion set (offers are params, not axes).
+    param_rows = [e for e in block if e.get("kind") == "param"]
     # Issue #264 — offer eligibility must exclude any param the block
     # renders ``disagrees`` (either source — user-stated or
     # model-emitted): a value the measurement contradicts is never an
     # assumption to confirm (offering it would ask the user to affirm a
     # number the part itself disproves). The set is passed EXPLICITLY to
-    # ``select_offer_candidate`` — the helper itself is measurement-
-    # blind (it reads ``state_block_from_params``). Only param rows
-    # (``kind == "param"``) enter the set: an axis row's disagreement is
-    # the axis's own business (it is never offered — offers are params,
-    # not axes).
+    # ``select_offer_candidate`` (the block rows above already carry the
+    # same provenance — the explicit set stays, so the exclusion is
+    # always explicit, never inferred).
     disagree_names = {
-        e["name"]
-        for e in block
-        if e.get("kind") == "param" and e.get("provenance") == "disagrees"
+        e["name"] for e in param_rows if e.get("provenance") == "disagrees"
     }
     # The confirmed set for SELECTION is the pre-pass latest version's
     # ``confirmed_params`` (the caller's ``prev_confirmed`` — read and
@@ -860,12 +865,15 @@ async def _resolve_offer(
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
         released_axes=released_axes, user_quoted_mm=quoted,
-        disagree_names=disagree_names,
+        disagree_names=disagree_names, block_entries=param_rows,
     )
     if name is None:
         versions.set_pending_offer(project_id, None)
         return None
-    entry = offer_entry(params, meta, name)
+    # The chosen param's entry comes from the SAME block (the single-
+    # source seam — the label + value the Brief shows, with the same
+    # ``meta_unit`` / ``param_axis`` graft), never a second build.
+    entry = offer_entry(params, meta, name, block_entries=param_rows)
     if entry is None:
         versions.set_pending_offer(project_id, None)
         return None
