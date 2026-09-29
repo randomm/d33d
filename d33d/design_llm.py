@@ -221,6 +221,36 @@ def _tool_names_for_role(role: str) -> list[str]:
     return [name] if name else list(T1_TOOL_NAMES)
 
 
+def _http_error_detail(resp: Any) -> str:
+    """``<code>`` plus a short safe hint for common non-2xx statuses.
+
+    ``resp`` is an ``httpx.Response`` in production (``status_code``); test
+    stubs may only emulate the attribute, hence the ``getattr`` fallbacks.
+    Never includes the response body — it could echo headers or keys.
+    """
+    # Accepted response shapes: httpx (``status_code``) and test stubs (``status``).
+    status = getattr(resp, "status_code", None)
+    if status is None:
+        status = getattr(resp, "status", "?")
+    status = int(status) if isinstance(status, (int, str)) and str(status).isdigit() else None
+    if status is None:
+        return "unknown status"
+    hint: str | None
+    if status in (401, 403):
+        hint = "check the model key"
+    elif status == 404:
+        hint = "check the model name/base URL"
+    elif status == 429:
+        hint = "rate limited"
+    elif 500 <= status < 600:
+        hint = "provider error"
+    else:
+        hint = None
+    if hint:
+        return f"HTTP {status} ({hint})"
+    return f"HTTP {status}"
+
+
 class SenderError(RuntimeError):
     """The endpoint answered non-OK, or the tier has no tool channel.
 
@@ -563,7 +593,7 @@ async def send(
     resp = await request_factory(body)
     if not getattr(resp, "is_success", False):
         raise SenderError(
-            f"LLM call for role {role!r} failed: HTTP {getattr(resp, 'status', '?')}",
+            f"LLM call for role {role!r} failed: {_http_error_detail(resp)}",
             status="error",
         )
     _logging = logging.getLogger(__name__)

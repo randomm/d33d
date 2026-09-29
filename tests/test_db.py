@@ -287,3 +287,30 @@ def test_row_factory_is_dict_like(conn: db.Connection) -> None:
     # sqlite3.Row supports dict-style access via keys() and dict() conversion.
     assert list(row.keys()) == ["one"]
     assert dict(row) == {"one": 1}
+
+
+def test_create_project_repo_lands_under_the_env_data_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A bare ``connect()`` + ``create_project`` must create its repo under
+    the ``D33D_DATA_DIR`` env value, never under ``~/.d33d`` (regression
+    guard for the #294 data-dir leak)."""
+    # The autouse _isolate_data_dir fixture in conftest already points
+    # D33D_DATA_DIR at tmp_path/d33d-data; assert the path-prefix contract
+    # explicitly rather than relying on the fixture's exact layout.
+    data_dir = tmp_path / "iso-data"
+    monkeypatch.setenv("D33D_DATA_DIR", str(data_dir))
+    real_home = Path.home() / ".d33d"
+    c = db.connect(":memory:")
+    try:
+        pid = c.create_project(name="x")
+        row = c.get_project(pid)
+        repo = Path(row["git_repo_path"])
+        assert str(repo).startswith(str(data_dir)), (
+            f"repo {repo} is not under the D33D_DATA_DIR {data_dir}"
+        )
+        assert not str(repo).startswith(str(real_home)), (
+            f"repo {repo} leaked under the operator's real {real_home}"
+        )
+    finally:
+        c.close()
