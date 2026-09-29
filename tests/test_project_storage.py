@@ -21,7 +21,6 @@ Covers the ticket's acceptance criteria:
 from __future__ import annotations
 
 import os
-import uuid
 from pathlib import Path
 
 import pytest
@@ -29,7 +28,7 @@ import pytest
 import d33d.db as db_mod
 from d33d.db import migrate_project_repos
 
-from .versioning.helpers import repo_path_for, run_async
+from .versioning.helpers import run_async
 
 # A minimal valid 1x1 PNG (same fixture family as
 # test_design_loop_finalize.py's inline photo).
@@ -89,8 +88,8 @@ def test_new_project_default_via_api_lands_under_data_dir(
     data_dir: Path, tmp_path: Path
 ):
     """``POST /api/projects`` (un-monkeypatched default) also lands the
-    repo under the app's data dir — the DB path's parent, steered into
-    ``D33D_DATA_DIR`` by ``create_app``."""
+    repo under the app's data dir — the DB path's parent, steered by
+    ``db.APP_DATA_DIR`` which the lifespan records."""
     import d33d.app as app_mod
 
     app = app_mod.create_app(
@@ -98,6 +97,9 @@ def test_new_project_default_via_api_lands_under_data_dir(
         master_key_path=data_dir / "master.key",
         catalogue_path=data_dir / "models.yaml",
     )
+    # Simulate the app wiring (the lifespan sets this to the DB path's
+    # parent): the repo default reads it at call time.
+    db_mod.APP_DATA_DIR = data_dir
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "api-default"})
@@ -107,7 +109,10 @@ def test_new_project_default_via_api_lands_under_data_dir(
         row = app.state.conn.get_project(r.json()["id"])
         return row["git_repo_path"]
 
-    repo = Path(run_async(app, _call))
+    try:
+        repo = Path(run_async(app, _call))
+    finally:
+        db_mod.APP_DATA_DIR = None
     assert repo.is_dir() or repo.parent.is_dir()  # repo dir exists on disk
     assert repo.parent == data_dir / "projects"
 
@@ -224,33 +229,65 @@ def test_migration_photo_outside_repo_prefix_not_rewritten(data_dir: Path):
         conn.close()
 
 
+def test_migration_basename_collision_resolved_not_nested(data_dir: Path, caplog):
+    """Two projects whose repos share a basename: the second must NOT be
+    moved *inside* the first (``<base>/<name>/<name>``) — it lands under a
+    collision suffix, both rows point at real directories, and both repos
+    keep their contents."""
+    first_repo = _seed_repo(data_dir / "elsewhere-a" / "abc123")
+    second_repo = _seed_repo(data_dir / "elsewhere-b" / "abc123")
+    conn = db_mod.connect(data_dir / "d33d.sqlite3")
+    conn.data_dir = data_dir
+    try:
+        pid1 = _seed_project(conn, name="first", repo=str(first_repo))
+        pid2 = _seed_project(conn, name="second", repo=str(second_repo))
+        with caplog.at_level("INFO", logger="d33d.db"):
+            res = migrate_project_repos(conn)
+        assert res == {"projects": 2, "present": 2, "missing": 0}
+        row1 = conn.get_project(pid1)
+        row2 = conn.get_project(pid2)
+        # The first project owns the bare basename.
+        assert row1["git_repo_path"] == str(data_dir / "projects" / "abc123")
+        assert (data_dir / "projects" / "abc123" / "design.scad").is_file()
+        # The second project landed under a collision suffix — never nested
+        # inside the first project's directory.
+        assert row2["git_repo_path"].startswith(
+            str(data_dir / "projects" / "abc123-")
+        )
+        nested = data_dir / "projects" / "abc123" / "abc123"
+        assert not nested.exists()
+        assert Path(row2["git_repo_path"]).is_dir()
+        assert (Path(row2["git_repo_path"]) / "design.scad").is_file()
+        assert not second_repo.exists()
+        # The collision is flagged (never silent) — but the missing-repo
+        # WARNING is a different message; only the suffix note may appear
+        # here.
+        suffix_notes = [
+            r for r in caplog.records if "collision suffix" in r.getMessage()
+        ]
+        assert len(suffix_notes) == 1
+    finally:
+        conn.close()
+
+
 def test_migration_non_git_repo_dir_still_moves(data_dir: Path):
     """A plain directory (empty or not a git repo) is moved, never an
     error: the operator rule is 'if the old directory exists, move it'."""
     plain = data_dir / "tmp-projects" / "plain77"
     plain.mkdir(parents=True)
-    conn = db_mod.connect(data_dir / "d33d.sqlite3")
-    conn.data_dir = data_dir
-    try:
-        pid = _seed_project(conn, name="plain", repo=str(plain))
-        res = migrate_project_repos(conn)
-        assert res == {"projects": 1, "present": 1, "missing": 0}
-        assert (data_dir / "projects" / "plain77").is_dir()
-        assert not plain.exists()
-    finally:
-        conn.close()
-
-
-def test_migration_empty_repo_dir_moves(data_dir: Path):
     empty = data_dir / "tmp-projects" / "empty00"
     empty.mkdir(parents=True)
     conn = db_mod.connect(data_dir / "d33d.sqlite3")
     conn.data_dir = data_dir
     try:
-        pid = _seed_project(conn, name="empty", repo=str(empty))
+        _seed_project(conn, name="plain", repo=str(plain))
+        _seed_project(conn, name="empty", repo=str(empty))
         res = migrate_project_repos(conn)
-        assert res == {"projects": 1, "present": 1, "missing": 0}
+        assert res == {"projects": 2, "present": 2, "missing": 0}
+        assert (data_dir / "projects" / "plain77").is_dir()
         assert (data_dir / "projects" / "empty00").is_dir()
+        assert not plain.exists()
+        assert not empty.exists()
     finally:
         conn.close()
 
@@ -295,7 +332,7 @@ def test_mixed_fleet_summary_counts(data_dir: Path, caplog):
     conn = db_mod.connect(data_dir / "d33d.sqlite3")
     conn.data_dir = data_dir
     try:
-        p1 = _seed_project(conn, name="one", repo=str(present_old))
+        _seed_project(conn, name="one", repo=str(present_old))
         _seed_project(conn, name="two", repo=str(gone_old))
         _seed_project(conn, name="three", repo=str(already))
         with caplog.at_level("INFO", logger="d33d.db"):
@@ -336,16 +373,18 @@ def test_fresh_install_summary_zeroes(data_dir: Path, caplog):
 
 
 def test_migration_runs_at_app_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """``create_app`` + lifespan (the production startup path) runs the
-    migration: a seeded temp-dir repo is moved before any request."""
+    """The REAL production startup path (``create_app`` + lifespan, as
+    ``python -m d33d.main`` runs it) runs the migration: a pre-existing
+    temp-dir repo row is moved into ``<data_dir>/projects/`` by the
+    lifespan — no manually pre-set ``app.state.conn`` steer."""
     data_dir = tmp_path / "d33d-data"
     data_dir.mkdir()
-    # The production shape: D33D_DATA_DIR names this exact directory
-    # (main.py sets it and the DB sits inside it). Pre-create the projects
-    # base under the REAL app data_dir and assert it stays empty — the
-    # migration base must be the app's data_dir, not the env's.
-    real_base = tmp_path / "other-data" / "projects"
-    real_base.mkdir(parents=True)
+    # The production shape: D33D_DATA_DIR names a DIFFERENT directory than
+    # the app's data dir. Pre-create the env's projects base and assert it
+    # stays empty — the migration base must be the app's data dir (the DB
+    # path's parent), not the env's.
+    env_base = tmp_path / "other-data" / "projects"
+    env_base.mkdir(parents=True)
     monkeypatch.setenv("D33D_DATA_DIR", str(tmp_path / "other-data"))
     old = _seed_repo(data_dir / "tmp-projects" / "start1", with_photo=True)
 
@@ -356,9 +395,12 @@ def test_migration_runs_at_app_start(tmp_path: Path, monkeypatch: pytest.MonkeyP
         master_key_path=data_dir / "master.key",
         catalogue_path=data_dir / "models.yaml",
     )
-    app.state.conn = db_mod.connect(data_dir / "d33d.sqlite3")
-    app.state.conn.data_dir = data_dir
-    pid = app.state.conn.create_project(name="start", git_repo_path=str(old))
+    # Seed the row the way a legacy installation would have it (the DB is
+    # the storage; only the row's path is the legacy state).
+    seed = db_mod.connect(data_dir / "d33d.sqlite3")
+    pid = seed.create_project(name="start", git_repo_path=str(old))
+    seed.update_project(pid, source_photo_path=str(old / "photo.png"))
+    seed.close()
 
     async def _call(client):
         # The lifespan has already run (run_async wraps it); read the
@@ -378,7 +420,7 @@ def test_migration_runs_at_app_start(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert row_db["source_photo_path"] == str(new / "photo.png")
     # The migration targeted the app's data dir — the env's projects base
     # was never used as the base.
-    assert list(real_base.iterdir()) == []
+    assert list(env_base.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

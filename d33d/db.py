@@ -70,6 +70,13 @@ __all__ = [
 
 SCHEMA_VERSION = 1
 
+#: The app-scoped data dir (issue #294). ``create_app``'s lifespan records
+#: the DB path's parent here at startup so the repo default resolves under
+#: the app's data dir instead of a leftover ``D33D_DATA_DIR`` env var. Left
+#: ``None`` for bare ``connect()`` usage (tests), where the env is the
+#: source. Reset by test setups that need the env-backed default.
+APP_DATA_DIR: Path | None = None
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_info (
     version INTEGER NOT NULL
@@ -153,11 +160,11 @@ class Connection:
 
     def __init__(self, path: str | Path) -> None:
         self.path = str(path)
-        # The app-scoped data dir (issue #294): ``create_app`` sets this
-        # to the directory of the DB path AFTER ``db.connect`` returns, so
-        # the repo default and the startup migration steer off it at call
-        # time instead of the ``D33D_DATA_DIR`` env. ``None`` for bare
-        # ``connect()`` usage (tests), where the env is the source.
+        # The app-scoped data dir (issue #294): set by the app lifespan to
+        # the directory of the DB path, so the repo default and the startup
+        # migration steer off it at call time instead of the ``D33D_DATA_DIR``
+        # env. ``None`` for bare ``connect()`` usage (tests), where the env
+        # is the source.
         self.data_dir: Path | None = None
         self._conn = sqlite3.connect(self.path)
         self._conn.row_factory = sqlite3.Row
@@ -186,6 +193,16 @@ class Connection:
     def close(self) -> None:
         self._conn.close()
 
+    @property
+    def closed(self) -> bool:
+        """True once ``close()`` has run (a test-owned connection that a
+        later ``run_async`` lifespan closed before re-entering the app)."""
+        try:
+            self._conn.execute("SELECT 1")
+            return False
+        except sqlite3.ProgrammingError:
+            return True
+
     # -- projects -----------------------------------------------------------
 
     def create_project(
@@ -202,25 +219,18 @@ class Connection:
         ``git_repo_path`` is the on-disk path of the per-project git repo.
         If not supplied, a path under ``projects_dir()`` is generated so
         the row is immediately consistent (the caller is expected to
-        ``git init`` that path before any commit).
+        ``git init`` that path before any commit). A caller-supplied
+        ``git_repo_path`` is trusted: the caller must ensure the
+        directory exists before ``git init``.
         """
         tags = tags or []
-        # Look the default up through the module global at call time —
-        # never a def-time binding — so tests that patch
-        # ``db_mod._default_git_path`` intercept this call as well (the
-        # versioning/conftest, test_projects and issue-163 seams). The
-        # connection's app data dir steers the base (issue #294).
-        if git_repo_path is None:
-            patched = globals()["_default_git_path"]
-            if patched is not _default_git_path:
-                # Patched seam (the versioning/conftest, test_projects and
-                # issue-163 monkeypatches) — the patch fully overrides the
-                # base, exactly as before.
-                git_path = patched(name)
-            else:
-                git_path = _default_git_path_for(self, name)
-        else:
-            git_path = git_repo_path
+        # ``_default_git_path`` is looked up as a bare global at call time —
+        # so a monkeypatched ``db_mod._default_git_path`` (the
+        # versioning/conftest, test_projects and issue-163 seams) intercepts
+        # it with its exact ``(name)`` signature. The unpatched path is
+        # steered by the module-level ``APP_DATA_DIR`` the app lifespan
+        # records (issue #294).
+        git_path = git_repo_path if git_repo_path is not None else _default_git_path(name)
         cur = self._conn.execute(
             "INSERT INTO projects (name, git_repo_path, tags, notes, source_photo_path)"
             " VALUES (?, ?, ?, ?, ?)",
@@ -529,16 +539,6 @@ def projects_dir(data_dir: str | Path | None = None) -> Path:
     return base
 
 
-def _default_git_path_for(conn: Connection, name: str) -> str:
-    """The un-patched default, steered by ``conn.data_dir`` (issue #294):
-    a repo under the connection's app data dir when one is set, else the
-    ``D33D_DATA_DIR`` env default (bare-``connect()`` tests)."""
-    slug = uuid.uuid4().hex[:12]
-    base = projects_dir(conn.data_dir) / slug
-    base.mkdir(parents=True, exist_ok=True)
-    return str(base)
-
-
 def _default_git_path(name: str) -> str:
     """Generate a unique on-disk path for the per-project git repo.
 
@@ -549,8 +549,16 @@ def _default_git_path(name: str) -> str:
     ``uuid4``) makes the path unique per project and keeps it from
     colliding across tests / worktrees. The caller is expected to
     ``git init`` this path before any commit.
+
+    The base comes from the module-level :data:`APP_DATA_DIR` when the app
+    has set it (issue #294 — the lifespan records the DB path's parent),
+    else the ``D33D_DATA_DIR`` env default (bare-``connect()`` usage).
+    Called from ``create_project`` through the module global at call time
+    so a monkeypatched ``db_mod._default_git_path`` (the versioning/conftest,
+    test_projects and issue-163 seams) intercepts it with its exact
+    ``(name)`` signature.
     """
-    base = projects_dir() / uuid.uuid4().hex[:12]
+    base = projects_dir(APP_DATA_DIR) / uuid.uuid4().hex[:12]
     base.mkdir(parents=True, exist_ok=True)
     return str(base)
 
@@ -561,79 +569,86 @@ def migrate_project_repos(
     """One-shot startup migration: move project repos into the data dir.
 
     For every project whose ``git_repo_path`` is NOT under
-    ``projects_dir_path`` (the data-dir ``projects/`` base): if the old
-    directory still exists it is moved (``shutil.move``) to
-    ``<base>/<repo-basename>`` and the row's ``git_repo_path`` — plus
-    ``source_photo_path`` when it sat under the old repo prefix — is
-    rewritten to the new location (an INFO log). If the old directory is
-    gone (the OS-temp clean already ran), the row is left UNCHANGED: a
-    single WARNING names the project id only (never a path), no empty
-    repo is created, and nothing is deleted. Migration never blocks
-    startup — a per-row failure is logged and skipped.
+    ``projects_dir_path`` (the data-dir ``projects/`` base), the old
+    directory is moved to ``<base>/<repo-basename>`` and the row's paths
+    rewritten; if the old directory is gone, the row is left UNCHANGED
+    with a single WARNING naming the project id only (never a path).
+    Migration never blocks startup — a per-row failure is logged and
+    skipped.
 
-    Idempotent: after the first run every live repo is under the base, so
-    a second run moves nothing.
-
-    Returns ``{"projects": N, "present": M, "missing": K}`` — the
-    post-migration state, always logged as exactly one summary line
-    ``"N projects, M repos present, K missing"`` (the fresh-install
-    ``0/0/0`` case included): ``present`` is a disk-existence check on
-    each (post-migration) ``git_repo_path``, derived fresh — never a
-    persisted flag that could go stale.
+    Returns ``{"projects": N, "present": M, "missing": K}``, derived
+    fresh from each row's post-migration ``git_repo_path``.
     """
-    base = Path(projects_dir_path) if projects_dir_path is not None else projects_dir()
-    n = moved = missing = 0
+    base = (
+        Path(projects_dir_path) if projects_dir_path is not None else projects_dir()
+    )
+    base_resolved = base.resolve()
+    n = 0
     for p in conn.list_projects():
         pid = p["id"]
         n += 1
         old = Path(p["git_repo_path"])
         if old == base or base in old.parents:
-            if old.is_dir():
-                moved += 1
-            else:
-                missing += 1
             continue
         new = base / old.name
-        if old.is_dir():
-            try:
-                new.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(old), str(new))
-            except OSError as e:
-                logger.warning(
-                    "project %s: could not move repo to %s: %s",
-                    pid,
-                    new,
-                    e,
-                )
-                if not old.is_dir():
-                    missing += 1
-                continue
-            updates = {"git_repo_path": str(new)}
-            photo = p.get("source_photo_path")
-            if photo:
-                photo_p = Path(photo)
-                if photo_p == old or old in photo_p.parents:
-                    updates["source_photo_path"] = str(
-                        photo_p if photo_p == old else new / photo_p.relative_to(old)
-                    )
-            conn.raw.execute(
-                "UPDATE projects SET git_repo_path = ?, "
-                "source_photo_path = COALESCE(?, source_photo_path) WHERE id = ?",
-                (updates["git_repo_path"], updates.get("source_photo_path"), pid),
+        if new.exists():
+            # A prior row in this run (or a prior migration) already owns this
+            # basename: without the guard, ``shutil.move`` would move ``old``
+            # *inside* the existing directory (``<base>/<name>/<name>``) while
+            # the row points at the outer one — silent data loss. Resolve the
+            # collision with a short suffix instead, and log it.
+            new = base / f"{old.name}-{uuid.uuid4().hex[:4]}"
+            logger.warning(
+                "project %s: basename %s already exists in the projects base — "
+                "moved under a collision suffix",
+                pid,
+                old.name,
             )
-            conn.commit()
-            logger.info(
-                "project %s: moved repo from %s to %s", pid, old, new
-            )
-        else:
+        if not old.is_dir():
             logger.warning(
                 "project %s: repo directory missing — left unchanged; "
                 "design source and photo are unrecoverable",
                 pid,
             )
-        if new.is_dir():
-            moved += 1
-        else:
-            missing += 1
-    logger.info("%d projects, %d repos present, %d missing", n, moved, missing)
-    return {"projects": n, "present": moved, "missing": missing}
+            continue
+        # Containment: the basename comes from trusted DB content, but a
+        # traversal (or a symlinked base) must not move the repo outside
+        # ``<data_dir>/projects/``.
+        if not new.is_absolute() or not new.resolve().is_relative_to(base_resolved):
+            logger.warning(
+                "project %s: repo move target escapes the projects base — "
+                "skipped",
+                pid,
+            )
+            continue
+        new_photo = p.get("source_photo_path")
+        if new_photo:
+            photo_p = Path(new_photo)
+            if photo_p == old or old in photo_p.parents:
+                new_photo = str(photo_p if photo_p == old else new / photo_p.relative_to(old))
+        # Point the row at the new location FIRST: a failed move leaves the
+        # repo intact at the old path (row updated, nothing moved); a failed
+        # DB update leaves the old row + the repo already moved, which the
+        # next run sees as a missing old dir and leaves unchanged — the
+        # operator sees the row and recovers manually either way.
+        conn.raw.execute(
+            "UPDATE projects SET git_repo_path = ?, "
+            "source_photo_path = COALESCE(?, source_photo_path) WHERE id = ?",
+            (str(new), new_photo, pid),
+        )
+        conn.commit()
+        try:
+            shutil.move(str(old), str(new))
+        except OSError as e:
+            logger.warning("project %s: could not move repo: %s", pid, e)
+            continue
+        logger.info("project %s: moved repo to projects/%s", pid, old.name)
+    # Summary derived fresh from disk (never a persisted flag that could
+    # go stale), logged as exactly one line — the fresh-install 0/0/0
+    # case included.
+    present = sum(
+        1 for p in conn.list_projects() if Path(p["git_repo_path"]).is_dir()
+    )
+    missing = n - present
+    logger.info("%d projects, %d repos present, %d missing", n, present, missing)
+    return {"projects": n, "present": present, "missing": missing}
