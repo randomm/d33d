@@ -233,6 +233,29 @@ export default function App({ client }: AppProps) {
   // reads it and never recomputes presence in the client.
   const [projectStorage, setProjectStorage] = useState<ProjectStorage | undefined>(undefined);
 
+  // The project's live storage signal (issue #295) — the server-computed
+  // {repo_present, photo_present} from the project GET. Fetched once the
+  // project exists (the SPA never recomputes presence client-side) and
+  // re-fetched on every version-created frame alongside the design state —
+  // a fresh version write is the only event that can change file presence
+  // in-band. A failed fetch leaves the last-known signal (never wipes it
+  // to "present"); absent → the Brief shows no marker.
+  const [projectStorage, setProjectStorage] =
+    useState<ProjectStorage | undefined>(undefined);
+  const refetchProject = useCallback((projectIdOverride?: number) => {
+    const effectiveProjectId = projectIdOverride ?? projectId;
+    if (effectiveProjectId === null) return;
+    apiClient
+      .getProject(effectiveProjectId)
+      .then((project) => {
+        setProjectStorage(project.storage);
+      })
+      .catch(() => {
+        // Keep the last-known signal (or none) — a storage read that fails
+        // must never flip a missing marker into "present".
+      });
+  }, [projectId, apiClient]);
+
   // Lazy project creation (issue #192): no POST /api/projects on mount —
   // the project is created by the FIRST explicit user action (a chat send,
   // or a photo upload) and never again for the lifetime of this mount. The
@@ -248,6 +271,7 @@ export default function App({ client }: AppProps) {
         .then((project) => {
           setProjectId(project.id);
           setProjectName(project.name);
+          setProjectStorage(project.storage);
           return project.id;
         })
         .catch((e) => {
@@ -304,6 +328,10 @@ export default function App({ client }: AppProps) {
         if (!isStale()) {
           setDesignState(rows);
           setDesignStateStale(false);
+          // Issue #295: re-read the storage signal on the same trigger —
+          // a new version write is the only in-band event that can change
+          // file presence.
+          refetchProject(effectiveProjectId);
         }
       })
       .catch(() => {
@@ -329,7 +357,7 @@ export default function App({ client }: AppProps) {
             });
         }, 300);
       });
-  }, [projectId, apiClient]);
+  }, [projectId, apiClient, refetchProject]);
 
   // The mount-time refetch effect: fires when projectId changes (from null
   // to the created project's id). This is the "project change" effect that
@@ -1644,6 +1672,10 @@ export default function App({ client }: AppProps) {
           storage={projectStorage}
           hasLivePin={pendingSelection !== null}
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
+          // Issue #295: the server-computed storage signal drives the Brief's
+          // missing-design banner / missing-photo marker (the SPA never
+          // recomputes presence). Absent → no marker (legacy server).
+          storage={projectStorage}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
           onChange={(label) => handleSendMessage(`${copy.brief.rowActions.change}: ${label}`)}
         />

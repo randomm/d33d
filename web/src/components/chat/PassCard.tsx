@@ -52,8 +52,11 @@ interface PassCardProps {
   views: RenderImage[];
   /** The pass's summary prose (UI face, no dimensions). */
   summary?: string;
-  /** The generated source (the disclosure's content — never chat text). */
-  source?: string;
+  /** The generated source (the disclosure's content — never chat text).
+   *  `undefined` = no source carried this turn (no disclosure control);
+   *  `null` = a source was expected but is missing on disk (issue #295 —
+   *  the disclosure renders "source missing" instead of an empty <pre>). */
+  source?: string | null;
   /** The enlarged view's close action (issue #125). */
   onBesidePhoto?: () => void;
 }
@@ -119,11 +122,10 @@ export function PassCard({
       )}
       {source !== undefined && (
         <>
-          {source === "" ? (
-            // Issue #295: the pass's recorded design.scad is no longer on
-            // disk — render the "source missing" disclosure instead of an
-            // empty <pre> or "OpenSCAD, 0 lines" (house rule: no confident
-            // value it has not established).
+          {source === null ? (
+            // Issue #295: no source to show. Never "OpenSCAD, 0 lines",
+            // never an empty <pre> — a confident value the card has not
+            // established.
             <span
               className="pass-card-source-missing"
               data-testid="pass-card-source-missing"

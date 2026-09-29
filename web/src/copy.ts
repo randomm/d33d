@@ -148,6 +148,25 @@ export const brief = {
    *  disagrees rows, and unknowns are never grouped away; the unknowns are
    *  the thing to act on, so they surface out of the list. */
   unresolvedHeading: (count: number): string => `Unresolved · ${count}`,
+
+  /** The Brief's storage-degradation states (issue #295): the project's
+   *  saved design source or reference photo is missing on disk (the server
+   *  reports both via the project's `storage` field — the SPA reads it,
+   *  never recomputes). Both render in `var(--color-blocked)` ochre —
+   *  never the region-marker colour (W17: the marker hex has exactly one
+   *  home, lib/marker.ts). The banner is HONEST ABOUT WHAT
+   *  SURVIVES: the persisted params/bbox still show as-is underneath, so
+   *  the sentence never claims the design is lost, only that the SOURCE
+   *  is. This is also the exact wire string the server's no-run chat reply
+   *  and the restore/branch 409 carry (the design-contract tripwire pins
+   *  the three-way agreement — the #260 way). */
+  savedDesignMissing:
+    "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+  /** The Brief's small marker for a reference photo that was deleted after
+   *  being stored (the `storage.photo_present === false` state — a
+   *  photo-LESS project is `null` and shows nothing). */
+  referencePhotoMissing: "Reference photo missing",
+
   /** The collapsed-params disclosure line (issue #274): how many settled,
    *  agreeing param rows are hidden behind it. Singular-aware. */
   moreParameters: (count: number): string =>
@@ -173,6 +192,11 @@ export const passCard = {
     `${lines} line${lines === 1 ? "" : "s"} changed`,
   sourceFootnote:
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
+  /** The source disclosure when no source exists (issue #295): the card
+   *  must NOT render "OpenSCAD, 0 lines" or an empty <pre> as if it were
+   *  an established value — it says plainly that there is no source. */
+  sourceMissing: "Source missing — no OpenSCAD to show for this design.",
+
 
   checksPassed: (count: number): string => `${count} checks`,
   closeDisclosure: "Close the source",
@@ -640,6 +664,14 @@ export const export3mf = {
    *  flight — the version being created is not yet exportable). */
   conflict:
     "A design is still being made — export it once that finishes.",
+  /** The 409 with `detail: "source_missing"` (issue #295): the project's
+   *  saved design source is gone (the repo or the version's design.scad
+   *  was lost), so restore and branch-from cannot copy it. The SPA maps
+   *  ONLY this detail code to this copy — every other 409 keeps its
+   *  existing message. */
+  sourceMissing409:
+    "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+
   /** The generic fallback: an unlisted/`unknown` class, no `error_class`
    *  (the 404 bodies), or a network failure with no class at all. */
   failed: "The 3MF couldn't be exported.",

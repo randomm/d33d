@@ -132,6 +132,15 @@ interface BriefProps {
    *  from MARKER_COLOR — no CSS token, by design / W17). The outline
    *  makes the click-on-pixels legibly a click-on-parameter. */
   highlightModuleId?: string | null;
+  /** The project's live storage signal (issue #295) — the server's file
+   *  checks, read verbatim (the SPA never recomputes presence). Drives the
+   *  missing-saved-design banner (`repo_present === false` or a lost
+   *  source) and the reference-photo-missing marker
+   *  (`photo_present === false` — NOT `null`: a photo-less project
+   *  shows nothing). Both render in `var(--color-blocked)` ochre, never
+   *  the region-marker colour (W17: the marker hex has exactly one home,
+   *  lib/marker.ts). */
+  storage?: ProjectStorage;
   /** The unknown-value control's question — sent to the assistant. */
   onAsk?: (label: string) => void;
   /** The expanded row's "Change it" — routed to the assistant. */
@@ -207,9 +216,19 @@ export function Brief({
   const safeEntries = entries ?? [];
   const chip = isChip || hasLivePin === true;
 
+  // Issue #295: the storage-degradation states. `savedDesignMissing` fires
+  // only when the server says the repo (and therefore the source) is gone —
+  // the persisted params/bbox still render underneath, as-is, so the banner
+  // is the ONLY thing that changes. `photoMissing` fires ONLY on `false`
+  // (a path was stored, the file was lost): `null` (never had a photo) and
+  // `true` show nothing.
+
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
   const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
+
+  const savedDesignMissing = storage?.repo_present === false;
+  const photoMissing = storage?.photo_present === false;
 
   // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows
   // (stated / measured / assumed, `kind: "param"`, never disagrees). Axis
@@ -499,6 +518,41 @@ export function Brief({
       }}
     >
       {copy.brief.eyebrow}
+
+      {savedDesignMissing && (
+        <div
+          className="brief-saved-missing"
+          data-testid="brief-saved-missing"
+          style={{
+            marginTop: 8,
+            padding: "4px 8px",
+            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+            color: "var(--color-blocked)",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          {copy.brief.savedDesignMissing}
+        </div>
+      )}
+
+      {photoMissing && (
+        <span
+          className="brief-photo-missing"
+          data-testid="brief-photo-missing"
+          style={{
+            display: "inline-block",
+            marginTop: 8,
+            padding: "2px 8px",
+            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+            color: "var(--color-blocked)",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          {copy.brief.referencePhotoMissing}
+        </span>
+      )}
 
       {safeEntries.length === 0 ? (
         <p

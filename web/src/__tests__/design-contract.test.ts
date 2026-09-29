@@ -551,6 +551,43 @@ describe("design contract", () => {
     expect(summary.toLowerCase()).not.toContain("passed validation");
   });
 
+  it("the storage-missing states have one deck home and agree across all three surfaces (issue #295)", () => {
+    // Issue #295: the missing-design reply has THREE surfaces that must
+    // never drift — the Brief's missing-design banner
+    // (`brief.savedDesignMissing`), the chat's no-run missing-source reply
+    // (the server emits the same string verbatim, #260 way), and the
+    // restore/branch 409 the SPA maps from `detail: "source_missing"`
+    // (`export3mf.sourceMissing409`). One deck home per surface; the two
+    // design-copy keys pin the SAME wire string.
+    //
+    // The exact sentence (acceptance criterion, verbatim):
+    expect(copy.brief.savedDesignMissing).toBe(
+      "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+    );
+    expect(copy.export3mf.sourceMissing409).toBe(copy.brief.savedDesignMissing);
+    // The 409 copy and the 404/other-409 copy are distinct — only the
+    // `source_missing` detail maps here; every other 409 keeps its own
+    // message.
+    expect(copy.export3mf.sourceMissing409).not.toBe(copy.export3mf.conflict);
+    // The photo-missing marker is a short marker, not the full sentence —
+    // the two states are distinct honest statements.
+    expect(copy.brief.referencePhotoMissing).toBe("Reference photo missing");
+    expect(copy.brief.referencePhotoMissing).not.toBe(copy.brief.savedDesignMissing);
+    // Neither storage string is a failure headline with a confident number
+    // — no digits, and neither reads like an export error.
+    for (const s of [copy.brief.savedDesignMissing, copy.brief.referencePhotoMissing]) {
+      expect(s).not.toMatch(/\d/);
+    }
+    // The pass card's source-missing disclosure: "source missing" instead
+    // of "OpenSCAD, 0 lines" or an empty <pre> (the house rule: no
+    // confident value it has not established).
+    expect(copy.passCard.sourceMissing).toContain("Source missing");
+    expect(copy.passCard.sourceMissing).not.toContain("0 lines");
+    expect(copy.passCard.sourceMissing).not.toBe(
+      copy.passCard.sourceDisclosure(0),
+    );
+  });
+
   it("an unestablished value is a phrase, never a number or a dash", () => {
     // Never-stated and not-yet-measured are both real states. A blank is honest;
     // a plausible-looking number is the house anti-pattern.
