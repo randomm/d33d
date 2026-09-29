@@ -1532,8 +1532,8 @@ def _build_production_design_loop():
     ``asyncio.run``-nested inside the already-running event loop, which
     ``asyncio.run`` forbids with ``RuntimeError``.
     """
-    from d33d.config.catalogue import load_catalogue
-    from d33d.config.preflight import model_preflight
+    from d33d.config.catalogue import CatalogueError, MissingEnvVarError, load_catalogue
+    from d33d.config.preflight import model_preflight_loaded
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
     from d33d.design_loop import (
@@ -1582,16 +1582,20 @@ def _build_production_design_loop():
         # LLM call — a missing/empty provider key, an unresolved design
         # role, or a missing/invalid catalogue must end the turn at once
         # with the loop-level ``model_unconfigured`` reason (zero LLM
-        # HTTP calls, zero capability probes, zero render calls). Fresh
-        # ``load_catalogue`` inside ``model_preflight`` — the ``cat``
-        # load that used to sit above (and raised straight into the
-        # closure) is gone: the pre-flight's own load is the same fresh
-        # read, so a not-ok result never touches a catalogue and an ok
-        # result reloads the (unchanged) file once more.
-        pre = model_preflight(catalogue_path, "design")
+        # HTTP calls, zero capability probes, zero render calls). One
+        # ``load_catalogue`` in the closure, then ``model_preflight_loaded``
+        # on that same ``cat``.
+        try:
+            cat = load_catalogue(catalogue_path)
+        except MissingEnvVarError as e:
+            return _model_unconfigured_result(e.var_name)
+        except CatalogueError:
+            # Missing or invalid catalogue file: the pre-flight's
+            # not-ok case (no env var to name).
+            return _model_unconfigured_result(None)
+        pre = model_preflight_loaded(cat, "design")
         if not pre.ok:
             return _model_unconfigured_result(pre.env_var)
-        cat = load_catalogue(catalogue_path)
         res = resolve_model(cat, "design")
         # The key comes from the RESOLVED model's own provider (issue #303
         # api_key bug fix — NOT the first provider in ``cat.providers``,
