@@ -7,9 +7,12 @@
  * `ErrorClass` values plus the design-loop-level timeout reason
  * (`design_loop_timed_out`, emitted by the server-side loop deadline —
  * distinct from the render-worker `timeout` ErrorClass) plus the
- * loop-level pre-flight reason (`renderer_unavailable`, issue #277 —
+ * loop-level pre-flight reasons (`renderer_unavailable`, issue #277 —
  * emitted when the renderer reachability check fails before the first
- * iteration; a loop-level reason, NOT a render-worker `ErrorClass`).
+ * iteration; and `model_unconfigured`, issue #303 — emitted when the
+ * model pre-flight finds the configured LLM model cannot be used before
+ * any LLM call, so the loop never starts). Both are loop-level reasons,
+ * NOT render-worker `ErrorClass` values.
  * `displayDesignLoopError` maps that closed set to the
  * failure turn's part 1 — a sentence a person would say — plus the raw
  * detail for the turn's part 4.
@@ -50,10 +53,19 @@ export const FAILURE_REASONS: readonly string[] = [
   // the overall loop's wall-clock deadline fired; distinct from the
   // render-worker "timeout" ErrorClass above.
   "design_loop_timed_out",
-  // loop-level pre-flight reason (d33d/design_loop.py, issue #277) —
-  // the renderer (Docker daemon) was unreachable before the first
-  // iteration; NOT a render-worker ErrorClass (the render never ran).
+  // loop-level pre-flight reasons (d33d/design_loop.py) — the renderer
+  // (issue #277: the Docker daemon was unreachable before the first
+  // iteration) and the model (issue #303: the model pre-flight found the
+  // LLM model unusable before any LLM call); NOT render-worker ErrorClass
+  // values (the render never ran / no LLM call was made).
+  // `model_unconfigured` (d33d/config/preflight.py, issue #303): the
+  // configured LLM model could not be used (its env var is missing,
+  // or the model alias/role does not resolve) BEFORE the first iteration;
+  // NOT a render-worker ErrorClass (nothing ran). Terminal: the frame's
+  // `env_var` field (the missing variable's name, null when the model did
+  // not resolve) selects the helper sentence, and no retry is offered.
   "renderer_unavailable",
+  "model_unconfigured",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */
@@ -84,6 +96,12 @@ export interface DisplayError {
    *  (label + the model's declared value + the measured extent),
    *  formatted client-side by `copy.failure.axisMismatchLine` (never a
    *  raw server string). */
+  /** The name of the missing/empty `${ENV}` variable (issue #303,
+   *  `model_unconfigured` frame's `env_var` field, omit-not-null): drives
+   *  the helper sentence. NEVER the key value — the variable NAME is
+   *  what the SPA renders ("Set <NAME> where the server runs, then
+   *  restart it."); absent → the "Check the model settings." variant. */
+  envVar?: string;
   mismatches?: Array<{
     label: string;
     model: number;
@@ -164,11 +182,21 @@ export function displayDesignLoopError(
     reason?: unknown;
     carried_axes?: unknown;
     mismatches?: unknown;
+    /** The model pre-flight frame's `env_var` field (issue #303): the
+     *  missing variable's name, or `null` when the model did not resolve.
+     *  The key value never crosses the wire — only the variable NAME.
+     *  The mapping ignores it (the headline is reason-keyed); the
+     *  failure turn renders the helper sentence from it. */
+    env_var?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
   const rawMessage = typeof data.message === "string" ? data.message : "Stream error";
   const reason = typeof data.reason === "string" ? data.reason : undefined;
+  // The model pre-flight's `${ENV}` variable NAME (issue #303, omit-not-
+  // null on the frame): the key value never crosses the wire, so the name
+  // is safe to render in the helper sentence.
+  const envVar = typeof data.env_var === "string" && data.env_var !== "" ? data.env_var : undefined;
   if (reason !== undefined) {
     const mapped = (copy.failure.reasons as Record<string, string>)[reason];
     let message = mapped ?? UNKNOWN_REASON_COPY;
@@ -251,10 +279,14 @@ export function displayDesignLoopError(
     return {
       message,
       detail,
-      retryable: true,
+      // A pre-flight configuration failure is not retryable (issue #303):
+      // `model_unconfigured` renders no retry button in the FailureTurn;
+      // every other closed-set reason keeps the retry control.
+      retryable: reason !== "model_unconfigured",
       reason,
       ...(envelope !== undefined ? { envelope } : {}),
       ...(mismatches !== undefined ? { mismatches } : {}),
+      ...(envVar !== undefined ? { envVar } : {}),
     };
   }
   return {

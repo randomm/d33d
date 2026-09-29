@@ -101,6 +101,7 @@ __all__ = [
     "NOT_ESTABLISHED",
     "UNANSWERABLE_MISSING_TEMPLATE",
     "AnswerOutcome",
+    "ModelUnconfiguredError",
     "ask_answer_call",
     "build_answer_prompt",
     "deterministic_axis_answer",
@@ -175,6 +176,29 @@ NOT_ESTABLISHED = "The design as it stands doesn't establish that — nothing wa
 UNANSWERABLE_MISSING_TEMPLATE = (
     "I don't know {missing}. Tell me and I'll check — nothing was changed."
 )
+
+
+class ModelUnconfiguredError(Exception):
+    """A model-backed question stage must NOT call the LLM (issue #303).
+
+    Raised by the question-path model pre-flight (``d33d.app.
+    _build_question_answer_call``) when ``model_preflight`` reports the
+    model cannot be used (missing/empty ``${ENV}`` key, or an unresolved
+    role/alias). The route's existing broad ``except Exception`` catch
+    turns it into a structured terminal error frame (reason
+    ``model_unconfigured``) — the SAME frame the design loop emits —
+    instead of degrading into a silent LLM call.
+
+    ``env_var`` carries the name of the missing (or empty) ``${ENV}``
+    variable (e.g. ``"TRAIL_OPENERS_LLM_KEY"``) or ``None`` for an
+    unresolved role/alias or catalogue-level failure. It is NEVER the key
+    value: the variable NAME is what the SPA renders in the helper
+    sentence ("Set <NAME> where the server runs, then restart it.").
+    """
+
+    def __init__(self, env_var: str | None = None) -> None:
+        self.env_var = env_var
+        super().__init__("model not configured")
 
 
 def _validate_missing_fact(missing: Any) -> str | None:
@@ -1133,6 +1157,9 @@ async def ask_answer_call(
         # must propagate so the caller's cancellation (and any of its
         # ``except CancelledError`` cleanup) is never swallowed into a
         # no-run reply.
+        raise
+    except ModelUnconfiguredError:
+        # Pre-flight (issue #303) configuration failure: re-raise to the route's ``except ModelUnconfiguredError`` — never a swallowed ``COULD_NOT_ANSWER``.
         raise
     except TimeoutError:
         # The hard ``timeout`` bound fired (``asyncio.wait_for`` raises

@@ -312,11 +312,36 @@ export const failure = {
   axisMismatchLine: (label: string, modelMm: number, measuredMm: number): string =>
     `${label}: ${mm(modelMm)} → ${mm(measuredMm)}`,
 
+  /** The model pre-flight helper (issue #303): the helper sentence when the
+   *  terminal `model_unconfigured` frame named the missing env var (the
+   *  frame's `env_var` field) — the name renders in the mono face, the fix
+   *  is the operator's. A sibling of `reasons`, not a reason-code entry: it
+   *  is a second sentence the failure turn renders after the headline. */
+  modelUnconfiguredHelper: (envVar: string): string =>
+    `Set ${envVar} where the server runs, then restart it.`,
+  /** The model pre-flight helper (issue #303): the helper sentence when the
+   *  pre-flight could not resolve the model itself (no env var to name —
+   *  the alias/role is missing). Distinct from the env-var helper: the fix
+   *  is the settings file, not a shell variable. Also a sibling of `reasons`. */
+  modelUnresolved: "Check the model settings.",
+
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value,
-   *  every render ErrorClass value, and the loop-level pre-flight reason
-   *  (`renderer_unavailable`, issue #277) has an entry. */
+   *  every render ErrorClass value, and the loop-level pre-flight reasons
+   *  (`renderer_unavailable`, issue #277; `model_unconfigured`, issue #303)
+   *  have an entry (the `model_unconfigured` entry is the headline; the
+   *  sibling helpers `modelUnconfiguredHelper` / `modelUnresolved` render
+   *  after it). */
   reasons: {
+    /** Loop-level pre-flight (issue #303): the configured LLM model could
+     *  not be used, so nothing was designed. Terminal — retrying changes
+     *  nothing until the operator sets the env var (or fixes the model
+     *  settings), which is why the failure turn offers no retry. The
+     *  helper sentences (sibling keys `modelUnconfiguredHelper` /
+     *  `modelUnresolved`, not reason codes) name the env var or the
+     *  settings; the failure turn renders them after this headline. */
+    model_unconfigured:
+      "The model isn't configured, so nothing was designed.",
     bbox_out_of_tolerance:
       "It came out a different size from the one you asked for.",
     stated_dims_not_named_parameters:

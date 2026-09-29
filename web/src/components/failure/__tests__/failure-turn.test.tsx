@@ -226,6 +226,58 @@ describe("FailureTurn", () => {
     expect(onAction).toHaveBeenCalledWith(copy.failure.envelope.actions.biggerPrinter);
   });
 
+  it("a model_unconfigured failure offers NO retry and renders the env-var helper in mono (issue #303)", () => {
+    // The terminal pre-flight frame: reason model_unconfigured, retryable
+    // false (the mapping marks it), and the env_var field carrying the
+    // missing variable's name. The failure turn offers no retry button
+    // (retrying changes nothing until the operator sets the variable),
+    // and renders the helper sentence naming the variable.
+    const error: DisplayError = {
+      message: copy.failure.reasons.model_unconfigured,
+      detail: "model_unconfigured",
+      retryable: false,
+      reason: "model_unconfigured",
+      envVar: "TRAIL_OPENERS_LLM_KEY",
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    // The headline is the deck's reason sentence.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toBe(
+      copy.failure.reasons.model_unconfigured,
+    );
+    // The helper names the variable verbatim.
+    const helper = screen.getByTestId("failure-turn-model-helper");
+    expect(helper.textContent).toBe(
+      copy.failure.modelUnconfiguredHelper("TRAIL_OPENERS_LLM_KEY"),
+    );
+    // No retry button — the action set is the non-envelope branch, but
+    // retryable:false omits it. The actions container is still present
+    // (the turn's structure is fixed) but empty.
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+    expect(screen.queryByTestId("failure-turn-actions")).toBeTruthy();
+  });
+
+  it("a model_unconfigured failure with an unresolved model renders the settings helper, no retry (issue #303)", () => {
+    // The alias/role does not resolve: the frame's env_var is null (or
+    // absent), so the helper is the model-settings sentence — no variable
+    // name to render (a name the SPA has not established is never shown).
+    const error: DisplayError = {
+      message: copy.failure.reasons.model_unconfigured,
+      detail: "model_unconfigured",
+      retryable: false,
+      reason: "model_unconfigured",
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.getByTestId("failure-turn-model-helper").textContent).toBe(
+      copy.failure.modelUnresolved,
+    );
+    // The settings helper has no variable name: no mono run, and no
+    // retry (terminal either way).
+    expect(screen.getByTestId("failure-turn-model-helper").textContent).not.toMatch(
+      /mono/,
+    );
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+  });
+
   it("a non-envelope failure offers the generic retry action", () => {
     const error: DisplayError = {
       message: copy.failure.reasons.timeout,

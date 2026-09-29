@@ -79,6 +79,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MAX_ITERATIONS",
+    "MODEL_UNCONFIGURED",
     "NO_IMPROVEMENT_LIMIT",
     "RENDERER_PREFLIGHT_CACHE_SECONDS",
     "RENDERER_UNAVAILABLE",
@@ -115,6 +116,13 @@ NO_IMPROVEMENT_LIMIT = 2
 #: the first iteration (issue #277). The run ends at once with this reason
 #: and NO LLM call.
 RENDERER_UNAVAILABLE = "renderer_unavailable"
+
+#: The loop-level (NOT an error_class) failure reason emitted when the model
+#: pre-flight check finds the configured LLM model cannot be used before
+#: the first iteration (issue #303). The run ends at once with this reason
+#: and NO LLM call — the same pre-flight pattern as
+#: :data:`RENDERER_UNAVAILABLE`, but for the model rather than the renderer.
+MODEL_UNCONFIGURED = "model_unconfigured"
 
 #: How long a SUCCESSFUL renderer pre-flight check is trusted before the
 #: next design-loop run re-checks (per-process cache; issue #277 operator
@@ -338,6 +346,11 @@ class DesignResult:
     iterations (never silently the last attempt); ``failure_reason`` is one
     of the structured classes in :data:`GATE_REASON_BITS` or a render-worker
     class — never free text.
+
+    ``env_var`` (issue #303) carries the model pre-flight's missing/empty
+    ``${ENV}`` variable NAME (never the value) when the loop short-circuits
+    on ``model_unconfigured`` — the adapter's terminal frame picks it up.
+    ``None`` for every other outcome.
     """
 
     status: str
@@ -345,6 +358,7 @@ class DesignResult:
     iterations: tuple[IterationRecord, ...]
     failure_reason: str | None = None
     iterations_used: int = 0
+    env_var: str | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each

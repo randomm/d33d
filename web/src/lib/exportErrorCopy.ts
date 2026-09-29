@@ -61,7 +61,7 @@ export function displayExportError(e: unknown): ExportErrorDisplay {
       e.errorClass && Object.hasOwn(EXPORT_REASONS, e.errorClass)
         ? EXPORT_REASONS[e.errorClass]
         : undefined;
-    const message = typeof hit === "string" ? hit : copy.export3mf.failed;
+    const message = hit !== undefined ? hit : copy.export3mf.failed;
     const detail = rawDetail(e);
     return { message, ...(detail !== undefined ? { detail } : {}) };
   }

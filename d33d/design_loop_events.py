@@ -39,7 +39,7 @@ from typing import Any
 
 from PIL import Image
 
-from d33d.design_loop import BboxInfo
+from d33d.design_loop import MODEL_UNCONFIGURED, BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -675,9 +675,10 @@ def _structured_reason(result: Any) -> str | None:
     the free-text message (issue #82). The value is one of the
     ``GATE_REASON_BITS``, a render-worker ``ErrorClass`` (syntax_error,
     empty_model, artifact_error, timeout, oom, container_error), or a
-    loop-level reason (``renderer_unavailable`` — the pre-flight failed
-    before any LLM call, issue #277); ``None`` (absent from the frame) is
-    the "no reason" case.
+    loop-level reason (``renderer_unavailable`` — the renderer pre-flight
+    failed before any LLM call, issue #277; ``model_unconfigured`` — the
+    model pre-flight found the LLM model unusable before any LLM call,
+    issue #303); ``None`` (absent from the frame) is the "no reason" case.
     """
     reason = getattr(result, "failure_reason", None)
     if isinstance(reason, str) and reason:
@@ -1937,6 +1938,17 @@ async def run_design_loop_with_events(
         reason = _structured_reason(result)
         if reason is not None:
             error_data["reason"] = reason
+        # The missing/empty ``${ENV}`` variable name (issue #303): the
+        # model pre-flight's ``ModelPreflight.env_var`` rides the result as
+        # ``env_var`` so the SPA's ``FailureTurn`` can render the helper
+        # sentence ("Set <NAME> where the server runs, then restart it.")
+        # via ``copy.failure.reasons.model_unconfigured``. Omitted for every
+        # other reason (omit-not-null); omitted when the pre-flight could
+        # not name a variable (unresolved role/alias → the "Check the model
+        # settings." copy).
+        env_var = getattr(result, "env_var", None)
+        if reason == MODEL_UNCONFIGURED and isinstance(env_var, str) and env_var:
+            error_data["env_var"] = env_var
         # The gate's per-axis enforced set (issue #261 fix batch): lets
         # the failure copy name the value that was HELD when a carried
         # axis fails ("I kept the height you set earlier (12.0 mm)").

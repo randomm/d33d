@@ -586,3 +586,176 @@ def test_role_target_not_a_string_rejected(tmp_path: Path) -> None:
     p.write_text(yaml.safe_dump(doc))
     with pytest.raises(CatalogueError, match="string alias"):
         load_catalogue(p)
+
+
+# ---------------------------------------------------------------------------
+# model pre-flight (issue #303)
+# ---------------------------------------------------------------------------
+
+from d33d.config import MissingEnvVarError, model_preflight
+
+
+def test_model_preflight_ok_when_keyed_and_resolves(models_yaml_file: Path) -> None:
+    result = model_preflight(models_yaml_file, "design")
+    assert result.ok is True
+    assert result.env_var is None
+
+
+def test_model_preflight_unset_env_var_reports_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TRAIL_OPENERS_LLM_KEY", raising=False)
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    result = model_preflight(p, "design")
+    assert result.ok is False
+    assert result.env_var == "TRAIL_OPENERS_LLM_KEY"
+
+
+def test_model_preflight_empty_env_var_reports_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "")
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    result = model_preflight(p, "design")
+    assert result.ok is False
+    assert result.env_var == "TRAIL_OPENERS_LLM_KEY"
+
+
+def test_model_preflight_missing_file_returns_not_ok_no_env(
+    tmp_path: Path,
+) -> None:
+    result = model_preflight(tmp_path / "nope.yaml", "design")
+    assert result.ok is False
+    assert result.env_var is None
+
+
+def test_model_preflight_invalid_yaml_returns_not_ok_no_env(
+    tmp_path: Path,
+) -> None:
+    p = tmp_path / "m.yaml"
+    p.write_text("providers: [unclosed\n")
+    result = model_preflight(p, "design")
+    assert result.ok is False
+    assert result.env_var is None
+
+
+def test_model_preflight_unresolved_role_returns_not_ok_no_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A catalogue that lacks the ``critique``/``classification`` required roles
+    # is invalid; instead use a valid catalogue and ask for a missing role.
+    doc = {
+        "providers": {"p": {"base": "https://x/v1", "key": "k"}},
+        "models": [{"id": "a", "provider": "p", "model": "m/1"}],
+        "roles": {"design": "a", "critique": "a", "classification": "a"},
+    }
+    p = tmp_path / "m.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    result = model_preflight(p, "mystery")
+    assert result.ok is False
+    assert result.env_var is None
+
+
+def test_model_preflight_fresh_load_picks_up_hot_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """model_preflight runs a fresh load each call; editing the file between
+    calls is visible without any restart or cache invalidation."""
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "env-key-value")
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    assert model_preflight(p, "design").ok is True
+
+    # Unset the key in the file: swap the role to the keyed-backup alias
+    # that uses a static key, then set the env var to empty to trigger failure
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "")
+    # fresh load now sees the env var as empty -> pre-flight fails
+    result = model_preflight(p, "design")
+    assert result.ok is False
+    assert result.env_var == "TRAIL_OPENERS_LLM_KEY"
+
+
+def test_missing_env_var_carry_var_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("TRAIL_OPENERS_LLM_KEY", raising=False)
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    with pytest.raises(MissingEnvVarError) as exc_info:
+        load_catalogue(p)
+    assert exc_info.value.var_name == "TRAIL_OPENERS_LLM_KEY"
+
+
+def test_missing_env_var_carry_var_name_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "")
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    with pytest.raises(MissingEnvVarError) as exc_info:
+        load_catalogue(p)
+    assert exc_info.value.var_name == "TRAIL_OPENERS_LLM_KEY"
+
+
+def test_missing_env_var_message_never_contains_key_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key VALUE must never appear in the exception message — only the name."""
+    sentinel = "sentinel-key-value-xyz987"
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", sentinel)
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    # Force a MissingEnvVarError by having a second provider reference an unset var
+    doc = yaml.safe_load(p.read_text())
+    doc["providers"]["unkeyed"] = {
+        "base": "https://unkeyed/v1",
+        "key": "${UNSET_SENTINEL_VAR}",
+    }
+    p.write_text(yaml.safe_dump(doc))
+    monkeypatch.delenv("UNSET_SENTINEL_VAR", raising=False)
+    with pytest.raises(MissingEnvVarError) as exc_info:
+        load_catalogue(p)
+    msg = str(exc_info.value)
+    assert sentinel not in msg
+    assert "UNSET_SENTINEL_VAR" in msg
+
+
+def test_model_preflight_two_provider_design_resolves_to_second(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Design role resolves to the second (keyed) provider when the first is
+    keyless — proves the pre-flight uses the resolved provider, not the first."""
+    doc = {
+        "providers": {
+            "nokey": {"base": "https://a/v1"},  # no key at all
+            "keyed": {"base": "https://b/v1", "key": "${SECOND_PROVIDER_KEY}"},
+        },
+        "models": [{"id": "m1", "provider": "keyed", "model": "m/1"}],
+        "roles": {"design": "m1", "critique": "m1", "classification": "m1"},
+    }
+    p = tmp_path / "m.yaml"
+    p.write_text(yaml.safe_dump(doc))
+    monkeypatch.setenv("SECOND_PROVIDER_KEY", "second-key-value")
+    result = model_preflight(p, "design")
+    assert result.ok is True
+    assert result.env_var is None
+
+
+def test_model_preflight_key_value_never_in_repr_or_str(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The key VALUE must not surface in repr()/str() of a ModelPreflight."""
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "super-secret-key-456")
+    p = tmp_path / "models.yaml"
+    p.write_text(MODELS_YAML)
+    result = model_preflight(p, "design")
+    assert "super-secret-key-456" not in repr(result)
+    assert "super-secret-key-456" not in str(result)
+    # also for the not-ok path
+    monkeypatch.setenv("TRAIL_OPENERS_LLM_KEY", "")
+    result2 = model_preflight(p, "design")
+    assert "super-secret-key-456" not in repr(result2)
+    assert "super-secret-key-456" not in str(result2)
+    assert result2.env_var == "TRAIL_OPENERS_LLM_KEY"

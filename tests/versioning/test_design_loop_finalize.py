@@ -15,10 +15,12 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -782,19 +784,39 @@ def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkey
         async def __call__(self, *a, **k):
             return ""
 
+    class _MockEntry:
+        id = "m"
+        provider = "p"
+        model: ClassVar[Any] =  "stub"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
+
+        def provider_key(self):
+            return "p"
+
+    class _MockCat:
+        providers: ClassVar[Any] =  {"p": types.SimpleNamespace(key="stub")}
+        roles: ClassVar[Any] =  {"design": "m"}
+        models: ClassVar[Any] =  {"m": _MockEntry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
+
     monkeypatch.setattr(
         _catalogue_mod,
         "load_catalogue",
-        lambda p: types.SimpleNamespace(
-            providers={"p": types.SimpleNamespace(key="stub")}
-        ),
+        lambda p: _MockCat(),
     )
     monkeypatch.setattr(
         _resolve_mod,
         "resolve_model",
         lambda cat, role: types.SimpleNamespace(
             entry=types.SimpleNamespace(model="stub"),
-            provider=types.SimpleNamespace(base="http://stub"),
+            provider=types.SimpleNamespace(base="http://stub", key="stub-key"),
         ),
     )
     monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)
@@ -4878,3 +4900,644 @@ def test_storage_signal_and_embed_gate_can_disagree_on_corrupt_crc(
     assert dle.photo_storage_signal(str(good)) is True
     assert dle._photo_usable(str(good)) is True
     assert dle.photo_data_uri(str(good)).startswith("data:image/png;base64,")
+
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #303 — the model pre-flight: the design-loop frame twins and the
+# question-path short-circuit
+# ---------------------------------------------------------------------------
+# The design-loop terminal frame twin of
+# ``test_chat_renderer_unavailable_error_frame_carries_reason`` for the
+# ``model_unconfigured`` reason (the ``env_var`` field, omit-not-null when
+# the pre-flight could not name a variable), and the question-path
+# short-circuit (with-version model-backed question → the SAME frame, no
+# new version; deterministic axis question → still answered, no pre-flight
+# fire).
+
+
+def _model_unconfigured_result(env_var=None):
+    """An exhausted result shaped like the closure's pre-flight short-
+    circuit: the reason + ``env_var`` (issue #303 frame fields)."""
+    record = IterationRecord(iteration=0, scad_source="", render=None, score=None)
+    value = env_var
+
+    class _Result:
+        status = "exhausted"
+        best = record
+        failure_reason = "model_unconfigured"
+        iterations_used = 0
+        env_var = value
+
+    return _Result()
+
+
+def test_chat_model_unconfigured_error_frame_carries_reason_and_env_var(
+    app_with_versions,
+):
+    """The design-loop twin of the #277 frame test: a closure result with
+    ``failure_reason=model_unconfigured`` + ``env_var`` reaches the SPA as
+    the SAME terminal ``error`` frame (``reason`` + ``env_var``), and no
+    version is created."""
+
+    async def _loop(app, **kwargs):
+        return _model_unconfigured_result("TRAIL_OPENERS_LLM_KEY")
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "model_unconfigured"
+    assert error_frames[0]["env_var"] == "TRAIL_OPENERS_LLM_KEY", (
+        "the terminal frame carries the pre-flight's env var name "
+        "(the NAME, never the value)"
+    )
+    assert error_frames[0]["message"] == "Design loop exhausted: model_unconfigured"
+    # No version is created for a pre-flight failure (no LLM call happened).
+    assert timeline == []
+
+
+def test_chat_model_unconfigured_frame_omits_env_var_when_unknown(
+    app_with_versions,
+):
+    """Omit-not-null: an unresolved role/alias (``env_var=None``) emits the
+    frame WITHOUT the ``env_var`` key (the SPA renders the 'Check the
+    model settings.' variant), while the reason is still carried."""
+
+    async def _loop(app, **kwargs):
+        return _model_unconfigured_result(None)
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "model_unconfigured"
+    assert "env_var" not in error_frames[0], (
+        "env_var must be omitted (never null) when the pre-flight could "
+        f"not name a variable; got {error_frames[0].get('env_var')!r}"
+    )
+
+
+def test_chat_error_frame_omits_env_var_for_other_reasons(
+    app_with_versions,
+):
+    """Omit-not-null: a non-``model_unconfigured`` result carrying a
+    stray ``env_var`` (e.g. a stub) does NOT put ``env_var`` on the
+    terminal frame — the field rides the frame only for the
+    ``model_unconfigured`` reason."""
+
+    class _Result:
+        status = "exhausted"
+        best = IterationRecord(iteration=0, scad_source="", render=None, score=None)
+        failure_reason = "bbox_out_of_tolerance"
+        iterations_used = 0
+        env_var = "TRAIL_OPENERS_LLM_KEY"
+
+    async def _loop(app, **kwargs):
+        return _Result()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "bbox_out_of_tolerance"
+    assert "env_var" not in error_frames[0], (
+        "env_var must ride the terminal frame ONLY for the "
+        "model_unconfigured reason"
+    )
+
+
+class _VersionsSvcForQuestion:
+    """A duck-typed versions service whose ``latest_version`` returns a
+    version row (so the pre-route takes the question path, not the
+    design-loop no-version route). ``get_pending_offer`` returns None
+    (the offer pre-route must not fire — the message is not an
+    affirmation)."""
+
+    def __init__(self, latest):
+        self._latest = latest
+
+    def latest_version(self, project_id: int):
+        return self._latest
+
+    def list_versions(self, project_id: int):
+        return []
+
+    def get_pending_offer(self, project_id: int):
+        return None
+
+    def get_project(self, project_id: int):
+        return {"id": project_id, "current_version": None}
+
+
+def _unconfigured_catalogue(monkeypatch):
+    """Monkeypatch the closure's seams to an unkeyed catalogue (empty
+    ``${ENV}`` key — the pre-flight's not-ok case) with resolve / probe /
+    LLM spied: any call into them means the pre-flight did NOT
+    short-circuit."""
+    from d33d.config import catalogue as _cat
+    from d33d.config import probes as _probes
+    from d33d.config import resolve as _resolve_mod
+
+    class _Prov:
+        base = "http://stub"
+        key = ""
+
+    class _Entry:
+        id = "m"
+        model = "stub"
+        provider: ClassVar[Any] =  "p"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
+
+        def provider_key(self) -> str:
+            return "p"
+
+    class _Cat:
+        providers: ClassVar[Any] =  {"p": _Prov()}
+        roles: ClassVar[Any] =  {"design": "m", "critique": "m", "classification": "m"}
+        models: ClassVar[Any] =  {"m": _Entry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str) -> _Entry:
+            return self.models[alias]
+
+    monkeypatch.setattr(_cat, "load_catalogue", lambda p: _Cat())
+
+    # The pre-flight's ``resolve_model`` must SUCCEED (it needs the
+    # resolved provider to check the key — an empty key is the not-ok
+    # signal). The design-loop's LATER ``resolve_model`` call is blocked
+    # by the ``_no_probe`` spy (the loop never reaches resolve — the
+    # pre-flight short-circuits before it). The LLM spy proves zero
+    # LLM calls.
+    def _ok_resolve(cat, role, unavailable=None):
+        import types
+
+        return types.SimpleNamespace(entry=_Entry(), provider=_Prov())
+
+    monkeypatch.setattr(_resolve_mod, "resolve", _ok_resolve)
+
+    def _no_probe(*a, **kw):
+        raise AssertionError("probe must not run when the pre-flight is not ok")
+
+    monkeypatch.setattr(_probes, "probe_capabilities", _no_probe)
+
+    class _LLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, role, messages, system):
+            self.calls += 1
+            return ""
+
+    llm = _LLM()
+    import d33d.design_loop as _dl_mod
+
+    monkeypatch.setattr(_dl_mod, "make_llm_fn", lambda cat, f, c: llm)
+    return llm
+
+
+def _restore(app_with_versions, state_before):
+    app_with_versions.state.event_sources.clear()
+    app_with_versions.state.event_sources.update(state_before["events"])
+
+
+def test_question_path_model_unconfigured_frame_with_version(
+    app_with_versions, monkeypatch
+):
+    """Operator decision #303: a model-backed question with a version
+    present and the model unconfigured → the SAME structured terminal
+    error frame (reason ``model_unconfigured``), NO new version (count
+    unchanged), and the edge's pre-flight fires before any
+    resolve/probe/LLM call."""
+    from d33d.app import _build_question_answer_call
+
+    llm = _unconfigured_catalogue(monkeypatch)
+    # The edge is built AFTER the monkeypatch (the closure binds
+    # ``load_catalogue`` / ``resolve_model`` / ``probe_capabilities`` /
+    # ``make_llm_fn`` at build time — a pre-built edge would bypass the
+    # spies).
+    app_with_versions.state.answer_question = _build_question_answer_call(
+        app_with_versions.state.catalogue_path, app_with_versions
+    )
+    # The route reads ``app.state.versions.latest_version`` TWICE per chat
+    # turn (the question pre-route, then the stated-dimension carry), so a
+    # real version row is the clean way to make both reads see "a version
+    # exists": a duck-typed fake would miss on the second read (the stated
+    # helper reads other service methods). Create a real project + version
+    # (the pre-route takes the question path — the message is not an
+    # axis-size question — and the deterministic stage does not fire).
+    state_before = {"events": dict(app_with_versions.state.event_sources)}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 20.0})
+        resp = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "What material is it?"}
+        )
+        assert resp.status_code == 202, resp.text
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    _restore(app_with_versions, state_before)
+
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "model_unconfigured"
+    # The pre-flight could not name a variable (empty key, not unset) →
+    # the field is omitted (the SPA's 'Check the model settings.' copy).
+    assert "env_var" not in error_frames[0]
+    assert llm.calls == 0, "the question path must not call the LLM"
+    # No NEW version created (count unchanged — the design loop never
+    # runs; the one version is the one the test created).
+    assert len(timeline) == 1
+
+
+# The pre-route + stated-evidence read fix is applied per-test below via
+# the same helper (the route reads ``app.state.versions.latest_version``
+# twice per chat turn — once for the question pre-route, once for the
+# stated-dimension carry — so a single setattr of the duck-typed fake is
+# not enough if the real service is reinstalled between the two reads).
+
+
+
+def test_question_path_deterministic_answer_unaffected_by_model_unconfigured(
+    app_with_versions, monkeypatch
+):
+    """The deterministic axis stage fires BEFORE any model pre-flight:
+    'How tall is it?' is answered from the design state with NO model
+    call — the short-circuit must not fire for a deterministic question
+    (the resolve/probe/LLM spies prove the edge never ran)."""
+    from d33d.app import _build_question_answer_call
+
+    llm = _unconfigured_catalogue(monkeypatch)
+    # The edge is built AFTER the monkeypatch (the closure binds
+    # ``load_catalogue`` / ``resolve_model`` / ``probe_capabilities`` /
+    # ``make_llm_fn`` at build time — a pre-built edge would bypass the
+    # spies).
+    app_with_versions.state.answer_question = _build_question_answer_call(
+        app_with_versions.state.catalogue_path, app_with_versions
+    )
+    # The deterministic stage reads the version's bbox (the measured
+    # extents — a param row alone is not an answer source). A real
+    # version carries a bbox once the loop renders — here the test
+    # creates the version with a height param and the deterministic
+    # answer reads the version row's stated/measured state.
+    state_before = {"events": dict(app_with_versions.state.event_sources)}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # A version must exist for the pre-route to take the question
+        # path (the deterministic stage fires for "How tall is it?"). The
+        # version endpoint does not persist ``stated_dims`` (it is the
+        # design-loop's write), so patch the row's column directly — the
+        # deterministic stage reads the stated set (a param row alone is
+        # not an answer source — it needs the stated value to name a
+        # number, not the "not established" sentence).
+        version = await create_version(client, pid, {"H": 12.0})
+        vid = version["id"]
+        app_with_versions.state.conn.raw.execute(
+            "UPDATE versions SET stated_dims = ? WHERE id = ?",
+            ('{"H": 12.0}', vid),
+        )
+        resp = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "How tall is it?"}
+        )
+        assert resp.status_code == 202, resp.text
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    _restore(app_with_versions, state_before)
+
+    done_frames = [data for event, data in frames if event == "done"]
+    assert done_frames, "expected a done frame"
+    assert done_frames[0].get("kind") == "answer"
+    # The answer text rides the done frame's ``message`` field (the
+    # ``kind: "answer"`` discriminator — the SPA renders it verbatim as a
+    # plain assistant message). There is no separate ``answer`` field.
+    answer = done_frames[0].get("message", "")
+    # The deterministic stage names the height (the stated value, 12.0 mm).
+    assert "12" in answer, f"deterministic answer must name the height, got {answer!r}"
+    assert "established" not in answer.lower(), (
+        f"the answer must be the stated value, not the 'not established' "
+        f"sentence, got {answer!r}"
+    )
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames == [], "no error frame for a deterministic answer"
+    assert llm.calls == 0
+    # No NEW version created (count unchanged — the design loop never
+    # runs; the one version is the one the test created).
+    assert len(timeline) == 1
+
+
+def test_startup_lifespan_logs_exactly_one_warning_naming_var(
+    app_with_versions, monkeypatch, caplog
+):
+    """Issue #303 startup: a not-ok model pre-flight logs EXACTLY ONE
+    WARNING naming the env var (never the value); a missing models.yaml
+    logs the same way (the no-variable branch, no crash); a configured
+    model logs nothing."""
+    import asyncio
+
+    app = app_with_versions
+
+    try:
+        # Case 1: missing models.yaml (the file is absent in the fixture)
+        # → exactly one WARNING (the no-variable branch), never a crash.
+        async def _enter():
+            async with app.router.lifespan_context(app):
+                pass
+
+        asyncio.run(_enter())
+        warnings = caplog.get_records("call")
+        assert len(warnings) == 1, (
+            f"exactly one WARNING expected on a missing models.yaml, got "
+            f"{len(warnings)}: {[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "model pre-flight" in msg
+        assert "design" in msg
+        caplog.clear()
+
+        # Case 2: an unset ${ENV} key → exactly one WARNING that NAMES
+        # the variable and never carries the value.
+        p = app.state.catalogue_path
+        p.write_text(
+            "providers:\n"
+            "  p:\n"
+            "    base: http://stub\n"
+            "    key: ${UNSET_303_STARTUP}\n"
+            "models:\n"
+            "  - id: m\n"
+            "    provider: p\n"
+            "    model: stub/1\n"
+            "roles:\n"
+            "  design: m\n"
+            "  critique: m\n"
+            "  classification: m\n"
+        )
+        monkeypatch.delenv("UNSET_303_STARTUP", raising=False)
+        asyncio.run(_enter())
+        warnings = caplog.get_records("call")
+        assert len(warnings) == 1, (
+            f"exactly one WARNING expected for an unset key, got "
+            f"{len(warnings)}: {[r.getMessage() for r in warnings]}"
+        )
+        msg = warnings[0].getMessage()
+        assert "UNSET_303_STARTUP" in msg
+        assert "sentinel" not in msg
+        caplog.clear()
+
+        # Case 3: a configured model → NO warning.
+        p.write_text(
+            "providers:\n"
+            "  p:\n"
+            "    base: http://stub\n"
+            "    key: a-static-key\n"
+            "models:\n"
+            "  - id: m\n"
+            "    provider: p\n"
+            "    model: stub/1\n"
+            "roles:\n"
+            "  design: m\n"
+            "  critique: m\n"
+            "  classification: m\n"
+        )
+        asyncio.run(_enter())
+        warnings = caplog.get_records("call")
+        assert warnings == [], (
+            f"no WARNING expected for a configured model, got "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+    finally:
+        if p.is_file():
+            p.unlink()
+
+# ---------------------------------------------------------------------------
+# Issue #303 — the production design-loop closure's model pre-flight
+# ---------------------------------------------------------------------------
+# The closure (``d33d.app._build_production_design_loop``) runs
+# ``model_preflight_loaded`` BEFORE ``probe_capabilities`` / any LLM /
+# render call. When the pre-flight is not ok it returns an exhausted
+# ``DesignResult`` with the loop-level ``model_unconfigured`` reason,
+# ``iterations_used=0``, and the pre-flight's ``env_var`` riding the
+# result (the adapter emits it into the terminal frame). The api_key
+# fix is pinned too: the key comes from the RESOLVED model's provider,
+# not the first provider in ``cat.providers``.
+
+
+def test_production_closure_model_unconfigured_short_circuits(
+    app_with_versions, monkeypatch
+) -> None:
+    """not-ok pre-flight → exhausted ``model_unconfigured`` (zero
+    LLM/probe/render calls), and the result carries ``env_var`` (issue
+    #303)."""
+    import types
+
+    from d33d.app import _build_production_design_loop
+    from d33d.config import catalogue as _cat
+    from d33d.config import probes as _probes
+    from d33d.config import resolve as _resolve_mod
+
+    class _Provider:
+        base = "http://stub"
+        key = ""
+
+    class _Entry:
+        id = "m"
+        model = "stub"
+        provider: ClassVar[Any] =  "p"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
+
+        def provider_key(self) -> str:
+            return "p"
+
+    class _Cat:
+        providers: ClassVar[Any] =  {"p": _Provider()}
+        roles: ClassVar[Any] =  {"design": "m", "critique": "m", "classification": "m"}
+        models: ClassVar[Any] =  {"m": _Entry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str) -> _Entry:
+            return self.models[alias]
+
+    monkeypatch.setattr(_cat, "load_catalogue", lambda p: _Cat())
+
+    def _no_probe(*a, **kw):
+        raise AssertionError("probe_capabilities must not run on a not-ok pre-flight")
+
+    monkeypatch.setattr(_probes, "probe_capabilities", _no_probe)
+    monkeypatch.setattr(
+        _resolve_mod,
+        "resolve",
+        lambda cat, role, unavailable=None: types.SimpleNamespace(
+            entry=_Entry(), provider=_Provider()
+        ),
+    )
+
+    class _LLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, role, messages, system):
+            self.calls += 1
+            return ""
+
+    llm = _LLM()
+    import d33d.design_loop as _dl_mod
+
+    monkeypatch.setattr(_dl_mod, "make_llm_fn", lambda cat, f, c: llm)
+
+    renders = []
+
+    def _no_render(scad_source, defines):
+        renders.append(scad_source)
+        raise AssertionError("the renderer must not run on a not-ok pre-flight")
+
+    import d33d.render_worker as _rw_mod
+
+    monkeypatch.setattr(_rw_mod, "render_for_design_loop", _no_render)
+    import d33d.app as _app_mod
+
+    monkeypatch.setattr(_app_mod, "render_for_design_loop", _no_render)
+
+    loop = _build_production_design_loop()
+
+    async def _call():
+        return await loop(app_with_versions, request="make a box", on_progress=None)
+
+    result = asyncio.run(_call())
+    assert result.status == "exhausted"
+    assert result.failure_reason == "model_unconfigured"
+    assert result.iterations_used == 0
+    assert getattr(result, "env_var", "sentinel") is None, (
+        "the pre-flight could not name a variable (empty key) — env_var "
+        "must be None on the result"
+    )
+    assert llm.calls == 0, "zero LLM calls before iteration 1"
+    assert renders == [], "zero render calls before iteration 1"
+
+
+def test_production_closure_unset_env_var_rides_the_result(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A real (unpatched) catalogue with an unset ``${ENV}`` key: the
+    closure's pre-flight is not ok AND names the variable — ``env_var``
+    rides the exhausted result (the adapter's frame picks it up). Zero
+    probe/LLM/render calls (issue #303)."""
+    from d33d.app import _build_production_design_loop
+    from d33d.config import probes as _probes
+
+    monkeypatch.delenv("UNSET_303_KEY", raising=False)
+    p = tmp_path / "m.yaml"
+    p.write_text(
+        "providers:\n"
+        "  p:\n"
+        "    base: http://stub\n"
+        "    key: ${UNSET_303_KEY}\n"
+        "models:\n"
+        "  - id: m\n"
+        "    provider: p\n"
+        "    model: stub/1\n"
+        "roles:\n"
+        "  design: m\n"
+        "  critique: m\n"
+        "  classification: m\n"
+    )
+    # The closure reads the app state's catalogue path — point it at the
+    # real file (no load_catalogue monkeypatch: the fresh real load is
+    # exactly the path under test).
+    app_with_versions.state.catalogue_path = p
+
+    def _no_probe(*a, **kw):
+        raise AssertionError("probe_capabilities must not run on a not-ok pre-flight")
+
+    monkeypatch.setattr(_probes, "probe_capabilities", _no_probe)
+
+    class _LLM:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def __call__(self, role, messages, system):
+            self.calls += 1
+            return ""
+
+    llm = _LLM()
+    import d33d.design_loop as _dl_mod
+
+    monkeypatch.setattr(_dl_mod, "make_llm_fn", lambda cat, f, c: llm)
+
+    loop = _build_production_design_loop()
+
+    async def _call():
+        return await loop(app_with_versions, request="make a box", on_progress=None)
+
+    result = asyncio.run(_call())
+    assert result.failure_reason == "model_unconfigured"
+    assert result.iterations_used == 0
+    assert result.env_var == "UNSET_303_KEY", (
+        "the pre-flight's env_var (the variable NAME, never the value) must "
+        "ride the exhausted result"
+    )
+    assert llm.calls == 0

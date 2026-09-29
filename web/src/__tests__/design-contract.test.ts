@@ -44,6 +44,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { createElement } from "react";
 
 import copy, { mm } from "../copy";
+import { FAILURE_REASONS, displayDesignLoopError } from "../lib/errorMapping";
 // The backend's mm spelling (issue #265): the SPA has no build step that
 // imports Python, so the pin below compares the backend's emitted wire
 // strings (rendered here as the exact sentences `d33d.confirm_offer`'s
@@ -166,6 +167,50 @@ describe("design contract", () => {
     expect(copy.failure.axisMismatchLine("Width", 40, 43.8)).toBe(
       `Width: ${mm(40)} → ${mm(43.8)}`,
     );
+  });
+
+  /* ---------------------------------------- W303 */
+
+  it("the model pre-flight failure copy lives in the deck (issue #303)", () => {
+    // Issue #303: the terminal `model_unconfigured` frame (the model
+    // pre-flight failed — the configured LLM model could not be used)
+    // maps to the deck's reason sentence, and the frame's `env_var`
+    // field selects the helper: the named-variable sentence when the
+    // variable is established, the model-settings sentence when the
+    // alias/role does not resolve (env_var null). The reason is
+    // TERMINAL — errorMapping marks it non-retryable so the failure
+    // turn offers no retry button.
+    const headline = copy.failure.reasons.model_unconfigured;
+    expect(headline).toBe("The model isn't configured, so nothing was designed.");
+    // No digit: a number in the reason sentence the SPA has not
+    // established is the house anti-pattern.
+    expect(headline).not.toMatch(/\d/);
+    // The env-var helper names the variable verbatim (the name renders in
+    // the mono face by the failure turn, never here).
+    expect(copy.failure.modelUnconfiguredHelper("TRAIL_OPENERS_LLM_KEY")).toBe(
+      "Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
+    );
+    // The unresolved-model helper is distinct from the env-var helper —
+    // a missing variable and an unresolved model are different honest
+    // statements and must never read the same.
+    expect(copy.failure.modelUnresolved).toBe("Check the model settings.");
+    expect(copy.failure.modelUnresolved).not.toBe(
+      copy.failure.modelUnconfiguredHelper("TRAIL_OPENERS_LLM_KEY"),
+    );
+    // The headline is the closed-map entry; the helpers are separate keys
+    // (the two-sentence surface the failure turn renders in order).
+    expect(headline).not.toContain("Set ");
+    expect(headline).not.toBe(copy.failure.modelUnresolved);
+    // The closed set includes the reason and it is non-retryable (no
+    // retry button on the failure turn) — the mapping is the seam the
+    // SPA never overrides.
+    expect(FAILURE_REASONS).toContain("model_unconfigured");
+    void (copy.failure.reasons as unknown); // the cast is the type seam, not a runtime read
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: model_unconfigured",
+      reason: "model_unconfigured",
+    });
+    expect(display.retryable).toBe(false);
   });
 
   /* ---------------------------------------- W260 */
@@ -1643,7 +1688,7 @@ describe("design contract", () => {
     // copy names a second failure.
     expect((copy.failure as Record<string, unknown>).askInstead).toBeUndefined();
     for (const key of Object.keys(copy.failure.reasons)) {
-      const value = (copy.failure.reasons as Record<string, string>)[key];
+      const value = (copy.failure.reasons as unknown as Record<string, string>)[key];
       expect(value).not.toMatch(/\btwice\b|\bsecond\b/i);
     }
   });

@@ -21,6 +21,14 @@
 import { copy } from "../../copy";
 import type { DisplayError } from "../../lib/errorMapping";
 
+/** The model pre-flight frame's `env_var` field (issue #303) as carried
+ *  on the mapped `DisplayError` (the `envVar` field — the mapping copies
+ *  it from the frame). Absent → `null`: the helper is the unresolved
+ *  variant, never a fabricated name. */
+function envVarOf(error: DisplayError): string | null {
+  return error.envVar ?? null;
+}
+
 interface EnvelopeAxisRow {
   /** The axis letter from the API envelope's x/y/z — "x", "y" or "z". */
   label: string;
@@ -63,6 +71,21 @@ export function FailureTurn({
 }: FailureTurnProps) {
   const isEnvelope = error.reason === "bbox_out_of_tolerance";
   const envelopeData = isEnvelope && error.envelope !== undefined ? error.envelope : null;
+
+  // The model pre-flight helper (issue #303): the terminal
+  // `model_unconfigured` frame's `env_var` field selects the second
+  // sentence — the named-variable sentence when it is established,
+  // the model-settings sentence when the model did not resolve (null).
+  // Rendered in the mono face: the variable name is a measurement, not
+  // prose. No other reason renders a helper (only the pre-flight frame
+  // carries `env_var`).
+  const modelEnvVar = envVarOf(error);
+  const modelHelper =
+    error.reason === "model_unconfigured"
+      ? modelEnvVar !== null
+        ? copy.failure.modelUnconfiguredHelper(modelEnvVar)
+        : copy.failure.modelUnresolved
+      : null;
 
   // Part 1 — the sentence. For the envelope gate with a measurement, the
   // deck's body names measured and limit together (the headline stays as
@@ -113,6 +136,15 @@ export function FailureTurn({
         {headline}
         {body !== null && <span className="failure-turn-body">{body}</span>}
       </p>
+
+      {/* Part 1c — the model pre-flight helper (issue #303): the env-var
+          name (mono, a measurement) or the model-settings nudge, when the
+          terminal model_unconfigured frame established it. */}
+      {modelHelper !== null && (
+        <p className="failure-turn-body" data-testid="failure-turn-model-helper">
+          {modelHelper}
+        </p>
+      )}
 
       {/* Part 1b — the per-param mismatch detail (issue #276): one line
           per mismatching parameter, formatted by the SPA's own copy
@@ -209,15 +241,22 @@ export function FailureTurn({
             </button>
           </>
         ) : (
-          <button
-            type="button"
-            className="failure-turn-action"
-            data-testid="failure-action-retry"
-            disabled={inFlight}
-            onClick={() => onAction(copy.failure.retryAction)}
-          >
-            {copy.failure.retryAction}
-          </button>
+          // The retry control is offered only when the failure is
+          // retryable: the `model_unconfigured` pre-flight failure (issue
+          // #303) is a configuration state — retrying just fails again —
+          // so it renders NO retry button (the helper sentence in part 1
+          // says what to do instead).
+          error.retryable ? (
+            <button
+              type="button"
+              className="failure-turn-action"
+              data-testid="failure-action-retry"
+              disabled={inFlight}
+              onClick={() => onAction(copy.failure.retryAction)}
+            >
+              {copy.failure.retryAction}
+            </button>
+          ) : null
         )}
       </div>
 

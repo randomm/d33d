@@ -135,7 +135,9 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
 #: alongside the gate bits. Without this, a Docker-down design turn
 #: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
 #: archive would log an exception on EVERY such turn.
-LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset({"renderer_unavailable"})
+LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
+    {"renderer_unavailable", "model_unconfigured"}
+)
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM
 #: runaway source would otherwise dominate the file. Mirrors the design
