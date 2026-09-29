@@ -12,18 +12,22 @@
 #      - colima status says NOT running: `colima start` (a stop+start on
 #        an already-dead VM is meaningless).
 #      - colima status says running: the forward is presumed dead.
-#        Safety rule: if any container inside the VM is RUNNING (or the
-#        probe itself fails), do NOT touch the VM — log a WARNING and
-#        exit 2. Otherwise re-establish the `ssh -O forward` through
-#        the lima ControlMaster (ControlPath read at runtime from the
-#        colima ssh config); fall back to `colima stop && colima start`
-#        only when re-forward is impossible.
+#        Safety rule: the `ssh -O forward` re-forward is attempted
+#        UNCONDITIONALLY — it rides the host-side ControlMaster socket
+#        and does not touch the VM, so running containers are unaffected.
+#        Only the `colima stop && colima start` fallback is gated: it
+#        runs only when the container probe succeeded AND found zero
+#        running containers. Containers running (or a failed probe) ends
+#        the tick with a WARNING naming the count (or the probe failure)
+#        and exit 2.
 #   3. Every heal is verified with a bounded `docker info` retry loop
 #      (docker.sock readiness lags `colima start` completion).
 #
-# Exit codes: 0 healthy or healed, 1 not healed, 2 skipped because
-# containers were running (or the container probe failed — conservative),
-# 64 usage/environment error (unknown flag, garbage numeric override).
+# Exit codes: 0 healthy or healed (docker info answers), 1 heal
+# attempted but docker still doesn't answer, 2 restart was needed but
+# blocked (containers running — the message names the count — or the
+# container probe failed), 64 usage/environment error (unknown flag,
+# garbage numeric override).
 # Any other non-zero code means the script aborted mid-run before
 # reaching a decision.
 #
@@ -33,10 +37,13 @@
 # stale-lock recovery) is the fence against overlapping launchd ticks
 # during a ~1 min restart.
 #
-# --dry-run: logs the intended heal path instead of executing it. The
-# post-heal verification is deliberately skipped in dry-run (the stubs
-# never recover), so dry-run reports the intended action and exits 0
-# without waiting on docker.
+# --dry-run: logs the intended heal path instead of executing it, and
+# the post-heal verification loop is skipped (the harness stubs never
+# recover), so dry-run always ends by reporting the intended action:
+# re-forward if that was possible, else restart if the restart gate
+# passes, else start. Exit code follows the decision: 0 when a heal was
+# the intended action, 2 when the intended heal is blocked (restart
+# gated by running containers or a failed probe).
 #
 # Overridable via env for the local test harness (tests/scripts/):
 #   D33D_WD_HOME         fake $HOME (log dir + colima dir point here)
@@ -340,22 +347,26 @@ main() {
         EXIT INT TERM
 
     if colima_status_running; then
-        # Running VM, dead forward. Safety rule first: if the container
-        # probe fails or finds a RUNNING container, do not touch the VM.
+        # Running VM, dead forward. Re-forward is attempted unconditionally:
+        # the ssh -O round-trip rides the host-side ControlMaster socket and
+        # never touches the VM, so running containers are unaffected. Only
+        # the stop/start fallback below is gated on the container probe.
         n=$(running_container_count)
+        # The restart fallback (the only heal that touches the VM) is gated
+        # on the probe: never stop+start with running containers, and never
+        # when the probe itself failed (cannot prove zero).
         if [ "$n" = "error" ]; then
-            log WARN "cannot probe container list (colima ssh failed); not touching VM"
+            log WARN "cannot probe container list (colima ssh failed); restart blocked"
             exit 2
         fi
         if [ "$n" -gt 0 ]; then
-            log WARN "$n container(s) RUNNING; not restarting (safety rule)"
+            log WARN "$n container(s) RUNNING; restart blocked (safety rule)"
             exit 2
         fi
-        # Cheapest heal first: re-forward via the ControlMaster.
         if rebuild_forward; then
             if [ "$DRY_RUN" -eq 1 ]; then
-                # Dry-run: the intended heal is re-forward; verification
-                # is skipped because stubs never recover.
+                # Intended heal is the re-forward; verification skipped
+                # (stubs never recover).
                 exit 0
             fi
             if wait_for_docker; then

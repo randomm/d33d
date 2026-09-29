@@ -5,7 +5,8 @@
 # Defaults to DRY-RUN: it lists what it would remove without removing it.
 # Pass --yes to actually delete.
 #
-# Scope (strict, exact patterns only — never touches other projects):
+# Scope (strict, exact patterns only — a name is in scope ONLY if it
+# matches one of these; anything else is left alone):
 #   Containers:
 #     * render-<8 lowercase hex>  (e.g. render-0123abcd)
 #     * registry-get-<8 hex>      (e.g. registry-get-0123abcd)
@@ -13,7 +14,7 @@
 #   Volumes:
 #     * d33d-render-render-*
 #     * d33d-*
-#     * registry-<hex>
+#     * registry-<8 hex>          (e.g. registry-0123abcd)
 #
 #   docker-prune-d33d.sh          # dry-run (default)
 #   docker-prune-d33d.sh --yes    # actually delete
@@ -59,12 +60,12 @@ is_in_scope_container() {
 # Exact volume-name patterns (POSIX case):
 #   d33d-render-render-*
 #   d33d-*
-#   registry-<hex+>
+#   registry-<exactly 8 hex> (mirrors the registry container arms)
 is_in_scope_volume() {
     case "$1" in
         d33d-render-render-*) return 0 ;;
         d33d-*) return 0 ;;
-        registry-[0-9a-fA-F]*) return 0 ;;
+        registry-[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -116,13 +117,68 @@ done
 
 # ── Volumes ────────────────────────────────────────────────────────────────
 # Dangling in-scope volumes.
+LISTED_VOLUMES=""
 while IFS= read -r vol; do
     [ -z "$vol" ] && continue
     is_in_scope_volume "$vol" || continue
     process_one "volume" "$vol" "docker volume rm $vol"
+    LISTED_VOLUMES="$LISTED_VOLUMES $vol "
 done <<EOF
 $(docker volume ls --filter "dangling=true" --format '{{.Name}}')
 EOF
+
+# ── Dry-run only: orphan prediction ────────────────────────────────────────
+# Besides the dangling list above, the dry run also names every in-scope
+# volume that the container removals in this run would ORPHAN: a volume that
+# no container in the final (post-removal) set mounts (checked via
+# `docker inspect` of the Mounts of every container that stays). It is never
+# predicted twice (deduped against the dangling list) and never predicted
+# while a surviving container still mounts it. The real (--yes) run does not
+# do this: its volume removal already picks up newly-dangling volumes via the
+# filter above.
+if [ "$DRY_RUN" = 1 ]; then
+    # The mount names of the containers this run removes (exited/created/
+    # paused in-scope containers), one JSON entry per line; an inspect
+    # failure (container gone mid-run) contributes nothing.
+    REMOVED_MOUNTS="$(
+        for state in exited created paused; do
+            while IFS= read -r name; do
+                [ -z "$name" ] && continue
+                is_in_scope_container "$name" || continue
+                docker inspect --format '{{json .Mounts}}' "$name" 2>/dev/null || true
+            done <<EOF2
+$(docker ps -a --filter "status=$state" --format '{{.Names}}')
+EOF2
+        done | sed 's/},{/{/g' | sed -n 's/.*"Type":"volume".*"Name":"\([^"]*\)".*/\1/p'
+    )"
+    while IFS= read -r vol; do
+        [ -z "$vol" ] && continue
+        is_in_scope_volume "$vol" || continue
+        # Never predict a volume any container that survives this run still
+        # mounts. `docker ps` (no -a) lists exactly the running containers:
+        # every in-scope name in it survives, because the removals above
+        # only take exited / created / paused containers.
+        still_mounted=0
+        while IFS= read -r other; do
+            [ -z "$other" ] && continue
+            mounts_json=$(docker inspect --format '{{json .Mounts}}' "$other" 2>/dev/null) || continue
+            case "$mounts_json" in
+                *"\"Name\":\"$vol\""*) still_mounted=1; break ;;
+                *) ;;
+            esac
+        done <<EOF
+$(docker ps --format '{{.Names}}')
+EOF
+        [ "$still_mounted" = 1 ] && continue
+        case "$LISTED_VOLUMES" in
+            *" $vol "*) continue ;;
+            *) LISTED_VOLUMES="$LISTED_VOLUMES $vol "
+               process_one "volume (orphaned by this run)" "$vol" "docker volume rm $vol" ;;
+        esac
+    done <<EOF
+$REMOVED_MOUNTS
+EOF
+fi
 
 echo "== done: $removed removed, $would_remove would be removed (dry-run) =="
 exit 0

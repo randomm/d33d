@@ -6,17 +6,24 @@ Colima on this Mac forwards `~/.colima/default/docker.sock` into the VM via an
 post-boot and nothing re-establishes the forward — lima-vm/lima#5420). Every
 d33d render then fails against a dead socket. The watchdog detects this and
 restores the forward automatically, once a minute, with a full audit trail.
+It re-establishes the `ssh -O forward` unconditionally — the round-trip rides
+the host-side ControlMaster socket and never touches the VM, so running
+containers are unaffected; only the `colima stop && colima start` fallback is
+gated on the container probe (it runs only when the probe succeeded and found
+zero running containers).
 
 - Script: `scripts/colima-watchdog.sh` (POSIX sh, run by launchd)
 - Launch agent: `scripts/com.d33d.colima-watchdog.plist` (60 s `StartInterval`)
 - Log: `~/Library/Logs/d33d-colima-watchdog.log` (one timestamped line per
   event: check failed, action taken, result; a healthy tick writes nothing)
-- Exit codes: `0` healthy or healed, `1` not healed (or skipped — another
-  watchdog instance is already healing), `2` skipped because containers were
-  running (or the container probe failed — conservative; the safety rule),
+- Exit codes: `0` healthy or healed (docker info answers), `1` heal
+  attempted but docker still doesn't answer (or skipped — another
+  watchdog instance is already healing), `2` restart was needed but
+  blocked (containers running — the log line names the count — or the
+  container probe failed; the safety rule gates only the restart),
   `64` usage/environment error (unknown flag, non-numeric env override).
-  Any other non-zero code means the script aborted mid-run before reaching
-  a decision.
+  Any other non-zero code means the script aborted mid-run before
+  reaching a decision.
 
 The plist captures no stdout/stderr: the log file above is the single audit
 surface. Launchd's own captures would just duplicate (or silently lose) what
