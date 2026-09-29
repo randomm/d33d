@@ -76,11 +76,12 @@ def test_project_metadata_survives_round_trip(app_with_versions, tmp_path):
         await create_version(client, pid, {"W": 20}, name="v1")
 
         # Upload a source photo (1x1 PNG, png content-type).
-        png_bytes = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
-            b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
-            b"\x00\x00\x00\nIDATx\x9cc\x00\x01\x01\x00\x05\x18"
-            b"\xd8\x9c\x00\x00\x00\x00IEND\xaeB\x60\x82"
+        # Issue #299: the hand-crafted literal had a bad IDAT checksum and
+        # would now 422 at the decode gate — swapped for a valid PNG.
+        import base64 as _b64
+        png_bytes = _b64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgSjnBAAAC6Q"
+            "E3I8kx3AAAAABJRU5ErkJggg=="
         )
         r = await client.post(
             f"/api/projects/{pid}/photos",

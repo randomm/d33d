@@ -693,6 +693,22 @@ export const missingStorage = {
     "The saved design for that version is missing, so I can't restore it. The versions list and its measurements are still here",
 } as const;
 
+/**
+ * Reference-photo upload rejection copy (issue #299). When the backend
+ * rejects an upload because the bytes are not a decodable image, it
+ * returns a 422 with `detail` carrying this exact sentence; the SPA
+ * surfaces `detail` verbatim (throwFor/PhotoUpload render it as-is, the
+ * #295 way), and the design-contract tripwire pins the two-way agreement
+ * so a wording drift between the deck and the wire fails the test.
+ */
+export const photoUpload = {
+  /** The 422 `detail` body the upload route returns for bytes that are
+   *  not a readable PNG or JPEG. The SPA shows it verbatim — never
+   *  paraphrased, never a status code. */
+  undecodable:
+    "That file isn't a readable PNG or JPEG image. Try exporting it again.",
+} as const;
+
 export const copy = {
   brief,
   passCard,
@@ -708,6 +724,7 @@ export const copy = {
   shell,
   export3mf,
   missingStorage,
+  photoUpload,
 } as const;
 
 export default copy;

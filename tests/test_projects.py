@@ -14,6 +14,7 @@ All tests non-slow: no Docker, no network, no port binding. Git is local-only
 from __future__ import annotations
 
 import asyncio
+import base64
 import shutil as _shutil
 import subprocess
 from pathlib import Path
@@ -23,11 +24,40 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
-from d33d.projects import ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES
+from d33d.projects import ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES, UNDECODABLE_PHOTO_DETAIL
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _valid_png_1x1() -> bytes:
+    """A genuinely decodable 1x1 RGBA PNG (issue #299: the upload decode
+    gate requires a real image — the old hand-crafted magic-byte literals
+    were not decodable)."""
+    return base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPgSjnBAAAC6Q"
+        "E3I8kx3AAAAABJRU5ErkJggg=="
+    )
+
+
+def _valid_jpeg_1x1() -> bytes:
+    """A genuinely decodable 1x1 JPEG (issue #299: the upload decode
+    gate requires a real image — the old magic-byte literal was not
+    decodable)."""
+    return base64.b64decode(
+        "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwg"
+        "JC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIy"
+        "MjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAABAAEDASIAAhEBAxEB/8QA"
+        "HwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIh"
+        "MUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVW"
+        "V1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXG"
+        "x8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQF"
+        "BgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAV"
+        "YnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOE"
+        "hYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq"
+        "8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDgqKKK8M/VD//Z"
+    )
 
 
 def _run_async(app: Any, coro_factory) -> Any:
@@ -234,13 +264,7 @@ def test_get_project_storage_field_present(app_with_projects):
         # (photo_present must be false, NOT null).
         create_r2 = await client.post("/api/projects", json={"name": "S2"})
         pid2 = create_r2.json()["id"]
-        png_bytes = (
-            b"\x89PNG\r\n\x1a\n"
-            b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-            b"\x08\x02\x00\x00\x00\x90w\xfe\xed"
-            b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05"
-            b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB\xbfK"
-        )
+        png_bytes = _valid_png_1x1()
         files = {"file": ("p.png", png_bytes, "image/png")}
         await client.post(f"/api/projects/{pid2}/photos", files=files)
         row2 = app_with_projects.state.conn.get_project(pid2)
@@ -365,14 +389,7 @@ def test_delete_project_cascades_transcripts(app_with_projects, app_paths):
 def test_upload_photo_success(app_with_projects, tmp_path):
     """POST /api/projects/{id}/photos with a valid PNG stores the file
     in the git repo and updates source_photo_path."""
-    # Create a minimal valid PNG (1x1 pixel)
-    png_bytes = (
-        b"\x89PNG\r\n\x1a\n"
-        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-        b"\x08\x02\x00\x00\x00\x90w\xfe\xed"
-        b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05"
-        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB\xbfK"
-    )
+    png_bytes = _valid_png_1x1()
 
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Photo Project"})
@@ -402,7 +419,7 @@ def test_upload_photo_updates_source_photo_path(app_with_projects):
     """After a successful upload, source_photo_path is updated in the DB."""
 
     async def _call(client):
-        png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        png_bytes = _valid_png_1x1()
         create_r = await client.post("/api/projects", json={"name": "Path Test"})
         pid = create_r.json()["id"]
         files = {"file": ("img.png", png_bytes, "image/png")}
@@ -492,13 +509,7 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
     commit call, i.e. the route is not bypassing the lock)."""
     import d33d.projects as projects_mod
 
-    png_bytes = (
-        b"\x89PNG\r\n\x1a\n"
-        b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
-        b"\x08\x02\x00\x00\x00\x90w\xfe\xed"
-        b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05"
-        b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB\xbfK"
-    )
+    png_bytes = _valid_png_1x1()
     real_commit_all = projects_mod.commit_all
 
     calls: list[int] = []
@@ -552,9 +563,9 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
 
 
 def test_upload_photo_accepts_jpeg(app_with_projects):
-    """image/jpeg is in the allowed set → accepted."""
-    # Minimal JPEG magic bytes
-    jpeg_bytes = b"\xff\xd8\xff\xdb\x00\x43\x08" + b"\x00" * 10
+    """image/jpeg is in the allowed set → accepted (issue #299: a real,
+    decodable JPEG — magic bytes alone would now 422)."""
+    jpeg_bytes = _valid_jpeg_1x1()
 
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Jpeg Test"})
@@ -577,7 +588,7 @@ def test_upload_photo_sanitizes_commit_message(app_with_projects):
     never reach the git commit message: the message stays a single line of
     safe alnum+``._-`` characters (regression test for the commit-message
     injection sink in the per-project repo's commit history)."""
-    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+    png_bytes = _valid_png_1x1()
     evil_name = "a\n$(whoami);rm -rf / # " + """" ' `""" + ".png"
 
     async def _call(client):
@@ -618,6 +629,117 @@ def test_max_upload_bytes_is_20mb():
 def test_allowed_content_types():
     """The allowed set is exactly png + jpeg."""
     assert ALLOWED_CONTENT_TYPES == {"image/png", "image/jpeg"}
+
+
+# ---------------------------------------------------------------------------
+# Issue #299 — the upload decode gate: an undecodable file (e.g. an 8-byte
+# "fake-png" text blob with an image/png content type) is rejected with 422
+# BEFORE any file write / git commit / DB update, and the stored extension
+# follows the DETECTED format (Pillow's ``img.format``), not the declared
+# content type. Check order is fixed: content type (400) → size (413) →
+# decode gate (422) → write/commit/DB.
+# ---------------------------------------------------------------------------
+
+
+def test_upload_photo_rejects_undecodable_file_with_422(app_with_projects):
+    """A non-decodable file (8-byte "fake-png" with image/png content type)
+    → 422 with the copy.ts message verbatim, and NOTHING is written: no
+    file in the repo's photos/ dir, no git commit, and
+    ``source_photo_path`` stays unchanged (NULL for a fresh project).
+    """
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Gate Test"})
+        pid = create_r.json()["id"]
+        repo_path = _repo_for(app_with_projects, pid)
+        files = {"file": ("fake.png", b"fake-png", "image/png")}
+        r = await client.post(f"/api/projects/{pid}/photos", files=files)
+        get_r = await client.get(f"/api/projects/{pid}")
+        photos_dir = repo_path / "photos"
+        remaining = list(photos_dir.iterdir()) if photos_dir.exists() else []
+        # A fresh repo has no commits; "no commit" is proven by the
+        # photos/ dir being empty (the commit would have staged it).
+        return r, get_r.json(), remaining
+
+    r, body, remaining = _run_async(app_with_projects, _call)
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
+    # The 422 body is {"detail": "<copy text>"} — the SPA renders it verbatim.
+    assert r.json()["detail"] == UNDECODABLE_PHOTO_DETAIL
+    # Nothing was written to the repo's photos/ dir (and hence no commit).
+    assert remaining == [], f"a file was written on a 422: {remaining}"
+    # source_photo_path is unchanged (NULL for a fresh project).
+    assert body["source_photo_path"] is None
+
+
+def test_upload_photo_422_fires_after_size_check(app_with_projects):
+    """>20 MB undecodable garbage → 413, NOT 422 (the size check fires
+    first — the decode gate never sees the bytes). The existing
+    ``test_upload_photo_rejects_oversized_file`` pins this; this test
+    re-pins it against the decode-gate regression (a 422-before-413
+    ordering would break the 20 MB contract)."""
+    oversized = b"\x89PNG" + b"\x00" * (MAX_UPLOAD_BYTES + 100)
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Size First"})
+        pid = create_r.json()["id"]
+        files = {"file": ("big.png", oversized, "image/png")}
+        return await client.post(f"/api/projects/{pid}/photos", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 413, f"expected 413, got {r.status_code}: {r.text}"
+    assert "exceeds" in r.json()["detail"]
+
+
+def test_upload_photo_extension_follows_detected_format(app_with_projects):
+    """Issue #299: the stored suffix follows the DETECTED format
+    (Pillow's ``img.format``), never the declared content type.
+    - A real PNG declared ``image/jpeg`` → stored as ``.png``.
+    - A real JPEG declared ``image/png`` → stored as ``.jpg``.
+    """
+
+    async def _call(client):
+        # Case 1: PNG bytes declared image/jpeg → .png on disk.
+        c1 = await client.post("/api/projects", json={"name": "Mime1"})
+        pid1 = c1.json()["id"]
+        r1 = await client.post(
+            f"/api/projects/{pid1}/photos",
+            files={"file": ("x.jpg", _valid_png_1x1(), "image/jpeg")},
+        )
+        path1 = r1.json().get("source_photo_path")
+        # Case 2: JPEG bytes declared image/png → .jpg on disk.
+        c2 = await client.post("/api/projects", json={"name": "Mime2"})
+        pid2 = c2.json()["id"]
+        r2 = await client.post(
+            f"/api/projects/{pid2}/photos",
+            files={"file": ("x.png", _valid_jpeg_1x1(), "image/png")},
+        )
+        path2 = r2.json().get("source_photo_path")
+        return r1, r2, path1, path2
+
+    r1, r2, path1, path2 = _run_async(app_with_projects, _call)
+    assert r1.status_code == 201, r1.text
+    assert r2.status_code == 201, r2.text
+    assert path1 is not None and path1.endswith(".png"), f"PNG bytes should be .png: {path1}"
+    assert path2 is not None and path2.endswith(".jpg"), f"JPEG bytes should be .jpg: {path2}"
+
+
+def test_upload_photo_422_on_truncated_png(app_with_projects):
+    """A valid PNG header with a truncated body (magic bytes + IHDR only,
+    no IDAT/IEND) is NOT decodable → 422 (the old hand-crafted test
+    fixtures relied on this being accepted; issue #299 pins it as a
+    rejection — the upload gate requires a fully decodable image).
+    """
+    truncated = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Trunc"})
+        pid = create_r.json()["id"]
+        files = {"file": ("trunc.png", truncated, "image/png")}
+        return await client.post(f"/api/projects/{pid}/photos", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
+    assert r.json()["detail"] == UNDECODABLE_PHOTO_DETAIL
 
 
 # ---------------------------------------------------------------------------

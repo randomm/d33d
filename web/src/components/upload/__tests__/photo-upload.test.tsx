@@ -231,4 +231,97 @@ describe("PhotoUpload", () => {
     // Restore the shared FakeImage stub for subsequent tests in this file.
     vi.stubGlobal("Image", FakeImage);
   });
+
+  it("shows the 422 undecodable detail verbatim in the error state (issue #299)", async () => {
+    // Issue #299: when the backend rejects an upload with 422 because the
+    // bytes are not a readable PNG or JPEG, the SPA must surface the
+    // `detail` body verbatim — the copy.ts `photoUpload.undecodable`
+    // string, never paraphrased, never a status code.
+    const undecodableDetail =
+      "That file isn't a readable PNG or JPEG image. Try exporting it again.";
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      json: async () => ({ detail: undecodableDetail }),
+    });
+    const file = makeFile("image/png", 1024, "test.png");
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(undecodableDetail);
+    });
+
+    // The component's visible error state must show the detail verbatim.
+    const errorEl = screen.getByTestId("upload-error");
+    expect(errorEl).toBeTruthy();
+    expect(errorEl.textContent).toBe(undecodableDetail);
+  });
+
+  it("shows the 400 bad content-type detail verbatim in the error state", async () => {
+    // The 400 path (bad content type) also carries a `detail` body that
+    // must surface verbatim — same contract as the 422 path.
+    const badTypeDetail = 'Content type "application/pdf" is not allowed';
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      json: async () => ({ detail: badTypeDetail }),
+    });
+    const file = makeFile("image/png", 1024, "test.png");
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(badTypeDetail);
+    });
+
+    const errorEl = screen.getByTestId("upload-error");
+    expect(errorEl).toBeTruthy();
+    expect(errorEl.textContent).toBe(badTypeDetail);
+  });
+
+  it("shows client-side validation errors verbatim in the error state", async () => {
+    // Client-side validation (type/size checks) also surfaces its message
+    // verbatim in the error state — the contract is one rule: the detail
+    // string is shown as-is.
+    const file = makeFile("image/gif", 1000, "anim.gif");
+    render(
+      <PhotoUpload projectId={projectId} onUploaded={onUploaded} onError={onError} />,
+    );
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(
+        expect.stringContaining("Unsupported file type"),
+      );
+    });
+
+    const errorEl = screen.getByTestId("upload-error");
+    expect(errorEl).toBeTruthy();
+    expect(errorEl.textContent).toContain("Unsupported file type");
+  });
+
+  it("shows the no-project error verbatim in the error state", async () => {
+    // When projectId is undefined and onEnsureProject is not provided,
+    // the component shows shell.noProject verbatim.
+    const file = makeFile("image/png", 1024, "test.png");
+    render(<PhotoUpload onUploaded={onUploaded} onError={onError} />);
+    const input = screen.getByTestId("photo-file-input");
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(onError).toHaveBeenCalledWith("No project selected");
+    });
+
+    const errorEl = screen.getByTestId("upload-error");
+    expect(errorEl).toBeTruthy();
+    expect(errorEl.textContent).toBe("No project selected");
+  });
 });

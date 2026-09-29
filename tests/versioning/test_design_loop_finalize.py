@@ -2476,6 +2476,87 @@ def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
         assert "photo.png" not in m, f"the WARNING carries the filename: {m!r}"
 
 
+def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp_path):
+    """Issue #299, the treat-as-lost extension of #295: a project whose
+    photo is PRESENT on disk but undecodable (the 8-byte ``fake-png``
+    repro) behaves identically to a lost photo — the design proceeds with
+    exactly :data:`EMPTY_PHOTO_DATA_URI` (the MIME flip from a stored
+    ``.jpg`` to ``data:image/png`` is expected and pinned), the stream
+    carries ONE ``PHOTO_MISSING_NOTICE`` notice frame before the terminal
+    frame, and the WARNING names the project id only (no file path).
+    A photo-LESS project (NULL path) must NOT get a notice — pinned by
+    ``test_chat_missing_photo_falls_back_to_empty_constant``.
+    """
+    import logging as _logging
+
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+    from d33d.projects import PHOTO_MISSING_NOTICE
+
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        # State 3b: the path is SET and the file IS on disk, but its
+        # bytes are not a decodable image (the ticket's 8-byte "fake-png").
+        bad_path = tmp_path / "photo.jpg"
+        bad_path.write_bytes(b"fake-png")
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(bad_path)
+        )
+        logger = _logging.getLogger("d33d.design_loop_events")
+        records: list = []
+        handler = _logging.Handler()
+
+        def _emit(record):
+            records.append(record)
+
+        handler.emit = _emit
+        logger.addHandler(handler)
+        logger.setLevel(_logging.WARNING)
+        try:
+            await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "hi"}
+            )
+            source = app_with_versions.state.event_sources.get(pid)
+            frames = []
+            assert source is not None
+            async for _event, _data in source:
+                frames.append((_event, _data))
+                if _event in ("done", "error"):
+                    break
+            return frames, [r.getMessage() for r in records]
+        finally:
+            logger.removeHandler(handler)
+
+    frames, log_messages = run_async(app_with_versions, _call)
+    # The design proceeded with the EMPTY constant, never the bad bytes.
+    assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
+    # ONE copy.ts notice frame, BEFORE the terminal frame.
+    notice_idx = next(
+        (i for i, (ev, _d) in enumerate(frames) if ev == "notice"), None
+    )
+    terminal_idx = next(
+        (i for i, (ev, _d) in enumerate(frames) if ev in ("done", "error")),
+        len(frames),
+    )
+    assert notice_idx is not None, "no notice frame for an undecodable photo"
+    assert notice_idx < terminal_idx, "the notice must precede the terminal frame"
+    assert frames[notice_idx][1]["message"] == PHOTO_MISSING_NOTICE
+    assert sum(1 for ev, _d in frames if ev == "notice") == 1
+    # The WARNING fired, project id only (no file path).
+    warnings = [m for m in log_messages if "photo" in m and "missing" in m]
+    assert warnings, "no WARNING logged for an undecodable stored photo"
+    for m in warnings:
+        assert str(tmp_path) not in m, f"the WARNING carries a file path: {m!r}"
+        assert "photo.jpg" not in m, f"the WARNING carries the filename: {m!r}"
+
+
 def test_chat_missing_design_source_reply_no_run(app_with_versions):
     """Issue #295, acceptance criterion 2 (the missing-source chat reply):
     a project whose git repo (and with it the current version's
@@ -3009,12 +3090,37 @@ def test_sse_wide_catch_emits_terminal_error():
 
 def test_photo_data_uri_jpeg(app_with_versions, tmp_path):
     """A JPEG photo gets image/jpeg MIME (from the .jpg extension)."""
+    import io
+
+    from PIL import Image
     from d33d.design_loop_events import photo_data_uri
 
     jpg_path = tmp_path / "photo.jpg"
-    jpg_path.write_bytes(b"\xff\xd8\xff\xdbfakejpegdata")
+    _img = Image.new("RGB", (1, 1), (200, 10, 10))
+    _buf = io.BytesIO()
+    _img.save(_buf, "JPEG")
+    jpg_path.write_bytes(_buf.getvalue())
     uri = photo_data_uri(str(jpg_path))
     assert uri.startswith("data:image/jpeg;base64,"), f"wrong MIME: {uri[:50]}"
+
+
+def test_photo_data_uri_undecodable_stored_photo_returns_constant(tmp_path):
+    """Issue #299: a stored photo that is present on disk but undecodable
+    (an 8-byte ``fake-png`` — the repro from the ticket) returns exactly
+    :data:`EMPTY_PHOTO_DATA_URI` (the ``data:image/png`` flip from a
+    stored ``.jpg`` is expected and pinned). The file is NEVER base64-
+    embedded — that would 400 the LLM endpoint on every design pass.
+    """
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI, photo_data_uri
+
+    bad_jpg = tmp_path / "photo.jpg"
+    bad_jpg.write_bytes(b"fake-png")
+    uri = photo_data_uri(str(bad_jpg))
+    assert uri == EMPTY_PHOTO_DATA_URI
+    # A text file with a .png extension is equally unusable.
+    bad_png = tmp_path / "photo.png"
+    bad_png.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR")
+    assert photo_data_uri(str(bad_png)) == EMPTY_PHOTO_DATA_URI
 
 
 def test_photo_data_uri_missing_file_returns_constant():
