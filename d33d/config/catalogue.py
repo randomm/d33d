@@ -146,15 +146,13 @@ def _interp_env(value: Any, where: str) -> str:
         name = m.group(1)
         if name not in os.environ:
             raise MissingEnvVarError(
-                f"{where}: environment variable {name!r} "
-                f"(referenced by key {value!r}) is not set",
+                f"{where}: environment variable {name!r} is not set",
                 var_name=name,
             )
         resolved = os.environ[name]
         if not resolved:
             raise MissingEnvVarError(
-                f"{where}: environment variable {name!r} "
-                f"(referenced by key {value!r}) is set but empty",
+                f"{where}: environment variable {name!r} is set but empty",
                 var_name=name,
             )
         return resolved

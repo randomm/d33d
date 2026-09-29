@@ -5004,6 +5004,47 @@ def test_chat_model_unconfigured_frame_omits_env_var_when_unknown(
     )
 
 
+def test_chat_error_frame_omits_env_var_for_other_reasons(
+    app_with_versions,
+):
+    """Omit-not-null: a non-``model_unconfigured`` result carrying a
+    stray ``env_var`` (e.g. a stub) does NOT put ``env_var`` on the
+    terminal frame — the field rides the frame only for the
+    ``model_unconfigured`` reason."""
+
+    class _Result:
+        status = "exhausted"
+        best = IterationRecord(iteration=0, scad_source="", render=None, score=None)
+        failure_reason = "bbox_out_of_tolerance"
+        iterations_used = 0
+        env_var = "TRAIL_OPENERS_LLM_KEY"
+
+    async def _loop(app, **kwargs):
+        return _Result()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "bbox_out_of_tolerance"
+    assert "env_var" not in error_frames[0], (
+        "env_var must ride the terminal frame ONLY for the "
+        "model_unconfigured reason"
+    )
+
+
 class _VersionsSvcForQuestion:
     """A duck-typed versions service whose ``latest_version`` returns a
     version row (so the pre-route takes the question path, not the
@@ -5252,27 +5293,11 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
     """Issue #303 startup: a not-ok model pre-flight logs EXACTLY ONE
     WARNING naming the env var (never the value); a missing models.yaml
     logs the same way (the no-variable branch, no crash); a configured
-    model logs nothing. ``caplog`` is used so the ``logging`` handler
-    swap below has the fixture's teardown bookkeeping (it is also the
-    standard caplog seam these tests run through)."""
+    model logs nothing."""
     import asyncio
-    import logging
 
     app = app_with_versions
 
-    class _Spy(logging.Handler):
-        def __init__(self):
-            super().__init__()
-            self.records = []
-
-        def emit(self, record):
-            self.records.append(record)
-
-    spy = _Spy()
-    app_logger = logging.getLogger("d33d.app")
-    saved = (app_logger.handlers[:], app_logger.level)
-    app_logger.handlers = [spy]
-    app_logger.setLevel(logging.DEBUG)
     try:
         # Case 1: missing models.yaml (the file is absent in the fixture)
         # → exactly one WARNING (the no-variable branch), never a crash.
@@ -5281,7 +5306,7 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
                 pass
 
         asyncio.run(_enter())
-        warnings = [r for r in spy.records if r.levelno == logging.WARNING]
+        warnings = caplog.get_records("call")
         assert len(warnings) == 1, (
             f"exactly one WARNING expected on a missing models.yaml, got "
             f"{len(warnings)}: {[r.getMessage() for r in warnings]}"
@@ -5289,7 +5314,7 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
         msg = warnings[0].getMessage()
         assert "model pre-flight" in msg
         assert "design" in msg
-        spy.records.clear()
+        caplog.clear()
 
         # Case 2: an unset ${ENV} key → exactly one WARNING that NAMES
         # the variable and never carries the value.
@@ -5310,7 +5335,7 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
         )
         monkeypatch.delenv("UNSET_303_STARTUP", raising=False)
         asyncio.run(_enter())
-        warnings = [r for r in spy.records if r.levelno == logging.WARNING]
+        warnings = caplog.get_records("call")
         assert len(warnings) == 1, (
             f"exactly one WARNING expected for an unset key, got "
             f"{len(warnings)}: {[r.getMessage() for r in warnings]}"
@@ -5318,7 +5343,7 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
         msg = warnings[0].getMessage()
         assert "UNSET_303_STARTUP" in msg
         assert "sentinel" not in msg
-        spy.records.clear()
+        caplog.clear()
 
         # Case 3: a configured model → NO warning.
         p.write_text(
@@ -5336,13 +5361,12 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
             "  classification: m\n"
         )
         asyncio.run(_enter())
-        warnings = [r for r in spy.records if r.levelno == logging.WARNING]
+        warnings = caplog.get_records("call")
         assert warnings == [], (
             f"no WARNING expected for a configured model, got "
             f"{[r.getMessage() for r in warnings]}"
         )
     finally:
-        app_logger.handlers, app_logger.level = saved
         if p.is_file():
             p.unlink()
 

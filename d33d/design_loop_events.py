@@ -39,7 +39,7 @@ from typing import Any
 
 from PIL import Image
 
-from d33d.design_loop import BboxInfo
+from d33d.design_loop import MODEL_UNCONFIGURED, BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -1947,7 +1947,7 @@ async def run_design_loop_with_events(
         # not name a variable (unresolved role/alias → the "Check the model
         # settings." copy).
         env_var = getattr(result, "env_var", None)
-        if isinstance(env_var, str) and env_var:
+        if reason == MODEL_UNCONFIGURED and isinstance(env_var, str) and env_var:
             error_data["env_var"] = env_var
         # The gate's per-axis enforced set (issue #261 fix batch): lets
         # the failure copy name the value that was HELD when a carried

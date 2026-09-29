@@ -79,10 +79,11 @@ export function FailureTurn({
   // Rendered in the mono face: the variable name is a measurement, not
   // prose. No other reason renders a helper (only the pre-flight frame
   // carries `env_var`).
+  const modelEnvVar = envVarOf(error);
   const modelHelper =
     error.reason === "model_unconfigured"
-      ? envVarOf(error) !== null
-        ? copy.failure.modelUnconfiguredHelper(envVarOf(error) ?? "")
+      ? modelEnvVar !== null
+        ? copy.failure.modelUnconfiguredHelper(modelEnvVar)
         : copy.failure.modelUnresolved
       : null;
 

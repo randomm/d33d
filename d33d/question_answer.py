@@ -1159,12 +1159,7 @@ async def ask_answer_call(
         # no-run reply.
         raise
     except ModelUnconfiguredError:
-        # The model pre-flight (issue #303) found the model cannot be
-        # called: this is NOT a failed answer — it is a configuration
-        # failure that must propagate to the route's
-        # ``except ModelUnconfiguredError`` (the structured terminal error
-        # frame, reason ``model_unconfigured``), never a swallowed
-        # ``COULD_NOT_ANSWER`` reply.
+        # Pre-flight (issue #303) configuration failure: re-raise to the route's ``except ModelUnconfiguredError`` — never a swallowed ``COULD_NOT_ANSWER``.
         raise
     except TimeoutError:
         # The hard ``timeout`` bound fired (``asyncio.wait_for`` raises

@@ -306,19 +306,9 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
 async def _model_unconfigured_frames(env_var: str | None = None):
     """The model-unconfigured terminal frame (issue #303): ONE ``error``
     frame — the SAME structured shape the design loop's terminal error
-    frame carries (``reason: model_unconfigured`` + ``env_var`` when known)
-    — so the SPA's ``displayDesignLoopError`` / ``FailureTurn`` render it
-    via the same path (no retry button, blocked styling #D2A63C).
-
-    ``env_var`` is the name of the missing/empty ``${ENV}`` variable (or
-    ``None`` for an unresolved role/alias — the SPA then renders the
-    "Check the model settings." copy). It is NEVER the key value.
-
-    The frame is ``error`` (not ``done``): a ``done`` frame with
-    ``kind: "answer"`` would render as a plain assistant message, not a
-    failure turn. The in-flight flag is released by ``streaming.py``'s
-    ``finally`` on the SSE endpoint (the same single release point as
-    ``_answered_frames``).
+    frame carries (``reason: model_unconfigured`` + ``env_var`` when known;
+    never the key value). ``error``, not ``done``: a ``done`` frame would
+    render as a plain assistant message, not a failure turn.
     """
     from d33d.design_loop import MODEL_UNCONFIGURED
 
