@@ -209,15 +209,22 @@ export function FailureTurn({
             </button>
           </>
         ) : (
-          <button
-            type="button"
-            className="failure-turn-action"
-            data-testid="failure-action-retry"
-            disabled={inFlight}
-            onClick={() => onAction(copy.failure.retryAction)}
-          >
-            {copy.failure.retryAction}
-          </button>
+          // The retry control is offered only when the failure is
+          // retryable: the `model_unconfigured` pre-flight failure (issue
+          // #303) is a configuration state — retrying just fails again —
+          // so it renders NO retry button (the helper sentence in part 1
+          // says what to do instead).
+          error.retryable ? (
+            <button
+              type="button"
+              className="failure-turn-action"
+              data-testid="failure-action-retry"
+              disabled={inFlight}
+              onClick={() => onAction(copy.failure.retryAction)}
+            >
+              {copy.failure.retryAction}
+            </button>
+          ) : null
         )}
       </div>
 

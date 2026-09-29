@@ -4088,6 +4088,38 @@ describe("App design-loop error display (issue #82)", () => {
     expect(screen.getByTestId("failure-action-retry")).toBeTruthy();
   });
 
+  it("maps model_unconfigured to the env-var helper with NO retry button (issue #303)", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onError?.({
+        message: "Design loop exhausted: model_unconfigured",
+        reason: "model_unconfigured",
+        env_var: "TRAIL_OPENERS_LLM_KEY",
+      });
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
+    });
+    // The helper sentence names the variable (the NAME, never the value).
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
+      "The model isn't configured. Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
+    );
+    // A configuration failure is not retryable — the retry button is omitted.
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+    // The raw reason survives in the collapsed detail.
+    expect(screen.getByTestId("failure-turn-raw-code").textContent).toContain(
+      "model_unconfigured",
+    );
+  });
+
   it("maps an unknown reason code to the generic sentence plus the raw code", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });

@@ -312,10 +312,25 @@ export const failure = {
   axisMismatchLine: (label: string, modelMm: number, measuredMm: number): string =>
     `${label}: ${mm(modelMm)} → ${mm(measuredMm)}`,
 
+  /** The `model_unconfigured` helper (issue #303): the frame carries the
+   *  missing/empty `${ENV}` variable NAME (never the value) when the
+   *  pre-flight could name one — this sentence names it. Rendered by
+   *  `displayDesignLoopError` for the `model_unconfigured` reason. */
+  modelUnconfigured: (envVar: string): string =>
+    `The model isn't configured. Set ${envVar} where the server runs, then restart it.`,
+
+  /** The `model_unconfigured` variant for a model the pre-flight could not
+   *  resolve (no single env var to name, issue #303). */
+  modelUnconfiguredCheck: (): string =>
+    "The model isn't configured. Check the model settings.",
+
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value,
-   *  every render ErrorClass value, and the loop-level pre-flight reason
-   *  (`renderer_unavailable`, issue #277) has an entry. */
+   *  every render ErrorClass value, and the loop-level pre-flight reasons
+   *  (`renderer_unavailable`, issue #277; `model_unconfigured`, issue #303)
+   *  have an entry (the `model_unconfigured` entry is the base sentence; the
+   *  env-var helper is selected by `copy.failure.modelUnconfigured` when the
+   *  frame names the variable). */
   reasons: {
     bbox_out_of_tolerance:
       "It came out a different size from the one you asked for.",
@@ -337,6 +352,7 @@ export const failure = {
       "The render environment failed. That is temporary — try again.",
     renderer_unavailable:
       "The renderer isn't running, so nothing was designed. Start Docker and try again.",
+    model_unconfigured: "The model isn't configured.",
     load_error: "The finished model could not be loaded back for checking.",
     watertight:
       "The model has holes in its surface, so a slicer can't tell inside from outside.",

@@ -64,6 +64,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import dataclasses
 import json
 import logging
 import math
@@ -1531,7 +1532,7 @@ def _build_production_design_loop():
     ``asyncio.run``-nested inside the already-running event loop, which
     ``asyncio.run`` forbids with ``RuntimeError``.
     """
-    from d33d.config.catalogue import load_catalogue
+    from d33d.config.catalogue import CatalogueError, MissingEnvVarError, load_catalogue
     from d33d.config.preflight import model_preflight_loaded
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
@@ -1560,7 +1561,31 @@ def _build_production_design_loop():
                 on_progress=kwargs.get("on_progress"),
             )
 
-        cat = load_catalogue(catalogue_path)
+        try:
+            cat = load_catalogue(catalogue_path)
+        except MissingEnvVarError as e:
+            # The ``${ENV}`` key is unset or empty: the pre-flight's
+            # not-ok case. The closure returns the structured terminal
+            # result (the adapter emits the frame) — never a crash.
+            result = DesignResult(
+                status="exhausted",
+                best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
+                iterations=(),
+                failure_reason=MODEL_UNCONFIGURED,
+                iterations_used=0,
+            )
+            return dataclasses.replace(result, env_var=e.var_name)
+        except CatalogueError:
+            # Missing or invalid catalogue file: the pre-flight's
+            # not-ok case (no env var to name).
+            result = DesignResult(
+                status="exhausted",
+                best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
+                iterations=(),
+                failure_reason=MODEL_UNCONFIGURED,
+                iterations_used=0,
+            )
+            return dataclasses.replace(result, env_var=None)
         # Model pre-flight (issue #303): BEFORE any capability probe or
         # LLM call — a missing/empty provider key or an unresolved design
         # role must end the turn at once with the loop-level
@@ -1570,13 +1595,20 @@ def _build_production_design_loop():
         # exhausted ``DesignResult`` before iteration 1).
         pre = model_preflight_loaded(cat, "design")
         if not pre.ok:
-            return DesignResult(
+            # ``env_var`` rides the result (issue #303): the adapter
+            # (``design_loop_events``'s ``env_var`` emit) puts the name
+            # in the terminal frame so the SPA's ``FailureTurn`` renders
+            # the helper sentence. ``None`` (unresolved role/alias) → the
+            # frame omits it → the SPA's "Check the model settings."
+            # copy. The NAME, never the value.
+            result = DesignResult(
                 status="exhausted",
                 best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
                 iterations=(),
                 failure_reason=MODEL_UNCONFIGURED,
                 iterations_used=0,
             )
+            return dataclasses.replace(result, env_var=pre.env_var)
         res = resolve_model(cat, "design")
         # The key comes from the RESOLVED model's own provider (issue #303
         # api_key bug fix — NOT the first provider in ``cat.providers``,

@@ -240,6 +240,43 @@ describe("FailureTurn", () => {
     expect(onAction).toHaveBeenCalledWith(copy.failure.retryAction);
   });
 
+  it("a model_unconfigured failure (retryable: false) offers NO retry button (issue #303)", () => {
+    // The model pre-flight failure is a configuration state: the helper
+    // sentence in part 1 says what to do, and retrying just fails again —
+    // so the retry control is omitted entirely (no failure-action-retry).
+    const error: DisplayError = {
+      message: copy.failure.modelUnconfigured("TRAIL_OPENERS_LLM_KEY"),
+      detail: "model_unconfigured",
+      retryable: false,
+      reason: "model_unconfigured",
+      envVar: "TRAIL_OPENERS_LLM_KEY",
+    };
+    const onAction = vi.fn();
+    render(<FailureTurn error={error} inFlight={false} onAction={onAction} />);
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+    expect(screen.queryByTestId("failure-action-split")).toBeNull();
+    // Part 1 still renders the helper sentence (the var NAME, never a value).
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
+      "Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
+    );
+    // The unresolved-model variant renders the "Check the model settings."
+    // copy with no env var name.
+    const check: DisplayError = {
+      message: copy.failure.modelUnconfiguredCheck(),
+      detail: "model_unconfigured",
+      retryable: false,
+      reason: "model_unconfigured",
+    };
+    render(
+      <FailureTurn error={check} inFlight={false} onAction={onAction} />,
+    );
+    expect(screen.queryAllByTestId("failure-action-retry")).toHaveLength(0);
+    expect(screen.getAllByTestId("failure-turn-sentence")[1].textContent).toContain(
+      "Check the model settings.",
+    );
+    expect(onAction).not.toHaveBeenCalled();
+  });
+
   it("actions are disabled while a loop is in flight", () => {
     const error: DisplayError = {
       message: copy.failure.reasons.timeout,

@@ -346,6 +346,11 @@ class DesignResult:
     iterations (never silently the last attempt); ``failure_reason`` is one
     of the structured classes in :data:`GATE_REASON_BITS` or a render-worker
     class — never free text.
+
+    ``env_var`` (issue #303) carries the model pre-flight's missing/empty
+    ``${ENV}`` variable NAME (never the value) when the loop short-circuits
+    on ``model_unconfigured`` — the adapter's terminal frame picks it up.
+    ``None`` for every other outcome.
     """
 
     status: str
@@ -353,6 +358,7 @@ class DesignResult:
     iterations: tuple[IterationRecord, ...]
     failure_reason: str | None = None
     iterations_used: int = 0
+    env_var: str | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each

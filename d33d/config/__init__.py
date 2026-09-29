@@ -26,7 +26,11 @@ from d33d.config.catalogue import (
     load_catalogue,
     resolve_call_params,
 )
-from d33d.config.preflight import ModelPreflight, model_preflight
+from d33d.config.preflight import (
+    ModelPreflight,
+    model_preflight,
+    model_preflight_loaded,
+)
 from d33d.config.resolve import resolve_model
 
 __all__ = [
@@ -45,6 +49,7 @@ __all__ = [
     "hot_reload",
     "load_catalogue",
     "model_preflight",
+    "model_preflight_loaded",
     "resolve_call_params",
     "resolve_model",
 ]
