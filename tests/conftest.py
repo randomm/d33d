@@ -30,11 +30,11 @@ if root_str not in sys.path:
     sys.path.insert(0, root_str)
 
 
-def _count_projects_dirs() -> int:
+def _project_entry_names() -> set[str]:
     p = Path.home() / ".d33d" / "projects"
     if p.is_dir():
-        return len(list(p.iterdir()))
-    return 0
+        return {e.name for e in p.iterdir()}
+    return set()
 
 
 @pytest.fixture(autouse=True)
@@ -48,11 +48,17 @@ def _isolate_data_dir(tmp_path, monkeypatch):
     run. Steer every test at its own ``tmp_path`` and clear the
     module-level ``APP_DATA_DIR`` so a value recorded by an earlier app
     lifespan can't leak between tests.
+
+    The tmp dir is NOT pre-created: ``projects_dir()`` creates its
+    ``projects/`` child with ``mkdir(parents=True)`` on demand, and
+    pre-creating ``d33d-data`` would collide with a test's own ``data_dir``
+    fixture that mkdir's the same ``tmp_path`` path (``pytest`` shares one
+    ``tmp_path`` per test across fixtures; a bare ``mkdir`` then raises
+    FileExistsError).
     """
     import d33d.db as db_mod
 
     data_dir = tmp_path / "d33d-data"
-    data_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("D33D_DATA_DIR", str(data_dir))
     monkeypatch.setattr(db_mod, "APP_DATA_DIR", None)
     yield
@@ -62,18 +68,22 @@ def _isolate_data_dir(tmp_path, monkeypatch):
 def _home_d33d_projects_guard():
     """Session guard: tests must not create entries in ``~/.d33d/projects``.
 
-    Records the entry count at session start (zero when the directory is
-    absent) and asserts it is unchanged at session end. Fails loudly
-    naming this issue when the count grows; passes when the directory is
-    absent or re-appears with the same entry count as at session start.
+    Snapshots the entry NAMES at session start and asserts that no NEW
+    entries (names absent from the snapshot) exist at session end. A raw
+    count comparison would flake on operator activity on this same machine
+    — the dev server creates real projects (and users delete them) during
+    the session — so only growth caused by a name that was not present at
+    session start is reported, and the message says so.
     """
     projects_dir = Path.home() / ".d33d" / "projects"
-    count = _count_projects_dirs()
+    before = _project_entry_names()
     yield
-    now_count = _count_projects_dirs()
-    assert now_count == count, (
-        f"tests created {now_count - count} new directorie(s) in the operator's "
-        f"real {projects_dir} — tests must isolate D33D_DATA_DIR "
+    new = _project_entry_names() - before
+    assert not new, (
+        f"tests created {len(new)} new directorie(s) in the operator's "
+        f"real {projects_dir} ({sorted(new)[:5]}{' …' if len(new) > 5 else ''}) — "
+        f"tests must isolate D33D_DATA_DIR "
         f"(see the autouse _isolate_data_dir fixture in tests/conftest.py). "
-        f"Entries before: {count}, after: {now_count}."
+        f"Note: a live dev server on this machine creating real projects would "
+        f"also trip this; pause it when running the suite."
     )
