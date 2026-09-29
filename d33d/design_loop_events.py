@@ -30,11 +30,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import inspect
+import io
 import logging
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+
+from PIL import Image
 
 from d33d.design_loop import BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
@@ -86,20 +89,177 @@ _PHOTO_MIME_BY_SUFFIX: dict[str, str] = {
     ".jpeg": "image/jpeg",
 }
 
+# Issue #299 — the decompression-bomb guard: an image claiming more pixels
+# than this is rejected at header-parse time (before any full decode), so a
+# tiny file with a 10000×1 header can never allocate gigabytes.
+MAX_PHOTO_SIDE_PX = 8192
+# NOTE: process-wide — this assignment also covers ``render_worker``'s
+# PNG view checks (they run in the same process and import the same PIL
+# module) as well as every photo check below.
+Image.MAX_IMAGE_PIXELS = MAX_PHOTO_SIDE_PX * MAX_PHOTO_SIDE_PX
+
+
+#: A photo upload whose bytes decode to this format is stored with ``.png``;
+#: ``JPEG``/``JPEG2000``/``MPEG`` decode to ``.jpg`` (the upload gate only
+#: admits PNG and JPEG, so the mapping is total over accepted bytes).
+_FORMAT_TO_SUFFIX: dict[str, str] = {
+    "PNG": ".png",
+    "JPEG": ".jpg",
+}
+
+
+def validate_photo_bytes(content: bytes) -> str:
+    """The upload decode gate (issue #299): ``content`` must be a
+    decodable PNG or JPEG image; the returned ``.png``/``.jpg`` suffix
+    follows the DETECTED format (never the declared content type).
+
+    Raises ``ValueError`` for any undecodable payload, a non-PNG/JPEG
+    format, a side exceeding :data:`MAX_PHOTO_SIDE_PX`, or a decode
+    failure — the caller maps ``ValueError`` to HTTP 422. The dimensions
+    are read from the header (``Image.open`` is lazy) and checked BEFORE
+    ``verify()`` / ``load()``, so a decompression-bomb header is rejected
+    without a full decode.
+    """
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            if img.format not in _FORMAT_TO_SUFFIX:
+                raise ValueError(
+                    f"not a PNG or JPEG image (decoded as {img.format!r})"
+                )
+            width, height = img.size
+            if width > MAX_PHOTO_SIDE_PX or height > MAX_PHOTO_SIDE_PX:
+                raise ValueError(
+                    f"image is {width}x{height}; each side must be "
+                    f"≤ {MAX_PHOTO_SIDE_PX} px"
+                )
+            img.verify()  # structural integrity, no full pixel decode
+        with Image.open(io.BytesIO(content)) as img:
+            img.load()
+    except ValueError:
+        raise
+    except Exception as e:  # PIL raises OSError/Image.DecompressionBombError etc.
+        raise ValueError(f"undecodable image: {e}") from e
+    with Image.open(io.BytesIO(content)) as img:
+        return _FORMAT_TO_SUFFIX[img.format]
+
+def _photo_usable(photo_path: str) -> bool:
+    """True iff the stored photo at ``photo_path`` is a decodable PNG or
+    JPEG (issue #299) — the EMBED-TIME twin of the upload decode gate
+    (the one shared definition of "a usable photo", built on the same
+    checks as :func:`validate_photo_bytes` — full ``verify()`` AND
+    ``load()``, so upload, embed and storage checks agree by
+    construction: a truncated-IDAT file is "not usable" in all three).
+
+    The design loop must never embed an undecodable file (the LLM endpoint
+    400s on every design pass), so a present-but-undecodable photo
+    degrades to the photo-LOST path instead: :func:`photo_data_uri`
+    returns :data:`EMPTY_PHOTO_DATA_URI` and :func:`photo_lost` fires the
+    #295 notice + WARNING. Any read/decode failure returns ``False`` —
+    this helper never raises.
+    """
+    try:
+        data = Path(photo_path).read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
+            if img.format not in _FORMAT_TO_SUFFIX:
+                return False
+            img.verify()
+        with Image.open(io.BytesIO(data)) as img:
+            img.load()
+    except (OSError, ValueError, SyntaxError):
+        # undecodable, unreadable, oversized (or a bad-chunk-CRC ``
+        # SyntaxError`` — PIL's PNG verify raises it, see
+        # :func:`_photo_structurally_valid`) — all treated as lost
+        return False
+    return True
+
+
+def photo_storage_signal(photo_path: str | None) -> bool | None:
+    """The project's stored-photo storage signal (issue #299): the
+    THREE-way ``photo_present`` value, computed CHEAPLY — a header-only
+    open + dimension check + ``verify()`` (structural integrity), no full
+    ``load()``, and memoized per ``(path, mtime, size)`` so the project
+    list endpoint never pays a per-row decode.
+
+    ``None`` for a photo-LESS project (``source_photo_path`` unset — a
+    photo-LESS project must never read as a LOST one); ``False`` for a
+    photo whose file is missing out-of-band OR present-but-undecodable;
+    ``True`` when the stored file is on disk and structurally intact.
+
+    Deliberately NOT :func:`_photo_usable` (which full-decodes at embed
+    time, the strict twin of the upload gate): the storage signal only
+    needs the cheap structural check — a file whose header and verify
+    pass is reported present, and the embed-time gate remains the
+    strict final word before anything reaches an LLM request.
+    """
+    if not photo_path:
+        return None
+    p = Path(photo_path)
+    if not p.is_file():
+        return False
+    try:
+        st = p.stat()
+    except OSError:
+        return False
+    key = (photo_path, st.st_mtime, st.st_size)
+    cached = _photo_signal_cache.get(key)
+    if cached is not None:
+        return cached
+    ok = _photo_structurally_valid(photo_path)
+    if len(_photo_signal_cache) > 1024:  # bound the memo (stale keys
+        _photo_signal_cache.clear()  # out as files turn over)
+    _photo_signal_cache[key] = ok
+    return ok
+
+
+
+def _photo_structurally_valid(photo_path: str) -> bool:
+    """Cheap structural check: header open + side cap + ``verify()`` —
+    NO full pixel decode (the ``load()`` the embed-time gate still
+    performs). Any read/decode failure is ``False`` (never raises).
+
+    The ``SyntaxError`` in the catch is deliberate: PIL's PNG ``verify``
+    raises ``SyntaxError`` (not ``OSError``) for a bad chunk CRC — a
+    structurally-broken PNG must report ``False`` (unusable) here, not
+    escape the cheap check and 500 the project list endpoint.
+    """
+    try:
+        with Image.open(io.BytesIO(Path(photo_path).read_bytes())) as img:
+            if img.format not in _FORMAT_TO_SUFFIX:
+                return False
+            width, height = img.size
+            if width > MAX_PHOTO_SIDE_PX or height > MAX_PHOTO_SIDE_PX:
+                return False
+            img.verify()
+    except (OSError, ValueError, SyntaxError):
+        return False
+    return True
+
+
+#: The storage-signal memo: ``(path, mtime, size) -> bool``. Files change
+#: only out-of-band (or via a fresh upload, which sets a new path), so
+#: the mtime+size key is the invalidation — the list endpoint pays at
+#: most one header check per distinct file per session, not one per row.
+_photo_signal_cache: dict[tuple[str, float, int], bool] = {}
+
 
 def photo_data_uri(source_photo_path: str | None) -> str:
     """The project's stored photo as a data URI (MIME from the extension).
 
     ``None`` / missing file → :data:`EMPTY_PHOTO_DATA_URI` (never ``None`` —
     the design loop's LLM message builder requires a data URI/URL string).
-    The URI contract stays EMPTY for ALL THREE photo states (issue #295:
-    the notice / WARNING logic lives at the ``post_chat`` caller —
-    :func:`photo_lost` — never here).
+    An on-disk-but-undecodable file returns the SAME constant (issue
+    #299 — the MIME flips to ``image/png`` on the way down, which the
+    notice/WARNING contract treats as expected); the URI contract stays
+    EMPTY for ALL FOUR photo states (issue #295: the notice / WARNING
+    logic lives at the ``post_chat`` caller — :func:`photo_lost` — never
+    here).
     """
     if not source_photo_path:
         return EMPTY_PHOTO_DATA_URI
     p = Path(source_photo_path)
     if not p.is_file():
+        return EMPTY_PHOTO_DATA_URI
+    if not _photo_usable(source_photo_path):
         return EMPTY_PHOTO_DATA_URI
     mime = _PHOTO_MIME_BY_SUFFIX.get(p.suffix.lower(), "image/png")
     b64 = base64.b64encode(p.read_bytes()).decode("ascii")
@@ -107,20 +267,26 @@ def photo_data_uri(source_photo_path: str | None) -> str:
 
 
 def photo_lost(row: dict[str, Any]) -> bool:
-    """Whether the project's stored photo was LOST out-of-band (issue
-    #295): ``source_photo_path`` is set AND the file is gone.
+    """Whether the project's stored photo must be treated as LOST (issue
+    #295, extended by issue #299): ``source_photo_path`` is set AND the
+    file is either gone out-of-band OR present-but-undecodable (a bad
+    upload or out-of-band corruption — embedding it would 400 every
+    design pass).
 
     The three-way photo state, exactly as the operator decided it:
     ``source_photo_path`` NULL (photo-LESS project) → ``False`` (the run
     proceeds identically to today — no notice, no WARNING); path set +
-    file present → ``False``; path set + file missing → ``True`` (the
-    stream carries the copy.ts notice and the WARNING fires — project id
-    only, never a file path).
+    file present AND decodable → ``False``; path set + file missing or
+    undecodable → ``True`` (the stream carries the copy.ts notice and the
+    WARNING fires — project id only, never a file path).
     """
     photo_path = row.get("source_photo_path")
     if not photo_path:
         return False
-    return not Path(photo_path).is_file()
+    p = Path(photo_path)
+    if not p.is_file():
+        return True
+    return not _photo_usable(photo_path)
 
 
 def axes_to_gate_triple(
@@ -1805,5 +1971,7 @@ __all__ = [
     "latest_version_stated_dims",
     "photo_data_uri",
     "photo_lost",
+    "photo_storage_signal",
     "run_design_loop_with_events",
+    "validate_photo_bytes",
 ]

@@ -39,7 +39,9 @@ from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.design_loop_events import (
     axes_to_gate_triple,
     photo_data_uri,
+    photo_storage_signal,
     run_design_loop_with_events,
+    validate_photo_bytes,
 )
 from d33d.dimension_protocol import (
     effective_stated_dims,
@@ -55,6 +57,15 @@ from d33d.question_answer import route_chat_message
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
 _READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB — bounded read chunk size
 ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
+
+# Issue #299 — the 422 detail for an undecodable upload (a verbatim copy of
+# web/src/copy.ts `photoUpload.undecodable` — the SPA renders the 422 body's
+# ``detail`` verbatim, so the two copies must never drift apart). The check
+# order is fixed: content type (400) → size (413) → decode gate (422) →
+# write/commit/DB — a 422 writes nothing, commits nothing, updates nothing.
+UNDECODABLE_PHOTO_DETAIL = (
+    "That file isn't a readable PNG or JPEG image. Try exporting it again."
+)
 
 # Issue #295 — the two fixed copy.ts strings the missing-storage chat
 # pre-routes reply with (verbatim copies of the SPA's copy deck — the
@@ -351,13 +362,13 @@ def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     Git invisibility: the raw repo path is consumed here, never carried
     into the response (the caller already strips it).
     """
-    repo_present = Path(row["git_repo_path"]).is_dir()
-    photo_path = row.get("source_photo_path")
-    if photo_path is None:
-        photo_present: bool | None = None
-    else:
-        photo_present = Path(photo_path).is_file()
-    return {"repo_present": repo_present, "photo_present": photo_present}
+    # The storage signal (issue #299) is ONE shared definition —
+    # ``photo_storage_signal`` in ``d33d.design_loop_events`` — so the
+    # upload, embed and storage checks agree by construction. Cheap: a
+    # header-only open + verify + size, memoized per (path, mtime, size),
+    # so the project list endpoint never full-decodes per row.
+    photo_present = photo_storage_signal(row.get("source_photo_path"))
+    return {"repo_present": Path(row["git_repo_path"]).is_dir(), "photo_present": photo_present}
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -794,6 +805,19 @@ def create_projects_router() -> APIRouter:
                 )
         content = bytes(buf)
 
+        # Issue #299 — the decode gate (AFTER the 20 MB size check, BEFORE
+        # any file write / git commit / DB update): the bytes must decode
+        # as a real PNG or JPEG image with sane dimensions. A failure
+        # writes nothing — no file, no commit, no DB update (same contract
+        # as the 413 path above). The stored extension follows the
+        # DETECTED format (``img.format``), never the declared content type
+        # (a PNG declared ``image/jpeg`` must land on disk as ``.png`` —
+        # otherwise the data-URI MIME would mislabel the bytes).
+        try:
+            suffix = validate_photo_bytes(content)
+        except ValueError:
+            raise HTTPException(status_code=422, detail=UNDECODABLE_PHOTO_DETAIL)
+
         # Determine a safe filename
         original_name = getattr(file, "filename", None) or "photo"
         safe_name = Path(original_name).name  # strip path components
@@ -804,17 +828,12 @@ def create_projects_router() -> APIRouter:
         # the repo's commit history can never carry newlines or shell
         # metacharacters derived from the user-supplied filename.
         commit_subject = _sanitize_commit_message(original_name) or "photo"
-        # Ensure extension matches the declared type
-        if file_content_type == "image/png":
-            if "." in safe_name:
-                safe_name = safe_name.rsplit(".", 1)[0] + ".png"
-            else:
-                safe_name = safe_name + ".png"
+        # Ensure the extension matches the DETECTED format (issue #299 —
+        # the decode gate above already guarantees a PNG or JPEG)
+        if "." in safe_name:
+            safe_name = safe_name.rsplit(".", 1)[0] + suffix
         else:
-            if "." in safe_name:
-                safe_name = safe_name.rsplit(".", 1)[0] + ".jpg"
-            else:
-                safe_name = safe_name + ".jpg"
+            safe_name = safe_name + suffix
 
         # Write to the repo's photos/ dir
         repo_path = Path(row["git_repo_path"])

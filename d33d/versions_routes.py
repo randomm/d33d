@@ -777,9 +777,12 @@ def _finalize_loop_kwargs(
     archived. This helper builds that contract from the app state and the
     project row:
 
-    - ``photo`` — the body's photo, else the project's stored
-      ``source_photo_path`` (the uploaded reference photo); ``None`` when
-      neither exists (text-only finalize — the hook's photo is optional).
+    - ``photo`` — the body's photo ONLY when it is a ``data:image/png``
+      or ``data:image/jpeg`` URI whose decoded bytes pass the shared
+      upload gate (``validate_photo_bytes``) — otherwise the project's
+      stored ``source_photo_path`` via ``photo_data_uri`` (an undecodable
+      or missing stored photo degrades to ``EMPTY_PHOTO_DATA_URI``), and
+      never the raw on-disk path (issue #299's decode-or-ignore gate).
     - ``stated_dims`` — the current run's per-axis confirmed set (the
       body's ``stated_dims`` axes, else the per-axis extraction of the
       message). There is NO persisted fallback (issue #247's per-axis
@@ -803,7 +806,12 @@ def _finalize_loop_kwargs(
     """
     from d33d.axis_lexicon import classify as _classify_axis_cues
     from d33d.config.catalogue import CatalogueError, ResolutionError
-    from d33d.design_loop_events import axes_to_gate_triple
+    from d33d.design_loop_events import (
+        EMPTY_PHOTO_DATA_URI,
+        axes_to_gate_triple,
+        photo_data_uri,
+        validate_photo_bytes,
+    )
     from d33d.dimension_protocol import (
         effective_stated_dims,
         latest_stated_dims_dict,
@@ -837,7 +845,44 @@ def _finalize_loop_kwargs(
     row = app.state.versions.get_project(project_id)
     assert row is not None  # already 404'd above
 
-    photo = body.photo or row.get("source_photo_path")
+    # The photo gate (issue #299 — the finalize seam's twin of the chat
+    # path's ``photo_data_uri`` / ``photo_lost`` gate, #295): the
+    # design loop's ``photo`` must ALWAYS be a data URI / URL string —
+    # never the raw on-disk path. The stored-photo fallback goes through
+    # ``photo_data_uri`` (undecodable or missing file →
+    # ``EMPTY_PHOTO_DATA_URI``, never the raw bytes or the path). A
+    # ``body.photo`` override (client-supplied) is decoded-or-IGNORED
+    # (the dispatch's minimal rule): it is embedded ONLY when it is a
+    # ``data:image/png`` or ``data:image/jpeg`` URI whose DECODED BYTES
+    # pass the shared upload gate (``validate_photo_bytes``) — an
+    # http(s) URL is NEVER forwarded (the model host fetching a
+    # client-controllable URL is an SSRF the rule closes), an
+    # undecodable data URI is never embedded (it would 400 every
+    # design pass), and a raw filesystem path or other opaque string
+    # is ignored in favour of the stored-photo gate — never embedded
+    # verbatim into the outgoing ``image_url``.
+    body_photo = body.photo
+    if body_photo is not None:
+        _t = body_photo.strip()
+        _p = _t.partition(",")
+        if (
+            _t.startswith(("data:image/png;base64,", "data:image/jpeg;base64,"))
+            and _p[2]
+        ):
+            try:
+                import base64 as _b64
+
+                _payload = _b64.b64decode(_p[2], validate=True)
+                validate_photo_bytes(_payload)
+            except (ValueError, OSError):
+                body_photo = None  # undecodable / not valid b64 — ignored
+        else:
+            body_photo = None  # http(s) URL, raw path, other — ignored
+    if body_photo is not None:
+        photo = body_photo
+    else:
+        stored_photo = photo_data_uri(row.get("source_photo_path"))
+        photo = stored_photo or EMPTY_PHOTO_DATA_URI
     latest = app.state.versions.latest_version(project_id)
     # The gate's target (ticket #91; issue #247's per-axis decision): the
     # CURRENT run's per-axis confirmed set — the body's explicit

@@ -68,6 +68,7 @@ export function PhotoUpload({
   const [state, setState] = useState<UploadState>("idle");
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
   const validateFile = (file: File): string | null => {
     if (!ALLOWED_TYPES.includes(file.type)) {
@@ -95,25 +96,31 @@ export function PhotoUpload({
           // (App routes it to the shared project-creation card, the same
           // card the send path uses), never an upload failure.
           setState("error");
-          onError?.(shellCopy.projectCreationFailed(
+          const msg = shellCopy.projectCreationFailed(
             e instanceof Error ? e.message : "unknown error",
-          ));
+          );
+          setErrorDetail(msg);
+          onError?.(msg);
           return;
         }
       } else {
         setState("error");
-        onError?.(shellCopy.noProject);
+        const msg = shellCopy.noProject;
+        setErrorDetail(msg);
+        onError?.(msg);
         return;
       }
     }
     const error = validateFile(file);
     if (error) {
       setState("error");
+      setErrorDetail(error);
       onError?.(error);
       return;
     }
 
     setState("uploading");
+    setErrorDetail(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -125,7 +132,9 @@ export function PhotoUpload({
 
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({ detail: resp.statusText }));
-        throw new Error(body.detail ?? `Upload failed (${resp.status})`);
+        const detail = body.detail ?? `Upload failed (${resp.status})`;
+        setErrorDetail(detail);
+        throw new Error(detail);
       }
 
       const parsed: unknown = await resp.json();
@@ -214,7 +223,7 @@ export function PhotoUpload({
       </label>
       {state === "error" && (
         <span className="upload-error" data-testid="upload-error">
-          Upload failed
+          {errorDetail ?? "Upload failed"}
         </span>
       )}
     </div>

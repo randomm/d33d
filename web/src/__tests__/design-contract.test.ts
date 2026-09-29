@@ -138,6 +138,7 @@ describe("design contract", () => {
       "history",
       "missingStorage",
       "passCard",
+      "photoUpload",
       "progress",
       "region",
       "shell",
@@ -444,6 +445,32 @@ describe("design contract", () => {
     // lost, the 409 copy is about the DESIGN SOURCE being lost. They
     // must never read the same.
     expect(copy.missingStorage.photoMissing).not.toBe(copy.missingStorage.sourceMissing);
+  });
+
+  it("the 422 undecodable upload rejection pins the copy.ts string verbatim (issue #299)", () => {
+    // Issue #299: when the backend rejects an upload because the bytes
+    // are not a readable PNG or JPEG, it returns a 422 with `detail`
+    // carrying this exact sentence. The SPA surfaces `detail` verbatim
+    // (PhotoUpload shows it as-is), and the design-contract tripwire
+    // pins the two-way agreement: the copy.ts string must equal the
+    // backend's wire string, so a wording drift fails the test.
+    const undecodable = copy.photoUpload.undecodable;
+    expect(undecodable).toBe(
+      "That file isn't a readable PNG or JPEG image. Try exporting it again.",
+    );
+    // No status code in the copy — the house rule: never lead with a
+    // code, never show a status number to the user.
+    expect(undecodable).not.toMatch(/422|400|413/);
+    // The PhotoUpload component must render the error detail verbatim —
+    // the tripwire reads the component's source to pin the wiring.
+    const uploadSrc = readFileSync(
+      join(SRC, "components/upload/PhotoUpload.tsx"),
+      "utf8",
+    );
+    // The component must have an errorDetail state and render it in the
+    // upload-error testid span.
+    expect(uploadSrc).toMatch(/errorDetail/);
+    expect(uploadSrc).toMatch(/upload-error/);
   });
 
   it("the storage copy keys exist for Brief and PassCard (issue #295, d6)", () => {
