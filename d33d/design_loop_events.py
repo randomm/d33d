@@ -158,11 +158,12 @@ def _photo_usable(photo_path: str) -> bool:
     this helper never raises.
     """
     try:
-        with Image.open(io.BytesIO(Path(photo_path).read_bytes())) as img:
+        data = Path(photo_path).read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
             if img.format not in _FORMAT_TO_SUFFIX:
                 return False
             img.verify()
-        with Image.open(io.BytesIO(Path(photo_path).read_bytes())) as img:
+        with Image.open(io.BytesIO(data)) as img:
             img.load()
     except (OSError, ValueError, SyntaxError):
         # undecodable, unreadable, oversized (or a bad-chunk-CRC ``

@@ -777,9 +777,12 @@ def _finalize_loop_kwargs(
     archived. This helper builds that contract from the app state and the
     project row:
 
-    - ``photo`` — the body's photo, else the project's stored
-      ``source_photo_path`` (the uploaded reference photo); ``None`` when
-      neither exists (text-only finalize — the hook's photo is optional).
+    - ``photo`` — the body's photo ONLY when it is a ``data:image/png``
+      or ``data:image/jpeg`` URI whose decoded bytes pass the shared
+      upload gate (``validate_photo_bytes``) — otherwise the project's
+      stored ``source_photo_path`` via ``photo_data_uri`` (an undecodable
+      or missing stored photo degrades to ``EMPTY_PHOTO_DATA_URI``), and
+      never the raw on-disk path (issue #299's decode-or-ignore gate).
     - ``stated_dims`` — the current run's per-axis confirmed set (the
       body's ``stated_dims`` axes, else the per-axis extraction of the
       message). There is NO persisted fallback (issue #247's per-axis
@@ -875,10 +878,11 @@ def _finalize_loop_kwargs(
                 body_photo = None  # undecodable / not valid b64 — ignored
         else:
             body_photo = None  # http(s) URL, raw path, other — ignored
-    stored_photo = photo_data_uri(row.get("source_photo_path"))
-    photo = body_photo if body_photo is not None else stored_photo
-    if photo is None or not photo:
-        photo = EMPTY_PHOTO_DATA_URI
+    if body_photo is not None:
+        photo = body_photo
+    else:
+        stored_photo = photo_data_uri(row.get("source_photo_path"))
+        photo = stored_photo or EMPTY_PHOTO_DATA_URI
     latest = app.state.versions.latest_version(project_id)
     # The gate's target (ticket #91; issue #247's per-axis decision): the
     # CURRENT run's per-axis confirmed set — the body's explicit

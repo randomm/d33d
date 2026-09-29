@@ -16,6 +16,7 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 from pathlib import Path
 
@@ -2705,13 +2706,16 @@ def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
         return '{"answerable": true, "answer": "It is 10 mm."}'
 
     for message, expected in MATRIX:
+        # Bind both loop variables through default arguments: the loop
+        # body reassigns them per iteration, and a bare closure would
+        # capture the last-iteration value (B023).
         loop_called = {"n": 0}
 
-        async def _loop(app, **kwargs):
-            loop_called["n"] += 1
+        async def _loop(app, _lc: dict = loop_called, **kwargs):
+            _lc["n"] += 1
             return _StubResult("pass", {"W": 10})
 
-        async def _call(client):
+        async def _call(client, _message: str = message):
             # The shared connection is closed after the first run_async's
             # lifespan teardown; reopen it for each matrix case (the
             # lifespan's ``if state.conn is None`` guard then skips the
@@ -2721,7 +2725,7 @@ def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
             closed = False
             try:
                 app_with_versions.state.conn.raw.execute("SELECT 1")
-            except Exception:
+            except sqlite3.Error:
                 closed = True
             if app_with_versions.state.conn is None or closed:
                 import d33d.db as _db
@@ -2740,7 +2744,8 @@ def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
             app_with_versions.state.run_design_loop = _loop
             app_with_versions.state.answer_question = _answer_edge
             r = await client.post(
-                f"/api/projects/{pid}/chat", json={"message": message, "chat_history": []}
+                f"/api/projects/{pid}/chat",
+                json={"message": _message, "chat_history": []},
             )
             assert r.status_code == 202, r.text
             source = app_with_versions.state.event_sources.get(pid)
