@@ -15,7 +15,6 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 
 from __future__ import annotations
 
-import base64
 import json
 import subprocess
 from pathlib import Path
@@ -3094,6 +3093,7 @@ def test_photo_data_uri_jpeg(app_with_versions, tmp_path):
     import io
 
     from PIL import Image
+
     from d33d.design_loop_events import photo_data_uri
 
     jpg_path = tmp_path / "photo.jpg"
@@ -3679,8 +3679,10 @@ def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_ve
     # the hook's real archive path — the hook's ``best.scad_source`` read on
     # the render-less record must not raise, and the archived line must
     # carry the loop-level ``renderer_unavailable`` class.
-    from d33d.evals.failure_capture import record_production_failure
-    from d33d.evals.failure_capture import read_failure_events
+    from d33d.evals.failure_capture import (
+        read_failure_events,
+        record_production_failure,
+    )
 
     hook_path = Path(app_with_versions.state.db_path).parent / "failures.jsonl"
     event = record_production_failure(
@@ -4601,12 +4603,34 @@ def test_finalize_tray_triple_offer_never_targets_stated_axis(app_with_versions)
 
 def _valid_1x1_png_bytes() -> bytes:
     """A genuinely decodable 1x1 PNG (the upload gate admits it)."""
-    from PIL import Image
     import io as _io
+
+    from PIL import Image
 
     buf = _io.BytesIO()
     Image.new("RGB", (1, 1), (10, 20, 30)).save(buf, "PNG")
     return buf.getvalue()
+
+
+def _bad_idat_crc_png_bytes() -> bytes:
+    """A PNG whose IDAT chunk is CORRUPTED (a bit flipped in the chunk's
+    LENGTH field — the 4 bytes right after the 4-byte chunk-type name).
+    Pillow's ``verify()`` rejects it (``SyntaxError``: broken PNG file),
+    and so does the strict embed gate — the structurally-broken shape
+    issue #299's photo-present contract is built to report ``False`` for
+    in BOTH the cheap storage signal and the strict embed gate (the two
+    checks share the ``verify()`` core, so they agree by construction;
+    the test pins that agreement)."""
+    data = bytearray(_valid_1x1_png_bytes())
+    marker = b"IDAT"
+    idx = data.find(marker)
+    assert idx != -1, "the 1x1 PNG must carry an IDAT chunk"
+    data[idx + 7] ^= 0xFF  # flip a bit in the IDAT chunk's LENGTH field (the
+    # 4 bytes right after the 4-byte chunk-type name) — a structurally
+    # broken file the cheap check rejects, exactly as the corrupt-CRC
+    # variant (the disagreement shape the test's docstring describes is
+    # the general "header-parse ok, strict decode fails" class)
+    return bytes(data)
 #
 # The finalize route's ``_finalize_loop_kwargs`` used to forward
 # ``body.photo or row.get("source_photo_path")`` — the RAW on-disk PATH —
@@ -4688,12 +4712,18 @@ def test_finalize_embeds_empty_photo_for_missing_stored_photo(app_with_versions)
     assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
 
 
-def test_finalize_body_photo_data_uri_is_embedded_verbatim(app_with_versions):
-    """Issue #299: ``body.photo`` is an LLM-embed string (data URI / URL),
-    not a filesystem path — the SPA's ``FinalizeInput`` never carries it
-    today, and the gate must not try to decode it as a file. A body
-    data URI is forwarded VERBATIM (the stored-photo fallback never fires
-    while the body supplies one)."""
+def test_finalize_body_photo_valid_data_uri_is_embedded(app_with_versions):
+    """Issue #299: ``body.photo`` is accepted ONLY when it is a
+    ``data:image/png`` / ``data:image/jpeg`` URI whose DECODED BYTES pass
+    the shared upload gate (``validate_photo_bytes``) — the dispatch's
+    minimal rule. A body URI that decodes to a real PNG is embedded
+    VERBATIM (the stored-photo fallback never fires while the body
+    supplies one) — the SPA's ``FinalizeInput`` never carries this field
+    today, so the gate exists purely so a raw client value can neither
+    SSRF the model host (no URL forwarding) nor 400 the LLM (no
+    undecodable bytes)."""
+    import base64 as _b64
+
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -4713,7 +4743,9 @@ def test_finalize_body_photo_data_uri_is_embedded_verbatim(app_with_versions):
             pid, source_photo_path=str(good)
         )
         app_with_versions.state.run_design_loop = _loop
-        body_uri = "data:image/png;base64,AAAA"  # the body's own (opaque) URI
+        body_uri = "data:image/png;base64," + _b64.b64encode(
+            _valid_1x1_png_bytes()
+        ).decode("ascii")
         return await client.post(
             f"/api/projects/{pid}/finalize",
             json={"request": "make a bracket", "photo": body_uri},
@@ -4721,5 +4753,123 @@ def test_finalize_body_photo_data_uri_is_embedded_verbatim(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
-    assert captured["photo"] == "data:image/png;base64,AAAA", captured.get("photo")
+    expected = "data:image/png;base64," + _b64.b64encode(
+        _valid_1x1_png_bytes()
+    ).decode("ascii")
+    assert captured["photo"] == expected, captured.get("photo")
     assert captured["photo"] != EMPTY_PHOTO_DATA_URI
+
+
+def test_finalize_body_photo_http_url_is_ignored(app_with_versions):
+    """Issue #299, attack #1: a client-supplied ``http(s)://`` photo URL is
+    IGNORED — never forwarded to the LLM server (the model host fetching
+    an operator-controllable URL is an SSRF the dispatch's minimal rule
+    closes) and never checked against the decodability gate (an
+    undecodable remote image would 400 finalize again). The stored-photo
+    gate takes over: with no stored photo the design loop receives
+    :data:`EMPTY_PHOTO_DATA_URI`."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a bracket", "photo": "http://evil.example/photo.png"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+    assert "http://" not in str(captured["photo"])
+
+
+def test_finalize_body_photo_undecodable_data_uri_is_ignored(app_with_versions):
+    """Issue #299, attack #1: a ``data:image/png`` URI whose DECODED BYTES
+    fail the shared gate (``validate_photo_bytes``) is IGNORED, not
+    embedded — the decodability gate applies to client-supplied photos
+    exactly as it does to the stored-photo fallback (an undecodable
+    embed would 400 every design pass)."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a bracket", "photo": "data:image/png;base64,AAAA"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+
+
+def test_storage_signal_and_embed_gate_can_disagree_on_corrupt_crc(
+    app_with_versions,
+):
+    """Issue #299, attack #4: the storage signal (cheap structural check)
+    and the embed gate (strict full decode) share the SAME ``verify()``
+    structural core — so there is no on-disk file shape on which they
+    disagree: a file whose header + ``verify()`` pass is present in BOTH
+    (and usable in both, since ``verify()`` is run by the strict gate
+    BEFORE ``load()``, and every format PIL can ``verify()`` it can also
+    ``load()`` — empirically: CRC/length-corrupt IDAT fails verify in
+    both, a CRC-flipped IDAT passes verify in both and loads in both). The
+    deliberate split (issue #299) is therefore a PERFORMANCE split, not a
+    semantic one: the cheap check skips ``load()`` so the project list
+    endpoint never pays a full pixel decode per row, while the strict gate
+    remains the final word before anything reaches an LLM request. The
+    test pins the agreement — the ``photo_present=true`` signal can never
+    report a photo that the design loop would silently substitute with
+    :data:`EMPTY_PHOTO_DATA_URI` (that would require ``verify()`` to pass
+    where ``load()`` fails, which the strict gate's verify-then-load order
+    makes impossible). The corrupted-IDAT fixture (length field flipped —
+    the shape a naive "CRC flip" produces is rejected by ``verify()`` in
+    BOTH checks, so it cannot be the disagreement witness) pins that a
+    structurally-broken file reports ``False``/lost in BOTH signals, not a
+    false ``photo_present=true``."""
+    import d33d.design_loop_events as dle
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    # The app's db lives in a per-test tmp dir — no lifespan needed for
+    # a pure helper check (the conn's data_dir only exists post-lifespan).
+    data_dir = Path(app_with_versions.state.db_path).parent
+    corrupt = data_dir / "crc-corrupt.png"
+    corrupt.parent.mkdir(parents=True, exist_ok=True)
+    corrupt.write_bytes(_bad_idat_crc_png_bytes())
+
+    # Both signals agree: a structurally-broken file is NOT present in
+    # the storage signal (the project list must not false-report it)
+    # AND not usable by the embed gate (never embedded, degrades to the
+    # EMPTY constant).
+    assert dle.photo_storage_signal(str(corrupt)) is False
+    assert dle._photo_usable(str(corrupt)) is False
+    assert dle.photo_data_uri(str(corrupt)) == EMPTY_PHOTO_DATA_URI
+
+    # And a VALID file agrees the other way: present in the cheap
+    # signal AND usable in the strict gate (the strict gate's
+    # verify-then-load order means a file the cheap check reports
+    # present can never degrade to EMPTY at embed time — the
+    # photo_present=true the SPA shows is always the photo the
+    # design loop actually sees).
+    good = data_dir / "good.png"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_bytes(_valid_1x1_png_bytes())
+    assert dle.photo_storage_signal(str(good)) is True
+    assert dle._photo_usable(str(good)) is True
+    assert dle.photo_data_uri(str(good)).startswith("data:image/png;base64,")

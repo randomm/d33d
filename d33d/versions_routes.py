@@ -807,6 +807,7 @@ def _finalize_loop_kwargs(
         EMPTY_PHOTO_DATA_URI,
         axes_to_gate_triple,
         photo_data_uri,
+        validate_photo_bytes,
     )
     from d33d.dimension_protocol import (
         effective_stated_dims,
@@ -847,18 +848,33 @@ def _finalize_loop_kwargs(
     # never the raw on-disk path. The stored-photo fallback goes through
     # ``photo_data_uri`` (undecodable or missing file →
     # ``EMPTY_PHOTO_DATA_URI``, never the raw bytes or the path). A
-    # ``body.photo`` override (client-supplied) is an LLM-embed string
-    # (a data URI / URL — the SPA's ``FinalizeInput`` carries no photo
-    # today, but the field must not bypass the contract either): a value
-    # that is neither an http(s) URL nor a ``data:`` URI is a filesystem
-    # path or other opaque string and is IGNORED in favour of the
-    # stored-photo gate — it is never embedded verbatim into the
-    # outgoing ``image_url``.
+    # ``body.photo`` override (client-supplied) is decoded-or-IGNORED
+    # (the dispatch's minimal rule): it is embedded ONLY when it is a
+    # ``data:image/png`` or ``data:image/jpeg`` URI whose DECODED BYTES
+    # pass the shared upload gate (``validate_photo_bytes``) — an
+    # http(s) URL is NEVER forwarded (the model host fetching a
+    # client-controllable URL is an SSRF the rule closes), an
+    # undecodable data URI is never embedded (it would 400 every
+    # design pass), and a raw filesystem path or other opaque string
+    # is ignored in favour of the stored-photo gate — never embedded
+    # verbatim into the outgoing ``image_url``.
     body_photo = body.photo
     if body_photo is not None:
         _t = body_photo.strip()
-        if not _t.startswith(("data:", "http://", "https://")):
-            body_photo = None
+        _p = _t.partition(",")
+        if (
+            _t.startswith(("data:image/png;base64,", "data:image/jpeg;base64,"))
+            and _p[2]
+        ):
+            try:
+                import base64 as _b64
+
+                _payload = _b64.b64decode(_p[2], validate=True)
+                validate_photo_bytes(_payload)
+            except (ValueError, OSError):
+                body_photo = None  # undecodable / not valid b64 — ignored
+        else:
+            body_photo = None  # http(s) URL, raw path, other — ignored
     stored_photo = photo_data_uri(row.get("source_photo_path"))
     photo = body_photo if body_photo is not None else stored_photo
     if photo is None or not photo:

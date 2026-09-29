@@ -24,7 +24,11 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
-from d33d.projects import ALLOWED_CONTENT_TYPES, MAX_UPLOAD_BYTES, UNDECODABLE_PHOTO_DETAIL
+from d33d.projects import (
+    ALLOWED_CONTENT_TYPES,
+    MAX_UPLOAD_BYTES,
+    UNDECODABLE_PHOTO_DETAIL,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -334,6 +338,45 @@ def test_list_projects_storage_signal_is_memoized_not_per_row_decode(
     # And the memo is populated (the (path, mtime, size) dict the helper
     # reads).
     assert memo_len >= 1
+
+
+def test_storage_signal_memo_invalidates_on_in_place_overwrite(
+    app_with_projects, monkeypatch
+):
+    """Issue #299, attack #3: the storage-signal memo is keyed on
+    ``(path, mtime, size)`` — a file overwritten IN PLACE (same path) must
+    recompute on the next read: the memo cannot observe the write itself,
+    so the key change (``size`` and/or ``mtime``) is the invalidation this
+    test pins. After the overwrite the helper must return the NEW file's
+    verdict — never the stale cached ``True``."""
+    import d33d.design_loop_events as dle
+
+    # The memo is path-keyed — any tmp dir works; the conn's data_dir
+    # only exists after the lifespan, so use the app's db-path parent
+    # directly.
+    data_dir = Path(app_with_projects.state.db_path).parent
+    data_dir.mkdir(parents=True, exist_ok=True)
+    good = data_dir / "memo-overwrite.png"
+    good.write_bytes(_valid_png_1x1())
+    # Prime the memo with the GOOD file's verdict (the primed key: the
+    # good file's path/mtime/size).
+    assert dle.photo_storage_signal(str(good)) is True
+
+    # Overwrite in place with the ticket's undecodable repro bytes — a
+    # SIZE change (8 != the PNG's size) flips the memo key, so the stale
+    # entry can never match the new key even if the mtime did not tick.
+    good.write_bytes(b"fake-png")
+
+    calls = {"n": 0}
+    original = dle._photo_structurally_valid
+
+    def _counting(path: str) -> bool:
+        calls["n"] += 1
+        return original(path)
+
+    monkeypatch.setattr(dle, "_photo_structurally_valid", _counting)
+    assert dle.photo_storage_signal(str(good)) is False
+    assert calls["n"] == 1, "in-place overwrite was served from the stale memo"
 
 
 def test_get_project_not_found(app_with_projects):
