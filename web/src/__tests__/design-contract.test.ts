@@ -557,18 +557,15 @@ describe("design contract", () => {
     // (`brief.savedDesignMissing`), the chat's no-run missing-source reply
     // (the server emits the same string verbatim, #260 way), and the
     // restore/branch 409 the SPA maps from `detail: "source_missing"`
-    // (`export3mf.sourceMissing409`). One deck home per surface; the two
-    // design-copy keys pin the SAME wire string.
+    // (`missingStorage.sourceMissing` — the 409 mapping's one deck home).
     //
     // The exact sentence (acceptance criterion, verbatim):
     expect(copy.brief.savedDesignMissing).toBe(
       "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
     );
-    expect(copy.export3mf.sourceMissing409).toBe(copy.brief.savedDesignMissing);
-    // The 409 copy and the 404/other-409 copy are distinct — only the
-    // `source_missing` detail maps here; every other 409 keeps its own
-    // message.
-    expect(copy.export3mf.sourceMissing409).not.toBe(copy.export3mf.conflict);
+    // One deck home for the 409 sentence: the 409 mapping and the Brief
+    // banner pin the SAME string (no second key to drift).
+    expect(copy.missingStorage.sourceMissing).toBe(copy.brief.savedDesignMissing);
     // The photo-missing marker is a short marker, not the full sentence —
     // the two states are distinct honest statements.
     expect(copy.brief.referencePhotoMissing).toBe("Reference photo missing");

@@ -48,14 +48,6 @@ export class ApiError extends Error {
     this.detail = detail;
     this.errorClass = errorClass;
   }
-
-  /** The machine-readable 409/4xx detail code, when the server sends one as
-   *  a plain string (issue #295: `detail: "source_missing"` from the
-   *  restore/branch missing-source 409). `undefined` for every other body
-   *  shape, so callers fall through to the default message unchanged. */
-  get detailCode(): string | undefined {
-    return typeof this.detail === "string" ? this.detail : undefined;
-  }
 }
 
 function stringifyDetail(detail: unknown): string {
@@ -216,23 +208,6 @@ export interface LibraryCard {
   current_version: number | null;
   last_activity: { ts: string | null; version_id: number | null; name: string | null } | null;
   thumbnail: string | null;
-}
-
-/**
- * The project's live storage signal (issue #295) — computed server-side from
- * live file checks on the project GET; the SPA reads it, never recomputes
- * presence client-side.
- *
- * `photo_present` is a three-way value, pinned by JSON: `null` (the project
- * never had a photo — `source_photo_path` is NULL), `true` (the photo is on
- * disk), or `false` (a photo path is set but the file was lost out of band).
- * A photo-LESS project must never read as a LOST one. `repo_present` covers
- * the git repo the version sources live in. Both booleans are ALWAYS present
- * on the wire — the field is never omitted.
- */
-export interface ProjectStorage {
-  repo_present: boolean;
-  photo_present: boolean | null;
 }
 
 /**

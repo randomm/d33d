@@ -647,13 +647,6 @@ export const export3mf = {
    *  flight — the version being created is not yet exportable). */
   conflict:
     "A design is still being made — export it once that finishes.",
-  /** The 409 with `detail: "source_missing"` (issue #295): the project's
-   *  saved design source is gone (the repo or the version's design.scad
-   *  was lost), so restore and branch-from cannot copy it. The SPA maps
-   *  ONLY this detail code to this copy — every other 409 keeps its
-   *  existing message. */
-  sourceMissing409:
-    "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
 
   /** The generic fallback: an unlisted/`unknown` class, no `error_class`
    *  (the 404 bodies), or a network failure with no class at all. */
