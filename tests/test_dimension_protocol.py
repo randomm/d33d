@@ -1150,6 +1150,151 @@ class TestTripleExtraction:
         and excluded from the tier-2 offer scan."""
         assert user_quoted_unmapped_mm(["60x45x80mm"]) == set()
 
+    # ------------------------------------------------------------------
+    # Issue #305: "by" joiner
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            pytest.param("60 by 45 by 80 mm", {"W": 60.0, "D": 45.0, "H": 80.0}, id="by-triple-spaced"),
+            pytest.param("60 by 45 by 80mm", {"W": 60.0, "D": 45.0, "H": 80.0}, id="by-triple-glued-last"),
+            pytest.param("60mm by 45mm by 80mm", {"W": 60.0, "D": 45.0, "H": 80.0}, id="by-triple-each-number"),
+            pytest.param("a box 60 by 45 by 80 mm", {"W": 60.0, "D": 45.0, "H": 80.0}, id="by-triple-with-noun"),
+            pytest.param("60 x 45 by 80 mm", {"W": 60.0, "D": 45.0, "H": 80.0}, id="mixed-x-by"),
+        ],
+    )
+    def test_by_joiner_triple(self, message, expected):
+        """Issue #305: 'by' as a whole-word joiner states W/D/H like the
+        x-form (each joiner independent — mixed x/by is valid)."""
+        axes = stated_axes_from_message(message)
+        assert axes == expected
+
+    def test_by_joiner_consumed(self):
+        """Issue #305: '60 x 45 by 80 mm' — all three numbers consumed
+        (the leaked-offerable-80 path is closed)."""
+        unmapped = user_quoted_unmapped_mm(["60 x 45 by 80 mm"])
+        assert 60.0 not in unmapped
+        assert 45.0 not in unmapped
+        assert 80.0 not in unmapped
+
+    # ------------------------------------------------------------------
+    # Issue #305: two-number footprint pairs
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            pytest.param("60 x 45 mm plate", {"W": 60.0, "D": 45.0}, id="footprint-x"),
+            pytest.param("a 60 by 45 mm tray", {"W": 60.0, "D": 45.0}, id="footprint-by"),
+            pytest.param("60mm x 45mm", {"W": 60.0, "D": 45.0}, id="footprint-glued"),
+        ],
+    )
+    def test_footprint_pair_wd_only(self, message, expected):
+        """Issue #305: two-number footprint states W and D only (H
+        absent), and stated_dims_from_message returns None."""
+        axes = stated_axes_from_message(message)
+        assert axes == expected
+        assert "H" not in axes
+        assert stated_dims_from_message(message) is None
+
+    def test_footprint_pair_consumed(self):
+        """Issue #305: a stated footprint pair's numbers are consumed
+        (excluded from user_quoted_unmapped_mm)."""
+        assert user_quoted_unmapped_mm(["60 x 45 mm plate"]) == set()
+
+    # ------------------------------------------------------------------
+    # Issue #305: part-noun conditional suppression
+    # ------------------------------------------------------------------
+
+    def test_part_noun_lid_primary_object_states(self):
+        """Issue #305: 'a 60 × 45 mm lid' — lid is the primary object
+        (no earlier match states), so the pair states W/D."""
+        axes = stated_axes_from_message("a 60 × 45 mm lid")
+        assert axes == {"W": 60.0, "D": 45.0}
+
+    def test_part_noun_lid_primary_object_make(self):
+        """Issue #305: 'make a 60 x 45 mm lid' — same, with verb."""
+        axes = stated_axes_from_message("make a 60 x 45 mm lid")
+        assert axes == {"W": 60.0, "D": 45.0}
+
+    def test_part_noun_lid_suppressed_by_earlier_triple(self):
+        """Issue #305: 'a box 60 × 45 × 80 mm with a 55 × 40 mm lid' —
+        the box triple states (first match wins); the lid pair is
+        suppressed (earlier match already stated the envelope). 40 stays
+        unmapped/offerable — 55 is excluded from the offer scan only
+        because it duplicates a stated box value (the 55×40 pair itself
+        consumes nothing)."""
+        axes = stated_axes_from_message("a box 60 × 45 × 80 mm with a 55 × 40 mm lid")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+        unmapped = user_quoted_unmapped_mm(["a box 60 × 45 × 80 mm with a 55 × 40 mm lid"])
+        assert 40.0 in unmapped
+        # 55 is not offerable — it duplicates a stated box dimension
+        # (pre-existing dedupe of user-quoted values against stated ones),
+        # not because the lid pair consumed it (the suppressed pair's 40
+        # stays offerable, proving nothing was consumed).
+        # The box numbers are consumed
+        assert 60.0 not in unmapped
+        assert 45.0 not in unmapped
+        assert 80.0 not in unmapped
+
+    def test_part_noun_lid_no_earlier_triple_states(self):
+        """Issue #305: 'a box with a 55 × 40 mm lid' — the box has no
+        numbers, so the lid pair is the primary object and states W/D."""
+        axes = stated_axes_from_message("a box with a 55 × 40 mm lid")
+        assert axes == {"W": 55.0, "D": 40.0}
+
+    def test_part_noun_lid_consumed_when_stated(self):
+        """Issue #305: 'a 60 × 45 mm lid' (stated) — numbers consumed."""
+        assert user_quoted_unmapped_mm(["a 60 × 45 mm lid"]) == set()
+
+    # ------------------------------------------------------------------
+    # Issue #305: by-form guard pass-through
+    # ------------------------------------------------------------------
+
+    def test_by_form_letter_glued(self):
+        """Issue #305: 'an M3 by 10 mm screw' — letter-glued guard
+        suppresses (M before 3)."""
+        assert stated_axes_from_message("an M3 by 10 mm screw") == {}
+
+    def test_by_form_foreign_unit(self):
+        """Issue #305: '60 by 45 cm' — foreign unit guard suppresses."""
+        assert stated_axes_from_message("60 by 45 cm") == {}
+
+    def test_by_form_magnitude(self):
+        """Issue #305: 'a 150 by 45 tray' — unit-less pair >100,
+        magnitude guard suppresses."""
+        assert stated_axes_from_message("a 150 by 45 tray") == {}
+
+    def test_by_form_feature_noun(self):
+        """Issue #305: 'a 10 by 10 mm hole' — feature noun 'hole'
+        suppresses the pair."""
+        assert stated_axes_from_message("a 10 by 10 mm hole") == {}
+
+    def test_by_form_mm_unit_beats_in(self):
+        """Issue #305: '60 by 45 mm in the drawer' — explicit mm unit
+        on the match beats the following 'in' preposition."""
+        axes = stated_axes_from_message("60 by 45 mm in the drawer")
+        assert axes == {"W": 60.0, "D": 45.0}
+
+    # ------------------------------------------------------------------
+    # Issue #305: 'by' non-dimension false positives
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            pytest.param("stand by", id="stand-by"),
+            pytest.param("by the edge", id="by-the-edge"),
+            pytest.param("made by 3 mm walls", id="made-by-walls"),
+            pytest.param("made by Alice", id="made-by-alice"),
+        ],
+    )
+    def test_by_non_dimension_does_not_state(self, message):
+        """Issue #305: 'by' as a preposition never becomes a joiner
+        (no digit on both sides of the joiner)."""
+        assert stated_axes_from_message(message) == {}
+
 
 class TestTripleFalsePositives:
     """Issue #275 round-1: the triple must not state axes on non-envelope
@@ -1324,7 +1469,7 @@ class TestTriplePerMatchEvaluation:
         prevents matching '23x45x67' starting inside '123')."""
         from d33d.dimension_protocol import _extract_triple
 
-        axes, consumed = _extract_triple("123x45x67")
+        axes, _consumed = _extract_triple("123x45x67")
         # The full triple matches (123, 45, 67) — not a partial (23, 45, 67).
         assert axes == {"W": 123.0, "D": 45.0, "H": 67.0}
 

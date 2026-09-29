@@ -464,6 +464,36 @@ class TestFeatureNounAbstain:
         # single-axis-word clause).
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
+    def test_part_nouns_subset_pin(self) -> None:
+        """Issue #305: _PART_NOUNS is exactly {"lid"} — a named constant
+        pin. The subset must be a subset of _FEATURE_NOUNS."""
+        from d33d.axis_lexicon import _FEATURE_NOUNS, _PART_NOUNS
+
+        assert _PART_NOUNS == frozenset({"lid"}), (
+            f"_PART_NOUNS drifted: expected {{'lid'}}, got {_PART_NOUNS}"
+        )
+        assert _PART_NOUNS <= _FEATURE_NOUNS, (
+            f"_PART_NOUNS not a subset of _FEATURE_NOUNS: "
+            f"{_PART_NOUNS - _FEATURE_NOUNS}"
+        )
+
+    def test_part_noun_single_number_lexicon_unchanged(self) -> None:
+        """Issue #305: the part-noun conditional suppression applies ONLY
+        in the triple path (dimension_protocol._extract_triple), NOT to
+        the lexicon's single-number classify. 'a 7 mm lid' still states
+        nothing at the lexicon level (unchanged behavior)."""
+        from d33d.dimension_protocol import stated_axes_from_message
+
+        # Lexicon: single-number 'lid' still states nothing.
+        result = classify("a 7 mm lid")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == [7.0]
+
+        # Triple path: 'a 60 x 45 mm lid' DOES state W/D (the part-noun
+        # conditional allows it when the lid is the primary object).
+        axes = stated_axes_from_message("a 60 x 45 mm lid")
+        assert axes == {"W": 60.0, "D": 45.0}
+
 
 class TestReleaseFallbackFunction:
     """The #261 round-2 pure-direction-request fallback (extracted from

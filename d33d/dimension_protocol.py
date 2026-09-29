@@ -46,6 +46,7 @@ from typing import Any, Literal, Protocol
 from d33d.axis_lexicon import (
     _FEATURE_NOUNS,
     _FOREIGN_UNIT_RE,
+    _PART_NOUNS,
     MM_UNIT_ALTERNATION,
 )
 
@@ -296,7 +297,11 @@ def _extract_stated(
     return out
 
 
-def _triple_suppressed_by_feature_noun(message: str, m: re.Match[str]) -> bool:
+def _triple_suppressed_by_feature_noun(
+    message: str,
+    m: re.Match[str],
+    feature_nouns: frozenset[str] = _FEATURE_NOUNS,
+) -> bool:
     """True if a feature noun sits in the triple's before- or after-window
     (issue #275 round-1 feature-noun suppression; issue #275 round-3, item
     2, moved into a helper so EVERY match runs the same guard).
@@ -308,6 +313,10 @@ def _triple_suppressed_by_feature_noun(message: str, m: re.Match[str]) -> bool:
     immediately BEFORE the triple's first number, stopping early at the
     same separators. Words are whitespace tokens.
 
+    ``feature_nouns`` defaults to the full ``_FEATURE_NOUNS`` (the
+    unconditional suppression path); ``_extract_triple`` passes the
+    ``_PART_NOUNS`` subset for its conditional part-noun check (issue
+    #305) so "lid" can state when it is the message's primary object.
     """
     separators = {",", ";", ".", "!", "?", "with", "and", "in", "on", "for"}
 
@@ -332,9 +341,85 @@ def _triple_suppressed_by_feature_noun(message: str, m: re.Match[str]) -> bool:
             break
         before_window.append(clean_w.lower())
 
-    return any(w in _FEATURE_NOUNS for w in after_window) or any(
-        w in _FEATURE_NOUNS for w in before_window
+    return any(w in feature_nouns for w in after_window) or any(
+        w in feature_nouns for w in before_window
     )
+
+
+def _any_earlier_match_states(message: str, current_match: re.Match[str]) -> bool:
+    """True if ANY other number-bearing triple or pair in ``message`` sits
+    in an EARLIER position than ``current_match`` and states its axes
+    (issue #305: the part-noun primary-object rule's suppression trigger).
+
+    "Earlier" means the candidate match's start is strictly before the
+    current match's start (in-text order — the ``_extract_triple``
+    per-match loop already visits in that order). A candidate states when
+    it passes the same guards the current match would (letter-glued,
+    feature-noun, foreign-unit, magnitude) — i.e., it is not itself
+    suppressed by a feature noun window (the recursive call must be
+    guarded to avoid infinite recursion by NOT checking the part-noun
+    condition on candidates, only the plain feature-noun window), has no
+    letter-glued prefix, has no foreign unit, and passes the magnitude
+    bound.
+
+    Used by ``_extract_triple`` to decide whether a pair followed by a
+    part noun (``_PART_NOUNS``) is the message's primary object: if an
+    earlier match already states the envelope, the part-noun pair stays
+    suppressed ("a box 60 × 45 × 80 mm with a 55 × 40 mm lid" → only the
+    box states); otherwise the pair states W/D ("a 60 × 45 mm lid").
+
+    The candidate scan uses the SAME joiner alternation as
+    ``_extract_triple`` (``[×xX]|by``) so a "by"-joined earlier match is
+    equally a stating envelope (issue #305).
+    """
+    triple_re = re.compile(
+        r"(?<!\d)\b(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
+        r"\s*(?:[×xX]|by)"
+        r"\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
+        r"(?:\s*(?:[×xX]|by)\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?)?"
+    )
+    for cm in triple_re.finditer(message):
+        if cm.start() >= current_match.start():
+            continue  # not earlier (or is the current match itself)
+        numbers = [float(g) for g in cm.groups() if g]
+        if len(numbers) < 2:
+            continue
+        # Letter-glued prefix → this candidate is itself suppressed.
+        before_char = message[cm.start() - 1] if cm.start() > 0 else ""
+        if before_char.isalpha():
+            continue
+        # Feature-noun window (full set — the unconditional path; the
+        # part-noun conditional is NOT applied to candidates: a candidate
+        # pair followed by a part noun with no earlier match would itself
+        # state, but that case means the current match has an earlier
+        # stating match only if this one states, which is circular. The
+        # operator's rule: "an earlier number-bearing triple or pair
+        # already stated the envelope" — the candidate must pass the
+        # unconditional feature-noun guard to be considered a stating
+        # envelope; the part-noun conditional only relaxes suppression
+        # for the primary-object case, not for secondary pairs.)
+        if _triple_suppressed_by_feature_noun(message, cm):
+            continue
+        span_text = message[cm.start():cm.end()]
+        has_mm_unit = re.search(
+            r"mm|millimetres?|millimeters?", span_text, re.IGNORECASE
+        ) is not None
+        # Foreign unit → candidate suppressed.
+        if not has_mm_unit:
+            if _FOREIGN_UNIT_RE.search(span_text):
+                continue
+            next_token = message[cm.end():].lstrip().split()[:1]
+            if next_token and next_token[0].lower() in {
+                "cm", "in", "inches", "inch", "m",
+            }:
+                continue
+        # Magnitude: unit-less pair >100 → candidate suppressed.
+        if len(numbers) == 2 and not has_mm_unit and any(
+            v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
+        ):
+            continue
+        return True
+    return False
 
 
 def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
@@ -354,7 +439,12 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
     suppression) — consumption is uniform across all suppression paths:
     a number is consumed only when a match states.
 
-    Joiners: "×" (U+00D7), "x", "X" with optional spaces. The unit may be
+    Joiners: "×" (U+00D7), "x", "X" with optional spaces, plus "by" as a
+    whole word (issue #305 — "60 by 45 by 80 mm" states W/D/H like the
+    x-form; each joiner is independent, so "60 x 45 by 80 mm" is a valid
+    mixed triple). "by" is whole-word and only fires between two numbers,
+    so "stand by", "by the edge", "made by 3 mm walls", "made by Alice"
+    never match (no digit on both sides of the joiner). The unit may be
     "mm" or a spelled-out "millimetre(s)"/"millimeter(s)" (the shared
     ``MM_UNIT_ALTERNATION`` — one definition with the lexicon), after the
     last number or after each number. Two numbers state W and D only.
@@ -365,7 +455,17 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
     2. letter-glued prefix: a letter immediately before the first digit
        ("M3 x 10 mm" — thread spec; "v2 is 60x45x20mm" — a version
        label) suppresses ("part3x4" likewise);
-    3. feature-noun window (``_triple_suppressed_by_feature_noun``);
+    3. feature-noun window (``_triple_suppressed_by_feature_noun``):
+       unconditional for the full ``_FEATURE_NOUNS`` set, but CONDITIONAL
+       for the ``_PART_NOUNS`` subset (issue #305) — a two-number pair
+       followed by a part noun states W/D when the pair is the message's
+       primary object (no earlier number-bearing triple or pair already
+       states the envelope, per ``_any_earlier_match_states``) and stays
+       suppressed otherwise ("a box 60 × 45 × 80 mm with a 55 × 40 mm
+       lid" → only the box states); the part-noun conditional applies
+       ONLY to two-number pairs (a 3-number triple with "lid" in the
+       window is a feature-size spec, not a primary object, and stays
+       suppressed);
     4. foreign unit (only when the match has NO explicit mm unit — an
        explicit mm unit wins, so the "in" in "60 x 45 mm in the drawer"
        is the preposition, not the inch unit): a cm/in/inches/inch/m
@@ -379,9 +479,10 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
        nothing).
     """
     triple_re = re.compile(
-        r"(?<!\d)\b(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?\s*[×xX]"
+        r"(?<!\d)\b(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
+        r"\s*(?:[×xX]|by)"
         r"\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?"
-        r"(?:\s*[×xX]\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?)?"
+        r"(?:\s*(?:[×xX]|by)\s*(\d+(?:\.\d+)?)(?:" + MM_UNIT_ALTERNATION + r")?)?"
     )
     for m in triple_re.finditer(message):
         numbers: list[float] = [
@@ -412,9 +513,23 @@ def _extract_triple(message: str) -> tuple[dict[str, float], set[float]]:
         before_char = message[m.start() - 1] if m.start() > 0 else ""
         if before_char.isalpha():
             continue  # letter-glued — this match states nothing
-        # Guard 2: feature-noun window.
-        if _triple_suppressed_by_feature_noun(message, m):
-            continue
+        # Guard 2: feature-noun window — unconditional for the full
+        # _FEATURE_NOUNS set; CONDITIONAL for the _PART_NOUNS subset
+        # (issue #305): a two-number pair followed by a part noun
+        # states W/D when the pair is the message's primary object (no
+        # earlier match states the envelope), suppressed otherwise.
+        # A 3-number triple with a part noun in the window stays
+        # suppressed (it is a feature-size spec, not a primary object).
+        if len(numbers) == 2 and _triple_suppressed_by_feature_noun(
+            message, m, _PART_NOUNS
+        ):
+            # Part noun in window — check if an earlier match states.
+            if _any_earlier_match_states(message, m):
+                continue  # earlier envelope stated → suppress
+            # No earlier match states → this pair IS the primary object
+            # → state W/D (fall through to remaining guards).
+        elif _triple_suppressed_by_feature_noun(message, m):
+            continue  # non-part feature noun → unconditional suppress
         # Guard 3: foreign unit — only when the match has NO explicit mm
         # unit of its own (an explicit mm unit wins — the "in" in
         # "60 x 45 mm in the drawer" is the preposition, not the inch

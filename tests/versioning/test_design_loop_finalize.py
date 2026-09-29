@@ -4033,6 +4033,88 @@ def test_chat_triple_message_gate_input_and_persisted_stated_dims(
     assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
 
 
+def test_chat_by_form_triple_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end (issue #305): 'a 60 by 45 by 20 mm tray' — the 'by'-
+    joiner form — the gate input is (60, 45, 20) and stated_dims
+    {W:60, D:45, H:20} are persisted on the new version row, like the
+    x-form twin above."""
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 60 by 45 by 20 mm tray"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20).
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the stated_dims.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+def test_chat_footprint_pair_persisted_stated_dims_h_absent(
+    app_with_versions,
+):
+    """End-to-end (issue #305): 'a 60 \u00d7 45 mm lid' — a two-number
+    footprint pair as the primary object — the gate input is (60, 45, 0)
+    (the pair leaves H unstated, so the gate triple carries 0.0 for the
+    unconfirmed H — the #91 zero-means-unknown convention: the gate
+    enforces W/D only) and the new version row persists stated_dims
+    {W:60, D:45} with H absent (still gated)."""
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 60 \u00d7 45 mm lid"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 0) — the W/D pair confirmed, the H
+    # axis unconfirmed (0.0 = not gated on H, the #91 convention).
+    assert captured["stated_dims"] == (60.0, 45.0, 0.0)
+    # The new version row persists only W/D; H is absent (still gated).
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0}
+    assert "H" not in (raw or {})
+
+
 def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
     app_with_versions,
 ):
@@ -4072,6 +4154,97 @@ def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
     assert latest is not None
     raw = latest.get("stated_dims")
     assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+# ---------------------------------------------------------------------------
+# (issue #305, task-b) e2e chat-seam tests: by-form tray triple persists
+# W/D/H, and lid footprint pair persists W/D with H still gated.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_by_form_triple_message_gate_input_and_persisted_stated_dims(
+    app_with_versions,
+):
+    """End-to-end (issue #305): 'a 60 by 45 by 20 mm tray' (the by-form
+    triple) → the gate input is (60, 45, 20) and stated_dims {W:60, D:45,
+    H:20} are persisted on the new version row, identical to the x-form
+    twin above (the by-joiner must flow through the full chat seam
+    without any special-casing in the route)."""
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0, "H": 20.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 60 by 45 by 20 mm tray"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 20) — same as the x-form twin.
+    assert captured["stated_dims"] == (60.0, 45.0, 20.0)
+    # The new version row persists the full triple.
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0, "H": 20.0}
+
+
+def test_chat_lid_footprint_pair_persists_wd_with_h_gated(
+    app_with_versions,
+):
+    """End-to-end (issue #305): 'a 60 \u00d7 45 mm lid' (a two-number
+    footprint pair on a part noun that is the message's primary object)
+    → the gate input is None (stated_dims_from_message returns None for
+    a partial pair) but the version row's persisted stated_dims carry
+    W:60, D:45 with H absent (the partial W/D are carried forward via
+    ``stated_axes_from_message`` + ``effective_stated_dims``)."""
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 60.0, "D": 45.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 60 \u00d7 45 mm lid"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (60, 45, 0) — axes_to_gate_triple normalizes the
+    # partial {W:60, D:45} into a triple with 0.0 for the unconfirmed H
+    # axis (the loop's _bbox_within_tolerance skips <= 0 axes, so H is
+    # effectively un-gated).
+    assert captured["stated_dims"] == (60.0, 45.0, 0.0)
+    # The new version row persists W and D only — H is absent (gated).
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 60.0, "D": 45.0}
+    assert "H" not in raw
 
 
 # ---------------------------------------------------------------------------
