@@ -132,15 +132,6 @@ interface BriefProps {
    *  from MARKER_COLOR — no CSS token, by design / W17). The outline
    *  makes the click-on-pixels legibly a click-on-parameter. */
   highlightModuleId?: string | null;
-  /** The project's live storage signal (issue #295) — the server's file
-   *  checks, read verbatim (the SPA never recomputes presence). Drives the
-   *  missing-saved-design banner (`repo_present === false` or a lost
-   *  source) and the reference-photo-missing marker
-   *  (`photo_present === false` — NOT `null`: a photo-less project
-   *  shows nothing). Both render in `var(--color-blocked)` ochre, never
-   *  the region-marker colour (W17: the marker hex has exactly one home,
-   *  lib/marker.ts). */
-  storage?: ProjectStorage;
   /** The unknown-value control's question — sent to the assistant. */
   onAsk?: (label: string) => void;
   /** The expanded row's "Change it" — routed to the assistant. */

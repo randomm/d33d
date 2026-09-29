@@ -290,11 +290,11 @@ def store_version_source(
 
 __all__ = [
     "SOURCE_FILENAME",
-    "source_expected",
-    "source_expected_for_version",
     "TRUNCATION_MARKER",
     "current_version_source",
     "design_source_lines",
+    "source_expected",
+    "source_expected_for_version",
     "source_path_for_version",
     "store_version_source",
 ]

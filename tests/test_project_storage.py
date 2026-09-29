@@ -289,6 +289,41 @@ def test_migration_non_git_repo_dir_still_moves(data_dir: Path):
         conn.close()
 
 
+def test_migration_move_failure_leaves_row_unchanged(data_dir: Path, monkeypatch, caplog):
+    """Issue #294 review: a failed ``shutil.move`` leaves the row UNCHANGED
+    (repo still at the old path, row still points at the old path) and logs
+    a WARNING with the project id only. The move happens BEFORE the row
+    update; a move failure skips the update entirely."""
+    old = _seed_repo(data_dir / "tmp-projects" / "fail99")
+    conn = db_mod.connect(data_dir / "d33d.sqlite3")
+    conn.data_dir = data_dir
+    try:
+        pid = _seed_project(conn, name="fail", repo=str(old))
+        original_path = conn.get_project(pid)["git_repo_path"]
+
+        def _raise(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("d33d.db.shutil.move", _raise)
+        with caplog.at_level("WARNING", logger="d33d.db"):
+            migrate_project_repos(conn)
+
+        row = conn.get_project(pid)
+        assert row["git_repo_path"] == original_path, (
+            "a failed move must leave the row unchanged"
+        )
+        assert old.is_dir(), (
+            "a failed move must leave the repo at the old path"
+        )
+        warnings = [
+            r for r in caplog.records if r.levelname == "WARNING" and "could not move" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+        assert str(pid) in warnings[0].getMessage()
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # Missing repo: unchanged row, derived flag, exactly one WARNING
 # ---------------------------------------------------------------------------
