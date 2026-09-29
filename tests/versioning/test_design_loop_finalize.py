@@ -4388,3 +4388,100 @@ def test_region_edit_label_inheritance_keeps_previous_label(app_with_versions):
     assert latest is not None
     assert latest["param_meta"]["overall_height"]["label"] == "Overall height"
     assert latest["param_meta"]["overall_height"]["unit"] == "mm"
+
+
+# ---------------------------------------------------------------------------
+# Issue #300 (task-a, AC3): the finalize seam's offer eligibility reads
+# the SAME single-source block as the chat seam — a tray-triple finalize
+# message (stated W/D/H matching the loop result's axis params) never
+# offers a stated axis param; the offer targets the pure assumed param.
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_tray_triple_offer_never_targets_stated_axis(app_with_versions):
+    """End-to-end FINALIZE path: the same tray triple as the chat seam
+    ("a tray 60 x 45 x 20 mm" as the finalize message → stated_dims
+    {W:60, D:45, H:20} persisted) and a passing loop whose axis-declared
+    params match the stated values, flagged ``confirm_first=
+    "wall_thickness"`` → the pending offer names ``wall_thickness``
+    (the pure assumed param — the tier-3 flag seam, the axis tiers are
+    empty once the stated axis params drop out), never any of the three
+    axis params (the new version's block renders them stated, rule (a) —
+    the same single-source block the chat seam reads)."""
+    from d33d.design_state import state_block_for_version
+
+    params = {
+        "tray_width": 60.0,
+        "tray_depth": 45.0,
+        "tray_height": 20.0,
+        "wall_thickness": 3.0,
+    }
+    meta = {
+        "tray_width": {"label": "Tray width", "unit": "mm", "axis": "W"},
+        "tray_depth": {"label": "Tray depth", "unit": "mm", "axis": "D"},
+        "tray_height": {"label": "Tray height", "unit": "mm", "axis": "H"},
+    }
+
+    from d33d.design_loop import IterationRecord, Score
+
+    class _TrayFinalizeResult:
+        def __init__(self) -> None:
+            self.status = "pass"
+            self.failure_reason = None
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="W = 60; cube([W, 45, 20]);",
+                render=_default_render(),
+                score=Score(
+                    bits=(True, True, True, True, True),
+                    rank=5,
+                    tiebreak=(True,) * 5,
+                ),
+                params=dict(params),
+                param_meta=dict(meta),
+                confirm_first="wall_thickness",
+            )
+
+    async def _loop(app, **kwargs):
+        return _TrayFinalizeResult()
+
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.answer_question = None
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={
+                "name": "the tray",
+                "message": "a tray 60 x 45 x 20 mm",
+            },
+        )
+        assert r.status_code == 201, r.text
+        svc = app_with_versions.state.versions
+        pending = svc.get_pending_offer(pid)
+        latest = svc.latest_version(pid)
+        return r.status_code, pending, latest
+
+    status, pending, latest = run_async(app_with_versions, _call)
+    assert status == 201, status
+    # The new version persists the stated triple (the finalize seam's
+    # ``stated_axes_from_message`` on the request text).
+    assert latest["stated_dims"] == {"W": 60.0, "D": 45.0, "H": 20.0}, latest
+    # The new version's own block (the single source) renders the three
+    # axis params stated — the precondition the gate keys on.
+    block = state_block_for_version(
+        latest["params"],
+        latest["bbox"],
+        latest["stated_dims"],
+        latest["param_meta"],
+        latest["confirmed_params"],
+    )
+    by_name = {e["name"]: e for e in block if e.get("kind") == "param"}
+    for name in ("tray_width", "tray_depth", "tray_height"):
+        assert by_name[name]["provenance"] == "stated", by_name[name]
+    # The offer targets the pure assumed param — never a stated axis.
+    assert pending is not None, "no pending offer was recorded on finalize"
+    assert pending["param"] == "wall_thickness", pending
+    assert pending["version_id"] == latest["id"]

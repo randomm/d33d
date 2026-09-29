@@ -2194,3 +2194,356 @@ def test_ack_label_falls_back_to_param_name(app_with_versions):
     assert done[0].get("confirm_ack_value") == "3", done
     # The message uses the identifier as the label.
     assert done[0]["message"] == "Got it — wall_thickness stays 3.", done
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #300 (task-a): the single-source block seam — eligibility, the
+# entry lookup and the "build once per resolve" performance gate all read
+# the version's full ``state_block_for_version`` param rows, built ONCE
+# per ``_resolve_offer`` call (never per tier or per param).
+# ---------------------------------------------------------------------------
+
+_TRAY_PARAMS: dict[str, Any] = {
+    "tray_width": 60.0,
+    "tray_depth": 45.0,
+    "tray_height": 20.0,
+    "wall_thickness": 3.0,
+}
+_TRAY_META: dict[str, Any] = {
+    "tray_width": {"label": "Tray width", "unit": "mm", "axis": "W"},
+    "tray_depth": {"label": "Tray depth", "unit": "mm", "axis": "D"},
+    "tray_height": {"label": "Tray height", "unit": "mm", "axis": "H"},
+}
+
+
+def _tray_param_rows() -> list[dict[str, Any]]:
+    """The tray-triple's full-block param rows (issue #300's fixture —
+    all three axes stated, the loop result's values matching them
+    exactly: rule (a) promotes each axis param to ``stated``)."""
+    from d33d.design_state import state_block_for_version
+
+    block = state_block_for_version(
+        _TRAY_PARAMS, None, {"W": 60.0, "D": 45.0, "H": 20.0}, _TRAY_META, None
+    )
+    return [e for e in block if e.get("kind") == "param"]
+
+
+def test_pure_selection_block_rows_exclude_stated_axis_params():
+    """Pure seam: the same tray-triple params the Brief promotes (rule
+    (a) — each axis-declared param matches a stated axis within
+    tolerance) are NOT offered when the precomputed block rows are
+    passed; the params-only fallback (``block_entries=None``) still
+    offers the axis param (pre-#300 behaviour, unchanged)."""
+    from d33d.confirm_offer import select_offer_candidate
+
+    # No block (the pre-#300 fallback): the axis param is assumed from
+    # the params-only substrate → it is offered.
+    assert select_offer_candidate(
+        _TRAY_PARAMS, _TRAY_META, None, set(), None
+    ) == "tray_width"
+    # The full block (stated_dims match every declared axis): the three
+    # axis params render stated and drop out of the eligible set. The
+    # offer then names the pure assumed param ONLY via the validated
+    # ``confirm_first`` flag (the tier-3 seam — the terminal rule stays
+    # "declared-axis assumed param, else the flagged param, else none":
+    # a stated axis is never a silent fallback target, and an unflagged
+    # axis-less version yields no offer rather than a guess).
+    rows = _tray_param_rows()
+    assert select_offer_candidate(
+        _TRAY_PARAMS, _TRAY_META, None, set(), None, block_entries=rows
+    ) is None
+    assert select_offer_candidate(
+        _TRAY_PARAMS, _TRAY_META, None, set(), "wall_thickness", block_entries=rows
+    ) == "wall_thickness"
+    # A stated axis param flagged by confirm_first is rejected (never a
+    # re-offer of a stated value) — the pure assumed param is not a
+    # silent fallback for a bad flag.
+    for name in ("tray_width", "tray_depth", "tray_height"):
+        assert select_offer_candidate(
+            _TRAY_PARAMS, _TRAY_META, None, set(), name, block_entries=rows
+        ) is None
+    # The tier-1 exemption does NOT override the block provenance: with
+    # every axis released, none of the stated axis params is offered —
+    # the offer names the pure assumed param only when flagged, never a
+    # stated axis.
+    assert select_offer_candidate(
+        _TRAY_PARAMS,
+        _TRAY_META,
+        None,
+        set(),
+        None,
+        released_axes={"W", "D", "H"},
+        block_entries=rows,
+    ) is None
+    # A changed stated-axis param on a released axis is likewise excluded
+    # (the exemption relaxes only the changed-set rule, never provenance)
+    # — flagged, it is still rejected (stated provenance wins).
+    assert select_offer_candidate(
+        _TRAY_PARAMS,
+        _TRAY_META,
+        None,
+        {"tray_width"},
+        "tray_width",
+        released_axes={"W", "D", "H"},
+        block_entries=rows,
+    ) is None
+
+
+def test_pure_selection_block_rows_do_not_rebuild_params_block():
+    """Build-once gate (pure half): when ``block_entries`` is passed,
+    ``state_block_from_params`` is NOT called — the selection runs on
+    the precomputed rows alone. The fallback (``block_entries=None``)
+    still calls it (the pre-#300 path is unchanged)."""
+    from unittest import mock
+
+    import d33d.design_state as _ds
+    from d33d.confirm_offer import select_offer_candidate
+
+    with mock.patch.object(_ds, "state_block_from_params") as spy:
+        assert select_offer_candidate(
+            {"wall_thickness": 3.0},
+            {"wall_thickness": {"label": "Wall", "unit": "mm"}},
+            None,
+            set(),
+            "wall_thickness",
+            block_entries=[
+                {
+                    "name": "wall_thickness",
+                    "kind": "param",
+                    "label": "Wall",
+                    "label_is_identifier": False,
+                    "value": 3.0,
+                    "unit": "mm",
+                    "provenance": "assumed",
+                }
+            ],
+        ) == "wall_thickness"
+    assert spy.call_count == 0, (
+        "state_block_from_params must not run when block_entries is given"
+    )
+    with mock.patch.object(
+        _ds, "state_block_from_params", wraps=_ds.state_block_from_params
+    ) as spy2:
+        assert select_offer_candidate(
+            {"wall_thickness": 3.0},
+            {"wall_thickness": {"label": "Wall", "unit": "mm"}},
+            None,
+            set(),
+            "wall_thickness",
+        ) == "wall_thickness"
+    assert spy2.call_count == 1, "the fallback path must still build the params block"
+
+
+def test_offer_entry_block_rows_use_precomputed_entry():
+    """The entry lookup runs on the SAME precomputed rows (issue #300 —
+    the single source the sentence builders and the ack render from):
+    the label, the ``meta_unit`` / ``param_axis`` graft, and the
+    ``mm()``-formatted value spelling all come from the block row — and
+    the graft mutates a copy, never the caller's row (the block is the
+    Brief's shared data; it must not be re-labelled in place)."""
+    from d33d.confirm_offer import mm_value_str, offer_entry
+
+    rows = _tray_param_rows()
+    by_name = {e["name"]: e for e in rows}
+    # A stated axis param: the entry is the block's own row (label
+    # "Tray depth", provenance stated — the row the Brief shows).
+    entry = offer_entry(_TRAY_PARAMS, _TRAY_META, "tray_depth", block_entries=rows)
+    assert entry is not None
+    assert entry["provenance"] == "stated", entry
+    # The graft resolves onto the entry (issue #265): mm evidence from
+    # the param's own metadata.
+    assert entry.get("meta_unit") == "mm"
+    assert entry.get("param_axis") == "D"
+    assert mm_value_str(entry) == "45.0\u202fmm"
+    # The caller's row is untouched (the graft is a copy, never in place).
+    assert "meta_unit" not in by_name["tray_depth"], by_name["tray_depth"]
+    # Fallback (no block rows): identical label/graff, built from the
+    # params-only substrate (the pre-#300 behaviour, unchanged).
+    bare = offer_entry(_TRAY_PARAMS, _TRAY_META, "tray_depth")
+    assert bare is not None
+    assert bare["label"] == "Tray depth"
+    assert bare.get("meta_unit") == "mm"
+    assert bare.get("param_axis") == "D"
+    # The pure assumed param (wall_thickness) is findable either way.
+    # Its metadata carries no unit and no axis — the mm-evidence rule
+    # (issue #265) is metadata-driven, so the value keeps the bare
+    # ``:g`` spelling, exactly as the fallback entry does.
+    wall = offer_entry(_TRAY_PARAMS, _TRAY_META, "wall_thickness", block_entries=rows)
+    assert wall is not None
+    assert wall["provenance"] == "assumed"
+    assert wall.get("meta_unit") is None
+    assert wall.get("param_axis") is None
+    assert mm_value_str(wall) == "3"
+
+
+def test_chat_tray_triple_offer_never_targets_stated_axis(app_with_versions):
+    """AC1 end-to-end (chat seam, ``run_design_loop_with_events``): a
+    "a tray 60 x 45 x 20 mm" pass whose stub design returns
+    tray_width/depth/height = 60/45/20 with declared axes W/D/H plus
+    wall_thickness 3 produces a done frame whose ``confirm_offer``
+    targets ``wall_thickness`` — NEVER any of the three axis params
+    (the block renders them stated, rule (a)). The sentence never says
+    "I assumed" for a stated value; it is the pure assumed param's
+    offer."""
+    class _TrayStubResult:
+        """A pass result whose ``best`` is a real ``IterationRecord``
+        carrying the tray-triple params + declared axes."""
+
+        def __init__(self) -> None:
+            from d33d.design_loop import IterationRecord, Score
+            from tests.versioning.test_design_loop_finalize import (
+                _default_render,
+            )
+
+            self.status = "pass"
+            self.failure_reason = None
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="W = 60; cube([W, 45, 20]);",
+                render=_default_render(),
+                score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
+                params=dict(_TRAY_PARAMS),
+                param_meta=dict(_TRAY_META),
+                confirm_first="wall_thickness",
+            )
+
+    async def _loop(app, **kwargs):
+        return _TrayStubResult()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.answer_question = None
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "a tray 60 x 45 x 20 mm"}
+        )
+        latest = app_with_versions.state.versions.latest_version(pid)
+        row_offer = app_with_versions.state.versions.get_pending_offer(pid)
+        return r.status_code, frames, latest, row_offer
+
+    status, frames, latest, row_offer = run_async(app_with_versions, _call)
+    assert status == 202, status
+    # The persisted row carries the stated triple (the block's rule (a)
+    # evidence — the same value the Brief shows as stated).
+    assert latest["stated_dims"] == {"W": 60.0, "D": 45.0, "H": 20.0}, latest
+    from d33d.design_state import state_block_for_version
+
+    block = state_block_for_version(
+        latest["params"],
+        latest["bbox"],
+        latest["stated_dims"],
+        latest["param_meta"],
+        latest["confirmed_params"],
+    )
+    by_name = {e["name"]: e for e in block if e.get("kind") == "param"}
+    for name in ("tray_width", "tray_depth", "tray_height"):
+        assert by_name[name]["provenance"] == "stated", by_name[name]
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The offer targets the pure assumed param (flagged by the stub's
+    # confirm_first) — never a stated axis.
+    assert done[-1].get("confirm_offer") == "wall_thickness", done
+    sentence = done[-1].get("confirm_sentence", "")
+    for bad in ("Tray width", "Tray depth", "Tray height", "60", "45", "20"):
+        assert bad not in sentence, f"stated axis value leaked into the offer: {sentence!r}"
+    assert row_offer == {"version_id": latest["id"], "param": "wall_thickness"}
+
+
+def test_chat_block_built_once_per_resolve(app_with_versions):
+    """AC4 (performance, chat seam): ``state_block_for_version`` is
+    called at most ONCE per ``_resolve_offer`` call (the single source
+    the selection, the entry and the guard all read), and
+    ``state_block_from_params`` is NOT called on the selection path
+    (the block rows are passed down — no second build)."""
+    from unittest import mock
+
+    import d33d.design_state as _ds
+    from d33d.design_state import state_block_for_version
+
+    class _TrayStubResult:
+        def __init__(self) -> None:
+            from d33d.design_loop import IterationRecord, Score
+            from tests.versioning.test_design_loop_finalize import (
+                _default_render,
+            )
+
+            self.status = "pass"
+            self.failure_reason = None
+            self.best = IterationRecord(
+                iteration=0,
+                scad_source="W = 60; cube([W, 45, 20]);",
+                render=_default_render(),
+                score=Score(bits=(True, True, True, True, True), rank=5, tiebreak=(True,) * 5),
+                params=dict(_TRAY_PARAMS),
+                param_meta=dict(_TRAY_META),
+                confirm_first="wall_thickness",
+            )
+
+    counts = {"for_version": 0, "from_params": 0}
+
+    real_for_version = _ds.state_block_for_version
+
+    def _counting_for_version(*a, **kw):
+        counts["for_version"] += 1
+        return real_for_version(*a, **kw)
+
+    real_from_params = _ds.state_block_from_params
+
+    def _counting_from_params(*a, **kw):
+        # ``state_block_from_params`` runs exactly once per resolve — as
+        # the internal call inside the single ``state_block_for_version``
+        # build. A second call would be the params-only fallback on the
+        # selection path (the bug this test pins: the seam must pass the
+        # block rows down, never rebuild). The block builder is patched
+        # via ``side_effect`` (the real function), so its body's
+        # reference to ``state_block_from_params`` goes through the
+        # module attribute — the patched spy — and is counted here.
+        counts["from_params"] += 1
+        return real_from_params(*a, **kw)
+
+
+    async def _loop(app, **kwargs):
+        return _TrayStubResult()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.answer_question = None
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "a tray 60 x 45 x 20 mm"}
+        )
+        return r.status_code, frames
+
+    with (
+        mock.patch.object(_ds, "state_block_for_version", side_effect=_counting_for_version),
+        mock.patch.object(_ds, "state_block_from_params", side_effect=_counting_from_params),
+    ):
+        status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The block was built exactly ONCE on the resolve seam (the
+    # selection, the entry and the guard all read that ONE build). The
+    # GET /design-state route's own build is a different call site, out
+    # of scope for this resolve-level gate.
+    assert counts["for_version"] == 1, counts
+    # ``state_block_from_params`` ran exactly ONCE — the internal call
+    # inside the single ``state_block_for_version`` build (the side
+    # effect calls the real function, which reads the patched module
+    # attribute). A second call would be the params-only fallback on
+    # the selection path (the bug this test pins: the seam must pass
+    # the block rows down, never rebuild).
+    assert counts["from_params"] == 1, counts
+    # The offer targets the pure assumed param (the ``confirm_first``
+    # flag the stub's best record carries) — never a stated axis.
+    # The mock patches can affect the offer's sentence build, so the
+    # offer's PRESENCE and its param are the assertions that matter
+    # here (the sentence's exact spelling is pinned by the other
+    # tests that don't mock the block builders).
+    assert done[-1].get("confirm_offer") is not None, done
+    assert done[-1]["confirm_offer"] != "tray_width"  # never a stated axis
+    assert done[-1]["confirm_offer"] != "tray_depth"
+    assert done[-1]["confirm_offer"] != "tray_height"

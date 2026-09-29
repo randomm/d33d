@@ -137,6 +137,7 @@ def _assumed_numeric_params(
     excluded: set[str],
     disagree_names: Collection[str] = frozenset(),
     exempt_axes: set[str] | None = None,
+    block_entries: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """The version's assumed numeric params eligible for an offer: a
     numeric (non-bool, non-zero) value, NOT in ``confirmed_params`` (rule
@@ -168,19 +169,42 @@ def _assumed_numeric_params(
     it would ask the user to affirm a number the part itself disproves.
     The caller computes the set from the FULL ``state_block_for_version``
     output (the only place the measurement comparison runs) and passes
-    it in — this helper itself is measurement-blind (it reads
-    ``state_block_from_params``), so the exclusion is always explicit,
-    never inferred. The default ``frozenset()`` keeps pre-#264 callers
-    (and the tier tests) exactly as they were: an empty set excludes
-    nothing."""
-    from d33d.design_state import state_block_from_params
+    it in; the default ``frozenset()`` excludes nothing (the pre-#264
+    callers' behaviour).
 
+    ``block_entries`` (issue #300) is the single-source seam: the
+    PRECOMPUTED param rows of the version's full
+    ``state_block_for_version`` block (the caller builds the block ONCE
+    — it is also where the measurement comparison runs, and the same
+    rows feed ``select_offer_candidate`` / :func:`validate_confirm_first`
+    and the ``offer_entry`` lookup, never recomputed per tier or per
+    param). Eligibility reads provenance from THAT block: a param the
+    block renders ``stated`` (rule (a) axis promotion / rule (b)
+    confirmation), ``measured``, or ``disagrees`` is never an offer, in
+    every case where the params-only substrate (the ``block_entries is
+    None`` fallback — today's ``state_block_from_params`` behaviour,
+    unchanged for the pre-#300 callers and the pure tests) would still
+    render it ``assumed``. Only ``kind == "param"`` rows are ever
+    candidates: an axis row (``kind == "axis"``) is never an offer
+    target, and its name never enters an exclusion set (a literal
+    W/D/H-named PARAM is a param row and is excluded by its row's own
+    provenance, never by name). When ``block_entries`` is ``None`` the
+    helper falls back to ``state_block_from_params`` exactly as it
+    did pre-#300."""
     confirmed = confirmed or {}
     changed = {name for name, value in params.items() if name in excluded}
     changed.update(excluded)
     disagrees = set(disagree_names)
-    entries = state_block_from_params(params, param_meta)
-    by_name = {e["name"]: e for e in entries}
+    if block_entries is not None:
+        by_name = {
+            e["name"]: e
+            for e in block_entries
+            if e.get("kind") == "param"
+        }
+    else:
+        from d33d.design_state import state_block_from_params
+
+        by_name = {e["name"]: e for e in state_block_from_params(params, param_meta)}
     out: list[dict[str, Any]] = []
     for name, value in params.items():
         if name in confirmed or name in disagrees:
@@ -213,6 +237,7 @@ def select_offer_candidate(
     released_axes: set[str] | None = None,
     user_quoted_mm: set[float] | None = None,
     disagree_names: Collection[str] = frozenset(),
+    block_entries: list[dict[str, Any]] | None = None,
 ) -> str | None:
     """The ONE assumed param to offer for this version, or ``None``.
 
@@ -249,6 +274,19 @@ def select_offer_candidate(
     ``state_block_for_version`` output (the only place the measurement
     comparison runs) and passes it in; the default ``frozenset()``
     excludes nothing (the pre-#264 callers' behaviour, unchanged).
+
+    ``block_entries`` (issue #300) is the SAME precomputed block as in
+    :func:`_assumed_numeric_params`: the version's full
+    ``state_block_for_version`` param rows, built ONCE by the caller
+    (the single source of provenance the Brief shows). Eligibility —
+    including the tier-1 exemption — then reads provenance from the
+    full block: a param the block renders ``stated`` (rule (a) axis
+    promotion / rule (b) confirmation), ``measured``, or ``disagrees``
+    is never offered even when the tier-1 exemption would otherwise
+    release it (the exemption relaxes only the changed-set rule). When
+    ``None`` (the pre-#300 callers, the pure tests) the helper falls
+    back to ``state_block_from_params`` — the params-only substrate's
+    behaviour, unchanged.
     """
     changed_set = set(changed or ())
     # released_axes doubles as the tier-1 exemption set (an empty set exempts nothing).
@@ -259,6 +297,7 @@ def select_offer_candidate(
         changed_set,
         disagree_names,
         exempt_axes=released_axes or None,
+        block_entries=block_entries,
     )
     if not eligible:
         return None
@@ -295,16 +334,23 @@ def validate_confirm_first(
     confirmed: dict[str, Any] | None,
     changed: set[str] | tuple[str, ...],
     disagree_names: Collection[str] = frozenset(),
+    block_entries: list[dict[str, Any]] | None = None,
 ) -> bool:
     """``confirm_first`` is valid iff it names an assumed numeric param of
     THIS version (in the eligible set — declared, non-zero numeric
     value, not confirmed, not user-changed, not a disagrees param —
-    see :func:`select_offer_candidate` for ``disagree_names``)."""
+    see :func:`select_offer_candidate` for ``disagree_names``).
+
+    ``block_entries`` (issue #300): the same single-source seam as
+    :func:`select_offer_candidate` — the precomputed param rows of the
+    version's full ``state_block_for_version`` block (``None`` →
+    ``state_block_from_params`` fallback, unchanged)."""
     if not isinstance(confirm_first, str) or not confirm_first:
         return False
     changed_set = set(changed or ())
     eligible = _assumed_numeric_params(
-        params, param_meta, confirmed, changed_set, disagree_names
+        params, param_meta, confirmed, changed_set, disagree_names,
+        block_entries=block_entries,
     )
     return any(e["name"] == confirm_first for e in eligible)
 
@@ -313,12 +359,23 @@ def offer_entry(
     params: dict[str, Any],
     param_meta: dict[str, Any] | None,
     name: str,
+    block_entries: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """The chosen param's design-state entry (label + value from the
     shared block builder), with the param's own metadata grafted onto
     resolved metadata (see the module docstring's tier rules) — or
     ``None`` when the name is not a declared param (a guard — the caller
     should never reach here with a bad name).
+
+    ``block_entries`` (issue #300): the single-source seam — the
+    PRECOMPUTED param rows of the version's full
+    ``state_block_for_version`` block, the SAME rows the selection ran
+    on (the caller builds the block once per resolve; the entry the
+    sentence builders and the acceptance render come from that block,
+    never from a second build). Only ``kind == "param"`` rows are
+    looked up (an axis row's name is never the chosen param). When
+    ``None`` (the pre-#300 callers, the pure tests) the entry is built
+    from ``state_block_from_params`` exactly as before.
 
     The param's metadata is normalised ONCE (``normalize_param_meta``) and
     resolved onto the entry under ``meta_unit`` / ``param_axis`` (issue
@@ -330,8 +387,16 @@ def offer_entry(
     from d33d.design_state import normalize_param_meta, state_block_from_params
 
     meta = normalize_param_meta(param_meta)
-    for entry in state_block_from_params(params, param_meta):
-        if entry["name"] == name:
+    if block_entries is not None:
+        source = (e for e in block_entries if e.get("kind") == "param")
+    else:
+        source = state_block_from_params(params, param_meta)
+    for source_entry in source:
+        if source_entry["name"] == name:
+            # The graft lands on a COPY: with ``block_entries`` the rows
+            # are the caller's precomputed block (the Brief's shared data)
+            # and must not be re-labelled in place.
+            entry = dict(source_entry)
             m = meta.get(name) or {}
             unit = m.get("unit")
             axis = m.get("axis")

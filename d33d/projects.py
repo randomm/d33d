@@ -244,6 +244,7 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
         is_pending_offer_acceptance,
         offer_entry,
     )
+    from d33d.design_state import state_block_for_version
 
     versions = app.state.versions
     offer = versions.get_pending_offer(project_id)
@@ -253,7 +254,29 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     if not is_pending_offer_acceptance(message, offer, latest):
         return None
     name = offer["param"]
-    entry = offer_entry(dict(latest["params"]), latest["param_meta"], name)
+    # The same single-source block the Brief shows (issue #300's operator
+    # decision): the acceptance pre-route reads provenance from
+    # ``state_block_for_version`` — not the stated/measurement-blind
+    # ``state_block_from_params`` the pre-fix path used — so a param the
+    # Brief renders ``stated`` (rule (a) axis promotion / rule (b)
+    # confirmed), ``measured`` or ``disagrees`` is never confirmed. A
+    # "yes" is accepted only when the param row is EXACTLY ``assumed``
+    # here; any other provenance lapses the offer (the offer stays
+    # untouched — the next pass overwrites the pending-offer state — and
+    # the message routes normally). The block carries the row's label /
+    # value, so the ack and its ``confirm_ack_*`` fields ride the same
+    # single source (the ``meta_unit`` / ``param_axis`` graft is applied
+    # inside ``offer_entry`` as before — the value spelling is unchanged).
+    block = state_block_for_version(
+        dict(latest["params"]),
+        latest["bbox"],
+        latest["stated_dims"],
+        latest["param_meta"],
+        latest["confirmed_params"],
+    )
+    entry = offer_entry(
+        dict(latest["params"]), latest["param_meta"], name, block_entries=block
+    )
     if entry is None or entry.get("provenance") != "assumed":
         # The param is gone or no longer assumed (confirmed/stated /
         # measured): the offer is stale — leave it be (the next pass
