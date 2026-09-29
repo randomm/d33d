@@ -58,6 +58,8 @@ import { Filmstrip } from "../components/versions/Filmstrip";
 import { BranchGraph } from "../components/versions/BranchGraph";
 import { HistorySheet } from "../components/versions/HistorySheet";
 import { CompareView } from "../components/versions/CompareView";
+import { ChatPanel, type ChatMessage } from "../components/chat/ChatPanel";
+import { ApiClient } from "../lib/api";
 import { VariantGallery } from "../components/versions/VariantGallery";
 import { Brief } from "../components/brief/Brief";
 import type { VersionCompare, VersionTimelineEntry } from "../lib/api";
@@ -134,6 +136,7 @@ describe("design contract", () => {
       "firstPass",
       "firstRun",
       "history",
+      "missingStorage",
       "passCard",
       "progress",
       "region",
@@ -351,6 +354,121 @@ describe("design contract", () => {
     expect(deck).toBe("I assumed V for L. Want it different?");
   });
 
+  /* ----------------------------------------- W278 */
+
+  it("the 409 `source_missing` 409 detail code maps to copy.ts text (issue #295, d5)", () => {
+    // Issue #295 (d5): the restore / branch-from seam 409s with the
+    // detail body `{ code: "source_missing", message: … }` when the
+    // target version's recorded design source — or the project's git
+    // repo — is absent from disk. The SPA maps the CODE to the RESTORE
+    // sentence (`restoreSourceMissing`, never the raw detail message,
+    // never the generic `API 409: …` string); every other 409 (the no-op
+    // dedupe keeps its legacy string detail) keeps its existing message.
+    // The chat and Brief keep `sourceMissing` (their own surface sentence).
+    const sentence = copy.missingStorage.restoreSourceMissing;
+    expect(sentence).toBeTruthy();
+    // No digit: a number in the sentence the SPA has not established is
+    // the house anti-pattern.
+    expect(sentence).not.toMatch(/\d/);
+    // No raw backend wording: the sentence is plain user-facing copy,
+    // never the wire string ("the saved design source is missing from
+    // disk").
+    expect(sentence).not.toContain("design source is missing from disk");
+    expect(sentence).not.toContain("source_missing");
+    // The restore handler in App.tsx reads the code off the 409 detail
+    // object and maps it to this sentence — the tripwire reads the
+    // handler's source so a wiring change that drops the mapping fails
+    // here (the #250 way: the tripwire reads both sides).
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(appSrc).toMatch(/code === "source_missing"/);
+    expect(appSrc).toMatch(/copy\.missingStorage\.restoreSourceMissing/);
+  });
+
+  it("pins both storage-missing sentences verbatim (issue #295, fix batch)", () => {
+    // Issue #295: the two storage-missing sentences are distinct honest
+    // statements for distinct surfaces — the chat/Brief sentence ("I can't
+    // change it") and the restore sentence ("I can't restore it"; the
+    // versions list and its measurements survive). Pin both verbatim so a
+    // wording drift on either side fails here (the #260 way).
+    expect(copy.missingStorage.sourceMissing).toBe(
+      "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+    );
+    expect(copy.missingStorage.restoreSourceMissing).toBe(
+      "The saved design for that version is missing, so I can't restore it. The versions list and its measurements are still here",
+    );
+    // The two sentences are distinct (the restore action cannot recreate
+    // the source; the design loop can).
+    expect(copy.missingStorage.restoreSourceMissing).not.toBe(copy.missingStorage.sourceMissing);
+    // Neither carries a digit or the wire string.
+    for (const s of [copy.missingStorage.sourceMissing, copy.missingStorage.restoreSourceMissing]) {
+      expect(s).not.toMatch(/\d/);
+      expect(s).not.toContain("design source is missing from disk");
+    }
+  });
+
+  it("the lost-photo notice string pins the backend's `PHOTO_MISSING_NOTICE` (issue #295, fix batch)", () => {
+    // Issue #295 (fix batch): the backend emits an SSE `notice` frame
+    // carrying the fixed string `PHOTO_MISSING_NOTICE` (d33d/projects.py)
+    // when the project's stored reference photo was lost out-of-band
+    // (path set, file gone — never a photo-LESS project). The SPA renders
+    // it as a plain assistant message in the transcript, before the
+    // pass/failure turn. The design-contract tripwire pins the two-way
+    // agreement: the copy.ts string must equal the backend's wire string
+    // (the same pattern as the #260 no-run replies — the wire and the
+    // deck are one sentence).
+    const notice = copy.missingStorage.photoMissing;
+    expect(notice).toBeTruthy();
+    // No digit: a number in the sentence the SPA has not established is
+    // the house anti-pattern.
+    expect(notice).not.toMatch(/\d/);
+    // The backend's `PHOTO_MISSING_NOTICE` (d33d/projects.py) is the
+    // exact wire string the server emits on the `notice` frame. The
+    // tripwire pins the two-way agreement: a wording drift between the
+    // deck and the server would fail here (the #260 way).
+    expect(notice).toBe(
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone",
+    );
+    // The App.tsx renders the notice as a plain assistant message in the
+    // transcript — the tripwire reads the handler's source so a wiring
+    // change that drops the notice rendering fails here (the #250 way).
+    const appSrc = readFileSync(join(SRC, "App.tsx"), "utf8");
+    expect(appSrc).toMatch(/onNotice/);
+    expect(appSrc).toMatch(/"notice"/);
+  });
+
+  it("the lost-photo notice is distinct from the restore 409 copy (issue #295, fix batch)", () => {
+    // Issue #295 (fix batch): the lost-photo notice (the SSE `notice`
+    // frame's string) and the restore/branch 409 `source_missing` copy
+    // are two DIFFERENT sentences — the notice is about the PHOTO being
+    // lost, the 409 copy is about the DESIGN SOURCE being lost. They
+    // must never read the same.
+    expect(copy.missingStorage.photoMissing).not.toBe(copy.missingStorage.sourceMissing);
+  });
+
+  it("the storage copy keys exist for Brief and PassCard (issue #295, d6)", () => {
+    // Issue #295 (d6): the Brief shows a "saved design missing" banner /
+    // "reference photo missing" marker in var(--color-blocked).
+    // All copy keys live in the deck (house rule: no inline prose).
+    expect(copy.brief.savedDesignMissing).toBeTruthy();
+    expect(copy.brief.referencePhotoMissing).toBeTruthy();
+    // No digit in any of the two sentences.
+    expect(copy.brief.savedDesignMissing).not.toMatch(/\d/);
+    expect(copy.brief.referencePhotoMissing).not.toMatch(/\d/);
+    // The Brief reads the storage prop and renders the banner/marker —
+    // the tripwire reads the Brief's source so a wiring change fails here.
+    const briefSrc = readFileSync(join(SRC, "components/brief/Brief.tsx"), "utf8");
+    expect(briefSrc).toMatch(/storage/);
+    expect(briefSrc).toMatch(/savedDesignMissing/);
+    expect(briefSrc).toMatch(/referencePhotoMissing/);
+    expect(briefSrc).toMatch(/--color-blocked/);
+    // The PassCard does NOT render a "source missing" disclosure — the
+    // `source: null` path is unreachable (the token accumulator always
+    // produces a string), so the key is removed.
+    const passSrc = readFileSync(join(SRC, "components/chat/PassCard.tsx"), "utf8");
+    expect(passSrc).not.toMatch(/sourceMissing/);
+  });
+
   /* ----------------------------------------- W265 */
 
   it("the backend's tier-3 offer/ack mm spelling agrees with the deck's mm() (issue #265)", () => {
@@ -494,6 +612,32 @@ describe("design contract", () => {
     // surface verbatim to the user.
     expect(summary.toLowerCase()).not.toContain("design loop");
     expect(summary.toLowerCase()).not.toContain("passed validation");
+  });
+
+  it("the storage-missing states have one deck home and agree across all three surfaces (issue #295)", () => {
+    // Issue #295: the missing-design reply has THREE surfaces that must
+    // never drift — the Brief's missing-design banner
+    // (`brief.savedDesignMissing`), the chat's no-run missing-source reply
+    // (the server emits the same string verbatim, #260 way), and the
+    // restore/branch 409 the SPA maps from `detail: "source_missing"`
+    // (`missingStorage.sourceMissing` — the 409 mapping's one deck home).
+    //
+    // The exact sentence (acceptance criterion, verbatim):
+    expect(copy.brief.savedDesignMissing).toBe(
+      "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+    );
+    // One deck home for the 409 sentence: the 409 mapping and the Brief
+    // banner pin the SAME string (no second key to drift).
+    expect(copy.missingStorage.sourceMissing).toBe(copy.brief.savedDesignMissing);
+    // The photo-missing marker is a short marker, not the full sentence —
+    // the two states are distinct honest statements.
+    expect(copy.brief.referencePhotoMissing).toBe("Reference photo missing");
+    expect(copy.brief.referencePhotoMissing).not.toBe(copy.brief.savedDesignMissing);
+    // Neither storage string is a failure headline with a confident number
+    // — no digits, and neither reads like an export error.
+    for (const s of [copy.brief.savedDesignMissing, copy.brief.referencePhotoMissing]) {
+      expect(s).not.toMatch(/\d/);
+    }
   });
 
   it("an unestablished value is a phrase, never a number or a dash", () => {
@@ -1774,5 +1918,117 @@ describe("design contract", () => {
       }),
     );
     expect(fullRender.container.querySelector("[data-testid='brief-chip-assumed']")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #295 (fix batch): the lost-photo notice reaches the user.
+//
+// The backend emits an SSE `notice` frame carrying the fixed copy.ts string
+// `PHOTO_MISSING_NOTICE` (d33d/projects.py) when the project's stored
+// reference photo was lost out-of-band. The SPA must render it as a plain
+// assistant message in the transcript, before the pass/failure turn.
+//
+// The test below feeds a REAL SSE byte stream (containing a notice frame)
+// through the real stream parser (ApiClient.streamEvents) and the real
+// ChatPanel, and asserts the notice text is VISIBLE in the rendered chat.
+// ---------------------------------------------------------------------------
+
+describe("the lost-photo notice reaches the user (issue #295, fix batch)", () => {
+  it("a real SSE byte stream containing a notice frame renders the notice as a visible assistant message in the ChatPanel", async () => {
+    // Build a real SSE byte stream containing a notice frame. The stream
+    // parser (ApiClient.streamEvents) reads the byte stream and demuxes
+    // frames to handlers. The notice frame is a non-terminal frame that
+    // the server emits before the terminal done frame.
+    const noticeMessage =
+      "Your reference photo for this project is missing, so I'm designing " +
+      "from your words alone";
+    const ssePayload =
+      `event: notice\ndata: ${JSON.stringify({ message: noticeMessage })}\n\n` +
+      `event: done\ndata: ${JSON.stringify({ message: "Design loop passed validation" })}\n\n`;
+
+    // Build a real Response with the SSE byte stream (split into chunks of
+    // 7 bytes to guarantee mid-frame chunking, proving the reader is
+    // byte-offset safe).
+    const encoder = new TextEncoder();
+    const bytes = encoder.encode(ssePayload);
+    const chunks: Uint8Array[] = [];
+    for (let i = 0; i < bytes.length; i += 7) {
+      chunks.push(bytes.subarray(i, i + 7));
+    }
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      },
+    });
+    const sseResponse = new Response(stream, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    // A fake fetch that returns the SSE response for the stream endpoint.
+    let sseCalled = false;
+    const fakeFetch = (_url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
+      sseCalled = true;
+      return Promise.resolve(sseResponse);
+    };
+
+    // Create a real ApiClient with the fake fetch.
+    const client = new ApiClient({
+      baseUrl: "http://api.test",
+      fetch: fakeFetch,
+    });
+
+    // The messages array that the App would build. The notice handler
+    // appends a plain assistant message to the transcript.
+    const messages: ChatMessage[] = [];
+
+    // Feed the real SSE byte stream through the real stream parser.
+    // The onNotice handler appends the notice as a plain assistant message
+    // (exactly what App.tsx does).
+    await client.streamEvents(1, {
+      onToken: () => {},
+      onProgress: () => {},
+      onNotice: (data) => {
+        const msg = typeof data.message === "string" ? data.message : "";
+        if (msg.length > 0) {
+          messages.push({
+            id: "notice-1",
+            role: "assistant",
+            content: msg,
+          });
+        }
+      },
+      onDone: () => {},
+    });
+
+    // The stream parser must have called the fake fetch.
+    expect(sseCalled).toBe(true);
+    // The notice must have been appended to the messages array.
+    expect(messages.length).toBe(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].content).toBe(noticeMessage);
+
+    // Render the ChatPanel with the notice message and assert the notice
+    // text is VISIBLE in the rendered chat.
+    const { container } = render(
+      createElement(ChatPanel, {
+        messages,
+        onSend: () => {},
+      }),
+    );
+
+    // The notice text must be visible in the rendered chat.
+    const noticeEl = container.textContent;
+    expect(noticeEl).toContain(noticeMessage);
+
+    // The notice must be rendered as a plain assistant message (not a
+    // PassCard, not a failure turn).
+    const noticeMsgEl = container.querySelector(
+      '[data-testid="chat-msg-assistant"]',
+    );
+    expect(noticeMsgEl).not.toBeNull();
+    expect(noticeMsgEl?.textContent).toContain(noticeMessage);
   });
 });

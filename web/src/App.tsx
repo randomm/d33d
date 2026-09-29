@@ -51,11 +51,13 @@ import { ConversationPane } from "./components/chat/ConversationPane";
 import { RegionEditBar } from "./components/region/RegionEditBar";
 import {
   ApiClient,
+  ApiError,
   type RegionEditViewId,
   type VersionTimelineEntry,
   type VersionCompare,
   type DesignStateEntry,
   type Envelope,
+  type ProjectStorage,
 } from "./lib/api";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
@@ -225,6 +227,11 @@ export default function App({ client }: AppProps) {
   // real, never a guess, because Export3MF only renders once the project
   // exists and its name has been set from the API's response.
   const [projectName, setProjectName] = useState("untitled project");
+  // The project's live storage signal (issue #295) — fetched once the
+  // project exists, re-fetched on every design-state refetch (the same
+  // trigger — a new version means the block may have changed). The Brief
+  // reads it and never recomputes presence in the client.
+  const [projectStorage, setProjectStorage] = useState<ProjectStorage | undefined>(undefined);
 
   // Lazy project creation (issue #192): no POST /api/projects on mount —
   // the project is created by the FIRST explicit user action (a chat send,
@@ -241,6 +248,7 @@ export default function App({ client }: AppProps) {
         .then((project) => {
           setProjectId(project.id);
           setProjectName(project.name);
+          setProjectStorage(project.storage);
           return project.id;
         })
         .catch((e) => {
@@ -280,6 +288,24 @@ export default function App({ client }: AppProps) {
   const refetchDesignState = useCallback((projectIdOverride?: number) => {
     const effectiveProjectId = projectIdOverride ?? projectId;
     if (effectiveProjectId === null) return;
+    // Issue #295: re-fetch the storage signal alongside the design state
+    // (the same trigger — a new version may have changed the repo's state).
+    apiClient
+      .getProject(effectiveProjectId)
+      .then((p) => setProjectStorage(p.storage))
+      .catch((e) => {
+        // Issue #295 (fix batch): the storage refetch must not silently
+        // swallow a failure. The "don't flip to present on failure"
+        // behaviour is preserved (a failed GET must never make the Brief
+        // show a present value the SPA has not established), but the
+        // failure is no longer a silent `.catch(() => {})`: a
+        // `console.warn` names the project id so a lost refetch is
+        // diagnosable in the console without changing the UI.
+        console.warn(
+          `d33d: storage refetch failed for project ${effectiveProjectId}:`,
+          e instanceof Error ? e.message : String(e),
+        );
+      });
     designStateReqRef.current = { seq: designStateReqRef.current.seq + 1, projectId: effectiveProjectId };
     const { seq, projectId: latestProjectId } = designStateReqRef.current;
     const isStale = () =>
@@ -771,11 +797,29 @@ export default function App({ client }: AppProps) {
         const vs = await apiClient.listVersions(projectId);
         setVersions(vs);
       } catch (e) {
+        // Issue #295: a 409 whose detail body carries the code
+        // `source_missing` (the repo — or the target version's recorded
+        // design source — is absent from disk) maps to the copy.ts
+        // sentence; every other 409 (the no-op dedupe) and every other
+        // failure keeps the existing message.
+        let message: string;
+        let detail: string | undefined;
+        if (e instanceof ApiError) {
+          const d = e.detail as { code?: unknown; message?: unknown } | null;
+          if (e.status === 409 && d && d.code === "source_missing") {
+            message = copy.missingStorage.restoreSourceMissing;
+            detail = typeof d.message === "string" ? d.message : undefined;
+          } else {
+            message = `Restore failed: ${e.message}`;
+            detail = e.message;
+          }
+        } else {
+          message = `Restore failed: ${e instanceof Error ? e.message : "unknown error"}`;
+          detail = e instanceof Error ? e.message : undefined;
+        }
         setStreamError({
-          message: `Restore failed: ${
-            e instanceof Error ? e.message : "unknown error"
-          }`,
-          detail: e instanceof Error ? e.message : undefined,
+          message,
+          detail,
           retryable: false,
         });
       }
@@ -1087,6 +1131,31 @@ export default function App({ client }: AppProps) {
                 // guard in refetchDesignState ensures that only the latest
                 // response is applied.
                 refetchDesignState(effectiveProjectId);
+              }
+            },
+            onNotice: (data) => {
+              // Issue #295 (fix batch): the notice frame is a non-terminal
+              // frame the server emits before the terminal done/error frame
+              // to carry a fixed copy.ts sentence (e.g. the lost-photo
+              // notice). The SPA renders it as a plain assistant message in
+              // the transcript, before the pass/failure turn.
+              //
+              // The wire string is the backend's own `PHOTO_MISSING_NOTICE`
+              // (d33d/projects.py) — the SPA renders it verbatim (the same
+              // pattern as the done frame's `confirm_sentence` and the
+              // answer frame's `message`). The design-contract tripwire
+              // pins the two-way agreement with copy.missingStorage.photoMissing.
+              const message = typeof data.message === "string" ? data.message : "";
+              if (message.length > 0) {
+                const noticeId = nextMsgId("notice");
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: noticeId,
+                    role: "assistant" as const,
+                    content: message,
+                  },
+                ]);
               }
             },
             onDone: (data) => {
@@ -1610,6 +1679,7 @@ export default function App({ client }: AppProps) {
           conversationCollapsed={conversationCollapsed}
           entries={designState}
           refreshFailed={designStateStale}
+          storage={projectStorage}
           hasLivePin={pendingSelection !== null}
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}

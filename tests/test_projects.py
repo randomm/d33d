@@ -14,6 +14,7 @@ All tests non-slow: no Docker, no network, no port binding. Git is local-only
 from __future__ import annotations
 
 import asyncio
+import shutil as _shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,64 @@ def test_get_project(app_with_projects):
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 200
     assert r.json()["name"] == "Fetch Me"
+
+
+def test_get_project_storage_field_present(app_with_projects):
+    """Issue #295: the project GET response ALWAYS carries a ``storage``
+    field ``{"repo_present": bool, "photo_present": true|false|null}``.
+    ``photo_present`` is JSON ``null`` for a photo-LESS project (never
+    omitted, never ``false``), ``true`` when the stored file is on disk,
+    and ``false`` when the path is set but the file is gone. The field is
+    always present, never omitted (the wire contract pins this against
+    the field-omission bug). Git invisibility still holds: the raw repo
+    path is never in the response."""
+
+    async def _call(client):
+        # Case 1: fresh project — repo present, photo never uploaded
+        # (photo_present must be null, NOT false).
+        create_r = await client.post("/api/projects", json={"name": "S1"})
+        pid1 = create_r.json()["id"]
+        body1 = (await client.get(f"/api/projects/{pid1}")) .json()
+        # Case 2: project with a photo — upload, then delete out-of-band
+        # (photo_present must be false, NOT null).
+        create_r2 = await client.post("/api/projects", json={"name": "S2"})
+        pid2 = create_r2.json()["id"]
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90w\xfe\xed"
+            b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05"
+            b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB\xbfK"
+        )
+        files = {"file": ("p.png", png_bytes, "image/png")}
+        await client.post(f"/api/projects/{pid2}/photos", files=files)
+        row2 = app_with_projects.state.conn.get_project(pid2)
+        assert row2 is not None
+        photo_path = Path(row2["source_photo_path"])
+        body2_present = (await client.get(f"/api/projects/{pid2}")) .json()
+        photo_path.unlink()  # delete out-of-band (state 3: lost)
+        body2_lost = (await client.get(f"/api/projects/{pid2}")) .json()
+        # Case 3: project whose repo is gone (repo_present false).
+        create_r3 = await client.post("/api/projects", json={"name": "S3"})
+        pid3 = create_r3.json()["id"]
+        _shutil.rmtree(_repo_for(app_with_projects, pid3))
+        body3 = (await client.get(f"/api/projects/{pid3}")) .json()
+        return body1, body2_present, body2_lost, body3
+
+    body1, body2_present, body2_lost, body3 = _run_async(
+        app_with_projects, _call
+    )
+    # The field is ALWAYS present (never omitted) — JSON null for the
+    # photo-less project (the wire contract: {"repo_present": true,
+    # "photo_present": null} vs {"repo_present": true, "photo_present": false}).
+    for body in (body1, body2_present, body2_lost, body3):
+        assert "storage" in body, "the storage field must always be present"
+        assert set(body["storage"]) == {"repo_present", "photo_present"}
+        assert "git_repo_path" not in body, "git invisibility"
+    assert body1["storage"] == {"repo_present": True, "photo_present": None}
+    assert body2_present["storage"] == {"repo_present": True, "photo_present": True}
+    assert body2_lost["storage"] == {"repo_present": True, "photo_present": False}
+    assert body3["storage"] == {"repo_present": False, "photo_present": None}
 
 
 def test_get_project_not_found(app_with_projects):

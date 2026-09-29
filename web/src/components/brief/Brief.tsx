@@ -47,7 +47,7 @@
 import { useState } from "react";
 import copy, { mm } from "../../copy";
 import { MARKER_COLOR } from "../../lib/marker";
-import type { DesignStateEntry } from "../../lib/api";
+import type { DesignStateEntry, ProjectStorage } from "../../lib/api";
 
 /** Above this many rows the resolved list collapses to one honest count
  *  (the "not a list that grows" rule — design answer 1). */
@@ -119,6 +119,11 @@ interface BriefProps {
    *  surfaces the failure — the stale-empty "Nothing yet" state must not
    *  persist silently. Clears on the next successful fetch. */
   refreshFailed?: boolean;
+  /** The project's live storage signal (issue #295) — the SPA reads it,
+   *  never recomputes. `repo_present === false` → the "saved design
+   *  missing" banner; `photo_present === false` (NOT null) → the
+   *  "reference photo missing" marker. Both in var(--color-blocked). */
+  storage?: ProjectStorage;
   /** A live region pin (the region bar owns the task) — the Brief
    *  collapses to its chip whatever the window size says. */
   hasLivePin?: boolean;
@@ -189,6 +194,7 @@ export function Brief({
   refreshFailed,
   hasLivePin,
   highlightModuleId,
+  storage,
   onAsk,
   onChange,
   onShowOnModel,
@@ -201,9 +207,19 @@ export function Brief({
   const safeEntries = entries ?? [];
   const chip = isChip || hasLivePin === true;
 
+  // Issue #295: the storage-degradation states. `savedDesignMissing` fires
+  // only when the server says the repo (and therefore the source) is gone —
+  // the persisted params/bbox still render underneath, as-is, so the banner
+  // is the ONLY thing that changes. `photoMissing` fires ONLY on `false`
+  // (a path was stored, the file was lost): `null` (never had a photo) and
+  // `true` show nothing.
+
   const unknowns = safeEntries.filter((e) => e.provenance === "unknown");
   const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
+
+  const savedDesignMissing = storage?.repo_present === false;
+  const photoMissing = storage?.photo_present === false;
 
   // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows
   // (stated / measured / assumed, `kind: "param"`, never disagrees). Axis
@@ -493,6 +509,41 @@ export function Brief({
       }}
     >
       {copy.brief.eyebrow}
+
+      {savedDesignMissing && (
+        <div
+          className="brief-saved-missing"
+          data-testid="brief-saved-missing"
+          style={{
+            marginTop: 8,
+            padding: "4px 8px",
+            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+            color: "var(--color-blocked)",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          {copy.brief.savedDesignMissing}
+        </div>
+      )}
+
+      {photoMissing && (
+        <span
+          className="brief-photo-missing"
+          data-testid="brief-photo-missing"
+          style={{
+            display: "inline-block",
+            marginTop: 8,
+            padding: "2px 8px",
+            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+            color: "var(--color-blocked)",
+            borderRadius: 4,
+            fontSize: 13,
+          }}
+        >
+          {copy.brief.referencePhotoMissing}
+        </span>
+      )}
 
       {safeEntries.length === 0 ? (
         <p

@@ -626,22 +626,23 @@ def migrate_project_repos(
             photo_p = Path(new_photo)
             if photo_p == old or old in photo_p.parents:
                 new_photo = str(photo_p if photo_p == old else new / photo_p.relative_to(old))
-        # Point the row at the new location FIRST: a failed move leaves the
-        # repo intact at the old path (row updated, nothing moved); a failed
-        # DB update leaves the old row + the repo already moved, which the
-        # next run sees as a missing old dir and leaves unchanged — the
-        # operator sees the row and recovers manually either way.
+        # Move the repo FIRST: a failed move leaves the row unchanged
+        # (repo still at the old path, row still points at the old path —
+        # the next run retries the migration). A failed DB update leaves
+        # the repo already moved but the row pointing at the old path —
+        # the next run sees the old path missing and leaves the row
+        # unchanged (the operator recovers manually either way).
+        try:
+            shutil.move(str(old), str(new))
+        except OSError as e:
+            logger.warning("project %s: could not move repo: %s", pid, e)
+            continue
         conn.raw.execute(
             "UPDATE projects SET git_repo_path = ?, "
             "source_photo_path = COALESCE(?, source_photo_path) WHERE id = ?",
             (str(new), new_photo, pid),
         )
         conn.commit()
-        try:
-            shutil.move(str(old), str(new))
-        except OSError as e:
-            logger.warning("project %s: could not move repo: %s", pid, e)
-            continue
         logger.info("project %s: moved repo to projects/%s", pid, old.name)
     # Summary derived fresh from disk (never a persisted flag that could
     # go stale), logged as exactly one line — the fresh-install 0/0/0

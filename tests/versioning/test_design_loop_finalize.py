@@ -2357,8 +2357,14 @@ def test_chat_photo_data_uri_from_project(app_with_versions, tmp_path):
 
 
 def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
-    """A project with no photo gets the fixed 1x1 transparent-PNG data URI
-    constant (never None)."""
+    """A project with NO photo (state 1: source_photo_path NULL) gets the
+    fixed 1x1 transparent-PNG data URI constant (never None) — the
+    data-URI contract is EMPTY for all three photo states (issue #295's
+    operator decision: the URI stays unchanged; the notice and the WARNING
+    fire ONLY in state 3 — path set, file gone — pinned by
+    ``test_chat_lost_photo_notice_and_warning`` below). A photo-less
+    project's stream carries NO notice and logs NO warning (the run
+    proceeds identically to today)."""
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -2373,13 +2379,211 @@ def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
         app_with_versions.state.run_design_loop = _loop
         await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
         source = app_with_versions.state.event_sources.get(pid)
+        frames = []
         if source is not None:
             async for _event, _data in source:
+                frames.append((_event, _data))
                 if _event in ("done", "error"):
                     break
+        return frames
 
-    run_async(app_with_versions, _call)
+    frames = run_async(app_with_versions, _call)
     assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
+    # State 1 (photo-LESS): no notice frame, ever.
+    assert not any(ev == "notice" for ev, _d in frames), (
+        "a photo-LESS project must not get a lost-photo notice"
+    )
+
+
+def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
+    """Issue #295, state 3 (photo path SET + file deleted out-of-band):
+    the design proceeds photo-less with the EMPTY data URI (unchanged
+    behaviour), BUT the stream carries ONE plain copy.ts notice before
+    the done frame, and the design-loop adapter logs a WARNING that
+    names the project id and NO file path (no PII — the path is never in
+    the log line)."""
+    import logging as _logging
+
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+    from d33d.projects import PHOTO_MISSING_NOTICE
+
+    captured: dict = {}
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        # State 3: the path is SET, then the file is deleted out-of-band.
+        png_path = tmp_path / "photo.png"
+        png_path.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(png_path)
+        )
+        png_path.unlink()
+        logger = _logging.getLogger("d33d.design_loop_events")
+        records: list = []
+        handler = _logging.Handler()
+
+        def _emit(record):
+            records.append(record)
+
+        handler.emit = _emit
+        logger.addHandler(handler)
+        logger.setLevel(_logging.WARNING)
+        try:
+            await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "hi"}
+            )
+            source = app_with_versions.state.event_sources.get(pid)
+            frames = []
+            assert source is not None
+            async for _event, _data in source:
+                frames.append((_event, _data))
+                if _event in ("done", "error"):
+                    break
+            return frames, [r.getMessage() for r in records]
+        finally:
+            logger.removeHandler(handler)
+
+    frames, log_messages = run_async(app_with_versions, _call)
+    # The design proceeded photo-less (unchanged behaviour — the URI is
+    # still the EMPTY constant, never None, never a dead path).
+    assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
+    # The stream carries the copy.ts notice, BEFORE the terminal frame.
+    notice_idx = next(
+        (i for i, (ev, _d) in enumerate(frames) if ev == "notice"), None
+    )
+    terminal_idx = next(
+        (i for i, (ev, _d) in enumerate(frames) if ev in ("done", "error")),
+        len(frames),
+    )
+    assert notice_idx is not None, "no notice frame for a lost photo"
+    assert notice_idx < terminal_idx, "the notice must precede the terminal frame"
+    notice_data = frames[notice_idx][1]
+    assert notice_data["message"] == PHOTO_MISSING_NOTICE
+    # Exactly ONE notice frame.
+    assert sum(1 for ev, _d in frames if ev == "notice") == 1
+    # The WARNING fired and named the project id — with NO file path
+    # (no PII: the operator decision is project id only).
+    warnings = [m for m in log_messages if "photo" in m and "missing" in m]
+    assert warnings, "no WARNING logged for a lost photo"
+    for m in warnings:
+        assert str(tmp_path) not in m, f"the WARNING carries a file path: {m!r}"
+        assert "photo.png" not in m, f"the WARNING carries the filename: {m!r}"
+
+
+def test_chat_missing_design_source_reply_no_run(app_with_versions):
+    """Issue #295, acceptance criterion 2 (the missing-source chat reply):
+    a project whose git repo (and with it the current version's
+    design.scad) is gone out-of-band — the chat POST returns 202, the
+    stream carries ONE plain ``kind: "answer"`` done frame with the
+    copy.ts "saved design missing" text, and NO design run, NO new
+    version, NO version row. The reply uses the existing
+    ``_answered_frames`` pattern: 202, a single done frame, and the
+    flag released by the stream drain (the operator's decision).
+    The in-flight check runs AFTER the in-flight claim (consistent with
+    every other pre-route) — the net effect: the flag is never observed
+    as held by a design loop."""
+    import shutil as _shutil
+
+    from d33d.projects import SAVED_DESIGN_MISSING_REPLY
+
+    loop_called = [False]
+
+    async def _loop(app, **kwargs):
+        loop_called[0] = True
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await create_version(client, pid, {"W": 10.0})
+        # Delete the repo out-of-band (the whole repo — repo_present False
+        # and the current version's design.scad gone with it).
+        repo = repo_path_for(app_with_versions, pid)
+        _shutil.rmtree(repo)
+        r = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        assert source is not None
+        async for _event, _data in source:
+            frames.append((_event, _data))
+            if _event in ("done", "error"):
+                break
+        # No new version was created (the version list is still exactly
+        # the original version — the reply is a plain message, not a
+        # design run).
+        versions_after = app_with_versions.state.versions.list_versions(pid)
+        return r, frames, versions_after, pid in app_with_versions.state.design_loop_inflight
+
+    r, frames, versions_after, still_inflight = run_async(
+        app_with_versions, _call
+    )
+    # 202 + single done frame + kind "answer" (the _answered_frames
+    # pattern — the same mechanism as the #249/#260 no-run replies).
+    assert r.status_code == 202, r.text
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    terminal = frames[0]
+    assert terminal[0] == "done"
+    assert terminal[1].get("kind") == "answer"
+    assert terminal[1]["message"] == SAVED_DESIGN_MISSING_REPLY
+    # No design run, no version.
+    assert not loop_called[0], (
+        "the design loop was called for a missing-design project"
+    )
+    assert len(versions_after) == 1, (
+        "a missing-design chat must not create a version"
+    )
+    # The in-flight flag stays set until the SSE endpoint drains the
+    # stream (the _answered_frames contract — the same as the #249/#260
+    # no-run replies; the SSE endpoint's ``finally`` is the single release
+    # point). The test drives the generator directly, so the flag is still
+    # set here (it would be cleared by the SSE drain in production).
+    assert still_inflight is True, (
+        "the flag stays set for an answered-frame stream "
+        "(the SSE drain is the release point, as for #249/#260)"
+    )
+
+
+def test_chat_turn_one_proceeds_to_design_loop(app_with_versions):
+    """Issue #295 edge case: a project with NO version yet (turn one)
+    is NOT the missing state — the clean-slate wording is the honest
+    one, and the chat proceeds to the design loop exactly as today.
+    (``source_expected`` returns False for a project with no version
+    rows: there is no design to lose.)"""
+    loop_called = [False]
+
+    async def _loop(app, **kwargs):
+        loop_called[0] = True
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r = await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources.get(pid)
+        frames = []
+        assert source is not None
+        async for _event, _data in source:
+            frames.append((_event, _data))
+            if _event in ("done", "error"):
+                break
+        return r, frames
+
+    r, frames = run_async(app_with_versions, _call)
+    # The design loop was called (turn one proceeds normally).
+    assert r.status_code == 202, r.text
+    assert loop_called[0], "turn-one chat must proceed to the design loop"
+    # No answer-only frame (no missing-source reply was emitted).
+    assert not any(
+        ev == "done" and d.get("kind") == "answer" for ev, d in frames
+    ), "turn-one chat must not emit the missing-source reply"
 
 
 def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):

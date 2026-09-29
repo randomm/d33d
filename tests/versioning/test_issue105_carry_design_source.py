@@ -33,6 +33,7 @@ from d33d.design_loop import MAX_SCAD_SOURCE_BYTES, run_design_loop
 from d33d.design_source import (
     TRUNCATION_MARKER,
     design_source_lines,
+    source_expected,
     source_path_for_version,
     store_version_source,
 )
@@ -346,6 +347,121 @@ def test_truncation_never_splits_a_multibyte_character(tmp_path):
     # fits the byte budget.
     assert len(kept.encode("utf-8")) == kept_bytes
     kept.encode("utf-8").decode("utf-8")  # raises if the cut split a char
+
+
+# ---------------------------------------------------------------------------
+# Issue #295 — the ``source_expected`` predicate: the single missing-source
+# decision both the chat pre-route and the project GET's ``storage`` field
+# use (the two surfaces can never disagree). The pre-#105 distinction
+# (operator decision, binding): a version whose commit contains NO
+# ``design.scad`` is NOT the missing state — it proceeds on the clean-slate
+# wording from today.
+# ---------------------------------------------------------------------------
+
+
+def test_source_expected_false_for_fresh_project(app_with_versions):
+    """A project with no versions is NEVER the missing state (turn one
+    has no design to lose — the clean-slate wording is the honest one)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        return source_expected(row, app_with_versions.state.versions)
+
+    assert run_async(app_with_versions, _call) is False
+
+
+def test_source_expected_false_when_repo_and_source_present(app_with_versions):
+    """A project with a version whose design.scad is on disk is NOT the
+    missing state (the normal case — the source is present and the
+    project is healthy)."""
+    from d33d.projects import commit_all
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        repo = Path(row["git_repo_path"])
+        # Create a version with a source (the normal passing-design path).
+        await create_version(client, pid, {"diameter": 30.0})
+        # The version's source file is present on disk.
+        versions = app_with_versions.state.versions.list_versions(pid)
+        vid = versions[0]["id"]
+        store_version_source(repo, vid, "diameter = 30;\nsphere(d = diameter);\n")
+        commit_all(repo, "source for test")
+        return source_expected(row, app_with_versions.state.versions)
+
+    assert run_async(app_with_versions, _call) is False
+
+
+def test_source_expected_true_when_repo_deleted(app_with_versions):
+    """A project whose repo directory is gone out-of-band (and that has
+    at least one version row) IS the missing state."""
+    import shutil as _shutil
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"diameter": 30.0})
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        repo = Path(row["git_repo_path"])
+        _shutil.rmtree(repo)
+        return source_expected(row, app_with_versions.state.versions)
+
+    assert run_async(app_with_versions, _call) is True
+
+
+def test_source_expected_true_when_design_scad_deleted(app_with_versions):
+    """A project whose repo is present but whose current version's
+    design.scad was deleted out-of-band IS the missing state (the file
+    was recorded in the version's commit — the persistent marker says
+    a source was written, and it is now gone)."""
+    import shutil as _shutil
+
+    from d33d.projects import commit_all
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        repo = Path(row["git_repo_path"])
+        await create_version(client, pid, {"diameter": 30.0})
+        versions = app_with_versions.state.versions.list_versions(pid)
+        vid = versions[0]["id"]
+        store_version_source(repo, vid, "diameter = 30;\nsphere(d = diameter);\n")
+        commit_all(repo, "source for test")
+        # Delete the design.scad out-of-band (the repo survives).
+        path = source_path_for_version(repo, vid)
+        path.unlink()
+        # Re-read the project row (fresh, no cached state).
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        return source_expected(row, app_with_versions.state.versions)
+
+    assert run_async(app_with_versions, _call) is True
+
+
+def test_source_expected_false_for_pre105_params_only_version(app_with_versions):
+    """A version whose commit contains NO design.scad (pre-#105
+    params-only version) is NOT the missing state — it proceeds on the
+    clean-slate wording from today (operator decision, binding)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        row = app_with_versions.state.conn.get_project(pid)
+        assert row is not None
+        # A params-only version (no source file written — the commit
+        # contains only params.json, not design.scad).
+        await create_version(client, pid, {"diameter": 30.0})
+        return source_expected(row, app_with_versions.state.versions)
+
+    assert run_async(app_with_versions, _call) is False
 
 
 # ---------------------------------------------------------------------------

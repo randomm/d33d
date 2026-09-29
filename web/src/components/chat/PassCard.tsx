@@ -52,7 +52,9 @@ interface PassCardProps {
   views: RenderImage[];
   /** The pass's summary prose (UI face, no dimensions). */
   summary?: string;
-  /** The generated source (the disclosure's content — never chat text). */
+  /** The generated source (the disclosure's content — never chat text).
+   *  `undefined` or empty string = no source carried this turn
+   *  (no disclosure control). */
   source?: string;
   /** The enlarged view's close action (issue #125). */
   onBesidePhoto?: () => void;
@@ -117,7 +119,7 @@ export function PassCard({
           {copy.passCard.partialViews(views.length, TOTAL_VIEWS)}
         </span>
       )}
-      {source !== undefined && (
+      {source !== undefined && source !== "" && (
         <>
           <button
             type="button"

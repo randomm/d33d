@@ -10,7 +10,7 @@
  *   PATCH  /api/projects/{id}                 — update name / tags / notes
  *   DELETE /api/projects/{id}                 — delete project (204)
  *   POST   /api/projects/{id}/photos          — multipart photo upload
- *   GET    /api/stream/{id}                   — SSE: progress | token | done | error
+ *   GET    /api/stream/{id}                   — SSE: progress | token | notice | done | error
  *   GET    /api/config/models                 — model catalogue (keys redacted)
  *   PUT    /api/config/models                 — full-YAML catalogue replacement
  *   GET    /api/settings/credentials          — names-only credential list
@@ -215,6 +215,19 @@ export interface LibraryCard {
  * (issue #8): `current_version` (the resume pointer) and
  * `last_activity` (the library-card activity).
  */
+/**
+ * The project's live storage signal (issue #295), computed server-side
+ * from live file checks — the SPA reads it and never recomputes presence
+ * in the client. `photo_present` is a three-way value: `null` for a
+ * project that never had a photo, `false` for a lost photo, `true` when
+ * the stored file is on disk. The field is ALWAYS present on the project
+ * GET response (never omitted).
+ */
+export interface ProjectStorage {
+  repo_present: boolean;
+  photo_present: boolean | null;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -228,6 +241,8 @@ export interface Project {
   current_version?: number | null;
   /** Last-activity record (the latest version's ts/name/id). */
   last_activity?: { ts: string | null; version_id: number | null; name: string | null } | null;
+  /** The live storage signal (issue #295) — always present on project GET. */
+  storage?: ProjectStorage;
 }
 
 /** A design-loop FINALIZE input (issue #8). */
@@ -263,9 +278,17 @@ export interface PhotoUploadResult {
   size: number;
 }
 
-/** The four SSE event kinds the backend emits (d33d/streaming.py).
- *  Payloads are open-ended dicts keyed by event kind. */
-export type StreamEventKind = "progress" | "token" | "done" | "error";
+/** The SSE event kinds the backend emits (d33d/streaming.py).
+ *  Payloads are open-ended dicts keyed by event kind. `notice` (issue
+ *  #295) is a non-terminal frame the server emits before the terminal
+ *  frame to carry a fixed copy.ts sentence (the lost-photo notice);
+ *  the SPA renders it as a plain assistant message in the transcript. */
+export type StreamEventKind =
+  | "progress"
+  | "token"
+  | "notice"
+  | "done"
+  | "error";
 
 export interface StreamEvent<T extends StreamEventKind = StreamEventKind> {
   event: T;
@@ -281,7 +304,11 @@ export interface StreamEvent<T extends StreamEventKind = StreamEventKind> {
         // legacy frames — a missing `reason` means "not a mapped design-loop
         // gate failure", never a gate reason.
         ? { message?: string; reason?: string }
-        : { message?: string });
+        : T extends "notice"
+          // Issue #295: the notice frame's fixed copy.ts sentence
+          // (the lost-photo notice) — verbatim from the server.
+          ? { message: string }
+          : { message?: string });
 }
 
 export interface ModelCatalogue {
@@ -917,6 +944,10 @@ export class ApiClient {
     handlers: {
       onToken: (text: string, data: Record<string, unknown>) => void;
       onProgress: (step: string | undefined, data: Record<string, unknown>) => void;
+      /** Issue #295: the notice frame (a fixed copy.ts sentence the
+       *  server emits before the terminal frame, e.g. the lost-photo
+       *  notice). The SPA renders it as a plain assistant message. */
+      onNotice?: (data: Record<string, unknown>) => void;
       onDone?: (data: Record<string, unknown>) => void;
       onError?: (data: Record<string, unknown>) => void;
     },
@@ -1060,6 +1091,7 @@ function dispatch(
   handlers: {
     onToken: (text: string, data: Record<string, unknown>) => void;
     onProgress: (step: string | undefined, data: Record<string, unknown>) => void;
+    onNotice?: (data: Record<string, unknown>) => void;
     onDone?: (data: Record<string, unknown>) => void;
     onError?: (data: Record<string, unknown>) => void;
   },
@@ -1073,6 +1105,14 @@ function dispatch(
         typeof payload.step === "string" ? payload.step : undefined,
         payload,
       );
+      return;
+    case "notice":
+      // Issue #295: the notice frame is non-terminal — the run's frames
+      // (progress, version-created, tokens) have already landed; the
+      // terminal frame (done | error) arrives right after. Dispatch to
+      // the notice handler (the SPA renders it as a plain assistant
+      // message in the transcript) rather than dropping it.
+      handlers.onNotice?.(payload);
       return;
     case "done":
       handlers.onDone?.(payload);
@@ -1105,8 +1145,18 @@ async function throwFor(res: Response): Promise<never> {
   if (detail && typeof detail === "object") {
     const d = detail as Record<string, unknown>;
     if (typeof d.error_class === "string") errorClass = d.error_class;
-    if (typeof d.detail === "string") detail = d.detail;
-    else if (typeof d.error === "string") detail = d.error;
+    if (typeof d.detail === "string") {
+      detail = d.detail;
+    } else if (d.detail && typeof d.detail === "object") {
+      // Issue #295: the restore / branch-from 409 carries a STRUCTURED detail
+      // `{ detail: { code, message } }` (d33d/versions_routes.py, `_raise_mapped`).
+      // Unwrap the envelope so `ApiError.detail` IS the inner `{ code, message }`
+      // object — the SPA maps `detail.code` to copy.ts text. The legacy string
+      // detail (`{ detail: "…" }`) keeps its today's flattening above.
+      detail = d.detail;
+    } else if (typeof d.error === "string") {
+      detail = d.error;
+    }
   }
   throw new ApiError(res.status, detail ?? `HTTP ${res.status}`, errorClass);
 }

@@ -136,6 +136,25 @@ export const brief = {
    *  disagrees rows, and unknowns are never grouped away; the unknowns are
    *  the thing to act on, so they surface out of the list. */
   unresolvedHeading: (count: number): string => `Unresolved · ${count}`,
+
+  /** The Brief's storage-degradation states (issue #295): the project's
+   *  saved design source or reference photo is missing on disk (the server
+   *  reports both via the project's `storage` field — the SPA reads it,
+   *  never recomputes). Both render in `var(--color-blocked)` ochre —
+   *  never the region-marker colour (W17: the marker hex has exactly one
+   *  home, lib/marker.ts). The banner is HONEST ABOUT WHAT
+   *  SURVIVES: the persisted params/bbox still show as-is underneath, so
+   *  the sentence never claims the design is lost, only that the SOURCE
+   *  is. This is also the exact wire string the server's no-run chat reply
+   *  and the restore/branch 409 carry (the design-contract tripwire pins
+   *  the three-way agreement — the #260 way). */
+  savedDesignMissing:
+    "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+  /** The Brief's small marker for a reference photo that was deleted after
+   *  being stored (the `storage.photo_present === false` state — a
+   *  photo-LESS project is `null` and shows nothing). */
+  referencePhotoMissing: "Reference photo missing",
+
   /** The collapsed-params disclosure line (issue #274): how many settled,
    *  agreeing param rows are hidden behind it. Singular-aware. */
   moreParameters: (count: number): string =>
@@ -623,9 +642,55 @@ export const export3mf = {
    *  flight — the version being created is not yet exportable). */
   conflict:
     "A design is still being made — export it once that finishes.",
+
   /** The generic fallback: an unlisted/`unknown` class, no `error_class`
    *  (the 404 bodies), or a network failure with no class at all. */
   failed: "The 3MF couldn't be exported.",
+} as const;
+
+/**
+ * Missing-storage copy (issue #295). Two distinct sentences:
+ * - `photoMissing`: the fixed copy.ts string the backend emits on the
+ *   SSE `notice` frame (a non-terminal frame before the terminal
+ *   done/error frame) when the project's stored reference photo was lost
+ *   out-of-band (path set, file gone — never a photo-LESS project). The
+ *   SPA renders it as a plain assistant message in the transcript.
+ * - `sourceMissing`: the sentence the restore / branch 409 with detail
+ *   code `source_missing` maps to — the SPA maps the 409 body's
+ *   `{ code: "source_missing" }` to this text (never the raw detail
+ *   message), the same deck-home pattern as the #260 no-run replies.
+ *
+ * The chat pre-route's saved-design-missing reply is the backend's own
+ * wire string (emitted verbatim on the done frame — the SPA never
+ * substitutes its own copy for it), so only the 409 mapping and the
+ * notice live here.
+ */
+export const missingStorage = {
+  /** The SSE `notice` frame's fixed string (issue #295): the backend
+   *  emits this verbatim when the project's stored reference photo is
+   *  lost out-of-band (path set, file gone). The SPA renders it as a
+   *  plain assistant message in the transcript, before the pass/failure
+   *  turn. The design-contract tripwire pins the two-way agreement with
+   *  the backend's `PHOTO_MISSING_NOTICE` (d33d/projects.py).
+   *  Never a fabricated value, never a digit. */
+  photoMissing:
+    "Your reference photo for this project is missing, so I'm designing " +
+    "from your words alone",
+
+  /** The 409 `source_missing` 409 detail code (restore / branch-from): the
+   *  target version's recorded design source — or the project's git repo —
+   *  is absent from disk. Same honest statement the chat pre-route makes.
+   *  Never the raw backend message, never a fabricated value. */
+  sourceMissing:
+    "The saved design for this project is missing, so I can't change it. Start a new design, or describe it again and I'll make it fresh",
+
+  /** The restore-specific 409 `source_missing` sentence (issue #295): the
+   *  restore action cannot recreate the missing source, so the sentence says
+   *  what the user can still keep (the versions list + its measurements).
+   *  Distinct from `sourceMissing` (chat + Brief) by design — the two
+   *  surfaces make two different honest statements. */
+  restoreSourceMissing:
+    "The saved design for that version is missing, so I can't restore it. The versions list and its measurements are still here",
 } as const;
 
 export const copy = {
@@ -642,6 +707,7 @@ export const copy = {
   firstRun,
   shell,
   export3mf,
+  missingStorage,
 } as const;
 
 export default copy;
