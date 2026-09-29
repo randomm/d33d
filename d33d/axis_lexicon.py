@@ -166,17 +166,12 @@ _FEATURE_NOUN_RE = re.compile(
 )
 
 #: The feature nouns that can ALSO name a whole printed part (issue #305
-#: task-a, operator decision: exactly {"lid"} in this ticket — widening the
-#: set is a follow-up). These stay in ``_FEATURE_NOUNS`` (the lexicon's
-#: single-number path is unchanged: "a 7 mm lid" still states nothing at
-#: the lexicon level), but the triple/pair path
-#: (``dimension_protocol._extract_triple``) uses this subset for its
-#: CONDITIONAL suppression: a pair followed by a part noun states W/D when
-#: the pair is the message's primary object (no earlier number-bearing
-#: triple or pair in the message states the envelope) and stays suppressed
-#: when an earlier triple or pair already stated it ("a box 60 × 45 × 80
-#: mm with a 55 × 40 mm lid" → only the box states). Pinned by
-#: ``tests/test_axis_lexicon.py`` (the subset pin).
+#: task-a, operator decision: exactly {"lid"}; widening is a follow-up).
+#: Stays in ``_FEATURE_NOUNS`` (the lexicon's single-number path is
+#: unchanged: "a 7 mm lid" still states nothing); the triple/pair path
+#: (``dimension_protocol._extract_triple``) uses it for its conditional
+#: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
+#: (the subset pin).
 _PART_NOUNS: frozenset[str] = frozenset({"lid"})
 
 # All axis words (absolute + relative) for clause-level detection.

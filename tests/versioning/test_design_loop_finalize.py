@@ -4036,8 +4036,8 @@ def test_chat_triple_message_gate_input_and_persisted_stated_dims(
 def test_chat_by_form_triple_gate_input_and_persisted_stated_dims(
     app_with_versions,
 ):
-    """End-to-end (issue #305): 'a 60 by 45 by 20 mm tray' — the 'by'-
-    joiner form — the gate input is (60, 45, 20) and stated_dims
+    """End-to-end (issue #305, task-a): 'a 60 by 45 by 20 mm tray' — the
+    'by'-joiner form — the gate input is (60, 45, 20) and stated_dims
     {W:60, D:45, H:20} are persisted on the new version row, like the
     x-form twin above."""
     captured: dict = {}
@@ -4165,11 +4165,13 @@ def test_finalize_triple_message_gate_input_and_persisted_stated_dims(
 def test_chat_by_form_triple_message_gate_input_and_persisted_stated_dims(
     app_with_versions,
 ):
-    """End-to-end (issue #305): 'a 60 by 45 by 20 mm tray' (the by-form
-    triple) → the gate input is (60, 45, 20) and stated_dims {W:60, D:45,
-    H:20} are persisted on the new version row, identical to the x-form
-    twin above (the by-joiner must flow through the full chat seam
-    without any special-casing in the route)."""
+    """End-to-end (issue #305, task-b): 'a 60 by 45 by 20 mm tray' (the
+    by-form triple) → the gate input is (60, 45, 20) and stated_dims
+    {W:60, D:45, H:20} are persisted on the new version row, identical to
+    the x-form twin (the by-joiner must flow through the full chat seam
+    without any special-casing in the route). Distinct test name from the
+    task-a twin so both run (the previous identical-name pair shadowed
+    the task-a body — the by-form chat path was silently untested)."""
     captured: dict = {}
     latest_row: list = []
 

@@ -1222,18 +1222,19 @@ class TestTripleExtraction:
         """Issue #305: 'a box 60 × 45 × 80 mm with a 55 × 40 mm lid' —
         the box triple states (first match wins); the lid pair is
         suppressed (earlier match already stated the envelope). 40 stays
-        unmapped/offerable — 55 is excluded from the offer scan only
-        because it duplicates a stated box value (the 55×40 pair itself
-        consumes nothing)."""
+        unmapped/offerable — 55 is not in the offer scan because it has no
+        explicit mm unit in the message (the offer regex only matches
+        numbers followed by "mm")."""
         axes = stated_axes_from_message("a box 60 × 45 × 80 mm with a 55 × 40 mm lid")
         assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
         unmapped = user_quoted_unmapped_mm(["a box 60 × 45 × 80 mm with a 55 × 40 mm lid"])
         assert 40.0 in unmapped
-        # 55 is not offerable — it duplicates a stated box dimension
-        # (pre-existing dedupe of user-quoted values against stated ones),
-        # not because the lid pair consumed it (the suppressed pair's 40
-        # stays offerable, proving nothing was consumed).
-        # The box numbers are consumed
+        # 55 is not in the unmapped set — it has no explicit "mm" unit in
+        # the message, so the tier-2 offer regex (\b(\d+)\s*mm\b) never
+        # matches it. This is NOT because it duplicates a stated box value.
+        # The suppressed lid pair's 40 stays offerable (it has "mm"),
+        # proving nothing was consumed from the pair.
+        # The box numbers are consumed (they have explicit mm).
         assert 60.0 not in unmapped
         assert 45.0 not in unmapped
         assert 80.0 not in unmapped
@@ -1243,6 +1244,41 @@ class TestTripleExtraction:
         numbers, so the lid pair is the primary object and states W/D."""
         axes = stated_axes_from_message("a box with a 55 × 40 mm lid")
         assert axes == {"W": 55.0, "D": 40.0}
+
+    def test_part_noun_lid_suppressed_by_later_triple(self):
+        """Issue #305 (HIGH security regression): 'a 55x40 mm lid for the
+        60x45x80mm box' — the lid pair is textually EARLIER but the box
+        triple (later) states the envelope. The primary-object relaxation
+        must NOT fire when ANY other number-bearing triple/pair in the
+        message states, not only earlier ones. Without this guard the
+        lid pair would state W=55/D=40 and the bbox gate would enforce a
+        fabricated 55x40x0 target against a 60x45x80 box."""
+        axes = stated_axes_from_message("a 55x40 mm lid for the 60x45x80mm box")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+
+    def test_part_noun_lid_suppressed_by_later_triple_comma(self):
+        """Issue #305 (HIGH security regression, comma variant): 'make a
+        40x60 lid, the box is 60x45x80mm' — the lid pair is textually
+        first, the box triple is textually second (separated by a comma).
+        The box states, the lid pair does not."""
+        axes = stated_axes_from_message("make a 40x60 lid, the box is 60x45x80mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+
+    def test_part_noun_lid_suppressed_by_later_by_form_triple(self):
+        """Issue #305: 'a 55 by 40 mm lid for the 60 by 45 by 80 mm box'
+        — the lid pair (by-joiner) precedes the box triple (also
+        by-joiner); the box states, the lid pair does not."""
+        axes = stated_axes_from_message("a 55 by 40 mm lid for the 60 by 45 by 80 mm box")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+
+    def test_part_noun_lid_suppressed_by_later_comma_variant(self):
+        """Issue #305 round-1 (HIGH security regression): 'a 55 x 40 mm
+        lid, box is 60x45x80mm' — the lid pair is textually first, the
+        box triple is textually second (separated by a comma after "lid").
+        The comma makes "lid" a clause boundary, so it does NOT suppress
+        the box triple. The box states, the lid pair does not."""
+        axes = stated_axes_from_message("a 55 x 40 mm lid, box is 60x45x80mm")
+        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
 
     def test_part_noun_lid_consumed_when_stated(self):
         """Issue #305: 'a 60 × 45 mm lid' (stated) — numbers consumed."""
