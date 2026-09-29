@@ -303,19 +303,39 @@ def test_production_closure_forwards_request_past_the_hook(app_with_versions, mo
     async def _noop_llm(*a, **k):
         return ""
 
+    class _MockEntry:
+        id = "m"
+        provider = "p"
+        model = "stub"
+        params = {}
+        fallbacks = ()
+        retries = {}
+
+        def provider_key(self):
+            return "p"
+
+    class _MockCat:
+        providers = {"p": types.SimpleNamespace(key="stub")}
+        roles = {"design": "m"}
+        models = {"m": _MockEntry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
+
     monkeypatch.setattr(
         _cat,
         "load_catalogue",
-        lambda p: types.SimpleNamespace(
-            providers={"p": types.SimpleNamespace(key="stub")}
-        ),
+        lambda p: _MockCat(),
     )
     monkeypatch.setattr(
         _res,
         "resolve_model",
         lambda cat, role: types.SimpleNamespace(
             entry=types.SimpleNamespace(model="stub"),
-            provider=types.SimpleNamespace(base="http://stub"),
+            provider=types.SimpleNamespace(base="http://stub", key="stub-key"),
         ),
     )
     monkeypatch.setattr(_probes, "probe_capabilities", _fake_probe)
@@ -405,19 +425,40 @@ def test_production_closure_render_fn_matches_worker_signature(
         )
 
     monkeypatch.setattr(_app, "render_for_design_loop", _spy)
+
+    class _MockEntry:
+        id = "m"
+        provider = "p"
+        model = "stub"
+        params = {}
+        fallbacks = ()
+        retries = {}
+
+        def provider_key(self):
+            return "p"
+
+    class _MockCat:
+        providers = {"p": types.SimpleNamespace(key="stub")}
+        roles = {"design": "m"}
+        models = {"m": _MockEntry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
+
     monkeypatch.setattr(
         _cat,
         "load_catalogue",
-        lambda p: types.SimpleNamespace(
-            providers={"p": types.SimpleNamespace(key="stub")}
-        ),
+        lambda p: _MockCat(),
     )
     monkeypatch.setattr(
         _res,
         "resolve_model",
         lambda cat, role: types.SimpleNamespace(
             entry=types.SimpleNamespace(model="stub"),
-            provider=types.SimpleNamespace(base="http://stub"),
+            provider=types.SimpleNamespace(base="http://stub", key="stub-key"),
         ),
     )
 

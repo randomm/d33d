@@ -782,19 +782,39 @@ def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkey
         async def __call__(self, *a, **k):
             return ""
 
+    class _MockEntry:
+        id = "m"
+        provider = "p"
+        model = "stub"
+        params = {}
+        fallbacks = ()
+        retries = {}
+
+        def provider_key(self):
+            return "p"
+
+    class _MockCat:
+        providers = {"p": types.SimpleNamespace(key="stub")}
+        roles = {"design": "m"}
+        models = {"m": _MockEntry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
+
     monkeypatch.setattr(
         _catalogue_mod,
         "load_catalogue",
-        lambda p: types.SimpleNamespace(
-            providers={"p": types.SimpleNamespace(key="stub")}
-        ),
+        lambda p: _MockCat(),
     )
     monkeypatch.setattr(
         _resolve_mod,
         "resolve_model",
         lambda cat, role: types.SimpleNamespace(
             entry=types.SimpleNamespace(model="stub"),
-            provider=types.SimpleNamespace(base="http://stub"),
+            provider=types.SimpleNamespace(base="http://stub", key="stub-key"),
         ),
     )
     monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)

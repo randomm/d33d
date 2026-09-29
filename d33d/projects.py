@@ -48,7 +48,7 @@ from d33d.dimension_protocol import (
     latest_stated_dims_dict,
     stated_axes_from_message,
 )
-from d33d.question_answer import route_chat_message
+from d33d.question_answer import ModelUnconfiguredError, route_chat_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -301,6 +301,38 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
         "entry": entry,
         "param": name,
     }
+
+
+async def _model_unconfigured_frames(env_var: str | None = None):
+    """The model-unconfigured terminal frame (issue #303): ONE ``error``
+    frame — the SAME structured shape the design loop's terminal error
+    frame carries (``reason: model_unconfigured`` + ``env_var`` when known)
+    — so the SPA's ``displayDesignLoopError`` / ``FailureTurn`` render it
+    via the same path (no retry button, blocked styling #D2A63C).
+
+    ``env_var`` is the name of the missing/empty ``${ENV}`` variable (or
+    ``None`` for an unresolved role/alias — the SPA then renders the
+    "Check the model settings." copy). It is NEVER the key value.
+
+    The frame is ``error`` (not ``done``): a ``done`` frame with
+    ``kind: "answer"`` would render as a plain assistant message, not a
+    failure turn. The in-flight flag is released by ``streaming.py``'s
+    ``finally`` on the SSE endpoint (the same single release point as
+    ``_answered_frames``).
+    """
+    from d33d.design_loop import MODEL_UNCONFIGURED
+
+    error_data: dict[str, Any] = {
+        "message": f"Design loop exhausted: {MODEL_UNCONFIGURED}",
+        "reason": MODEL_UNCONFIGURED,
+    }
+    if env_var is not None:
+        error_data["env_var"] = env_var
+    yield ("error", error_data)
+    # The in-flight flag is released by ``d33d.streaming._stream_events``
+    # (the SSE endpoint's ``finally`` — the single release point for every
+    # event source, on every exit path), exactly as for
+    # ``_answered_frames``.
 
 
 async def _answered_frames(
@@ -620,6 +652,15 @@ def create_projects_router() -> APIRouter:
                 app.state.versions.latest_version(project_id),
                 answer_edge=getattr(app.state, "answer_question", None),
             )
+        except ModelUnconfiguredError as e:
+            # The model pre-flight (issue #303) found the model cannot be
+            # called: the question path emits the SAME structured terminal
+            # error frame the design loop emits (reason
+            # ``model_unconfigured``) — never the COULD_NOT_ANSWER text,
+            # never a silent degrade into an LLM call. No version is
+            # created (the design loop never runs).
+            app.state.event_sources[project_id] = _model_unconfigured_frames(e.env_var)
+            return {"status": "accepted"}
         except Exception:
             # The pre-route is best-effort but its failure is fatal to
             # THIS request (re-raised below): release the claim so the

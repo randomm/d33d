@@ -754,6 +754,11 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
 
     class _Entry:
         model = "model-x"
+        provider = "p"
+        id = "m"
+
+        def provider_key(self):
+            return "p"
 
     class _Provider:
         base = "http://127.0.0.1:1"
@@ -762,6 +767,14 @@ def test_app_state_hooked_loop_archives_exhausted_loop(tmp_path: Path, monkeypat
     class _Cat:
         def __init__(self) -> None:
             self.providers = {"p": _Provider()}
+            self.roles = {"design": "m"}
+            self.models = {"m": _Entry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
 
     class _Res:
         entry = _Entry()
@@ -872,6 +885,11 @@ def test_hooked_loop_preflight_failure_archives_renderer_unavailable(
 
     class _Entry:
         model = "model-x"
+        provider = "p"
+        id = "m"
+
+        def provider_key(self):
+            return "p"
 
     class _Provider:
         base = "http://127.0.0.1:1"
@@ -880,6 +898,14 @@ def test_hooked_loop_preflight_failure_archives_renderer_unavailable(
     class _Cat:
         def __init__(self) -> None:
             self.providers = {"p": _Provider()}
+            self.roles = {"design": "m"}
+            self.models = {"m": _Entry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
 
     class _Res:
         entry = _Entry()
@@ -981,6 +1007,11 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
 
     class _Entry:
         model = "model-x"
+        provider = "p"
+        id = "m"
+
+        def provider_key(self):
+            return "p"
 
     class _Provider:
         base = "http://127.0.0.1:1"
@@ -989,6 +1020,14 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
     class _Cat:
         def __init__(self) -> None:
             self.providers = {"p": _Provider()}
+            self.roles = {"design": "m"}
+            self.models = {"m": _Entry()}
+
+        def role(self, r: str) -> str:
+            return self.roles[r]
+
+        def model(self, alias: str):
+            return self.models[alias]
 
     class _Res:
         entry = _Entry()

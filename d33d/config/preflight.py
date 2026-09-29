@@ -16,8 +16,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from d33d.config.catalogue import (
+    Catalogue,
     CatalogueError,
     MissingEnvVarError,
     ResolutionError,
@@ -58,6 +60,18 @@ def model_preflight(catalogue_path: Path | str, role: str) -> ModelPreflight:
         return ModelPreflight(ok=False, env_var=e.var_name)
     except CatalogueError:
         return ModelPreflight(ok=False)
+    return model_preflight_loaded(cat, role)
+
+
+def model_preflight_loaded(cat: Catalogue | Any, role: str) -> ModelPreflight:
+    """Check that ``role`` resolves to a keyed model on an ALREADY-LOADED
+    catalogue (no fresh ``load_catalogue`` — the caller loaded it, so a
+    monkeypatched ``load_catalogue`` is respected and no duplicate file
+    read occurs).
+
+    * unset/empty ``${ENV}`` provider key -> ``ok=False`` with that name
+    * role or alias that does not resolve -> ``ok=False, env_var=None``
+    """
     try:
         res = resolve_model(cat, role)
     except (CatalogueError, ResolutionError):
@@ -67,4 +81,4 @@ def model_preflight(catalogue_path: Path | str, role: str) -> ModelPreflight:
     return ModelPreflight(ok=True)
 
 
-__all__ = ["ModelPreflight", "MissingEnvVarError", "model_preflight"]
+__all__ = ["ModelPreflight", "MissingEnvVarError", "model_preflight", "model_preflight_loaded"]

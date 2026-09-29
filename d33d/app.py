@@ -372,6 +372,29 @@ async def _lifespan(app: FastAPI):
         state.master_key = cred.get_or_create_master_key(state.master_key_path)
     if state.credential_store is None:
         state.credential_store = cred.CredentialStore(state.conn, state.master_key)
+    # Issue #303 — the model pre-flight at startup: a one-shot WARNING
+    # naming the missing/empty ``${ENV}`` variable (NEVER its value) when
+    # the ``design`` role's model cannot be used. A missing/invalid
+    # ``models.yaml`` is logged the same way — it never crashes startup.
+    from d33d.config.preflight import model_preflight
+
+    _pre = model_preflight(state.catalogue_path, "design")
+    if not _pre.ok:
+        if _pre.env_var:
+            logger.warning(
+                "model pre-flight: the LLM model for the 'design' role is "
+                "not configured — environment variable %r is not set or is "
+                "empty; the design loop will report 'model_unconfigured' "
+                "until it is",
+                _pre.env_var,
+            )
+        else:
+            logger.warning(
+                "model pre-flight: the LLM model for the 'design' role is "
+                "not configured (no resolvable design role or model) — "
+                "the design loop will report 'model_unconfigured' until it "
+                "is"
+            )
     yield
     db.APP_DATA_DIR = prior_app_data_dir
     if state.conn is not None:
@@ -1367,6 +1390,7 @@ def _build_question_answer_call(
     HTTP call) and degrades to the design loop.
     """
     from d33d.config.catalogue import ResolutionError
+    from d33d.config.preflight import model_preflight_loaded
     from d33d.config.resolve import resolve_model
     from d33d.design_llm import SenderError
     from d33d.question_answer import ANSWER_CALL_TIMEOUT_SECONDS, build_answer_prompt
@@ -1380,6 +1404,22 @@ def _build_question_answer_call(
 
         state = app_state.state  # bound at build time (see the docstring above)
         cat = load_catalogue(catalogue_path)
+        # Model pre-flight (issue #303): when the model cannot be called,
+        # the question path must NOT call the LLM. It raises a sentinel
+        # exception the route's ``except ModelUnconfiguredError`` turns
+        # into the structured terminal error frame (reason
+        # ``model_unconfigured``) — the SAME frame the design loop emits.
+        # The pre-flight runs on the role the question path actually
+        # resolves: ``question`` when the catalogue defines it, ``design``
+        # otherwise (a pre-#249 catalogue — the degrade-to-design
+        # semantics).
+        roles = getattr(cat, "roles", {})
+        has_question_role = isinstance(roles, dict) and "question" in roles
+        pre = model_preflight_loaded(cat, "question" if has_question_role else "design")
+        if not pre.ok:
+            from d33d.question_answer import ModelUnconfiguredError
+
+            raise ModelUnconfiguredError(pre.env_var)
         try:
             res = resolve_model(cat, "question")
         except (ResolutionError, KeyError):
@@ -1492,9 +1532,11 @@ def _build_production_design_loop():
     ``asyncio.run`` forbids with ``RuntimeError``.
     """
     from d33d.config.catalogue import load_catalogue
+    from d33d.config.preflight import model_preflight_loaded
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
-    from d33d.design_loop import make_llm_fn
+    from d33d.design_loop import IterationRecord, MODEL_UNCONFIGURED, make_llm_fn
+    from d33d.design_loop import DesignResult
     from d33d.evals.failure_capture import default_run_design_loop_hook
     from d33d.prompt_hash import canonical_hash
 
@@ -1519,9 +1561,27 @@ def _build_production_design_loop():
             )
 
         cat = load_catalogue(catalogue_path)
+        # Model pre-flight (issue #303): BEFORE any capability probe or
+        # LLM call — a missing/empty provider key or an unresolved design
+        # role must end the turn at once with the loop-level
+        # ``model_unconfigured`` reason (zero LLM HTTP calls, zero
+        # capability probes, zero render calls). Mirrors the renderer
+        # pre-flight's short-circuit (``run_design_loop_async`` returns an
+        # exhausted ``DesignResult`` before iteration 1).
+        pre = model_preflight_loaded(cat, "design")
+        if not pre.ok:
+            return DesignResult(
+                status="exhausted",
+                best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
+                iterations=(),
+                failure_reason=MODEL_UNCONFIGURED,
+                iterations_used=0,
+            )
         res = resolve_model(cat, "design")
-        provider = cat.providers[next(iter(cat.providers))]
-        api_key = provider.key
+        # The key comes from the RESOLVED model's own provider (issue #303
+        # api_key bug fix — NOT the first provider in ``cat.providers``,
+        # which may be a different, keyless provider).
+        api_key = res.provider.key
         factory = _http_request_factory(res.provider.base, api_key)
         capability = await probe_capabilities(
             base_url=res.provider.base,

@@ -82,6 +82,7 @@ __all__ = [
     "NO_IMPROVEMENT_LIMIT",
     "RENDERER_PREFLIGHT_CACHE_SECONDS",
     "RENDERER_UNAVAILABLE",
+    "MODEL_UNCONFIGURED",
     "BboxInfo",
     "DesignResult",
     "IterationRecord",
@@ -115,6 +116,13 @@ NO_IMPROVEMENT_LIMIT = 2
 #: the first iteration (issue #277). The run ends at once with this reason
 #: and NO LLM call.
 RENDERER_UNAVAILABLE = "renderer_unavailable"
+
+#: The loop-level (NOT an error_class) failure reason emitted when the model
+#: pre-flight check finds the configured LLM model cannot be used before
+#: the first iteration (issue #303). The run ends at once with this reason
+#: and NO LLM call — the same pre-flight pattern as
+#: :data:`RENDERER_UNAVAILABLE`, but for the model rather than the renderer.
+MODEL_UNCONFIGURED = "model_unconfigured"
 
 #: How long a SUCCESSFUL renderer pre-flight check is trusted before the
 #: next design-loop run re-checks (per-process cache; issue #277 operator
