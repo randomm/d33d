@@ -53,10 +53,9 @@ interface PassCardProps {
   /** The pass's summary prose (UI face, no dimensions). */
   summary?: string;
   /** The generated source (the disclosure's content — never chat text).
-   *  `undefined` = no source carried this turn (no disclosure control);
-   *  `null` = a source was expected but is missing on disk (issue #295 —
-   *  the disclosure renders "source missing" instead of an empty <pre>). */
-  source?: string | null;
+   *  `undefined` or empty string = no source carried this turn
+   *  (no disclosure control). */
+  source?: string;
   /** The enlarged view's close action (issue #125). */
   onBesidePhoto?: () => void;
 }
@@ -120,45 +119,23 @@ export function PassCard({
           {copy.passCard.partialViews(views.length, TOTAL_VIEWS)}
         </span>
       )}
-      {source !== undefined && (
+      {source !== undefined && source !== "" && (
         <>
-          {source === null ? (
-            // Issue #295: no source to show. Never "OpenSCAD, 0 lines",
-            // never an empty <pre> — a confident value the card has not
-            // established.
-            <span
-              className="pass-card-source-missing"
-              data-testid="pass-card-source-missing"
-              style={{
-                display: "inline-block",
-                padding: "2px 8px",
-                background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
-                color: "var(--color-blocked)",
-                borderRadius: 4,
-                fontSize: 12,
-              }}
-            >
-              {copy.passCard.sourceMissing}
-            </span>
-          ) : (
-            <>
-              <button
-                type="button"
-                className="pass-card-source-toggle"
-                data-testid="pass-card-source-toggle"
-                aria-expanded={sourceOpen}
-                onClick={() => setSourceOpen((o) => !o)}
-              >
-                {sourceOpen
-                  ? copy.passCard.closeDisclosure
-                  : copy.passCard.sourceDisclosure(sourceLines)}
-              </button>
-              {sourceOpen && (
-                <pre className="pass-card-source" data-testid="pass-card-source">
-                  {source}
-                </pre>
-              )}
-            </>
+          <button
+            type="button"
+            className="pass-card-source-toggle"
+            data-testid="pass-card-source-toggle"
+            aria-expanded={sourceOpen}
+            onClick={() => setSourceOpen((o) => !o)}
+          >
+            {sourceOpen
+              ? copy.passCard.closeDisclosure
+              : copy.passCard.sourceDisclosure(sourceLines)}
+          </button>
+          {sourceOpen && (
+            <pre className="pass-card-source" data-testid="pass-card-source">
+              {source}
+            </pre>
           )}
         </>
       )}

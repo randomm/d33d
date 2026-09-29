@@ -383,16 +383,13 @@ describe("design contract", () => {
 
   it("the storage copy keys exist for Brief and PassCard (issue #295, d6)", () => {
     // Issue #295 (d6): the Brief shows a "saved design missing" banner /
-    // "reference photo missing" marker in var(--color-blocked); the
-    // PassCard shows "source missing" instead of an empty disclosure.
-    // All three copy keys live in the deck (house rule: no inline prose).
+    // "reference photo missing" marker in var(--color-blocked).
+    // All copy keys live in the deck (house rule: no inline prose).
     expect(copy.brief.savedDesignMissing).toBeTruthy();
     expect(copy.brief.referencePhotoMissing).toBeTruthy();
-    expect(copy.passCard.sourceMissing).toBeTruthy();
-    // No digit in any of the three sentences.
+    // No digit in any of the two sentences.
     expect(copy.brief.savedDesignMissing).not.toMatch(/\d/);
     expect(copy.brief.referencePhotoMissing).not.toMatch(/\d/);
-    expect(copy.passCard.sourceMissing).not.toMatch(/\d/);
     // The Brief reads the storage prop and renders the banner/marker —
     // the tripwire reads the Brief's source so a wiring change fails here.
     const briefSrc = readFileSync(join(SRC, "components/brief/Brief.tsx"), "utf8");
@@ -400,10 +397,11 @@ describe("design contract", () => {
     expect(briefSrc).toMatch(/savedDesignMissing/);
     expect(briefSrc).toMatch(/referencePhotoMissing/);
     expect(briefSrc).toMatch(/--color-blocked/);
-    // The PassCard renders the "source missing" disclosure.
+    // The PassCard does NOT render a "source missing" disclosure — the
+    // `source: null` path is unreachable (the token accumulator always
+    // produces a string), so the key is removed.
     const passSrc = readFileSync(join(SRC, "components/chat/PassCard.tsx"), "utf8");
-    expect(passSrc).toMatch(/sourceMissing/);
-    expect(passSrc).toMatch(/--color-blocked/);
+    expect(passSrc).not.toMatch(/sourceMissing/);
   });
 
   /* ----------------------------------------- W265 */
@@ -575,14 +573,6 @@ describe("design contract", () => {
     for (const s of [copy.brief.savedDesignMissing, copy.brief.referencePhotoMissing]) {
       expect(s).not.toMatch(/\d/);
     }
-    // The pass card's source-missing disclosure: "source missing" instead
-    // of "OpenSCAD, 0 lines" or an empty <pre> (the house rule: no
-    // confident value it has not established).
-    expect(copy.passCard.sourceMissing).toContain("Source missing");
-    expect(copy.passCard.sourceMissing).not.toContain("0 lines");
-    expect(copy.passCard.sourceMissing).not.toBe(
-      copy.passCard.sourceDisclosure(0),
-    );
   });
 
   it("an unestablished value is a phrase, never a number or a dash", () => {

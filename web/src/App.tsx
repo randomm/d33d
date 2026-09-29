@@ -232,19 +232,6 @@ export default function App({ client }: AppProps) {
   // trigger — a new version means the block may have changed). The Brief
   // reads it and never recomputes presence in the client.
   const [projectStorage, setProjectStorage] = useState<ProjectStorage | undefined>(undefined);
-  const refetchProject = useCallback((projectIdOverride?: number) => {
-    const effectiveProjectId = projectIdOverride ?? projectId;
-    if (effectiveProjectId === null) return;
-    apiClient
-      .getProject(effectiveProjectId)
-      .then((project) => {
-        setProjectStorage(project.storage);
-      })
-      .catch(() => {
-        // Keep the last-known signal (or none) — a storage read that fails
-        // must never flip a missing marker into "present".
-      });
-  }, [projectId, apiClient]);
 
   // Lazy project creation (issue #192): no POST /api/projects on mount —
   // the project is created by the FIRST explicit user action (a chat send,
@@ -318,10 +305,6 @@ export default function App({ client }: AppProps) {
         if (!isStale()) {
           setDesignState(rows);
           setDesignStateStale(false);
-          // Issue #295: re-read the storage signal on the same trigger —
-          // a new version write is the only in-band event that can change
-          // file presence.
-          refetchProject(effectiveProjectId);
         }
       })
       .catch(() => {
@@ -347,7 +330,7 @@ export default function App({ client }: AppProps) {
             });
         }, 300);
       });
-  }, [projectId, apiClient, refetchProject]);
+  }, [projectId, apiClient]);
 
   // The mount-time refetch effect: fires when projectId changes (from null
   // to the created project's id). This is the "project change" effect that

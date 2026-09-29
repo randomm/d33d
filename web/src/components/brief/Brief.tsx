@@ -656,48 +656,6 @@ export function Brief({
         </div>
       )}
 
-      {/* Issue #295: the "saved design missing" banner — the project's git
-          repo (or the current version's recorded design.scad) is absent from
-          disk. Rendered in var(--color-blocked), never the region marker.
-          The persisted params/bbox still show as-is (the rows above). */}
-      {storage !== undefined && storage.repo_present === false && (
-        <div
-          className="brief-saved-missing"
-          data-testid="brief-saved-missing"
-          style={{
-            marginTop: 8,
-            padding: "4px 8px",
-            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
-            color: "var(--color-blocked)",
-            borderRadius: 4,
-            fontSize: 13,
-          }}
-        >
-          {copy.brief.savedDesignMissing}
-        </div>
-      )}
-
-      {/* Issue #295: the "reference photo missing" marker — the photo path
-          is set but the file is gone (photo_present === false, NOT null).
-          A photo-LESS project (photo_present === null) never shows this. */}
-      {storage !== undefined && storage.photo_present === false && (
-        <span
-          className="brief-photo-missing"
-          data-testid="brief-photo-missing"
-          style={{
-            display: "inline-block",
-            marginTop: 8,
-            padding: "2px 8px",
-            background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
-            color: "var(--color-blocked)",
-            borderRadius: 4,
-            fontSize: 12,
-          }}
-        >
-          {copy.brief.referencePhotoMissing}
-        </span>
-      )}
-
       {failedPass !== undefined && failedPass !== null && (
         <div
           className="brief-failed-footer"

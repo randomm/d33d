@@ -180,11 +180,6 @@ export const passCard = {
     `${lines} line${lines === 1 ? "" : "s"} changed`,
   sourceFootnote:
     "Named parameters, because that is what makes the next change a change and not a rewrite. Copy it into OpenSCAD if you want — nothing here needs you to.",
-  /** The source disclosure when no source exists (issue #295): the card
-   *  must NOT render "OpenSCAD, 0 lines" or an empty <pre> as if it were
-   *  an established value — it says plainly that there is no source. */
-  sourceMissing: "Source missing — no OpenSCAD to show for this design.",
-
 
   checksPassed: (count: number): string => `${count} checks`,
   closeDisclosure: "Close the source",
