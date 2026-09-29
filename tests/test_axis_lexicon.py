@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 from d33d.axis_lexicon import axis_for_question_word, classify
+from d33d.dimension_protocol import stated_axes_from_message
 
 # ---------------------------------------------------------------------------
 # Absolute cues — each word maps its axis with the number
@@ -464,6 +465,34 @@ class TestFeatureNounAbstain:
         # single-axis-word clause).
         assert classify("a 7 mm tall stand").absolute == {"H": 7.0}
 
+    def test_part_nouns_subset_pin(self) -> None:
+        """Issue #305: _PART_NOUNS is exactly {"lid"} — a named constant
+        pin. The subset must be a subset of _FEATURE_NOUNS."""
+        from d33d.axis_lexicon import _FEATURE_NOUNS, _PART_NOUNS
+
+        assert _PART_NOUNS == frozenset({"lid"}), (
+            f"_PART_NOUNS drifted: expected {{'lid'}}, got {_PART_NOUNS}"
+        )
+        assert _PART_NOUNS <= _FEATURE_NOUNS, (
+            f"_PART_NOUNS not a subset of _FEATURE_NOUNS: "
+            f"{_PART_NOUNS - _FEATURE_NOUNS}"
+        )
+
+    def test_part_noun_single_number_lexicon_unchanged(self) -> None:
+        """Issue #305: the part-noun conditional suppression applies ONLY
+        in the triple path (dimension_protocol._extract_triple), NOT to
+        the lexicon's single-number classify. 'a 7 mm lid' still states
+        nothing at the lexicon level (unchanged behavior)."""
+        # Lexicon: single-number 'lid' still states nothing.
+        result = classify("a 7 mm lid")
+        assert result.absolute == {}
+        assert result.unmapped_mm_numbers == [7.0]
+
+        # Triple path: 'a 60 x 45 mm lid' DOES state W/D (the part-noun
+        # conditional allows it when the lid is the primary object).
+        axes = stated_axes_from_message("a 60 x 45 mm lid")
+        assert axes == {"W": 60.0, "D": 45.0}
+
 
 class TestReleaseFallbackFunction:
     """The #261 round-2 pure-direction-request fallback (extracted from
@@ -656,16 +685,12 @@ class TestTripleExtraction:
         """The protocol's triple extractor suppresses the same double
         (feature noun in the after-window) — the lexicon and the protocol
         agree that '10 × 10 mm hole' states nothing."""
-        from d33d.dimension_protocol import stated_axes_from_message
-
         assert stated_axes_from_message("a 10 × 10 mm hole") == {}
 
     def test_plural_feature_nouns_suppress(self) -> None:
         """Plural feature nouns (magnets, spacers, grids) suppress the
         triple double the same way the singulars do (issue #275 round-1
         false-positive fix)."""
-        from d33d.dimension_protocol import stated_axes_from_message
-
         assert stated_axes_from_message("add 2x magnets 6x3mm") == {}
         assert stated_axes_from_message("print 2 x 40 mm spacers") == {}
         assert stated_axes_from_message("a 5x5 grid") == {}
@@ -675,8 +700,6 @@ class TestTripleExtraction:
         noun near the numbers); the lexicon itself still sees the 60/45/20
         as explicit-mm numbers the protocol triple maps — the tier-2
         helper excludes them (asserted in test_dimension_protocol)."""
-        from d33d.dimension_protocol import stated_axes_from_message
-
         axes = stated_axes_from_message("a 60 × 45 × 20 mm tray")
         assert axes == {"W": 60.0, "D": 45.0, "H": 20.0}
 

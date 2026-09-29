@@ -165,6 +165,15 @@ _FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
 
+#: The feature nouns that can ALSO name a whole printed part (issue #305
+#: task-a, operator decision: exactly {"lid"}; widening is a follow-up).
+#: Stays in ``_FEATURE_NOUNS`` (the lexicon's single-number path is
+#: unchanged: "a 7 mm lid" still states nothing); the triple/pair path
+#: (``dimension_protocol._extract_triple``) uses it for its conditional
+#: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
+#: (the subset pin).
+_PART_NOUNS: frozenset[str] = frozenset({"lid"})
+
 # All axis words (absolute + relative) for clause-level detection.
 _ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(RELATIVE_WORDS)
 
