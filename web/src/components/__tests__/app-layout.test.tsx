@@ -4150,6 +4150,38 @@ describe("App design-loop error display (issue #82)", () => {
     expect(detail.textContent).toContain("totally_unknown_code");
   });
 
+  it("maps model_unconfigured to the model pre-flight sentence with NO retry (issue #303)", async () => {
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      handlers.onError?.({
+        message: "Design loop exhausted: model_unconfigured",
+        reason: "model_unconfigured",
+        env_var: "TRAIL_OPENERS_LLM_KEY",
+      });
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("hi");
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("failure-turn")).toBeTruthy();
+    });
+    // The mapped sentence (not the raw message) — the deck's reason copy.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
+      "The model isn't configured",
+    );
+    // The raw reason is in the detail element.
+    const detail = screen.getByTestId("failure-turn-raw-code");
+    expect(detail.textContent).toContain("model_unconfigured");
+    // No retry button: the pre-flight failure is terminal — retrying
+    // changes nothing until the operator sets the env var.
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+  });
+
   it("shows no envelope actions for a region-edit failure (generic retry action set)", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });

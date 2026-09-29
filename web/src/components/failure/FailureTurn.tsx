@@ -21,6 +21,16 @@
 import { copy } from "../../copy";
 import type { DisplayError } from "../../lib/errorMapping";
 
+/** Read the frame's `env_var` field (the model pre-flight's terminal
+ *  frame carries it — issue #303) as a string or `null`. Anything else
+ *  (absent, malformed) is treated as absent: the helper is the unresolved
+ *  variant, never a fabricated name. */
+function envVarOf(error: DisplayError): string | null {
+  const frame = error as unknown as Record<string, unknown>;
+  const v = frame.env_var;
+  return typeof v === "string" && v.length > 0 ? v : null;
+}
+
 interface EnvelopeAxisRow {
   /** The axis letter from the API envelope's x/y/z — "x", "y" or "z". */
   label: string;
@@ -63,6 +73,20 @@ export function FailureTurn({
 }: FailureTurnProps) {
   const isEnvelope = error.reason === "bbox_out_of_tolerance";
   const envelopeData = isEnvelope && error.envelope !== undefined ? error.envelope : null;
+
+  // The model pre-flight helper (issue #303): the terminal
+  // `model_unconfigured` frame's `env_var` field selects the second
+  // sentence — the named-variable sentence when it is established,
+  // the model-settings sentence when the model did not resolve (null).
+  // Rendered in the mono face: the variable name is a measurement, not
+  // prose. No other reason renders a helper (only the pre-flight frame
+  // carries `env_var`).
+  const modelHelper =
+    error.reason === "model_unconfigured"
+      ? envVarOf(error) !== null
+        ? copy.failure.modelUnconfiguredHelper(envVarOf(error) ?? "")
+        : copy.failure.modelUnresolved
+      : null;
 
   // Part 1 — the sentence. For the envelope gate with a measurement, the
   // deck's body names measured and limit together (the headline stays as
@@ -113,6 +137,15 @@ export function FailureTurn({
         {headline}
         {body !== null && <span className="failure-turn-body">{body}</span>}
       </p>
+
+      {/* Part 1c — the model pre-flight helper (issue #303): the env-var
+          name (mono, a measurement) or the model-settings nudge, when the
+          terminal model_unconfigured frame established it. */}
+      {modelHelper !== null && (
+        <p className="failure-turn-body" data-testid="failure-turn-model-helper">
+          {modelHelper}
+        </p>
+      )}
 
       {/* Part 1b — the per-param mismatch detail (issue #276): one line
           per mismatching parameter, formatted by the SPA's own copy

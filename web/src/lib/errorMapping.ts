@@ -9,9 +9,10 @@
  * distinct from the render-worker `timeout` ErrorClass) plus the
  * loop-level pre-flight reasons (`renderer_unavailable`, issue #277 —
  * emitted when the renderer reachability check fails before the first
- * iteration; `model_unconfigured`, issue #303 — emitted when the model
- * pre-flight finds the LLM model cannot be used before any LLM call;
- * both are loop-level reasons, NOT render-worker `ErrorClass` values).
+ * iteration; and `model_unconfigured`, issue #303 — emitted when the
+ * model pre-flight finds the configured LLM model cannot be used before
+ * any LLM call, so the loop never starts). Both are loop-level reasons,
+ * NOT render-worker `ErrorClass` values.
  * `displayDesignLoopError` maps that closed set to the
  * failure turn's part 1 — a sentence a person would say — plus the raw
  * detail for the turn's part 4.
@@ -57,6 +58,12 @@ export const FAILURE_REASONS: readonly string[] = [
   // iteration) and the model (issue #303: the model pre-flight found the
   // LLM model unusable before any LLM call); NOT render-worker ErrorClass
   // values (the render never ran / no LLM call was made).
+  // `model_unconfigured` (d33d/config/preflight.py, issue #303): the
+  // configured LLM model could not be used (its env var is missing,
+  // or the model alias/role does not resolve) BEFORE the first iteration;
+  // NOT a render-worker ErrorClass (nothing ran). Terminal: the frame's
+  // `env_var` field (the missing variable's name, null when the model did
+  // not resolve) selects the helper sentence, and no retry is offered.
   "renderer_unavailable",
   "model_unconfigured",
 ];
@@ -175,9 +182,11 @@ export function displayDesignLoopError(
     reason?: unknown;
     carried_axes?: unknown;
     mismatches?: unknown;
-    /** The name of the missing/empty `${ENV}` variable (issue #303,
-     *  the `model_unconfigured` frame's `env_var` field, omit-not-null).
-     *  The key value never crosses the wire — only the variable NAME. */
+    /** The model pre-flight frame's `env_var` field (issue #303): the
+     *  missing variable's name, or `null` when the model did not resolve.
+     *  The key value never crosses the wire — only the variable NAME.
+     *  The mapping ignores it (the headline is reason-keyed); the
+     *  failure turn renders the helper sentence from it. */
     env_var?: unknown;
   },
   envelopeLimits?: [number, number, number],
@@ -257,17 +266,6 @@ export function displayDesignLoopError(
           )
           .join("\n");
       }
-    }
-    // The model_unconfigured helper (issue #303): the env-var NAME rides
-    // the frame when the pre-flight could name one — the sentence names
-    // it; when it could not (unresolved role/alias) the sentence says
-    // "Check the model settings." The env-var name is the ONLY thing
-    // rendered here (never the key value), and the failure is NOT
-    // retryable: retrying a configuration failure just fails again.
-    if (reason === "model_unconfigured") {
-      message = envVar !== undefined
-        ? copy.failure.modelUnconfigured(envVar)
-        : copy.failure.modelUnconfiguredCheck();
     }
     if (reason === "bbox_out_of_tolerance" && envelopeLimits !== undefined) {
       const parsed = parseEnvelopeGateDetail(rawMessage, envelopeLimits);

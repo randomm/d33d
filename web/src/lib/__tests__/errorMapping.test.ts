@@ -47,6 +47,9 @@ const LOOP_FAILURE_REASONS = [
   // reachability check (issue #277) and the model pre-flight (issue #303)
   // failed before any work ran; NOT render-worker ErrorClasses.
   "renderer_unavailable",
+  // Loop-level pre-flight reason (d33d/config/preflight.py, issue #303) —
+  // the configured LLM model could not be used before the first iteration;
+  // NOT a render-worker ErrorClass (nothing ran). Terminal (no retry).
   "model_unconfigured",
 ];
 
@@ -83,6 +86,51 @@ describe("errorMapping", () => {
 
   it("the closed set is exactly the five bits plus the seven classes plus the loop-level reasons", () => {
     expect([...CLOSED_SET].sort()).toEqual([...FAILURE_REASONS].sort());
+  });
+
+  it("the model_unconfigured frame maps to the pre-flight sentence and is NOT retryable (issue #303)", () => {
+    // The terminal frame carries `reason: "model_unconfigured"` plus an
+    // `env_var` field (the missing variable's name, null when the model
+    // alias/role does not resolve). The headline sentence is the
+    // reason-keyed `copy.failure.reasons` entry; the env-var helper
+    // sentence (`copy.failure.modelUnconfiguredHelper`) is rendered by the
+    // failure turn from the frame's `env_var`, never folded into the
+    // mapped sentence. The reason is terminal — no retry button, because
+    // retrying changes nothing until the operator sets the variable or
+    // fixes the model settings.
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: model_unconfigured",
+      reason: "model_unconfigured",
+    });
+    expect(display.message).toBe(copy.failure.reasons.model_unconfigured);
+    expect(display.detail).toBe("model_unconfigured");
+    expect(display.retryable).toBe(false);
+    expect(display.reason).toBe("model_unconfigured");
+
+    // The frame's env_var field is irrelevant to the MAPPING (the sentence
+    // is reason-keyed); it only selects the helper sentence downstream.
+    const withEnvVar = displayDesignLoopError({
+      message: "Design loop exhausted: model_unconfigured",
+      reason: "model_unconfigured",
+      env_var: "TRAIL_OPENERS_LLM_KEY",
+    });
+    expect(withEnvVar.message).toBe(copy.failure.reasons.model_unconfigured);
+    expect(withEnvVar.retryable).toBe(false);
+  });
+
+  it("the model_unconfigured helper sentences name the env var, or the settings (issue #303)", () => {
+    // The frame's `env_var` field selects the helper: a named variable gets
+    // the set-the-variable sentence (the name in the mono face, rendered
+    // by the failure turn); an unresolved alias/role (env_var null) gets
+    // the model-settings sentence. The two are distinct honest statements.
+    const withVar = copy.failure.modelUnconfiguredHelper("TRAIL_OPENERS_LLM_KEY");
+    expect(withVar).toBe("Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.");
+    expect(copy.failure.modelUnresolved).toBe("Check the model settings.");
+    expect(withVar).not.toBe(copy.failure.modelUnresolved);
+    // The helper is a SEPARATE key from the closed `reasons` map — the
+    // headline and the helper are two sentences the turn renders in order,
+    // and the headline stays the reason-keyed map entry.
+    expect(copy.failure.reasons.model_unconfigured).not.toContain("Set ");
   });
 
   it("the renderer_unavailable frame maps to the pre-flight sentence (issue #277)", () => {
