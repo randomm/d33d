@@ -104,4 +104,4 @@ the root logger's level.
 
 ## Docker prune (one-off cleanup, issue #280)
 
-`scripts/docker-prune-d33d.sh` is a one-off cleanup script that removes leaked d33d render/registry containers and dangling `d33d-*`/`registry-*` volumes. It defaults to dry-run; pass `--yes` to actually delete.
+`scripts/docker-prune-d33d.sh` is a one-off cleanup script that removes leaked d33d render/registry containers and dangling `d33d-*`/`registry-<8 hex>` volumes (e.g. `registry-0123abcd`, but not `registry-data` or `registry-abcdef0` or `registry-abcdef012`); the dry-run also lists in-scope volumes that the run's container removals would orphan. It defaults to dry-run; pass `--yes` to actually delete.

@@ -16,18 +16,24 @@ WD_TEST_DIR=$WD_TEST_DIR . "$(dirname -- "$0")/wd_test_helper.sh"
 
 # =============================================================================
 # 4. forward dead + status running + containers RUNNING
-#    -> script does NOT restart, logs WARN, exits 2 (safety rule)
+#    -> re-forward IS attempted (it does not touch the VM), the restart
+#       fallback is blocked, WARNING names the count, exits 2 (safety rule)
 # =============================================================================
 reset_state
 make_control_path
 make_stubs 1 "ERROR: cannot connect" 0 0 "$STATUS_RUNNING" 0 "abc123"
 run_watchdog --dry-run
 rc=$?
-check_rc "containers-running skip exit 2" 2 "$rc"
+check_rc "containers-running: restart blocked, exit 2" 2 "$rc"
 if [ -f "$LOGFILE" ]; then
-    check_grep "containers-running WARNING logged" "$LOGFILE" "WARN"
+    check_grep "containers-running WARNING names the count" "$LOGFILE" "1 container(s) RUNNING"
 fi
 if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        pass "containers-running: re-forward was attempted"
+    else
+        fail "containers-running: re-forward was not attempted"
+    fi
     if grep -q "colima stop\|colima start" "$WORKROOT/actions.log" 2>/dev/null; then
         fail "containers-running must not restart"
     else
@@ -37,7 +43,7 @@ fi
 
 # =============================================================================
 # 5. forward dead + status running + docker ps probe FAILS (non-zero)
-#    -> conservative: no restart, log WARNING, exit 2
+#    -> re-forward IS attempted, restart blocked, log WARNING, exit 2
 # =============================================================================
 reset_state
 make_control_path
@@ -45,6 +51,21 @@ make_stubs 1 "ERROR: cannot connect" 0 0 "$STATUS_RUNNING" 1 ""
 run_watchdog --dry-run
 rc=$?
 check_rc "docker-ps probe failure -> exit 2 (conservative)" 2 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "probe failure WARNING logged" "$LOGFILE" "cannot probe container list"
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        pass "probe failure: re-forward was attempted"
+    else
+        fail "probe failure: re-forward was not attempted"
+    fi
+    if grep -q "colima stop\|colima start" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "probe failure must not restart"
+    else
+        pass "probe failure did not restart"
+    fi
+fi
 
 # =============================================================================
 # 5b. container probe emits a warning word plus a real container id
@@ -85,6 +106,29 @@ if [ -f "$WORKROOT/actions.log" ]; then
 fi
 
 # =============================================================================
+# 21. re-forward cannot heal (no ControlMaster socket) + containers RUNNING
+#     -> restart blocked, exit 2 naming the count (no restart executed)
+# =============================================================================
+reset_state
+# No ssh_config / socket: rebuild_forward fails immediately, the dry-run
+# would then exit 0 via the restart-fallback path — the exit-2 gate must
+# fire first.
+make_stubs 1 "ERROR: cannot connect" 0 0 "$STATUS_RUNNING" 0 "abc123 def456"
+run_watchdog --dry-run
+rc=$?
+check_rc "re-forward impossible + containers running -> exit 2" 2 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "blocked-restart message names the count" "$LOGFILE" "2 container(s) RUNNING"
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima stop\|colima start" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "re-forward-impossible + containers running must not restart"
+    else
+        pass "re-forward-impossible + containers running did not restart"
+    fi
+fi
+
+# =============================================================================
 # 7. forward dead + colima status probe fails (rc != 0)
 #    -> cannot determine VM state; dry-run start path, exit 0
 # =============================================================================
@@ -115,6 +159,7 @@ reset_state
 rm -f "$LOGFILE"
 make_stubs 0 "Server: healthy" 0 0 "$STATUS_RUNNING" 0 ""
 run_watchdog --dry-run
+rc=$?
 if [ -f "$LOGFILE" ]; then
     if grep -q "WARN" "$LOGFILE" 2>/dev/null; then
         fail "healthy run must not log a WARNING"
