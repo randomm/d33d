@@ -250,6 +250,34 @@ def test_t0_non_ok_response_raises_error_status():
     assert exc.value.status == "error"
 
 
+def test_t0_non_ok_response_reports_real_status_and_hint():
+    """A stub response with ``status_code=401`` produces a message with the
+    real code and the key hint, never ``?`` (regression for the
+    ``getattr(resp, 'status', '?')`` 'HTTP ?' bug)."""
+
+    class _StubResponse:
+        status_code = 401
+        is_success = False
+
+    async def factory(request: dict[str, Any]):
+        return _StubResponse()
+
+    with pytest.raises(SenderError) as exc:
+        _run(
+            send(
+                role="design",
+                model_id="m",
+                messages=_design_messages(),
+                request_factory=factory,
+                capability=_t0(),
+            )
+        )
+    assert "401" in exc.value.args[0]
+    assert "key" in exc.value.args[0]
+    assert "?" not in exc.value.args[0]
+    assert exc.value.status == "error"
+
+
 # ---------------------------------------------------------------------------
 # T1 dispatch
 # ---------------------------------------------------------------------------
