@@ -381,6 +381,31 @@ describe("design contract", () => {
     expect(appSrc).toMatch(/copy\.missingStorage\.sourceMissing/);
   });
 
+  it("the storage copy keys exist for Brief and PassCard (issue #295, d6)", () => {
+    // Issue #295 (d6): the Brief shows a "saved design missing" banner /
+    // "reference photo missing" marker in var(--color-blocked); the
+    // PassCard shows "source missing" instead of an empty disclosure.
+    // All three copy keys live in the deck (house rule: no inline prose).
+    expect(copy.brief.savedDesignMissing).toBeTruthy();
+    expect(copy.brief.referencePhotoMissing).toBeTruthy();
+    expect(copy.passCard.sourceMissing).toBeTruthy();
+    // No digit in any of the three sentences.
+    expect(copy.brief.savedDesignMissing).not.toMatch(/\d/);
+    expect(copy.brief.referencePhotoMissing).not.toMatch(/\d/);
+    expect(copy.passCard.sourceMissing).not.toMatch(/\d/);
+    // The Brief reads the storage prop and renders the banner/marker —
+    // the tripwire reads the Brief's source so a wiring change fails here.
+    const briefSrc = readFileSync(join(SRC, "components/brief/Brief.tsx"), "utf8");
+    expect(briefSrc).toMatch(/storage/);
+    expect(briefSrc).toMatch(/savedDesignMissing/);
+    expect(briefSrc).toMatch(/referencePhotoMissing/);
+    expect(briefSrc).toMatch(/--color-blocked/);
+    // The PassCard renders the "source missing" disclosure.
+    const passSrc = readFileSync(join(SRC, "components/chat/PassCard.tsx"), "utf8");
+    expect(passSrc).toMatch(/sourceMissing/);
+    expect(passSrc).toMatch(/--color-blocked/);
+  });
+
   /* ----------------------------------------- W265 */
 
   it("the backend's tier-3 offer/ack mm spelling agrees with the deck's mm() (issue #265)", () => {

@@ -57,6 +57,7 @@ import {
   type VersionCompare,
   type DesignStateEntry,
   type Envelope,
+  type ProjectStorage,
 } from "./lib/api";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
@@ -226,6 +227,11 @@ export default function App({ client }: AppProps) {
   // real, never a guess, because Export3MF only renders once the project
   // exists and its name has been set from the API's response.
   const [projectName, setProjectName] = useState("untitled project");
+  // The project's live storage signal (issue #295) — fetched once the
+  // project exists, re-fetched on every design-state refetch (the same
+  // trigger — a new version means the block may have changed). The Brief
+  // reads it and never recomputes presence in the client.
+  const [projectStorage, setProjectStorage] = useState<ProjectStorage | undefined>(undefined);
 
   // Lazy project creation (issue #192): no POST /api/projects on mount —
   // the project is created by the FIRST explicit user action (a chat send,
@@ -281,6 +287,12 @@ export default function App({ client }: AppProps) {
   const refetchDesignState = useCallback((projectIdOverride?: number) => {
     const effectiveProjectId = projectIdOverride ?? projectId;
     if (effectiveProjectId === null) return;
+    // Issue #295: re-fetch the storage signal alongside the design state
+    // (the same trigger — a new version may have changed the repo's state).
+    apiClient
+      .getProject(effectiveProjectId)
+      .then((p) => setProjectStorage(p.storage))
+      .catch(() => {});
     designStateReqRef.current = { seq: designStateReqRef.current.seq + 1, projectId: effectiveProjectId };
     const { seq, projectId: latestProjectId } = designStateReqRef.current;
     const isStale = () =>
@@ -1629,6 +1641,7 @@ export default function App({ client }: AppProps) {
           conversationCollapsed={conversationCollapsed}
           entries={designState}
           refreshFailed={designStateStale}
+          storage={projectStorage}
           hasLivePin={pendingSelection !== null}
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}

@@ -119,21 +119,44 @@ export function PassCard({
       )}
       {source !== undefined && (
         <>
-          <button
-            type="button"
-            className="pass-card-source-toggle"
-            data-testid="pass-card-source-toggle"
-            aria-expanded={sourceOpen}
-            onClick={() => setSourceOpen((o) => !o)}
-          >
-            {sourceOpen
-              ? copy.passCard.closeDisclosure
-              : copy.passCard.sourceDisclosure(sourceLines)}
-          </button>
-          {sourceOpen && (
-            <pre className="pass-card-source" data-testid="pass-card-source">
-              {source}
-            </pre>
+          {source === "" ? (
+            // Issue #295: the pass's recorded design.scad is no longer on
+            // disk — render the "source missing" disclosure instead of an
+            // empty <pre> or "OpenSCAD, 0 lines" (house rule: no confident
+            // value it has not established).
+            <span
+              className="pass-card-source-missing"
+              data-testid="pass-card-source-missing"
+              style={{
+                display: "inline-block",
+                padding: "2px 8px",
+                background: "color-mix(in srgb, var(--color-blocked) 18%, transparent)",
+                color: "var(--color-blocked)",
+                borderRadius: 4,
+                fontSize: 12,
+              }}
+            >
+              {copy.passCard.sourceMissing}
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                className="pass-card-source-toggle"
+                data-testid="pass-card-source-toggle"
+                aria-expanded={sourceOpen}
+                onClick={() => setSourceOpen((o) => !o)}
+              >
+                {sourceOpen
+                  ? copy.passCard.closeDisclosure
+                  : copy.passCard.sourceDisclosure(sourceLines)}
+              </button>
+              {sourceOpen && (
+                <pre className="pass-card-source" data-testid="pass-card-source">
+                  {source}
+                </pre>
+              )}
+            </>
           )}
         </>
       )}

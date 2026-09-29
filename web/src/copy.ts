@@ -131,6 +131,18 @@ export const brief = {
   refreshFailed:
     "Couldn't refresh — these values may be out of date.",
 
+  /** Issue #295: the "saved design missing" banner — the project's git
+   *  repo (or the current version's recorded design.scad) is absent from
+   *  disk. Rendered in var(--color-blocked), never the region marker.
+   *  Same honest statement the chat pre-route's reply makes. */
+  savedDesignMissing:
+    "The saved design for this project is missing on disk.",
+
+  /** Issue #295: the "reference photo missing" marker — the photo path is
+   *  set but the file is gone (photo_present is false, not null). A
+   *  photo-LESS project (photo_present null) never shows this. */
+  referencePhotoMissing: "Reference photo missing",
+
   /** Above 7 COLLAPSIBLE rows the settled, agreeing param rows fold into one
    *  honest count — the disclosure line for the hidden ones. Axis rows,
    *  disagrees rows, and unknowns are never grouped away; the unknowns are
@@ -164,6 +176,11 @@ export const passCard = {
 
   checksPassed: (count: number): string => `${count} checks`,
   closeDisclosure: "Close the source",
+  /** Issue #295: the PassCard's "source missing" disclosure — the pass
+   *  produced a version but its recorded design.scad is no longer on disk.
+   *  Rendered instead of an empty <pre> or "OpenSCAD, 0 lines" (house
+   *  rule: no confident value it has not established). */
+  sourceMissing: "Source missing",
   viewEnlargedCaption:
     "Rendered straight from the model, not a photo of the viewport. This is the picture the system itself looked at.",
   viewActions: {

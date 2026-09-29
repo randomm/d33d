@@ -215,6 +215,19 @@ export interface LibraryCard {
  * (issue #8): `current_version` (the resume pointer) and
  * `last_activity` (the library-card activity).
  */
+/**
+ * The project's live storage signal (issue #295), computed server-side
+ * from live file checks — the SPA reads it and never recomputes presence
+ * in the client. `photo_present` is a three-way value: `null` for a
+ * project that never had a photo, `false` for a lost photo, `true` when
+ * the stored file is on disk. The field is ALWAYS present on the project
+ * GET response (never omitted).
+ */
+export interface ProjectStorage {
+  repo_present: boolean;
+  photo_present: boolean | null;
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -228,6 +241,8 @@ export interface Project {
   current_version?: number | null;
   /** Last-activity record (the latest version's ts/name/id). */
   last_activity?: { ts: string | null; version_id: number | null; name: string | null } | null;
+  /** The live storage signal (issue #295) — always present on project GET. */
+  storage?: ProjectStorage;
 }
 
 /** A design-loop FINALIZE input (issue #8). */

@@ -2365,8 +2365,6 @@ def test_chat_missing_photo_falls_back_to_empty_constant(app_with_versions):
     ``test_chat_lost_photo_notice_and_warning`` below). A photo-less
     project's stream carries NO notice and logs NO warning (the run
     proceeds identically to today)."""
-    import logging as _logging
-
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
