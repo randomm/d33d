@@ -251,16 +251,11 @@ def test_t0_non_ok_response_raises_error_status():
 
 
 def test_t0_non_ok_response_reports_real_status_and_hint():
-    """A stub response with ``status_code=401`` produces a message with the
-    real code and the key hint, never ``?`` (regression for the
-    ``getattr(resp, 'status', '?')`` 'HTTP ?' bug)."""
-
-    class _StubResponse:
-        status_code = 401
-        is_success = False
+    """A stub response with status 401 produces a message with the
+    real code and the key hint, never ``?``."""
 
     async def factory(request: dict[str, Any]):
-        return _StubResponse()
+        return FakeResponse(401, {})
 
     with pytest.raises(SenderError) as exc:
         _run(
@@ -272,9 +267,9 @@ def test_t0_non_ok_response_reports_real_status_and_hint():
                 capability=_t0(),
             )
         )
-    assert "401" in exc.value.args[0]
-    assert "key" in exc.value.args[0]
-    assert "?" not in exc.value.args[0]
+    assert "401" in str(exc.value)
+    assert "key" in str(exc.value)
+    assert "?" not in str(exc.value)
     assert exc.value.status == "error"
 
 

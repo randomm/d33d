@@ -85,7 +85,7 @@ def test_new_project_default_lands_under_data_dir(data_dir: Path):
 
 
 def test_new_project_default_via_api_lands_under_data_dir(
-    data_dir: Path, tmp_path: Path
+    data_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """``POST /api/projects`` (un-monkeypatched default) also lands the
     repo under the app's data dir — the DB path's parent, steered by
@@ -99,7 +99,7 @@ def test_new_project_default_via_api_lands_under_data_dir(
     )
     # Simulate the app wiring (the lifespan sets this to the DB path's
     # parent): the repo default reads it at call time.
-    db_mod.APP_DATA_DIR = data_dir
+    monkeypatch.setattr(db_mod, "APP_DATA_DIR", data_dir)
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "api-default"})
@@ -109,10 +109,7 @@ def test_new_project_default_via_api_lands_under_data_dir(
         row = app.state.conn.get_project(r.json()["id"])
         return row["git_repo_path"]
 
-    try:
-        repo = Path(run_async(app, _call))
-    finally:
-        db_mod.APP_DATA_DIR = None
+    repo = Path(run_async(app, _call))
     assert repo.is_dir() or repo.parent.is_dir()  # repo dir exists on disk
     assert repo.parent == data_dir / "projects"
 

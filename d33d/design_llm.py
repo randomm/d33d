@@ -228,9 +228,10 @@ def _http_error_detail(resp: Any) -> str:
     stubs may only emulate the attribute, hence the ``getattr`` fallbacks.
     Never includes the response body — it could echo headers or keys.
     """
+    # Accepted response shapes: httpx (``status_code``) and test stubs (``status``).
     status = getattr(resp, "status_code", None)
     if status is None:
-        status = getattr(resp, "status", None)
+        status = getattr(resp, "status", "?")
     status = int(status) if isinstance(status, (int, str)) and str(status).isdigit() else None
     if status is None:
         return "unknown status"

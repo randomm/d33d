@@ -298,8 +298,6 @@ def test_create_project_repo_lands_under_the_env_data_dir(
     # The autouse _isolate_data_dir fixture in conftest already points
     # D33D_DATA_DIR at tmp_path/d33d-data; assert the path-prefix contract
     # explicitly rather than relying on the fixture's exact layout.
-    import os
-
     data_dir = tmp_path / "iso-data"
     monkeypatch.setenv("D33D_DATA_DIR", str(data_dir))
     real_home = Path.home() / ".d33d"
