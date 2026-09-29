@@ -803,7 +803,11 @@ def _finalize_loop_kwargs(
     """
     from d33d.axis_lexicon import classify as _classify_axis_cues
     from d33d.config.catalogue import CatalogueError, ResolutionError
-    from d33d.design_loop_events import axes_to_gate_triple
+    from d33d.design_loop_events import (
+        EMPTY_PHOTO_DATA_URI,
+        axes_to_gate_triple,
+        photo_data_uri,
+    )
     from d33d.dimension_protocol import (
         effective_stated_dims,
         latest_stated_dims_dict,
@@ -837,7 +841,28 @@ def _finalize_loop_kwargs(
     row = app.state.versions.get_project(project_id)
     assert row is not None  # already 404'd above
 
-    photo = body.photo or row.get("source_photo_path")
+    # The photo gate (issue #299 — the finalize seam's twin of the chat
+    # path's ``photo_data_uri`` / ``photo_lost`` gate, #295): the
+    # design loop's ``photo`` must ALWAYS be a data URI / URL string —
+    # never the raw on-disk path. The stored-photo fallback goes through
+    # ``photo_data_uri`` (undecodable or missing file →
+    # ``EMPTY_PHOTO_DATA_URI``, never the raw bytes or the path). A
+    # ``body.photo`` override (client-supplied) is an LLM-embed string
+    # (a data URI / URL — the SPA's ``FinalizeInput`` carries no photo
+    # today, but the field must not bypass the contract either): a value
+    # that is neither an http(s) URL nor a ``data:`` URI is a filesystem
+    # path or other opaque string and is IGNORED in favour of the
+    # stored-photo gate — it is never embedded verbatim into the
+    # outgoing ``image_url``.
+    body_photo = body.photo
+    if body_photo is not None:
+        _t = body_photo.strip()
+        if not _t.startswith(("data:", "http://", "https://")):
+            body_photo = None
+    stored_photo = photo_data_uri(row.get("source_photo_path"))
+    photo = body_photo if body_photo is not None else stored_photo
+    if photo is None or not photo:
+        photo = EMPTY_PHOTO_DATA_URI
     latest = app.state.versions.latest_version(project_id)
     # The gate's target (ticket #91; issue #247's per-axis decision): the
     # CURRENT run's per-axis confirmed set — the body's explicit

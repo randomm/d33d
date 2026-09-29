@@ -39,6 +39,7 @@ from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.design_loop_events import (
     axes_to_gate_triple,
     photo_data_uri,
+    photo_storage_signal,
     run_design_loop_with_events,
     validate_photo_bytes,
 )
@@ -361,27 +362,13 @@ def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     Git invisibility: the raw repo path is consumed here, never carried
     into the response (the caller already strips it).
     """
-    repo_present = Path(row["git_repo_path"]).is_dir()
-    photo_path = row.get("source_photo_path")
-    if photo_path is None:
-        photo_present: bool | None = None
-    else:
-        # Issue #299: an on-disk-but-undecodable photo reports ``false``
-        # (the photo is unusable — same as lost), not ``true``.
-        photo_present = Path(photo_path).is_file() and _photo_decodable(photo_path)
-    return {"repo_present": repo_present, "photo_present": photo_present}
-
-
-def _photo_decodable(photo_path: str) -> bool:
-    """Issue #299: True iff the file at ``photo_path`` is a decodable PNG
-    or JPEG (never raises — any read/decode failure is ``False``, which
-    the caller treats as photo-lost)."""
-    try:
-        validate_photo_bytes(Path(photo_path).read_bytes())
-    except (ValueError, OSError):
-        # undecodable, unreadable, oversized — all "not usable"
-        return False
-    return True
+    # The storage signal (issue #299) is ONE shared definition —
+    # ``photo_storage_signal`` in ``d33d.design_loop_events`` — so the
+    # upload, embed and storage checks agree by construction. Cheap: a
+    # header-only open + verify + size, memoized per (path, mtime, size),
+    # so the project list endpoint never full-decodes per row.
+    photo_present = photo_storage_signal(row.get("source_photo_path"))
+    return {"repo_present": Path(row["git_repo_path"]).is_dir(), "photo_present": photo_present}
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:

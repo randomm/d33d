@@ -15,6 +15,7 @@ FINALIZE result) — never on clarify/propose/patch/critique events. Covers:
 
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -4591,3 +4592,134 @@ def test_finalize_tray_triple_offer_never_targets_stated_axis(app_with_versions)
     assert pending is not None, "no pending offer was recorded on finalize"
     assert pending["param"] == "wall_thickness", pending
     assert pending["version_id"] == latest["id"]
+
+
+# ---------------------------------------------------------------------------
+# Issue #299 — the FINALIZE seam's photo gate
+# ---------------------------------------------------------------------------
+
+
+def _valid_1x1_png_bytes() -> bytes:
+    """A genuinely decodable 1x1 PNG (the upload gate admits it)."""
+    from PIL import Image
+    import io as _io
+
+    buf = _io.BytesIO()
+    Image.new("RGB", (1, 1), (10, 20, 30)).save(buf, "PNG")
+    return buf.getvalue()
+#
+# The finalize route's ``_finalize_loop_kwargs`` used to forward
+# ``body.photo or row.get("source_photo_path")`` — the RAW on-disk PATH —
+# straight into the design loop's ``image_url`` content part. A stored
+# photo that is present but undecodable (the ticket's 8-byte ``fake-png``)
+# therefore reached the outgoing LLM request un-gated, while the chat path
+# already ran it through ``photo_data_uri`` / ``photo_lost`` (issue #295).
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_embeds_empty_photo_for_undecodable_stored_photo(app_with_versions):
+    """Issue #299: finalize on a project whose stored photo is present but
+    undecodable must hand the design loop exactly
+    :data:`EMPTY_PHOTO_DATA_URI` — never the raw path, never the
+    undecodable bytes base64-encoded — and still succeed (201, no
+    400/500). The stored-photo twin of the chat path's #295 gate (the
+    notice + id-only WARNING live in the chat adapter; on finalize the
+    gate is the constant itself)."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # An on-disk, undecodable stored photo (the ticket's repro bytes).
+        bad_photo = app_with_versions.state.conn.data_dir / "fake-png"
+        bad_photo.parent.mkdir(parents=True, exist_ok=True)
+        bad_photo.write_bytes(b"fake-png")
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(bad_photo)
+        )
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a bracket"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert "photo" in captured, "finalize seam did not supply a photo kwarg"
+    assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+    # The raw path must not leak into the loop either way.
+    assert not str(captured["photo"]).endswith("fake-png")
+
+
+def test_finalize_embeds_empty_photo_for_missing_stored_photo(app_with_versions):
+    """Issue #299: the finalize photo gate covers ALL FOUR photo states —
+    a stored photo whose file is gone out-of-band (path set, file deleted)
+    also degrades to :data:`EMPTY_PHOTO_DATA_URI`, identical to the chat
+    path's photo-LOST handling."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        gone = app_with_versions.state.conn.data_dir / "gone.png"
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(gone)
+        )
+        app_with_versions.state.run_design_loop = _loop
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a bracket"},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+
+
+def test_finalize_body_photo_data_uri_is_embedded_verbatim(app_with_versions):
+    """Issue #299: ``body.photo`` is an LLM-embed string (data URI / URL),
+    not a filesystem path — the SPA's ``FinalizeInput`` never carries it
+    today, and the gate must not try to decode it as a file. A body
+    data URI is forwarded VERBATIM (the stored-photo fallback never fires
+    while the body supplies one)."""
+    from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
+
+    captured: dict = {}
+
+    def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 10})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # A stored photo the fallback would pick — proves the body wins.
+        good = app_with_versions.state.conn.data_dir / "good.png"
+        good.parent.mkdir(parents=True, exist_ok=True)
+        good.write_bytes(_valid_1x1_png_bytes())
+        app_with_versions.state.conn.update_project(
+            pid, source_photo_path=str(good)
+        )
+        app_with_versions.state.run_design_loop = _loop
+        body_uri = "data:image/png;base64,AAAA"  # the body's own (opaque) URI
+        return await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"request": "make a bracket", "photo": body_uri},
+        )
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 201, r.text
+    assert captured["photo"] == "data:image/png;base64,AAAA", captured.get("photo")
+    assert captured["photo"] != EMPTY_PHOTO_DATA_URI

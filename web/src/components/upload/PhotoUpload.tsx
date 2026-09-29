@@ -167,8 +167,6 @@ export function PhotoUpload({
     } catch (e) {
       setState("error");
       const msg = e instanceof Error ? e.message : "Upload failed";
-      // If setErrorDetail was not called before the throw, set it here.
-      if (e instanceof Error) setErrorDetail(msg);
       onError?.(msg);
     }
   };

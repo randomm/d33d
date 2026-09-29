@@ -296,6 +296,46 @@ def test_get_project_storage_field_present(app_with_projects):
     assert body3["storage"] == {"repo_present": False, "photo_present": None}
 
 
+def test_list_projects_storage_signal_is_memoized_not_per_row_decode(
+    app_with_projects, monkeypatch
+):
+    """Issue #299: the project list / GET endpoint's storage signal uses
+    the CHEAP structural check (header open + verify, no full ``load()``),
+    and the memo means the check runs at most ONCE per distinct
+    (path, mtime, size) — not once per row per request. A regression that
+    full-decoded per row would (a) call the full-decode helper more than
+    once for the same file and (b) never hit the memo."""
+    import d33d.design_loop_events as dle
+
+    calls = {"n": 0}
+    original = dle._photo_structurally_valid
+
+    def _counting(path: str) -> bool:
+        calls["n"] += 1
+        return original(path)
+
+    monkeypatch.setattr(dle, "_photo_structurally_valid", _counting)
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Memo"})
+        pid = create_r.json()["id"]
+        files = {"file": ("p.png", _valid_png_1x1(), "image/png")}
+        await client.post(f"/api/projects/{pid}/photos", files=files)
+        # Two requests, two rows — the memo means the structural check
+        # for this file runs at most once total.
+        await client.get("/api/projects")
+        await client.get(f"/api/projects/{pid}")
+        return calls["n"], len(dle._photo_signal_cache)
+
+    n, memo_len = _run_async(app_with_projects, _call)
+    # The memo means one structural check for the file across BOTH
+    # requests (a per-row regression would show 2).
+    assert n == 1, f"structural check ran {n}x for one file"
+    # And the memo is populated (the (path, mtime, size) dict the helper
+    # reads).
+    assert memo_len >= 1
+
+
 def test_get_project_not_found(app_with_projects):
     """GET /api/projects/{id} for a non-existent ID → 404."""
 
