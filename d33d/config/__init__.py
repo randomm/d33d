@@ -14,6 +14,7 @@ from d33d.config.catalogue import (
     REQUIRED_ROLES,
     Catalogue,
     CatalogueError,
+    MissingEnvVarError,
     ModelCatalogueLoader,
     ModelEntry,
     Provider,
@@ -25,14 +26,17 @@ from d33d.config.catalogue import (
     load_catalogue,
     resolve_call_params,
 )
+from d33d.config.preflight import ModelPreflight, model_preflight
 from d33d.config.resolve import resolve_model
 
 __all__ = [
     "REQUIRED_ROLES",
     "Catalogue",
     "CatalogueError",
+    "MissingEnvVarError",
     "ModelCatalogueLoader",
     "ModelEntry",
+    "ModelPreflight",
     "Provider",
     "ResolutionError",
     "Role",
@@ -40,6 +44,7 @@ __all__ = [
     "apply_fallbacks",
     "hot_reload",
     "load_catalogue",
+    "model_preflight",
     "resolve_call_params",
     "resolve_model",
 ]

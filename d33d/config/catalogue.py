@@ -32,6 +32,20 @@ class CatalogueError(Exception):
         super().__init__(message)
 
 
+class MissingEnvVarError(CatalogueError):
+    """A ``${ENV_VAR}`` referenced by a provider key could not be resolved.
+
+    Raised by :func:`_interp_env` when the variable is unset, or when it is
+    set but empty (the key field is the only place the empty case matters).
+    ``var_name`` carries the bare variable name (e.g. ``"TRAIL_OPENERS_LLM_KEY"``),
+    never the key value, so it is safe to log or surface in a frame.
+    """
+
+    def __init__(self, message: str, var_name: str, source: str = "") -> None:
+        self.var_name = var_name
+        super().__init__(message, source)
+
+
 class ResolutionError(Exception):
     """A role could not be resolved to a callable model."""
 
@@ -114,7 +128,13 @@ class RoleResolution:
 
 
 def _interp_env(value: Any, where: str) -> str:
-    """Resolve a ``${ENV_VAR}`` key reference. Unset vars fail loudly."""
+    """Resolve a ``${ENV_VAR}`` key reference. Unset or empty vars fail loudly.
+
+    The provider key is the only field that uses this helper, so the
+    set-but-empty case is also an error here: an empty key makes the model
+    unc allable, and reporting it at load time (with the variable name) is
+    more useful than a silent empty string.
+    """
     if value is None:
         return ""
     if not isinstance(value, str):
@@ -125,10 +145,19 @@ def _interp_env(value: Any, where: str) -> str:
     if m:
         name = m.group(1)
         if name not in os.environ:
-            raise CatalogueError(
-                f"{where}: environment variable {name!r} (referenced by key {value!r}) is not set"
+            raise MissingEnvVarError(
+                f"{where}: environment variable {name!r} "
+                f"(referenced by key {value!r}) is not set",
+                var_name=name,
             )
-        return os.environ[name]
+        resolved = os.environ[name]
+        if not resolved:
+            raise MissingEnvVarError(
+                f"{where}: environment variable {name!r} "
+                f"(referenced by key {value!r}) is set but empty",
+                var_name=name,
+            )
+        return resolved
     return value
 
 
