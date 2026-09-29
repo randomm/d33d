@@ -1536,8 +1536,12 @@ def _build_production_design_loop():
     from d33d.config.preflight import model_preflight_loaded
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
-    from d33d.design_loop import IterationRecord, MODEL_UNCONFIGURED, make_llm_fn
-    from d33d.design_loop import DesignResult
+    from d33d.design_loop import (
+        MODEL_UNCONFIGURED,
+        DesignResult,
+        IterationRecord,
+        make_llm_fn,
+    )
     from d33d.evals.failure_capture import default_run_design_loop_hook
     from d33d.prompt_hash import canonical_hash
 

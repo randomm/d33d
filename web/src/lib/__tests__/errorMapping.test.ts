@@ -70,15 +70,12 @@ describe("errorMapping", () => {
         message: `Design loop exhausted: ${reason}`,
         reason,
       });
-      // The model_unconfigured reason without an env_var renders the
-      // "Check the model settings." variant (the base copy is the
-      // sentence; the env-var helper is selected when the frame names
-      // the variable).
-      const expected =
-        reason === "model_unconfigured"
-          ? copy.failure.modelUnconfiguredCheck()
-          : (copy.failure.reasons as Record<string, string>)[reason];
-      expect(display.message).toBe(expected);
+      // The headline is the reason-keyed `reasons` entry for every reason
+      // (the env-var helper sentence is rendered by the failure turn from
+      // the frame's `env_var`, never folded into the mapped headline).
+      expect(display.message).toBe(
+        (copy.failure.reasons as Record<string, string>)[reason],
+      );
       // The raw reason is present for part 4 (collapsed).
       expect(display.detail).toBe(reason);
     }
@@ -146,36 +143,6 @@ describe("errorMapping", () => {
     );
     expect(display.detail).toBe("renderer_unavailable");
     expect(display.retryable).toBe(true);
-  });
-
-  it("the model_unconfigured frame names the env var, is NOT retryable (issue #303)", () => {
-    // The model pre-flight found the `${ENV}` key unset/empty: the frame
-    // carries reason + the variable NAME (never the value). The sentence
-    // names the variable, and retryable is false — retrying a
-    // configuration failure just fails again, so FailureTurn omits the
-    // retry button.
-    const display = displayDesignLoopError({
-      message: "Design loop exhausted: model_unconfigured",
-      reason: "model_unconfigured",
-      env_var: "TRAIL_OPENERS_LLM_KEY",
-    });
-    expect(display.message).toBe(copy.failure.modelUnconfigured("TRAIL_OPENERS_LLM_KEY"));
-    expect(display.message).toBe(
-      "The model isn't configured. Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
-    );
-    expect(display.detail).toBe("model_unconfigured");
-    expect(display.retryable).toBe(false);
-    expect(display.envVar).toBe("TRAIL_OPENERS_LLM_KEY");
-    // The closed-set totality test maps `reason` alone: without env_var
-    // the "Check the model settings." variant is the sentence.
-    const headless = displayDesignLoopError({
-      message: "Design loop exhausted: model_unconfigured",
-      reason: "model_unconfigured",
-    });
-    expect(headless.message).toBe(copy.failure.modelUnconfiguredCheck());
-    expect(headless.message).toBe("The model isn't configured. Check the model settings.");
-    expect(headless.retryable).toBe(false);
-    expect(headless.envVar).toBeUndefined();
   });
 
   it("an unknown or missing reason stays retryable (issue #303 pins the inversion)", () => {

@@ -17,7 +17,7 @@ is that a value was passed around six hops and never rendered).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 from d33d.design_loop import run_design_loop
 from d33d.render_worker import RenderResult
@@ -307,17 +307,17 @@ def test_production_closure_forwards_request_past_the_hook(app_with_versions, mo
         id = "m"
         provider = "p"
         model = "stub"
-        params = {}
+        params: ClassVar[Any] =  {}
         fallbacks = ()
-        retries = {}
+        retries: ClassVar[Any] =  {}
 
         def provider_key(self):
             return "p"
 
     class _MockCat:
-        providers = {"p": types.SimpleNamespace(key="stub")}
-        roles = {"design": "m"}
-        models = {"m": _MockEntry()}
+        providers: ClassVar[Any] =  {"p": types.SimpleNamespace(key="stub")}
+        roles: ClassVar[Any] =  {"design": "m"}
+        models: ClassVar[Any] =  {"m": _MockEntry()}
 
         def role(self, r: str) -> str:
             return self.roles[r]
@@ -430,17 +430,17 @@ def test_production_closure_render_fn_matches_worker_signature(
         id = "m"
         provider = "p"
         model = "stub"
-        params = {}
+        params: ClassVar[Any] =  {}
         fallbacks = ()
-        retries = {}
+        retries: ClassVar[Any] =  {}
 
         def provider_key(self):
             return "p"
 
     class _MockCat:
-        providers = {"p": types.SimpleNamespace(key="stub")}
-        roles = {"design": "m"}
-        models = {"m": _MockEntry()}
+        providers: ClassVar[Any] =  {"p": types.SimpleNamespace(key="stub")}
+        roles: ClassVar[Any] =  {"design": "m"}
+        models: ClassVar[Any] =  {"m": _MockEntry()}
 
         def role(self, r: str) -> str:
             return self.roles[r]

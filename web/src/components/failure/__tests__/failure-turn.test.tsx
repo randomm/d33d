@@ -232,13 +232,13 @@ describe("FailureTurn", () => {
     // missing variable's name. The failure turn offers no retry button
     // (retrying changes nothing until the operator sets the variable),
     // and renders the helper sentence naming the variable.
-    const error: DisplayError & { env_var: string } = {
+    const error: DisplayError = {
       message: copy.failure.reasons.model_unconfigured,
       detail: "model_unconfigured",
       retryable: false,
       reason: "model_unconfigured",
-      env_var: "TRAIL_OPENERS_LLM_KEY",
-    } as DisplayError & { env_var: string };
+      envVar: "TRAIL_OPENERS_LLM_KEY",
+    };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
     // The headline is the deck's reason sentence.
     expect(screen.getByTestId("failure-turn-sentence").textContent).toBe(

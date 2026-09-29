@@ -592,8 +592,7 @@ def test_role_target_not_a_string_rejected(tmp_path: Path) -> None:
 # model pre-flight (issue #303)
 # ---------------------------------------------------------------------------
 
-from d33d.config import MissingEnvVarError, ModelPreflight, model_preflight
-from d33d.config.catalogue import load_catalogue as _lc
+from d33d.config import MissingEnvVarError, model_preflight
 
 
 def test_model_preflight_ok_when_keyed_and_resolves(models_yaml_file: Path) -> None:

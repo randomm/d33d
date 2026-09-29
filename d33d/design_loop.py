@@ -79,10 +79,10 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "MAX_ITERATIONS",
+    "MODEL_UNCONFIGURED",
     "NO_IMPROVEMENT_LIMIT",
     "RENDERER_PREFLIGHT_CACHE_SECONDS",
     "RENDERER_UNAVAILABLE",
-    "MODEL_UNCONFIGURED",
     "BboxInfo",
     "DesignResult",
     "IterationRecord",

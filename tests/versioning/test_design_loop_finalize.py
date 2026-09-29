@@ -20,6 +20,7 @@ import json
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -786,18 +787,18 @@ def test_production_seam_forwards_bbox_fn_to_real_loop(app_with_versions, monkey
     class _MockEntry:
         id = "m"
         provider = "p"
-        model = "stub"
-        params = {}
-        fallbacks = ()
-        retries = {}
+        model: ClassVar[Any] =  "stub"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
 
         def provider_key(self):
             return "p"
 
     class _MockCat:
-        providers = {"p": types.SimpleNamespace(key="stub")}
-        roles = {"design": "m"}
-        models = {"m": _MockEntry()}
+        providers: ClassVar[Any] =  {"p": types.SimpleNamespace(key="stub")}
+        roles: ClassVar[Any] =  {"design": "m"}
+        models: ClassVar[Any] =  {"m": _MockEntry()}
 
         def role(self, r: str) -> str:
             return self.roles[r]
@@ -5042,18 +5043,18 @@ def _unconfigured_catalogue(monkeypatch):
     class _Entry:
         id = "m"
         model = "stub"
-        provider = "p"
-        params = {}
-        fallbacks = ()
-        retries = {}
+        provider: ClassVar[Any] =  "p"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
 
         def provider_key(self) -> str:
             return "p"
 
     class _Cat:
-        providers = {"p": _Prov()}
-        roles = {"design": "m", "critique": "m", "classification": "m"}
-        models = {"m": _Entry()}
+        providers: ClassVar[Any] =  {"p": _Prov()}
+        roles: ClassVar[Any] =  {"design": "m", "critique": "m", "classification": "m"}
+        models: ClassVar[Any] =  {"m": _Entry()}
 
         def role(self, r: str) -> str:
             return self.roles[r]
@@ -5370,7 +5371,6 @@ def test_production_closure_model_unconfigured_short_circuits(
     from d33d.config import catalogue as _cat
     from d33d.config import probes as _probes
     from d33d.config import resolve as _resolve_mod
-    from d33d.render_worker import render_for_design_loop as _render
 
     class _Provider:
         base = "http://stub"
@@ -5379,18 +5379,18 @@ def test_production_closure_model_unconfigured_short_circuits(
     class _Entry:
         id = "m"
         model = "stub"
-        provider = "p"
-        params = {}
-        fallbacks = ()
-        retries = {}
+        provider: ClassVar[Any] =  "p"
+        params: ClassVar[Any] =  {}
+        fallbacks: ClassVar[Any] =  ()
+        retries: ClassVar[Any] =  {}
 
         def provider_key(self) -> str:
             return "p"
 
     class _Cat:
-        providers = {"p": _Provider()}
-        roles = {"design": "m", "critique": "m", "classification": "m"}
-        models = {"m": _Entry()}
+        providers: ClassVar[Any] =  {"p": _Provider()}
+        roles: ClassVar[Any] =  {"design": "m", "critique": "m", "classification": "m"}
+        models: ClassVar[Any] =  {"m": _Entry()}
 
         def role(self, r: str) -> str:
             return self.roles[r]

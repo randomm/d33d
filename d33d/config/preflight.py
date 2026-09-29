@@ -81,4 +81,4 @@ def model_preflight_loaded(cat: Catalogue | Any, role: str) -> ModelPreflight:
     return ModelPreflight(ok=True)
 
 
-__all__ = ["ModelPreflight", "MissingEnvVarError", "model_preflight", "model_preflight_loaded"]
+__all__ = ["MissingEnvVarError", "ModelPreflight", "model_preflight", "model_preflight_loaded"]

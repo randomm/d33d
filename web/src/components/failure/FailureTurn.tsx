@@ -21,14 +21,12 @@
 import { copy } from "../../copy";
 import type { DisplayError } from "../../lib/errorMapping";
 
-/** Read the frame's `env_var` field (the model pre-flight's terminal
- *  frame carries it — issue #303) as a string or `null`. Anything else
- *  (absent, malformed) is treated as absent: the helper is the unresolved
+/** The model pre-flight frame's `env_var` field (issue #303) as carried
+ *  on the mapped `DisplayError` (the `envVar` field — the mapping copies
+ *  it from the frame). Absent → `null`: the helper is the unresolved
  *  variant, never a fabricated name. */
 function envVarOf(error: DisplayError): string | null {
-  const frame = error as unknown as Record<string, unknown>;
-  const v = frame.env_var;
-  return typeof v === "string" && v.length > 0 ? v : null;
+  return error.envVar ?? null;
 }
 
 interface EnvelopeAxisRow {

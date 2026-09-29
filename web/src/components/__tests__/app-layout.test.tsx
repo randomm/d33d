@@ -4108,9 +4108,13 @@ describe("App design-loop error display (issue #82)", () => {
     await waitFor(() => {
       expect(screen.getByTestId("failure-turn")).toBeTruthy();
     });
-    // The helper sentence names the variable (the NAME, never the value).
+    // The headline is the reason-keyed deck sentence; the helper sentence
+    // (the env-var NAME, never the value) renders after it.
     expect(screen.getByTestId("failure-turn-sentence").textContent).toContain(
-      "The model isn't configured. Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
+      "The model isn't configured, so nothing was designed.",
+    );
+    expect(screen.getByTestId("failure-turn-model-helper").textContent).toContain(
+      "Set TRAIL_OPENERS_LLM_KEY where the server runs, then restart it.",
     );
     // A configuration failure is not retryable — the retry button is omitted.
     expect(screen.queryByTestId("failure-action-retry")).toBeNull();
