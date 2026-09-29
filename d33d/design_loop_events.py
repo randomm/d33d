@@ -160,11 +160,13 @@ def _photo_usable(photo_path: str) -> bool:
     """
     try:
         import io as _io
+
         from PIL import Image as _Image
 
         with _Image.open(_io.BytesIO(Path(photo_path).read_bytes())) as img:
             img.load()
-    except Exception:  # undecodable, unreadable, oversized — treated as lost
+    except (OSError, ValueError):
+        # undecodable, unreadable, oversized — treated as lost
         return False
     return True
 

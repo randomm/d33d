@@ -742,6 +742,30 @@ def test_upload_photo_422_on_truncated_png(app_with_projects):
     assert r.json()["detail"] == UNDECODABLE_PHOTO_DETAIL
 
 
+def test_upload_photo_rejects_decompression_bomb(app_with_projects):
+    """A PNG header claiming 10000×1 is rejected at header-parse time
+    (before a full decode) → 422 (issue #299: ``MAX_PHOTO_SIDE_PX`` = 8192,
+    ``Image.MAX_IMAGE_PIXELS`` is set — a tiny file with a giant pixel
+    declaration must never allocate gigabytes)."""
+    # A minimal valid PNG with IHDR declaring 10000×1 (45 bytes total —
+    # signature + IHDR + IEND, no IDAT data). Pillow's Image.open reads
+    # only the header and reports size (10000, 1); the validator rejects
+    # it at the dimension check, never calling verify()/load().
+    bomb = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAJxAAAAABCAIAAAD3vCNcAAAAAElFTkSuQmCC"
+    )
+
+    async def _call(client):
+        create_r = await client.post("/api/projects", json={"name": "Bomb"})
+        pid = create_r.json()["id"]
+        files = {"file": ("bomb.png", bomb, "image/png")}
+        return await client.post(f"/api/projects/{pid}/photos", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422, f"expected 422, got {r.status_code}: {r.text}"
+    assert r.json()["detail"] == UNDECODABLE_PHOTO_DETAIL
+
+
 # ---------------------------------------------------------------------------
 # Issue #300 — the offer-acceptance pre-route reads the same single-source
 # block the Brief shows (``state_block_for_version`` — rule (a) axis

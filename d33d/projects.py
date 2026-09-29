@@ -378,7 +378,8 @@ def _photo_decodable(photo_path: str) -> bool:
     the caller treats as photo-lost)."""
     try:
         validate_photo_bytes(Path(photo_path).read_bytes())
-    except Exception:  # undecodable, unreadable, oversized — all "not usable"
+    except (ValueError, OSError):
+        # undecodable, unreadable, oversized — all "not usable"
         return False
     return True
 
