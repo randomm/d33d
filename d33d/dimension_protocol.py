@@ -277,6 +277,22 @@ def _extract_stated(
                     for axis, value in triple_axes.items():
                         if axis not in out:
                             out[axis] = value
+            # Single-axis-word lexicon (issue #314, operator decision:
+            # the single-axis-word path is part of the per-axis contract,
+            # and the triple/pair path alone cannot see a single-number
+            # statement such as "a 60 mm wide stand for a 100 × 70 mm
+            # phone", where the stand's own width is the part's stated
+            # axis). Fills ONLY axes the triple left empty (precedence:
+            # axis-letter cues > triple > cube shorthand > lexicon —
+            # the ticket's own priority order), and the lexicon's own
+            # mating-connector guard ("a lid for a box 60 mm wide" →
+            # nothing) applies inside it, so the connector rule holds on
+            # this path too.
+            if not all(a in out for a in DIMENSION_AXES):
+                lexicon_axes = _classify_axis_cues(text)
+                for axis, value in lexicon_axes.items():
+                    if axis not in out:
+                        out[axis] = value
             # Equal-axis size shorthand (only if the axis pass and the
             # triple left axes empty).
             if not out:
@@ -538,6 +554,23 @@ def stated_axes_from_message(
         for axis in DIMENSION_AXES
         if axis in stated
     }
+
+
+def _classify_axis_cues(text: str) -> dict[str, float]:
+    """The closed axis lexicon's absolute assignment for ONE message — the
+    per-axis seam's floor (issue #314, operator decision: the
+    single-axis-word path is part of the per-axis contract, and the
+    triple/pair path alone cannot see a single-number statement such as
+    "a 60 mm wide stand for a 100 × 70 mm phone", where the stand's own
+    width is the part's stated axis). The mate connector rule applies
+    here too (the lexicon's own mate-zone guard), and the triple path
+    wins on conflicts (the explicit cue, per the ticket's precedence:
+    "axis letter cues > triple > cube shorthand > lexicon"), so this
+    only fills axes the triple left empty.
+    """
+    from d33d.axis_lexicon import classify
+
+    return dict(classify(text).absolute)
 
 
 def stated_dims_from_message(

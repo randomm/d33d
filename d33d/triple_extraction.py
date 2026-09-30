@@ -16,10 +16,12 @@ from d33d.axis_lexicon import (
     _FOREIGN_UNIT_RE,
     _PART_NOUNS,
     MM_UNIT_ALTERNATION,
+    _mating_connector_at,
 )
 
 __all__ = [
     "_extract_triple",
+    "_in_mating_zone",
     "_mm_cue_values",
     "_triple_suppressed_by_feature_noun",
     "user_quoted_unmapped_mm",
@@ -122,6 +124,36 @@ def _triple_suppressed_by_feature_noun(
     )
 
 
+def _in_mating_zone(message: str, pos: int) -> bool:
+    """True if ``pos`` (a match's start) sits in the mating part's zone
+    (issue #314): after a mating connector (``_MATING_CONNECTORS`` —
+    "fits", "fit", "fitting", "to fit", "for", "over", "onto", "on top
+    of", "that goes on") with no later mating connector before it, so the
+    size belongs to the MATING PART, never the part being made.
+
+    A size after a mating connector is the mating part's, not the part's:
+    "a 55 × 40 mm lid that fits a 60 × 45 mm box" → the lid (55 × 40) is
+    the part; the box's 60 × 45 must never state the lid's axes. The rule
+    is head-noun-independent ("a 60 mm wide stand for a 100 × 70 mm
+    phone" → the phone's pair is the mating part's), and clause-local:
+    a later "with"/"and" clause after the mating phrase resumes normal
+    parsing, but a connector's zone extends to the NEXT mating connector
+    ("a lid that fits a 60 × 45 mm box, 5 mm thick" → the 5 mm is still
+    in the box's zone — "thick" is not an axis word, so nothing states
+    either way).
+
+    Multi-word connectors ("to fit", "on top of", "that goes on") match
+    as whole phrases; the shared ``_MATING_CONNECTOR_RE`` (the
+    axis_lexicon's single definition, longest-first) never matches "fit"
+    inside another token, and ``_mating_connector_at``'s fit-type filter
+    ("slip fit"/"press fit") is inherited by this helper — a fit-TYPE
+    word is not a mating connector. This is the single helper the
+    triple/pair path uses; the lexicon's clause classification uses the
+    same ``_mating_connector_at`` from its own side.
+    """
+    return _mating_connector_at(message, pos)
+
+
 def _match_states(message: str, m: re.Match[str]) -> bool:
     """True if the triple/pair match ``m`` passes ALL the unconditional
     per-match guards (the shared guard body — ONE evaluation, used by BOTH
@@ -143,7 +175,11 @@ def _match_states(message: str, m: re.Match[str]) -> bool:
     5. magnitude: an explicit mm unit anywhere on the match NEVER
        magnitude-suppresses ("a 150x45mm tray" → W150 D45); the >100
        bound applies only to a unit-less pair ("1920x1080",
-       "a 150x45 tray" → nothing).
+       "a 150x45 tray" → nothing);
+    6. mating connector (issue #314): the match starts in the mating
+       part's zone (``_in_mating_zone``) — a size after a mating
+       connector belongs to the mating part and never states the part's
+       axes; its numbers stay unmapped/offerable.
 
     The part-noun conditional (issue #305) is deliberately NOT part of
     this predicate — it lives in ``_extract_triple`` as the single
@@ -183,11 +219,14 @@ def _match_states(message: str, m: re.Match[str]) -> bool:
         }:
             return False
     # Guard 4: magnitude — the bound applies only to a unit-less pair.
-    return not (
-        len(numbers) == 2 and not has_mm_unit and any(
-            v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
-        )
-    )
+    if len(numbers) == 2 and not has_mm_unit and any(
+        v > _NO_UNIT_DOUBLE_MAX_MM for v in numbers
+    ):
+        return False
+    # Guard 5: mating connector (issue #314) — a size after a mating
+    # connector ("fits", "for", "over", …) belongs to the mating part and
+    # never states the part's axes; its numbers stay unmapped/offerable.
+    return not _in_mating_zone(message, m.start())
 
 
 def _any_other_stating_match(message: str, exclude: re.Match[str]) -> bool:
@@ -219,6 +258,14 @@ def _any_other_stating_match(message: str, exclude: re.Match[str]) -> bool:
     for cm in _TRIPLE_RE.finditer(message):
         if cm.start() == exclude.start():
             continue
+        # Issue #314: a candidate in the mating part's zone (after a
+        # mating connector) never states, so it can never count as the
+        # "other stating match" that would suppress a part-noun pair
+        # (e.g. the box pair in "a 55 × 40 mm lid that fits a 60 × 45 mm
+        # box" must not suppress the lid pair's W/D reading). The
+        # part-noun conditional is intentionally NOT applied here
+        # (same as before #314): the candidate must pass the UNCONDITIONAL
+        # guard stack — and the mating guard is unconditional.
         if _match_states(message, cm):
             return True
     return False
