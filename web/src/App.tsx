@@ -296,18 +296,6 @@ export default function App({ client }: AppProps) {
   const refetchDesignState = useCallback((projectIdOverride?: number) => {
     const effectiveProjectId = projectIdOverride ?? projectId;
     if (effectiveProjectId === null) return;
-    // Issue #316 fix round: a new project (a `projectId` change re-creates
-    // this callback with a new `effectiveProjectId`) starts from a clean
-    // design state. The `history_missing` flag is reset to `false` here
-    // (scoped to the CURRENT project — a version-created refetch for the
-    // SAME project does NOT re-create this callback, so the flag is NOT
-    // reset on a version-created refetch; only a project switch re-creates
-    // the callback and triggers the reset). The entries are NOT reset
-    // here (the refetch's `.then` applies the new block); resetting them
-    // here would wipe the last-known block on a version-created refetch
-    // (the #237 "keep last-known" contract). The `isStale` guard in
-    // `applyEnvelope` still protects against out-of-order responses.
-    setDesignStateHistoryMissing(false);
     // Issue #295: re-fetch the storage signal alongside the design state
     // (the same trigger — a new version may have changed the repo's state).
     apiClient
