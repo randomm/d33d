@@ -145,6 +145,12 @@ LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
 #: importing across workstreams.
 MAX_OUTPUT_SCAD_CHARS = 256 * 1024
 
+#: Hard cap on ``FailureEvent.stderr_tail`` (chars) — the bounded tail of
+#: the best candidate's render diagnostic text (container stderr +
+#: harvested render.log tail) the archive carries so the next triage
+#: takes one run to diagnose (issue #309).
+MAX_STDERR_TAIL_CHARS = 8 * 1024
+
 #: Hard cap on a single JSON line (bytes) — well over any realistic
 #: 7-field line, keeping the POSIX O_APPEND atomicity argument tight.
 MAX_LINE_BYTES = 512 * 1024
@@ -182,6 +188,12 @@ class FailureEvent(BaseModel):
       ``MAX_OUTPUT_SCAD_CHARS``).
     - ``failure_class`` — one of :data:`EVAL_FAILURE_CLASSES`. Closed
       enum, validated at construction.
+    - ``exit_code`` (issue #309) — the best candidate's render exit code
+      (``None`` when the loop never rendered — a pre-flight exhaustion
+      has no render).
+    - ``stderr_tail`` (issue #309) — the bounded tail of the best
+      candidate's render diagnostic text (``""`` when the render carried
+      none).
     - ``ts`` — UTC ISO-8601 timestamp (provenance, not one of the 7).
     - ``event_id`` — uuid4 hex (provenance, not one of the 7).
 
@@ -197,6 +209,8 @@ class FailureEvent(BaseModel):
     prompt_version: str = Field(min_length=1)
     output_scad: str = Field(default="")
     failure_class: str = Field(min_length=1)
+    exit_code: int | None = None
+    stderr_tail: str = ""
     ts: str = Field(min_length=1)
     event_id: str = Field(min_length=1)
 
@@ -273,6 +287,8 @@ def make_failure_event(
     prompt_version: str,
     output_scad: str,
     failure_class: str,
+    exit_code: int | None = None,
+    stderr_tail: str = "",
     now: datetime | None = None,
     event_id: str | None = None,
     allow_gate_reasons: bool = False,
@@ -305,6 +321,8 @@ def make_failure_event(
         prompt_version=prompt_version,
         output_scad=output_scad[:MAX_OUTPUT_SCAD_CHARS],
         failure_class=failure_class,
+        exit_code=exit_code,
+        stderr_tail=(stderr_tail or "")[:MAX_STDERR_TAIL_CHARS],
         ts=ts,
         event_id=eid,
     )
@@ -443,6 +461,15 @@ def _exhausted_loop_event(
             f"EVAL_FAILURE_CLASSES, GATE_REASON_CLASSES or "
             f"LOOP_LEVEL_FAILURE_REASONS"
         )
+    best = getattr(design_result, "best", None)
+    render = getattr(best, "render", None) if best is not None else None
+    exit_code = None
+    stderr_tail = ""
+    if render is not None:
+        raw_exit = getattr(render, "exit_code", None)
+        if isinstance(raw_exit, int):
+            exit_code = raw_exit
+        stderr_tail = str(getattr(render, "stderr", "") or "")
     return make_failure_event(
         photo=_optional_str(photo),
         region_mark=_optional_str(region_mark),
@@ -451,6 +478,8 @@ def _exhausted_loop_event(
         prompt_version=prompt_version,
         output_scad=output_scad,
         failure_class=failure_reason,
+        exit_code=exit_code,
+        stderr_tail=stderr_tail,
         allow_gate_reasons=True,
     )
 

@@ -403,7 +403,8 @@ def test_production_closure_render_fn_matches_worker_signature(
 
     calls: list[dict[str, Any]] = []
 
-    # Signature EXACTLY matches ``render_for_design_loop`` — no
+    # Signature matches render_for_design_loop's positional +
+    # renders_dir/on_progress/project_id kwargs — no
     # ``**kwargs`` catch-all: a stray kwarg from the buggy closure is a
     # ``TypeError`` at call time, which is the guard.
     def _spy(
@@ -411,6 +412,7 @@ def test_production_closure_render_fn_matches_worker_signature(
         defines: dict[str, str],
         renders_dir=None,
         on_progress=None,
+        project_id=None,
     ) -> RenderResult:
         calls.append({"renders_dir": renders_dir, "on_progress": on_progress})
         return RenderResult(

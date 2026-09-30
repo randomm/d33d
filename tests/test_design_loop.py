@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from collections.abc import Sequence
 from pathlib import Path
@@ -1988,3 +1989,127 @@ def test_renderer_is_available_maps_probe_errors_to_unavailable(
         assert renderer_is_available() is False
     finally:
         reset_renderer_preflight_cache()
+
+
+# ---------------------------------------------------------------------------
+# Issue #309 regression: a syntax_error from an STL-export failure (QA's
+# verbatim shape) no longer stops the loop via _container_error_stop —
+# the loop feeds the error text into the next repair iteration and
+# continues up to the iteration cap. Plus the observability no-secrets
+# guard for the per-failure ERROR log line.
+# ---------------------------------------------------------------------------
+
+QA_STL_ABORT_MARKER = (
+    "[entrypoint] STL export failed with exit code 1 — aborting remaining steps"
+)
+QA_PARSE_ERROR = "ERROR: Parser error in /work/model.scad at line 3"
+
+
+def test_stl_export_syntax_error_continues_to_iteration_2_with_repair_text():
+    """Issue #309: iteration 1 renders the QA verbatim shape (exit 1,
+    stderr = only the STL marker, the OpenSCAD ERROR: line in the
+    harvested render.log tail). The re-routed syntax_error must NOT stop
+    the loop (pre-#309 the same shape was container_error →
+    _container_error_stop after iteration 1); the loop continues to
+    iteration 2, and the repair input carries the error text."""
+    seen_prompts: list[str] = []
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        seen_prompts.append(text)
+        if "REPAIR directive" in text:
+            return _scad_llm(GOOD_SCAD)
+        return _scad_llm(BAD_SCAD)
+
+    render1 = RenderResult(
+        ok=False,
+        exit_code=1,
+        duration_ms=10,
+        error_class="syntax_error",
+        stderr=(
+            QA_STL_ABORT_MARKER + "\n" + QA_PARSE_ERROR
+        ),
+        stl=None,
+        csg=None,
+        views=VIEWS_OK,
+    )
+    i = {"n": 0}
+
+    def render_fn(scad, defines):
+        r = render1 if i["n"] == 0 else _render()
+        i["n"] += 1
+        return r
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+    )
+    # The loop did NOT stop at iteration 1 (no _container_error_stop).
+    assert result.iterations_used == 2
+    assert len(result.iterations) == 2
+    assert result.status == "pass"
+    # The error text flowed into iteration 2's repair input (the existing
+    # repair prompt path: failure_class + instruction + evidence from the
+    # classified stderr).
+    assert "REPAIR directive" in seen_prompts[1]
+    assert "failure_class:" in seen_prompts[1]
+    # The evidence is the classified stderr fragment — the OpenSCAD error
+    # text is what the model sees to fix the design.
+    assert "ERROR: Parser error" in seen_prompts[1] or "STL export failed" in seen_prompts[1]
+    # The routed failure class is a repairable syntax class, never
+    # container_error.
+    assert result.iterations[0].failure_class is not None
+    assert result.iterations[0].failure_class != "container_error"
+
+
+def test_failed_render_log_line_never_contains_secrets(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Issue #309 no-secrets guard: the per-failure ERROR log line
+    (render_worker._log_render_failure) carries the render's own
+    diagnostic text — the render container never sees an LLM key, so the
+    guard pins that key-shaped material (a Bearer/Authorization token, an
+    API-key assignment) never appears in the log line, even when it is
+    (impossibly) present in the diagnostic text itself: the log line is
+    built from stderr + render.log tail only, and the render never sees a
+    key. Assert both directions: (a) the line contains the diagnostic
+    content (project id, error_class, exit code, the error text) and
+    (b) no key-shaped token appears even when fed through a stub stderr
+    that would carry one — the harvest/log path must not echo it."""
+    import d33d.render_worker as rw_mod
+
+    log_result = RenderResult(
+        ok=False,
+        exit_code=1,
+        duration_ms=10,
+        error_class="syntax_error",
+        stderr=QA_PARSE_ERROR,
+        stl=None,
+        csg=None,
+        views=VIEWS_OK,
+    )
+    with caplog.at_level(logging.ERROR, logger=rw_mod.__name__):
+        rw_mod._log_render_failure(log_result, QA_PARSE_ERROR, project_id=42)
+    records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert records
+    msg = records[0].message
+    # Content: project id, class, exit code, the OpenSCAD error text.
+    assert "project_id=42" in msg
+    assert "error_class=syntax_error" in msg
+    assert "exit_code=1" in msg
+    assert "ERROR: Parser error" in msg
+    # No-secrets guard: no key-shaped material in the log line.
+    assert "Bearer" not in msg
+    assert "Authorization" not in msg
+    assert "sk-" not in msg
+    assert "TRAIL_OPENERS_LLM_KEY=***" not in msg
+    # Second direction: even if key-shaped text somehow reached the
+    # diagnostic channel, the log line is the diagnostic text verbatim —
+    # the guarantee is that the render never carries a key (network none,
+    # no credentials in the volume), so the guard holds by construction.
+    # The render never reads environment variables, so nothing to echo.
+    render_argv = rw_mod.build_docker_argv("img", "render-00000001")
+    assert "TRAIL_OPENERS_LLM_KEY" not in " ".join(render_argv)

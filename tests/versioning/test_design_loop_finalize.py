@@ -3018,14 +3018,17 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
         defines: dict[str, str],
         renders_dir=None,
         on_progress=None,
+        project_id=None,
     ) -> RenderResult:
-        # Exact 4-parameter signature of render_for_design_loop — an extra
-        # keyword argument here is a genuine TypeError, not a swallowed
-        # **kwargs (a star-star stub would let the buggy call pass).
+        # Signature matches render_for_design_loop's positional +
+        # renders_dir/on_progress/project_id kwargs — an extra keyword
+        # argument here is a genuine TypeError, not a swallowed **kwargs
+        # (a star-star stub would let the buggy call pass).
         spy_calls["scad_source"] = scad_source
         spy_calls["defines"] = defines
         spy_calls["renders_dir"] = renders_dir
         spy_calls["on_progress"] = on_progress
+        spy_calls["project_id"] = project_id
         return canned
 
     monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
@@ -3071,6 +3074,9 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
     assert spy_calls["on_progress"] is None
     # The project-scoped renders_dir is still bound (issue #72).
     assert spy_calls["renders_dir"] is not None
+    # The project id flows through (issue #309 observability: the
+    # per-failure ERROR log line names the project).
+    assert spy_calls["project_id"] == 7
 
 
 def test_sse_wide_catch_emits_terminal_error():

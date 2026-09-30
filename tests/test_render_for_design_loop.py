@@ -17,13 +17,12 @@ version had.
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import Any
 
 import pytest
-
-import logging
 
 import d33d.render_worker as rw
 
@@ -580,7 +579,7 @@ def test_render_for_design_loop_renders_dir_kwarg_overrides_base(
 
 def _stub_docker_run_with_label(
     labels: dict[str, str] | None,
-) -> "subprocess.CompletedProcess[str] | None":
+) -> subprocess.CompletedProcess[str] | None:
     """Return a ``subprocess.run`` stub that handles both the
     ``docker image inspect`` call (returns the label JSON or non-zero
     for an absent image) and all other docker calls (returns success).
@@ -798,3 +797,110 @@ def test_render_for_design_loop_fails_loudly_when_image_absent(
     # No render argv was issued.
     render_runs = [c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c]
     assert render_runs == [], f"render run issued on absent image: {render_runs}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #309: regression at the render_for_design_loop level — QA's verbatim
+# shape (exit 1; container stderr = ONLY the STL marker; /work/render.log
+# tail = "ERROR: Parser error …") must classify as syntax_error, with the
+# render.log harvested via the busybox pattern BEFORE the finally cleanup.
+# ---------------------------------------------------------------------------
+
+QA_STL_ABORT_MARKER = (
+    "[entrypoint] STL export failed with exit code 1 — aborting remaining steps"
+)
+
+QA_RENDER_LOG = (
+    Path(__file__).parent / "fixtures" / "issue-309-render.log"
+)
+
+
+def _qa_stub(render_log_text: str, calls: list[list[str]]) -> Any:
+    """``subprocess.run`` stub reproducing QA's capture verbatim: the render
+    container exits 1 with only the STL marker on stderr; the render.log
+    harvest helper (``tail -c 65536 /work/render.log``) writes the fixture
+    text to the harvest output dir; everything else succeeds."""
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=QA_STL_ABORT_MARKER.encode()
+            )
+        if "tail -c 65536 /work/render.log" in " ".join(argv):
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    out_dir = Path(tok.rsplit(":", 1)[0])
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    (out_dir / "render.log").write_text(render_log_text)
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    return _record
+
+
+def _run_qa_render(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, render_log_text: str
+) -> tuple[Any, list[list[str]]]:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(rw.subprocess, "run", _qa_stub(render_log_text, calls))
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-309qa001")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+    result = rw.render_for_design_loop("cube(10);", {}, project_id=42)
+    return result, calls
+
+
+def test_qa_verbatim_shape_classifies_as_syntax_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression (issue #309): exit 1 + stderr = only the STL marker +
+    render.log = ERROR: Parser error → syntax_error (pre-#309 this shape
+    classified container_error → the loop stopped via #287's
+    _container_error_stop instead of running the repair loop)."""
+    result, _ = _run_qa_render(monkeypatch, tmp_path, QA_RENDER_LOG.read_text())
+    assert result.ok is False
+    assert result.error_class == "syntax_error"
+    assert result.exit_code == 1
+
+
+def test_qa_shape_still_syntax_error_when_render_log_empty(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 64-KiB-truncation edge at the render level: the harvest finds an
+    empty log (no ERROR: line survived the window) — the STL marker in
+    stderr alone still classifies syntax_error (it is the only source of
+    that marker, so the truncated tail never regresses the class)."""
+    result, _ = _run_qa_render(monkeypatch, tmp_path, "")
+    assert result.error_class == "syntax_error"
+    assert result.exit_code == 1
+
+
+def test_qa_shape_container_error_when_no_markers_anywhere(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Docker-layer failure shape (no STL marker in stderr, no ERROR: in the
+    harvested tail) → container_error — the re-routing must not turn
+    genuine environment faults into repairable design errors."""
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=1, stdout=b"", stderr=b"docker: some failure"
+            )
+        if "tail -c 65536 /work/render.log" in " ".join(argv):
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    out_dir = Path(tok.rsplit(":", 1)[0])
+                    out_dir.mkdir(parents=True, exist_ok=True)
+                    (out_dir / "render.log").write_text("benign log line\n")
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-309qa002")
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp-2"))
+    result = rw.render_for_design_loop("cube(10);", {}, project_id=42)
+    assert result.error_class == "container_error"

@@ -230,6 +230,24 @@ RENDER_SIZE: tuple[int, int] = (800, 800)
 #: OpenSCAD diagnostic marker in stderr — the ``syntax_error`` gate.
 OPENSCAD_DIAGNOSTIC_RE = re.compile(r"ERROR:")
 
+#: The entrypoint's STL-abort marker — the entrypoint writes this to the
+#: container's STDERR (entrypoint.sh, the step-1 abort path) when the STL
+#: export fails: "[entrypoint] STL export failed with exit code <N> —
+#: aborting remaining steps". The ONLY source of this line in the container
+#: stderr is the STL step itself, so its presence proves the entrypoint ran
+#: AND that the failure is an OpenSCAD design failure — never a docker-layer
+#: fault. The ``syntax_error`` gate: the marker (in the container stderr)
+#: takes precedence over the ``ERROR:`` marker (either source).
+STL_ABORT_RE = re.compile(r"\[entrypoint\] STL export failed")
+
+#: Bounded tail (bytes) harvested from the on-volume /work/render.log on
+#: every render — the entrypoint appends every openscad invocation's stderr
+#: there, so on a failure the OpenSCAD ``ERROR:`` diagnostics live in the
+#: log, NOT in the container's stderr (which carries only the ``[entrypoint]``
+#: markers). The tail is decoded UTF-8 ``errors="replace"`` and fed to
+#: :func:`classify` as the log half of the diagnostic text (issue #309).
+RENDER_LOG_TAIL_BYTES = 64 * 1024
+
 #: stderr is truncated by the caller to the first 256 KiB — the binary
 #: value 262144 bytes, NOT 256000. Decoded UTF-8 ``errors="replace"``.
 STDERR_MAX_BYTES = 262144
@@ -1061,6 +1079,52 @@ def _cleanup_container(name: str) -> None:
         return
 
 
+def _harvest_render_log(
+    volume: str, host_tmp: Path
+) -> str:
+    """Copy the on-volume ``/work/render.log`` tail out via the busybox
+    harvest pattern (volume → host, no bind mount) and return its bounded
+    tail as a UTF-8 string (``""`` when the file is absent or the copy
+    fails — a missing log degrades to the container-stderr-only path).
+
+    Must run on the non-zero exit path BEFORE the render ``finally``
+    removes the container and volume (issue #309): the entrypoint
+    redirects every openscad invocation's stderr to /work/render.log, so
+    on a failure the OpenSCAD ``ERROR:`` diagnostics live in the log, not
+    in the container's stderr. A naive read of the on-volume path after
+    :func:`_remove_render_volume` would be a silent no-op — the harvest
+    goes through the same busybox helper the artifact harvest uses.
+    """
+    out = host_tmp / "log"
+    out.mkdir(exist_ok=True)
+    log_path = out / "render.log"
+    argv = [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--volume",
+        f"{volume}:/work",
+        "--volume",
+        f"{out}:/host",
+        "busybox:latest",
+        "sh",
+        "-c",
+        "tail -c 65536 /work/render.log > /host/render.log 2>/dev/null; true",
+    ]
+    try:
+        subprocess.run(argv, capture_output=True, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if not log_path.is_file():
+        return ""
+    try:
+        return log_path.read_bytes()[:RENDER_LOG_TAIL_BYTES].decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+
+
 def _remove_render_volume(volume: str) -> None:
     """``docker volume rm -f <volume>`` — bounded by ``_CLEANUP_TIMEOUT_S``.
 
@@ -1165,13 +1229,27 @@ def classify(
     vertex_count: int = 0,
     watertight: bool = False,
     volume: float = 0.0,
+    render_log: str = "",
 ) -> ErrorClass:
     """Classify a render run. First match wins; the table is TOTAL.
 
     1. ``timeout`` — caller wall-clock fired; ``exit_code`` recorded 124
     2. ``oom`` — ``exit_code`` 137 or ``docker inspect`` reports ``OOMKilled``
-    3. ``syntax_error`` — non-zero exit, no STL, stderr matches ``ERROR:``
-    4. ``container_error`` — any other non-zero exit, no STL
+    3. ``syntax_error`` — non-zero exit, no STL, AND one of the two
+       design-error markers is present (issue #309, explicit precedence):
+       a. ``[entrypoint] STL export failed`` in ``stderr`` (first) — the
+          entrypoint's STL-abort marker; its only source is the STL step,
+          so it proves the entrypoint ran and the failure is a design
+          error, even when the harvested ``render_log`` tail is truncated
+          past any ``ERROR:`` line (the 64-KiB tail never regresses a
+          true syntax error to ``container_error``)
+       b. ``ERROR:`` in either source (the container's ``stderr`` or the
+          harvested ``render_log`` tail — the entrypoint redirects every
+          openscad invocation's stderr to /work/render.log, so the
+          OpenSCAD ``ERROR:`` diagnostics usually live there)
+    4. ``container_error`` — any other non-zero exit, no STL (the
+       entrypoint demonstrably never ran, or a docker-layer failure: no
+       marker present, or a non-render exit code like 125/126/127)
     5. ``artifact_error`` — STL present but the CSG or any of the six PNGs
        is missing or invalid, regardless of exit code
     6. ``empty_model`` — all eight artifacts present but the STL has
@@ -1179,6 +1257,9 @@ def classify(
     7. ``ok`` — all eight artifacts present and valid, exit 0, STL
        non-degenerate
 
+    ``render_log`` (issue #309): the bounded tail of the on-volume
+    /work/render.log harvested on the non-zero path (``""`` when the
+    harvest found nothing) — the second, ``ERROR:``-inspected source.
     ``views`` must be a 6-element sequence of non-empty filename strings
     for class 5/6/7 to be reachable; a wrong length or a missing entry
     counts as the PNG missing.
@@ -1189,8 +1270,11 @@ def classify(
         return "oom"
     stl_present = isinstance(stl_path, str) and bool(stl_path)
     if not stl_present:
-        if exit_code != 0 and OPENSCAD_DIAGNOSTIC_RE.search(stderr or ""):
-            return "syntax_error"
+        if exit_code != 0:
+            if STL_ABORT_RE.search(stderr or ""):
+                return "syntax_error"
+            if OPENSCAD_DIAGNOSTIC_RE.search(stderr or "") or OPENSCAD_DIAGNOSTIC_RE.search(render_log or ""):
+                return "syntax_error"
         return "container_error"
     if not _csg_and_views_valid(csg_path, views):
         return "artifact_error"
@@ -1316,12 +1400,42 @@ def _persist_render_artifacts(
     return str(target)
 
 
+def _log_render_failure(
+    result: RenderResult,
+    render_log: str,
+    project_id: int | None = None,
+) -> None:
+    """One ERROR line per non-``ok`` render (issue #309 observability):
+    project id, error_class, exit code and the first ~20 lines of the
+    diagnostic text (container stderr + harvested render.log tail).
+
+    The tail carries the container's stderr (the ``[entrypoint]``
+    markers) followed by the render.log tail (the OpenSCAD ``ERROR:``
+    diagnostics) — bounded to ~20 lines each so a runaway log cannot
+    flood the log line. The content is the render's own diagnostic
+    output (no secrets by construction — the render never sees a key),
+    and the log call itself degrades to a no-op on any formatting error.
+    """
+    proj = "unknown" if project_id is None else str(project_id)
+    head = "\n".join((result.stderr or "").splitlines()[:20])
+    tail = "\n".join((render_log or "").splitlines()[:20])
+    detail = head + ("\n--- /work/render.log tail ---\n" + tail if tail else "")
+    logger.error(
+        "render failed: project_id=%s error_class=%s exit_code=%s | %s",
+        proj,
+        result.error_class,
+        result.exit_code,
+        detail,
+    )
+
+
 def render_for_design_loop(
     scad_source: str,
     defines: dict[str, str],
     renders_dir: str | Path | None = None,
     on_progress: Any = None,
     repo_root: Path | None = None,
+    project_id: int | None = None,
 ) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
@@ -1332,6 +1446,16 @@ def render_for_design_loop(
     7-class ``error_class`` enum. Any exception in the pipeline is a
     ``container_error`` — a loop render failure is a classified render
     outcome, never an unclassified raise.
+
+    On a non-zero render exit the worker harvests the on-volume
+    /work/render.log tail (issue #309 — the entrypoint redirects
+    openscad's stderr there, so the ``ERROR:`` diagnostics are not in the
+    container's stderr) and feeds it to :func:`classify` alongside the
+    container's stderr, so an STL-export failure classifies as
+    ``syntax_error`` (a design error the repair loop fixes) instead of
+    ``container_error``. Every non-``ok`` result logs one ERROR line
+    (project id, error_class, exit code, the first ~20 lines of the
+    diagnostic text — never secrets).
 
     ``on_progress`` (issue #121): a sync callback ``(kind, payload)``
     invoked from the render container's stderr-drain thread (a worker
@@ -1558,13 +1682,23 @@ def render_for_design_loop(
                 return stl, csg, views
 
             if proc.returncode != 0:
+                # Harvest the on-volume render.log tail BEFORE the finally
+                # removes the volume (issue #309): the entrypoint redirects
+                # openscad's stderr to /work/render.log, so an STL-export
+                # failure's ``ERROR:`` diagnostics live in the log, not in
+                # the container's stderr. A timeout (124) has an empty
+                # stderr by contract and no log to harvest — skip.
+                render_log = ""
+                if proc.returncode != 124:
+                    render_log = _harvest_render_log(volume, host_tmp)
                 error_class = classify(
                     exit_code=proc.returncode,
                     stl_path=None,
                     stderr=stderr,
                     timed_out=proc.returncode == 124,
+                    render_log=render_log,
                 )
-                return RenderResult(
+                result = RenderResult(
                     ok=False,
                     exit_code=proc.returncode,
                     duration_ms=duration_ms,
@@ -1574,6 +1708,8 @@ def render_for_design_loop(
                     csg=None,
                     views=(),
                 )
+                _log_render_failure(result, render_log, project_id)
+                return result
 
             stl, csg, views = _harvest()
             vertex_count = 0
@@ -1661,7 +1797,7 @@ def render_for_design_loop(
             else:
                 stl_path = str(stl) if stl.is_file() else None
                 views_paths = tuple(str(v) for v in views) if views_ok else ()
-            return RenderResult(
+            result = RenderResult(
                 ok=error_class == "ok",
                 exit_code=proc.returncode,
                 duration_ms=duration_ms,
@@ -1672,6 +1808,9 @@ def render_for_design_loop(
                 views=views_paths,
                 render_artifact_dir=render_artifact_dir,
             )
+            if error_class != "ok":
+                _log_render_failure(result, "", project_id)
+            return result
     except (OSError, RuntimeError, ValueError) as e:
         return RenderResult(
             ok=False,
