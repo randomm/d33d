@@ -48,6 +48,7 @@ from d33d.question_answer import (
     DETERMINISTIC_AXIS_ADJECTIVES,
     DETERMINISTIC_AXIS_NOUNS,
     DETERMINISTIC_AXIS_SENTENCES,
+    DETERMINISTIC_COMPARISON_SENTENCES,
     DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
@@ -60,6 +61,7 @@ from d33d.question_answer import (
     route_chat_message,
     state_block_numbers,
 )
+from d33d.confirm_offer import mm_formatted
 from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS as _LLM_TIMEOUT
 from d33d.design_loop import (
     BBOX_TOLERANCE_MIN_MM as _TOL_MIN,
@@ -1367,86 +1369,245 @@ class TestDeterministicComparison:
 
     def test_deep_enough_for_30mm_screw_yes(self) -> None:
         # D=43.9, target 30 → yes (43.9 >= 30, diff 13.9 > tolerance).
+        # The golden "more than" fixture — the at-least direction with
+        # measured > target (issue #320: the relation word follows the
+        # sign of measured − target).
         r = self._cmp("Is it deep enough for a 30 mm screw?")
         assert r is not None
         axis, reply = r
         assert axis == "D"
-        assert "Yes" in reply
-        assert "43.9" in reply
-        assert "13.9" in reply
-        assert "30.0" in reply
+        assert reply == (
+            "Yes — it measures "
+            + mm_formatted(43.9)
+            + " deep, "
+            + mm_formatted(13.9)
+            + " more than "
+            + mm_formatted(30.0)
+            + "."
+        )
 
     def test_taller_than_10mm_yes(self) -> None:
-        # H=12, target 10 → yes.
+        # H=12, target 10 → yes (measured > target → "more than").
         r = self._cmp("Is it taller than 10 mm?")
         assert r is not None
         axis, reply = r
         assert axis == "H"
         assert "Yes" in reply
+        assert "2.0" in reply
+        assert "10.0" in reply
+        assert "more than" in reply
 
     def test_shorter_than_10mm_no(self) -> None:
-        # H=12, target 10, relative word "shorter" → polarity inverts → no.
+        # H=12, target 10, relative word "shorter" → polarity inverts →
+        # no. The relation follows the SIGN (12 > 10 → "more than"),
+        # not the No (issue #320 — the old "short of" was false here).
         r = self._cmp("Is it shorter than 10 mm?")
         assert r is not None
         axis, reply = r
         assert axis == "H"
         assert "No" in reply
+        assert "12.0" in reply
+        assert "2.0" in reply
+        assert "10.0" in reply
+        assert "more than" in reply
 
     def test_wider_than_10mm_yes(self) -> None:
-        # W=20, target 10 → yes.
+        # W=20, target 10 → yes (measured > target → "more than").
         r = self._cmp("Is it wider than 10 mm?")
         assert r is not None
         axis, reply = r
         assert axis == "W"
         assert "Yes" in reply
+        assert "20.0" in reply
+        assert "10.0" in reply
+        assert "more than" in reply
 
     def test_narrower_than_10mm_no(self) -> None:
-        # W=20, target 10, relative word "narrower" → no.
+        # W=20, target 10, relative word "narrower" → no. Relation: 20 >
+        # 10 → "more than" (issue #320 — the old "short of" was false).
         r = self._cmp("Is it narrower than 10 mm?")
         assert r is not None
         axis, reply = r
         assert axis == "W"
-        assert "No" in reply
+        assert reply == (
+            "No — it measures "
+            + mm_formatted(20.0)
+            + " wide, "
+            + mm_formatted(10.0)
+            + " more than "
+            + mm_formatted(10.0)
+            + "."
+        )
 
     def test_shallower_than_30mm_no(self) -> None:
-        # D=43.9, target 30, relative word "shallower" → no.
+        # D=43.9, target 30, relative word "shallower" → no. Relation:
+        # 43.9 > 30 → "more than" (issue #320 — the old "short of"
+        # was false).
         r = self._cmp("Is it shallower than 30 mm?")
         assert r is not None
         axis, reply = r
         assert axis == "D"
         assert "No" in reply
+        assert "43.9" in reply
+        assert "13.9" in reply
+        assert "30.0" in reply
+        assert "more than" in reply
 
     def test_fit_in_45mm_deep_gap_yes(self) -> None:
-        # D=43.9, gap 45 → fits (43.9 <= 45, diff 1.1 > tolerance → yes).
+        # D=43.9, gap 45 → fits (43.9 <= 45, diff 1.1 > tolerance →
+        # yes). The #320 acceptance sentence: 43.9 < 45 → "less than"
+        # (the old "more than" was false).
         r = self._cmp("Will it fit in a 45 mm deep gap?")
         assert r is not None
         axis, reply = r
         assert axis == "D"
-        assert "Yes" in reply
+        assert reply == (
+            "Yes — it measures "
+            + mm_formatted(43.9)
+            + " deep, "
+            + mm_formatted(1.1)
+            + " less than "
+            + mm_formatted(45.0)
+            + "."
+        )
 
     def test_fit_in_40mm_deep_gap_no(self) -> None:
-        # D=43.9, gap 40 → does not fit (43.9 > 40).
+        # D=43.9, gap 40 → does not fit (43.9 > 40). The No sentence
+        # carries a "more than" relation (issue #320 — the old "short
+        # of" was false here).
         r = self._cmp("Will it fit in a 40 mm deep gap?")
         assert r is not None
         axis, reply = r
         assert axis == "D"
-        assert "No" in reply
+        assert reply == (
+            "No — it measures "
+            + mm_formatted(43.9)
+            + " deep, "
+            + mm_formatted(3.9)
+            + " more than "
+            + mm_formatted(40.0)
+            + "."
+        )
 
     def test_fit_in_50mm_deep_gap_yes(self) -> None:
-        # D=43.9, gap 50 → fits (43.9 <= 50).
+        # D=43.9, gap 50 → fits (43.9 <= 50, diff 6.1 > tolerance).
+        # Relation: 43.9 < 50 → "less than".
         r = self._cmp("Will it fit in a 50 mm deep gap?")
         assert r is not None
         axis, reply = r
         assert axis == "D"
-        assert "Yes" in reply
+        assert reply == (
+            "Yes — it measures "
+            + mm_formatted(43.9)
+            + " deep, "
+            + mm_formatted(6.1)
+            + " less than "
+            + mm_formatted(50.0)
+            + "."
+        )
 
     def test_tall_enough_for_50mm_shelf_no(self) -> None:
-        # H=12, target 50 → not enough (12 < 50).
+        # H=12, target 50 → not enough (12 < 50). The at-least No now
+        # says "less than" (issue #320 retired "short of").
         r = self._cmp("Is it tall enough for a 50 mm shelf?")
         assert r is not None
         axis, reply = r
         assert axis == "H"
-        assert "No" in reply
+        assert reply == (
+            "No — it measures "
+            + mm_formatted(12.0)
+            + " tall, "
+            + mm_formatted(38.0)
+            + " less than "
+            + mm_formatted(50.0)
+            + "."
+        )
+
+    def test_shorter_than_50mm_yes_less_than(self) -> None:
+        # H=12, "Is it shorter than 50 mm?" → yes (12 <= 50) with a
+        # "less than" relation (issue #320 acceptance example: the old
+        # sentence said "38.0 mm more than 50.0 mm" — false).
+        r = self._cmp("Is it shorter than 50 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert reply == (
+            "Yes — it measures "
+            + mm_formatted(12.0)
+            + " tall, "
+            + mm_formatted(38.0)
+            + " less than "
+            + mm_formatted(50.0)
+            + "."
+        )
+
+    def test_taller_than_50mm_no_less_than(self) -> None:
+        # H=12, "Is it taller than 50 mm?" → no (12 < 50) with a "less
+        # than" relation — the acceptance example that replaces "short
+        # of" (issue #320).
+        r = self._cmp("Is it taller than 50 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert reply == (
+            "No — it measures "
+            + mm_formatted(12.0)
+            + " tall, "
+            + mm_formatted(38.0)
+            + " less than "
+            + mm_formatted(50.0)
+            + "."
+        )
+
+    def test_relation_word_follows_sign_table(self) -> None:
+        # Issue #320 table test: every direction (enough / fit /
+        # than-inverted / than-absolute) × (measured above target, below
+        # target) asserts the relation word matches the sign of measured
+        # − target AND the Yes/No matches the direction. The about-the-
+        # same cell asserts the unchanged about_the_same sentence (no
+        # relation word).
+        cases = [
+            # (message, axis, measured, target, expected_answer, relation)
+            ("Is it deep enough for a 30 mm screw?", "D", 43.9, 30.0, "Yes", "more than"),
+            ("Is it deep enough for a 50 mm screw?", "D", 43.9, 50.0, "No", "less than"),
+            ("Will it fit in a 45 mm deep gap?", "D", 43.9, 45.0, "Yes", "less than"),
+            ("Will it fit in a 40 mm deep gap?", "D", 43.9, 40.0, "No", "more than"),
+            ("Is it taller than 10 mm?", "H", 12.0, 10.0, "Yes", "more than"),
+            ("Is it taller than 50 mm?", "H", 12.0, 50.0, "No", "less than"),
+            ("Is it shorter than 50 mm?", "H", 12.0, 50.0, "Yes", "less than"),
+            ("Is it shorter than 10 mm?", "H", 12.0, 10.0, "No", "more than"),
+            ("Is it wider than 10 mm?", "W", 20.0, 10.0, "Yes", "more than"),
+            ("Is it wider than 30 mm?", "W", 20.0, 30.0, "No", "less than"),
+            ("Is it narrower than 30 mm?", "W", 20.0, 30.0, "Yes", "less than"),
+            ("Is it narrower than 10 mm?", "W", 20.0, 10.0, "No", "more than"),
+            ("Is it shallower than 30 mm?", "D", 43.9, 30.0, "No", "more than"),
+            ("Is it shallower than 50 mm?", "D", 43.9, 50.0, "Yes", "less than"),
+            ("Is it deeper than 30 mm?", "D", 43.9, 30.0, "Yes", "more than"),
+            ("Is it deeper than 50 mm?", "D", 43.9, 50.0, "No", "less than"),
+        ]
+        adj = {"D": "deep", "W": "wide", "H": "tall"}
+        for message, ax, measured, target, answer, relation in cases:
+            r = self._cmp(message)
+            assert r is not None, message
+            got_axis, reply = r
+            assert got_axis == ax, message
+            expected = DETERMINISTIC_COMPARISON_SENTENCES["yes" if answer == "Yes" else "no"].format(
+                measured=mm_formatted(measured),
+                axis=adj[ax],
+                delta=mm_formatted(abs(measured - target)),
+                relation=relation,
+                target=mm_formatted(target),
+            )
+            assert reply == expected, f"{message}: {reply!r} != {expected!r}"
+        # The about-the-same cell: the unchanged about_the_same sentence,
+        # no relation word (boundary at tolerance, inclusive).
+        r = self._cmp("Is it deep enough for a 43.4 mm screw?")
+        assert r is not None
+        got_axis, reply = r
+        assert got_axis == "D"
+        assert reply == DETERMINISTIC_COMPARISON_SENTENCES["about_the_same"].format(
+            measured=mm_formatted(43.9), axis="deep"
+        )
 
     # -- boundary tests ----------------------------------------------------
 
@@ -1791,6 +1952,51 @@ class TestDeterministicCopyDeckParity:
         # contract test's pinned strings — no regex, no placeholder
         # conversion, both directions pinned by the literals above.
         assert expected == expected_exact
+
+        # The comparison templates (issue #320) are pinned against the
+        # deck's sign-aware relation argument the same way: the same
+        # sample values the W313 design-contract test pins — one pair per
+        # relation, so a deck edit to comparisonYes/comparisonNo without
+        # the backend (or vice versa) breaks this.
+        cm40 = "40.0\u202fmm"
+        cm439 = "43.9\u202fmm"
+        cmp_expected = [
+            DETERMINISTIC_COMPARISON_SENTENCES["yes"].format(
+                measured=cm40,
+                axis="deep",
+                delta="10.0\u202fmm",
+                relation="more than",
+                target="30\u202fmm",
+            ),
+            DETERMINISTIC_COMPARISON_SENTENCES["no"].format(
+                measured=cm439,
+                axis="deep",
+                delta="5.0\u202fmm",
+                relation="less than",
+                target="50.0\u202fmm",
+            ),
+            DETERMINISTIC_COMPARISON_SENTENCES["yes"].format(
+                measured=cm439,
+                axis="deep",
+                delta="1.1\u202fmm",
+                relation="less than",
+                target="45.0\u202fmm",
+            ),
+            DETERMINISTIC_COMPARISON_SENTENCES["no"].format(
+                measured=cm439,
+                axis="deep",
+                delta="3.9\u202fmm",
+                relation="more than",
+                target="40.0\u202fmm",
+            ),
+        ]
+        cmp_expected_exact = [
+            "Yes — it measures 40.0\u202fmm deep, 10.0\u202fmm more than 30\u202fmm.",
+            "No — it measures 43.9\u202fmm deep, 5.0\u202fmm less than 50.0\u202fmm.",
+            "Yes — it measures 43.9\u202fmm deep, 1.1\u202fmm less than 45.0\u202fmm.",
+            "No — it measures 43.9\u202fmm deep, 3.9\u202fmm more than 40.0\u202fmm.",
+        ]
+        assert cmp_expected == cmp_expected_exact
 
         # The per-axis adjective/noun lookups carry the axis words the
         # W263 design-contract test pins (tall/wide/deep, height/width/

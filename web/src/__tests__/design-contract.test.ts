@@ -362,25 +362,39 @@ describe("design contract", () => {
     //     "Yes — it measures 40.0 mm deep, 10.0 mm more than 30 mm."
     //     Every mm value is pre-formatted via mm() (one decimal, U+202F
     //     NB space before "mm"): the measured extent, the absolute
-    //     delta, and the number the user named.
-    expect(copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm")).toBe(
+    //     delta, and the number the user named. The relation argument is
+    //     the TRUE number relation (issue #320): "more than" when
+    //     measured > target, "less than" when measured < target —
+    //     independent of the Yes/No.
+    expect(copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm", "more than")).toBe(
       "Yes — it measures 40.0\u202fmm deep, 10.0\u202fmm more than 30\u202fmm.",
     );
     // Height variant — absolute word.
-    expect(copy.deterministicAnswer.comparisonYes(H, "tall", "2.0\u202fmm", "100\u202fmm")).toBe(
+    expect(copy.deterministicAnswer.comparisonYes(H, "tall", "2.0\u202fmm", "100\u202fmm", "more than")).toBe(
       "Yes — it measures 102.0\u202fmm tall, 2.0\u202fmm more than 100\u202fmm.",
     );
+    // Fit-direction Yes with a "less than" relation — the #320 false-
+    // relation fix: "will it fit in a 45 mm deep gap?" at D 43.9.
+    expect(copy.deterministicAnswer.comparisonYes("43.9\u202fmm", "deep", "1.1\u202fmm", "45.0\u202fmm", "less than")).toBe(
+      "Yes — it measures 43.9\u202fmm deep, 1.1\u202fmm less than 45.0\u202fmm.",
+    );
 
-    // (2) Comparison not met — "No — it measures 25.0 mm deep, 5.0 mm
-    //     short of 30 mm." The axis slot carries the adjective the
-    //     backend's DETERMINISTIC_AXIS_ADJECTIVES yields (wide/deep/
-    //     tall) — the deck interpolates it verbatim.
-    expect(copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm")).toBe(
-      "No — it measures 25.0\u202fmm deep, 5.0\u202fmm short of 30\u202fmm.",
+    // (2) Comparison not met — the relation still follows the sign
+    //     (issue #320 retired "short of"): a No with measured > target
+    //     says "more than", a No with measured < target says "less than".
+    //     The axis slot carries the adjective the backend's
+    //     DETERMINISTIC_AXIS_ADJECTIVES yields (wide/deep/tall) — the
+    //     deck interpolates it verbatim.
+    expect(copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "50.0\u202fmm", "less than")).toBe(
+      "No — it measures 25.0\u202fmm deep, 5.0\u202fmm less than 50.0\u202fmm.",
+    );
+    // Fit-direction No with a "more than" relation: 43.9 in a 40 mm gap.
+    expect(copy.deterministicAnswer.comparisonNo("43.9\u202fmm", "deep", "3.9\u202fmm", "40.0\u202fmm", "more than")).toBe(
+      "No — it measures 43.9\u202fmm deep, 3.9\u202fmm more than 40.0\u202fmm.",
     );
     // Absolute-word variant ("How wide is…" → the adjective "wide").
-    expect(copy.deterministicAnswer.comparisonNo("25.0\u202fmm", "wide", "5.0\u202fmm", "30\u202fmm")).toBe(
-      "No — it measures 25.0\u202fmm wide, 5.0\u202fmm short of 30\u202fmm.",
+    expect(copy.deterministicAnswer.comparisonNo("25.0\u202fmm", "wide", "5.0\u202fmm", "30.0\u202fmm", "less than")).toBe(
+      "No — it measures 25.0\u202fmm wide, 5.0\u202fmm less than 30.0\u202fmm.",
     );
 
     // (3) Within tolerance — "About the same — it measures 30.2 mm deep."
@@ -411,8 +425,8 @@ describe("design contract", () => {
     // (The individual pins above already fix each string byte-for-byte;
     // this is the one-line distinctness check over both sets.)
     const comparisonAll = [
-      copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm"),
-      copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm"),
+      copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm", "more than"),
+      copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "50.0\u202fmm", "less than"),
       copy.deterministicAnswer.comparisonAboutTheSame(D3, "deep"),
       copy.deterministicAnswer.comparisonMissingFact("tall", "the shelf", H),
     ];
