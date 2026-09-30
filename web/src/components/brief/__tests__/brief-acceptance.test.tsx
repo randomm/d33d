@@ -420,6 +420,54 @@ describe("Brief — the list that does not grow", () => {
     }
   });
 
+  it("the QA box block (3 axis rows + settled params) renders one row per axis and folds the rest as the exact count (issue #316)", () => {
+    // The de-dup happens in state_block_for_version (the server already
+    // dropped the agreeing W/D/H param rows) — the Brief renders the
+    // collapsed block verbatim: the 3 axis rows once each (never the
+    // six-row repetition QA quoted), the settled params behind one
+    // honest count that matches what is actually hidden.
+    const entries: DesignStateEntry[] = [
+      axisStated("W", 40),
+      axisStated("D", 40),
+      axisStated("H", 12),
+      stated("box_wall", 2),
+      stated("screw_1", 4),
+      stated("screw_2", 4),
+      stated("screw_3", 4),
+      stated("screw_4", 4),
+      stated("screw_5", 4),
+      stated("screw_6", 4),
+      stated("screw_7", 4),
+      stated("screw_8", 4),
+      stated("screw_9", 4),
+      stated("screw_10", 4),
+    ];
+    render(<Brief {...baseProps} entries={entries} />);
+    // One row per axis — exactly 3 axis rows, no param W/D/H duplicates.
+    expect(screen.getByTestId("brief-row-axis-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-axis-D")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-axis-H")).toBeTruthy();
+    expect(screen.queryByTestId("brief-row-W")).toBeNull();
+    expect(screen.queryByTestId("brief-row-D")).toBeNull();
+    expect(screen.queryByTestId("brief-row-H")).toBeNull();
+    // The settled params fold behind one honest count. The fixture is
+    // 3 axis rows (never collapsible) + 11 param rows (box_wall +
+    // screw_1..screw_10), so the count is EXACTLY 11 — pinned literally
+    // (a self-referential assertion that re-parses the rendered number
+    // would pass for any count and pin nothing).
+    expect(screen.getByTestId("brief-groups-count").textContent).toBe(
+      copy.brief.moreParameters(11),
+    );
+    expect(screen.queryByTestId("brief-row-screw_1")).toBeNull();
+    // Expanding reveals all 11 hidden params — every one of them, pinned
+    // by name so a dropped row anywhere in the fixture fails the test.
+    fireEvent.click(screen.getByTestId("brief-groups-count"));
+    expect(screen.getByTestId("brief-row-box_wall")).toBeTruthy();
+    for (let i = 1; i <= 10; i += 1) {
+      expect(screen.getByTestId(`brief-row-screw_${i}`)).toBeTruthy();
+    }
+  });
+
   it("unknown rows are never collapsed, whatever the collapsible count (issue #274)", () => {
     // 9 collapsible settled params (> 7 → the group exists) + 2 unknowns:
     // the unknowns render in their own block, never inside the group.

@@ -26,7 +26,6 @@ import App from "../../App";
 import { dataUriToArrayBuffer } from "../../lib/dataUri";
 import { ApiClient, ApiError, MAX_REGION_EDIT_MODULE_IDS } from "../../lib/api";
 import type {
-  DesignStateEntry,
   Project,
   RegionEditResult,
   VersionTimelineEntry,
@@ -924,7 +923,7 @@ describe("App restore 409 wiring (issue #295)", () => {
       storage: { repo_present: true, photo_present: null },
     });
     // The design-state fetch must not hit the stubbed fetch either.
-    vi.spyOn(client, "getDesignState").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false });
     (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = fetchMock;
 
     render(<App client={client} />);
@@ -1041,29 +1040,32 @@ describe("App Brief wiring (issue #123)", () => {
     // would still pass. These assertions close that gap: the Brief is in the
     // tree, App reads the design-state block, and the block's rows reach the
     // DOM (so a broken wiring is not silent).
-    vi.spyOn(client, "getDesignState").mockResolvedValue([
-      {
-        name: "W",
-        label: "Width",
-        value: 60,
-        unit: "mm",
-        provenance: "stated",
-      },
-      {
-        name: "D",
-        label: "Depth",
-        value: 45,
-        unit: "mm",
-        provenance: "stated",
-      },
-      {
-        name: "H",
-        label: "Height",
-        value: 80,
-        unit: "mm",
-        provenance: "stated",
-      },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [
+        {
+          name: "W",
+          label: "Width",
+          value: 60,
+          unit: "mm",
+          provenance: "stated",
+        },
+        {
+          name: "D",
+          label: "Depth",
+          value: 45,
+          unit: "mm",
+          provenance: "stated",
+        },
+        {
+          name: "H",
+          label: "Height",
+          value: 80,
+          unit: "mm",
+          provenance: "stated",
+        },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
     // Issue #192: the design-state fetch only fires once the (lazily
@@ -1083,12 +1085,46 @@ describe("App Brief wiring (issue #123)", () => {
     expect(chip.textContent).toContain("Height · 80.0\u202Fmm");
   });
 
+  it("the design-state envelope's history_missing flag drives the brief-saved-missing banner (issue #316)", async () => {
+    // The web-wire half of the missing-history signal: the design-state
+    // response's `history_missing: true` (the wire source, ORed with
+    // `storage.repo_present === false` in the Brief) drives the existing
+    // `brief-saved-missing` banner — even when the project-GET storage
+    // signal says the repo is present — and it renders exactly ONCE.
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [
+        { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: true,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    // The storage refetch resolves with a PRESENT repo — by itself the
+    // banner would not fire; only the design-state flag does.
+    vi.spyOn(client, "getProject").mockResolvedValue({
+      ...PROJECT,
+      storage: { repo_present: true, photo_present: null },
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make a box");
+    const banner = await screen.findByTestId("brief-saved-missing");
+    expect(banner.textContent).toContain(copy.brief.savedDesignMissing);
+    // Rendered once — the two signals (storage, design-state flag) are the
+    // same condition and must not stack into two banners.
+    expect(screen.getAllByTestId("brief-saved-missing")).toHaveLength(1);
+    // The rows still render beneath the banner (they come from the DB).
+    const chip = screen.getByTestId("brief-chip");
+    expect(chip.textContent).toContain("Width · 60.0\u202Fmm");
+  });
+
   it("renders the design-state rows in the full panel when the window is large (issue #123)", async () => {
-    vi.spyOn(client, "getDesignState").mockResolvedValue([
-      { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-      { name: "D", kind: "param", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
-      { name: "H", kind: "param", label: "Height", value: 80, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [
+        { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+        { name: "D", kind: "param", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
+        { name: "H", kind: "param", label: "Height", value: 80, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
     Object.defineProperty(window, "innerHeight", { configurable: true, value: 900 });
 
@@ -1106,7 +1142,7 @@ describe("App Brief wiring (issue #123)", () => {
   });
 
   it("refetches the design-state block on the version-created frame (issue #123)", async () => {
-    vi.spyOn(client, "getDesignState").mockResolvedValue([] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
@@ -1152,10 +1188,13 @@ describe("App Brief wiring (issue #123)", () => {
     // uses a fixed [] mock (the refetch would return the same value) and a
     // second send to drive the refetch; this test uses a sequence mock to
     // verify the transition from empty to populated.
-    vi.spyOn(client, "getDesignState").mockResolvedValueOnce([]).mockResolvedValue([
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-      { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValueOnce({ entries: [], history_missing: false }).mockResolvedValue({
+      entries: [
+        { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+        { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
@@ -1188,11 +1227,14 @@ describe("App Brief wiring (issue #123)", () => {
     // rejects on call 2 (version-created), and returns populated rows on
     // call 3 (the retry, ~300 ms later). The Brief must show the populated
     // rows from the retry — no failure marker.
-    const populated = [
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>;
+    const populated = {
+      entries: [
+        { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>;
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce([]) // mount-time: []
+      .mockResolvedValueOnce({ entries: [], history_missing: false }) // mount-time: empty
       .mockRejectedValueOnce(new Error("network blip")) // version-created: rejects
       .mockResolvedValue(populated); // retry: populated rows
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
@@ -1224,9 +1266,12 @@ describe("App Brief wiring (issue #123)", () => {
     // fires ~300 ms later (call 3 → also rejects). The Brief keeps the
     // last-known rows AND shows the refreshFailed line.
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce([
-        { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-      ] as Awaited<ReturnType<ApiClient["getDesignState"]>>)
+      .mockResolvedValueOnce({
+        entries: [
+          { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+        ],
+        history_missing: false,
+      } as Awaited<ReturnType<ApiClient["getDesignState"]>>)
       .mockRejectedValue(new Error("server 500"));
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
@@ -1259,19 +1304,25 @@ describe("App Brief wiring (issue #123)", () => {
     // fresh rows on call 3 (version-created #2). When the hung call 2
     // finally resolves with stale rows, the Brief must still show the
     // fresh rows from call 3.
-    const staleRows = [
-      { name: "STALE", label: "Stale row", value: 10, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>;
-    const freshRows = [
-      { name: "FRESH", label: "Fresh row", value: 20, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>;
-    let resolveStale: (rows: DesignStateEntry[]) => void = () => {};
-    const staleHang = new Promise<DesignStateEntry[]>((r) => {
+    const staleRows = {
+      entries: [
+        { name: "STALE", label: "Stale row", value: 10, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>;
+    const freshRows = {
+      entries: [
+        { name: "FRESH", label: "Fresh row", value: 20, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>;
+    let resolveStale: (rows: Awaited<ReturnType<ApiClient["getDesignState"]>>) => void = () => {};
+    const staleHang = new Promise<Awaited<ReturnType<ApiClient["getDesignState"]>>>((r) => {
       resolveStale = r;
     });
-    const unusedHang = new Promise<DesignStateEntry[]>(() => {});
+    const unusedHang = new Promise<Awaited<ReturnType<ApiClient["getDesignState"]>>>(() => {});
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce([]) // mount-time, request 1
+      .mockResolvedValueOnce({ entries: [], history_missing: false }) // mount-time, request 1
       .mockReturnValue(staleHang) // version-created #1, request 2 — hangs
       .mockResolvedValueOnce(freshRows) // version-created #2, request 3
       .mockReturnValue(unusedHang); // safety net: never consumed
@@ -1307,9 +1358,12 @@ describe("App Brief wiring (issue #123)", () => {
     // design-state refetch — the Brief keeps whatever it last knew. This
     // rule is about a failed PASS; a failed REFETCH on a successful pass
     // is governed by the retry/surface rules above.
-    vi.spyOn(client, "getDesignState").mockResolvedValue([
-      { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
-    ] as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [
+        { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onError?.({ step: "error", reason: "envelope" });
     });
@@ -1652,13 +1706,16 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
           json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
         });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false }) });
     }));
     // makeClient's listVersions stub returns one version — that would hide
     // the first-run screen (isFirstRun needs zero versions). The photo IS
     // the first action, so the project must start empty.
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
-    vi.spyOn(client, "getDesignState").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
     // Issue #192: no project on mount — the photo IS the first action.
@@ -1697,7 +1754,7 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
           json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
         });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => [] });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false }) });
     }));
 
     render(<App client={client} />);
@@ -1733,6 +1790,10 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     });
     vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
     await waitFor(() => {
@@ -2190,6 +2251,7 @@ describe("App chat wiring", () => {
   it("surfaces a stream error via onError without crashing", async () => {
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onError?.({ message: "stream interrupted: boom" });
@@ -2241,13 +2303,14 @@ describe("App photo upload wiring", () => {
         }
         // Non-photos URLs (e.g. /api/projects/{id}/design-state, called
         // at mount via getDesignState which is not stubbed in makeClient)
-        // get a valid empty-array response — the shape every GET array
-        // endpoint expects. The App's design-state block renders empty;
+        // get a valid empty-entries envelope response — the shape every GET
+        // design-state endpoint expects (issue #316: `{entries,
+        // history_missing}`). The App's design-state block renders empty;
         // no crash, no fake value.
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => [],
+          json: async () => ({ entries: [], history_missing: false }),
         });
       },
     );
@@ -2590,6 +2653,7 @@ describe("App streamEvents rejection handling", () => {
   it("does not surface an unhandled promise rejection when streamEvents rejects after onError", async () => {
     const client = new ApiClient();
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     // Mirrors the real ApiClient.streamEvents contract: on a mid-stream
     // failure it invokes onError with the user-facing message, then
@@ -3662,16 +3726,19 @@ describe("App region-selection (point pick) wiring", () => {
     const client = makeClient();
     // Stub the design-state fetch to return a single entry matching the
     // resolved module.
-    vi.spyOn(client, "getDesignState").mockResolvedValue([
-      {
-        name: "wing_left",
-        kind: "param" as const,
-        label: "Wing (left)",
-        value: 60,
-        unit: "mm",
-        provenance: "stated" as const,
-      },
-    ]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [
+        {
+          name: "wing_left",
+          kind: "param" as const,
+          label: "Wing (left)",
+          value: 60,
+          unit: "mm",
+          provenance: "stated" as const,
+        },
+      ],
+      history_missing: false,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     resolvePointPickMock.mockReturnValue({ hit: true, module: "wing_left" });
 
     // The Brief has hasLivePin=true, so it renders as a chip — the chip

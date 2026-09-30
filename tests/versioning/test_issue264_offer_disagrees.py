@@ -364,10 +364,16 @@ def test_v25_fixture_all_params_disagree_no_offer(app_with_versions):
         return name, disagree_names, param_rows
 
     name, disagree_names, param_rows = run_async(app_with_versions, _call)
-    # W and D are disagrees (40 vs 43.8/43.9); H is measured (12.0
-    # vs 12.0, within tolerance). W/D are excluded from the offer; H is
-    # ``measured`` (not ``assumed``), so nothing is offerable → no offer.
+    # Issue #316 de-dup: the W and D params (40) DISAGREE with their
+    # measured extents (43.8/43.9) → they keep their param rows (the #264
+    # disagrees display is unchanged). The H param (12) AGREES with the
+    # measured H extent (12.0) → its param row is DROPPED (the H axis row
+    # carries the same number — one row per axis). W/D are excluded from
+    # the offer (disagrees); H is de-duped (not in param_rows), so
+    # nothing is offerable → no offer.
     assert disagree_names == {"W", "D"}, disagree_names
     assert name is None, name
+    # The H param row is DROPPED (it agrees with the H axis row).
     provs = {e["name"]: e["provenance"] for e in param_rows}
-    assert provs == {"W": "disagrees", "D": "disagrees", "H": "measured"}, provs
+    assert "H" not in provs, f"H should be de-duped: {provs}"
+    assert provs == {"W": "disagrees", "D": "disagrees"}, provs
