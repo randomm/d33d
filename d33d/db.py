@@ -53,12 +53,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any
+
+from d33d.data_dir import default_data_dir, guard_real_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -533,14 +534,12 @@ def projects_dir(data_dir: str | Path | None = None) -> Path:
     missing.
     """
     if data_dir is None:
-        # Route the env/default fallback through the single test-mode
-        # guard (issue #310) — the default is the operator's real
-        # ``~/.d33d`` and the guard refuses it while a test run is in
-        # progress; explicit data_dir arguments (the app path, test tmp
-        # dirs) pass through untouched.
-        from d33d.data_dir import default_data_dir
-
         data_dir = default_data_dir()
+    # Guard the resolved base on BOTH paths (explicit arg and the env/
+    # default fallback, issue #310) — an explicit arg pointing at the
+    # operator's real ``~/.d33d`` is the same failure mode the guard
+    # exists to prevent, not an exemption from it.
+    guard_real_data_path(data_dir)
     base = Path(data_dir) / "projects"
     base.mkdir(parents=True, exist_ok=True)
     return base

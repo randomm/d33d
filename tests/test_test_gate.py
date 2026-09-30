@@ -298,8 +298,6 @@ def test_provenance_guard_refuses_main_checkout_from_worktree() -> None:
             f"{tried}) — venv not installed"
         )
 
-    import shutil
-
     with tempfile.TemporaryDirectory() as td:
         tmp_root = Path(td).resolve()
         # Build the foreign ("main checkout") tree.
@@ -308,10 +306,17 @@ def test_provenance_guard_refuses_main_checkout_from_worktree() -> None:
         (foreign_pkg / "__init__.py").write_text(
             "__version__ = '0.0.0-main-checkout'\n"
         )
-        # Copy the real tests directory into the simulated worktree so the
-        # guard's REPO_ROOT is tmp_root (not the real repo root).
+        # Minimal simulated-worktree tests package: only the import-time
+        # guard entry (tests/__init__.py) matters here — it defines
+        # REPO_ROOT as its own parent's parent and runs both guards. A
+        # full copy of the real tests/ directory would pull in every
+        # sibling module (which need the project deps at import time) for
+        # no additional coverage of the provenance guard.
         tests_copy = tmp_root / "tests"
-        shutil.copytree(REPO_ROOT / "tests", tests_copy)
+        tests_copy.mkdir()
+        (tests_copy / "__init__.py").write_text(
+            (REPO_ROOT / "tests" / "__init__.py").read_text()
+        )
 
         code = (
             "import sys\n"
