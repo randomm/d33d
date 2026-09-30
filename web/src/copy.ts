@@ -606,27 +606,36 @@ export const deterministicAnswer = {
   dimensionList: (w: string, d: string, h: string): string =>
     `It measures ${w} × ${d} × ${h}.`,
 
-  /** Comparison met (issue #313): "Yes — it measures 40.0 mm deep,
-   *  10.0 mm more than 30 mm." `measured`, `delta`, and `target` arrive
-   *  pre-formatted via `mm()` — the delta is the absolute shortfall or
-   *  surplus, and the target is the number the user named. */
+  /** Comparison met (issue #313, issue #320): "Yes — it measures 40.0 mm
+   *  deep, 10.0 mm more than 30 mm." `measured`, `delta`, and `target`
+   *  arrive pre-formatted via `mm()` — the delta is the absolute
+   *  shortfall or surplus, and the target is the number the user named.
+   *  `relation` is the TRUE number relation between measured and target:
+   *  "more than" when measured > target, "less than" when measured <
+   *  target — it follows the sign of measured − target, independent of
+   *  the Yes/No the direction decides (issue #320 retired "short of"). */
   comparisonYes: (
     measured: string,
     axis: string,
     delta: string,
     target: string,
+    relation: string,
   ): string =>
-    `Yes — it measures ${measured} ${axis}, ${delta} more than ${target}.`,
+    `Yes — it measures ${measured} ${axis}, ${delta} ${relation} ${target}.`,
 
-  /** Comparison not met (issue #313): "No — it measures 25.0 mm deep,
-   *  5.0 mm short of 30 mm." */
+  /** Comparison not met (issue #313, issue #320): "No — it measures 45.0
+   *  mm deep, 5.0 mm less than 50 mm." `relation` carries the same
+   *  sign-true relation as `comparisonYes` — a No answer can say
+   *  "more than" (fit direction) and a Yes answer can say "less than"
+   *  ("shorter than 50 mm" at 12 mm). */
   comparisonNo: (
     measured: string,
     axis: string,
     delta: string,
     target: string,
+    relation: string,
   ): string =>
-    `No — it measures ${measured} ${axis}, ${delta} short of ${target}.`,
+    `No — it measures ${measured} ${axis}, ${delta} ${relation} ${target}.`,
 
   /** Within tolerance (issue #313): "About the same — it measures 30.2 mm
    *  deep." Used for both the borderline comparison and the named-axis fit

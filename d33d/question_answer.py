@@ -684,8 +684,13 @@ def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
 #: pinned by the Python tests here against the same sentences (the #250
 #: way — both directions are checked).
 DETERMINISTIC_COMPARISON_SENTENCES = {
-    "yes": "Yes — it measures {measured} {axis}, {delta} more than {target}.",
-    "no": "No — it measures {measured} {axis}, {delta} short of {target}.",
+    # The ``{relation}`` slot is the TRUE number relation between measured
+    # and target — "more than" when measured > target, "less than" when
+    # measured < target (issue #320). It follows the sign of measured −
+    # target, INDEPENDENT of the Yes/No the direction decides; "short of"
+    # is retired (it is only true for the at-least direction).
+    "yes": "Yes — it measures {measured} {axis}, {delta} {relation} {target}.",
+    "no": "No — it measures {measured} {axis}, {delta} {relation} {target}.",
     "about_the_same": "About the same — it measures {measured} {axis}.",
     "missing_fact": "How {axis} is {object}? The part is {measured} {axis}.",
 }
@@ -900,11 +905,18 @@ def _deterministic_comparison(
         # "taller than 30" reads as measured >= 30 (higher is yes);
         # "shorter than 33" reads as measured <= 33 (lower is yes).
         enough = higher if word in ("taller", "higher", "wider", "deeper") else not higher
+    # The relation word is the TRUE number relation between measured and
+    # target (issue #320): "more than" when measured > target, "less
+    # than" when measured < target. It is keyed on the SIGN of measured −
+    # target, independent of the direction — "short of" is retired because
+    # it is only true for the at-least direction.
+    relation = "more than" if higher else "less than"
     if enough:
         reply = DETERMINISTIC_COMPARISON_SENTENCES["yes"].format(
             measured=mm_formatted(value),
             axis=adj,
             delta=mm_formatted(abs(diff)),
+            relation=relation,
             target=mm_formatted(target),
         )
     else:
@@ -912,6 +924,7 @@ def _deterministic_comparison(
             measured=mm_formatted(value),
             axis=adj,
             delta=mm_formatted(abs(diff)),
+            relation=relation,
             target=mm_formatted(target),
         )
     return axis, reply
