@@ -4264,6 +4264,55 @@ def test_chat_lid_footprint_pair_persists_wd_with_h_gated(
 
 
 # ---------------------------------------------------------------------------
+# (issue #314, task-b) e2e chat-seam test: mating-connector lid case —
+# the lid's own W/D persists, not the box's mating dimensions.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_mating_connector_lid_persists_lid_not_box(
+    app_with_versions,
+):
+    """End-to-end (issue #314): 'a 55 × 40 mm lid that fits a 60 × 45 mm
+    box' — the lid's own size (55 × 40) is the part being made; the box's
+    60 × 45 is the mating part's size and must never state the lid's
+    axes. The gate input is (55, 40, 0) (the lid's W/D, H still gated)
+    and the version row persists stated_dims {W:55, D:40} — NOT {W:60,
+    D:45} (the box). Mirrors the #305 lid footprint pattern."""
+    captured: dict = {}
+    latest_row: list = []
+
+    async def _loop(app, **kwargs):
+        captured.update(kwargs)
+        return _StubResult("pass", {"W": 55.0, "D": 40.0})
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 55 \u00d7 40 mm lid that fits a 60 \u00d7 45 mm box"},
+        )
+        source = app_with_versions.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        latest_row.append(app_with_versions.state.versions.latest_version(pid))
+
+    run_async(app_with_versions, _call)
+    # The gate input is (55, 40, 0) — the lid's W/D (NOT the box's 60/45);
+    # H is unconfirmed (0.0 = the #91 zero-means-unknown convention).
+    assert captured["stated_dims"] == (55.0, 40.0, 0.0)
+    # The version row persists W:55, D:40 (the lid) — H absent (gated).
+    latest = latest_row[0]
+    assert latest is not None
+    raw = latest.get("stated_dims")
+    assert raw == {"W": 55.0, "D": 40.0}
+    assert "H" not in raw
+
+
+# ---------------------------------------------------------------------------
 # (issue #277, task-b) renderer_unavailable + per-class render reasons flow
 # the standard SSE ``reason`` field
 #

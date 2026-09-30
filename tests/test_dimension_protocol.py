@@ -1246,15 +1246,26 @@ class TestTripleExtraction:
         assert axes == {"W": 55.0, "D": 40.0}
 
     def test_part_noun_lid_suppressed_by_later_triple(self):
-        """Issue #305 (HIGH security regression): 'a 55x40 mm lid for the
-        60x45x80mm box' — the lid pair is textually EARLIER but the box
-        triple (later) states the envelope. The primary-object relaxation
-        must NOT fire when ANY other number-bearing triple/pair in the
-        message states, not only earlier ones. Without this guard the
-        lid pair would state W=55/D=40 and the bbox gate would enforce a
-        fabricated 55x40x0 target against a 60x45x80 box."""
+        """Issue #305 (HIGH security regression) — FLIPPED by issue #314
+        (operator decision): 'a 55x40 mm lid for the 60x45x80mm box' — the
+        lid pair is textually EARLIER but the box triple (later) is now in
+        the mating part's zone (after the "for" mating connector), so it is
+        SUPPRESSED and the LID pair states W/D (the head noun's own size).
+        The box's 60/45/80 stay unmapped/offerable (not consumed). Without
+        the #314 mating guard, the box triple would state and the bbox gate
+        would enforce a fabricated 60x45x80 target against a 55x40 lid —
+        the same anti-pattern, now the mirror image.
+        """
         axes = stated_axes_from_message("a 55x40 mm lid for the 60x45x80mm box")
-        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+        assert axes == {"W": 55.0, "D": 40.0}
+        # The box's 60/45/80 are unmapped/offerable (not consumed by the
+        # suppressed mating triple) — the lid pair's 55/40 are consumed.
+        unmapped = user_quoted_unmapped_mm(["a 55x40 mm lid for the 60x45x80mm box"])
+        assert 60.0 not in unmapped  # "60" in "60x45x80mm" is not an explicit-mm number
+        assert 45.0 not in unmapped
+        assert 80.0 not in unmapped
+        # The lid's 40 IS an explicit-mm number and IS consumed (stated).
+        assert 40.0 not in unmapped
 
     def test_part_noun_lid_suppressed_by_later_triple_comma(self):
         """Issue #305 (HIGH security regression, comma variant): 'make a
@@ -1265,11 +1276,21 @@ class TestTripleExtraction:
         assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
 
     def test_part_noun_lid_suppressed_by_later_by_form_triple(self):
-        """Issue #305: 'a 55 by 40 mm lid for the 60 by 45 by 80 mm box'
-        — the lid pair (by-joiner) precedes the box triple (also
-        by-joiner); the box states, the lid pair does not."""
+        """Issue #305 — FLIPPED by issue #314 (operator decision):
+        'a 55 by 40 mm lid for the 60 by 45 by 80 mm box' — the lid pair
+        (by-joiner) precedes the box triple (also by-joiner); the box is
+        now in the mating part's zone (after the "for" mating connector)
+        and is SUPPRESSED, so the LID pair states W/D (the head noun's
+        own size). The box's 60/45/80 stay unmapped/offerable.
+        """
         axes = stated_axes_from_message("a 55 by 40 mm lid for the 60 by 45 by 80 mm box")
-        assert axes == {"W": 60.0, "D": 45.0, "H": 80.0}
+        assert axes == {"W": 55.0, "D": 40.0}
+        # The box's 80 ("80 mm" — the only box number with an explicit mm
+        # unit) stays unmapped/offerable (not consumed). The lid's 40
+        # ("40 mm") IS consumed (stated).
+        unmapped = user_quoted_unmapped_mm(["a 55 by 40 mm lid for the 60 by 45 by 80 mm box"])
+        assert 80.0 in unmapped
+        assert 40.0 not in unmapped
 
     def test_part_noun_lid_suppressed_by_later_comma_variant(self):
         """Issue #305 round-1 (HIGH security regression): 'a 55 x 40 mm
@@ -1312,6 +1333,145 @@ class TestTripleExtraction:
         on the match beats the following 'in' preposition."""
         axes = stated_axes_from_message("60 by 45 mm in the drawer")
         assert axes == {"W": 60.0, "D": 45.0}
+
+    # ------------------------------------------------------------------
+    # Issue #314: mating-connector suppression (triple/pair path)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            # The QA-found-wrong case (the primary bug):
+            pytest.param(
+                "a 55 × 40 mm lid that fits a 60 × 45 mm box",
+                {"W": 55.0, "D": 40.0},
+                id="lid-fits-box-lid-states",
+            ),
+            pytest.param(
+                "a 55 x 40 mm lid that fits a 60 x 45 mm box",
+                {"W": 55.0, "D": 40.0},
+                id="lid-fits-box-x-joiner",
+            ),
+            # No own size — nothing stated:
+            pytest.param(
+                "a lid for a 60 × 45 mm box",
+                {},
+                id="lid-for-box-nothing",
+            ),
+            # 'to fit over' multi-word connector:
+            pytest.param(
+                "a 55 × 40 mm lid to fit over a 60 × 45 × 30 mm box",
+                {"W": 55.0, "D": 40.0},
+                id="lid-to-fit-over-box-triple-suppressed",
+            ),
+            # Head-noun-independent: 'for' suppresses the phone's pair:
+            pytest.param(
+                "a 60 mm wide stand for a 100 × 70 mm phone",
+                {"W": 60.0},
+                id="stand-for-phone-stand-states",
+            ),
+            # Non-mating 'for': the tray still states (no size after 'for'):
+            pytest.param(
+                "a tray 60 × 45 × 20 mm for screws",
+                {"W": 60.0, "D": 45.0, "H": 20.0},
+                id="tray-for-screws-tray-states",
+            ),
+            # 'for' + feature noun: nothing stated (double guard):
+            pytest.param(
+                "room for a 30 mm screw",
+                {},
+                id="room-for-screw-nothing",
+            ),
+            # Comma after mating phrase: '5 mm thick' is not an axis word
+            # pair, so nothing from the box and nothing from the thick:
+            pytest.param(
+                "a lid that fits a 60 × 45 mm box, 5 mm thick",
+                {},
+                id="lid-fits-box-comma-thick-nothing",
+            ),
+            # 'with' clause after mating phrase: the 10 mm rim is a
+            # feature noun (suppressed independently), the box pair is
+            # mating-suppressed, the lid pair states:
+            pytest.param(
+                "a 55 × 40 mm lid that fits a 60 × 45 mm box with a 10 mm rim",
+                {"W": 55.0, "D": 40.0},
+                id="lid-fits-box-with-rim-lid-states",
+            ),
+        ],
+    )
+    def test_mating_connector_suppresses_mating_size(self, message, expected):
+        """Issue #314: a size after a mating connector (fits/fit/fitting/
+        to fit/for/over/onto/on top of/that goes on) belongs to the
+        mating part and never states the part's axes. The head noun's own
+        size (before the connector) states normally."""
+        assert stated_axes_from_message(message) == expected
+
+    def test_mating_connector_x_form_flipped(self):
+        """Issue #314: 'a 55x40 mm lid for the 60x45x80mm box' — the
+        x-joiner variant of the QA case. The box triple is mating-
+        suppressed; the lid pair states W/D."""
+        axes = stated_axes_from_message("a 55x40 mm lid for the 60x45x80mm box")
+        assert axes == {"W": 55.0, "D": 40.0}
+
+    def test_mating_connector_by_form_flipped(self):
+        """Issue #314: 'a 55 by 40 mm lid for the 60 by 45 by 80 mm box'
+        — the by-joiner variant. The box triple is mating-suppressed;
+        the lid pair states W/D."""
+        axes = stated_axes_from_message(
+            "a 55 by 40 mm lid for the 60 by 45 by 80 mm box"
+        )
+        assert axes == {"W": 55.0, "D": 40.0}
+
+    def test_mating_connector_slip_fit_not_connector(self):
+        """Issue #314: 'slip fit' is a fit-TYPE, not a mating connector.
+        A message containing 'slip fit' alongside a valid triple still
+        states the triple (the 'fit' in 'slip fit' is filtered out by
+        ``_mating_connector_at``'s fit-type filter)."""
+        axes = stated_axes_from_message("a 60 x 45 mm lid with a slip fit")
+        assert axes == {"W": 60.0, "D": 45.0}
+
+    def test_mating_connector_unmapped_numbers(self):
+        """Issue #314: 'a 55 × 40 mm lid that fits a 60 × 45 mm box' —
+        the lid pair's numbers (55/40) are consumed (stated); the box's
+        numbers (60/45) are mating-suppressed and stay unmapped/offerable
+        (not consumed). The mm-only offer scan sees 40 (lid's D, consumed)
+        and 45 (box's D, explicit-mm, unmapped). The box's 60 is NOT an
+        explicit-mm number ("60 × 45 mm" — only 45 is adjacent to "mm")."""
+        unmapped = user_quoted_unmapped_mm(
+            ["a 55 × 40 mm lid that fits a 60 × 45 mm box"]
+        )
+        # 40 is consumed (the lid's D is stated) → not offerable.
+        assert 40.0 not in unmapped
+        # 45 is the box's D — mating-suppressed, not consumed → still
+        # offerable (explicit-mm number, adjacent to "mm").
+        assert 45.0 in unmapped
+
+    def test_mating_connector_no_own_size_unmapped(self):
+        """Issue #314: 'a lid for a 60 × 45 mm box' — nothing stated
+        (no own size); the box's 45 ("45 mm" — explicit-mm) stays
+        unmapped/offerable. The box's 60 is not an explicit-mm number
+        ("60 × 45 mm" — only 45 is adjacent to "mm")."""
+        axes = stated_axes_from_message("a lid for a 60 × 45 mm box")
+        assert axes == {}
+        unmapped = user_quoted_unmapped_mm(["a lid for a 60 × 45 mm box"])
+        assert 45.0 in unmapped
+
+    def test_mating_connector_triple_suppressed_unmapped(self):
+        """Issue #314: 'a 55 × 40 mm lid to fit over a 60 × 45 × 30 mm
+        box' — the box triple (60/45/30) is mating-suppressed; the lid
+        pair states W/D. The box's 30 ("30 mm" — explicit-mm) stays
+        unmapped/offerable; the lid's 40 ("40 mm" — consumed) is not."""
+        axes = stated_axes_from_message(
+            "a 55 × 40 mm lid to fit over a 60 × 45 × 30 mm box"
+        )
+        assert axes == {"W": 55.0, "D": 40.0}
+        unmapped = user_quoted_unmapped_mm(
+            ["a 55 × 40 mm lid to fit over a 60 × 45 × 30 mm box"]
+        )
+        # The box's 30 is explicit-mm and mating-suppressed → offerable.
+        assert 30.0 in unmapped
+        # The lid's 40 is consumed (stated) → not offerable.
+        assert 40.0 not in unmapped
 
     # ------------------------------------------------------------------
     # Issue #305: 'by' non-dimension false positives

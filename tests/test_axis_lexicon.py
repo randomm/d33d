@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from d33d.axis_lexicon import axis_for_question_word, classify
-from d33d.dimension_protocol import stated_axes_from_message
+from d33d.dimension_protocol import stated_axes_from_message, user_quoted_unmapped_mm
 
 # ---------------------------------------------------------------------------
 # Absolute cues — each word maps its axis with the number
@@ -492,6 +492,80 @@ class TestFeatureNounAbstain:
         # conditional allows it when the lid is the primary object).
         axes = stated_axes_from_message("a 60 x 45 mm lid")
         assert axes == {"W": 60.0, "D": 45.0}
+
+
+class TestMatingConnector:
+    """Issue #314: the mating-connector rule for the lexicon path.
+
+    A size that appears after a mating connector ("fits", "fit",
+    "fitting", "to fit", "for", "over", "onto", "on top of", "that
+    goes on") belongs to the mating part, never to the part being made.
+    The lexicon's classify() must suppress absolute axis cues in clauses
+    that hold only after-connector text.
+
+    Note: Tests for the triple/pair path (d33d/triple_extraction.py) are
+    in tests/test_dimension_protocol.py and handled by task-b."""
+
+    def test_mating_connectors_pin(self) -> None:
+        """Issue #314: _MATING_CONNECTORS is exactly the closed set —
+        pinned by test. Multi-word connectors are whole phrases."""
+        from d33d.axis_lexicon import _MATING_CONNECTORS
+
+        expected = frozenset(
+            {"fits", "fit", "fitting", "to fit", "for", "over", "onto", "on top of", "that goes on"}
+        )
+        assert _MATING_CONNECTORS == expected, (
+            f"_MATING_CONNECTORS drifted: extra={_MATING_CONNECTORS - expected}, "
+            f"missing={expected - _MATING_CONNECTORS}"
+        )
+
+    def test_mating_connector_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid for a box 60 mm wide' → nothing stated for W.
+        The axis word 'wide' is in the mating clause after 'for', so it must
+        not set the head noun's W. The 60 stays unmapped/offerable."""
+        result = classify("a lid for a box 60 mm wide")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_fits_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid that fits a 60 mm wide box' → nothing stated
+        for W (the 'wide' is after the connector 'fits')."""
+        result = classify("a lid that fits a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_onto_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid onto a 60 mm wide box' → nothing stated for W."""
+        result = classify("a lid onto a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_over_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid over a 60 mm wide box' → nothing stated for W."""
+        result = classify("a lid over a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_on_top_of_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid on top of a 60 mm wide box' → nothing stated
+        for W (multi-word connector)."""
+        result = classify("a lid on top of a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_that_goes_on_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid that goes on a 60 mm wide box' → nothing
+        stated for W (multi-word connector)."""
+        result = classify("a lid that goes on a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_to_fit_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid to fit a 60 mm wide box' → nothing stated
+        for W (multi-word connector)."""
+        result = classify("a lid to fit a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
 
 
 class TestReleaseFallbackFunction:

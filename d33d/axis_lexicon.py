@@ -174,6 +174,33 @@ _FEATURE_NOUN_RE = re.compile(
 #: (the subset pin).
 _PART_NOUNS: frozenset[str] = frozenset({"lid"})
 
+#: The mating connectors (issue #314): words and phrases that introduce the
+#: MATING PART of a design — the part the user's part must fit or sit on.
+#: Anything sized AFTER a mating connector belongs to the mating part, never
+#: to the part being made, so its size must never state the part's axes
+#: ("a 55 × 40 mm lid that fits a 60 × 45 mm box" → the LID is 55 × 40, the
+#: 60 × 45 box is the mating part). One closed, pinned definition — the
+#: triple/pair path (``d33d.triple_extraction``) imports it; it is NOT
+#: redefined there.
+#
+#: Multi-word connectors ("to fit", "on top of", "that goes on") match as
+#: whole phrases; "fit" is matched as a WHOLE WORD, so the fit-type words
+#: "slip fit" / "press fit" are NOT mating connectors. Pinned by
+#: ``tests/test_axis_lexicon.py``.
+_MATING_CONNECTORS: frozenset[str] = frozenset(
+    {"fits", "fit", "fitting", "to fit", "for", "over", "onto", "on top of", "that goes on"}
+)
+
+#: The compiled whole-phrase matcher for ``_MATING_CONNECTORS`` (the longest
+#: phrases first so "to fit" is found before "fit" and "on top of" before
+#: "on"). ``_word_re`` gives whole-word, case-insensitive matching — "slip
+#: fit" / "press fit" match "fit" as a whole word, and the caller filters
+#: those fit-type uses out (see ``_mating_connector_at``).
+_MATING_CONNECTOR_RE: re.Pattern[str] = re.compile(
+    r"(?<!\w)(?:" + "|".join(re.escape(c) for c in sorted(_MATING_CONNECTORS, key=len, reverse=True)) + r")(?!\w)",
+    re.IGNORECASE,
+)
+
 # All axis words (absolute + relative) for clause-level detection.
 _ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(RELATIVE_WORDS)
 
@@ -222,6 +249,39 @@ def _word_re(word: str) -> re.Pattern[str]:
     """An absolute axis word at a word boundary (underscore is a word
     char, so "height" inside "spacer_height" does NOT match)."""
     return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
+
+
+def _mating_connector_at(message: str, pos: int) -> bool:
+    """True if a mating connector (``_MATING_CONNECTORS``, issue #314) ends
+    at or before ``pos`` in ``message``.
+
+    The connector must be a WHOLE word/phrase: "slip fit" and "press fit"
+    (fit-TYPE words, not mating connectors) do NOT count. Multi-word
+    connectors ("to fit", "on top of", "that goes on") match as whole
+    phrases. This is the single helper both paths use: the lexicon's
+    clause classification (a clause holding only after-connector text
+    states no absolute axis) and the triple/pair extractor (a match
+    starting after the connector's clause states nothing).
+
+    The fit-type filter: if the connector is "fit", "fits", or "fitting"
+    and the word immediately before it is a fit-type adjective ("slip",
+    "press", "snap", "interference", "glue"), it is NOT a mating
+    connector."""
+    for m in _MATING_CONNECTOR_RE.finditer(message):
+        if m.end() > pos:
+            break
+        matched = m.group(0).strip().lower()
+        # Fit-type filter: "slip fit" / "press fit" — the word immediately
+        # before "fit"/"fits"/"fitting" is a fit-type adjective, not a
+        # mating connector.
+        if matched in ("fit", "fits", "fitting"):
+            prefix_words = message[: m.start()].split()
+            if prefix_words:
+                last_word = prefix_words[-1].lower()
+                if last_word in {"slip", "press", "snap", "interference", "glue"}:
+                    continue
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -376,6 +436,30 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
         if _word_re(word).search(clause):
             relative.add(axis)
             cue_words.append(word)
+
+    # Mating-connector suppression (issue #314): a clause that holds NO
+    # text before its first mating connector is entirely in the mating
+    # part's zone — its axis words and numbers describe the mating part
+    # ("a box 60 mm wide" in "a lid for a box 60 mm wide"), never the part
+    # being made. No ABSOLUTE axis cue is produced (the mm number falls
+    # out into unmapped_mm_numbers via the normal scan below); relative
+    # and global cues are KEPT (a release only stops enforcement, never
+    # sets a wrong value — the same conservative choice as the feature-noun
+    # guard). A clause with text before the connector ("a 55 × 40 mm lid
+    # that fits a 60 mm wide box") is NOT clause-local here (the clause
+    # splitter does not split on connectors), so this guard does not fire
+    # for the before-side; the triple/pair path handles that case.
+    if cue_words:
+        first_axis_word = min(
+            _word_re(w).search(clause).start() for w in cue_words if _word_re(w).search(clause)
+        )
+        if not _mating_connector_at(clause, first_axis_word):
+            # Some axis word appears before any connector — normal path.
+            pass
+        else:
+            # All axis words are after the first connector — the clause is
+            # entirely in the mating part's zone. No absolute cue.
+            return ({}, relative, global_, cue_words)
 
     # Feature-noun clauses (issue #261): "a 5 mm deep groove" / "a hole
     # 10 mm deep" / "12 mm high feet" state nothing about the part's
