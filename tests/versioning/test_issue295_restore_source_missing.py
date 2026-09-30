@@ -261,3 +261,52 @@ def test_source_missing_409_fires_before_version_create(app_with_versions):
     # Git invisibility: the on-disk repo path never crosses the boundary.
     assert repo_path not in r.text
     assert "git" not in r.json()["detail"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# (f) issue #316 (task-b): the design-state route's ``history_missing``
+#     flag mirrors the repo-present check
+# ---------------------------------------------------------------------------
+
+
+def test_design_state_history_missing_true_when_repo_absent(app_with_versions):
+    """After the same setup as ``test_restore_repo_absent_is_409_source_
+    missing`` (create project + version, delete the ``git_repo_path``
+    directory), the design-state GET returns ``history_missing: true``
+    (the repo check fires the same way) and still serves the entries
+    from the DB."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 30.0, "D": 30.0})
+        # The repo goes away (out-of-band loss — same pattern as the
+        # restore/branch 409 tests above).
+        shutil.rmtree(_repo_for(app_with_versions, pid))
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["history_missing"] is True
+    # Entries are still served (they come from the DB, not the repo).
+    assert len(body["entries"]) > 0
+
+
+def test_design_state_history_missing_false_when_repo_present(app_with_versions):
+    """With the repo intact (the normal case), the design-state GET
+    returns ``history_missing: false`` — the flag is ``false`` when the
+    project's repo directory exists on disk."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 30.0})
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    r = run_async(app_with_versions, _call)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["history_missing"] is False

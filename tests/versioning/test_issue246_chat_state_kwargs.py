@@ -196,8 +196,23 @@ def test_chat_adapter_kwargs_render_the_state_block_in_the_live_prompt():
     # ``measured``). Axis rows render their axis word (``Depth``), not
     # the bare letter, so the model can tell the protocol's axis from a
     # model param named ``D``.
+    # Issue #316 de-dup: the W and D params (30/25) AGREE with their
+    # stated axis rows (30/25, exact match) → their param rows are
+    # DROPPED; the surviving W/D rows are the axis rows, which take the
+    # params' CURRENT provenance (``assumed`` — the params were never
+    # promoted; no measurement to change their provenance). The H param
+    # (20) has no stated axis → keeps its own param row (``assumed``).
+    # The bore param (8) has no axis mapping → keeps its own param row.
+    # No row renders the ``stated`` mark (the de-dup takes the params'
+    # ``assumed`` provenance, not the axis rows' ``stated``).
     stated_rows = [ln for ln in text.split("\n") if ln.endswith("(stated by the user)")]
-    assert "Depth (D) = 25 (stated by the user)" in stated_rows, stated_rows
+    assert stated_rows == [], f"no rows should carry the stated mark after de-dup: {stated_rows}"
+    # The W axis row carries the param's label and provenance (``assumed``).
+    assert "Width (W) = 30 (assumed — the user never set this)" in text
+    # The D axis row carries the param's label and provenance (``assumed``).
+    assert "Depth (D) = 25 (assumed — the user never set this)" in text
+    # The H param row (no stated axis → not de-duped) carries ``assumed``.
+    assert "H = 20 (assumed — the user never set this)" in text
 
 
 def test_production_design_loop_forwards_state_stated():

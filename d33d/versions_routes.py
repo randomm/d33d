@@ -66,6 +66,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
+from d33d.projects import repo_present
 from d33d.design_loop_events import (
     _version_bbox_extents,
     _version_render_artifact_dir,
@@ -399,20 +400,30 @@ def create_versions_router() -> APIRouter:
     # -- design state (the block the SPA's Brief renders — issue #120) -------
 
     @router.get("/api/projects/{project_id}/design-state")
-    async def get_design_state(request: Request, project_id: int) -> list[dict[str, Any]]:
+    async def get_design_state(request: Request, project_id: int) -> dict[str, Any]:
         """The design-state block for the project's LATEST version (issue
         #120, consumer 2 — the GET the SPA reads to render the Brief).
 
-        Returns a JSON array of entries: ``name``, ``label``, ``value``
-        (nullable — ``unknown`` serialises as ``null``), ``unit`` (``mm``
-        for numeric params, ``null`` for non-numeric), and ``provenance``
-        (``stated``/``unknown``/``measured``/``disagrees`` — ``stated_value``
-        rides alongside ONLY for ``disagrees`` entries; ``measured``/
-        ``disagrees`` require the version's persisted measurement, issue
-        #137 — ``None`` when the version has no persisted bbox, see
-        ``d33d.design_state``). A project with no version yet returns an
-        EMPTY array with 200 (never a 404, never null — turn one is the
-        commonest case).
+        Returns an envelope: ``{"entries": [...], "history_missing": bool}``.
+
+        ``entries`` is the same list of entries as before — ``name``,
+        ``label``, ``value`` (nullable — ``unknown`` serialises as
+        ``null``), ``unit`` (``mm`` for numeric params, ``null`` for
+        non-numeric), and ``provenance`` (``stated``/``unknown``/
+        ``measured``/``disagrees`` — ``stated_value`` rides alongside ONLY
+        for ``disagrees`` entries; ``measured``/``disagrees`` require the
+        version's persisted measurement, issue #137 — ``None`` when the
+        version has no persisted bbox, see ``d33d.design_state``). A
+        project with no version yet returns ``"entries": []`` with 200
+        (never a 404, never null — turn one is the commonest case).
+
+        ``history_missing`` (issue #316) is ``true`` when the project's
+        git repo directory is absent — the same ``Path(git_repo_path).
+        is_dir()`` predicate as ``storage.repo_present`` (via the shared
+        ``repo_present`` helper in ``d33d.projects``), computed per
+        request. The SPA uses it to drive the existing ``brief-saved-
+        missing`` banner without needing a separate project-GET round
+        trip.
 
         This calls the SAME ``state_block_for_version`` the live prompt
         builder (``d33d.design_loop``) calls — the shared callable, not a
@@ -422,7 +433,7 @@ def create_versions_router() -> APIRouter:
         measurement.
         """
         svc = _service(request)
-        _project_or_404(svc, project_id)
+        project_row = _project_or_404(svc, project_id)
         latest = svc.latest_version(project_id)
         params = dict(latest["params"]) if latest is not None else None
         measurement = latest["bbox"] if latest is not None else None
@@ -439,7 +450,15 @@ def create_versions_router() -> APIRouter:
         # flow's evidence — a confirmed param renders ``stated`` (rule
         # (b)) in the SAME block the live prompt renders.
         confirmed = latest["confirmed_params"] if latest is not None else None
-        return state_block_for_version(params, measurement, stated, param_meta, confirmed)
+        entries = state_block_for_version(params, measurement, stated, param_meta, confirmed)
+        # history_missing (issue #316): the repo directory is absent → the
+        # saved design history is gone. Same predicate as
+        # storage.repo_present (via the shared repo_present helper) —
+        # computed per request (it can flip without a new version).
+        return {
+            "entries": entries,
+            "history_missing": not repo_present(project_row),
+        }
 
     # -- design source (the versioned OpenSCAD text) ---------------------------
 

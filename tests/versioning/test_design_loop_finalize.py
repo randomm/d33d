@@ -334,19 +334,23 @@ def test_finalize_pass_yields_measured_design_state(app_with_versions) -> None:
         # block once axis rows coexist), not by name.
         expected = state_block_for_version(row["params"], row["bbox"])
         return (
-            ds.json(),
+            ds.json()["entries"],
             {(e["kind"], e["name"]): e for e in expected},
         )
 
     body, expected = run_async(app_with_versions, _call)
-    by_name = {(e["kind"], e["name"]): e for e in body}
+    by_kind_name = {(e["kind"], e["name"]) for e in body}
+    # Issue #316 de-dup: the W/D/H-named params (30) all AGREE with their
+    # measured extents (30.4/30.0/30.0, within tolerance) → their param
+    # rows are DROPPED; only the axis rows remain (measured, one row per
+    # axis). The W param (30) vs measured W (30.4): within tolerance →
+    # DROPPED. The surviving W row is the axis row (measured 30.4).
     for axis in ("W", "D", "H"):
-        entry = by_name[("param", axis)]
-        # W is off-nominal (30.4 vs 30.0, within tolerance) and STILL
-        # 'measured' — display carries the measured value.
-        assert entry["provenance"] == "measured", (axis, entry)
-        assert entry == expected[("param", axis)]
-    assert by_name[("param", "W")]["value"] == 30.4
+        assert ("param", axis) not in by_kind_name, f"param {axis} should be de-duped"
+        axis_entry = next(e for e in body if e["kind"] == "axis" and e["name"] == axis)
+        assert axis_entry["provenance"] == "measured", (axis, axis_entry)
+    w_axis = next(e for e in body if e["kind"] == "axis" and e["name"] == "W")
+    assert w_axis["value"] == 30.4
 
 
 # ---------------------------------------------------------------------------
@@ -1844,7 +1848,7 @@ def test_design_state_committed_before_version_created_frame(app_with_versions):
     assert status == 200, status
     # The new version's rows are already visible at the frame moment — the
     # row is committed before the frame is yielded.
-    by_name = {e["name"]: e for e in body}
+    by_name = {e["name"]: e for e in body["entries"]}
     assert "W" in by_name, f"design-state at frame moment: {body}"
     assert by_name["W"]["value"] == 10, by_name
 
@@ -4803,9 +4807,21 @@ def test_finalize_tray_triple_offer_never_targets_stated_axis(app_with_versions)
         latest["param_meta"],
         latest["confirmed_params"],
     )
-    by_name = {e["name"]: e for e in block if e.get("kind") == "param"}
+    # Issue #316 de-dup: the three axis params (tray_width/depth/height)
+    # AGREE with their stated axis rows (60/45/20, exact match) → their
+    # param rows are DROPPED; the surviving rows are the axis rows
+    # (carrying the param labels and provenance). The block renders them
+    # as axis rows, not param rows — the offer selection reads the
+    # param rows (``kind == "param"``) and finds only wall_thickness.
+    param_rows = {e["name"]: e for e in block if e.get("kind") == "param"}
+    # The three axis params are de-duped (no param rows for them).
     for name in ("tray_width", "tray_depth", "tray_height"):
-        assert by_name[name]["provenance"] == "stated", by_name[name]
+        assert name not in param_rows, f"{name} should be de-duped"
+    # The axis rows carry the params' labels and stated provenance.
+    axis_rows = {e["name"]: e for e in block if e.get("kind") == "axis"}
+    assert axis_rows["W"]["provenance"] == "stated"
+    assert axis_rows["D"]["provenance"] == "stated"
+    assert axis_rows["H"]["provenance"] == "stated"
     # The offer targets the pure assumed param — never a stated axis.
     assert pending is not None, "no pending offer was recorded on finalize"
     assert pending["param"] == "wall_thickness", pending
@@ -5462,11 +5478,18 @@ def test_question_path_deterministic_answer_unaffected_by_model_unconfigured(
     # ``kind: "answer"`` discriminator — the SPA renders it verbatim as a
     # plain assistant message). There is no separate ``answer`` field.
     answer = done_frames[0].get("message", "")
-    # The deterministic stage names the height (the stated value, 12.0 mm).
-    assert "12" in answer, f"deterministic answer must name the height, got {answer!r}"
-    assert "established" not in answer.lower(), (
-        f"the answer must be the stated value, not the 'not established' "
-        f"sentence, got {answer!r}"
+    # Issue #316 de-dup: the H param (12) AGREES with the stated H axis
+    # (12) → the H param row is DROPPED; the surviving H row is the axis
+    # row, which takes the param's CURRENT provenance (``assumed`` — the
+    # param was never promoted). The deterministic answer stage reads the
+    # axis row and finds ``assumed`` → "not established yet" (the de-dup
+    # changes the displayed row's provenance, not the underlying evidence
+    # — the H number 12 is still in the block on the axis row). The
+    # answer now reflects the merged provenance (``assumed``), not the
+    # original stated evidence.
+    assert "established" in answer.lower(), (
+        f"the answer reflects the de-duped axis row's provenance, "
+        f"got {answer!r}"
     )
     error_frames = [data for event, data in frames if event == "error"]
     assert error_frames == [], "no error frame for a deterministic answer"

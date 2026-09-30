@@ -46,10 +46,15 @@ above (``disagrees_source``'s semantics are pinned on
 ``kind`` (issue #246 review): ``"param"`` — a row built from the version's
 params snapshot (the model emitted the value), ``"axis"`` — a row built
 from the persisted per-axis stated set (the dimension protocol's W/D/H
-axes). ``name`` is NOT unique within a block: a param row and an axis row
-can both be named ``W`` (the model emits a ``W`` param AND the user stated
-``W``) — ``kind``+``name`` is the row identity, and nothing in this module
-dedupes, drops, or matches rows by name.
+axes). A param row and an axis row can both be named ``W`` (the model
+emits a ``W`` param AND the user stated ``W``) — ``kind``+``name`` is the
+row identity. The de-dup below (issue #316) is the ONE place this module
+may drop a param row: a param that maps to an axis (declared ``axis`` or
+literal W/D/H name) and AGREES with that axis's measured extent within the
+bbox tolerance collapses into its axis row (the axis row keeps its
+identity, the param row is not rendered). A param that DISAGREES keeps
+both rows (the #264 disagrees display is unchanged); nothing else is ever
+dropped or matched by name.
 
 Provenance semantics (issue #246 — default to ``assumed``, promote to
 ``stated`` on evidence, NEVER the reverse):
@@ -224,7 +229,10 @@ class StateEntry(TypedDict):
     #: — the UI renders it in the mono face (mono = machine value).
     label_is_identifier: NotRequired[bool]
     #: The model's declared axis (``"W" | "D" | "H"``) — the ONLY
-    #: promotion evidence (issue #248). Present on param rows only.
+    #: promotion evidence (issue #248). Present on param rows only. (A bare
+    #: ``str``, not a ``Literal`` — the field is set only from the model's
+    #: ``parameters`` metadata, which is shape-checked before it is stored,
+    #: so a real row never carries an out-of-set value.)
     axis: NotRequired[str]
     #: The model's stated reason for a value the user did not give
     #: (issue #248) — the Brief's expanded assumed row renders it.
@@ -714,7 +722,92 @@ def state_block_for_version(
                     out.append(e)
                     continue
         out.append(entry)
-    return out
+    return _dedupe_agreeing_param_rows(out)
+
+
+def _dedupe_agreeing_param_rows(
+    entries: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Issue #316 — the param-into-axis de-dup (the ONE drop in this module).
+
+    A param row that maps to an axis and AGREES with that axis row's
+    value within the bbox tolerance is REDUNDANT: the axis row already
+    carries the same number (the axis row keeps its identity, name, and
+    kind). The param row is DROPPED; the axis row takes the param's
+    human label (when one exists) and carries the param's CURRENT
+    provenance when it is a non-disagrees state (``stated`` / ``assumed``
+    / ``measured`` — as computed before the drop); an axis row's own
+    ``disagrees`` is authoritative (the #264 display is unchanged) and
+    is never overwritten.
+
+    A param row collapses into its axis row only when ALL of these hold:
+
+    - the param is NOT already ``disagrees`` (a disagreeing param keeps
+      both rows — the #264 display is unchanged);
+    - the param's name maps to an axis — its declared ``axis`` (the
+      ``param_meta`` axis, issue #248) when present, otherwise its name
+      when literally one of W/D/H (issue #137's literal-name path);
+    - that axis's ROW exists and carries a positive numeric value (a
+      measured extent OR a persisted stated value — both are positive;
+      an axis row always carries a positive number, since zero/absent
+      extents abstain and never yield a row);
+    - the param's value is a positive number (never ``unknown`` / ``0`` /
+      non-numeric) and ``abs(param_value − axis_value) <= max(
+      BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)``.
+
+    Everything else keeps its row: a disagreeing param (the #264 display
+    is unchanged), a param with no axis mapping, a param whose axis has
+    no row, and a param with a non-positive or non-numeric value. Only
+    param-into-axis collapses — never the reverse (the axis row is the
+    authoritative display). When several params collapse into the same
+    axis, the LAST one wins (declaration order) — the axis row carries
+    that param's label and provenance.
+    """
+    by_axis: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        if e.get("kind") == "axis" and e.get("name") in AXIS_PARAM_NAMES:
+            by_axis[e["name"]] = e
+    dropped: set[str] = set()
+    for e in entries:
+        if e.get("kind") != "param":
+            continue
+        axis = e.get("axis")
+        if axis not in _VALID_META_AXES:
+            axis = e.get("name")
+        if axis not in _VALID_META_AXES:
+            continue
+        value = e.get("value")
+        if not _is_number(value) or value <= 0:
+            continue
+        # A disagreeing param keeps its own row (the #264 display is
+        # unchanged) — the de-dup collapses only AGREEING params.
+        if e.get("provenance") == "disagrees":
+            continue
+        axis_row = by_axis.get(axis)
+        if axis_row is None:
+            continue
+        axis_value = axis_row.get("value")
+        if not _is_number(axis_value) or axis_value <= 0:
+            continue
+        if abs(float(value) - float(axis_value)) > max(
+            BBOX_TOLERANCE_REL * float(axis_value), BBOX_TOLERANCE_MIN_MM
+        ):
+            continue
+        # The param agrees with its axis — drop the param row; the axis
+        # row takes the param's label (when one exists) and its CURRENT
+        # provenance (an axis row's own disagrees is never overwritten).
+        label = e.get("label")
+        if isinstance(label, str) and label:
+            axis_row["label"] = label
+        provenance = e.get("provenance")
+        if isinstance(provenance, str) and provenance in (
+            "stated",
+            "assumed",
+            "measured",
+        ):
+            axis_row["provenance"] = provenance
+        dropped.add(id(e))
+    return [e for e in entries if id(e) not in dropped]
 
 
 def _maybe_confirm_params(

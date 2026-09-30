@@ -1765,7 +1765,7 @@ def test_chat_yes_after_offer_confirms_param_no_new_version(app_with_versions):
     # The version is user-confirmed (the ONLY writer is this flow).
     assert row["confirmed_params"] == {"wall_thickness": 3.0}, row
     # The design-state block renders it stated (rule (b)).
-    by_name = {e["name"]: e for e in ds_body}
+    by_name = {e["name"]: e for e in ds_body["entries"]}
     assert by_name["wall_thickness"]["provenance"] == "stated", by_name
     # NO new version: the version count is unchanged and the latest id is
     # the pre-existing version.
@@ -2449,18 +2449,22 @@ def test_offer_entry_block_rows_use_precomputed_entry():
 
     rows = _tray_param_rows()
     by_name = {e["name"]: e for e in rows}
-    # A stated axis param: the entry is the block's own row (label
-    # "Tray depth", provenance stated — the row the Brief shows).
-    entry = offer_entry(_TRAY_PARAMS, _TRAY_META, "tray_depth", block_entries=rows)
-    assert entry is not None
-    assert entry["provenance"] == "stated", entry
-    # The graft resolves onto the entry (issue #265): mm evidence from
-    # the param's own metadata.
-    assert entry.get("meta_unit") == "mm"
-    assert entry.get("param_axis") == "D"
-    assert mm_value_str(entry) == "45.0\u202fmm"
-    # The caller's row is untouched (the graft is a copy, never in place).
-    assert "meta_unit" not in by_name["tray_depth"], by_name["tray_depth"]
+    # Issue #316 de-dup: the tray axis params (tray_width/depth/height)
+    # AGREE with their stated axis rows (60/45/20, exact match) → their
+    # param rows are DROPPED from the block; ``_tray_param_rows()``
+    # returns only the remaining param rows (wall_thickness). The
+    # de-duped axis params are NOT in ``rows`` (they are axis rows now).
+    assert "tray_depth" not in by_name, "tray_depth should be de-duped"
+    # The pure assumed param (wall_thickness) IS in the block's param
+    # rows.
+    assert "wall_thickness" in by_name
+    wall = offer_entry(_TRAY_PARAMS, _TRAY_META, "wall_thickness", block_entries=rows)
+    assert wall is not None
+    assert wall["provenance"] == "assumed"
+    # The de-duped axis param is NOT findable in the block's param rows
+    # (it is now an axis row, not a param row).
+    entry_gone = offer_entry(_TRAY_PARAMS, _TRAY_META, "tray_depth", block_entries=rows)
+    assert entry_gone is None
     # Fallback (no block rows): identical label/graff, built from the
     # params-only substrate (the pre-#300 behaviour, unchanged).
     bare = offer_entry(_TRAY_PARAMS, _TRAY_META, "tray_depth")
@@ -2540,9 +2544,18 @@ def test_chat_tray_triple_offer_never_targets_stated_axis(app_with_versions):
         latest["param_meta"],
         latest["confirmed_params"],
     )
-    by_name = {e["name"]: e for e in block if e.get("kind") == "param"}
+    # Issue #316 de-dup: the three axis params (tray_width/depth/height)
+    # AGREE with their stated axis rows (60/45/20) → their param rows
+    # are DROPPED; the surviving rows are the axis rows (carrying the
+    # param labels and stated provenance). The offer selection reads
+    # ``kind == "param"`` rows and finds only wall_thickness.
+    param_rows = {e["name"]: e for e in block if e.get("kind") == "param"}
     for name in ("tray_width", "tray_depth", "tray_height"):
-        assert by_name[name]["provenance"] == "stated", by_name[name]
+        assert name not in param_rows, f"{name} should be de-duped"
+    # The axis rows carry the params' stated provenance.
+    axis_rows = {e["name"]: e for e in block if e.get("kind") == "axis"}
+    for axis in ("W", "D", "H"):
+        assert axis_rows[axis]["provenance"] == "stated", axis_rows[axis]
     done = [d for e, d in frames if e == "done"]
     assert done, f"no done frame: {frames}"
     # The offer targets the pure assumed param (flagged by the stub's

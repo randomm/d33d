@@ -703,7 +703,7 @@ def test_design_state_get_serves_measured_without_re_render(app_with_versions) -
 
     resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
-    by_name = {e["name"]: e for e in resp.json()}
+    by_name = {e["name"]: e for e in resp.json()["entries"]}
     # The persisted measurement is served (measured, displayed value).
     assert by_name["W"]["provenance"] == "measured"
     assert by_name["W"]["value"] == 30.4  # the measured value (not the stated 30)
@@ -749,7 +749,11 @@ def test_shared_callable_identity_pins_both_consumers(app_with_versions) -> None
     # SAME object the route calls).
     lines = dl._design_state_lines((30.0, 30.0, 30.0), {"W": 30.0}, {"x": MEASURED_W, "y": 30.0, "z": 30.0})
     joined = "\n".join(lines)
-    assert f"W = {MEASURED_W:g}" in joined, "the prompt must carry the measured value"
+    # Issue #316 de-dup: the W param (30) AGREES with the measured W
+    # extent (30.4, within tolerance) → its row is DROPPED; the
+    # surviving W row is the axis row, rendered as ``Width (W) = 30.4``
+    # (the axis row prefix). The measured value is still in the prompt.
+    assert f"Width (W) = {MEASURED_W:g}" in joined, "the prompt must carry the measured value"
 
 
 def test_get_route_and_prompt_builder_same_callable_identity() -> None:

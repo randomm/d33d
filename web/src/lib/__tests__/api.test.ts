@@ -311,26 +311,30 @@ describe("region-scoped edit request", () => {
 // ---------------------------------------------------------------------------
 
 describe("getDesignState", () => {
-  it("GETs /api/projects/{id}/design-state and resolves the entry rows", async () => {
-    const rows = [
-      {
-        name: "outer_diameter",
-        label: "Outer diameter",
-        value: 20,
-        unit: "mm",
-        provenance: "stated",
-      },
-      {
-        name: "wire_gauge",
-        label: "Wire gauge",
-        value: null,
-        unit: null,
-        provenance: "unknown",
-      },
-    ];
-    fake.enqueue(json(200, rows));
-    const list = await client.getDesignState(1);
-    expect(list).toHaveLength(2);
+  it("GETs /api/projects/{id}/design-state and resolves the envelope", async () => {
+    const envelope = {
+      entries: [
+        {
+          name: "outer_diameter",
+          label: "Outer diameter",
+          value: 20,
+          unit: "mm",
+          provenance: "stated",
+        },
+        {
+          name: "wire_gauge",
+          label: "Wire gauge",
+          value: null,
+          unit: null,
+          provenance: "unknown",
+        },
+      ],
+      history_missing: false,
+    };
+    fake.enqueue(json(200, envelope));
+    const result = await client.getDesignState(1);
+    expect(result.entries).toHaveLength(2);
+    expect(result.history_missing).toBe(false);
     const { url, init } = lastCall();
     expect(url).toBe("http://api.test/api/projects/1/design-state");
     expect(init.method).toBe("GET");
@@ -338,41 +342,56 @@ describe("getDesignState", () => {
 
   it("preserves a null value on unknown entries — never 0 (issue #91 contract)", async () => {
     fake.enqueue(
-      json(200, [
-        {
-          name: "hole_diameter",
-          label: "Hole diameter",
-          value: null,
-          unit: "mm",
-          provenance: "unknown",
-        },
-      ]),
+      json(200, {
+        entries: [
+          {
+            name: "hole_diameter",
+            label: "Hole diameter",
+            value: null,
+            unit: "mm",
+            provenance: "unknown",
+          },
+        ],
+        history_missing: false,
+      }),
     );
-    const [row] = await client.getDesignState(1);
+    const [row] = (await client.getDesignState(1)).entries;
     expect(row?.value).toBeNull();
     expect(row?.value).not.toBe(0);
   });
 
   it("carries stated_value only on disagrees entries", async () => {
     fake.enqueue(
-      json(200, [
-        {
-          name: "width",
-          label: "Width",
-          value: 18,
-          unit: "mm",
-          provenance: "disagrees",
-          stated_value: 20,
-        },
-      ]),
+      json(200, {
+        entries: [
+          {
+            name: "width",
+            label: "Width",
+            value: 18,
+            unit: "mm",
+            provenance: "disagrees",
+            stated_value: 20,
+          },
+        ],
+        history_missing: false,
+      }),
     );
-    const [row] = await client.getDesignState(1);
+    const [row] = (await client.getDesignState(1)).entries;
     expect(row).toMatchObject({ value: 18, stated_value: 20 });
   });
 
-  it("resolves an empty array when the project has no version yet", async () => {
-    fake.enqueue(json(200, []));
-    await expect(client.getDesignState(1)).resolves.toEqual([]);
+  it("resolves an empty entries array when the project has no version yet", async () => {
+    fake.enqueue(json(200, { entries: [], history_missing: false }));
+    const result = await client.getDesignState(1);
+    expect(result.entries).toEqual([]);
+    expect(result.history_missing).toBe(false);
+  });
+
+  it("carries history_missing=true when the repo directory is absent (issue #316)", async () => {
+    fake.enqueue(json(200, { entries: [], history_missing: true }));
+    const result = await client.getDesignState(1);
+    expect(result.history_missing).toBe(true);
+    expect(result.entries).toEqual([]);
   });
 
   it("surfaces a 404 for an unknown project", async () => {

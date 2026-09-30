@@ -119,6 +119,12 @@ interface BriefProps {
    *  surfaces the failure — the stale-empty "Nothing yet" state must not
    *  persist silently. Clears on the next successful fetch. */
   refreshFailed?: boolean;
+  /** Issue #316: the design-state envelope's `history_missing` flag (true
+   *  when the project's repo directory is absent — the same predicate as
+   *  `storage.repo_present`). ORed with `storage.repo_present === false`
+   *  into the single `brief-saved-missing` banner, rendered once — the two
+   *  signals are the same underlying condition by construction. */
+  historyMissing?: boolean;
   /** The project's live storage signal (issue #295) — the SPA reads it,
    *  never recomputes. `repo_present === false` → the "saved design
    *  missing" banner; `photo_present === false` (NOT null) → the
@@ -195,6 +201,7 @@ export function Brief({
   hasLivePin,
   highlightModuleId,
   storage,
+  historyMissing,
   onAsk,
   onChange,
   onShowOnModel,
@@ -218,7 +225,15 @@ export function Brief({
   const assumed = safeEntries.filter((e) => e.provenance === "assumed");
   const resolved = safeEntries.filter((e) => e.provenance !== "unknown");
 
-  const savedDesignMissing = storage?.repo_present === false;
+  // Issue #316: one banner from two signals — the design-state
+  // `history_missing` flag (the wire source, computed per request) OR the
+  // project-GET `storage.repo_present === false`. Same underlying
+  // condition by construction; the OR makes either signal sufficient (a
+  // failed storage GET no longer hides the banner when the design-state
+  // fetch established the repo is gone), and the single `{... &&}` below
+  // guarantees it renders exactly once.
+  const savedDesignMissing =
+    historyMissing === true || storage?.repo_present === false;
   const photoMissing = storage?.photo_present === false;
 
   // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows

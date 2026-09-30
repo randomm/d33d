@@ -173,6 +173,23 @@ export interface DesignStateEntry {
 }
 
 /**
+ * The design-state envelope (GET /api/projects/{id}/design-state, issue
+ * #316). The response is an OBJECT, not a bare array: `entries` is the
+ * block the Brief renders (a project with no version yet returns `[]`),
+ * and `history_missing` is `true` when the project's git repo directory
+ * is absent — the SAME `Path(git_repo_path).is_dir()` predicate as
+ * `storage.repo_present`, computed per request (it can flip without a new
+ * version, so the SPA reads it from this fetch, not a cached project
+ * value). The Brief's `brief-saved-missing` banner fires from
+ * `history_missing === true` OR `storage.repo_present === false`, rendered
+ * once (issue #316 operator decision: one banner, no new copy).
+ */
+export interface DesignStateEnvelope {
+  entries: DesignStateEntry[];
+  history_missing: boolean;
+}
+
+/**
  * The compare response (GET .../versions/compare?a=&b=) — the prioritized
  * surface. Both full param sets, the computed diff table (added/removed/
  * changed), and the shared-rotation contract (identical units/axis
@@ -687,15 +704,18 @@ export class ApiClient {
   }
 
   /**
-   * Get the design-state block (issue #120, consumer 2): the entries the
-   * Brief renders, with provenance per value. `value` is nullable —
+   * Get the design-state envelope (issue #120, consumer 2; the `{entries,
+   * history_missing}` object since issue #316): the entries the Brief
+   * renders, with provenance per value. `value` is nullable —
    * `provenance: "unknown"` serialises as `null` and MUST survive JSON.parse
    * as `null` (never defaulted to 0 — issue #91 shipped exactly that
    * defect on the backend). `stated_value` rides alongside ONLY on
-   * `disagrees` entries.
+   * `disagrees` entries. `history_missing` is the repo-directory-absent
+   * flag (same predicate as `storage.repo_present`) the Brief's
+   * `brief-saved-missing` banner ORs with `storage.repo_present === false`.
    */
-  async getDesignState(id: number): Promise<DesignStateEntry[]> {
-    return this.request<DesignStateEntry[]>(
+  async getDesignState(id: number): Promise<DesignStateEnvelope> {
+    return this.request<DesignStateEnvelope>(
       "GET",
       `/api/projects/${id}/design-state`,
     );

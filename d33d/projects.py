@@ -390,7 +390,20 @@ def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     # header-only open + verify + size, memoized per (path, mtime, size),
     # so the project list endpoint never full-decodes per row.
     photo_present = photo_storage_signal(row.get("source_photo_path"))
-    return {"repo_present": Path(row["git_repo_path"]).is_dir(), "photo_present": photo_present}
+    return {"repo_present": repo_present(row), "photo_present": photo_present}
+
+
+def repo_present(row: dict[str, Any]) -> bool:
+    """The single predicate for "is the project's git repo directory on
+disk?" — the shared check used by both ``_storage_field`` (the project
+GET's ``storage.repo_present``) and the design-state route's
+``history_missing`` flag (issue #316 task-b).
+
+    True when the repo directory exists; False when it is absent (deleted
+    out-of-band, never created, etc.). Computed at call time — it can flip
+    without a new version (the caller must not cache it per-project).
+    """
+    return Path(row["git_repo_path"]).is_dir()
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:

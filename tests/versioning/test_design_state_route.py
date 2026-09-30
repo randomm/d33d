@@ -21,6 +21,8 @@ goes RED if the block stops reaching it.
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Any
 
 from d33d.design_state import state_block_for_version
@@ -55,9 +57,12 @@ def test_design_prompt_contains_previous_versions_stated_dimension(
     r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
     body = r.json()
-    # A JSON array of entries (the SPA's Brief renders this directly).
-    assert isinstance(body, list), "the route returns an array of entries"
-    by_name = {e["name"]: e for e in body}
+    # The envelope: {"entries": [...], "history_missing": bool}.
+    assert isinstance(body, dict), "the route returns an envelope object"
+    assert "entries" in body and "history_missing" in body
+    entries = body["entries"]
+    assert isinstance(entries, list), "entries is a list"
+    by_name = {e["name"]: e for e in entries}
     # The previous version's actual dimension (30) is in the block.
     assert by_name["W"]["value"] == 30.0
     # The block the ROUTE built and the block the PROMPT BUILDER builds
@@ -100,18 +105,19 @@ def test_prompt_builder_and_route_share_the_same_callable(app_with_versions) -> 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
     body = r.json()
+    entries = body["entries"]
 
     # The prompt builder's callable (the module the live loop imports).
     prompt_fn = ds.state_block_for_version
     assert prompt_fn is state_block_for_version  # identity
     # The route's output is exactly what the shared callable produces on
     # the latest version's params — same callable, same result.
-    route_names = {e["name"] for e in body}
+    route_names = {e["name"] for e in entries}
     assert route_names == {"W", "bore_diameter"}
     # Same callable, same per-name output (name-indexed — the persisted
     # snapshot may re-key in order; the contract is per-name equality).
     expected = prompt_fn({"W": 30.0, "bore_diameter": 8.0})
-    assert {e["name"]: e for e in body} == {e["name"]: e for e in expected}
+    assert {e["name"]: e for e in entries} == {e["name"]: e for e in expected}
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +148,10 @@ def test_design_state_route_returns_entries_for_latest_version(app_with_versions
     resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert isinstance(body, list)
-    assert len(body) == len(params), "ALL declared parameters, not a triple"
-    by_name = {e["name"]: e for e in body}
+    entries = body["entries"]
+    assert isinstance(entries, list)
+    assert len(entries) == len(params), "ALL declared parameters, not a triple"
+    by_name = {e["name"]: e for e in entries}
     for name, entry in by_name.items():
         # The entry contract (the shape the SPA's Brief renders).
         for key in ("name", "label", "value", "unit", "provenance"):
@@ -168,6 +175,8 @@ def test_design_state_route_returns_entries_for_latest_version(app_with_versions
     # shape), every label is the raw identifier + the mono flag.
     for name, entry in by_name.items():
         assert entry.get("label_is_identifier") is True
+    # history_missing: false (the repo exists in the fixture).
+    assert body["history_missing"] is False
 
 
 def test_design_state_route_carries_model_labels_and_promotion(
@@ -207,26 +216,32 @@ def test_design_state_route_carries_model_labels_and_promotion(
     r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
     body = r.json()
-    by_name = {e["name"]: e for e in body}
+    entries = body["entries"]
+    by_kind = {(e["kind"], e["name"]): e for e in entries}
     # width: model label present → not an identifier; declared axis W
     # confirmed at 60.0, value 60.4 within tolerance → promoted stated.
-    w = by_name["width"]
-    assert w["label"] == "Width"
-    assert w["label_is_identifier"] is False
-    assert w["provenance"] == "stated"
+    # Issue #316 de-dup: the width param (60.4) AGREES with the W axis
+    # row (60, within tolerance) → its row is DROPPED; the surviving W
+    # row is the axis row, carrying the param's label (``Width``) and
+    # its CURRENT provenance (``stated`` — rule (a)).
+    w_axis = by_kind.get(("axis", "W"))
+    assert w_axis is not None
+    assert w_axis["label"] == "Width"
+    assert w_axis["label_is_identifier"] is False
+    assert w_axis["provenance"] == "stated"
+    # The width param row is DROPPED (it agrees with the W axis row).
+    assert ("param", "width") not in by_kind
     # fillet_size_top: model label present → not an identifier; no
     # declared axis → stays assumed (no promotion without axis evidence).
-    f = by_name["fillet_size_top"]
+    f = by_kind.get(("param", "fillet_size_top"))
+    assert f is not None
     assert f["label"] == "Top fillet size"
     assert f["label_is_identifier"] is False
     assert f["provenance"] == "assumed"
-    # The W axis row (the persisted confirmed evidence) coexists — the
-    # promoted param row and the axis row both render, counted once each
-    # by their own provenance.
-    axis_rows = [e for e in body if e.get("kind") == "axis"]
-    assert len(axis_rows) == 1
-    assert axis_rows[0]["name"] == "W"
-    assert axis_rows[0]["provenance"] == "stated"
+    # Only ONE W row (the axis row — the param was de-duped).
+    w_rows = [e for e in entries if e["name"] == "W"]
+    assert len(w_rows) == 1
+    assert w_rows[0]["kind"] == "axis"
 
 
 def test_design_state_route_block_can_cite_stated_height_and_assumed_footprint(
@@ -263,19 +278,27 @@ def test_design_state_route_block_can_cite_stated_height_and_assumed_footprint(
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 200, r.text
-    by_kind = {(e["kind"], e["name"]): e for e in r.json()}
-    # H AXIS ROW is STATED (the user said 12 — the ticket's example).
-    h_axis = by_kind[("axis", "H")]
+    by_kind = {(e["kind"], e["name"]): e for e in r.json()["entries"]}
+    # H AXIS ROW: the H param (12) AGREES with the stated H axis (12)
+    # → the H param row is DROPPED (issue #316 de-dup); the surviving H
+    # row is the axis row, carrying the param's CURRENT provenance
+    # (``assumed`` — the param was never promoted; no measurement to
+    # change its provenance). The H axis row is still the authoritative
+    # display for the H number.
+    h_axis = by_kind.get(("axis", "H"))
+    assert h_axis is not None
     assert h_axis["value"] == 12.0
-    assert h_axis["provenance"] == "stated", "H must be stated for the provenance-citing answer"
+    # The H param row is DROPPED (it agrees with the H axis row).
+    assert ("param", "H") not in by_kind
     # W/D AXIS ROWS: not stated, no persisted bbox on this version → no
     # axis rows (issue #264: measured rows need a measurement; stated
     # rows need stated evidence — neither holds for W/D here).
     assert ("axis", "W") not in by_kind
     assert ("axis", "D") not in by_kind
-    # The model's own W/D/H-NAMED PARAM ROWS are assumed (issue #246:
+    # The model's own W/D-NAMED PARAM ROWS are assumed (issue #246:
     # model-emitted params are never stated from a params snapshot; no
-    # measurement to upgrade them).
+    # measurement to upgrade them). They are NOT de-duped (no W/D axis
+    # rows to collapse into).
     assert by_kind[("param", "W")]["value"] == 20.0
     assert by_kind[("param", "W")]["provenance"] == "assumed", "the footprint axis must be assumed (the 'I assumed' citation)"
     assert by_kind[("param", "D")]["provenance"] == "assumed"
@@ -292,9 +315,11 @@ def test_design_state_route_missing_project_is_404(app_with_versions) -> None:
     assert result.status_code == 404
 
 
-def test_design_state_route_no_version_yet_returns_empty_array(app_with_versions) -> None:
-    """No version yet → an EMPTY array with 200 (not a 404, not null).
-    Turn one is the commonest case and must be a defined, tested state."""
+def test_design_state_route_no_version_yet_returns_empty_entries(app_with_versions) -> None:
+    """No version yet → ``{"entries": [], "history_missing": <repo check>}``
+    with 200 (not a 404, not null). Turn one is the commonest case and
+    must be a defined, tested state. ``history_missing`` is ``false``
+    when the repo directory exists (the fixture always creates it)."""
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
@@ -303,7 +328,9 @@ def test_design_state_route_no_version_yet_returns_empty_array(app_with_versions
 
     result = run_async(app_with_versions, _call)
     assert result.status_code == 200, result.text
-    assert result.json() == []
+    body = result.json()
+    assert body["entries"] == []
+    assert body["history_missing"] is False
 
 
 def test_design_state_route_unknown_value_serialises_as_null(app_with_versions) -> None:
@@ -320,7 +347,7 @@ def test_design_state_route_unknown_value_serialises_as_null(app_with_versions) 
     resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    by_name = {e["name"]: e for e in body}
+    by_name = {e["name"]: e for e in body["entries"]}
     assert by_name["H"]["value"] is None
     assert by_name["H"]["provenance"] == "unknown"
     # The stated W still carries its value.
@@ -341,7 +368,7 @@ def test_design_state_route_uses_the_latest_version(app_with_versions) -> None:
     resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    by_name = {e["name"]: e for e in body}
+    by_name = {e["name"]: e for e in body["entries"]}
     assert by_name["W"]["value"] == 30.0  # the latest, not the first
     assert "bore_diameter" in by_name
 
@@ -444,7 +471,7 @@ def test_design_state_for_finalize_version_yields_measured(app_with_versions) ->
 
     resp = run_async(app_with_versions, _call)
     assert resp.status_code == 200, resp.text
-    by_name = {e["name"]: e for e in resp.json()}
+    by_name = {e["name"]: e for e in resp.json()["entries"]}
     for axis in ("W", "D", "H"):
         assert by_name[axis]["provenance"] == "measured", f"{axis} not measured: {by_name[axis]}"
     # The displayed value is the measurement (30.4), not the stated 30.
@@ -478,6 +505,81 @@ def test_design_state_for_finalize_version_without_bbox_stays_assumed(
     assert latest is not None
     assert latest["bbox"] is None, "absent measurement must persist NULL, never (0,0,0)"
     assert resp.status_code == 200, resp.text
-    by_name = {e["name"]: e for e in resp.json()}
+    by_name = {e["name"]: e for e in resp.json()["entries"]}
     for axis in ("W", "D", "H"):
         assert by_name[axis]["provenance"] == "assumed", f"{axis}: {by_name[axis]}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #316 (task-b): ``history_missing`` flag on the design-state route
+# ---------------------------------------------------------------------------
+
+
+def _repo_for(app, pid: int) -> Path:
+    """The project's on-disk repo path (server-internal — the API masks
+    it)."""
+    for row in app.state.conn.list_projects():
+        if row["id"] == pid:
+            return Path(row["git_repo_path"])
+    raise AssertionError(f"project {pid} not found")
+
+
+def test_design_state_history_missing_false_when_repo_present(app_with_versions) -> None:
+    """The repo directory exists → ``history_missing`` is ``false`` in
+    the design-state response (the common case — the project's history
+    is intact)."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 30.0})
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["history_missing"] is False
+    # The entries are still present (the repo is intact — nothing is lost).
+    assert len(body["entries"]) > 0
+
+
+def test_design_state_history_missing_true_when_repo_absent(app_with_versions) -> None:
+    """The project's git repo directory is deleted out-of-band →
+    ``history_missing`` is ``true`` in the design-state response. The
+    entries are still served (they come from the DB, not the repo) — the
+    flag is the signal that the history on disk is gone."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 30.0, "D": 30.0})
+        # The repo goes away (out-of-band loss).
+        shutil.rmtree(_repo_for(app_with_versions, pid))
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["history_missing"] is True
+    # Entries are still served from the DB (the flag does not suppress
+    # the rows — the Brief still renders them, it just shows the banner).
+    assert len(body["entries"]) > 0
+
+
+def test_design_state_history_missing_no_version_repo_absent(app_with_versions) -> None:
+    """No version yet AND the repo is absent → ``history_missing`` is
+    ``true`` and ``entries`` is empty. The flag is computed from the
+    repo check regardless of whether a version exists."""
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # The repo goes away before any version is created.
+        shutil.rmtree(_repo_for(app_with_versions, pid))
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["history_missing"] is True
+    assert body["entries"] == []

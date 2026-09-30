@@ -56,6 +56,7 @@ import {
   type VersionTimelineEntry,
   type VersionCompare,
   type DesignStateEntry,
+  type DesignStateEnvelope,
   type Envelope,
   type ProjectStorage,
 } from "./lib/api";
@@ -272,6 +273,13 @@ export default function App({ client }: AppProps) {
   // design. A fetch that RESOLVES (even `[]` — no version yet, or an
   // empty-params version) is a legitimate answer and is never retried.
   const [designState, setDesignState] = useState<DesignStateEntry[]>([]);
+  // Issue #316: the design-state envelope's `history_missing` flag (true
+  // when the project's repo directory is absent — the same predicate as
+  // `storage.repo_present`). `true` alone (a failed project-GET storage
+  // signal) still drives the Brief's `brief-saved-missing` banner via the
+  // OR at the render site; a failed design-state fetch never sets it (the
+  // flag reflects the last RESOLVED envelope, like the block itself).
+  const [designStateHistoryMissing, setDesignStateHistoryMissing] = useState(false);
   const [designStateStale, setDesignStateStale] = useState(false);
   // Stale-response guard (issue #237): a monotonically increasing request
   // id, tagged with the project id it belongs to. A response — success OR
@@ -311,14 +319,15 @@ export default function App({ client }: AppProps) {
     const isStale = () =>
       designStateReqRef.current.seq !== seq ||
       designStateReqRef.current.projectId !== latestProjectId;
+    const applyEnvelope = (envelope: DesignStateEnvelope) => {
+      if (isStale()) return;
+      setDesignState(envelope.entries ?? []);
+      setDesignStateHistoryMissing(envelope.history_missing === true);
+      setDesignStateStale(false);
+    };
     apiClient
       .getDesignState(effectiveProjectId)
-      .then((rows) => {
-        if (!isStale()) {
-          setDesignState(rows);
-          setDesignStateStale(false);
-        }
-      })
+      .then(applyEnvelope)
       .catch(() => {
         // First attempt failed: retry exactly once, ~300 ms later.
         if (isStale()) return;
@@ -326,12 +335,7 @@ export default function App({ client }: AppProps) {
           if (isStale()) return;
           apiClient
             .getDesignState(effectiveProjectId)
-            .then((rows) => {
-              if (!isStale()) {
-                setDesignState(rows);
-                setDesignStateStale(false);
-              }
-            })
+            .then(applyEnvelope)
             .catch(() => {
               // Both attempts failed: keep the last-known block (never
               // wipe it) and surface the failure inside the Brief. No
@@ -1679,6 +1683,7 @@ export default function App({ client }: AppProps) {
           conversationCollapsed={conversationCollapsed}
           entries={designState}
           refreshFailed={designStateStale}
+          historyMissing={designStateHistoryMissing}
           storage={projectStorage}
           hasLivePin={pendingSelection !== null}
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}

@@ -7,7 +7,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { Brief } from "../Brief";
 import copy from "../../../copy";
-import type { DesignStateEntry } from "../../../lib/api";
+import type { DesignStateEntry, ProjectStorage } from "../../../lib/api";
 
 describe("Brief", () => {
   it("renders the eyebrow line and the empty body when no entries are given", () => {
@@ -172,5 +172,98 @@ describe("Brief", () => {
     if (clickable) fireEvent.click(clickable);
     const expanded = container.querySelector("[data-testid='brief-row-expanded']");
     expect(expanded?.textContent).toContain(copy.brief.provenanceAssumed("3.0\u202Fmm"));
+  });
+});
+
+/** Issue #316: the design-state `history_missing` flag (the wire source)
+ *  and the project-GET `storage.repo_present` (the storage signal) are the
+ *  same underlying condition by construction — the Brief ORs them into a
+ *  SINGLE `brief-saved-missing` banner, rendered once, and never twice. */
+describe("Brief — the saved-design-missing banner (issue #316)", () => {
+  const withRepoAbsent: ProjectStorage = {
+    repo_present: false,
+    photo_present: true,
+  };
+  const withRepoPresent: ProjectStorage = {
+    repo_present: true,
+    photo_present: true,
+  };
+  const entries: DesignStateEntry[] = [
+    { name: "W", kind: "param", label: "Width", value: 60, unit: "mm", provenance: "stated" },
+  ];
+
+  it("historyMissing alone fires the single banner", () => {
+    // The storage signal is fine but the design-state fetch established the
+    // repo is gone — the banner fires from the history_missing source.
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={entries}
+        historyMissing
+        storage={withRepoPresent}
+      />,
+    );
+    const banners = screen.getAllByTestId("brief-saved-missing");
+    expect(banners).toHaveLength(1);
+    expect(banners[0].textContent).toBe(copy.brief.savedDesignMissing);
+    // The banner is blocked-styled, never the marker colour.
+    expect(banners[0].style.color).toBe("var(--color-blocked)");
+    expect(banners[0].getAttribute("style") ?? "").not.toContain("#ff3300");
+    // The DB-backed rows still render beneath the banner (the rows come
+    // from the design-state block, not from the repo).
+    expect(screen.getByTestId("brief-row-W")).toBeTruthy();
+  });
+
+  it("storage.repo_present === false alone fires the single banner", () => {
+    // No historyMissing signal at all (the design-state fetch never ran or
+    // the flag is false) — the storage source alone is sufficient.
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={entries}
+        storage={withRepoAbsent}
+      />,
+    );
+    const banners = screen.getAllByTestId("brief-saved-missing");
+    expect(banners).toHaveLength(1);
+    expect(banners[0].textContent).toBe(copy.brief.savedDesignMissing);
+  });
+
+  it("both signals together render EXACTLY ONE banner (issue #316)", () => {
+    // The co-present case: the wire flag and the storage signal both fire —
+    // the banner must render once, never twice (the OR is a single boolean,
+    // a single `{... &&}` node).
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={entries}
+        historyMissing
+        storage={withRepoAbsent}
+      />,
+    );
+    const banners = screen.getAllByTestId("brief-saved-missing");
+    expect(banners).toHaveLength(1);
+    // The rows are still visible — only the banner is singular.
+    expect(screen.getByTestId("brief-row-W")).toBeTruthy();
+  });
+
+  it("no banner when neither signal fires", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={entries}
+        historyMissing={false}
+        storage={withRepoPresent}
+      />,
+    );
+    expect(screen.queryByTestId("brief-saved-missing")).toBeNull();
   });
 });
