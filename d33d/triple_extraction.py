@@ -15,8 +15,8 @@ from d33d.axis_lexicon import (
     _FEATURE_NOUNS,
     _FOREIGN_UNIT_RE,
     _PART_NOUNS,
-    _mating_connector_at,
     MM_UNIT_ALTERNATION,
+    _mating_connector_at,
 )
 
 __all__ = [

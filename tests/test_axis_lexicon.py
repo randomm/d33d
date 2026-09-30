@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from d33d.axis_lexicon import axis_for_question_word, classify
-from d33d.dimension_protocol import stated_axes_from_message, user_quoted_unmapped_mm
+from d33d.dimension_protocol import stated_axes_from_message
 
 # ---------------------------------------------------------------------------
 # Absolute cues — each word maps its axis with the number
@@ -566,6 +566,47 @@ class TestMatingConnector:
         result = classify("a lid to fit a 60 mm wide box")
         assert result.absolute == {}
         assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_word_not_mixed_connector(self) -> None:
+        """Issue #314: the whole-phrase matcher must not fire on a
+        substring of a connector word (the "goes" inside "goes on"): a
+        message with no mating connector still classifies its size."""
+        result = classify("a box 60 mm wide")
+        assert result.absolute == {"W": 60.0}
+
+
+class TestAnyOtherStatingMatchIgnoresMatingSuppressed:
+    """Issue #314: _any_other_stating_match must ignore mating-suppressed
+    candidates — a box after a mating connector can never count as the
+    "other stating match" that suppresses a part-noun pair's own W/D."""
+
+    def test_mating_box_does_not_count_as_other_stating(self) -> None:
+        """Issue #314: in 'a 55 × 40 mm lid that fits a 60 × 45 mm box',
+        the box pair (after the mating connector) must NOT count as an
+        "other stating match" when the lid pair is the excluded match."""
+        from d33d.triple_extraction import _TRIPLE_RE, _any_other_stating_match
+
+        msg = "a 55 × 40 mm lid that fits a 60 × 45 mm box"
+        for m in _TRIPLE_RE.finditer(msg):
+            if m.start() == 2:  # the lid pair (the excluded match)
+                assert not _any_other_stating_match(msg, m), (
+                    "the mating-suppressed box pair must not count as an "
+                    "other stating match"
+                )
+
+    def test_non_mating_box_still_counts_as_other_stating(self) -> None:
+        """Issue #314: a NON-mating later triple (no connector) still
+        counts as an other stating match — the #305 comma-variant behavior
+        is preserved (regression guard against over-suppression)."""
+        from d33d.triple_extraction import _TRIPLE_RE, _any_other_stating_match
+
+        msg = "a 55 x 40 mm lid, box is 60x45x80mm"
+        for m in _TRIPLE_RE.finditer(msg):
+            if m.start() == 2:  # the lid pair (the excluded match)
+                assert _any_other_stating_match(msg, m), (
+                    "a non-mating later triple must still count as an "
+                    "other stating match"
+                )
 
 
 class TestReleaseFallbackFunction:
