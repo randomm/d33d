@@ -102,7 +102,7 @@ SCREW_SIZE_RE = re.compile(r"\bM(2(?:\.5)?|3|4|5|6|8)(?!\d)")
 #: says threaded / tapped / insert, the hole is not a clearance hole and
 #: the post-check does NOTHING (no repair, not even a false one) — the
 #: prompt instruction never applies to that wording.
-_THREAD_HOLE_WORD_RE = re.compile(r"\bthreaded?\b|\btapped\b|\binserts?\b", re.I)
+_THREAD_HOLE_WORD_RE = re.compile(r"\bthreaded?\b|\btapped\b|\binserts?\b", re.IGNORECASE)
 
 #: The explicit screw-hole instruction both prompts carry (issue #317):
 #: when the user names a metric screw size for a through-hole, the hole

@@ -189,8 +189,7 @@ def test_missing_param_meta_name_heuristic_fallback():
 
 def test_non_numeric_param_value_ignored():
     # A non-numeric value in params is skipped by the check.
-    params: dict[str, float] = {"hole_d": 4.0}  # type: ignore[assignment]
-    params["bad"] = "not a number"  # type: ignore[dict-item]
+    params: dict[str, object] = {"hole_d": 4.0, "bad": "not a number"}
     repair = undersize_screw_hole(REQUEST, params, META)
     assert repair is not None  # hole_d still triggers
     # The evidence uses the label from META (not the raw name).
@@ -225,7 +224,7 @@ def test_repair_failure_class_is_geometrically_wrong():
     assert repair["failure_class"] == "geometrically_wrong"
     # The class is in the closed enum (verified in test_failure_classes.py,
     # but pinned here for the post-check's specific contract).
-    from d33d.failure_classes import REPAIRABLE_CLASSES, FAILURE_CLASSES
+    from d33d.failure_classes import FAILURE_CLASSES, REPAIRABLE_CLASSES
 
     assert "geometrically_wrong" in FAILURE_CLASSES
     assert "geometrically_wrong" in REPAIRABLE_CLASSES

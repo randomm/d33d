@@ -22,14 +22,14 @@ from __future__ import annotations
 from typing import Any
 
 from d33d.design_prompts import (
+    _THREAD_HOLE_WORD_RE,
     METRIC_SCREW_CLEARANCE_MM,
     SCREW_SIZE_RE,
-    _THREAD_HOLE_WORD_RE,
 )
 
 __all__ = [
-    "mm",
     "is_screw_hole_candidate",
+    "mm",
     "undersize_screw_hole",
 ]
 

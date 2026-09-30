@@ -49,6 +49,7 @@ from d33d.design_loop import (
     MAX_SCAD_VALIDATION_CHARS,
     NO_IMPROVEMENT_LIMIT,
     RENDERER_UNAVAILABLE,
+    BboxFn,
     BboxInfo,
     DesignResult,
     Score,
