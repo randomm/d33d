@@ -44,8 +44,8 @@ from d33d.design_loop_events import (
     validate_photo_bytes,
 )
 from d33d.dimension_protocol import (
+    carried_stated_set,
     effective_stated_dims,
-    latest_stated_dims_dict,
     stated_axes_from_message,
 )
 from d33d.question_answer import ModelUnconfiguredError, route_chat_message
@@ -708,12 +708,11 @@ def create_projects_router() -> APIRouter:
                 for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
                 if value > 0
             } or None
+        _carried = carried_stated_set(app.state.conn, app.state.versions, project_id)
         if explicit_body is not None:
-            per_axis_stated = effective_stated_dims(
-                latest_stated_dims_dict(app.state.versions, project_id), explicit_body
-            )
+            per_axis_stated = effective_stated_dims(_carried, explicit_body)
         else:
-            _latest = latest_stated_dims_dict(app.state.versions, project_id)
+            _latest = _carried
             try:
                 _am = stated_axes_from_message(body.message, chat_history)
                 _cues_arg = _am if _am else _classify_axis_cues(body.message)
@@ -733,6 +732,22 @@ def create_projects_router() -> APIRouter:
             per_axis_stated = effective_stated_dims(_latest, _cues_arg)
 
         stated = axes_to_gate_triple(per_axis_stated)
+
+        # The project-level carried set (issue #312): written at the end of
+        # every chat turn (pass or fail — the loop runs asynchronously as an
+        # SSE stream; the write is here because the effective set is final
+        # once cues are resolved, regardless of the loop's outcome). A
+        # failed turn creates no version row, but the user's stated axes
+        # must survive into the next successful version's gate input.
+        try:
+            _json = __import__("json")
+            app.state.conn.raw.execute(
+                "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
+                (_json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
+            )
+            app.state.conn.commit()
+        except Exception:  # the write must never fail the 202
+            logger.debug("carried_stated_dims write failed for project %s", project_id, exc_info=True)
 
         # Photo: read the project's stored photo NOW (synchronously, before
         # the 202 response) — the background task runs via asyncio and the

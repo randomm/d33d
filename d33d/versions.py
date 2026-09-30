@@ -1458,6 +1458,15 @@ def migrate(conn: db_mod.Connection) -> None:
     # in ``post_chat`` never relies on the client's chat history; a new
     # offer overwrites, an accepted/lapsed offer clears it (NULL).
     _ensure_column(conn, "projects", "pending_offer", "TEXT")
+    # ``projects.carried_stated_dims`` (issue #312): the project-level
+    # carried per-axis stated set (JSON dict) that survives failed turns
+    # (a failed turn creates no version row, so the version-row-only
+    # read would lose the user's statement). Written at the end of every
+    # chat/finalize turn (pass or fail); seeded from the latest version's
+    # ``stated_dims`` on first read when the column is NULL. The single
+    # reader in ``dimension_protocol.carried_stated_set`` feeds all four
+    # production seams (chat, finalize, region edit).
+    _ensure_column(conn, "projects", "carried_stated_dims", "TEXT")
 
 
 __all__ = [

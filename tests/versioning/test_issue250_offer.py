@@ -1180,7 +1180,16 @@ def test_chat_tier1_released_axis_offer(app_with_versions):
     persisted ``stated_dims`` {"H": 12}), then "make it taller" (a
     relative H cue) RELEASES H — the offered param is the H-declared
     assumed param of the NEW version, and the sentence is the tier-1
-    template with the mm()-formatted value."""
+    template with the mm()-formatted value.
+
+    The harness keeps the CHANGED case green through the #312 honesty
+    gate: v1's ``lift_height`` is seeded at 12.0 (stated) and v2 is
+    created WITHOUT that param (the pre-#312 harness seeded v2 first and
+    left v1 param-less, which the gate now reads as "no previous
+    baseline for the changed param" → tier-3 sentence instead of the
+    "I made" tier-1). The offered value (15.0) is still a genuine
+    change off the stated 12.0 baseline — the tier-1 sentence fires
+    exactly as before."""
 
     async def _loop(app, **kwargs):
         return _TierStubResult(
@@ -1206,11 +1215,15 @@ def test_chat_tier1_released_axis_offer(app_with_versions):
         # carries the same params as v2; the adapter's create_version will
         # create a third version (name collision → suffix), which is a test
         # harness artifact. The offer resolution reads v2's row and builds
-        # the tier-1 sentence from it.
+        # the tier-1 sentence from it. v2 is created WITHOUT the param so
+        # the #312 baseline read (previous version's param value for the
+        # changed param) is the carried stated value (12.0) — a genuine
+        # change, the tier-1 sentence applies.
         v2 = await svc.create_version(
             pid,
-            {"lift_height": 15.0},
-            param_meta={"lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"}},
+            {},
+            param_meta={},
+            stated_dims={"H": 12.0},
         )
         app_with_versions.state.run_design_loop = _loop
         r, frames = await _drive_chat(
@@ -1225,6 +1238,96 @@ def test_chat_tier1_released_axis_offer(app_with_versions):
     assert done[-1].get("confirm_offer") == "lift_height", done
     assert done[-1].get("confirm_sentence") == (
         "You asked for taller — I made Lift height 15.0\u202fmm. Right?"
+    ), done
+
+
+def test_chat_tier1_released_axis_param_unchanged_no_tier1_offer(app_with_versions):
+    """Issue #312 (task-b): the released axis's value in the NEW version
+    is UNCHANGED from its baseline (the previous version's param value,
+    or the carried stated value when the previous version has no such
+    param) → the offer still fires (the param is still an assumption)
+    but the sentence is the tier-3 template ("I assumed …"), NOT the
+    tier-1 "I made" claim — "You asked for taller — I made Height 12.0
+    mm. Right?" would be a lie when 12 is the value the user already
+    stated."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_height": 12.0},
+            meta={"lift_height": {"label": "Lift height", "unit": "mm", "axis": "H"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        await svc.create_version(
+            pid,
+            {},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make it taller", "chat_history": []}
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The offer still fires (the param is still an assumption to confirm)
+    # — but the sentence is NOT the tier-1 "I made" claim.
+    assert done[-1].get("confirm_offer") == "lift_height", done
+    sentence = done[-1].get("confirm_sentence")
+    assert sentence is not None, done
+    assert not sentence.startswith("You asked for"), (
+        f"tier-1 sentence fired for an unchanged released-axis value: {sentence!r}"
+    )
+    # The tier-3 template ("I assumed 12.0 mm for Lift height. Want it
+    # different?") — the mm()-formatted value (meta unit "mm").
+    assert sentence == "I assumed 12.0\u202fmm for Lift height. Want it different?", done
+
+
+def test_chat_tier1_released_axis_param_changed_vs_stated_value(app_with_versions):
+    """Issue #312 (task-b, the CHANGED case through the carried-stated
+    baseline): v1 states H (``stated_dims`` {"H": 12.0}, the param not
+    present in v1's row — the #279 harness pattern), then "make it
+    taller" releases H and the loop returns an H param at 18.0 — the
+    value CHANGED off the carried stated baseline (12.0) → the tier-1
+    "I made" sentence fires (the operator decision: the offer is honest
+    when the value actually changed)."""
+
+    async def _loop(app, **kwargs):
+        return _TierStubResult(
+            {"lift_height": 18.0},
+            meta={"lift_height": {"label": "Height", "unit": "mm", "axis": "H"}},
+        )
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        app_with_versions.state.answer_question = None
+        await svc.create_version(
+            pid,
+            {},
+            stated_dims={"H": 12.0},
+        )
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make it taller", "chat_history": []}
+        )
+        return r.status_code, frames
+
+    status, frames = run_async(app_with_versions, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[-1].get("confirm_offer") == "lift_height", done
+    assert done[-1].get("confirm_sentence") == (
+        "You asked for taller — I made Height 18.0\u202fmm. Right?"
     ), done
 
 

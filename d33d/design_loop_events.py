@@ -31,6 +31,7 @@ import asyncio
 import base64
 import inspect
 import io
+import json
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -1029,9 +1030,86 @@ async def _resolve_offer(
     from d33d.dimension_protocol import offer_tier_signals
 
     released_axes, quoted = offer_tier_signals(user_message, chat_history)
+    # The tier-1 honesty gate (issue #312, task-b): the "You asked for
+    # {cue} — I made {label} {value}. Right?" sentence claims a CHANGE,
+    # so a released-axis param whose value is UNCHANGED is not a tier-1
+    # candidate. The baseline, per axis (the operator decision): the
+    # previous version's param value when the previous version declared
+    # that param; else the carried stated value for the axis — task-a's
+    # project-level ``carried_stated_dims`` set when the column exists
+    # (the user's last statement, which survives a failed turn even when
+    # the previous version row is absent), else the previous version's
+    # persisted ``stated_dims`` (the pre-task-a fallback); else no
+    # baseline (nothing to compare against is not a lie — the tier
+    # applies). A candidate at its baseline value keeps the param
+    # eligible for EVERY OTHER tier (the exclusion is tier-level, not
+    # candidate-level — the param is still an assumption worth
+    # confirming); only the "I made" sentence is withheld: tier 1
+    # selection skips it (``select_offer_candidate`` with the candidate
+    # re-scoped off tier 1), and the sentence dispatch below falls
+    # through to the next applicable tier for it.
+    tier1_eligible: set[str] = set()
+    tier1_blocked: set[str] = set()
+    if released_axes:
+        carried_set: dict[str, float] = {}
+        # The carried stated value (task-a's project-level set, when the
+        # column exists — it survives a failed turn where no version row
+        # was created), else the previous version's persisted
+        # ``stated_dims`` (the pre-task-a fallback).
+        if prev_version is not None:
+            row = app.state.conn.get_project(project_id)
+            raw_carried = row.get("carried_stated_dims") if row else None
+            if isinstance(raw_carried, str) and raw_carried:
+                try:
+                    loaded = json.loads(raw_carried)
+                    if isinstance(loaded, dict):
+                        carried_set = loaded
+                except ValueError:
+                    carried_set = {}
+            elif isinstance(raw_carried, dict):
+                carried_set = raw_carried
+            if not carried_set and isinstance(
+                prev_version.get("stated_dims"), dict
+            ):
+                carried_set = prev_version["stated_dims"]
+        for e in param_rows:
+            axis = e.get("axis")
+            if axis not in released_axes:
+                continue
+            value = e.get("value")
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            prev_value = prev_params.get(e["name"])
+            baseline: float | None = None
+            if isinstance(prev_value, (int, float)) and not isinstance(
+                prev_value, bool
+            ):
+                baseline = float(prev_value)
+            else:
+                raw = carried_set.get(axis)
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+                    baseline = float(raw)
+            if baseline is None:
+                continue
+            if abs(float(value) - baseline) <= 1e-6:
+                tier1_blocked.add(e["name"])
+            else:
+                tier1_eligible.add(e["name"])
+    # Tier 1 selects over the released-axis candidates EXCEPT the
+    # unchanged ones (tiers 2 / 3 still see the full eligible set — the
+    # candidate itself was never excluded, only its "I made" tier; this
+    # re-scoping only prevents tier 1 from CHOOSING an unchanged param,
+    # so the selection order is preserved for the honest candidates).
+    tier1_axes = released_axes
+    if tier1_blocked:
+        tier1_axes = {
+            e.get("axis")
+            for e in param_rows
+            if e.get("axis") in released_axes and e["name"] in tier1_eligible
+        }
     name = select_offer_candidate(
         params, meta, confirmed, changed, confirm_first,
-        released_axes=released_axes, user_quoted_mm=quoted,
+        released_axes=tier1_axes or None, user_quoted_mm=quoted,
         disagree_names=disagree_names, block_entries=param_rows,
     )
     if name is None:
@@ -1048,7 +1126,19 @@ async def _resolve_offer(
     # tier 1 "You asked for {cue}…", tier 2 "You said {value}…"); tier 3
     # keeps the #250 machinery (the model's ``confirm_sentence`` when the
     # number guard passes, else the deterministic template).
-    if released_axes and entry.get("axis") in released_axes:
+    # Issue #312's tier-1 honesty gate: a released-axis param whose value
+    # equals its baseline (previous version's value, else the carried
+    # stated value) gets NO "I made" — the offer still stands (the other
+    # tiers above selected it); the sentence falls through to the next
+    # tier's machinery (the model's sentence when the number guard
+    # passes, else the deterministic "I assumed …" template — which
+    # claims nothing).
+    tier1_ok = bool(
+        released_axes
+        and entry.get("axis") in released_axes
+        and entry.get("name") in tier1_eligible
+    )
+    if tier1_ok:
         from d33d.confirm_offer import tier_1_cue, tier_1_sentence
 
         cue = tier_1_cue(user_message)

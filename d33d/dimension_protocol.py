@@ -38,6 +38,7 @@ single biggest divergence from the Meshy/Tripo-style "just guess" agents:
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -65,6 +66,7 @@ __all__ = [
     "_extract_triple",
     "_mm_cue_values",
     "_triple_suppressed_by_feature_noun",
+    "carried_stated_set",
     "effective_stated_dims",
     "emit_named_params",
     "latest_stated_dims_dict",
@@ -331,6 +333,62 @@ def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] 
         if f > 0:
             axes[str(axis)] = f
     return axes or None
+
+
+def carried_stated_set(
+    conn: Any, versions: Any, project_id: int
+) -> dict[str, float] | None:
+    """The project-level carried per-axis stated set (issue #312, task-a).
+
+    The SINGLE READER for the carry-forward input that feeds all four
+    production seams (chat ``post_chat``, finalize ``versions_routes``
+    (both sites) and region edit ``app.create_region_edit``). Replaces
+    :func:`latest_stated_dims_dict`'s version-row-only read with the
+    project-level ``carried_stated_dims`` column (written at the end of
+    every chat/finalize turn — pass or fail — so a failed turn's stated
+    axes survive into the next successful version).
+
+    Seed: when the column is NULL (a fresh project, or an existing DB
+    migrated before this column landed), the latest version's
+    ``stated_dims`` is used as the fallback (the pre-task-a behaviour).
+    Returns ``None`` when neither source provides a set (the merge helper
+    treats ``None`` as an empty carried set — the gate abstains).
+
+    Values are filtered to positive floats (the same cleaning rule as
+    :func:`latest_stated_dims_dict`).
+    """
+    row = conn.get_project(project_id)
+    if row is not None:
+        raw = row.get("carried_stated_dims")
+        if isinstance(raw, str) and raw:
+            try:
+                loaded = json.loads(raw)
+            except (ValueError, TypeError):
+                loaded = None
+            if isinstance(loaded, dict):
+                axes: dict[str, float] = {}
+                for axis, value in loaded.items():
+                    try:
+                        f = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                    if f > 0:
+                        axes[str(axis)] = f
+                return axes or None
+        elif isinstance(raw, dict):
+            axes = {}
+            for axis, value in raw.items():
+                try:
+                    f = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if f > 0:
+                    axes[str(axis)] = f
+            if axes:
+                return axes
+    # Fallback (seed from the latest version row when the column is NULL
+    # or empty — a fresh DB or an un-migrated project).
+    return latest_stated_dims_dict(versions, project_id)
 
 
 class CuesLike(Protocol):
