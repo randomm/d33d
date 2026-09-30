@@ -372,13 +372,15 @@ describe("design contract", () => {
     );
 
     // (2) Comparison not met — "No — it measures 25.0 mm deep, 5.0 mm
-    //     short of 30 mm."
+    //     short of 30 mm." The axis slot carries the adjective the
+    //     backend's DETERMINISTIC_AXIS_ADJECTIVES yields (wide/deep/
+    //     tall) — the deck interpolates it verbatim.
     expect(copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm")).toBe(
       "No — it measures 25.0\u202fmm deep, 5.0\u202fmm short of 30\u202fmm.",
     );
-    // Relative-word variant ("shallower than").
-    expect(copy.deterministicAnswer.comparisonNo(D2, "shallow", "5.0\u202fmm", "30\u202fmm")).toBe(
-      "No — it measures 25.0\u202fmm shallow, 5.0\u202fmm short of 30\u202fmm.",
+    // Absolute-word variant ("How wide is…" → the adjective "wide").
+    expect(copy.deterministicAnswer.comparisonNo("25.0\u202fmm", "wide", "5.0\u202fmm", "30\u202fmm")).toBe(
+      "No — it measures 25.0\u202fmm wide, 5.0\u202fmm short of 30\u202fmm.",
     );
 
     // (3) Within tolerance — "About the same — it measures 30.2 mm deep."
@@ -404,8 +406,10 @@ describe("design contract", () => {
       "How wide is my drawer? The part is 60.0\u202fmm wide.",
     );
 
-    // All four comparison templates are distinct from the six axis-size
-    // templates — no two provenance classes read the same.
+    // All ten templates (four comparison + six axis-size) render
+    // distinct strings — no two provenance classes read the same.
+    // (The individual pins above already fix each string byte-for-byte;
+    // this is the one-line distinctness check over both sets.)
     const comparisonAll = [
       copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm"),
       copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm"),
@@ -420,13 +424,7 @@ describe("design contract", () => {
       copy.deterministicAnswer.notEstablished("height"),
       copy.deterministicAnswer.dimensionList("60.0\u202fmm", "45.0\u202fmm", H),
     ];
-    for (const a of comparisonAll) {
-      for (const b of [...comparisonAll, ...axisAll]) {
-        if (a !== b) {
-          expect(a).not.toBe(b);
-        }
-      }
-    }
+    expect(new Set([...comparisonAll, ...axisAll]).size).toBe(10);
   });
 
   /* ----------------------------------------- W250 */

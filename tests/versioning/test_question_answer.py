@@ -1467,10 +1467,11 @@ class TestDeterministicComparison:
         assert axis == "D"
         assert "Yes" in reply
 
-    # -- missing-fact ------------------------------------------------------
+    # -- missing-fact trigger (one-word bare-noun form, issue #313) ----
 
     def test_missing_fact_taller_than_the_shelf(self) -> None:
-        # No number → missing-fact reply.
+        # No number → missing-fact reply. The trigger reads the bare
+        # noun after "than" ("the shelf" → the object is "the shelf").
         r = self._cmp("Is it taller than the shelf?")
         assert r is not None
         axis, reply = r
@@ -1479,12 +1480,25 @@ class TestDeterministicComparison:
         assert "12.0" in reply
 
     def test_missing_fact_wider_than_my_drawer(self) -> None:
+        # "my drawer" → the reply's object is "my drawer" (the bare
+        # noun, no article split).
         r = self._cmp("Is it wider than my drawer?")
         assert r is not None
         axis, reply = r
         assert axis == "W"
         assert "How wide is my drawer?" in reply
         assert "20.0" in reply
+
+    def test_missing_fact_digit_exclusion_at_direction_level(self) -> None:
+        # Unit level: the digit exclusion fires inside the direction
+        # detection — "than v2" is a "than" direction, not "missing"
+        # (a missing-fact object must carry no digit).
+        from d33d.question_answer import _comparison_direction
+
+        result = _comparison_direction("Is it taller than v2?", "H")
+        assert result is not None
+        direction, _ = result
+        assert direction == "than"
 
     # -- fall-throughs -----------------------------------------------------
 
@@ -1545,26 +1559,40 @@ class TestDeterministicComparison:
         r = self._cmp("Is it taller than the previous one?")
         assert r is None
 
-    def test_missing_fact_v2_falls_through(self) -> None:
-        # "v2" → version name (digit in noun) → falls through.
+    def test_than_v2_routes_as_a_than_comparison_not_missing_fact(
+        self,
+    ) -> None:
+        # "than v2" fires the missing-fact trigger, but "v2" carries a
+        # digit → the missing-fact exclusion fires and the direction is
+        # "than" (not "missing"). The message has no parseable number
+        # ("v2" is not a bare number), so the stage falls through —
+        # the reply is NOT the missing-fact sentence.
         r = self._cmp("Is it taller than v2?")
-        # "v2" has a digit → the missing-fact trigger excludes it.
-        # But "v2" is also a number → the stage may fire as a "than" comparison.
-        # The digit in the noun means the missing-fact path is excluded,
-        # but the "than" direction still fires with target=2.
-        if r is not None:
-            axis, reply = r
-            assert axis == "H"
-            # The reply should be a "than" comparison, not a missing-fact reply.
-            assert "How tall is v2" not in reply
+        assert r is None
+        # Unit-level check: the direction is "than", not "missing".
+        from d33d.question_answer import _comparison_direction
+
+        result = _comparison_direction("Is it taller than v2?", "H")
+        assert result is not None
+        direction, _ = result
+        assert direction == "than"
 
     def test_missing_fact_before_falls_through(self) -> None:
-        # "than before" → no article → not a missing-fact form → falls through.
+        # "than before" → "before" is an adverb, not a noun object →
+        # the missing-fact reply would be nonsense → falls through
+        # (the digit-free adverb is excluded by the "no noun" rule of
+        # the closed trigger set — the operator decision's bare noun
+        # must name an object, and "before" names none).
+        # The message has zero numbers, so the than-comparison path
+        # (which needs a target number) cannot fire either → the stage
+        # does not take the message.
         r = self._cmp("Is it taller than before?")
         assert r is None
 
     def test_missing_fact_it_was_falls_through(self) -> None:
-        # "than it was" → "it" is not an article → falls through.
+        # "than it was" → "it" is not a noun object (the design loop
+        # treats it as the part itself) → the missing-fact reply would
+        # be nonsense ("How tall is it it was?") → falls through.
         r = self._cmp("Is it taller than it was?")
         assert r is None
 
@@ -1625,6 +1653,72 @@ class TestDeterministicComparison:
         from d33d.question_answer import _deterministic_comparison
 
         return _deterministic_comparison(message, latest)
+
+
+class TestDeterministicComparisonLog:
+    """Issue #313: the deterministic comparison stage logs at INFO
+    (the answer is a computed, no-LLM success — WARNING is reserved for
+    failures), one line naming the axis and the provenance class
+    (``comparison``), never the message text."""
+
+    def test_comparison_hit_logs_info_not_warning(self, caplog) -> None:
+        # A measured axis (bbox carries D=43.9): the comparison stage
+        # takes the message and logs ONE INFO line (the answer is a
+        # computed, no-LLM success — WARNING is reserved for failures).
+        latest = _latest({}, None, {"x": 20.0, "y": 43.9, "z": 12.0})
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "Is it deep enough for a 30 mm screw?",
+                    latest,
+                    None,
+                )
+            )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert warnings == [], (
+            "the deterministic comparison stage must not log at WARNING — "
+            f"got {warnings}"
+        )
+        infos = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and "outcome=deterministic" in r.getMessage()
+        ]
+        assert len(infos) == 1, f"expected 1 INFO, got {infos}"
+        msg = infos[0].getMessage()
+        assert "provenance=comparison" in msg
+        assert "Is it deep enough for a 30 mm screw?" not in msg
+
+    def test_comparison_hit_does_not_reach_stage2(self, caplog) -> None:
+        # The comparison stage answers BEFORE stage 2: no stage-2 WARNING
+        # or stage-2 INFO line is emitted for a comparison hit.
+        latest = _latest({"H": 12.0}, None, {"x": 20.0, "y": 43.9, "z": 12.0})
+
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "Is it deep enough for a 30 mm screw?",
+                    latest,
+                    _edge,
+                )
+            )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        # The only log records from the question-answer module are the
+        # single INFO deterministic line — no stage-2 WARNING, no
+        # stage-2 INFO (the LLM was never called).
+        qa_records = [
+            r for r in caplog.records if r.name == "d33d.question_answer"
+        ]
+        assert len(qa_records) == 1, f"expected 1 record, got {qa_records}"
+        assert qa_records[0].levelno == logging.INFO
+        assert "outcome=deterministic" in qa_records[0].getMessage()
 
 
 class TestDeterministicCopyDeckParity:
@@ -3019,7 +3113,10 @@ class TestStage2OutcomeWarningLogs:
         assert "latency_ms=" in msg
 
     def test_exception_emits_error_info(self, caplog) -> None:
-        # #313: a non-timeout exception maps to outcome=error.
+        # #313: a non-timeout exception maps to outcome=error and the
+        # INFO record carries the exception's class name (a capability
+        # failure and a network blip must not read as the same
+        # unclassified ``error``).
         async def _edge(q, e):
             raise RuntimeError("boom")
 
@@ -3037,6 +3134,8 @@ class TestStage2OutcomeWarningLogs:
         assert len(stage2_infos) == 1
         msg = stage2_infos[0].getMessage()
         assert "project_id=42" in msg
+        assert "outcome=error" in msg
+        assert "error_class=RuntimeError" in msg
         assert "outcome=error" in msg
 
     def test_malformed_emits_error_info(self, caplog) -> None:

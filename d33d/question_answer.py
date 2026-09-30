@@ -690,61 +690,27 @@ DETERMINISTIC_COMPARISON_SENTENCES = {
     "missing_fact": "How {axis} is {object}? The part is {measured} {axis}.",
 }
 
-#: The number the user named in the comparison question, in mm. A
-#: bare number or a number immediately followed by ``mm`` (any
-#: whitespace) is accepted; ANY other unit suffix (cm, in, inches, …)
-#: makes the stage abstain (inch units are out of scope — fall through
-#: to stage 2).
-#: The number itself (``group 1``) plus the unit word (``group 2``,
-#: possibly empty — a bare number is mm by the stage's contract).
-#: The unit word, when present, is required to be a LETTER (``[a-z]``)
-#: so the regex cannot misread a bare number's own digits as its unit
-#: (the previous ``\b(\d+(?:\.\d+)?)\s*(mm)?\b`` form matched a bare
-#: number with group 1 empty and group 2 = the whole number, so
-#: ``_comparison_number``'s unit check misread the number itself as the
-#: unit: "a 3 cm screw" (token 3) returned unit "3" — a fall through
-#: instead of a foreign-unit fall through — and "30 mm" matched at a
-#: wrong offset so the unit group never saw "mm"). Both misreadings are
-#: now impossible: a bare number simply has no unit (mm by contract),
-#: and a number followed by a letter-word always reads that word.
+#: The number the user named in the comparison question, in mm.
+#: ``group 1`` is the number itself; ``group 2`` the unit word
+#: immediately after it (``[a-z]+`` — a letter run only, so the regex
+#: can never read a bare number's own digits as its unit; empty for a
+#: bare number, which is mm by the stage's contract).
 _COMPARISON_NUMBER_RE = re.compile(
-    r"\b(\d+(?:\.\d+)?)\s*([a-z°]+)?\b",
+    r"\b(\d+(?:\.\d+)?)\s*([a-z]+)?\b",
     re.IGNORECASE,
 )
 
 #: The missing-fact trigger (issue #313, operator decision): a relative
 #: axis word + "than" + an article or possessive (the/a/an/my/our/your/
-#: this/that) + a noun phrase with no digit — "than the shelf", "than my
-#: drawer". It never fires for "than before", "than it was", "than the
-#: last one", "than the previous (one|version)", "than v\d+" or version
-#: names (those fall through to the existing routing): the operator
-#: decision's closed trigger set is article/possessive + noun only, and
-#: the trailing word is validated to carry no digit and no markup
-#: character (a short noun phrase never needs one).
+#: this/that) + a noun ("than the shelf", "than my drawer"). The noun is
+#: validated in :func:`_comparison_direction` to be non-digit, non-markup,
+#: and not a version-referring word ("last", "previous") — those fall
+#: through to the existing routing.
 _MISSING_FACT_RE = re.compile(
     r"\b(?:taller|shorter|higher|lower|wider|narrower|deeper|shallower)"
-    r"\s+than\s+(the|a|an|my|our|your|this|that)\s+(\S+)\b",
+    r"\s+than\s+(the|a|an|my|our|your|this|that)\s+\S+",
     re.IGNORECASE,
 )
-
-#: The missing-fact trigger's closed noun exclusion set (operator
-#: decision, issue #313): the trigger is article/possessive + noun, and
-#: a noun that names a VERSION rather than a physical object ("the last
-#: one", "the previous one", "my previous version") is a version
-#: comparison — it falls through to the existing routing (the version-
-#: name path, then stage 2), never the missing-fact reply. A digit in
-#: the noun already excludes it (the ``\d`` check in
-#: :func:`_comparison_direction`); this set pins the digit-free forms.
-_MISSING_FACT_NOUN_EXCLUSIONS: frozenset[str] = frozenset(
-    {"last", "previous", "previouses"}
-)
-
-#: The ``v\d+`` version-name form ("than v2", "than the v1"): a digit
-#: after the bare ``v`` marks a version name, not a physical object —
-#: excluded from the missing-fact trigger (operator decision, issue
-#: #313). (The digit check in :func:`_comparison_direction` already
-#: excludes these; the pattern documents the shape.)
-_MISSING_FACT_VERSION_RE = re.compile(r"^v\d", re.IGNORECASE)
 
 #: The named-axis fit forms: "will it fit in a 45 mm deep gap?" — a
 #: single axis word (absolute or relative) somewhere after the "fit"
@@ -762,62 +728,29 @@ _FIT_FORM_RE = re.compile(
 def _comparison_number(message: str) -> float | None:
     """The user's comparison target in mm, or ``None`` (fall through).
 
-    Exactly one number in the message (``mm``-suffixed or bare) is a
-    comparison target; zero numbers (the missing-fact form) or two or
-    more (ambiguous) is ``None``, and any number carrying a foreign
-    unit suffix (anything other than ``mm``) makes the stage abstain
-    (inch units are out of scope — the question goes to stage 2).
+    ONE regex pass over ``message`` reads the number-and-unit pair
+    (``_COMPARISON_NUMBER_RE``): the number is ``group 1`` and the unit
+    the letter word immediately after it (``group 2``, ``mm`` or empty —
+    a bare number is mm by the stage's contract). A foreign unit
+    (anything other than ``mm``) makes the stage abstain (inch units are
+    out of scope — the question goes to stage 2). The count check
+    (exactly one number, from ``_NUMBER_TOKEN_RE``) runs on the same
+    single pass: zero numbers (the missing-fact form) or two or more
+    (ambiguous) is ``None``.
     """
-    numbers = _NUMBER_TOKEN_RE.findall(message)
-    if len(numbers) != 1:
+    pairs = list(_COMPARISON_NUMBER_RE.finditer(message))
+    if len(pairs) != 1:
         return None
-    value = float(numbers[0])
-    # The unit, if any, is a word: ``mm`` (or no unit at all — mm by the
-    # stage's contract) is accepted, anything else (cm, in, inches, …) is
-    # out of scope and the stage abstains (the question goes to stage 2).
-    # The ``_COMPARISON_NUMBER_RE`` match's group 1 is the number
-    # itself; the unit is the word immediately after the number (with
-    # optional whitespace), read by scanning past the number's span.
-    # If the regex already consumed ``mm`` (group 2), that is the unit.
-    # Otherwise, if a word follows the number's span, that word is the
-    # unit (``cm``/``in``/… → foreign → fall through; nothing → mm by
-    # contract).
-    m = _COMPARISON_NUMBER_RE.search(message)
-    unit = ""
-    if m is not None:
-        if m.group(2):
-            unit = m.group(2).lower()
-        else:
-            rest = message[m.end():].lstrip()
-            word_m = re.match(r"[a-z°]+", rest, re.IGNORECASE)
-            if word_m is not None:
-                unit = word_m.group(0).lower()
+    m = pairs[0]
+    unit = (m.group(2) or "").lower()
     if unit not in ("", "mm"):
         return None  # foreign unit (cm, in, …) → fall through
-    return value
+    return float(m.group(1))
 
 
-def _fit_phrase(message: str) -> tuple[int, int] | None:
-    """The span ``(start, end)`` of the named-axis fit phrase in
-    ``message`` (issue #313), or ``None``.
-
-    The operator decision's fit form: "will it fit in a 45 mm deep gap?"
-    — the axis word sits inside the "fit in <gap phrase>" clause, and the
-    gap's NOUN is the fit object, NOT the part: "a 45 mm deep gap" names
-    a gap 45 mm deep. The message-level word scan (the one-axis rule)
-    still sees exactly the axis word ("gap" is not an axis word), so the
-    fit form is detected HERE — the axis word must sit in a short window
-    after the "fit" verb ("fit in a 45 mm deep gap" — up to six words,
-    "in a 45 mm", before the axis word; "gap" itself is not an axis word
-    so it does not extend the scan). The axis-less "will it fit in a
-    45 mm gap?" has no axis word in the window and is NOT a fit form —
-    it falls through to stage 2 (the operator decision).
-    """
-    m = _FIT_FORM_RE.search(message)
-    return (m.start(), m.end()) if m is not None else None
-
-
-def _comparison_direction(message: str, axis: str) -> str | None:
+def _comparison_direction(
+    message: str, axis: str
+) -> tuple[str, str | None] | None:
     """The comparison's direction for ONE axis, or ``None`` (fall
     through).
 
@@ -834,29 +767,40 @@ def _comparison_direction(message: str, axis: str) -> str | None:
     the fit form is the operator decision's only fit syntax, and the
     axis word's position (inside the fit clause) is what makes it a fit
     at all.
+
+    Returns ``(direction, noun)`` — ``direction`` is ``"enough"``,
+    ``"than"``, ``"fit"`` or ``"missing"``; for the ``"missing"``
+    direction ``noun`` is the missing-fact object ("the shelf", "my
+    drawer"), ``None`` otherwise. The caller uses the noun directly —
+    never a re-search.
     """
     low = message.lower()
     if re.search(r"\benough\b", low) is not None:
-        return "enough"
+        return ("enough", None)
     if re.search(r"\bthan\b", low) is not None:
         m = _MISSING_FACT_RE.search(low)
         if m is not None:
-            noun = m.group(2)
-            # The closed exclusion set (operator decision): a digit (a
-            # version number), a markup character, a ``v\d`` version
-            # name, or a version-referring noun ("last", "previous") is
-            # NOT a missing-fact object — the stage falls through to
-            # the existing routing.
+            # The trigger is article + \S+; the object is the article
+            # (group 1) plus the noun (the last \S+ in the match).
+            matched = m.group(0)
+            parts = matched.rsplit(None, 1)
+            noun = re.sub(r"[?!.,:]\s*$", "", parts[-1]) if len(parts) > 1 else ""
+            # The closed exclusion (operator decision): a digit (a
+            # version number — "v2"), a markup character, a
+            # version-referring noun ("last", "previous"), or a
+            # non-object token ("it", "before", "after") is NOT a
+            # missing-fact object — the stage falls through to the
+            # existing routing.
             if (
-                re.search(r"\d", noun) is None
+                noun
+                and re.search(r"\d", noun) is None
                 and re.search(r"[<>=`\"'()&\[\]{}]", noun) is None
-                and _MISSING_FACT_VERSION_RE.match(noun) is None
-                and noun.lower() not in _MISSING_FACT_NOUN_EXCLUSIONS
+                and noun.lower() not in ("last", "previous", "it", "before", "after")
             ):
-                return "missing"
-        return "than"
+                return ("missing", f"{m.group(1)} {noun}")
+        return ("than", None)
     if _FIT_FORM_RE.search(low) is not None:
-        return "fit"
+        return ("fit", None)
     return None
 
 
@@ -907,18 +851,19 @@ def _deterministic_comparison(
     cls, value, _ = _axis_value_for(axis, entries, latest)
     if cls not in ("measured", "stated+measured") or value is None or value <= 0:
         return None
-    direction = _comparison_direction(message, axis)
-    if direction is None:
+    result = _comparison_direction(message, axis)
+    if result is None:
         return None
+    direction, missing_object = result
     # The fit form's number lives INSIDE the "fit in a 45 mm deep gap"
     # phrase (the gap's size) — any number outside it would make the
     # fit target ambiguous (fall through). Every other form scans the
     # whole message.
     if direction == "fit":
-        fit_span = _fit_phrase(message)
-        if fit_span is None:
-            return None
-        candidate = message[fit_span[0]:fit_span[1]]
+        fit_phrase = _FIT_FORM_RE.search(message)
+        # ``direction == "fit"`` came from this same search, so the match
+        # exists; the candidate is the matched phrase.
+        candidate = fit_phrase.group(0) if fit_phrase is not None else ""
     else:
         candidate = message
     target = _comparison_number(candidate)
@@ -926,11 +871,12 @@ def _deterministic_comparison(
         return None
     adj = DETERMINISTIC_AXIS_ADJECTIVES[axis]
     if direction == "missing":
-        m = _MISSING_FACT_RE.search(message.lower())
-        # ``m`` is guaranteed by the direction detection above; group(1)
-        # (the article) + group(2) (the noun) name the OTHER object.
+        # ``missing_object`` comes from the direction detection above
+        # ("the shelf", "my drawer" — the article + noun the user said).
         reply = DETERMINISTIC_COMPARISON_SENTENCES["missing_fact"].format(
-            axis=adj, object=f"{m.group(1)} {m.group(2)}", measured=mm_formatted(value)
+            axis=adj,
+            object=missing_object,
+            measured=mm_formatted(value),
         )
         return axis, reply
     tolerance = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
@@ -1448,10 +1394,10 @@ async def ask_answer_call(
     #313) naming the project id (or ``-`` when absent), the outcome
     (``answered`` / ``timeout`` / ``error`` / ``unanswerable`` — the
     ``request`` outcome logs NO INFO line: the message is routed to the
-    design loop, not answered) and ``latency_ms`` — the wall time of
-    the WHOLE stage-2 attempt, the same span the WARNING's ``elapsed_ms``
-    covers, so the two numbers agree. Never the prompt, the answer text
-    or the key (no PII in logs).
+    design loop, not answered) and ``latency_ms``. ONE ``_finish`` call
+    per outcome measures the stage-2 span ONCE and writes BOTH records
+    with that single value, so the WARNING's ``elapsed_ms`` and the
+    INFO's ``latency_ms`` are the same number by construction.
     """
     prompt = build_answer_prompt(question, entries)
     started = time.monotonic()
@@ -1469,20 +1415,24 @@ async def ask_answer_call(
             len(question),
         )
 
-    def _info(outcome: str, elapsed_ms: float) -> None:
-        # The stage-2 INFO line (issue #313): project id (or ``-``),
-        # outcome, latency. ``latency_ms`` is the wall time of the whole
-        # stage-2 attempt — the same span the WARNING's ``elapsed_ms``
-        # covers, so the two numbers agree. Never the prompt, the answer
-        # text or the key (no PII in logs). The ``request`` outcome is
-        # the one outcome with NO INFO line (the caller routes to the
-        # design loop — it is not an answer outcome).
-        logger.info(
-            "question-answer stage 2: project_id=%s outcome=%s latency_ms=%.0f",
-            project_id if project_id is not None else "-",
-            outcome,
-            elapsed_ms,
-        )
+    def _finish(warn_outcome: str, info_outcome: str | None) -> None:
+        # One measurement, two records (issue #313): the stage-2 span is
+        # measured ONCE and both records carry it, so the WARNING's
+        # ``elapsed_ms`` and the INFO's ``latency_ms`` are the same
+        # number by construction. The INFO record names the project id
+        # (or ``-``), the outcome and the latency — never the prompt, the
+        # answer text or the key (no PII in logs); ``info_outcome=None``
+        # (the ``request`` outcome) logs no INFO line (the caller routes
+        # to the design loop — it is not an answer outcome).
+        elapsed_ms = (time.monotonic() - started) * 1000
+        _warn(warn_outcome, elapsed_ms)
+        if info_outcome is not None:
+            logger.info(
+                "question-answer stage 2: project_id=%s outcome=%s latency_ms=%.0f",
+                project_id if project_id is not None else "-",
+                info_outcome,
+                elapsed_ms,
+            )
 
     raw: Any
     try:
@@ -1500,8 +1450,7 @@ async def ask_answer_call(
         # The hard ``timeout`` bound fired (``asyncio.wait_for`` raises
         # ``TimeoutError`` — ``asyncio.TimeoutError`` is an alias of the
         # builtin in 3.11+): a failed answer of the ``timeout`` class.
-        _warn("timeout", (time.monotonic() - started) * 1000)
-        _info("timeout", (time.monotonic() - started) * 1000)
+        _finish("timeout", "timeout")
         return None
     except Exception as exc:  # noqa: BLE001 — any non-timeout failure is a failed answer; the classification below is by class, not blind
         # ANY other failure is a failed answer — classify by the exception
@@ -1510,39 +1459,42 @@ async def ask_answer_call(
         # is httpx-based: an httpx timeout (the per-request client bound
         # in ``_http_request_factory``) is a ``timeout`` too; anything else
         # (a plain exception, an HTTP error, a connection reset) is an
-        # ``exception``.
+        # ``exception``. The INFO record carries the exception's class
+        # name — a capability failure and a network blip must not both
+        # read as the same unclassified ``error``.
         if httpx is not None and isinstance(exc, httpx.TimeoutException):
-            _warn("timeout", (time.monotonic() - started) * 1000)
-            _info("timeout", (time.monotonic() - started) * 1000)
+            _finish("timeout", "timeout")
         else:
-            _warn("exception", (time.monotonic() - started) * 1000)
-            _info("error", (time.monotonic() - started) * 1000)
+            elapsed_ms = (time.monotonic() - started) * 1000
+            _warn("exception", elapsed_ms)
+            logger.info(
+                "question-answer stage 2: project_id=%s outcome=error error_class=%s latency_ms=%.0f",
+                project_id if project_id is not None else "-",
+                type(exc).__name__,
+                elapsed_ms,
+            )
         return None
     parsed = parse_answer_reply(raw)
     if parsed is None:
-        _warn("malformed", (time.monotonic() - started) * 1000)
-        _info("error", (time.monotonic() - started) * 1000)
+        _finish("malformed", "error")
         return None
     kind, answer, missing = parsed
     if kind == "request":
-        _warn("request", (time.monotonic() - started) * 1000)
         # No INFO line for the ``request`` outcome (the message routes to
         # the design loop — it is not an answer outcome).
+        _finish("request", None)
         return "request", answer, None
     if kind == "unanswerable":
-        _warn("unanswerable", (time.monotonic() - started) * 1000)
-        _info("unanswerable", (time.monotonic() - started) * 1000)
+        _finish("unanswerable", "unanswerable")
         return "unanswerable", answer, missing
     # The guard licenses the answer's numbers from the block AND the
     # question (issue #278 — the answer may quote the user's own
     # numbers, e.g. the "30" of "a 30 mm screw"); a number in neither
     # is invented → a failed answer of the ``guard`` class.
     if not guard_answer_numbers(answer, entries, question=question):
-        _warn("guard", (time.monotonic() - started) * 1000)
-        _info("error", (time.monotonic() - started) * 1000)
+        _finish("guard", "error")
         return None
-    _warn("answer", (time.monotonic() - started) * 1000)
-    _info("answered", (time.monotonic() - started) * 1000)
+    _finish("answer", "answered")
     return "answer", answer, None
 
 
@@ -1650,7 +1602,7 @@ async def route_chat_message(
     comparison = _deterministic_comparison(message, latest)
     if comparison is not None:
         axis, reply = comparison
-        logger.warning(
+        logger.info(
             "question-answer: outcome=deterministic axis=%s "
             "provenance=comparison (len(message)=%d)",
             axis,
