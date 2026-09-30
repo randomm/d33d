@@ -27,6 +27,10 @@ from d33d.config.catalogue import load_catalogue
 from d33d.design_prompts import (
     BOSL2_CHEATSHEET_PATH,
     FDM_TOLERANCE_TABLE,
+    METRIC_SCREW_CLEARANCE_MM,
+    SCREW_CLEARANCE_INSTRUCTION,
+    SCREW_SIZE_RE,
+    clearance_rows_line,
     design_prompt,
     load_bosl2_cheatsheet,
     model_overrides,
@@ -110,6 +114,54 @@ def test_design_prompt_injects_cheatsheet() -> None:
     assert "FDM tolerance table" in system
     for fit in FDM_TOLERANCE_TABLE:
         assert fit in system
+
+
+def test_design_prompt_renders_screw_clearance_rows_from_single_table():
+    """Issue #317: the screw clearance rows render from the SINGLE source
+    table — every (size, diameter) pair appears in the prompt, the live
+    loop's system prompt renders the identical rows, and no second
+    hard-coded copy of the numbers exists in the prompt module."""
+    system, _ = design_prompt(stated_dims=STATED)
+    # Every table entry renders (size name + its diameter, from the table
+    # — never a second copy).
+    for size, mm in METRIC_SCREW_CLEARANCE_MM.items():
+        assert f"{size} = {mm:g} mm" in system
+    # The explicit instruction renders too.
+    assert SCREW_CLEARANCE_INSTRUCTION in system
+    # The LIVE loop prompt renders the same rows from the same table
+    # (single-source: the two prompts cannot drift).
+    import d33d.design_loop as dl
+
+    live_system = dl._design_system(STATED)
+    assert clearance_rows_line() in live_system
+    assert SCREW_CLEARANCE_INSTRUCTION in live_system
+
+
+def test_screw_size_regex_word_boundary_and_table_lookup():
+    """Issue #317 detection regex: word-boundary anchoring (``M40`` and
+    ``BM4`` do not match; ``M4x20`` does) and the ``M`` + value lookup
+    into the single-source table."""
+    m = SCREW_SIZE_RE.search("a 60 × 45 mm plate with an M4 hole")
+    assert m is not None and f"M{m.group(1)}" in METRIC_SCREW_CLEARANCE_MM
+    # ``M40`` / ``BM4``: no word-boundary match.
+    assert SCREW_SIZE_RE.search("an M40 flange") is None
+    assert SCREW_SIZE_RE.search("the BM4 reference") is None
+    # ``M4x20``: a thread-length spec still names an M4 thread.
+    m4x20 = SCREW_SIZE_RE.search("an M4x20 bolt")
+    assert m4x20 is not None and f"M{m4x20.group(1)}" == "M4"
+    # M2.5 maps into the table.
+    m25 = SCREW_SIZE_RE.search("holes for M2.5 screws")
+    assert m25 is not None and f"M{m25.group(1)}" in METRIC_SCREW_CLEARANCE_MM
+
+
+def test_design_prompt_instructs_screw_clearance_not_nominal():
+    """Issue #317: the prompt instructs that a user-named metric screw
+    through-hole is modelled at the table's clearance diameter (not the
+    nominal size) and the clearance stated in the param's reason."""
+    system, _ = design_prompt(stated_dims=STATED)
+    assert "clearance diameter" in system
+    assert "NOT the nominal size" in system
+    assert "parameter's reason" in system
 
 
 def test_design_prompt_has_neutral_delimiters_not_model_specific_tokens() -> None:

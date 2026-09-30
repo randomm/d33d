@@ -2113,3 +2113,336 @@ def test_failed_render_log_line_never_contains_secrets(
     # The render never reads environment variables, so nothing to echo.
     render_argv = rw_mod.build_docker_argv("img", "render-00000001")
     assert "TRAIL_OPENERS_LLM_KEY" not in " ".join(render_argv)
+
+
+# ---------------------------------------------------------------------------
+# Issue #317: metric screw-hole clearance post-check (single-source table,
+# ok-render branch, before the score.perfect pass return)
+# ---------------------------------------------------------------------------
+
+
+def _screw_scad_llm(scad: str, params: list[dict] | None = None) -> LLMResult:
+    """A T1-shaped design response whose tool call carries a ``parameters``
+    metadata array (the label/reason channel the post-check reads)."""
+    args: dict[str, Any] = {"scad": scad}
+    if params is not None:
+        args["parameters"] = params
+    return LLMResult(
+        content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+        tool_calls=({"name": "emit_design", "arguments": args},),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def _plate_scad(hole: float) -> str:
+    """A 60 × 45 × 8 plate with a single circular through-hole of the
+    given diameter — every literal a named declaration (the named-params
+    gate passes), bbox matches the stated triple exactly."""
+    return (
+        "W = 60;\nD = 45;\nH = 8;\nhole_d = "
+        f"{hole:g};\n"
+        "difference() {\n"
+        "  cube([W, D, H]);\n"
+        "  translate([30, 22.5, 0]) cylinder(h = H + 2, d = hole_d);\n"
+        "}\n"
+    )
+
+
+def _run_screw_loop(
+    llm_script: Sequence[LLMResult],
+    request: str,
+    *,
+    bbox_fn: BboxFn = None,
+    max_iterations: int = MAX_ITERATIONS,
+    seen_prompts: list[str] | None = None,
+):
+    """Run the loop over an ok-render plate (all five gate bits green)
+    with a ``request`` that names (or does not name) a metric screw.
+    The render script is one ok render, reused per iteration."""
+    render = _render()
+    seen = seen_prompts if seen_prompts is not None else []
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        seen.append(text)
+        return llm_script[min(len(seen) - 1, len(llm_script) - 1)]
+
+    def render_fn(scad, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=(60.0, 45.0, 8.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=bbox_fn or (lambda r: BboxInfo(60.0, 45.0, 8.0, 21600.0)),
+        request=request,
+        max_iterations=max_iterations,
+    )
+
+
+def test_screw_clearance_post_check_repairs_undersize_m4():
+    """Issue #317 trigger: "a 60 × 45 mm plate with an M4 hole" with
+    ``hole_d = 4.0`` → the all-green candidate does NOT pass; iteration
+    1's repair carries ``failure_class: geometrically_wrong`` and the
+    message "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5
+    mm" (substring of the instruction). The scripted model repeats 4.0,
+    so the hole stays undersize to the cap (the within-cap pass is
+    pinned by the next test)."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    llm = [_screw_scad_llm(_plate_scad(4.0), meta)]
+    seen: list[str] = []
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole", seen_prompts=seen)
+    # The all-green candidate does NOT pass: the post-check routes the
+    # repair and the loop takes the repair iterations within the cap.
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    # Iteration 1: all five gate bits green (the hole is not a gate bit)
+    # yet it still got the structured repair.
+    first = result.iterations[0]
+    assert first.score.perfect is True
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    assert (
+        "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm"
+        in first.repair["instruction"]
+    )
+    # The repair reached iteration 2's prompt through the existing
+    # REPAIR block (same _design_messages path, unchanged).
+    assert "REPAIR directive" not in seen[0]
+    assert "REPAIR directive" in seen[1]
+    assert "failure_class: geometrically_wrong" in seen[1]
+    assert "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm" in seen[1]
+
+
+def test_screw_clearance_repair_then_clearance_passes_within_cap():
+    """Issue #317: the model fixes the hole on the repair iteration —
+    4.0 mm triggers, 4.5 mm passes, all within the 3-iteration cap and
+    the no-improvement limit (the clearance repair counts as a normal
+    repair iteration, not a new budget)."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        if "REPAIR directive" in text:
+            return _screw_scad_llm(_plate_scad(4.5), meta)
+        return _screw_scad_llm(_plate_scad(4.0), meta)
+
+    def render_fn(scad, defines):
+        return _render()
+
+    seen: list[str] = []
+
+    def llm_fn_seen(role, messages, system):
+        seen.append(messages[0]["content"][0]["text"])
+        return llm_fn(role, messages, system)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(60.0, 45.0, 8.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn_seen,
+        bbox_fn=lambda r: BboxInfo(60.0, 45.0, 8.0, 21600.0),
+        request="a 60 × 45 mm plate with an M4 hole",
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None
+    assert "REPAIR directive" not in seen[0]
+    assert "REPAIR directive" in seen[1]
+    assert "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm" in seen[1]
+
+
+def test_screw_clearance_post_check_passes_at_clearance():
+    """Issue #317: hole_d = 4.5 (the table's M4 clearance) does NOT
+    trigger — the candidate passes on iteration 1 with no repair."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    llm = [_screw_scad_llm(_plate_scad(4.5), meta)]
+    seen: list[str] = []
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole", seen_prompts=seen)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+    assert "REPAIR directive" not in seen[0]
+
+
+def test_screw_clearance_post_check_boundary_005_mm():
+    """Issue #317 boundary: below clearance by MORE than 0.05 mm triggers
+    (4.44 → 4.5 − 4.44 = 0.06 > 0.05); at or above the threshold it
+    abstains (4.45 → 0.05, not more than 0.05)."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    # 4.44: triggers (the repair is routed; the scripted model repeats 4.44
+    # to the cap — the hole stays undersize).
+    llm = [_screw_scad_llm(_plate_scad(4.44), meta)]
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
+    assert result.status == "exhausted"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert "4.44 mm" in result.iterations[0].repair["instruction"]
+    # 4.45: abstains — no false repair, the pass is a clean pass.
+    llm = [_screw_scad_llm(_plate_scad(4.45), meta)]
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_screw_clearance_post_check_no_screw_named_does_nothing():
+    """Issue #317: a request that names NO metric screw size never
+    triggers, even with an undersize hole param (4.0 mm < 4.5)."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    llm = [_screw_scad_llm(_plate_scad(4.0), meta)]
+    seen: list[str] = []
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with a 4 mm hole", seen_prompts=seen)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert "REPAIR directive" not in seen[0]
+
+
+def test_screw_clearance_post_check_ambiguous_param_does_nothing():
+    """Issue #317: MORE than one hole-diameter candidate (``hole_d`` and
+    ``m4_hole`` both read as M4 holes) → the check cannot identify the
+    param confidently and does NOTHING (no repair, no crash)."""
+    scad = (
+        "W = 60;\nD = 45;\nH = 8;\nhole_d = 4.0;\nm4_hole = 4.0;\n"
+        "difference() {\n"
+        "  cube([W, D, H]);\n"
+        "  translate([30, 22.5, 0]) cylinder(h = H + 2, d = hole_d);\n"
+        "  translate([10, 10, 0]) cylinder(h = H + 2, d = m4_hole);\n"
+        "}\n"
+    )
+    meta = [
+        {"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"},
+        {"name": "m4_hole", "label": "M4 hole", "unit": "mm"},
+    ]
+    llm = [_screw_scad_llm(scad, meta)]
+    seen: list[str] = []
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole", seen_prompts=seen)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+    assert "REPAIR directive" not in seen[0]
+
+
+def test_screw_clearance_threaded_wording_abstains():
+    """Issue #317: threaded / tapped / insert wording is NOT a clearance
+    hole — the check abstains with NO repair (never a false repair),
+    even when the param is at the nominal size."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    for request in (
+        "a 60 × 45 mm plate with an M4 threaded hole",
+        "a 60 × 45 mm plate with a tapped M4 hole",
+        "a 60 × 45 mm plate with a heat-set insert for M4",
+    ):
+        llm = [_screw_scad_llm(_plate_scad(4.0), meta)]
+        seen: list[str] = []
+        result = _run_screw_loop(llm, request, seen_prompts=seen)
+        assert result.status == "pass", request
+        assert result.iterations_used == 1, request
+        assert result.iterations[0].repair is None, request
+        assert "REPAIR directive" not in seen[0], request
+
+
+def test_screw_clearance_post_check_survives_missing_param_meta():
+    """Issue #317: the T1 tier carries no ``parameters`` metadata — the
+    check falls back to the name heuristic only (``hole_d`` reads as a
+    hole) and still triggers; never a crash on missing param_meta."""
+    llm = [_screw_scad_llm(_plate_scad(4.0))]  # no parameters array
+    seen: list[str] = []
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole", seen_prompts=seen)
+    assert result.status == "exhausted"  # the model repeats 4.0 to the cap
+    assert result.iterations[0].repair is not None
+    assert (
+        "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm"
+        in result.iterations[0].repair["instruction"]
+    )
+
+
+def test_screw_clearance_undersize_at_cap_returns_best_effort():
+    """Issue #317: if the cap is reached with the hole still undersize,
+    the loop returns its normal best-effort result — no new
+    failure_reason (the failure_reason is a gate-class name, not the
+    clearance finding)."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    llm = [_screw_scad_llm(_plate_scad(4.0), meta)]  # never fixed
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    assert result.failure_reason is None
+    for iteration in result.iterations:
+        assert iteration.failure_class == "geometrically_wrong"
+        assert iteration.repair is not None
+        assert iteration.repair["failure_class"] == "geometrically_wrong"
+
+
+def test_screw_clearance_word_boundaries_never_trigger():
+    """Issue #317: ``M40`` / ``BM4`` are not M4 references — the post-check
+    sees no screw size and does nothing."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    for request in ("an M40 flange plate", "a plate with a BM4 reference"):
+        llm = [_screw_scad_llm(_plate_scad(4.0), meta)]
+        result = _run_screw_loop(llm, request)
+        assert result.status == "pass", request
+        assert result.iterations[0].repair is None, request
+
+
+def test_screw_clearance_direct_check_contract():
+    """Issue #317: the post-check helper's contract in isolation —
+    trigger/pass/no-op shapes, the message form, and the class value."""
+    from d33d.design_loop import _undersize_screw_hole
+
+    request = "a 60 × 45 mm plate with an M4 hole"
+    meta = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}
+    # Triggers: 4.0 is below the 4.5 clearance by more than 0.05 mm.
+    repair = _undersize_screw_hole(request, {"W": 60.0, "hole_d": 4.0}, meta)
+    assert repair is not None
+    assert repair["failure_class"] == "geometrically_wrong"
+    assert (
+        "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm"
+        in repair["instruction"]
+    )
+    # The evidence names the param by its model label when one exists
+    # (the param_meta label wins over the identifier).
+    assert "M4 hole diameter" in repair["evidence"]
+    assert "4.0 mm" in repair["evidence"]
+    assert "4.5 mm" in repair["evidence"]
+    # No label (T1 name-heuristic fallback): the identifier is used.
+    unlabeled = _undersize_screw_hole(request, {"hole_d": 4.0}, {})
+    assert unlabeled is not None and "hole_d" in unlabeled["evidence"]
+    # Passes: at clearance (and above).
+    assert _undersize_screw_hole(request, {"hole_d": 4.5}, meta) is None
+    assert _undersize_screw_hole(request, {"hole_d": 5.0}, meta) is None
+    # Boundary: exactly 0.05 below abstains; more than 0.05 below triggers.
+    assert _undersize_screw_hole(request, {"hole_d": 4.45}, meta) is None
+    assert _undersize_screw_hole(request, {"hole_d": 4.44}, meta) is not None
+    # No screw size named → abstain.
+    assert _undersize_screw_hole("a plate with a hole", {"hole_d": 4.0}, meta) is None
+    # Ambiguous (two candidates) → abstain.
+    ambiguous = {"hole_d": 4.0, "m4_hole": 4.0}
+    assert (
+        _undersize_screw_hole(
+            request, ambiguous, {"hole_d": meta["hole_d"], "m4_hole": {"label": "M4 hole"}}
+        )
+        is None
+    )
+    # Threaded wording → abstain.
+    assert (
+        _undersize_screw_hole(
+            "a plate with an M4 threaded hole", {"hole_d": 4.0}, meta
+        )
+        is None
+    )
+    # No hole param at all → abstain.
+    assert _undersize_screw_hole(request, {"W": 60.0, "D": 45.0}, {}) is None
+    # Empty request → abstain.
+    assert _undersize_screw_hole("", {"hole_d": 4.0}, meta) is None

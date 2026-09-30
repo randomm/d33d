@@ -786,6 +786,142 @@ def is_best(candidate: Score, incumbent: Score) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _mm(value: float) -> str:
+    """Issue #317 message rendering: the millimetre value of a clearance
+    measurement, rendered at its natural precision (``4.0`` for 4.0,
+    ``4.44`` for 4.44, ``4.5`` for 4.5) — the exact-form message pins
+    the value the model actually emitted.  At least one decimal is
+    always shown (``4.0``, never ``4``)."""
+    s = f"{value:.2f}"
+    if "." in s:
+        s = s.rstrip("0")
+        if s.endswith("."):
+            s += "0"
+    return s
+
+
+def _screw_hole_candidates(
+    name: str, value: float, meta: dict[str, Any] | None
+) -> bool:
+    """Issue #317: does this named parameter read as a screw through-hole
+    diameter (the param the deterministic post-check must find
+    CONFIDENTLY)?
+
+    A candidate is a positive numeric parameter whose name or its
+    param_meta label/reason says "hole".  Threaded/tapped/insert wording
+    in the name or metadata disqualifies it — those are not clearance
+    holes, and the check abstains on them (no repair, no false repair).
+    A param with no hole wording at all is not a candidate either:
+    the check must never guess which of several parameters a named
+    screw sizes."""
+    name_lower = name.lower()
+    if "thread" in name_lower or "tap" in name_lower or "insert" in name_lower:
+        return False
+    if "hole" not in name_lower:
+        return False
+    if meta:
+        meta_text = " ".join(
+            str(meta.get(key, "")) for key in ("label", "reason")
+        ).lower()
+        if any(word in meta_text for word in ("thread", "tap", "insert")):
+            return False
+        if "hole" not in meta_text:
+            return False
+    return True
+
+
+def _undersize_screw_hole(
+    request: str,
+    params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Issue #317: the deterministic screw-hole clearance post-check.
+
+    Runs on the ok-render branch of the loop, BEFORE the ``score.perfect``
+    pass return (an undersize hole is invisible to all five gate bits).
+
+    Returns ``None`` (the check abstains — nothing is fed to the next
+    iteration) unless ALL of the following hold:
+
+    * the user's ``request`` names a metric screw size with a word
+      boundary (``M4`` in "a 60 × 45 mm plate with an M4 hole"; ``M40``
+      and ``BM4`` do not; ``M4x20`` does);
+    * the request does NOT use threaded/tapped/insert wording (through
+      holes only — those abstain, never a false repair);
+    * EXACTLY ONE candidate parameter (name/label/reason reads as a hole
+      diameter, threaded/tapped/insert wording excluded) — zero or more
+      than one candidate abstains (never guess which param a named screw
+      sizes).
+
+    Otherwise returns the structured repair dict (the same shape
+    ``route_repair`` yields — ``failure_class`` pinned to the EXISTING
+    ``geometrically_wrong`` class, no new class) whose ``instruction``
+    carries the sentence ``M4 clearance hole is 4.0 mm; printed M4
+    clearance is 4.5 mm`` (values from the single-source
+    ``METRIC_SCREW_CLEARANCE_MM`` table) and whose ``evidence`` names the
+    parameter with both numbers.  The hole must be BELOW the table's
+    clearance diameter by MORE than 0.05 mm to trigger (a hole at
+    4.45 mm for M4 abstains; at 4.44 mm it triggers).
+    """
+    from d33d.design_prompts import (
+        METRIC_SCREW_CLEARANCE_MM,
+        SCREW_SIZE_RE,
+        _THREAD_HOLE_WORD_RE,
+    )
+
+    if not request or not params:
+        return None
+    if _THREAD_HOLE_WORD_RE.search(request):
+        return None
+    sizes: list[str] = []
+    for value in SCREW_SIZE_RE.findall(request):
+        size = f"M{value}"
+        if size in METRIC_SCREW_CLEARANCE_MM and size not in sizes:
+            sizes.append(size)
+    if not sizes:
+        return None
+    undersize: list[tuple[str, str, float, float]] = []
+    for size in sizes:
+        clearance = METRIC_SCREW_CLEARANCE_MM[size]
+        for name, value in params.items():
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            value = float(value)
+            if value <= 0:
+                continue
+            meta = param_meta.get(name) if isinstance(param_meta, dict) else None
+            if not _screw_hole_candidates(name, value, meta):
+                continue
+            if clearance - value > 0.05:
+                undersize.append((name, size, value, clearance))
+    if len(undersize) != 1:
+        # Zero: nothing to repair.  More than one (two hole params, or
+        # two named screw sizes): the check cannot identify the param
+        # confidently — it does nothing, never a false repair.
+        return None
+    name, size, value, clearance = undersize[0]
+    meta = param_meta.get(name) if isinstance(param_meta, dict) else None
+    label = (
+        meta.get("label")
+        if isinstance(meta, dict) and isinstance(meta.get("label"), str)
+        else name
+    )
+    return {
+        "failure_class": "geometrically_wrong",
+        "instruction": (
+            f"{size} clearance hole is {_mm(value)} mm; printed {size} "
+            f"clearance is {_mm(clearance)} mm. Model the hole at the "
+            f"clearance diameter ({_mm(clearance)} mm), not the nominal "
+            f"size, and state the clearance in the parameter's reason."
+        ),
+        "scad_source": "",
+        "evidence": (
+            f"{label} = {_mm(value)} mm "
+            f"(below the {size} clearance of {_mm(clearance)} mm)"
+        ),
+    }
+
+
 def _dim_params(
     stated: tuple[float, float, float], dims: dict[str, str]
 ) -> dict[str, str]:
@@ -837,12 +973,25 @@ def _dim_axis_list(stated: tuple[float, float, float]) -> str:
 
 
 def _design_system(stated: tuple[float, float, float]) -> str:
-    """Short imperative design-role system prompt (neutral delimiters)."""
+    """Short imperative design-role system prompt (neutral delimiters).
+
+    Carries the metric screw-clearance table (issue #317) rendered from
+    the SINGLE definition in ``d33d.design_prompts`` — the same table
+    ``design_prompt`` renders and the loop's post-check reads, so the
+    clearance numbers live in exactly one module."""
+    from d33d.design_prompts import (
+        SCREW_CLEARANCE_INSTRUCTION,
+        clearance_rows_line,
+    )
+
     return (
         "You are a parametric CAD designer. "
         f"Ground-truth dimensions in mm: {_dim_axis_list(stated)}. "
         "Never invent a fit-critical number. Every dimension and any FDM "
         "clearance is a named parameter, never an inline literal. "
+        "Screw clearance (through-holes), in mm: "
+        f"{clearance_rows_line()}. "
+        f"{SCREW_CLEARANCE_INSTRUCTION} "
         "Reply with exactly one fenced JSON block and nothing else."
     )
 
@@ -1527,6 +1676,32 @@ async def run_design_loop_async(
                     if directive is not None:
                         next_repair = directive.to_dict()
 
+        # Issue #317 deterministic post-check: an ok render whose all five
+        # gate bits are green can still carry an undersize metric-screw
+        # hole (hole size is not a gate bit) — the check runs on the
+        # ok-render branch BEFORE the pass return, so a 4.0 mm M4 hole
+        # never passes silently.  No new failure class: the repair dict
+        # carries the existing ``geometrically_wrong`` class (built
+        # inline, mirroring the #276 axis_params_mismatch construction);
+        # it is routed as the next iteration's repair within the existing
+        # cap and no-improvement limit.  It never adds a failure_reason:
+        # a hole still undersize at the cap returns the normal best-effort
+        # result.  A gate-driven repair already routed this iteration wins
+        # (the gate evidence is the more specific diagnosis).
+        _screw_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and (failure_class is None or failure_class == "geometrically_wrong")
+        ):
+            _screw_repair = _undersize_screw_hole(
+                request, _scad_params(scad_source), extract_param_meta(scad)
+            )
+            if _screw_repair is not None:
+                failure_class = "geometrically_wrong"
+                next_repair = _screw_repair
+                _screw_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -1543,7 +1718,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect:
+        if candidate_score.perfect and not _screw_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,
