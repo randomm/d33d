@@ -2795,20 +2795,22 @@ def test_chat_stage1_matrix_routes_imperatives_to_loop(app_with_versions):
 
 
 def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
-    """Issue #249 operator latency decision (re-pinned for #260): the
-    10 s hard bound covers the WHOLE pre-route (catalogue load +
-    capability probe + the completion), not just the completion. This
-    test monkeypatches the ``ANSWER_CALL_TIMEOUT_SECONDS`` to 0.1 s and
+    """Issue #249 operator latency decision (re-pinned for #260, renamed
+    for #313): the shared per-LLM-call hard bound
+    (``LLM_CALL_TIMEOUT_SECONDS``) covers the WHOLE pre-route (catalogue
+    load + capability probe + the completion), not just the completion.
+    This test monkeypatches ``LLM_CALL_TIMEOUT_SECONDS`` to 0.1 s and
     uses a production edge whose wire call hangs (sleeps 0.5 s, well
     past the 0.1 s bound). The /chat route must reply with the fixed
     no-run ``couldn't answer`` done frame (issue #260 — the design loop
     is never the fallback for a failed answer), and the total POST→202
     time stays under the bound + margin. The test runs in <1 s of wall
-    clock (the same contract as the 10 s production bound, at a
-    shorter value).
+    clock (the same contract as the shared per-LLM-call production bound,
+    at a shorter value).
 
-    There is exactly ONE 10 s enforcement point (issue #249 review):
-    ``ask_answer_call``'s ``asyncio.wait_for`` around the edge. The test
+    There is exactly ONE per-LLM-call enforcement point (issue #249
+    review, #313): ``ask_answer_call``'s ``asyncio.wait_for`` around the
+    edge. The test
     installs the PRODUCTION edge (``_build_question_answer_call``) with
     the probe monkeypatched to RAISE (the capability cache is seeded so
     the probe is not on the path) and the wire call hanging — the bound
@@ -2838,7 +2840,7 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
         # A T0-shaped capability (the probe never ran — the cache would
         # be cold, so the monkeypatched ``_fake_probe`` raises if it
         # does): this pins that the bound the test measures is the
-        # single 10 s enforcement point (``ask_answer_call``'s
+        # single per-LLM-call enforcement point (``ask_answer_call``'s
         # ``wait_for``) around the wire call, with no probe in the path.
         return _HangingLLM()
 
@@ -2860,6 +2862,7 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
     )
     monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe)
     monkeypatch.setattr(_design_loop_mod, "make_llm_fn", _fake_make_llm_fn)
+
     # The production edge reads ``app_state.question_capability_cache`` —
     # seed a T0 capability for the stub key so the probe path is not
     # taken (the monkeypatched probe raises if it is). The cache is a
@@ -2876,7 +2879,7 @@ def test_chat_pre_route_timeout_bounded(app_with_versions, monkeypatch):
 
     # Monkeypatch the timeout to 0.1 s so the test runs in <1 s.
     import d33d.question_answer as _qa_mod
-    monkeypatch.setattr(_qa_mod, "ANSWER_CALL_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(_qa_mod, "LLM_CALL_TIMEOUT_SECONDS", 0.1)
 
     loop_called = [False]
 
