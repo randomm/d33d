@@ -61,6 +61,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
 
+from d33d.data_dir import default_data_dir, guard_real_data_path
+
 logger = logging.getLogger(__name__)
 
 ErrorClass = Literal[
@@ -555,16 +557,34 @@ def _render_persist_base() -> Path | None:
     reads them from disk into the frame's data URIs, so the bytes must
     survive the tempdir.
 
-    ``D33D_RENDER_PERSIST_DIR`` (default ``~/.d33d/renders`` — mirrors
-    ``D33D_DATA_DIR``'s ``~/.d33d`` convention). Returns ``None`` when
-    the base cannot be created (read-only FS, permission) — persistence
-    is best-effort and must never change the render outcome."""
-    path = Path(
-        os.environ.get("D33D_RENDER_PERSIST_DIR", str(Path.home() / ".d33d" / "renders"))
-    )
+    ``D33D_RENDER_PERSIST_DIR`` (default ``<data-dir>/renders`` where the
+    data dir mirrors ``D33D_DATA_DIR``'s ``~/.d33d`` convention). Returns
+    ``None`` when the base cannot be created (read-only FS, permission)
+    OR when the single test-mode guard refuses the resolved path
+    (``~/.d33d``-rooted while a test run is in progress, issue #310) —
+    persistence is best-effort and must never change the render outcome:
+    a guard refusal falls through to ``None`` (no persistence) exactly as
+    a failed ``mkdir`` does.
+
+    Both the default (routed through
+    :func:`d33d.data_dir.default_data_dir`, so the isolation fixture's
+    ``D33D_DATA_DIR`` tmp steering applies exactly as it does to
+    ``projects_dir``) and the explicit ``D33D_RENDER_PERSIST_DIR`` value
+    pass through :func:`d33d.data_dir.guard_real_data_path` — the guard
+    is an invariant on every resolution, not just the fallback branch.
+    """
     try:
+        if os.environ.get("D33D_RENDER_PERSIST_DIR") is None:
+            path = default_data_dir() / "renders"
+        else:
+            path = Path(os.environ["D33D_RENDER_PERSIST_DIR"])
+            guard_real_data_path(path)
         path.mkdir(parents=True, exist_ok=True)
-    except OSError:
+    except (OSError, RuntimeError):
+        # A guard RuntimeError (``~/.d33d``-rooted while pytest runs, via
+        # ``default_data_dir`` or ``guard_real_data_path``) is a refusal of
+        # a best-effort fallback — the render simply does not persist, the
+        # same outcome as a ``mkdir`` ``OSError``.
         return None
     return path
 

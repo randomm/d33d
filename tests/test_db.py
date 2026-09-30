@@ -314,3 +314,171 @@ def test_create_project_repo_lands_under_the_env_data_dir(
         )
     finally:
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# Issue #310 — the data-dir test-mode guard (per-resolver "fires" tests)
+# ---------------------------------------------------------------------------
+# The operator's real ``~/.d33d`` must never be resolved (resolution is
+# itself the write — each resolver ``mkdir``s on resolve) while a pytest
+# run is in progress. The single guard in ``d33d/data_dir.py`` is exercised
+# per resolver below: each one that defaults into the real ``~/.d33d``
+# must raise the guard's ``RuntimeError`` when forced to its real default
+# (the env steering the autouse fixture applies is removed), while an
+# explicit isolated tmp path passes through untouched. ``PYTEST_CURRENT_TEST``
+# is always set here (we ARE inside a pytest run), so the tests do not
+# monkeypatch it — they exercise the real trigger.
+
+
+def _assert_guard_message(exc: pytest.ExceptionInfo[RuntimeError]) -> None:
+    """The guard's error must name the path and the pytest trigger."""
+    msg = str(exc.value)
+    assert ".d33d" in msg
+    assert "PYTEST_CURRENT_TEST" in msg
+
+
+# One case per resolver that can default into the real ``~/.d33d``.
+# The shared shape: force ``D33D_DATA_DIR`` at the real home (plus the
+# case-specific tweak), call the resolver, assert the outcome.
+# Parametrising makes "every resolver handles the real-home default" a
+# single assertion loop, so a new resolver added to the list is covered
+# by the same assertion rather than a copy of the boilerplate.
+#
+# ``expect_error`` distinguishes the two documented outcomes for a
+# ``~/.d33d``-rooted default while a test run is in progress:
+#
+# * the three hard-fail resolvers (``projects_dir``, ``_default_git_path``
+#   via ``projects_dir``, ``default_data_dir``) — the guard's
+#   ``RuntimeError`` propagates; the refusal is the pin.
+# * ``render_persist`` — the guard's ``RuntimeError`` is swallowed by the
+#   best-effort handler (the documented ``"must never change the render
+#   outcome"`` contract) and the function returns ``None``; the render
+#   proceeds unpersisted. This is the pin for the render-persist contract.
+@pytest.mark.parametrize(
+    "resolver,extra_setup,expect_error",
+    [
+        # (a) projects_dir's env fallback — the exact call chain that
+        #     created the 546 orphan repos.
+        ("projects_dir", lambda mp: None, True),
+        # (b) _default_git_path (the orphan-repo factory): resolves
+        #     through projects_dir(APP_DATA_DIR); APP_DATA_DIR must be
+        #     None so it takes the env fallback too.
+        (
+            "default_git_path",
+            lambda mp: mp.setattr(db, "APP_DATA_DIR", None),
+            True,
+        ),
+        # (c) the shared resolver behind main._resolve_data_dir — no
+        #     extra steering needed (its env IS the default).
+        ("default_data_dir", lambda mp: None, True),
+        # (d) the render-persist base's DEFAULT (D33D_RENDER_PERSIST_DIR
+        #     unset so the D33D_DATA_DIR default is what resolves). The
+        #     guard's RuntimeError is swallowed by the best-effort
+        #     handler → returns None (documented contract), NOT raises.
+        (
+            "render_persist",
+            lambda mp: mp.delenv("D33D_RENDER_PERSIST_DIR", raising=False),
+            False,
+        ),
+    ],
+)
+def test_guard_fires_resolver_forced_to_real_home(
+    resolver: str, extra_setup, expect_error: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import d33d.data_dir as dd
+    import d33d.render_worker as rw
+
+    real_home = Path.home() / ".d33d"
+    monkeypatch.setenv("D33D_DATA_DIR", str(real_home))
+    extra_setup(monkeypatch)
+    dispatch = {
+        "projects_dir": lambda: db.projects_dir(None),
+        "default_git_path": lambda: db._default_git_path("any-project"),
+        "default_data_dir": lambda: dd.default_data_dir(),
+        "render_persist": lambda: rw._render_persist_base(),
+    }[resolver]
+    if expect_error:
+        with pytest.raises(RuntimeError) as exc:
+            dispatch()
+        _assert_guard_message(exc)
+        if resolver == "projects_dir":
+            # The resolved path must be named in the refusal message —
+            # the operator needs to see which path the guard refused.
+            assert str(real_home) in str(exc.value)
+    else:
+        # render_persist: the documented best-effort contract — the
+        # guard's RuntimeError is swallowed and the function returns
+        # None (the render proceeds unpersisted, never aborts).
+        assert dispatch() is None
+
+
+def test_guard_fires_main_resolve_data_dir_when_forced_to_real_home(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``d33d.main._resolve_data_dir`` routes through the same shared
+    resolver — it must raise the guard's error type too."""
+    import d33d.main as main_mod
+
+    monkeypatch.setenv("D33D_DATA_DIR", str(Path.home() / ".d33d"))
+    with pytest.raises(RuntimeError) as exc:
+        main_mod._resolve_data_dir()
+    _assert_guard_message(exc)
+
+
+def test_guard_refusal_never_changes_render_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #310 review: when the guard refuses the render-persist
+    default (``~/.d33d``-rooted while a test run is in progress),
+    :func:`d33d.render_worker._render_persist_base` falls through to
+    ``None`` — the documented best-effort contract (``"Returns None when
+    the base cannot be created ... persistence is best-effort and must
+    never change the render outcome"``). The render proceeds unpersisted
+    instead of aborting: the guard's ``RuntimeError`` is swallowed by
+    the same handler as a ``mkdir`` ``OSError``, never propagating out
+    to the ``render()`` call site."""
+    import d33d.render_worker as rw
+
+    real_home = Path.home() / ".d33d"
+    monkeypatch.setenv("D33D_DATA_DIR", str(real_home))
+    monkeypatch.delenv("D33D_RENDER_PERSIST_DIR", raising=False)
+    assert rw._render_persist_base() is None
+
+
+def test_guard_escape_hatch_disables_the_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #310 review: ``D33D_DATA_DIR_GUARD=off`` is the documented
+    escape hatch for a test that intentionally exercises a resolver
+    against the real ``~/.d33d`` default — with the hatch set, the guard
+    is a no-op and ``default_data_dir`` resolves the real home instead of
+    raising. (The call here resolves only; it does NOT mkdir, so the
+    operator's real data dir is not touched by this test.)"""
+    import d33d.data_dir as dd
+
+    monkeypatch.setenv("D33D_DATA_DIR", str(Path.home() / ".d33d"))
+    monkeypatch.setenv("D33D_DATA_DIR_GUARD", "off")
+    assert dd.default_data_dir() == Path.home() / ".d33d"
+
+
+def test_guard_does_not_fire_explicit_isolated_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resolved path OUTSIDE the real ``~/.d33d`` must pass even under
+    pytest: an explicit tmp data_dir arg to ``projects_dir`` and an
+    explicit ``D33D_RENDER_PERSIST_DIR`` env are the caller's isolated
+    choices and the guard must not refuse them."""
+    import d33d.render_worker as rw
+
+    iso = tmp_path / "iso"
+    iso.mkdir()
+    # Explicit arg to projects_dir — never touches the env fallback.
+    base = db.projects_dir(iso)
+    assert base == iso / "projects"
+    assert base.is_dir()
+    # Explicit persist env — the guard is not in the explicit path.
+    persist = tmp_path / "renders-iso"
+    monkeypatch.setenv("D33D_RENDER_PERSIST_DIR", str(persist))
+    base2 = rw._render_persist_base()
+    assert base2 == persist
+    assert persist.is_dir()

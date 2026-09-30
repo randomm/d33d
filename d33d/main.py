@@ -18,13 +18,18 @@ from pathlib import Path
 import uvicorn
 
 from d33d.app import create_app
-
-_DEFAULT_DATA_DIR = Path.home() / ".d33d"
+from d33d.data_dir import default_data_dir
 
 
 def _resolve_data_dir() -> Path:
-    """``D33D_DATA_DIR`` (default ``~/.d33d``), created if missing."""
-    p = Path(os.environ.get("D33D_DATA_DIR", _DEFAULT_DATA_DIR))
+    """``D33D_DATA_DIR`` (default ``~/.d33d``), created if missing.
+
+    The env/default fallback routes through the single test-mode guard in
+    ``d33d.data_dir`` (issue #310) — ``default_data_dir()`` raises when
+    the resolved path lands inside the operator's real ``~/.d33d`` while
+    a test run is in progress; production runs resolve as before.
+    """
+    p = default_data_dir()
     p.mkdir(parents=True, exist_ok=True)
     return p
 
