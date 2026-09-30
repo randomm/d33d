@@ -90,16 +90,15 @@ META = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}
 
 
 def test_triggers_on_undersize_m4():
-    repair = undersize_screw_hole(REQUEST, {"W": 60.0, "hole_d": 4.0}, META)
-    assert repair is not None
-    assert repair["failure_class"] == "geometrically_wrong"
-    assert "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm" in (
-        repair["instruction"]
-    )
-    assert "scad_source" in repair
-    assert "M4 hole diameter" in repair["evidence"]
-    assert "4.0 mm" in repair["evidence"]
-    assert "4.5 mm" in repair["evidence"]
+    # Returns the DETECTION tuple (size, value, clearance, label) — the
+    # caller (design_loop) folds it into the repair dict.
+    det = undersize_screw_hole(REQUEST, {"W": 60.0, "hole_d": 4.0}, META)
+    assert det is not None
+    size, value, clearance, label = det
+    assert size == "M4"
+    assert value == 4.0
+    assert clearance == 4.5
+    assert label == "M4 hole diameter"
 
 
 def test_passes_at_clearance():
@@ -117,9 +116,9 @@ def test_boundary_005_mm_abstains():
 
 def test_boundary_005_plus_epsilon_triggers():
     # 4.5 - 4.44 = 0.06 > 0.05 → trigger.
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.44}, META)
-    assert repair is not None
-    assert "4.44 mm" in repair["instruction"]
+    det = undersize_screw_hole(REQUEST, {"hole_d": 4.44}, META)
+    assert det is not None
+    assert det[1] == 4.44
 
 
 def test_no_screw_size_named_abstains():
@@ -156,6 +155,39 @@ def test_threaded_wording_abstains():
         assert undersize_screw_hole(request, {"hole_d": 4.0}, meta) is None, request
 
 
+def test_no_param_meta_and_no_screw_framing_abstains():
+    """Adversarial finding: when a param has NO ``param_meta``, the
+    check may fire only if the REQUEST also frames the screw size as a
+    hole ("hole", "holes", "through", "clearance", "screw hole",
+    "mounting hole", or "for M4 screws" / "for an M4 screw").  A request
+    that does NOT frame a hole (e.g. "an M4 nut trap") must NOT fire —
+    the check must never guess which param a named screw sizes."""
+    # No meta + no hole-framing → abstain.
+    assert undersize_screw_hole("an M4 nut trap", {"m4_hole": 4.0}, {}) is None
+    assert undersize_screw_hole(
+        "a plate with an M4 bolt head recess", {"m4_hole": 4.0}, {}
+    ) is None
+    assert undersize_screw_hole(
+        "a bracket with an M4 fastener", {"m4_hole": 4.0}, {}
+    ) is None
+    # No meta + hole-framing present → fires (the request frames a hole).
+    assert undersize_screw_hole(REQUEST, {"hole_d": 4.0}, {}) is not None
+    assert undersize_screw_hole(
+        "a plate with holes for M4 screws", {"hole_d": 4.0}, {}
+    ) is not None
+    assert undersize_screw_hole(
+        "a plate with a through hole for an M4 screw", {"hole_d": 4.0}, {}
+    ) is not None
+    assert undersize_screw_hole(
+        "a plate with a mounting hole for M4", {"hole_d": 4.0}, {}
+    ) is not None
+    # With meta (meta says hole), the hole-framing is not required.
+    meta_m4 = {"m4_hole": {"label": "M4 hole diameter", "unit": "mm"}}
+    assert (
+        undersize_screw_hole("an M4 nut trap", {"m4_hole": 4.0}, meta_m4) is not None
+    )
+
+
 def test_word_boundary_m40_not_m4():
     meta = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}
     assert undersize_screw_hole(
@@ -173,142 +205,114 @@ def test_word_boundary_bm4_not_m4():
 def test_m4x20_is_m4():
     # "M4x20" is a thread-length spec that still names M4.
     meta = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}
-    repair = undersize_screw_hole(
+    det = undersize_screw_hole(
         "a plate with an M4x20 clearance hole", {"hole_d": 4.0}, meta
     )
-    assert repair is not None
-    assert "M4" in repair["instruction"]
+    assert det is not None
+    assert det[0] == "M4"
 
 
 def test_missing_param_meta_name_heuristic_fallback():
-    # No metadata at all — the name "hole_d" reads as a hole.
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, {})
-    assert repair is not None
-    assert "hole_d" in repair["evidence"]
+    # No metadata — the name "hole_d" reads as a hole AND the request
+    # frames a screw ("M4 hole"), so the check fires and the label is
+    # the raw name.
+    det = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, {})
+    assert det is not None
+    assert det[3] == "hole_d"
 
 
 def test_non_numeric_param_value_ignored():
     # A non-numeric value in params is skipped by the check.
     params: dict[str, object] = {"hole_d": 4.0, "bad": "not a number"}
-    repair = undersize_screw_hole(REQUEST, params, META)
-    assert repair is not None  # hole_d still triggers
-    # The evidence uses the label from META (not the raw name).
-    assert "M4 hole diameter" in repair["evidence"]
+    det = undersize_screw_hole(REQUEST, params, META)
+    assert det is not None  # hole_d still triggers
+    # The label uses the META label (not the raw name).
+    assert det[3] == "M4 hole diameter"
 
 
-def test_evidence_uses_label_when_present():
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, META)
-    assert repair is not None
-    assert "M4 hole diameter" in repair["evidence"]
-    assert "hole_d" not in repair["evidence"]
+def test_label_uses_label_when_present():
+    det = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, META)
+    assert det is not None
+    assert det[3] == "M4 hole diameter"
 
 
-def test_evidence_uses_name_when_no_label():
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, {})
-    assert repair is not None
-    assert "hole_d" in repair["evidence"]
-
-
-def test_repair_dict_has_all_required_keys():
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, META)
-    assert repair is not None
-    for key in ("failure_class", "instruction", "scad_source", "evidence"):
-        assert key in repair, f"missing key: {key}"
-
-
-def test_repair_failure_class_is_geometrically_wrong():
-    """The post-check uses the EXISTING geometrically_wrong class —
-    no new error_class is introduced (issue #317 operator decision)."""
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, META)
-    assert repair is not None
-    assert repair["failure_class"] == "geometrically_wrong"
-    # The class is in the closed enum (verified in test_failure_classes.py,
-    # but pinned here for the post-check's specific contract).
-    from d33d.failure_classes import FAILURE_CLASSES, REPAIRABLE_CLASSES
-
-    assert "geometrically_wrong" in FAILURE_CLASSES
-    assert "geometrically_wrong" in REPAIRABLE_CLASSES
-
-
-def test_instruction_carries_exact_message_substring():
-    """The repair instruction carries the exact-form sentence as a
-    substring (operator decision: the sentence appears INSIDE
-    ``instruction``, not as the whole instruction)."""
-    repair = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, META)
-    assert repair is not None
-    exact = "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm"
-    assert exact in repair["instruction"]
-    # The instruction is longer than the exact sentence (it also carries
-    # the remediation instruction).
-    assert len(repair["instruction"]) > len(exact)
+def test_label_uses_name_when_no_label():
+    det = undersize_screw_hole(REQUEST, {"hole_d": 4.0}, {})
+    assert det is not None
+    assert det[3] == "hole_d"
 
 
 def test_m3_hole_at_3_0_triggers():
     """M3 clearance is 3.4 mm; a 3.0 mm hole is below by 0.4 mm → trigger."""
     meta = {"m3_hole": {"label": "M3 hole diameter", "unit": "mm"}}
-    repair = undersize_screw_hole(
+    det = undersize_screw_hole(
         "a plate with an M3 hole", {"m3_hole": 3.0}, meta
     )
-    assert repair is not None
-    assert "M3 clearance hole is 3.0 mm; printed M3 clearance is 3.4 mm" in (
-        repair["instruction"]
-    )
+    assert det is not None
+    assert det[0] == "M3"
+    assert det[1] == 3.0
+    assert det[2] == 3.4
 
 
 def test_m8_hole_at_8_5_triggers():
     """M8 clearance is 9.0 mm; an 8.5 mm hole is below by 0.5 mm → trigger."""
     meta = {"m8_hole": {"label": "M8 hole diameter", "unit": "mm"}}
-    repair = undersize_screw_hole(
+    det = undersize_screw_hole(
         "a plate with an M8 hole", {"m8_hole": 8.5}, meta
     )
-    assert repair is not None
-    assert "M8 clearance hole is 8.5 mm; printed M8 clearance is 9.0 mm" in (
-        repair["instruction"]
-    )
+    assert det is not None
+    assert det[0] == "M8"
+    assert det[1] == 8.5
+    assert det[2] == 9.0
 
 
 def test_m2_5_hole_at_2_5_triggers():
     """M2.5 clearance is 2.9 mm; a 2.5 mm hole is below by 0.4 mm →
     trigger. The regex must match M2.5 (not M2)."""
     meta = {"m25_hole": {"label": "M2.5 hole diameter", "unit": "mm"}}
-    repair = undersize_screw_hole(
+    det = undersize_screw_hole(
         "a plate with an M2.5 hole", {"m25_hole": 2.5}, meta
     )
-    assert repair is not None
-    assert "M2.5 clearance hole is 2.5 mm; printed M2.5 clearance is 2.9 mm" in (
-        repair["instruction"]
-    )
+    assert det is not None
+    assert det[0] == "M2.5"
 
 
 def test_two_screw_sizes_named_single_undersize_triggers():
     """If the request names two screw sizes and one param is undersize
-    for BOTH sizes, the check sees two undersize entries (same param,
-    different sizes) → abstain (ambiguous).  When only ONE (param, size)
-    pair is undersize, the check fires."""
+    for ONE of them, the check fires (one (param, size) pair).  If a
+    param is undersize for BOTH sizes, the check sees two entries
+    (same param, different sizes) → abstain (ambiguous)."""
     meta = {
         "m4_hole": {"label": "M4 hole diameter", "unit": "mm"},
         "m3_hole": {"label": "M3 hole diameter", "unit": "mm"},
     }
+    # m4_hole at 4.0: undersize for M4 (4.5-4.0=0.5>0.05) but NOT for M3
+    # (3.4-4.0 is negative).  One entry → fires.
+    det = undersize_screw_hole(
+        "a plate with an M4 hole and an M3 hole",
+        {"m4_hole": 4.0},
+        meta,
+    )
+    assert det is not None
+    assert det[0] == "M4"
     # m3_hole at 3.0: undersize for M3 (3.4-3.0=0.4>0.05) AND for M4
     # (4.5-3.0=1.5>0.05) — two entries → abstain (ambiguous).
-    repair = undersize_screw_hole(
+    assert undersize_screw_hole(
         "a plate with an M4 hole and an M3 hole",
         {"m3_hole": 3.0},
         meta,
-    )
-    assert repair is None
+    ) is None
 
 
-def test_two_undersize_sizes_abstains():
-    """If two different screw sizes each have an undersize hole, the check
+def test_two_undersize_params_abstains():
+    """If two different params each have an undersize hole, the check
     cannot identify which one to repair → abstain."""
     meta = {
         "m4_hole": {"label": "M4 hole diameter", "unit": "mm"},
         "m3_hole": {"label": "M3 hole diameter", "unit": "mm"},
     }
-    repair = undersize_screw_hole(
+    assert undersize_screw_hole(
         "a plate with an M4 hole and an M3 hole",
         {"m4_hole": 4.0, "m3_hole": 3.0},
         meta,
-    )
-    assert repair is None
+    ) is None

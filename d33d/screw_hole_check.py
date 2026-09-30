@@ -12,15 +12,18 @@ and abstention guard). Both the live loop prompt and ``design_prompt``
 render the table's rows from ``d33d.design_prompts.METRIC_SCREW_CLEARANCE_MM``
 — no second copy of the numbers lives here.
 
-The repair dict the check returns carries the EXISTING ``geometrically_wrong``
-failure class (no new class, no new dict shape) and is routed through the
-same ``route_repair`` / ``_design_messages`` path as every other repair.
+The check (``undersize_screw_hole``) returns a DETECTION tuple
+``(size, value, clearance, label)`` — the caller (``d33d.design_loop``)
+folds it into the repair dict (the EXISTING ``geometrically_wrong`` class,
+no new class, no new dict shape) and routes it through the same
+``route_repair`` / ``_design_messages`` path as every other repair.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from d33d.design_loop import UNDERSIZE_EPSILON_MM
 from d33d.design_prompts import (
     _THREAD_HOLE_WORD_RE,
     METRIC_SCREW_CLEARANCE_MM,
@@ -32,6 +35,12 @@ __all__ = [
     "mm",
     "undersize_screw_hole",
 ]
+
+#: Threaded/tapped/insert wording — in a param NAME or its metadata,
+#: disqualifies the param from the screw-hole post-check (those are not
+#: clearance holes).  One constant used by both the name and the meta
+#: checks in :func:`is_screw_hole_candidate`.
+_THREAD_WORDS = ("thread", "tap", "insert")
 
 
 def mm(value: float) -> str:
@@ -54,16 +63,18 @@ def is_screw_hole_candidate(
 ) -> bool:
     """Does this named parameter read as a screw through-hole diameter?
 
-    A candidate is a positive numeric parameter whose name or its
-    ``param_meta`` label/reason says "hole".  Threaded/tapped/insert
-    wording in the name or metadata disqualifies it — those are not
-    clearance holes, and the check abstains on them (no repair, no false
-    repair).  A param with no hole wording at all is not a candidate
+    A candidate is a positive numeric parameter whose NAME contains
+    ``"hole"``.  When ``param_meta`` is present, its ``label``/``reason``
+    must ALSO say "hole"; when the metadata is absent the name is the
+    only evidence.  Threaded/tapped/insert wording in the name, or (when
+    metadata is present) in the metadata, disqualifies it — those are
+    not clearance holes, and the check abstains on them (no repair, no
+    false repair).  A param with no hole wording is not a candidate
     either: the check must never guess which of several parameters a
     named screw sizes.
     """
     name_lower = name.lower()
-    if "thread" in name_lower or "tap" in name_lower or "insert" in name_lower:
+    if any(word in name_lower for word in _THREAD_WORDS):
         return False
     if "hole" not in name_lower:
         return False
@@ -71,7 +82,7 @@ def is_screw_hole_candidate(
         meta_text = " ".join(
             str(meta.get(key, "")) for key in ("label", "reason")
         ).lower()
-        if any(word in meta_text for word in ("thread", "tap", "insert")):
+        if any(word in meta_text for word in _THREAD_WORDS):
             return False
         if "hole" not in meta_text:
             return False
@@ -82,7 +93,7 @@ def undersize_screw_hole(
     request: str,
     params: dict[str, float],
     param_meta: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> tuple[str, float, float, str] | None:
     """The deterministic screw-hole clearance post-check (issue #317).
 
     Runs on the ok-render branch of the loop, BEFORE the ``score.perfect``
@@ -101,15 +112,19 @@ def undersize_screw_hole(
       than one candidate abstains (never guess which param a named screw
       sizes).
 
-    Otherwise returns the structured repair dict (the same shape
-    ``route_repair`` yields — ``failure_class`` pinned to the EXISTING
-    ``geometrically_wrong`` class, no new class) whose ``instruction``
-    carries the sentence ``M4 clearance hole is 4.0 mm; printed M4
+    Otherwise returns the DETECTION tuple ``(size, value, clearance,
+    label)`` — ``size`` the metric name from the table, ``value`` the
+    SCAD-declared hole diameter, ``clearance`` the table's clearance
+    diameter, ``label`` the param's ``param_meta`` label (or the raw name
+    when the metadata is absent).  The caller (``d33d.design_loop``) folds
+    this into the repair dict — the EXISTING ``geometrically_wrong`` class
+    plus the instruction ``M4 clearance hole is 4.0 mm; printed M4
     clearance is 4.5 mm`` (values from the single-source
-    ``METRIC_SCREW_CLEARANCE_MM`` table) and whose ``evidence`` names the
-    parameter with both numbers.  The hole must be BELOW the table's
-    clearance diameter by MORE than 0.05 mm to trigger (a hole at
-    4.45 mm for M4 abstains; at 4.44 mm it triggers).
+    ``METRIC_SCREW_CLEARANCE_MM`` table) and the ``evidence`` naming the
+    parameter with both numbers — and routes it through ``route_repair``.
+    The hole must be BELOW the table's clearance diameter by MORE than
+    0.05 mm to trigger (a hole at 4.45 mm for M4 abstains; at 4.44 mm it
+    triggers).
     """
     if not request or not params:
         return None
@@ -122,43 +137,35 @@ def undersize_screw_hole(
             sizes.append(size)
     if not sizes:
         return None
-    undersize: list[tuple[str, str, float, float]] = []
-    for size in sizes:
-        clearance = METRIC_SCREW_CLEARANCE_MM[size]
-        for name, value in params.items():
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
+    request_lower = request.lower()
+    undersize: list[tuple[str, float, float, str]] = []
+    for name, value in params.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        value = float(value)
+        if value <= 0:
+            continue
+        meta = param_meta.get(name) if isinstance(param_meta, dict) else None
+        if not is_screw_hole_candidate(name, value, meta):
+            continue
+        if meta is None and "hole" not in request_lower:
+            # No metadata to confirm the param is a screw hole: the
+            # request must ALSO frame a hole for the check to fire
+            # (never guess which param a named screw sizes).
+            continue
+        for size in sizes:
+            clearance = METRIC_SCREW_CLEARANCE_MM[size]
+            if clearance - value <= UNDERSIZE_EPSILON_MM:
                 continue
-            value = float(value)
-            if value <= 0:
-                continue
-            meta = param_meta.get(name) if isinstance(param_meta, dict) else None
-            if not is_screw_hole_candidate(name, value, meta):
-                continue
-            if clearance - value > 0.05:
-                undersize.append((name, size, value, clearance))
+            label = (
+                meta.get("label")
+                if isinstance(meta, dict) and isinstance(meta.get("label"), str)
+                else name
+            )
+            undersize.append((size, value, clearance, label))
     if len(undersize) != 1:
         # Zero: nothing to repair.  More than one (two hole params, or
         # two named screw sizes): the check cannot identify the param
         # confidently — it does nothing, never a false repair.
         return None
-    name, size, value, clearance = undersize[0]
-    meta = param_meta.get(name) if isinstance(param_meta, dict) else None
-    label = (
-        meta.get("label")
-        if isinstance(meta, dict) and isinstance(meta.get("label"), str)
-        else name
-    )
-    return {
-        "failure_class": "geometrically_wrong",
-        "instruction": (
-            f"{size} clearance hole is {mm(value)} mm; printed {size} "
-            f"clearance is {mm(clearance)} mm. Model the hole at the "
-            f"clearance diameter ({mm(clearance)} mm), not the nominal "
-            f"size, and state the clearance in the parameter's reason."
-        ),
-        "scad_source": "",
-        "evidence": (
-            f"{label} = {mm(value)} mm "
-            f"(below the {size} clearance of {mm(clearance)} mm)"
-        ),
-    }
+    return undersize[0]

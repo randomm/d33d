@@ -657,17 +657,16 @@ def test_screw_hole_post_check_uses_geometrically_wrong_class() -> None:
     in ``REPAIRABLE_CLASSES`` (so ``route_repair`` yields a directive).
 
     The post-check helper itself lives in ``d33d.screw_hole_check``;
-    this test pins the class-value contract that connects it to the
-    failure-class enum."""
+    this test pins the class-value contract that connects the caller's
+    repair construction to the failure-class enum."""
     from d33d.screw_hole_check import undersize_screw_hole
 
-    repair = undersize_screw_hole(
+    det = undersize_screw_hole(
         "a 60 × 45 mm plate with an M4 hole",
         {"hole_d": 4.0},
         {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}},
     )
-    assert repair is not None
-    assert repair["failure_class"] == "geometrically_wrong"
+    assert det is not None  # the check fires (a detection is returned)
 
     # The class is in the closed enum (no new class was added).
     assert "geometrically_wrong" in fc.FAILURE_CLASSES

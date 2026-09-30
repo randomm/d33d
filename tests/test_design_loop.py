@@ -2220,6 +2220,22 @@ def test_screw_clearance_post_check_repairs_undersize_m4():
     assert "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm" in seen[1]
 
 
+def test_screw_clearance_repair_scad_source_equals_iteration_scad():
+    """Issue #317: the repair's ``scad_source`` carries the iteration's
+    REAL SCAD (routed through ``route_repair`` mirroring the #276
+    axis_params_mismatch construction), not an empty string."""
+    meta = [{"name": "hole_d", "label": "M4 hole diameter", "unit": "mm"}]
+    scad = _plate_scad(4.0)
+    llm = [_screw_scad_llm(scad, meta)]
+    result = _run_screw_loop(llm, "a 60 × 45 mm plate with an M4 hole")
+    first = result.iterations[0]
+    assert first.repair is not None
+    # The repair's scad_source is the iteration's own SCAD source.
+    assert first.repair["scad_source"] == first.scad_source
+    assert first.repair["scad_source"] == scad
+    assert first.repair["scad_source"] != ""
+
+
 def test_screw_clearance_repair_then_clearance_passes_within_cap():
     """Issue #317: the model fixes the hole on the repair iteration —
     4.0 mm triggers, 4.5 mm passes, all within the 3-iteration cap and
@@ -2399,27 +2415,25 @@ def test_screw_clearance_word_boundaries_never_trigger():
 
 def test_screw_clearance_direct_check_contract():
     """Issue #317: the post-check helper's contract in isolation —
-    trigger/pass/no-op shapes, the message form, and the class value."""
+    the DETECTION tuple shape (size, value, clearance, label) and the
+    trigger/pass/no-op conditions."""
     from d33d.screw_hole_check import undersize_screw_hole as _undersize_screw_hole
 
     request = "a 60 × 45 mm plate with an M4 hole"
     meta = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}
     # Triggers: 4.0 is below the 4.5 clearance by more than 0.05 mm.
-    repair = _undersize_screw_hole(request, {"W": 60.0, "hole_d": 4.0}, meta)
-    assert repair is not None
-    assert repair["failure_class"] == "geometrically_wrong"
-    assert (
-        "M4 clearance hole is 4.0 mm; printed M4 clearance is 4.5 mm"
-        in repair["instruction"]
-    )
-    # The evidence names the param by its model label when one exists
-    # (the param_meta label wins over the identifier).
-    assert "M4 hole diameter" in repair["evidence"]
-    assert "4.0 mm" in repair["evidence"]
-    assert "4.5 mm" in repair["evidence"]
+    det = _undersize_screw_hole(request, {"W": 60.0, "hole_d": 4.0}, meta)
+    assert det is not None
+    size, value, clearance, label = det
+    assert size == "M4"
+    assert value == 4.0
+    assert clearance == 4.5
+    # The label is the param's model label when one exists (the
+    # param_meta label wins over the identifier).
+    assert label == "M4 hole diameter"
     # No label (T1 name-heuristic fallback): the identifier is used.
     unlabeled = _undersize_screw_hole(request, {"hole_d": 4.0}, {})
-    assert unlabeled is not None and "hole_d" in unlabeled["evidence"]
+    assert unlabeled is not None and unlabeled[3] == "hole_d"
     # Passes: at clearance (and above).
     assert _undersize_screw_hole(request, {"hole_d": 4.5}, meta) is None
     assert _undersize_screw_hole(request, {"hole_d": 5.0}, meta) is None
