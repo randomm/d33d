@@ -450,18 +450,22 @@ describe("Brief — the list that does not grow", () => {
     expect(screen.queryByTestId("brief-row-W")).toBeNull();
     expect(screen.queryByTestId("brief-row-D")).toBeNull();
     expect(screen.queryByTestId("brief-row-H")).toBeNull();
-    // The settled params fold behind one honest count. The count
-    // matches what is actually hidden — the component derives it from
-    // the rows it receives, so it is consistent by construction.
-    const countText = screen.getByTestId("brief-groups-count").textContent;
-    expect(countText).toBe(
-      copy.brief.moreParameters(parseInt(countText!.split(" ")[0], 10)),
+    // The settled params fold behind one honest count. The fixture is
+    // 3 axis rows (never collapsible) + 11 param rows (box_wall +
+    // screw_1..screw_10), so the count is EXACTLY 11 — pinned literally
+    // (a self-referential assertion that re-parses the rendered number
+    // would pass for any count and pin nothing).
+    expect(screen.getByTestId("brief-groups-count").textContent).toBe(
+      copy.brief.moreParameters(11),
     );
     expect(screen.queryByTestId("brief-row-screw_1")).toBeNull();
-    // Expanding reveals all hidden params.
+    // Expanding reveals all 11 hidden params — every one of them, pinned
+    // by name so a dropped row anywhere in the fixture fails the test.
     fireEvent.click(screen.getByTestId("brief-groups-count"));
-    expect(screen.getByTestId("brief-row-screw_1")).toBeTruthy();
-    expect(screen.getByTestId("brief-row-screw_10")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-box_wall")).toBeTruthy();
+    for (let i = 1; i <= 10; i += 1) {
+      expect(screen.getByTestId(`brief-row-screw_${i}`)).toBeTruthy();
+    }
   });
 
   it("unknown rows are never collapsed, whatever the collapsible count (issue #274)", () => {
