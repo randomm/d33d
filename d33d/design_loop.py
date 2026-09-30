@@ -144,6 +144,12 @@ _preflight_success_at: float | None = None
 BBOX_TOLERANCE_REL = 0.01
 BBOX_TOLERANCE_MIN_MM = 0.5
 
+#: The screw-hole clearance post-check's undersize tolerance (issue #317):
+#: a hole is undersize when it is BELOW the table's clearance diameter by
+#: MORE than this many mm (a hole at 4.45 mm for M4 abstains; at 4.44 mm
+#: it triggers).
+UNDERSIZE_EPSILON_MM = 0.05
+
 Roles = Literal["design", "critique", "classification"]
 
 #: ``render_fn(scad_source, defines) -> RenderResult`` (sync or async).
@@ -786,6 +792,42 @@ def is_best(candidate: Score, incumbent: Score) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# The deterministic screw-hole clearance post-check (issue #317) lives in
+# ``d33d.screw_hole_check``.  The import is deferred to the call site:
+# ``design_prompts`` imports ``design_loop`` at module top (for
+# ``_dim_axis_list``), so a top-level ``from d33d.design_prompts import …``
+# here would create a real cycle — the deferred import breaks it.
+
+def _undersize_screw_hole(
+    request: str,
+    params: dict[str, float],
+    param_meta: dict[str, Any],
+) -> tuple[str, float, float, str] | None:
+    """Issue #317: the deterministic screw-hole clearance post-check.
+
+    See :func:`d33d.screw_hole_check.undersize_screw_hole` for the full
+    contract.  Returns the DETECTION tuple ``(size, value, clearance,
+    label)`` (or ``None`` when the check abstains).  The caller (the
+    design loop) folds this into the repair dict and routes it through
+    ``route_repair``.  This wrapper defers the import to break the
+    circular import chain (design_loop → screw_hole_check →
+    design_prompts → design_loop)."""
+    from d33d.screw_hole_check import undersize_screw_hole
+
+    return undersize_screw_hole(request, params, param_meta)
+
+
+def _mm(value: float) -> str:
+    """The screw-hole check's millimetre renderer (issue #317) — the
+    SAME ``mm`` the detection tuple's ``value`` / ``clearance`` are
+    rendered with in the check's ``instruction`` / ``evidence``.  The
+    import is deferred to the call site (the same circular-import break
+    as :func:`_undersize_screw_hole`)."""
+    from d33d.screw_hole_check import mm
+
+    return mm(value)
+
+
 def _dim_params(
     stated: tuple[float, float, float], dims: dict[str, str]
 ) -> dict[str, str]:
@@ -837,12 +879,25 @@ def _dim_axis_list(stated: tuple[float, float, float]) -> str:
 
 
 def _design_system(stated: tuple[float, float, float]) -> str:
-    """Short imperative design-role system prompt (neutral delimiters)."""
+    """Short imperative design-role system prompt (neutral delimiters).
+
+    Carries the metric screw-clearance table (issue #317) rendered from
+    the SINGLE definition in ``d33d.design_prompts`` — the same table
+    ``design_prompt`` renders and the loop's post-check reads, so the
+    clearance numbers live in exactly one module."""
+    from d33d.design_prompts import (
+        SCREW_CLEARANCE_INSTRUCTION,
+        clearance_rows_line,
+    )
+
     return (
         "You are a parametric CAD designer. "
         f"Ground-truth dimensions in mm: {_dim_axis_list(stated)}. "
         "Never invent a fit-critical number. Every dimension and any FDM "
         "clearance is a named parameter, never an inline literal. "
+        "Screw clearance (through-holes), in mm: "
+        f"{clearance_rows_line()}. "
+        f"{SCREW_CLEARANCE_INSTRUCTION} "
         "Reply with exactly one fenced JSON block and nothing else."
     )
 
@@ -1527,6 +1582,46 @@ async def run_design_loop_async(
                     if directive is not None:
                         next_repair = directive.to_dict()
 
+        # Issue #317: an ok render whose gates are green can still carry an
+        # undersize metric-screw hole (hole size is not a gate bit).  The
+        # check runs BEFORE the pass return; a gate-driven repair already
+        # routed this iteration wins (the gate evidence is more specific).
+        _screw_repair_fired = False
+        if render.error_class == "ok" and next_repair is None:
+            _screw_det = _undersize_screw_hole(
+                request, _scad_params(scad_source), extract_param_meta(scad)
+            )
+            if _screw_det is not None:
+                _size, _val, _clr, _lbl = _screw_det
+                _evidence = (
+                    f"{_lbl} = {_mm(_val)} mm "
+                    f"(below the {_size} clearance of {_mm(_clr)} mm)"
+                )
+                _ax_classified = ClassifiedFailure(
+                    failure_class="geometrically_wrong",
+                    evidence=_evidence,
+                    repairable=True,
+                )
+                directive = route_repair(
+                    classified=_ax_classified, scad_source=scad_source
+                )
+                if directive is not None:
+                    failure_class = "geometrically_wrong"
+                    _instr = (
+                        f"{_size} clearance hole is {_mm(_val)} mm; printed "
+                        f"{_size} clearance is {_mm(_clr)} mm. Model the hole "
+                        f"at the clearance diameter ({_mm(_clr)} mm), not the "
+                        f"nominal size, and state the clearance in the "
+                        f"parameter's reason."
+                    )
+                    next_repair = {
+                        "failure_class": "geometrically_wrong",
+                        "instruction": _instr,
+                        "scad_source": scad_source,
+                        "evidence": _evidence,
+                    }
+                    _screw_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -1543,7 +1638,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect:
+        if candidate_score.perfect and not _screw_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,

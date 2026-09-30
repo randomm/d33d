@@ -31,6 +31,7 @@ Also owns:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +41,10 @@ from d33d.design_loop import _dim_axis_list
 __all__ = [
     "BOSL2_CHEATSHEET_PATH",
     "FDM_TOLERANCE_TABLE",
+    "METRIC_SCREW_CLEARANCE_MM",
+    "SCREW_CLEARANCE_INSTRUCTION",
+    "SCREW_SIZE_RE",
+    "clearance_rows_line",
     "design_prompt",
     "load_bosl2_cheatsheet",
     "model_overrides",
@@ -60,6 +65,68 @@ FDM_TOLERANCE_TABLE: dict[str, str] = {
     "press": "≈0 to −0.1 mm interference",
     "holes": "0.1–0.25 mm undersize (holes print smaller than nominal)",
 }
+
+#: The metric clearance-hole diameters for printed parts, in mm — the
+#: SINGLE definition of these numbers (issue #317).  The live design-loop
+#: prompt (``d33d.design_loop._design_system`` / ``_design_messages``),
+#: :func:`design_prompt`, and the loop's deterministic clearance post-check
+#: all render/read from this table — no second copy of the numbers in
+#: prose.
+#:
+#: Values are ISO 273 normal-fit (through-hole) clearance diameters plus
+#: the print shrink allowance: printed holes come out 0.1–0.25 mm
+#: undersize (the FDM tolerance table above), so a hole modelled at the
+#: nominal screw diameter will not accept the screw.  Keys are the user-
+#: facing size names (the ``M4`` in "a 60 × 45 mm plate with an M4 hole");
+#: the ``M2.5`` entry is spelled ``M2.5`` (its key is its user-facing
+#: name).  Closed set: imperial screws are out of scope.
+METRIC_SCREW_CLEARANCE_MM: dict[str, float] = {
+    "M2": 2.4,
+    "M2.5": 2.9,
+    "M3": 3.4,
+    "M4": 4.5,
+    "M5": 5.5,
+    "M6": 6.6,
+    "M8": 9.0,
+}
+
+#: The word-boundary matcher for user-named metric screw sizes (issue
+#: #317): ``M4`` in "a 60 × 45 mm plate with an M4 hole" matches; ``M40``
+#: and ``BM4`` do not (the boundary); ``M4x20`` does (a thread-length
+#: spec still names an M4 thread).  The value group maps into
+#: :data:`METRIC_SCREW_CLEARANCE_MM` via ``"M" + value``.
+SCREW_SIZE_RE = re.compile(r"\bM(2(?:\.5)?|3|4|5|6|8)(?!\d)")
+
+#: The threaded/tapped/insert abstention guard (issue #317): the
+#: clearance rule covers THROUGH holes only.  When the user's request
+#: says threaded / tapped / insert, the hole is not a clearance hole and
+#: the post-check does NOTHING (no repair, not even a false one) — the
+#: prompt instruction never applies to that wording.
+_THREAD_HOLE_WORD_RE = re.compile(r"\bthreaded?\b|\btapped\b|\binserts?\b", re.IGNORECASE)
+
+#: The explicit screw-hole instruction both prompts carry (issue #317):
+#: when the user names a metric screw size for a through-hole, the hole
+#: is modelled at the table's clearance diameter, not the nominal size,
+#: and the clearance is stated in the parameter's reason.
+SCREW_CLEARANCE_INSTRUCTION = (
+    "When the user names a metric screw size for a through-hole (\"M4 hole\", "
+    "\"holes for M3 screws\"), model the hole at its clearance diameter from the "
+    "screw clearance table below, NOT the nominal size — printed holes come out "
+    "undersize, so a nominal-sized hole will not accept the screw — and state "
+    "the clearance in the parameter's reason."
+)
+
+
+def clearance_rows_line(table: dict[str, float] = METRIC_SCREW_CLEARANCE_MM) -> str:
+    """One line of ``M4 = 4.5 mm`` rows, rendered from the table.
+
+    The shared renderer (issue #317): both design prompts build their
+    screw-clearance line from :data:`METRIC_SCREW_CLEARANCE_MM` through
+    this function, so the numbers live in exactly one place.  Row order
+    is the table's (size ascending by construction).
+    """
+    return ", ".join(f"{size} = {mm:g} mm" for size, mm in table.items())
+
 
 #: The design-role system prompt's fixed, short imperative core (spec: short
 #: imperative system prompts; persona separated from protocol).  The BOSL2
@@ -203,6 +270,10 @@ def design_prompt(
     ]
     for fit, value in FDM_TOLERANCE_TABLE.items():
         lines.append(f"- {fit}: {value}")
+
+    lines.append("Screw clearance (through-holes), in mm:")
+    lines.append(clearance_rows_line())
+    lines.append(SCREW_CLEARANCE_INSTRUCTION)
 
     lines.append("")
     lines.append("BOSL2 cheatsheet (verified module signatures; do not invent):")
