@@ -494,6 +494,121 @@ class TestFeatureNounAbstain:
         assert axes == {"W": 60.0, "D": 45.0}
 
 
+class TestMatingConnector:
+    """Issue #314: the mating-connector rule for the lexicon path.
+
+    A size that appears after a mating connector ("fits", "fit",
+    "fitting", "to fit", "for", "over", "onto", "on top of", "that
+    goes on") belongs to the mating part, never to the part being made.
+    The lexicon's classify() must suppress absolute axis cues in clauses
+    that hold only after-connector text.
+
+    Note: Tests for the triple/pair path (d33d/triple_extraction.py) are
+    in tests/test_dimension_protocol.py and handled by task-b."""
+
+    def test_mating_connectors_pin(self) -> None:
+        """Issue #314: _MATING_CONNECTORS is exactly the closed set —
+        pinned by test. Multi-word connectors are whole phrases."""
+        from d33d.axis_lexicon import _MATING_CONNECTORS
+
+        expected = frozenset(
+            {"fits", "fit", "fitting", "to fit", "for", "over", "onto", "on top of", "that goes on"}
+        )
+        assert _MATING_CONNECTORS == expected, (
+            f"_MATING_CONNECTORS drifted: extra={_MATING_CONNECTORS - expected}, "
+            f"missing={expected - _MATING_CONNECTORS}"
+        )
+
+    def test_mating_connector_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid for a box 60 mm wide' → nothing stated for W.
+        The axis word 'wide' is in the mating clause after 'for', so it must
+        not set the head noun's W. The 60 stays unmapped/offerable."""
+        result = classify("a lid for a box 60 mm wide")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_fits_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid that fits a 60 mm wide box' → nothing stated
+        for W (the 'wide' is after the connector 'fits')."""
+        result = classify("a lid that fits a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_onto_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid onto a 60 mm wide box' → nothing stated for W."""
+        result = classify("a lid onto a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_over_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid over a 60 mm wide box' → nothing stated for W."""
+        result = classify("a lid over a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_on_top_of_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid on top of a 60 mm wide box' → nothing stated
+        for W (multi-word connector)."""
+        result = classify("a lid on top of a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_that_goes_on_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid that goes on a 60 mm wide box' → nothing
+        stated for W (multi-word connector)."""
+        result = classify("a lid that goes on a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_to_fit_suppresses_single_axis_word(self) -> None:
+        """Issue #314: 'a lid to fit a 60 mm wide box' → nothing stated
+        for W (multi-word connector)."""
+        result = classify("a lid to fit a 60 mm wide box")
+        assert result.absolute == {}
+        assert 60.0 in result.unmapped_mm_numbers
+
+    def test_mating_connector_word_not_mixed_connector(self) -> None:
+        """Issue #314: the whole-phrase matcher must not fire on a
+        substring of a connector word (the "goes" inside "goes on"): a
+        message with no mating connector still classifies its size."""
+        result = classify("a box 60 mm wide")
+        assert result.absolute == {"W": 60.0}
+
+
+class TestAnyOtherStatingMatchIgnoresMatingSuppressed:
+    """Issue #314: _any_other_stating_match must ignore mating-suppressed
+    candidates — a box after a mating connector can never count as the
+    "other stating match" that suppresses a part-noun pair's own W/D."""
+
+    def test_mating_box_does_not_count_as_other_stating(self) -> None:
+        """Issue #314: in 'a 55 × 40 mm lid that fits a 60 × 45 mm box',
+        the box pair (after the mating connector) must NOT count as an
+        "other stating match" when the lid pair is the excluded match."""
+        from d33d.triple_extraction import _TRIPLE_RE, _any_other_stating_match
+
+        msg = "a 55 × 40 mm lid that fits a 60 × 45 mm box"
+        for m in _TRIPLE_RE.finditer(msg):
+            if m.start() == 2:  # the lid pair (the excluded match)
+                assert not _any_other_stating_match(msg, m), (
+                    "the mating-suppressed box pair must not count as an "
+                    "other stating match"
+                )
+
+    def test_non_mating_box_still_counts_as_other_stating(self) -> None:
+        """Issue #314: a NON-mating later triple (no connector) still
+        counts as an other stating match — the #305 comma-variant behavior
+        is preserved (regression guard against over-suppression)."""
+        from d33d.triple_extraction import _TRIPLE_RE, _any_other_stating_match
+
+        msg = "a 55 x 40 mm lid, box is 60x45x80mm"
+        for m in _TRIPLE_RE.finditer(msg):
+            if m.start() == 2:  # the lid pair (the excluded match)
+                assert _any_other_stating_match(msg, m), (
+                    "a non-mating later triple must still count as an "
+                    "other stating match"
+                )
+
+
 class TestReleaseFallbackFunction:
     """The #261 round-2 pure-direction-request fallback (extracted from
     ``classify`` so it can be tested directly): a message that states NO
