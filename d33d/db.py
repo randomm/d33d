@@ -533,7 +533,14 @@ def projects_dir(data_dir: str | Path | None = None) -> Path:
     missing.
     """
     if data_dir is None:
-        data_dir = Path(os.environ.get("D33D_DATA_DIR", "~/.d33d")).expanduser()
+        # Route the env/default fallback through the single test-mode
+        # guard (issue #310) — the default is the operator's real
+        # ``~/.d33d`` and the guard refuses it while a test run is in
+        # progress; explicit data_dir arguments (the app path, test tmp
+        # dirs) pass through untouched.
+        from d33d.data_dir import default_data_dir
+
+        data_dir = default_data_dir()
     base = Path(data_dir) / "projects"
     base.mkdir(parents=True, exist_ok=True)
     return base

@@ -67,6 +67,30 @@ def _seed_project(conn, *, name: str, repo: str | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def test_guard_does_not_fire_in_normal_isolated_run(data_dir: Path) -> None:
+    """Issue #310: under a normal pytest run (``PYTEST_CURRENT_TEST`` set)
+    with the isolation fixture's env steering in effect (``D33D_DATA_DIR``
+    → the tmp data dir), the guard must NOT fire: every resolver succeeds
+    into the isolated tmp dir. The 12 existing tests in this file are the
+    ambient canary; this test pins the property explicitly so an
+    over-firing guard (refusing the tmp dir) fails loudly rather than
+    breaking the whole suite opaquely."""
+    # The data_dir fixture has steered D33D_DATA_DIR at tmp_path/d33d-data
+    # (not pre-created); PYTEST_CURRENT_TEST is set because we ARE inside a
+    # pytest run. All resolvers must succeed into the tmp dir.
+    real_home = Path.home() / ".d33d"
+    base = db_mod.projects_dir(None)  # env fallback → the tmp data dir
+    assert base.is_dir()
+    assert base.parent == data_dir, f"{base} not under the isolated {data_dir}"
+    assert real_home not in base.parents
+    # _default_git_path (APP_DATA_DIR=None → the env default) succeeds too
+    # (the autouse fixture keeps APP_DATA_DIR None in this test).
+    repo = Path(db_mod._default_git_path("guard-no-fire"))
+    assert repo.is_dir()
+    assert repo.parent == base
+    assert real_home not in repo.parents
+
+
 def test_new_project_default_lands_under_data_dir(data_dir: Path):
     """``create_project`` with no git_repo_path uses the real default:
     the repo path must start under ``<D33D_DATA_DIR>/projects/``."""

@@ -555,13 +555,23 @@ def _render_persist_base() -> Path | None:
     reads them from disk into the frame's data URIs, so the bytes must
     survive the tempdir.
 
-    ``D33D_RENDER_PERSIST_DIR`` (default ``~/.d33d/renders`` — mirrors
-    ``D33D_DATA_DIR``'s ``~/.d33d`` convention). Returns ``None`` when
-    the base cannot be created (read-only FS, permission) — persistence
-    is best-effort and must never change the render outcome."""
-    path = Path(
-        os.environ.get("D33D_RENDER_PERSIST_DIR", str(Path.home() / ".d33d" / "renders"))
-    )
+    ``D33D_RENDER_PERSIST_DIR`` (default ``<data-dir>/renders`` where the
+    data dir mirrors ``D33D_DATA_DIR``'s ``~/.d33d`` convention). Returns
+    ``None`` when the base cannot be created (read-only FS, permission) —
+    persistence is best-effort and must never change the render outcome.
+
+    The default routes through :func:`d33d.data_dir.default_data_dir`
+    (issue #310) so the isolation fixture's ``D33D_DATA_DIR`` tmp
+    steering applies to it exactly as it does to ``projects_dir`` —
+    and the single test-mode guard raises when no env steering is present
+    and the base would land in the operator's real ``~/.d33d``.
+    """
+    from d33d.data_dir import default_data_dir
+
+    if os.environ.get("D33D_RENDER_PERSIST_DIR") is None:
+        path = default_data_dir() / "renders"
+    else:
+        path = Path(os.environ["D33D_RENDER_PERSIST_DIR"])
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:

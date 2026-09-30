@@ -258,6 +258,94 @@ def test_provenance_guard_refuses_stale_tree() -> None:
         assert str(REPO_ROOT) in stderr
 
 
+def test_provenance_guard_refuses_main_checkout_from_worktree() -> None:
+    """Regression test (issue #310): the import-time provenance guard
+    must refuse when ``d33d`` resolves to the **main checkout** instead
+    of the worktree that pytest is running in.
+
+    The scenario
+    -----------
+    The shared ``.venv`` has an editable install whose ``__editable___*.py``
+    finder maps ``d33d`` to a fixed path (the main checkout).
+    A worktree run inherits that mapping, so ``import d33d`` resolves to
+    the main checkout's source tree, not the worktree's.
+    The provenance guard must catch this and ``sys.exit(4)``.
+
+    How the simulation works
+    ------------------------
+    We cannot safely mutate the live ``.venv`` editable finder.  Instead
+    we build a temporary directory tree that mirrors the worktree layout:
+
+        tmp/
+          main-checkout/d33d/__init__.py   ← foreign (stands in for main)
+          tests/                            ← copy of the real tests dir
+
+    The subprocess puts ``main-checkout/`` first on ``sys.path`` so
+    ``import d33d`` resolves there, and ``tmp/tests/`` second so the
+    ``import tests`` guard runs with ``REPO_ROOT = tmp/``.  Because
+    ``tmp/main-checkout/`` is *not* inside ``tmp/``, the guard fires.
+
+    We also verify that the guard names both paths — the expected tree
+    and the resolved one — so any report can never omit the provenance.
+    """
+    venv_py = _venv_python()
+    if venv_py is None:
+        import pytest
+
+        tried = ", ".join(_interpreter_candidates())
+        pytest.skip(
+            "no interpreter with the project deps found (tried: "
+            f"{tried}) — venv not installed"
+        )
+
+    import shutil
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_root = Path(td).resolve()
+        # Build the foreign ("main checkout") tree.
+        foreign_pkg = tmp_root / "main-checkout" / "d33d"
+        foreign_pkg.mkdir(parents=True)
+        (foreign_pkg / "__init__.py").write_text(
+            "__version__ = '0.0.0-main-checkout'\n"
+        )
+        # Copy the real tests directory into the simulated worktree so the
+        # guard's REPO_ROOT is tmp_root (not the real repo root).
+        tests_copy = tmp_root / "tests"
+        shutil.copytree(REPO_ROOT / "tests", tests_copy)
+
+        code = (
+            "import sys\n"
+            f"sys.path.insert(0, r'{tmp_root / 'main-checkout'}')\n"
+            f"sys.path.insert(1, r'{tests_copy}')\n"
+            "import tests\n"
+        )
+        result = subprocess.run(
+            [venv_py, "-c", code],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            env=_env(),
+        )
+        stderr = result.stderr.decode()
+        assert result.returncode == 4, (
+            "provenance guard did not refuse main-checkout d33d "
+            f"(expected exit 4, got {result.returncode})\n"
+            f"stderr: {stderr}"
+        )
+        assert "GATE FAILED (provenance guard)" in stderr
+        # The guard must name the foreign path (the simulated main
+        # checkout) and the expected root (the simulated worktree root),
+        # so a report can never omit either.
+        foreign_path = str(tmp_root / "main-checkout")
+        assert foreign_path in stderr, (
+            f"foreign path {foreign_path!r} not named in stderr: {stderr}"
+        )
+        assert "resolved to" in stderr
+        expected_root = str(tmp_root)
+        assert expected_root in stderr, (
+            f"expected root {expected_root!r} not named in stderr: {stderr}"
+        )
+
+
 def test_gate_reports_resolved_paths() -> None:
     """The guard must expose the resolved d33d.__file__ so any count
     can be quoted with its provenance."""
