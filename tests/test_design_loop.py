@@ -2399,7 +2399,7 @@ def test_screw_clearance_word_boundaries_never_trigger():
 def test_screw_clearance_direct_check_contract():
     """Issue #317: the post-check helper's contract in isolation —
     trigger/pass/no-op shapes, the message form, and the class value."""
-    from d33d.design_loop import _undersize_screw_hole
+    from d33d.screw_hole_check import undersize_screw_hole as _undersize_screw_hole
 
     request = "a 60 × 45 mm plate with an M4 hole"
     meta = {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}}

@@ -643,3 +643,42 @@ def test_is_repairable_property() -> None:
             repairable=False,
         )
         assert c.is_repairable is False
+
+
+# ---------------------------------------------------------------------------
+# Issue #317: the screw-hole post-check's failure class contract
+# ---------------------------------------------------------------------------
+
+
+def test_screw_hole_post_check_uses_geometrically_wrong_class() -> None:
+    """Issue #317: the deterministic screw-hole clearance post-check routes
+    its repair through the EXISTING ``geometrically_wrong`` class — no new
+    error_class is introduced.  The class must be in the closed enum AND
+    in ``REPAIRABLE_CLASSES`` (so ``route_repair`` yields a directive).
+
+    The post-check helper itself lives in ``d33d.screw_hole_check``;
+    this test pins the class-value contract that connects it to the
+    failure-class enum."""
+    from d33d.screw_hole_check import undersize_screw_hole
+
+    repair = undersize_screw_hole(
+        "a 60 × 45 mm plate with an M4 hole",
+        {"hole_d": 4.0},
+        {"hole_d": {"label": "M4 hole diameter", "unit": "mm"}},
+    )
+    assert repair is not None
+    assert repair["failure_class"] == "geometrically_wrong"
+
+    # The class is in the closed enum (no new class was added).
+    assert "geometrically_wrong" in fc.FAILURE_CLASSES
+    # The class is repairable (route_repair yields a directive for it).
+    assert "geometrically_wrong" in fc.REPAIRABLE_CLASSES
+    # A ClassifiedFailure built with this class is repairable.
+    cf = fc.ClassifiedFailure(
+        failure_class="geometrically_wrong",
+        evidence="test",
+        repairable=True,
+    )
+    assert cf.is_repairable is True
+    directive = fc.route_repair(classified=cf, scad_source="cube([20]);")
+    assert directive is not None
