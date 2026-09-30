@@ -66,12 +66,12 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from d33d import versions as versions_mod
-from d33d.projects import repo_present
 from d33d.design_loop_events import (
     _version_bbox_extents,
     _version_render_artifact_dir,
 )
 from d33d.design_state import state_block_for_version
+from d33d.projects import repo_present
 
 logger = logging.getLogger(__name__)
 

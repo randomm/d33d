@@ -795,6 +795,75 @@ def test_stated_axis_plus_bbox_within_tolerance_yields_measured() -> None:
     assert [e["name"] for e in entries] == ["W", "D", "H"]
 
 
+def test_qa_box_agreeing_params_render_one_row_per_axis() -> None:
+    """Issue #316 QA regression (the box from the QA 2026-09-29 review):
+    params literally named W/D/H with 40/40/12 plus a matching bbox
+    40 × 40 × 12. The de-dup drops all three redundant param rows —
+    the block carries exactly ONE row per axis (kind ``axis``), in
+    W/D/H order, each with the measured value displayed, never the
+    six-row repetition QA quoted ("Width 40 · Depth 40 · Height 12 ·
+    Depth 40 · Height 12 · Width 40")."""
+    entries = state_block_for_version(
+        {"W": 40.0, "D": 40.0, "H": 12.0},
+        {"x": 40.0, "y": 40.0, "z": 12.0},
+        None,
+    )
+    # Exactly one row per axis — 3 rows total, no param duplicates.
+    assert len(entries) == 3
+    assert [(e["kind"], e["name"]) for e in entries] == [
+        ("axis", "W"),
+        ("axis", "D"),
+        ("axis", "H"),
+    ]
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["W"]["value"] == 40.0
+    assert by_name["D"]["value"] == 40.0
+    assert by_name["H"]["value"] == 12.0
+    # All three measured (the param value equals the extent — within the
+    # tolerance either way; the #137 comparison marks them measured).
+    for name in ("W", "D", "H"):
+        assert by_name[name]["provenance"] == "measured"
+    # The merged axis rows took the params' snapshot labels (literal
+    # W/D/H fall back to the name as label) — the Brief renders the
+    # axis label from the name either way, so the display is unchanged.
+    for name in ("W", "D", "H"):
+        assert by_name[name]["label"] == name
+
+
+def test_qa_box_agreeing_param_meta_params_render_one_row_per_axis() -> None:
+    """Issue #316 QA regression, the box shape with param_meta labels:
+    box_width/box_depth/box_height at 40/40/12 with declared axes W/D/H
+    and a matching bbox 40 × 40 × 12 → the three param rows collapse
+    into the three axis rows (one row per axis), each carrying the
+    param's label and its current (stated) provenance."""
+    meta = {
+        "box_width": {"label": "Width", "axis": "W"},
+        "box_depth": {"label": "Depth", "axis": "D"},
+        "box_height": {"label": "Height", "axis": "H"},
+    }
+    entries = state_block_for_version(
+        {"box_width": 40.0, "box_depth": 40.0, "box_height": 12.0},
+        {"x": 40.0, "y": 40.0, "z": 12.0},
+        {"W": 40.0, "D": 40.0, "H": 12.0},
+        meta,
+    )
+    # One row per axis, in order — the redundant param rows are gone.
+    assert [(e["kind"], e["name"]) for e in entries] == [
+        ("axis", "W"),
+        ("axis", "D"),
+        ("axis", "H"),
+    ]
+    by_name = {e["name"]: e for e in entries}
+    # The merged rows carry the param's human label and CURRENT provenance
+    # (stated — the user gave the dimensions), with the measured value.
+    assert by_name["W"]["label"] == "Width"
+    assert by_name["D"]["label"] == "Depth"
+    assert by_name["H"]["label"] == "Height"
+    for name, value in (("W", 40.0), ("D", 40.0), ("H", 12.0)):
+        assert by_name[name]["provenance"] == "stated"
+        assert by_name[name]["value"] == value
+
+
 def test_stated_axis_plus_bbox_outside_tolerance_yields_disagrees() -> None:
     """A stated axis outside the measurement's tolerance → ``disagrees``
     carrying BOTH numbers (the measured one displayed, the stated one
