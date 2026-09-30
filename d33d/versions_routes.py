@@ -630,8 +630,8 @@ def create_versions_router() -> APIRouter:
         # persist a NULL — an absent statement abstains, never a
         # fabricated axis row.
         from d33d.dimension_protocol import (
+            carried_stated_set,
             effective_stated_dims,
-            latest_stated_dims_dict,
             stated_axes_from_message,
         )
         from d33d.versions import resolve_version_name
@@ -652,6 +652,7 @@ def create_versions_router() -> APIRouter:
             # row (the gate seam's ``current_axes`` below is the other
             # consumer of the same merge).
             msg_text = body.request or body.message or ""
+            _carried = carried_stated_set(app.state.conn, svc, project_id)
             if body.stated_dims is not None:
                 _w, _d, _h = body.stated_dims
                 explicit_axes = {
@@ -659,15 +660,28 @@ def create_versions_router() -> APIRouter:
                     for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
                     if value
                 } or None
-                per_axis_stated = effective_stated_dims(
-                    latest_stated_dims_dict(svc, project_id), explicit_axes
-                )
+                per_axis_stated = effective_stated_dims(_carried, explicit_axes)
             else:
                 _am = stated_axes_from_message(msg_text, chat_history=())
                 per_axis_stated = effective_stated_dims(
-                    latest_stated_dims_dict(svc, project_id),
+                    _carried,
                     _am if _am else _classify_axis_cues(msg_text),
                 )
+            # The project-level carried set (issue #312): written on every
+            # finalize turn (pass or fail — the write is here because the
+            # effective set is final once cues are resolved). A failed
+            # finalize creates no version row, but the user's stated axes
+            # must survive into the next successful version's gate input.
+            try:
+                import json as _json312
+
+                app.state.conn.raw.execute(
+                    "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
+                    (_json312.dumps(per_axis_stated) if per_axis_stated else None, project_id),
+                )
+                app.state.conn.commit()
+            except Exception:
+                logger.debug("carried_stated_dims write failed for project %s", project_id, exc_info=True)
             # The version name (issue #276, operator decision): the
             # SHARED resolver (the chat adapter's ``_resolve_version_create``
             # uses the same one, so both paths name identically): client
@@ -813,8 +827,8 @@ def _finalize_loop_kwargs(
         validate_photo_bytes,
     )
     from d33d.dimension_protocol import (
+        carried_stated_set,
         effective_stated_dims,
-        latest_stated_dims_dict,
         stated_axes_from_message,
     )
     from d33d.prompt_hash import canonical_hash
@@ -902,6 +916,7 @@ def _finalize_loop_kwargs(
     # row's persisted set; uncued axes carry forward; a statement that
     # confirms nothing (and nothing carried) is ``None`` (abstain) —
     # never (0.0, 0.0, 0.0).
+    _carried_gate = carried_stated_set(app.state.conn, app.state.versions, project_id)
     if body.stated_dims is not None:
         _w, _d, _h = body.stated_dims
         _explicit = {
@@ -909,13 +924,11 @@ def _finalize_loop_kwargs(
             for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
             if value > 0  # ``> 0`` (never truthiness): 0 is the unconfirmed marker
         } or None
-        current_axes = effective_stated_dims(
-            latest_stated_dims_dict(app.state.versions, project_id), _explicit
-        )
+        current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
         _am = stated_axes_from_message(body.request or body.message or "")
         current_axes = effective_stated_dims(
-            latest_stated_dims_dict(app.state.versions, project_id),
+            _carried_gate,
             _am if _am else _classify_axis_cues(body.request or body.message or ""),
         )
     stated_dims = axes_to_gate_triple(current_axes)

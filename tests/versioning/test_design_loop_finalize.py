@@ -3048,6 +3048,11 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
     state.versions = _VersionsSvc()
     state.catalogue = None
 
+    class _Conn:
+        def get_project(self, project_id):
+            return {"id": project_id, "carried_stated_dims": None}
+    state.conn = _Conn()
+
     class _Request:
         app = type("App", (), {"state": state})()
 

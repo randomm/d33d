@@ -768,3 +768,184 @@ def test_finalize_nonfinite_stated_dims_422(app_with_versions):
 
     r = run_async(app_with_versions, _call)
     assert r.status_code == 422, r.text
+
+
+# ---------------------------------------------------------------------------
+# Issue #312: carried stated set survives a failed turn (QA regression)
+# ---------------------------------------------------------------------------
+
+
+def test_failed_turn_stated_dims_survive_into_next_version(app_with_versions):
+    """QA regression (issue #312): turn 1 "a 40mm wide box, 12mm tall"
+    fails (no version created), turn 2 "make it taller" succeeds → the
+    carried set provides W=40 to the gate (not from any version row,
+    since none was created on turn 1). The gate triple fed to the loop
+    has W=40 enforced, never (0,0,0)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+
+        # Turn 1: the loop FAILS (exhausted — no version created).
+        exhausted_stub = type(
+            "_ExhaustedStub",
+            (),
+            {"status": "exhausted", "best": None},
+        )
+
+        async def _exhausted_loop(**kwargs):
+            return exhausted_stub()
+
+        app_with_versions.state.run_design_loop = _exhausted_loop
+        r1 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 40mm wide box, 12mm tall", "chat_history": []},
+        )
+        assert r1.status_code == 202, r1.text
+        source1 = app_with_versions.state.event_sources.get(pid)
+        assert source1 is not None
+        async for _event, _data in source1:
+            if _event in ("done", "error"):
+                break
+
+        # The carried set should have been written by the chat route.
+        row = app_with_versions.state.conn.get_project(pid)
+        raw_carried = row.get("carried_stated_dims")
+        import json as _json
+
+        carried = _json.loads(raw_carried) if raw_carried else None
+        assert carried is not None, f"carried_stated_dims not written: {raw_carried!r}"
+        # "a 40mm wide box" → W=40 (via the classify fallback)
+        assert abs(carried.get("W", 0) - 40.0) < 1e-6, f"W not 40: {carried}"
+
+        # Clear the inflight flag (the SSE endpoint normally does this on
+        # stream completion; in the test we drain it above and clear manually).
+        app_with_versions.state.design_loop_inflight.discard(pid)
+
+        # Turn 2: "make it taller" — the loop PASSES.
+        pass_stub_result = type(
+            "_PassStub",
+            (),
+            {
+                "status": "pass",
+                "best": type(
+                    "_Best",
+                    (),
+                    {
+                        "scad_source": "cube([40, 12, 40]);",
+                        "params": {"width": 40.0, "height": 12.0, "depth": 40.0},
+                        "render": None,
+                        "score": type(
+                            "_Score", (), {"bbox_abstained": False}
+                        ),
+                    },
+                )(),
+            },
+        )()
+
+        captured: dict[str, Any] = {}
+
+        async def _pass_loop(**kwargs):
+            captured.update(kwargs)
+            return pass_stub_result
+
+        app_with_versions.state.run_design_loop = _pass_loop
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make it taller", "chat_history": ["a 40mm wide box, 12mm tall"]},
+        )
+        assert r2.status_code == 202, r2.text
+        source2 = app_with_versions.state.event_sources.get(pid)
+        assert source2 is not None
+        async for _event, _data in source2:
+            if _event in ("done", "error"):
+                break
+
+        # The gate triple: W=40 enforced (from the carried set),
+        # D/H abstained. Never (0,0,0) — the regression.
+        stated = captured.get("stated_dims")
+        assert stated is not None, "stated_dims was None — gate should enforce W"
+        assert abs(stated[0] - 40.0) < 1e-6, f"W should be 40.0: {stated}"
+        assert stated != (0.0, 0.0, 0.0), "gate triple must NOT be all-zeros"
+
+    run_async(app_with_versions, _call)
+
+
+def test_failed_turn_no_stated_dims_still_abstains(app_with_versions):
+    """Edge case (issue #312 + #91): turn 1 "hello" (no dimensions) fails,
+    turn 2 "make it taller" passes on a FRESH project — no prior statement,
+    no version row. The gate must ABSTAIN (None), never (0, 0, 0)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+
+        # Turn 1: no dimensions, loop fails.
+        exhausted_stub = type(
+            "_ExhaustedStub",
+            (),
+            {"status": "exhausted", "best": None},
+        )
+
+        async def _exhausted_loop(**kwargs):
+            return exhausted_stub()
+
+        app_with_versions.state.run_design_loop = _exhausted_loop
+        r1 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "hello", "chat_history": []},
+        )
+        assert r1.status_code == 202, r1.text
+        source1 = app_with_versions.state.event_sources.get(pid)
+        assert source1 is not None
+        async for _event, _data in source1:
+            if _event in ("done", "error"):
+                break
+
+        # Clear the inflight flag.
+        app_with_versions.state.design_loop_inflight.discard(pid)
+
+        # Turn 2: "make it taller" — no prior statement exists.
+        pass_stub_result = type(
+            "_PassStub",
+            (),
+            {
+                "status": "pass",
+                "best": type(
+                    "_Best",
+                    (),
+                    {
+                        "scad_source": "cube([10]);",
+                        "params": {"size": 10.0},
+                        "render": None,
+                        "score": type(
+                            "_Score", (), {"bbox_abstained": True}
+                        ),
+                    },
+                )(),
+            },
+        )()
+
+        captured: dict[str, Any] = {}
+
+        async def _pass_loop(**kwargs):
+            captured.update(kwargs)
+            return pass_stub_result
+
+        app_with_versions.state.run_design_loop = _pass_loop
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "make it taller", "chat_history": ["hello"]},
+        )
+        assert r2.status_code == 202, r2.text
+        source2 = app_with_versions.state.event_sources.get(pid)
+        assert source2 is not None
+        async for _event, _data in source2:
+            if _event in ("done", "error"):
+                break
+
+        # No stated dims: the gate must be None (abstain), never (0,0,0).
+        stated = captured.get("stated_dims")
+        assert stated is None, f"gate should abstain (None), got {stated}"
+
+    run_async(app_with_versions, _call)
