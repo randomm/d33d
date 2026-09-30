@@ -605,6 +605,47 @@ export const deterministicAnswer = {
    *  axis uses its best value (pre-formatted) or "-" when not established. */
   dimensionList: (w: string, d: string, h: string): string =>
     `It measures ${w} × ${d} × ${h}.`,
+
+  /** Comparison met (issue #313): "Yes — it measures 40.0 mm deep,
+   *  10.0 mm more than 30 mm." `measured`, `delta`, and `target` arrive
+   *  pre-formatted via `mm()` — the delta is the absolute shortfall or
+   *  surplus, and the target is the number the user named. */
+  comparisonYes: (
+    measured: string,
+    axis: string,
+    delta: string,
+    target: string,
+  ): string =>
+    `Yes — it measures ${measured} ${axis}, ${delta} more than ${target}.`,
+
+  /** Comparison not met (issue #313): "No — it measures 25.0 mm deep,
+   *  5.0 mm short of 30 mm." */
+  comparisonNo: (
+    measured: string,
+    axis: string,
+    delta: string,
+    target: string,
+  ): string =>
+    `No — it measures ${measured} ${axis}, ${delta} short of ${target}.`,
+
+  /** Within tolerance (issue #313): "About the same — it measures 30.2 mm
+   *  deep." Used for both the borderline comparison and the named-axis fit
+   *  case ("will it fit in a 45 mm deep gap?"). */
+  comparisonAboutTheSame: (measured: string, axis: string): string =>
+    `About the same — it measures ${measured} ${axis}.`,
+
+  /** Missing-fact comparison (issue #313): "How tall is the shelf?
+   *  The part is 102.0 mm tall." The question half names the other
+   *  object (the backend validates it); the answer half states only the
+   *  part's own measured value — never a value the design state does not
+   *  establish. `axisNoun` is "tall" / "wide" / "deep" (the adjective,
+   *  matching the other axis templates). */
+  comparisonMissingFact: (
+    axisAdjective: string,
+    object: string,
+    measured: string,
+  ): string =>
+    `How ${axisAdjective} is ${object}? The part is ${measured} ${axisAdjective}.`,
 } as const;
 
 export const shell = {

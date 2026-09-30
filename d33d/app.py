@@ -95,6 +95,7 @@ from d33d.config.catalogue import (
 )
 from d33d.config.probes import CapabilityCache
 from d33d.config.resolve import resolve_model
+from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS
 from d33d.design_loop_events import (
     EMPTY_PHOTO_DATA_URI,
     latest_version_stated_dims,
@@ -648,8 +649,9 @@ def create_app(
     # role (the model is configured, never hardcoded). The question
     # pre-route (``d33d.projects.post_chat`` →
     # ``d33d.question_answer.route_chat_message``) awaits this under its
-    # own 10 s hard timeout; any failure degrades to the design loop
-    # exactly as today. A catalogue without a ``question`` role (a
+    # own per-LLM-call hard timeout (the shared
+    # ``LLM_CALL_TIMEOUT_SECONDS``); any failure degrades to the design
+    # loop exactly as today. A catalogue without a ``question`` role (a
     # pre-#249 models.yaml) degrades the pre-route to the design loop
     # with zero added failure modes (the role is ADDITIVE — no new
     # catalogue entry is required, and none is hard-coded here).
@@ -1300,15 +1302,17 @@ def _http_request_factory(
     request body or message (the key never reaches the browser).
 
     ``timeout`` (seconds) is the PER-REQUEST bound for the httpx client.
-    The design-loop closure uses the default 120 s (a render-loop LLM
-    call can legitimately be slow); the stage-2 question-answer closure
-    uses a short per-request bound (issue #249's latency decision — the
-    10 s operator bound must cover the catalogue load + capability probe
-    + the completion itself, not just the completion). ``None`` keeps
-    the historical 120 s."""
+    The design-loop closure uses the default :data:`LLM_CALL_TIMEOUT_SECONDS`
+    (120 s — a render-loop LLM call can legitimately be slow); the
+    stage-2 question-answer closure passes the SAME shared constant
+    (issue #313 — the per-call LLM timeout is one value, shared between
+    the design loop and the question path). ``None`` keeps the
+    historical 120 s."""
     import httpx
 
-    effective_timeout = 120.0 if timeout is None else timeout
+    effective_timeout = (
+        LLM_CALL_TIMEOUT_SECONDS if timeout is None else timeout
+    )
 
     async def _factory(body: dict[str, Any]) -> httpx.Response:
         # ``probe_capabilities`` hands over an envelope
@@ -1345,9 +1349,9 @@ def _build_question_answer_call(
     seam the route expects, no per-call state lookup.
 
     Returns the bound ``async (question_text, entries) -> reply_text``
-    edge for ``d33d.question_answer.ask_answer_call`` — which enforces the 10 s
-    hard timeout (``ANSWER_CALL_TIMEOUT_SECONDS``) and the number guard
-    around the raw call. One cheap single-shot completion, resolved
+    edge for ``d33d.question_answer.ask_answer_call`` — which enforces the shared
+    per-LLM-call timeout (:data:`LLM_CALL_TIMEOUT_SECONDS`, issue #313)
+    and the number guard around the raw call. One cheap single-shot completion, resolved
     lazily through the SAME live catalogue as the design role (the model
     is configured, never hardcoded; the catalogue hot-reloads — a
     ``models.yaml`` edited while the app is running is picked up on the
@@ -1360,8 +1364,10 @@ def _build_question_answer_call(
     ``None`` (the ``send`` sender then raises a T2/T3 ``SenderError``,
     caught by ``ask_answer_call`` → design loop).
 
-    **One 10 s enforcement point.** The operator's 10 s bound is enforced
-    exactly once — by ``ask_answer_call``'s ``asyncio.wait_for`` around
+    **One shared per-LLM-call enforcement point.** The operator's
+    per-LLM-call bound (:data:`LLM_CALL_TIMEOUT_SECONDS`, issue #313) is
+    enforced exactly once — by ``ask_answer_call``'s ``asyncio.wait_for``
+    around
     this edge. There is NO second ``wait_for`` here (the earlier
     ``_wrapper`` bound is removed: two nested bounds of the same value is
     redundant, and the inner one masked which layer actually fired). The
@@ -1395,8 +1401,8 @@ def _build_question_answer_call(
     from d33d.config.catalogue import ResolutionError
     from d33d.config.preflight import model_preflight_loaded
     from d33d.config.resolve import resolve_model
-    from d33d.design_llm import SenderError
-    from d33d.question_answer import ANSWER_CALL_TIMEOUT_SECONDS, build_answer_prompt
+    from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS, SenderError
+    from d33d.question_answer import build_answer_prompt
 
     async def _wrapper(question: str, entries: list[dict[str, Any]]) -> str:
         import time as _time
@@ -1439,12 +1445,12 @@ def _build_question_answer_call(
             )
             return ""
         provider = res.provider  # already the Provider object (resolve() does the dict lookup)
-        # The per-request httpx bound (issue #249's latency decision):
-        # the stage-2 LLM call is a single cheap completion — a hung
-        # request is bounded per-request independent of the operator's
-        # 10 s bound (which ``ask_answer_call`` enforces).
+        # The per-request httpx bound (issue #313): the shared per-call
+        # LLM timeout (the same constant the design loop's factory
+        # defaults to) — a hung request is bounded per-request
+        # independent of ``ask_answer_call``'s operator bound.
         factory = _http_request_factory(
-            res.provider.base, provider.key, timeout=ANSWER_CALL_TIMEOUT_SECONDS
+            res.provider.base, provider.key, timeout=LLM_CALL_TIMEOUT_SECONDS
         )
         # The capability probe, cached per (base_url, model): steady-state
         # questions make exactly one LLM request (the completion).

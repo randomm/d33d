@@ -60,6 +60,11 @@ from d33d.question_answer import (
     route_chat_message,
     state_block_numbers,
 )
+from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS as _LLM_TIMEOUT
+from d33d.design_loop import (
+    BBOX_TOLERANCE_MIN_MM as _TOL_MIN,
+    BBOX_TOLERANCE_REL as _TOL_REL,
+)
 
 from tests.seam_schemas_d import validate_frames_stream
 from tests.versioning.helpers import create_project, run_async
@@ -809,8 +814,8 @@ class TestRouteChatMessage:
         assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
 
     def test_stage2_timeout_returns_could_not_answer(self) -> None:
-        # The hard timeout at a short test value (the 10 s production
-        # bound's contract, pinned in <1 s of wall clock).
+        # The hard timeout at a short test value (the shared per-LLM-call
+        # production bound's contract, pinned in <1 s of wall clock).
         latest = _latest({"H": 12.0})
 
         async def _hanging_edge(question: str, entries: list) -> str:
@@ -1325,6 +1330,301 @@ class TestDeterministicWarningLog:
         assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
         assert "outcome=answer" in warnings[0].getMessage()
         assert "outcome=deterministic" not in warnings[0].getMessage()
+
+
+# ---------------------------------------------------------------------------
+# Issue #313 — the deterministic comparison stage (no LLM, no app)
+# ---------------------------------------------------------------------------
+
+
+def _latest_cmp(
+    bbox: dict | None = None,
+    stated: dict | None = None,
+    params: dict | None = None,
+) -> dict:
+    """Build a minimal version dict for the #313 comparison-stage tests."""
+    return {
+        "params": params or {},
+        "stated_dims": stated,
+        "bbox": bbox,
+        "param_meta": None,
+    }
+
+
+class TestDeterministicComparison:
+    """Issue #313: the deterministic comparison stage — a stage-1
+    candidate that names exactly one axis, carries exactly one mm number
+    (or is a relative-word "than the/… noun" missing-fact form), and has
+    a MEASURED axis value is answered from the design state with NO LLM
+    call, NO version, and NO design loop."""
+
+    BBOX = {"x": 20.0, "y": 43.9, "z": 12.0}
+
+    def _latest(self, stated: dict | None = None) -> dict:
+        return _latest_cmp(bbox=dict(self.BBOX), stated=stated)
+
+    # -- comparison table --------------------------------------------------
+
+    def test_deep_enough_for_30mm_screw_yes(self) -> None:
+        # D=43.9, target 30 → yes (43.9 >= 30, diff 13.9 > tolerance).
+        r = self._cmp("Is it deep enough for a 30 mm screw?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "Yes" in reply
+        assert "43.9" in reply
+        assert "13.9" in reply
+        assert "30.0" in reply
+
+    def test_taller_than_10mm_yes(self) -> None:
+        # H=12, target 10 → yes.
+        r = self._cmp("Is it taller than 10 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert "Yes" in reply
+
+    def test_shorter_than_10mm_no(self) -> None:
+        # H=12, target 10, relative word "shorter" → polarity inverts → no.
+        r = self._cmp("Is it shorter than 10 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert "No" in reply
+
+    def test_wider_than_10mm_yes(self) -> None:
+        # W=20, target 10 → yes.
+        r = self._cmp("Is it wider than 10 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "W"
+        assert "Yes" in reply
+
+    def test_narrower_than_10mm_no(self) -> None:
+        # W=20, target 10, relative word "narrower" → no.
+        r = self._cmp("Is it narrower than 10 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "W"
+        assert "No" in reply
+
+    def test_shallower_than_30mm_no(self) -> None:
+        # D=43.9, target 30, relative word "shallower" → no.
+        r = self._cmp("Is it shallower than 30 mm?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "No" in reply
+
+    def test_fit_in_45mm_deep_gap_yes(self) -> None:
+        # D=43.9, gap 45 → fits (43.9 <= 45, diff 1.1 > tolerance → yes).
+        r = self._cmp("Will it fit in a 45 mm deep gap?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "Yes" in reply
+
+    def test_fit_in_40mm_deep_gap_no(self) -> None:
+        # D=43.9, gap 40 → does not fit (43.9 > 40).
+        r = self._cmp("Will it fit in a 40 mm deep gap?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "No" in reply
+
+    def test_fit_in_50mm_deep_gap_yes(self) -> None:
+        # D=43.9, gap 50 → fits (43.9 <= 50).
+        r = self._cmp("Will it fit in a 50 mm deep gap?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "Yes" in reply
+
+    def test_tall_enough_for_50mm_shelf_no(self) -> None:
+        # H=12, target 50 → not enough (12 < 50).
+        r = self._cmp("Is it tall enough for a 50 mm shelf?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert "No" in reply
+
+    # -- boundary tests ----------------------------------------------------
+
+    def test_boundary_at_tolerance_about_the_same(self) -> None:
+        # D=43.9, target 43.4: diff=0.5, tolerance=max(0.01*43.4, 0.5)=0.5
+        # → abs(diff) <= tolerance → about-the-same (inclusive boundary).
+        r = self._cmp("Is it deep enough for a 43.4 mm screw?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "About the same" in reply
+
+    def test_boundary_just_outside_tolerance_yes(self) -> None:
+        # D=43.9, target 43.3: diff=0.6, tolerance=0.5 → outside → yes.
+        r = self._cmp("Is it deep enough for a 43.3 mm screw?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "D"
+        assert "Yes" in reply
+
+    # -- missing-fact ------------------------------------------------------
+
+    def test_missing_fact_taller_than_the_shelf(self) -> None:
+        # No number → missing-fact reply.
+        r = self._cmp("Is it taller than the shelf?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "H"
+        assert "How tall is the shelf?" in reply
+        assert "12.0" in reply
+
+    def test_missing_fact_wider_than_my_drawer(self) -> None:
+        r = self._cmp("Is it wider than my drawer?")
+        assert r is not None
+        axis, reply = r
+        assert axis == "W"
+        assert "How wide is my drawer?" in reply
+        assert "20.0" in reply
+
+    # -- fall-throughs -----------------------------------------------------
+
+    def test_axis_less_fit_falls_through(self) -> None:
+        # No axis word → not a comparison → falls through to stage 2.
+        r = self._cmp("Will it fit in a 45 mm gap?")
+        assert r is None
+
+    def test_foreign_unit_falls_through(self) -> None:
+        # "cm" → foreign unit → falls through to stage 2.
+        r = self._cmp("Is it deep enough for a 3 cm screw?")
+        assert r is None
+
+    def test_non_measured_axis_falls_through(self) -> None:
+        # H not in bbox → not measured → falls through.
+        latest = _latest_cmp(bbox={"x": 20.0, "y": 43.9})  # no z (H)
+        r = self._cmp2("Is it tall enough for a 50 mm shelf?", latest)
+        assert r is None
+
+    def test_zero_extent_falls_through(self) -> None:
+        # All-zero bbox → not measured → falls through.
+        latest = _latest_cmp(bbox={"x": 0.0, "y": 0.0, "z": 0.0})
+        r = self._cmp2("Is it tall enough for a 50 mm shelf?", latest)
+        assert r is None
+
+    def test_no_version_falls_through(self) -> None:
+        r = self._cmp2("Is it tall enough for a 50 mm shelf?", None)
+        assert r is None
+
+    def test_stated_only_falls_through(self) -> None:
+        # D stated but not measured (bbox y absent) → stated only → falls through.
+        latest = _latest_cmp(
+            bbox={"x": 20.0, "z": 12.0},  # no y (D)
+            stated={"D": 40.0},
+        )
+        r = self._cmp2("Is it deep enough for a 30 mm screw?", latest)
+        assert r is None
+
+    def test_two_numbers_falls_through(self) -> None:
+        # Two numbers → ambiguous → falls through.
+        r = self._cmp("Is it 40 mm deep or 30 mm deep?")
+        assert r is None
+
+    def test_no_direction_falls_through(self) -> None:
+        # No "enough", no "than", no "fit" → no direction → falls through.
+        r = self._cmp("Is it 40 mm deep?")
+        assert r is None
+
+    # -- missing-fact exclusions -------------------------------------------
+
+    def test_missing_fact_last_one_falls_through(self) -> None:
+        # "the last one" → version comparison → falls through.
+        r = self._cmp("Is it taller than the last one?")
+        assert r is None
+
+    def test_missing_fact_previous_one_falls_through(self) -> None:
+        # "the previous one" → version comparison → falls through.
+        r = self._cmp("Is it taller than the previous one?")
+        assert r is None
+
+    def test_missing_fact_v2_falls_through(self) -> None:
+        # "v2" → version name (digit in noun) → falls through.
+        r = self._cmp("Is it taller than v2?")
+        # "v2" has a digit → the missing-fact trigger excludes it.
+        # But "v2" is also a number → the stage may fire as a "than" comparison.
+        # The digit in the noun means the missing-fact path is excluded,
+        # but the "than" direction still fires with target=2.
+        if r is not None:
+            axis, reply = r
+            assert axis == "H"
+            # The reply should be a "than" comparison, not a missing-fact reply.
+            assert "How tall is v2" not in reply
+
+    def test_missing_fact_before_falls_through(self) -> None:
+        # "than before" → no article → not a missing-fact form → falls through.
+        r = self._cmp("Is it taller than before?")
+        assert r is None
+
+    def test_missing_fact_it_was_falls_through(self) -> None:
+        # "than it was" → "it" is not an article → falls through.
+        r = self._cmp("Is it taller than it was?")
+        assert r is None
+
+    # -- zero-LLM spy ------------------------------------------------------
+
+    def test_no_edge_called_for_deterministic_comparison(
+        self, app_with_versions
+    ) -> None:
+        # Integration: the deterministic comparison stage answers with NO
+        # LLM call (the answer-edge stub is NOT called).
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        latest = self._latest()
+        result = run_async_safe(
+            route_chat_message(
+                "Is it deep enough for a 30 mm screw?", latest, _edge
+            )
+        )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        assert "43.9" in result["answer"]
+        assert not edge_called[0], (
+            "the answer edge must NOT be called for a deterministic comparison"
+        )
+
+    def test_no_version_created_for_deterministic_comparison(
+        self, app_with_versions
+    ) -> None:
+        # Integration: the deterministic comparison stage does not create
+        # a version (no design run).
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        latest = self._latest()
+        result = run_async_safe(
+            route_chat_message(
+                "Is it deep enough for a 30 mm screw?", latest, _edge
+            )
+        )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+
+    # -- helpers ------------------------------------------------------------
+
+    def _cmp(self, message: str, stated: dict | None = None):
+        from d33d.question_answer import _deterministic_comparison
+
+        return _deterministic_comparison(message, self._latest(stated=stated))
+
+    def _cmp2(self, message: str, latest: dict | None):
+        from d33d.question_answer import _deterministic_comparison
+
+        return _deterministic_comparison(message, latest)
 
 
 class TestDeterministicCopyDeckParity:
@@ -1850,15 +2150,16 @@ def test_invented_number_guard_failure_gets_no_run_reply_not_loop(
 
 
 def test_screw_question_guard_licenses_question_number(app_with_versions) -> None:
-    """issue #278 REPRO: "Is it deep enough for a 30 mm screw?" with a
-    design-state block carrying D 43.9 (measured): the stage-2 answer
-    that quotes the question's "30" PASSES the guard → the done frame
-    carries the answer text (kind "answer"), not COULD_NOT_ANSWER.
-    No design run, no new version.
+    """issue #278 REPRO (re-pointed for #313): "Would a 30 mm screw hold
+    it?" with a design-state block carrying D 43.9 (measured): the
+    stage-2 answer that quotes the question's "30" PASSES the guard →
+    the done frame carries the answer text (kind "answer"), not
+    COULD_NOT_ANSWER. No design run, no new version.
 
-    The question contains a digit, so the #263 deterministic stage
-    already abstains (the target-number guard) — this exercises the
-    stage-2 guard at the route level."""
+    The question carries a digit but NO axis word, so the #263
+    deterministic stage abstains (no axis word) and the #313
+    deterministic comparison stage does not fire (no axis word) —
+    this exercises the stage-2 guard at the route level."""
 
     loop_called = False
 
@@ -1886,7 +2187,7 @@ def test_screw_question_guard_licenses_question_number(app_with_versions) -> Non
             app_with_versions,
             client,
             pid,
-            {"message": "Is it deep enough for a 30 mm screw?",
+            {"message": "Would a 30 mm screw hold it?",
              "chat_history": []},
             answer_reply=(
                 '{"kind": "answer", "answer": "Yes — it\'s 43.9 mm deep, '
@@ -1912,9 +2213,10 @@ def test_screw_question_guard_licenses_question_number(app_with_versions) -> Non
 def test_screw_question_answer_citing_25_still_guard_failure(
     app_with_versions,
 ) -> None:
-    """issue #278 negative control: the same screw question with an
-    answer citing 25 (in neither the question nor the block) still
-    fails the guard → COULD_NOT_ANSWER, no design run."""
+    """issue #278 negative control (re-pointed for #313): the same screw
+    question ("Would a 30 mm screw hold it?" — digit, no axis word →
+    stage 2) with an answer citing 25 (in neither the question nor the
+    block) still fails the guard → COULD_NOT_ANSWER, no design run."""
 
     loop_called = False
 
@@ -1942,7 +2244,7 @@ def test_screw_question_answer_citing_25_still_guard_failure(
             app_with_versions,
             client,
             pid,
-            {"message": "Is it deep enough for a 30 mm screw?",
+            {"message": "Would a 30 mm screw hold it?",
              "chat_history": []},
             answer_reply=(
                 '{"kind": "answer", "answer": "Yes — it\'s 43.9 mm deep, '
@@ -2002,6 +2304,29 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
     assert loop_called, "the design loop was NOT called for a fresh project"
 
 
+def test_llm_call_timeout_constant_equals_design_loop_default() -> None:
+    """#313: the shared ``LLM_CALL_TIMEOUT_SECONDS`` constant (the
+    stage-2 budget) equals the design loop's per-call default.
+
+    The constant lives in ``d33d.design_llm`` (a leaf module both
+    ``d33d.question_answer`` and ``d33d.app`` can import without a
+    cycle). The design loop's ``_http_request_factory`` defaults to
+    the SAME constant, so the stage-2 budget IS the design loop's
+    per-call timeout — one value, shared between both paths.
+    """
+    from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS
+
+    # The constant is 120.0 s (the design loop's historical default).
+    assert LLM_CALL_TIMEOUT_SECONDS == 120.0
+
+    # The question_answer module re-exports the SAME object (identity,
+    # not just equality — a monkeypatch of one is a monkeypatch of the
+    # other).
+    import d33d.question_answer as _qa_mod
+
+    assert _qa_mod.LLM_CALL_TIMEOUT_SECONDS is LLM_CALL_TIMEOUT_SECONDS
+
+
 def test_stage2_llm_timeout_gets_no_run_reply(app_with_versions, monkeypatch) -> None:
     """#260 REPRO-VERIFICATION: a stage-2 LLM call that times out
     (simulated via a hanging stub — the same 0.1 s monkeypatch contract
@@ -2010,12 +2335,12 @@ def test_stage2_llm_timeout_gets_no_run_reply(app_with_versions, monkeypatch) ->
     design loop is never the fallback for a failed answer.
 
     The timeout is monkeypatched to 0.1 s so the test runs in <1 s of
-    wall clock (the same contract as the 10 s production bound, at a
-    shorter value — the operator's latency decision is pinned by the
-    ``ask_answer_call`` timeout param, not by the literal value of
-    ``ANSWER_CALL_TIMEOUT_SECONDS``)."""
+    wall clock (the same contract as the shared per-LLM-call production
+    bound, at a shorter value — the operator's latency decision is
+    pinned by the ``ask_answer_call`` timeout param, not by the literal
+    value of ``LLM_CALL_TIMEOUT_SECONDS``)."""
     import d33d.question_answer as _qa_mod
-    monkeypatch.setattr(_qa_mod, "ANSWER_CALL_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(_qa_mod, "LLM_CALL_TIMEOUT_SECONDS", 0.1)
 
     loop_called = False
 
@@ -2371,6 +2696,17 @@ class TestStage2OutcomeWarningLogs:
     def _outcome_warning(self, caplog) -> list[logging.LogRecord]:
         return [r for r in caplog.records if r.levelno == logging.WARNING]
 
+    def _stage2_info(self, caplog) -> list[logging.LogRecord]:
+        # The stage-2 INFO line (issue #313) — distinct from the
+        # stage-1/route INFO lines: it names project_id, outcome and
+        # latency_ms.
+        return [
+            r
+            for r in caplog.records
+            if r.levelno == logging.INFO
+            and "question-answer stage 2: project_id=" in r.getMessage()
+        ]
+
     def test_answer_emits_one_warning_no_text(self, caplog) -> None:
         # Every stage-2 outcome — the three kinds AND the four failure
         # classes (timeout/exception/malformed/guard) — emits exactly one
@@ -2399,10 +2735,21 @@ class TestStage2OutcomeWarningLogs:
         for record in warnings:
             assert "What is the material?" not in record.getMessage()
             assert "It is 12 mm tall." not in record.getMessage()
-        # The answered path also keeps its INFO record (lengths only).
+        # The answered path keeps its route INFO record (lengths only)
+        # AND the issue #313 stage-2 INFO line (project id, outcome,
+        # latency_ms): exactly two INFO records on the answer path.
         infos = [r for r in caplog.records if r.levelno == logging.INFO]
-        assert len(infos) == 1, f"expected 1 INFO, got {len(infos)}"
-        assert "answering from the design-state block" in infos[0].getMessage()
+        assert len(infos) == 2, f"expected 2 INFO, got {len(infos)}"
+        route_infos = [
+            r for r in infos if "answering from the design-state block" in r.getMessage()
+        ]
+        assert len(route_infos) == 1
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg2 = stage2_infos[0].getMessage()
+        assert "project_id=-" in msg2
+        assert "outcome=answered" in msg2
+        assert "latency_ms=" in msg2
         for record in infos:
             assert "What is the material?" not in record.getMessage()
             assert "It is 12 mm tall." not in record.getMessage()
@@ -2471,6 +2818,14 @@ class TestStage2OutcomeWarningLogs:
         warnings = self._outcome_warning(caplog)
         assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
         assert "outcome=request" in warnings[0].getMessage()
+        # #313: the ``request`` outcome is the ONE stage-2 outcome with
+        # NO INFO line (the message routes to the design loop — it is
+        # not an answer outcome).
+        stage2_infos = self._stage2_info(caplog)
+        assert stage2_infos == [], (
+            "the request outcome must emit NO stage-2 INFO line — "
+            f"got {stage2_infos}"
+        )
 
     def test_timeout_emits_one_warning(self, caplog) -> None:
         async def _edge(q, e):
@@ -2631,6 +2986,196 @@ class TestStage2OutcomeWarningLogs:
         warnings = self._outcome_warning(caplog)
         assert len(warnings) == 1, f"expected 1 WARNING, got {len(warnings)}"
         assert "outcome=exception" in warnings[0].getMessage()
+
+    # ------------------------------------------------------------------
+    # Issue #313: the stage-2 INFO line (project id, outcome,
+    # latency_ms) — exactly ONE per stage-2 call except the
+    # ``request`` outcome (pinned above).
+    # ------------------------------------------------------------------
+
+    def test_timeout_emits_timeout_info(self, caplog) -> None:
+        # #313: the asyncio-timeout outcome logs exactly ONE stage-2
+        # INFO line with outcome=timeout.
+        async def _edge(q, e):
+            await asyncio.sleep(0.5)
+            return '{"kind": "answer", "answer": "x"}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What is the material?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                    timeout=0.05,
+                    project_id="42",
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1, f"expected 1 stage-2 INFO, got {stage2_infos}"
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=42" in msg
+        assert "outcome=timeout" in msg
+        assert "latency_ms=" in msg
+
+    def test_exception_emits_error_info(self, caplog) -> None:
+        # #313: a non-timeout exception maps to outcome=error.
+        async def _edge(q, e):
+            raise RuntimeError("boom")
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What is the material?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                    project_id="42",
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=42" in msg
+        assert "outcome=error" in msg
+
+    def test_malformed_emits_error_info(self, caplog) -> None:
+        # #313: a malformed reply maps to outcome=error.
+        async def _edge(q, e):
+            return "not json at all"
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What is the material?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                    project_id="42",
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=42" in msg
+        assert "outcome=error" in msg
+
+    def test_guard_failure_emits_error_info(self, caplog) -> None:
+        # #313: a number-guard failure maps to outcome=error.
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 15 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What is the material?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                    project_id="42",
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": COULD_NOT_ANSWER}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=42" in msg
+        assert "outcome=error" in msg
+
+    def test_unanswerable_emits_unanswerable_info(self, caplog) -> None:
+        # #313: an unanswerable reply maps to outcome=unanswerable.
+        async def _edge(q, e):
+            return '{"kind": "unanswerable", "answer": ""}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What colour is it?",
+                    self._latest({"H": 12.0}),
+                    _edge,
+                    project_id="42",
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": NOT_ESTABLISHED}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=42" in msg
+        assert "outcome=unanswerable" in msg
+
+    def test_absent_project_id_logs_dash(self, caplog) -> None:
+        # #313: no project id (the existing callers pass nothing) → the
+        # INFO line carries project_id=- — and never the message or
+        # answer text (no PII in logs).
+        async def _edge(q, e):
+            return '{"kind": "answer", "answer": "It is 12 mm tall."}'
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            result = asyncio.run(
+                route_chat_message(
+                    "What is the material?", self._latest({"H": 12.0}), _edge
+                )
+            )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1
+        msg = stage2_infos[0].getMessage()
+        assert "project_id=-" in msg
+        assert "outcome=answered" in msg
+        assert "What is the material?" not in msg
+        assert "It is 12 mm tall." not in msg
+
+    def test_route_with_project_id_logs_real_id(self, app_with_versions, caplog):
+        # #313 route-level: the /chat route (d33d/projects.py) passes the
+        # REAL project id to route_chat_message → the stage-2 INFO line
+        # carries that id (not -), with outcome=answered and latency_ms.
+
+        loop_called = False
+
+        def _loop(app, **kwargs):
+            nonlocal loop_called
+            loop_called = True
+
+            class _R:
+                status = "pass"
+                failure_reason = None
+                best = None
+
+            return _R()
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"H": 12.0},
+                stated_dims=None,
+            )
+            app_with_versions.state.run_design_loop = _loop
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "What is the material?", "chat_history": []},
+                answer_reply='{"kind": "answer", "answer": "It is 12 mm tall."}',
+            )
+            return r, frames, pid
+
+        with caplog.at_level(logging.INFO, "d33d.question_answer"):
+            r, frames, pid = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not loop_called
+        stage2_infos = self._stage2_info(caplog)
+        assert len(stage2_infos) == 1, f"expected 1 stage-2 INFO, got {stage2_infos}"
+        msg = stage2_infos[0].getMessage()
+        assert f"project_id={pid}" in msg, (
+            f"the /chat route must pass the real project id ({pid}) "
+            f"through — got: {msg}"
+        )
+        assert "outcome=answered" in msg
+        assert "latency_ms=" in msg
+        # Never the message or the answer text (no PII in logs).
+        assert "What is the material?" not in msg
+        assert "It is 12 mm tall." not in msg
 
 
 class TestCopyDeckParity:

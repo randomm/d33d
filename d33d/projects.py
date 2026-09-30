@@ -511,7 +511,8 @@ def create_projects_router() -> APIRouter:
 
         # Claim the in-flight flag IMMEDIATELY (issue #249 review):
         # the pre-route (``route_chat_message``) awaits a stage-2 LLM
-        # call (up to 10 s) between the 409 check and the old
+        # call (up to the shared per-LLM-call timeout,
+        # ``LLM_CALL_TIMEOUT_SECONDS``) between the 409 check and the old
         # ``inflight.add`` — a second concurrent POST in that window saw
         # an un-set flag and passed the 409. The flag is now set before
         # the pre-route; EVERY exit path that does not end in a
@@ -634,13 +635,15 @@ def create_projects_router() -> APIRouter:
         # version). Everything else — including anything ambiguous — goes
         # to the design loop EXACTLY as today. The route is narrow on
         # purpose (one stage-1 question detector, one cheap stage-2 LLM
-        # call with a deterministic number guard, a 10 s hard timeout):
+        # call with a deterministic number guard, a per-LLM-call hard
+        # timeout):
         # the common case ("make it taller") costs nothing.
         try:
             answer_route = await route_chat_message(
                 body.message,
                 app.state.versions.latest_version(project_id),
                 answer_edge=getattr(app.state, "answer_question", None),
+                project_id=str(project_id),
             )
         except ModelUnconfiguredError as e:
             # The model pre-flight (issue #303) found the model cannot be

@@ -345,6 +345,90 @@ describe("design contract", () => {
     expect(dimList).toContain("\u00d7");
   });
 
+  /* ---------------------------------------- W313 */
+
+  it("the deterministic comparison copy lives in the deck (issue #313)", () => {
+    // Issue #313: the new stage-1 comparison stage answers numeric
+    // comparisons against a measured axis ("Is it deep enough for a 30 mm
+    // screw?") with no LLM call. All mm values are pre-formatted via mm()
+    // (one decimal, U+202F NB space before "mm") — the deck templates
+    // mirror the backend's mm_formatted.
+    const D = "40.0\u202fmm";
+    const D2 = "25.0\u202fmm";
+    const D3 = "30.2\u202fmm";
+    const H = "102.0\u202fmm";
+
+    // (1) Comparison met — the acceptance criterion's exact sentence:
+    //     "Yes — it measures 40.0 mm deep, 10.0 mm more than 30 mm."
+    //     Every mm value is pre-formatted via mm() (one decimal, U+202F
+    //     NB space before "mm"): the measured extent, the absolute
+    //     delta, and the number the user named.
+    expect(copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm")).toBe(
+      "Yes — it measures 40.0\u202fmm deep, 10.0\u202fmm more than 30\u202fmm.",
+    );
+    // Height variant — absolute word.
+    expect(copy.deterministicAnswer.comparisonYes(H, "tall", "2.0\u202fmm", "100\u202fmm")).toBe(
+      "Yes — it measures 102.0\u202fmm tall, 2.0\u202fmm more than 100\u202fmm.",
+    );
+
+    // (2) Comparison not met — "No — it measures 25.0 mm deep, 5.0 mm
+    //     short of 30 mm."
+    expect(copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm")).toBe(
+      "No — it measures 25.0\u202fmm deep, 5.0\u202fmm short of 30\u202fmm.",
+    );
+    // Relative-word variant ("shallower than").
+    expect(copy.deterministicAnswer.comparisonNo(D2, "shallow", "5.0\u202fmm", "30\u202fmm")).toBe(
+      "No — it measures 25.0\u202fmm shallow, 5.0\u202fmm short of 30\u202fmm.",
+    );
+
+    // (3) Within tolerance — "About the same — it measures 30.2 mm deep."
+    //     Also the named-axis fit reply ("will it fit in a 45 mm deep
+    //     gap?") when the measured value sits inside tolerance.
+    expect(copy.deterministicAnswer.comparisonAboutTheSame(D3, "deep")).toBe(
+      "About the same — it measures 30.2\u202fmm deep.",
+    );
+    expect(copy.deterministicAnswer.comparisonAboutTheSame("45.1\u202fmm", "deep")).toBe(
+      "About the same — it measures 45.1\u202fmm deep.",
+    );
+
+    // (4) Missing-fact comparison — "How tall is the shelf? The part is
+    //     102.0 mm tall." The question half names the OTHER object (the
+    //     one the design state says nothing about); the answer half
+    //     states only the part's own measured value — it must never read
+    //     as if the shelf has the measured value (issue #313 operator
+    //     decision, no-unestablished-value rule).
+    expect(copy.deterministicAnswer.comparisonMissingFact("tall", "the shelf", H)).toBe(
+      "How tall is the shelf? The part is 102.0\u202fmm tall.",
+    );
+    expect(copy.deterministicAnswer.comparisonMissingFact("wide", "my drawer", "60.0\u202fmm")).toBe(
+      "How wide is my drawer? The part is 60.0\u202fmm wide.",
+    );
+
+    // All four comparison templates are distinct from the six axis-size
+    // templates — no two provenance classes read the same.
+    const comparisonAll = [
+      copy.deterministicAnswer.comparisonYes(D, "deep", "10.0\u202fmm", "30\u202fmm"),
+      copy.deterministicAnswer.comparisonNo(D2, "deep", "5.0\u202fmm", "30\u202fmm"),
+      copy.deterministicAnswer.comparisonAboutTheSame(D3, "deep"),
+      copy.deterministicAnswer.comparisonMissingFact("tall", "the shelf", H),
+    ];
+    const axisAll = [
+      copy.deterministicAnswer.statedAndMeasured(H, "tall"),
+      copy.deterministicAnswer.measuredOnly(H, "tall"),
+      copy.deterministicAnswer.statedOnly(H, "tall"),
+      copy.deterministicAnswer.disagrees("12.0\u202fmm", "43.8\u202fmm"),
+      copy.deterministicAnswer.notEstablished("height"),
+      copy.deterministicAnswer.dimensionList("60.0\u202fmm", "45.0\u202fmm", H),
+    ];
+    for (const a of comparisonAll) {
+      for (const b of [...comparisonAll, ...axisAll]) {
+        if (a !== b) {
+          expect(a).not.toBe(b);
+        }
+      }
+    }
+  });
+
   /* ----------------------------------------- W250 */
 
   it("the assumed-value confirmation copy lives in the deck (issue #250)", () => {

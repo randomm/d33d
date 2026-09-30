@@ -49,6 +49,7 @@ from d33d.response_shape import response_message_shape
 
 __all__ = [
     "Dialect",
+    "LLM_CALL_TIMEOUT_SECONDS",
     "LLMResult",
     "SenderError",
     "llm_request_body",
@@ -58,6 +59,18 @@ __all__ = [
     "send",
     "to_ollama_messages",
 ]
+
+#: The per-LLM-call timeout in seconds (issue #313): ONE shared constant
+#: for the whole design-side LLM path — the design loop's per-call
+#: default (``_http_request_factory`` in ``d33d.app``) AND the stage-2
+#: question-answer budget (the
+#: ``d33d.question_answer.LLM_CALL_TIMEOUT_SECONDS`` alias). 120 s is the
+#: value the design loop has always used; the stage-2 path's historical
+#: 10 s was far too short for the remote LLM endpoint and is retired.
+#: This module is a leaf with respect to ``d33d.app`` and
+#: ``d33d.question_answer`` (neither direction is imported here), so both
+#: can import the constant without a cycle.
+LLM_CALL_TIMEOUT_SECONDS = 120.0
 
 #: The two image dialects the sender supports.
 Dialect = Literal["openai", "ollama"]

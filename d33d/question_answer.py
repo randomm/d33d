@@ -81,7 +81,10 @@ from d33d.axis_lexicon import (
     axis_for_question_word,
 )
 from d33d.confirm_offer import mm_formatted
+from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS
 from d33d.design_state import (
+    BBOX_TOLERANCE_MIN_MM,
+    BBOX_TOLERANCE_REL,
     build_design_state_block,
     format_design_state_block,
     state_block_for_version,
@@ -90,14 +93,15 @@ from d33d.design_state import (
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "ANSWER_CALL_TIMEOUT_SECONDS",
     "ANSWER_DONE_KIND",
     "ANSWER_KINDS",
     "COULD_NOT_ANSWER",
     "DETERMINISTIC_AXIS_ADJECTIVES",
     "DETERMINISTIC_AXIS_NOUNS",
     "DETERMINISTIC_AXIS_SENTENCES",
+    "DETERMINISTIC_COMPARISON_SENTENCES",
     "DETERMINISTIC_DIMENSION_LIST_RE",
+    "LLM_CALL_TIMEOUT_SECONDS",
     "NOT_ESTABLISHED",
     "UNANSWERABLE_MISSING_TEMPLATE",
     "AnswerOutcome",
@@ -117,10 +121,14 @@ __all__ = [
     "state_block_numbers",
 ]
 
-#: The stage-2 hard timeout (operator decision: 10 s). The stage-2 call
-#: is a single cheap completion — a hung call is treated exactly like a
-#: failed one (design loop, unchanged), never a stall of the chat stream.
-ANSWER_CALL_TIMEOUT_SECONDS = 10.0
+#: The stage-2 hard timeout: the ONE shared per-LLM-call constant
+#: (issue #313, operator decision) — the design loop's per-call timeout
+#: re-exported here (imported from ``d33d.design_llm`` above; the name
+#: binds to that value, so ``d33d.question_answer.LLM_CALL_TIMEOUT_SECONDS``
+#: is the same object and the monkeypatch target the timeout tests use).
+#: The stage-2 budget covers the WHOLE answer call; a hung call is
+#: treated exactly like a failed one (design loop, unchanged), never a
+#: stall of the chat stream.
 
 #: The done frame's additive discriminator (operator decision): an
 #: answer-path terminal frame carries ``kind == "answer"``; a
@@ -662,6 +670,307 @@ def _noun_refers_to_part(noun: str, version_name: str | None) -> bool:
     return bool(words and words[0] == "it" and len(words) > 1)
 
 
+# ---------------------------------------------------------------------------
+# The deterministic comparison stage (issue #313, between stage 1 and
+# stage 2, BEFORE the deterministic axis stage)
+# ---------------------------------------------------------------------------
+
+#: The comparison reply sentences (issue #313; values mm()-formatted the
+#: way ``copy.ts mm()`` renders them — one decimal, U+202F, "mm"). The
+#: sibling ``copy`` workstream pins the matching deck strings
+#: (``deterministicAnswer``'s comparisonYes / comparisonNo /
+#: comparisonAboutTheSame / comparisonMissingFact) in
+#: ``web/src/copy.ts``; the backend's strings are the wire strings,
+#: pinned by the Python tests here against the same sentences (the #250
+#: way — both directions are checked).
+DETERMINISTIC_COMPARISON_SENTENCES = {
+    "yes": "Yes — it measures {measured} {axis}, {delta} more than {target}.",
+    "no": "No — it measures {measured} {axis}, {delta} short of {target}.",
+    "about_the_same": "About the same — it measures {measured} {axis}.",
+    "missing_fact": "How {axis} is {object}? The part is {measured} {axis}.",
+}
+
+#: The number the user named in the comparison question, in mm. A
+#: bare number or a number immediately followed by ``mm`` (any
+#: whitespace) is accepted; ANY other unit suffix (cm, in, inches, …)
+#: makes the stage abstain (inch units are out of scope — fall through
+#: to stage 2).
+#: The number itself (``group 1``) plus the unit word (``group 2``,
+#: possibly empty — a bare number is mm by the stage's contract).
+#: The unit word, when present, is required to be a LETTER (``[a-z]``)
+#: so the regex cannot misread a bare number's own digits as its unit
+#: (the previous ``\b(\d+(?:\.\d+)?)\s*(mm)?\b`` form matched a bare
+#: number with group 1 empty and group 2 = the whole number, so
+#: ``_comparison_number``'s unit check misread the number itself as the
+#: unit: "a 3 cm screw" (token 3) returned unit "3" — a fall through
+#: instead of a foreign-unit fall through — and "30 mm" matched at a
+#: wrong offset so the unit group never saw "mm"). Both misreadings are
+#: now impossible: a bare number simply has no unit (mm by contract),
+#: and a number followed by a letter-word always reads that word.
+_COMPARISON_NUMBER_RE = re.compile(
+    r"\b(\d+(?:\.\d+)?)\s*([a-z°]+)?\b",
+    re.IGNORECASE,
+)
+
+#: The missing-fact trigger (issue #313, operator decision): a relative
+#: axis word + "than" + an article or possessive (the/a/an/my/our/your/
+#: this/that) + a noun phrase with no digit — "than the shelf", "than my
+#: drawer". It never fires for "than before", "than it was", "than the
+#: last one", "than the previous (one|version)", "than v\d+" or version
+#: names (those fall through to the existing routing): the operator
+#: decision's closed trigger set is article/possessive + noun only, and
+#: the trailing word is validated to carry no digit and no markup
+#: character (a short noun phrase never needs one).
+_MISSING_FACT_RE = re.compile(
+    r"\b(?:taller|shorter|higher|lower|wider|narrower|deeper|shallower)"
+    r"\s+than\s+(the|a|an|my|our|your|this|that)\s+(\S+)\b",
+    re.IGNORECASE,
+)
+
+#: The missing-fact trigger's closed noun exclusion set (operator
+#: decision, issue #313): the trigger is article/possessive + noun, and
+#: a noun that names a VERSION rather than a physical object ("the last
+#: one", "the previous one", "my previous version") is a version
+#: comparison — it falls through to the existing routing (the version-
+#: name path, then stage 2), never the missing-fact reply. A digit in
+#: the noun already excludes it (the ``\d`` check in
+#: :func:`_comparison_direction`); this set pins the digit-free forms.
+_MISSING_FACT_NOUN_EXCLUSIONS: frozenset[str] = frozenset(
+    {"last", "previous", "previouses"}
+)
+
+#: The ``v\d+`` version-name form ("than v2", "than the v1"): a digit
+#: after the bare ``v`` marks a version name, not a physical object —
+#: excluded from the missing-fact trigger (operator decision, issue
+#: #313). (The digit check in :func:`_comparison_direction` already
+#: excludes these; the pattern documents the shape.)
+_MISSING_FACT_VERSION_RE = re.compile(r"^v\d", re.IGNORECASE)
+
+#: The named-axis fit forms: "will it fit in a 45 mm deep gap?" — a
+#: single axis word (absolute or relative) somewhere after the "fit"
+#: verb, with at most one gap word (the "in" / "a" of "fit in a …")
+#: between them. The axis-less "will it fit in a 45 mm gap?" is NOT a
+#: fit form (no axis word) and falls through to stage 2 (the operator
+#: decision).
+_FIT_FORM_RE = re.compile(
+    r"\bfit\b\s+(?:\S+\s+){0,5}\b(?:tall|high|height|wide|width|deep|depth"
+    r"|taller|shorter|higher|lower|wider|narrower|deeper|shallower)\b",
+    re.IGNORECASE,
+)
+
+
+def _comparison_number(message: str) -> float | None:
+    """The user's comparison target in mm, or ``None`` (fall through).
+
+    Exactly one number in the message (``mm``-suffixed or bare) is a
+    comparison target; zero numbers (the missing-fact form) or two or
+    more (ambiguous) is ``None``, and any number carrying a foreign
+    unit suffix (anything other than ``mm``) makes the stage abstain
+    (inch units are out of scope — the question goes to stage 2).
+    """
+    numbers = _NUMBER_TOKEN_RE.findall(message)
+    if len(numbers) != 1:
+        return None
+    value = float(numbers[0])
+    # The unit, if any, is a word: ``mm`` (or no unit at all — mm by the
+    # stage's contract) is accepted, anything else (cm, in, inches, …) is
+    # out of scope and the stage abstains (the question goes to stage 2).
+    # The ``_COMPARISON_NUMBER_RE`` match's group 1 is the number
+    # itself; the unit is the word immediately after the number (with
+    # optional whitespace), read by scanning past the number's span.
+    # If the regex already consumed ``mm`` (group 2), that is the unit.
+    # Otherwise, if a word follows the number's span, that word is the
+    # unit (``cm``/``in``/… → foreign → fall through; nothing → mm by
+    # contract).
+    m = _COMPARISON_NUMBER_RE.search(message)
+    unit = ""
+    if m is not None:
+        if m.group(2):
+            unit = m.group(2).lower()
+        else:
+            rest = message[m.end():].lstrip()
+            word_m = re.match(r"[a-z°]+", rest, re.IGNORECASE)
+            if word_m is not None:
+                unit = word_m.group(0).lower()
+    if unit not in ("", "mm"):
+        return None  # foreign unit (cm, in, …) → fall through
+    return value
+
+
+def _fit_phrase(message: str) -> tuple[int, int] | None:
+    """The span ``(start, end)`` of the named-axis fit phrase in
+    ``message`` (issue #313), or ``None``.
+
+    The operator decision's fit form: "will it fit in a 45 mm deep gap?"
+    — the axis word sits inside the "fit in <gap phrase>" clause, and the
+    gap's NOUN is the fit object, NOT the part: "a 45 mm deep gap" names
+    a gap 45 mm deep. The message-level word scan (the one-axis rule)
+    still sees exactly the axis word ("gap" is not an axis word), so the
+    fit form is detected HERE — the axis word must sit in a short window
+    after the "fit" verb ("fit in a 45 mm deep gap" — up to six words,
+    "in a 45 mm", before the axis word; "gap" itself is not an axis word
+    so it does not extend the scan). The axis-less "will it fit in a
+    45 mm gap?" has no axis word in the window and is NOT a fit form —
+    it falls through to stage 2 (the operator decision).
+    """
+    m = _FIT_FORM_RE.search(message)
+    return (m.start(), m.end()) if m is not None else None
+
+
+def _comparison_direction(message: str, axis: str) -> str | None:
+    """The comparison's direction for ONE axis, or ``None`` (fall
+    through).
+
+    ``"enough"`` — "deep enough for a 30 mm screw" (measured >=
+    target, about-the-same counts as enough);
+    ``"than"`` — "taller than 30 mm" (the relative word's polarity decides
+    which side is "yes"); ``"fit"`` — "will it fit in a 45 mm deep gap?"
+    (the gap is the object: the part fits iff measured <= target,
+    about-the-same counts as fits); ``"missing"`` — "taller than the
+    shelf" (no number → the missing-fact reply).
+
+    A named-axis fit phrase ("fit in a 45 mm deep gap") forces the
+    ``"fit"`` direction even when "enough"/"than" phrasing is absent —
+    the fit form is the operator decision's only fit syntax, and the
+    axis word's position (inside the fit clause) is what makes it a fit
+    at all.
+    """
+    low = message.lower()
+    if re.search(r"\benough\b", low) is not None:
+        return "enough"
+    if re.search(r"\bthan\b", low) is not None:
+        m = _MISSING_FACT_RE.search(low)
+        if m is not None:
+            noun = m.group(2)
+            # The closed exclusion set (operator decision): a digit (a
+            # version number), a markup character, a ``v\d`` version
+            # name, or a version-referring noun ("last", "previous") is
+            # NOT a missing-fact object — the stage falls through to
+            # the existing routing.
+            if (
+                re.search(r"\d", noun) is None
+                and re.search(r"[<>=`\"'()&\[\]{}]", noun) is None
+                and _MISSING_FACT_VERSION_RE.match(noun) is None
+                and noun.lower() not in _MISSING_FACT_NOUN_EXCLUSIONS
+            ):
+                return "missing"
+        return "than"
+    if _FIT_FORM_RE.search(low) is not None:
+        return "fit"
+    return None
+
+
+def _deterministic_comparison(
+    message: str, latest: dict[str, Any] | None
+) -> tuple[str, str] | None:
+    """The deterministic comparison stage's ONE derivation for ONE
+    message, or ``None`` (the stage does not take the message — fall
+    through to the existing routing, which runs :func:
+    ``_deterministic_decision`` next and then stage 2).
+
+    Fires only when ALL of the following hold (operator decision, issue
+    #313):
+
+    * a latest version exists;
+    * the message names EXACTLY ONE axis — the set of distinct axes over
+      absolute words (``axis_for_question_word``) and relative words
+      (``RELATIVE_WORDS``) has size 1. Feature nouns ("screw") do NOT
+      block the stage: "is it deep enough for a 30 mm screw?" fires on
+      the absolute word "deep" — the feature noun's clause suppression
+      (the dimension protocol) never applies to a question-form message,
+      and the comparison's number is the TARGET, not a stated part size;
+    * it contains exactly one number (``mm``-suffixed or bare; a foreign
+      unit falls through) — OR no number at all, in which case the
+      message must be a relative-word "than the/a/… noun" missing-fact
+      form ("is it taller than the shelf?");
+    * :func:`_axis_value_for` returns a MEASURED value (``measured`` or
+      ``stated+measured``, > 0). A stated-only, disagrees, or
+      not-established axis falls through to stage 2.
+
+    Returns ``(axis, reply)``. The reply is a computed string (never
+    model text): the #278 stage-2 number guard is structurally exempt
+    (the reply is returned before the guard's stage runs), and the
+    stage makes zero LLM calls and changes nothing.
+    """
+    if latest is None:
+        return None
+    low_words = re.findall(r"\b\w+\b", message.lower())
+    axes: dict[str, str] = {}
+    for w in low_words:
+        ax = axis_for_question_word(w) or RELATIVE_WORDS.get(w)
+        if ax is not None and w not in axes:
+            axes[w] = ax
+    if len(axes) != 1:
+        return None
+    word, axis = next(iter(axes.items()))
+    entries = state_block_for_chat(latest)
+    cls, value, _ = _axis_value_for(axis, entries, latest)
+    if cls not in ("measured", "stated+measured") or value is None or value <= 0:
+        return None
+    direction = _comparison_direction(message, axis)
+    if direction is None:
+        return None
+    # The fit form's number lives INSIDE the "fit in a 45 mm deep gap"
+    # phrase (the gap's size) — any number outside it would make the
+    # fit target ambiguous (fall through). Every other form scans the
+    # whole message.
+    if direction == "fit":
+        fit_span = _fit_phrase(message)
+        if fit_span is None:
+            return None
+        candidate = message[fit_span[0]:fit_span[1]]
+    else:
+        candidate = message
+    target = _comparison_number(candidate)
+    if target is None and direction != "missing":
+        return None
+    adj = DETERMINISTIC_AXIS_ADJECTIVES[axis]
+    if direction == "missing":
+        m = _MISSING_FACT_RE.search(message.lower())
+        # ``m`` is guaranteed by the direction detection above; group(1)
+        # (the article) + group(2) (the noun) name the OTHER object.
+        reply = DETERMINISTIC_COMPARISON_SENTENCES["missing_fact"].format(
+            axis=adj, object=f"{m.group(1)} {m.group(2)}", measured=mm_formatted(value)
+        )
+        return axis, reply
+    tolerance = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
+    diff = value - target
+    if abs(diff) <= tolerance:
+        reply = DETERMINISTIC_COMPARISON_SENTENCES["about_the_same"].format(
+            measured=mm_formatted(value), axis=adj
+        )
+        return axis, reply
+    # The part exceeds the target on this axis (``higher``) — which side
+    # is "yes" depends on the direction. ``"fit"`` is the special case:
+    # the TARGET is the gap's size, not the part's — the part fits when
+    # the part is at or below the gap (measured <= target), so the
+    # polarity inverts relative to "enough".
+    higher = diff > 0
+    if direction == "enough":
+        enough = higher  # "deep enough for N": measured >= target
+    elif direction == "fit":
+        enough = not higher  # "fit in a N mm deep gap": measured <= target
+    else:  # "than": the RELATIVE word's polarity decides the reading.
+        # "taller than 30" reads as measured >= 30 (higher is yes);
+        # "shorter than 33" reads as measured <= 33 (lower is yes).
+        enough = higher if word in ("taller", "higher", "wider", "deeper") else not higher
+    if enough:
+        reply = DETERMINISTIC_COMPARISON_SENTENCES["yes"].format(
+            measured=mm_formatted(value),
+            axis=adj,
+            delta=mm_formatted(abs(diff)),
+            target=mm_formatted(target),
+        )
+    else:
+        reply = DETERMINISTIC_COMPARISON_SENTENCES["no"].format(
+            measured=mm_formatted(value),
+            axis=adj,
+            delta=mm_formatted(abs(diff)),
+            target=mm_formatted(target),
+        )
+    return axis, reply
+
+
 def _deterministic_axis(message: str, version_name: str | None):
     """The deterministic-stage decision for ONE message.
 
@@ -1100,7 +1409,8 @@ async def ask_answer_call(
     question: str,
     entries: list[dict[str, Any]],
     answer_fn: AnswerFn,
-    timeout: float = ANSWER_CALL_TIMEOUT_SECONDS,
+    timeout: float = LLM_CALL_TIMEOUT_SECONDS,
+    project_id: str | None = None,
 ) -> tuple[AnswerOutcome, str, str | None] | None:
     """Stage 2: one cheap LLM call + the deterministic number guard.
 
@@ -1118,8 +1428,9 @@ async def ask_answer_call(
     replies with the fixed ``COULD_NOT_ANSWER`` no-run message — the
     design loop is never the fallback for a failed answer): a malformed
     reply, a guard failure, an exception from ``answer_fn``, or the
-    hard ``timeout`` (operator decision: the 10 s bound is hard — a
-    hung call fails exactly like a failed one).
+    hard ``timeout`` (the shared per-LLM-call bound,
+    :data:`LLM_CALL_TIMEOUT_SECONDS` — a hung call fails exactly like a
+    failed one).
 
     ``missing`` is the unanswerable reply's ``missing`` field (issue
     #278: the short noun phrase naming the fact the block does not
@@ -1132,6 +1443,15 @@ async def ask_answer_call(
     ``malformed`` / ``guard``) plus elapsed ms and message length —
     never the message text, the answer text, or the missing text (no
     PII in logs).
+
+    Every stage-2 outcome ALSO logs exactly ONE ``INFO`` record (issue
+    #313) naming the project id (or ``-`` when absent), the outcome
+    (``answered`` / ``timeout`` / ``error`` / ``unanswerable`` — the
+    ``request`` outcome logs NO INFO line: the message is routed to the
+    design loop, not answered) and ``latency_ms`` — the wall time of
+    the WHOLE stage-2 attempt, the same span the WARNING's ``elapsed_ms``
+    covers, so the two numbers agree. Never the prompt, the answer text
+    or the key (no PII in logs).
     """
     prompt = build_answer_prompt(question, entries)
     started = time.monotonic()
@@ -1147,6 +1467,21 @@ async def ask_answer_call(
             outcome,
             elapsed_ms,
             len(question),
+        )
+
+    def _info(outcome: str, elapsed_ms: float) -> None:
+        # The stage-2 INFO line (issue #313): project id (or ``-``),
+        # outcome, latency. ``latency_ms`` is the wall time of the whole
+        # stage-2 attempt — the same span the WARNING's ``elapsed_ms``
+        # covers, so the two numbers agree. Never the prompt, the answer
+        # text or the key (no PII in logs). The ``request`` outcome is
+        # the one outcome with NO INFO line (the caller routes to the
+        # design loop — it is not an answer outcome).
+        logger.info(
+            "question-answer stage 2: project_id=%s outcome=%s latency_ms=%.0f",
+            project_id if project_id is not None else "-",
+            outcome,
+            elapsed_ms,
         )
 
     raw: Any
@@ -1166,6 +1501,7 @@ async def ask_answer_call(
         # ``TimeoutError`` — ``asyncio.TimeoutError`` is an alias of the
         # builtin in 3.11+): a failed answer of the ``timeout`` class.
         _warn("timeout", (time.monotonic() - started) * 1000)
+        _info("timeout", (time.monotonic() - started) * 1000)
         return None
     except Exception as exc:  # noqa: BLE001 — any non-timeout failure is a failed answer; the classification below is by class, not blind
         # ANY other failure is a failed answer — classify by the exception
@@ -1177,19 +1513,25 @@ async def ask_answer_call(
         # ``exception``.
         if httpx is not None and isinstance(exc, httpx.TimeoutException):
             _warn("timeout", (time.monotonic() - started) * 1000)
+            _info("timeout", (time.monotonic() - started) * 1000)
         else:
             _warn("exception", (time.monotonic() - started) * 1000)
+            _info("error", (time.monotonic() - started) * 1000)
         return None
     parsed = parse_answer_reply(raw)
     if parsed is None:
         _warn("malformed", (time.monotonic() - started) * 1000)
+        _info("error", (time.monotonic() - started) * 1000)
         return None
     kind, answer, missing = parsed
     if kind == "request":
         _warn("request", (time.monotonic() - started) * 1000)
+        # No INFO line for the ``request`` outcome (the message routes to
+        # the design loop — it is not an answer outcome).
         return "request", answer, None
     if kind == "unanswerable":
         _warn("unanswerable", (time.monotonic() - started) * 1000)
+        _info("unanswerable", (time.monotonic() - started) * 1000)
         return "unanswerable", answer, missing
     # The guard licenses the answer's numbers from the block AND the
     # question (issue #278 — the answer may quote the user's own
@@ -1197,8 +1539,10 @@ async def ask_answer_call(
     # is invented → a failed answer of the ``guard`` class.
     if not guard_answer_numbers(answer, entries, question=question):
         _warn("guard", (time.monotonic() - started) * 1000)
+        _info("error", (time.monotonic() - started) * 1000)
         return None
     _warn("answer", (time.monotonic() - started) * 1000)
+    _info("answered", (time.monotonic() - started) * 1000)
     return "answer", answer, None
 
 
@@ -1235,7 +1579,8 @@ async def route_chat_message(
     message: str,
     latest: dict[str, Any] | None,
     answer_edge: AnswerEdge | None = None,
-    timeout: float = ANSWER_CALL_TIMEOUT_SECONDS,
+    timeout: float = LLM_CALL_TIMEOUT_SECONDS,
+    project_id: str | None = None,
 ) -> dict[str, Any] | None:
     """The pre-route decision for ONE chat message.
 
@@ -1268,13 +1613,18 @@ async def route_chat_message(
       says the message asks for a change, and the design loop is the
       right home (exactly as a non-question message would route).
 
-    The ``timeout`` parameter (default: ``ANSWER_CALL_TIMEOUT_SECONDS``
-    = 10 s) is the hard bound the stage-2 call runs under — the operator
-    decision's latency bound. Tests pass a shorter value to pin the
+    The ``timeout`` parameter (default: :data:`LLM_CALL_TIMEOUT_SECONDS`
+    — the shared per-LLM-call constant, issue #313) is the hard bound
+    the stage-2 call runs under. Tests pass a shorter value to pin the
     timeout contract in <1 s of wall clock.
 
+    The ``project_id`` (issue #313) rides the stage-2 INFO line (``-``
+    when absent); the existing callers/tests pass nothing and keep
+    working (the default ``None``).
+
     The stage-1 short-circuits log at INFO; every stage-2 outcome logs
-    at WARNING from :func:`ask_answer_call` (issue #260).
+    at WARNING and (except the ``request`` outcome) at INFO from
+    :func:`ask_answer_call` (issues #260 / #313).
     """
     if latest is None:
         logger.info("question-answer: no versions yet — design loop")
@@ -1287,6 +1637,26 @@ async def route_chat_message(
             len(message),
         )
         return None
+    # The deterministic comparison stage (issue #313): a stage-1
+    # candidate that names exactly one axis (absolute or relative word),
+    # carries exactly one mm number (or is a relative-word "than the/…
+    # object" missing-fact form), and has a MEASURED axis value is
+    # answered from the design state with NO LLM call (no timeout, no
+    # model call, no guard — the reply is computed, so the #278 stage-2
+    # number guard is structurally exempt). It runs BEFORE
+    # :func:`_deterministic_decision` (whose digit-abstain would block
+    # every digit-bearing comparison question). Anything it does not
+    # take falls through to the existing routing exactly as today.
+    comparison = _deterministic_comparison(message, latest)
+    if comparison is not None:
+        axis, reply = comparison
+        logger.warning(
+            "question-answer: outcome=deterministic axis=%s "
+            "provenance=comparison (len(message)=%d)",
+            axis,
+            len(message),
+        )
+        return {"kind": ANSWER_DONE_KIND, "answer": reply}
     # The deterministic axis-size stage (issue #263): a stage-1 candidate
     # that asks for exactly one axis's size — or the full dimension list —
     # is answered from the design state with NO LLM call (no timeout,
@@ -1318,7 +1688,9 @@ async def route_chat_message(
     async def _answer_fn(prompt: str) -> Any:
         return await answer_edge(message, entries)
 
-    result = await ask_answer_call(message, entries, _answer_fn, timeout=timeout)
+    result = await ask_answer_call(
+        message, entries, _answer_fn, timeout=timeout, project_id=project_id
+    )
     if result is None:
         # A FAILED stage-2 call (timeout, exception, malformed reply,
         # or number-guard failure): the fixed no-run reply. The design
