@@ -1576,6 +1576,7 @@ def _build_production_design_loop():
                 defines,
                 renders_dir=data_dir / "renders",
                 on_progress=kwargs.get("on_progress"),
+                project_id=kwargs.get("project_id"),
             )
 
         # Model pre-flight (issue #303): BEFORE any capability probe or
