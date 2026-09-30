@@ -17,7 +17,10 @@ with no label the label IS the parameter name, never invented prose),
 and ``provenance`` — a ``Literal`` (closed set, never a bare ``str``;
 the project's ``error_class`` enum is the precedent) of
 ``"stated" | "measured" | "assumed" | "unknown" | "disagrees"``, plus
-``stated_value`` when ``provenance == "disagrees"``, and
+``stated_value`` when ``provenance == "disagrees"`` (a collapsed row may
+    also carry the param's value alongside its ``stated`` provenance —
+    the two surfaces are independent and the stated value rides the
+    axis row), and
 ``disagrees_source`` (``"model" | "user"``) on PARAM rows whose
 provenance is ``"disagrees"`` — ``"user"`` when the stated value is the
 user's (the default; the field is ABSENT on the wire for backward
@@ -204,11 +207,12 @@ class StateEntry(TypedDict):
     """One design-state entry (the serialised contract).
 
     ``value`` is nullable: ``"unknown"`` provenance carries ``None``.
-    ``stated_value`` is present ONLY when ``provenance == "disagrees"``
-    (the displayed value is the MEASURED one — what will print — and the
-    stated value rides alongside; they are never collapsed), so it is
-    ``NotRequired``: the common case carries no ``stated_value`` key at
-    all.
+    ``stated_value`` rides alongside a ``disagrees`` row (the displayed
+    value is the MEASURED one — what will print — and the stated value
+    rides alongside; they are never collapsed). It may also be present
+    on a ``stated`` axis row collapsed into by an agreeing param (the
+    collapse never strips it), so it is ``NotRequired``: the common
+    case carries no ``stated_value`` key at all.
     """
 
     name: str
@@ -734,11 +738,15 @@ def _dedupe_agreeing_param_rows(
     value within the bbox tolerance is REDUNDANT: the axis row already
     carries the same number (the axis row keeps its identity, name, and
     kind). The param row is DROPPED; the axis row takes the param's
-    human label (when one exists) and carries the param's CURRENT
-    provenance when it is a non-disagrees state (``stated`` / ``assumed``
-    / ``measured`` — as computed before the drop); an axis row's own
-    ``disagrees`` is authoritative (the #264 display is unchanged) and
-    is never overwritten.
+    human label (when one exists) and the STRONGER of the two
+    provenances — rank ``stated`` > ``measured`` > ``assumed`` (the
+    user's words never lose to the model's guess, and the measurement
+    never loses to either when one of them is ``stated``). A param whose
+    own provenance is ``disagrees`` or ``unknown`` is never collapsed
+    (a disagreeing param keeps both rows — the #264 display is
+    unchanged — and an ``unknown`` param has no value to agree with).
+    An axis row's own ``disagrees`` is authoritative (the #264 display
+    is unchanged) and is never overwritten.
 
     A param row collapses into its axis row only when ALL of these hold:
 
@@ -767,14 +775,14 @@ def _dedupe_agreeing_param_rows(
     for e in entries:
         if e.get("kind") == "axis" and e.get("name") in AXIS_PARAM_NAMES:
             by_axis[e["name"]] = e
-    dropped: set[str] = set()
+    dropped: set[int] = set()
     for e in entries:
         if e.get("kind") != "param":
             continue
         axis = e.get("axis")
-        if axis not in _VALID_META_AXES:
+        if axis not in AXIS_PARAM_NAMES:
             axis = e.get("name")
-        if axis not in _VALID_META_AXES:
+        if axis not in AXIS_PARAM_NAMES:
             continue
         value = e.get("value")
         if not _is_number(value) or value <= 0:
@@ -794,18 +802,19 @@ def _dedupe_agreeing_param_rows(
         ):
             continue
         # The param agrees with its axis — drop the param row; the axis
-        # row takes the param's label (when one exists) and its CURRENT
-        # provenance (an axis row's own disagrees is never overwritten).
+        # row takes the param's label (when one exists) and the
+        # STRONGER of the two provenances (``stated`` > ``measured`` >
+        # ``assumed`` — the user's words never lose to the model's
+        # guess; an axis row's own disagrees is never overwritten).
         label = e.get("label")
         if isinstance(label, str) and label:
             axis_row["label"] = label
-        provenance = e.get("provenance")
-        if isinstance(provenance, str) and provenance in (
-            "stated",
-            "assumed",
-            "measured",
-        ):
-            axis_row["provenance"] = provenance
+        param_prov = e.get("provenance")
+        axis_prov = axis_row.get("provenance")
+        if param_prov == "stated" and axis_prov != "stated":
+            axis_row["provenance"] = "stated"
+        elif param_prov == "measured" and axis_prov == "assumed":
+            axis_row["provenance"] = "measured"
         dropped.add(id(e))
     return [e for e in entries if id(e) not in dropped]
 

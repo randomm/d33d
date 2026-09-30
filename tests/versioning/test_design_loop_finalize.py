@@ -5527,17 +5527,18 @@ def test_question_path_deterministic_answer_unaffected_by_model_unconfigured(
     # ``kind: "answer"`` discriminator — the SPA renders it verbatim as a
     # plain assistant message). There is no separate ``answer`` field.
     answer = done_frames[0].get("message", "")
-    # Issue #316 de-dup: the H param (12) AGREES with the stated H axis
-    # (12) → the H param row is DROPPED; the surviving H row is the axis
-    # row, which takes the param's CURRENT provenance (``assumed`` — the
-    # param was never promoted). The deterministic answer stage reads the
-    # axis row and finds ``assumed`` → "not established yet" (the de-dup
-    # changes the displayed row's provenance, not the underlying evidence
-    # — the H number 12 is still in the block on the axis row). The
-    # answer now reflects the merged provenance (``assumed``), not the
-    # original stated evidence.
-    assert "established" in answer.lower(), (
-        f"the answer reflects the de-duped axis row's provenance, "
+    # Issue #316 de-dup (never-downgrade rule): the H param (12) AGREES
+    # with the stated H axis (12) → the H param row is DROPPED; the
+    # surviving H row is the axis row, which keeps its OWN ``stated``
+    # provenance (the stronger of stated vs the param's ``assumed`` — the
+    # user's words never lose to the model's matching number). The
+    # deterministic answer stage reads the axis row and finds ``stated``
+    # → "You said 12.0 mm tall. Nothing has measured it yet." (the
+    # stated value is the user's, not the model's assumption — the
+    # never-downgrade rule corrects the old "not established" answer
+    # that treated the stated axis as an assumption).
+    assert "you said" in answer.lower(), (
+        f"the answer reflects the never-downgrade stated provenance, "
         f"got {answer!r}"
     )
     error_frames = [data for event, data in frames if event == "error"]

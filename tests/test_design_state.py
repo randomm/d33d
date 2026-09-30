@@ -942,11 +942,14 @@ def test_prompt_format_marks_assumed_and_stated_provenance() -> None:
     text = format_design_state_block(block)
     # The W param (30) AGREES with the stated W axis (30) → the redundant
     # W param row is DROPPED (issue #316 de-dup). The surviving W row is
-    # the axis row, which takes the param's CURRENT provenance (``assumed``
-    # — the param's provenance, as computed before the drop) and its label
-    # (the bare ``W`` identifier — the axis row keeps its name).
+    # the axis row, which takes the param's label (the bare ``W``
+    # identifier — the axis row keeps its name) and the STRONGER of the
+    # two provenances: the axis row's ``stated`` beats the param's
+    # ``assumed`` — the prompt's "stated" line for W must survive the
+    # collapse (the user said W = 30; the model's matching number never
+    # downgrades the row to ``assumed``).
     # ``spacer_width`` (no axis mapping) is unaffected.
-    assert "Width (W) = 30 (assumed — the user never set this)" in text
+    assert "Width (W) = 30 (stated by the user)" in text
     assert "spacer_width = 20 (assumed — the user never set this)" in text
     # The W param is not rendered as a SEPARATE row (dropped — one row
     # per axis, no repeat).
@@ -960,12 +963,13 @@ def test_prompt_format_marks_assumed_and_stated_provenance() -> None:
     assert "H = not specified" in text2
     assert "(stated by the user)" not in text2
     # The single-line variant marks the same way: the surviving W row is
-    # the axis row, carrying the param's provenance (``assumed``) and the
-    # axis prefix; the dropped W param leaves no separate bare-name line.
+    # the axis row, carrying the axis's ``stated`` provenance (never
+    # downgraded by the agreeing assumed param) and the axis prefix; the
+    # dropped W param leaves no separate bare-name line.
     from d33d.design_state import format_design_state_line
 
     line = format_design_state_line(block["entries"])
-    assert "Width (W)=30 (assumed — the user never set this)" in line
+    assert "Width (W)=30 (stated by the user)" in line
     assert "W=30 (assumed — the user never set this)" not in line
 
 
@@ -1208,16 +1212,20 @@ def test_promotion_param_named_w_without_axis_stays_assumed() -> None:
     Issue #316 de-dup: a literal W/D/H name maps onto its axis, so when
     the value AGREES with the axis row, the param row is DROPPED (the
     axis row carries the same number — one row per axis). The merged row
-    takes the param's CURRENT provenance (``assumed`` here — the param
-    was never promoted), never ``stated`` (that would be the forbidden
-    name-based promotion). The DISAGREEING case (50 vs 60) keeps both
-    rows (the #264 disagree display is unchanged)."""
+    keeps the STRONGER provenance: here the axis row's ``stated`` beats
+    the param's ``assumed`` (the user's words — never the model's
+    matching number — are the evidence, so the collapse must not
+    downgrade the row). The param itself is never promoted (it is
+    DROPPED, and the surviving row is the AXIS row, never a stated
+    PARAM row — the forbidden name-based promotion would render a param
+    row ``stated``). The DISAGREEING case (50 vs 60) keeps both rows
+    (the #264 disagree display is unchanged)."""
     # No measurement: the matching W param (60) AGREES with the stated W
     # axis (60) → DROPPED (issue #316 de-dup). The surviving W row is the
-    # axis row, carrying the param's CURRENT provenance — ``assumed``
-    # (the param was never promoted — no declared axis, no name-based
-    # promotion). This proves the de-dup is a DROP, not a promotion: a
-    # matching assumed param never renders ``stated``.
+    # axis row, keeping its OWN ``stated`` provenance (the stronger of
+    # the two — the param's ``assumed`` never downgrades it). This proves
+    # the de-dup is a DROP, not a promotion: the param row is gone and
+    # the surviving row is the axis row.
     entries = state_block_for_version(
         {"W": 60.0},
         None,
@@ -1227,9 +1235,9 @@ def test_promotion_param_named_w_without_axis_stays_assumed() -> None:
     assert len(entries) == 1
     assert entries[0]["kind"] == "axis"
     assert entries[0]["name"] == "W"
-    # The merged row carries the param's CURRENT provenance (``assumed``
-    # — the param was never promoted; no name-based promotion happened).
-    assert entries[0]["provenance"] == "assumed"
+    # The merged row keeps the axis row's ``stated`` provenance (the
+    # stronger — the param's ``assumed`` never downgrades it).
+    assert entries[0]["provenance"] == "stated"
     # And never a stated PARAM row (that would be the forbidden
     # name-based promotion).
     assert ("param", "W") not in {(e["kind"], e["name"]) for e in entries}
@@ -1303,11 +1311,11 @@ def test_prompt_format_shows_model_label_when_present() -> None:
     # The labelled param (fillet_size_top) renders under its label. The W
     # param (30) AGREES with the stated W axis (30) → its row is DROPPED
     # (issue #316 de-dup); the surviving W row is the axis row, which
-    # takes the param's label (the bare ``W`` identifier) and its CURRENT
-    # provenance (``assumed`` — the param's provenance, as computed
-    # before the drop).
+    # takes the param's label (the bare ``W`` identifier) and keeps the
+    # STRONGER provenance: the axis row's ``stated`` beats the param's
+    # ``assumed`` — the user's stated W line survives the collapse.
     assert "Top fillet size = 2 (assumed — the user never set this)" in text
-    assert "Width (W) = 30 (assumed — the user never set this)" in text
+    assert "Width (W) = 30 (stated by the user)" in text
     # The W param is not rendered as a SEPARATE row (dropped — one row
     # per axis, no repeat).
     assert text.count("Width (W) = 30") == 1
@@ -1609,9 +1617,9 @@ def test_within_tolerance_assumed_axis_param_stays_assumed() -> None:
     Issue #316 de-dup: the spacer_width param (40) AGREES with the
     measured W extent (40.2, within tolerance) → its redundant param row
     is DROPPED; the W axis row carries the same number. The merged row
-    takes the param's label (``Spacer width``) and its CURRENT provenance
-    (``assumed`` — the measurement does not promote it, and the de-dup is
-    a DROP, not a promotion)."""
+    takes the param's label (``Spacer width``) and the STRONGER
+    provenance (``measured`` — the axis row's own; the param's ``assumed``
+    never downgrades it)."""
     # spacer_width 40 vs measured 40.2: |40.2-40| = 0.2 <= tol 0.5.
     entries = state_block_for_version(
         {"spacer_width": 40.0},
@@ -1625,11 +1633,12 @@ def test_within_tolerance_assumed_axis_param_stays_assumed() -> None:
         (e["kind"], e["name"]) for e in entries
     }
     # The W axis row: ``measured`` (the measured extent is what will
-    # print), taking the param's label and its CURRENT provenance
-    # (``assumed`` — the measurement does not promote it, and the de-dup
-    # never renders a matching assumed param as ``stated``).
+    # print), taking the param's label and keeping the STRONGER
+    # provenance: the axis row's own ``measured`` beats the param's
+    # ``assumed`` (the measurement does not promote, and the de-dup
+    # never downgrades a ``measured`` row to ``assumed``).
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
-    assert w_axis["provenance"] == "assumed"
+    assert w_axis["provenance"] == "measured"
     assert w_axis["value"] == 40.2  # the measured extent (the display)
     assert w_axis["label"] == "Spacer width"  # the param's label
     assert "stated_value" not in w_axis
@@ -2156,8 +2165,8 @@ def test_axis_row_label_is_identifier_false_when_stated_no_measurement() -> None
 
     Issue #316 de-dup: the W param (60) AGREES with the stated W axis
     (60) → its row is DROPPED; the surviving W row is the axis row,
-    which takes the param's CURRENT provenance (``assumed`` — the param
-    was never promoted; no measurement to change its provenance). The
+    which keeps its OWN ``stated`` provenance (the stronger of the two —
+    the param's ``assumed`` never downgrades it). The
     ``label_is_identifier: False`` property of axis rows is unchanged."""
     entries = state_block_for_version(
         {"W": 60.0},
@@ -2168,10 +2177,10 @@ def test_axis_row_label_is_identifier_false_when_stated_no_measurement() -> None
     # W axis row remains (plus the D/H stated axis rows are absent —
     # only W is stated).
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
-    # The merged row carries the param's CURRENT provenance (``assumed``
-    # — the param was never promoted; the de-dup is a DROP, not a
-    # promotion).
-    assert w_axis["provenance"] == "assumed"
+    # The merged row keeps the axis row's OWN ``stated`` provenance
+    # (the stronger — the param's ``assumed`` never downgrades it; the
+    # de-dup is a DROP, never a name-based promotion of the param).
+    assert w_axis["provenance"] == "stated"
     # The axis row's ``label_is_identifier`` property is unchanged.
     assert w_axis["label_is_identifier"] is False
     # And never a stated PARAM row (that would be the forbidden
@@ -2418,3 +2427,129 @@ def test_label_inheritance_inputs_never_mutated() -> None:
     assert out["h"] is not meta["h"]
     # The inherited label is present.
     assert out["h"]["label"] == "Overall height"
+
+
+# ---------------------------------------------------------------------------
+# Issue #316 fix round: provenance must NEVER downgrade on collapse
+# (operator correction — supersedes "carries the param's CURRENT
+# provenance"): the merged axis row's provenance is the STRONGER of the
+# axis row's and the param's, with rank stated > measured > assumed.
+# ---------------------------------------------------------------------------
+
+
+def test_collapse_stated_axis_plus_assumed_param_keeps_stated() -> None:
+    """STATED axis + ASSUMED param → ``stated`` (the operator's worked
+    example): the user stated W 40; the model's box_width (declared axis
+    W) is 40 and ``assumed``. The collapse drops the param row and the
+    surviving W axis row must be ``stated`` — the user's words never lose
+    to the model's matching guess — with the MEASURED extent displayed
+    (40.2 — what will print, never the model's 40 or the stated 40)."""
+    entries = state_block_for_version(
+        {"box_width": 40.0},
+        {"x": 40.2, "y": 30.0, "z": 30.0},
+        {"W": 40.0},
+        {"box_width": {"label": "Width", "axis": "W"}},
+    )
+    # The box_width param row is DROPPED (it agrees with the W axis row —
+    # 40 vs 40.2, within tolerance): one row per axis.
+    assert ("param", "box_width") not in {(e["kind"], e["name"]) for e in entries}
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    # STRONGER wins: stated (the axis row's own) beats the param's assumed.
+    assert w_axis["provenance"] == "stated"
+    # The displayed value is the MEASURED extent (the axis row's own
+    # value — the collapse never swaps it).
+    assert w_axis["value"] == 40.2
+    # The param's human label rides the collapsed row.
+    assert w_axis["label"] == "Width"
+    # And the prompt renders the stated line for W (the collapse must
+    # never downgrade the user's statement to an assumption).
+    text = format_design_state_block(build_design_state_block(entries))
+    assert "Width (W) = 40.2 (stated by the user)" in text
+
+
+def test_collapse_measured_axis_plus_stated_param_keeps_stated() -> None:
+    """MEASURED axis + STATED param → ``stated`` (the user's explicit
+    confirmation beats the measurement when the two agree): a confirmed
+    spacer_width 40 (rule (b) promotion) that the measurement confirms
+    (40.2, within tolerance). The merged W row must be ``stated``, not
+    ``measured``."""
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 40.2, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+        {"spacer_width": 40.0},  # rule (b): explicit confirmation
+    )
+    # The confirmed param is promoted (``stated``) and then agrees with
+    # the measured W axis row (40 vs 40.2) → DROPPED into it.
+    assert ("param", "spacer_width") not in {(e["kind"], e["name"]) for e in entries}
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    # STRONGER wins: stated (the param's) beats the axis row's measured.
+    assert w_axis["provenance"] == "stated"
+    assert w_axis["value"] == 40.2
+    assert w_axis["label"] == "Spacer width"
+
+
+def test_collapse_measured_axis_plus_assumed_param_keeps_measured() -> None:
+    """MEASURED axis + ASSUMED param → ``measured`` (the model's number
+    never downgrades the measurement): an assumed spacer_width 40 with a
+    measured W extent of 40.2, NO stated/confirmed evidence. The merged W
+    row must be ``measured`` — not ``assumed`` (the param's provenance,
+    which is weaker) and not ``stated`` (no one stated it)."""
+    entries = state_block_for_version(
+        {"spacer_width": 40.0},
+        {"x": 40.2, "y": 30.0, "z": 30.0},
+        None,
+        {"spacer_width": {"label": "Spacer width", "axis": "W"}},
+    )
+    # The assumed param agrees (40 vs 40.2) → DROPPED into the measured
+    # axis row.
+    assert ("param", "spacer_width") not in {(e["kind"], e["name"]) for e in entries}
+    w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
+    # STRONGER wins: measured (the axis row's own) beats the param's assumed.
+    assert w_axis["provenance"] == "measured"
+    assert w_axis["value"] == 40.2
+    assert w_axis["label"] == "Spacer width"
+
+
+def test_qa_box_stated_provenance_survives_collapse() -> None:
+    """The QA box (issue #316) under the NEVER-DOWNGRADE rule: the user
+    stated W 40 and the model's box_width (declared axis W) is 40 and
+    ``assumed``, with a matching bbox of 40 × 40 × 12. The W row must
+    collapse to ONE row per axis, with W ``stated`` (the user's words
+    survive the collapse — never downgraded to ``assumed`` by the model's
+    matching number) and the D/H rows ``measured`` (the model's matching
+    D/H params never downgrade the measured extent either)."""
+    meta = {
+        "box_width": {"label": "Width", "axis": "W"},
+        "box_depth": {"label": "Depth", "axis": "D"},
+        "box_height": {"label": "Height", "axis": "H"},
+    }
+    entries = state_block_for_version(
+        {"box_width": 40.0, "box_depth": 40.0, "box_height": 12.0},
+        {"x": 40.0, "y": 40.0, "z": 12.0},
+        {"W": 40.0},  # the user stated W only (partial statement)
+        meta,
+    )
+    # One row per axis, in W/D/H order — the redundant param rows are gone.
+    assert [(e["kind"], e["name"]) for e in entries] == [
+        ("axis", "W"),
+        ("axis", "D"),
+        ("axis", "H"),
+    ]
+    by_name = {e["name"]: e for e in entries}
+    # W: stated (the axis row's own — the stronger of stated vs the
+    # param's assumed; never downgraded).
+    assert by_name["W"]["provenance"] == "stated"
+    assert by_name["W"]["value"] == 40.0
+    assert by_name["W"]["label"] == "Width"
+    # D/H: measured (the axis rows' own — the model's matching assumed
+    # params never downgrade a measured row).
+    assert by_name["D"]["provenance"] == "measured"
+    assert by_name["H"]["provenance"] == "measured"
+    # And the prompt: the W stated line survives the collapse, the D/H
+    # lines carry the plain measured rendering.
+    text = format_design_state_block(build_design_state_block(entries))
+    assert "Width (W) = 40 (stated by the user)" in text
+    assert "Depth (D) = 40" in text
+    assert "Height (H) = 12" in text
