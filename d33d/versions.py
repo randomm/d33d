@@ -824,10 +824,23 @@ class VersionService:
                 f"{version_id}/{PARAMS_FILENAME}",
                 commit_subject,
             )
-            self.conn.update_project(
-                project_id,
-                current_version=version_id,
-                last_activity=(version_id, version_name),
+            # Re-point the project pointer + last_activity in the SAME
+            # transaction as the version row (NOT via update_project, which
+            # commits mid-transaction and would split the commit boundary).
+            # The last_activity ts is set to the version's creation — the
+            # import's wall-clock ts is not available here (the version row
+            # carries the creation, the project column is a convenience).
+            self.conn.raw.execute(
+                "UPDATE projects SET current_version = ?, "
+                "last_activity = ?, updated_at = "
+                "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+                (
+                    version_id,
+                    json.dumps(
+                        {"version_id": version_id, "name": version_name, "ts": None}
+                    ),
+                    project_id,
+                ),
             )
             if part_values is not None:
                 # The part columns live on the PROJECT (one part per

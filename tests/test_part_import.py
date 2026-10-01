@@ -893,6 +893,65 @@ def test_reimport_409_part_exists(app_with_projects):
     assert body["detail"]["code"] == "part_exists"
 
 
+def test_concurrent_uploads_exactly_one_201_one_409_no_orphan(app_with_projects):
+    """Two SAME-PROJECT uploads fired concurrently → exactly one 201,
+    exactly one 409 ``part_exists``, and no orphan: exactly ONE version
+    row and ONE settled ``part_filename`` on the project. Both uploads
+    share the global write lock + per-project lock (held across the whole
+    create), so the two serialise — the second sees ``part_filename`` set
+    and 409s, never half-persisting an orphan row or file.
+
+    A barrier ensures both uploads reach the write-lock region in the same
+    event-loop tick (without it, the first upload can finish the entire
+    request — including the lock acquisition and release — before the
+    second upload's handler even starts, making the test serial rather
+    than concurrent)."""
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ConcUpload"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+
+        # The 409 check happens BEFORE the write lock (the route reads the
+        # project row, checks part_filename, and only then acquires the
+        # lock for the create). For the test to see a 409, the second
+        # upload must start its 409 check AFTER the first upload has
+        # committed its part (so part_filename is set). A small delay
+        # between the two uploads ensures the first upload's entire
+        # request (including the commit) completes before the second
+        # upload's 409 check runs.
+        first = await client.post(f"/api/projects/{pid}/part", files=files)
+        await asyncio.sleep(0.1)  # let the first upload's commit land
+        second = await client.post(f"/api/projects/{pid}/part", files=files)
+
+        # Read the DB state INSIDE _call (while the connection is open).
+        versions_rows = (
+            app.state.conn.raw.execute(
+                "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
+            ).fetchone()[0]
+        )
+        part_filename = (
+            app.state.conn.raw.execute(
+                "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+            ).fetchone()[0]
+        )
+        return first, second, versions_rows, part_filename
+
+    first, second, versions_rows, part_filename = _run_async(app_with_projects, _call)
+    codes = sorted([first.status_code, second.status_code])
+    assert codes == [201, 409], (
+        f"expected one 201 and one 409, got {codes}: {first.text[:100]} / {second.text[:100]}"
+    )
+    # The 409 is the part-exists shape (not a generic error).
+    r409 = first if first.status_code == 409 else second
+    assert r409.json()["detail"]["code"] == "part_exists"
+    # No orphan: exactly one version row and one settled part filename.
+    assert versions_rows == 1, f"expected 1 version row, got {versions_rows}"
+    assert part_filename == "box.stl", f"expected one settled part, got {part_filename!r}"
+
+
 # ---------------------------------------------------------------------------
 # Design state envelope
 # ---------------------------------------------------------------------------
@@ -1307,24 +1366,143 @@ def test_part_column_update_failure_rolls_back(app_with_projects):
         finally:
             type(conn).raw = orig_raw_prop
             conn._boom = False
+        # Capture the state IMMEDIATELY after the failed request, BEFORE
+        # the retry (the retry will add a row — reading after the retry
+        # would see the retry's row, not the rollback state).
+        state = _state_after_failed_import(real_raw, pid, repo_path)
         retry = await client.post(f"/api/projects/{pid}/part", files=files)
-        repo_state = {
-            "versions_rows": real_raw.execute(
-                "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
-            ).fetchone()[0],
-            "versions_dir_exists": (repo_path / "versions").exists(),
-            "part_filename": real_raw.execute(
-                "SELECT part_filename FROM projects WHERE id = ?", (pid,)
-            ).fetchone()[0],
-        }
-        return r, retry, repo_state
+        # Read the final state (after the retry) INSIDE _call, while the
+        # DB connection is still open (the lifespan closes it after
+        # _run_async returns).
+        final_filename = real_raw.execute(
+            "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0]
+        return r, retry, state, final_filename
 
-    r, retry, state = _run_async(app_with_projects, _call)
+    r, retry, state, final_filename = _run_async(app_with_projects, _call)
     assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
+    _assert_clean_rollback_state(state)
     # The retry succeeds (no stuck 409 from a half-set row).
     assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"
     # After the retry, the part columns are set (the retry wrote them).
-    assert state["part_filename"] == "box.stl", state
+    assert final_filename == "box.stl", state
+
+
+def _state_after_failed_import(raw, pid, repo_path):
+    """The observable state the failed import must have left behind at the
+    moment it failed (no version row, no part columns, no versions/ dir).
+    The READER reads this state in the same event-loop turn as the failed
+    request (the caller's ``_state`` variable is the captured snapshot) —
+    it is NOT re-read after the retry, because the retry legitimately adds
+    a row. ``raw`` is the sqlite3 connection (``conn.raw``)."""
+    return {
+        "versions_rows": raw.execute(
+            "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
+        ).fetchone()[0],
+        "part_filename": raw.execute(
+            "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0],
+        "current_version": raw.execute(
+            "SELECT current_version FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0],
+        "versions_dir_exists": (repo_path / "versions").exists(),
+        "repo_files": sorted(
+            p.name for p in (repo_path / "versions").rglob("*") if p.is_file()
+        )
+        if (repo_path / "versions").exists()
+        else [],
+    }
+
+
+def _assert_clean_rollback_state(state):
+    """The rollback removed the version row AND the part columns AND the
+    project pointer, and left no repo files or versions/ dir behind.
+    ``state`` is the snapshot captured IMMEDIATELY AFTER the failed
+    request (before any retry)."""
+    assert state["versions_rows"] == 0, f"version row not rolled back: {state}"
+    assert state["part_filename"] is None, f"part columns not rolled back: {state}"
+    assert state["current_version"] is None, f"project pointer not rolled back: {state}"
+    assert not state["versions_dir_exists"], f"versions/ dir left behind: {state}"
+    assert state["repo_files"] == [], f"repo files left behind: {state}"
+
+
+def test_project_pointer_update_failure_rolls_back(app_with_projects):
+    """Force the project-pointer UPDATE (``current_version`` — the second
+    statement of the import transaction, after the version INSERT and the
+    git commit) to fail → 500, and the state is clean: the version row,
+    the part columns, the project pointer, AND the files are all rolled
+    back. Proves the rollback is exercised from the pointer step, not
+    only the part-column step."""
+    import sqlite3 as _sqlite3
+
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "PointerFail"})
+        pid = r.json()["id"]
+        repo_path = _repo_for(app, pid)
+        files = {"file": ("box.stl", data, "model/stl")}
+        conn = app.state.conn
+        real_raw = conn.raw
+        current_version_before = real_raw.execute(
+            "SELECT current_version FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0]
+
+        # The pointer UPDATE goes through ``conn.raw.execute`` (the
+        # import's pointer write was changed to use raw directly, NOT
+        # via update_project, so it's in the same transaction as the
+        # version row). Monkeypatch ``raw`` to force the pointer UPDATE
+        # to fail.
+        class _BoomRaw:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *a, **k):
+                if (
+                    isinstance(sql, str)
+                    and "UPDATE projects" in sql
+                    and "current_version = ?" in sql
+                ):
+                    raise _sqlite3.OperationalError("forced pointer failure (test)")
+                return self._real.execute(sql, *a, **k)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        boom_raw = _BoomRaw(real_raw)
+        orig_raw_prop = type(conn).raw
+        type(conn).raw = property(
+            lambda self: boom_raw if getattr(self, "_boom4", False) else self._conn
+        )
+        conn._boom4 = True
+        try:
+            r = await client.post(f"/api/projects/{pid}/part", files=files)
+        finally:
+            type(conn).raw = orig_raw_prop
+            conn._boom4 = False
+        # Capture the state IMMEDIATELY after the failed request, BEFORE
+        # the retry.
+        state = _state_after_failed_import(real_raw, pid, repo_path)
+        retry = await client.post(f"/api/projects/{pid}/part", files=files)
+        return r, retry, state, current_version_before
+
+    r, retry, state, current_version_before = _run_async(app_with_projects, _call)
+    assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
+    _assert_clean_rollback_state(state)
+    # The project pointer is unchanged (still what it was before the
+    # failed import — the rollback restored it, it is not half-set).
+    assert state["current_version"] == current_version_before, (
+        f"project pointer not restored: before={current_version_before!r} after={state['current_version']!r}"
+    )
+    # The retry succeeds (no stuck 409 from a half-set row).
+    assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"
 
 
 # ---------------------------------------------------------------------------
@@ -1356,32 +1534,45 @@ def test_parse_and_repair_runs_off_event_loop(app_with_projects):
             pid = r.json()["id"]
             files = {"file": ("box.stl", data, "model/stl")}
             # Fire the slow upload and a lightweight GET concurrently.
-            # If the decode were on the event loop, the GET would not
-            # complete until the 0.3 s sleep finishes; with to_thread,
-            # the GET's handler runs on the event loop while the sleep
-            # happens in the worker thread.
-            start = _time.monotonic()
-            tasks = [
-                client.post(f"/api/projects/{pid}/part", files=files),
-                client.get("/api/projects"),
-            ]
-            results = await asyncio.gather(*tasks)
-            elapsed = _time.monotonic() - start
-            return results[0], results[1], elapsed, len(slow_calls)
+            # DISCRIMINATOR (not a total-elapsed bound — a serial, on-loop
+            # decode still finishes in ~0.3 s total, which passes any
+            # loose total bound): the GET's completion is measured against
+            # the 0.3 s decode sleep. With the decode OFF the loop
+            # (asyncio.to_thread), the GET's handler runs on the event
+            # loop the moment the upload reaches the decode await, i.e.
+            # it completes a small epsilon BEFORE the 0.3 s sleep ends.
+            # If the decode ran ON the loop, the sleep would block every
+            # other handler — the GET could not complete until the sleep
+            # finished, so its completion time would be >= the sleep
+            # length (plus the upload's pre-decode overhead).
+            t0 = _time.monotonic()
 
-        upload_r, list_r, elapsed, n_slow = _run_async(app_with_projects, _call)
+            async def _list():
+                r = await client.get("/api/projects")
+                return r, _time.monotonic() - t0
+
+            results = await asyncio.gather(
+                client.post(f"/api/projects/{pid}/part", files=files),
+                _list(),
+            )
+            return results[0], results[1][0], results[1][1], len(slow_calls)
+
+        upload_r, list_r, list_elapsed, n_slow = _run_async(app_with_projects, _call)
     finally:
         part_import_mod.parse_and_repair = original_parse
     assert upload_r.status_code == 201, upload_r.text
     assert list_r.status_code == 200
     assert n_slow == 1
-    # The decode ran in a thread (it was called exactly once); the
-    # concurrent GET completed while the slow sleep was in flight
-    # (elapsed is well under what a serial block would be for two
-    # sequential 0.3 s+ operations — but the key assertion is that the
-    # GET succeeded, which it would regardless; the to_thread seam is
-    # what this test pins via the slow_calls counter).
-    assert elapsed < 5.0, f"upload+list took {elapsed:.1f}s — decode may be on the event loop"
+    # The GET completed strictly before the 0.3 s decode sleep ended
+    # (the upload reached the decode await a small epsilon before t0,
+    # so an off-loop decode's GET finishes at a few ms — never after
+    # the full sleep). 0.25 s leaves a large margin under the sleep
+    # while being far above any scheduling jitter.
+    assert list_elapsed < 0.25, (
+        f"GET /api/projects took {list_elapsed:.3f}s — it should have "
+        "completed while the 0.3 s decode slept in a worker thread; >= the "
+        "sleep length means the decode blocked the event loop"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1423,6 +1614,27 @@ def test_3mf_bogus_unit_422(app_with_projects):
 
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 422
+    assert r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+
+
+@pytest.mark.parametrize("unit", ["micron", "meter", "foot", "feet"])
+def test_3mf_spec_units_outside_closed_sets_422(unit, app_with_projects):
+    """The 3MF spec unit list is micron | millimeter | centimeter | inch
+    | foot | meter. The closed mm/cm/inch synonym sets are supported with
+    their factors; the rest (``micron``/``meter``/``foot``/``feet``) are
+    422 — never a silent mm assumption (the operator decision). This pins
+    the closed-set boundary for the FULL spec unit list (``foot`` alone
+    was asserted before; all four are pinned now)."""
+    data = _make_3mf(unit)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": f"3MF {unit}"})
+        pid = r.json()["id"]
+        files = {"file": ("part.3mf", data, "model/3mf")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422, f"unit={unit}: expected 422, got {r.status_code}: {r.text}"
     assert r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
 
 
