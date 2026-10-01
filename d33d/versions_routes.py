@@ -405,7 +405,9 @@ def create_versions_router() -> APIRouter:
         """The design-state block for the project's LATEST version (issue
         #120, consumer 2 — the GET the SPA reads to render the Brief).
 
-        Returns an envelope: ``{"entries": [...], "history_missing": bool}``.
+        Returns an envelope: ``{"entries": [...], "history_missing": bool,
+        "part": {…} | None}`` (the ``part`` object is ``None`` when no
+        part has been imported; see issue #325).
 
         ``entries`` is the same list of entries as before — ``name``,
         ``label``, ``value`` (nullable — ``unknown`` serialises as
@@ -437,23 +439,20 @@ def create_versions_router() -> APIRouter:
         project_row = _project_or_404(svc, project_id)
         latest = svc.latest_version(project_id)
         params = dict(latest["params"]) if latest is not None else None
+        # Measurement (issue #325): for an imported part with unsettled
+        # units, no measurement is passed — W/D/H stay unknown (the
+        # file-unit bbox is not a meaningful mm measurement until the unit
+        # is settled). For a settled import (or a non-import project) the
+        # latest version's persisted bbox is used as before (for a settled
+        # import, settle has already updated v1's bbox to file-bbox ×
+        # scale, i.e. mm — passing the v1's mm bbox as the measurement so
+        # W/D/H axis rows render ``measured``; the mesh is the ground
+        # truth, stronger than stated).
+        _has_part = project_row.get("part_filename") is not None
+        _part_unsettled = _has_part and project_row.get("part_unit_status") != "settled"
         measurement = latest["bbox"] if latest is not None else None
-        # The part's mm bbox (issue #325): when the project has an imported
-        # part with settled units, the design-state route passes the v1's
-        # mm bbox as the measurement so W/D/H axis rows render ``measured``
-        # (the mesh is the ground truth, stronger than stated). While the
-        # part's units are unsettled, the v1's bbox is ``None`` (the
-        # file-unit bbox is not mm — the route abstains, W/D/H stay
-        # unknown).
-        if measurement is None and project_row.get("part_filename"):
-            # The v1 (the import's version) carries the mm bbox once settled.
-            v1 = svc.conn.raw.execute(
-                "SELECT bbox FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
-                (project_id,),
-            ).fetchone()
-            if v1 is not None and v1["bbox"]:
-                import json as _json325
-                measurement = _json325.loads(v1["bbox"])
+        if _part_unsettled:
+            measurement = None
         # The persisted per-axis stated set (issue #246): the design-state
         # block's axis rows render ``stated`` from this evidence (and are
         # omitted when it is absent) — read from the persisted row, never
@@ -470,12 +469,8 @@ def create_versions_router() -> APIRouter:
         entries = state_block_for_version(params, measurement, stated, param_meta, confirmed)
         # The part facts (issue #325): the project's imported part (NULL
         # columns → ``None`` — a project with no part renders ``null``,
-        # never a fabricated empty object). The design-state route passes
-        # the v1 mm bbox as the measurement when the part's units are
-        # settled, so W/D/H axis rows render ``measured`` (the mesh is the
-        # ground truth, stronger than stated). While unsettled, no
-        # measurement is passed (the v1's bbox is ``None`` — the file-unit
-        # bbox, not mm, so W/D/H stay unknown).
+        # never a fabricated empty object; the SPA uses the absence to
+        # decide whether to render the import screens).
         part = _decode_part_row(project_row) if project_row.get("part_filename") else None
         # history_missing (issue #316): the repo directory is absent → the
         # saved design history is gone. Same predicate as
