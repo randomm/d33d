@@ -38,10 +38,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
+from d33d.confirm_offer import mm_formatted
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
     COULD_NOT_ANSWER,
@@ -61,13 +62,6 @@ from d33d.question_answer import (
     route_chat_message,
     state_block_numbers,
 )
-from d33d.confirm_offer import mm_formatted
-from d33d.design_llm import LLM_CALL_TIMEOUT_SECONDS as _LLM_TIMEOUT
-from d33d.design_loop import (
-    BBOX_TOLERANCE_MIN_MM as _TOL_MIN,
-    BBOX_TOLERANCE_REL as _TOL_REL,
-)
-
 from tests.seam_schemas_d import validate_frames_stream
 from tests.versioning.helpers import create_project, run_async
 
@@ -1360,7 +1354,7 @@ class TestDeterministicComparison:
     a MEASURED axis value is answered from the design state with NO LLM
     call, NO version, and NO design loop."""
 
-    BBOX = {"x": 20.0, "y": 43.9, "z": 12.0}
+    BBOX: ClassVar[dict[str, float]] = {"x": 20.0, "y": 43.9, "z": 12.0}
 
     def _latest(self, stated: dict | None = None) -> dict:
         return _latest_cmp(bbox=dict(self.BBOX), stated=stated)
@@ -2599,7 +2593,7 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
         )
         return r, frames
 
-    r, frames = run_async(app_with_versions, _call)
+    r, _frames = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
     assert loop_called, "the design loop was NOT called for a fresh project"
 
@@ -3466,7 +3460,7 @@ class TestStage2OutcomeWarningLogs:
             return r, frames, pid
 
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
-            r, frames, pid = run_async(app_with_versions, _call)
+            r, _frames, pid = run_async(app_with_versions, _call)
         assert r.status_code == 202, r.text
         assert not loop_called
         stage2_infos = self._stage2_info(caplog)
@@ -3667,9 +3661,9 @@ class TestCapabilityProbeCached:
         import types
 
         from d33d import design_llm as _design_llm_mod
+        from d33d.app import _build_question_answer_call
         from d33d.config import probes as _probes_mod
         from d33d.config.probes import CapabilityResult as _Cap
-        from d33d.app import _build_question_answer_call
 
         probe_count = {"n": 0}
 
@@ -3723,7 +3717,7 @@ class TestCapabilityProbeCached:
                 try:
                     await edge("How tall is it now?", [{"name": "H", "value": 12.0}])
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug("edge probe failed, retrying", exc_info=True)
             return probe_count["n"], llm.calls
 
         probes, llm_calls = asyncio.run(_call())
@@ -3753,13 +3747,12 @@ class TestQuestionRoleRequestLogs:
     def test_question_call_writes_request_log_row(self, app_with_versions, monkeypatch) -> None:
         import types
 
-        from d33d import app as _app_mod
+        from d33d.app import _build_question_answer_call
         from d33d.config import catalogue as _catalogue_mod
         from d33d.config import probes as _probes_mod
         from d33d.config import resolve as _resolve_mod
         from d33d.config.probes import CapabilityResult as _Cap
         from d33d.design_llm import LLMResult
-        from d33d.app import _build_question_answer_call
 
         _prov = types.SimpleNamespace(base="http://stub", key="stub", name="p")
         monkeypatch.setattr(
@@ -3942,11 +3935,10 @@ class TestPromptPairAgreement:
         "model"`` — the v25 Shelf-spacer shape) renders the row's mark
         "(my value differs from the measurement)" so the model can tell
         the rows apart from user-source ones."""
-        from d33d.question_answer import build_answer_prompt
-
         # v25-shaped: declared-axis params that contest the measurement
         # render disagrees_source "model".
         from d33d.design_state import state_block_for_version
+        from d33d.question_answer import build_answer_prompt
 
         model_entries = state_block_for_version(
             {"spacer_width": 40.0, "spacer_depth": 40.0},

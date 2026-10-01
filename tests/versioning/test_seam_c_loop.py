@@ -193,11 +193,6 @@ class _StubVersions:
         self._versions.append({"id": v, "params": params, "name": name})
         return {"id": v, "params": params, "name": name, "message": message}
 
-    async def create_version(self, project_id, params, name=None, message="", **kwargs):
-        v = self._next
-        self._next += 1
-        return {"id": v, "params": params, "name": name, "message": message}
-
 
 class _StubResult:
     """A duck-typed ``DesignResult`` whose ``best`` is the recorded
@@ -374,7 +369,6 @@ def test_list_versions_failure_degrades_to_empty_baseline(app_with_versions) -> 
     name may then lack its ``-2`` suffix; the version is still made).
     A stub whose ``list_versions`` raises is the tripwire."""
     import asyncio
-    from dataclasses import replace
 
     from d33d.design_loop_events import _resolve_version_create
 

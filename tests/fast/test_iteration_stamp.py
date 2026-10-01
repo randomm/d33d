@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -127,7 +127,7 @@ def _patch_ok_render(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
 
     class _FakeMesh:
-        vertices = [0, 1, 2]
+        vertices: ClassVar[list[int]] = [0, 1, 2]
         is_watertight = True
         volume = 1000.0
 

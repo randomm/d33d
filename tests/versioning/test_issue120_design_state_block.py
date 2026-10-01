@@ -284,6 +284,8 @@ def test_finalize_seam_state_params_match_route_callable(app_with_versions):
     from d33d.design_state import (
         build_design_state_block,
         format_design_state_block,
+    )
+    from d33d.design_state import (
         state_block_for_version as _shared,
     )
     from tests.versioning.test_design_loop_finalize import _StubResult

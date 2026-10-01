@@ -630,7 +630,7 @@ def test_chat_pass_real_iteration_record_creates_version_and_frame(
         latest = app_with_versions.state.versions.latest_version(pid)
         return r, frames, timeline, fixture, pid, latest
 
-    r, frames, timeline, fixture, pid, latest = run_async(app_with_versions, _call)
+    r, frames, timeline, fixture, _pid, latest = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
 
     # EXACTLY ONE versions row.

@@ -98,7 +98,7 @@ def test_qa_verbatim_classifies_as_syntax_error(
 ) -> None:
     """QA's exact capture: exit 1, stderr = only the STL marker,
     render.log = ERROR: Parser error → syntax_error."""
-    stub, calls = _qa_stub()
+    stub, _calls = _qa_stub()
     result = _run_render_for_design_loop(monkeypatch, stub, tmp_path)
 
     assert result.ok is False
@@ -144,7 +144,7 @@ def test_no_render_log_still_syntax_error_via_stl_marker(
 ) -> None:
     """When the render.log harvest finds nothing (empty log), the STL
     marker in stderr alone still classifies as syntax_error."""
-    stub, calls = _qa_stub(render_log_content="")
+    stub, _calls = _qa_stub(render_log_content="")
     result = _run_render_for_design_loop(monkeypatch, stub, tmp_path)
     assert result.error_class == "syntax_error"
 
@@ -155,7 +155,7 @@ def test_container_error_when_no_markers(
     """A non-zero exit with no STL marker in stderr and no ERROR: in
     render.log → container_error (the entrypoint demonstrably never
     ran or a docker-layer failure)."""
-    stub, calls = _qa_stub(render_log_content="some benign output\n", render_stderr="docker: some error")
+    stub, _calls = _qa_stub(render_log_content="some benign output\n", render_stderr="docker: some error")
     result = _run_render_for_design_loop(monkeypatch, stub, tmp_path)
     assert result.error_class == "container_error"
 
@@ -167,7 +167,7 @@ def test_failure_is_logged_with_project_id(
 ) -> None:
     """Every failed render logs one ERROR line with the project id,
     error_class, and exit code (issue #309 observability)."""
-    stub, calls = _qa_stub()
+    stub, _calls = _qa_stub()
     with caplog.at_level(logging.ERROR, logger=rw.__name__):
         _run_render_for_design_loop(monkeypatch, stub, tmp_path)
 
@@ -187,7 +187,7 @@ def test_render_log_included_in_log_tail(
     """The logged diagnostic text includes the harvested render.log
     tail (the OpenSCAD ERROR: line that is NOT in the container
     stderr)."""
-    stub, calls = _qa_stub()
+    stub, _calls = _qa_stub()
     with caplog.at_level(logging.ERROR, logger=rw.__name__):
         _run_render_for_design_loop(monkeypatch, stub, tmp_path)
 

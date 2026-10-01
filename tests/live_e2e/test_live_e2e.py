@@ -43,7 +43,7 @@ from fastapi import FastAPI
 # importable without a package __init__).
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from conftest import REPO_ROOT, _catalogue_path, case_timer
+from conftest import _catalogue_path, case_timer
 
 from d33d import db as db_mod
 from d33d import print_validation as _pv

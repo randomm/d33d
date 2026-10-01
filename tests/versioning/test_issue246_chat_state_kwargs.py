@@ -185,7 +185,7 @@ def test_chat_adapter_kwargs_render_the_state_block_in_the_live_prompt():
         state_bbox=state_bbox,
         state_stated=state_stated,
     )
-    text = [p for p in messages[0]["content"] if p.get("type") == "text"][0]["text"]
+    text = next(p for p in messages[0]["content"] if p.get("type") == "text")["text"]
 
     assert "Current design state (mm):" in text
     # The model-emitted parameter renders the assumed mark (never stated).
@@ -228,13 +228,14 @@ def test_production_design_loop_forwards_state_stated():
     the inner hook stubbed (and the catalogue/probe/llm_fn pieces stubbed
     too, so no real models.yaml is required): the wrapper's ``kwargs``
     forwarding is what reaches the stub."""
+    from pathlib import Path
+
+    import d33d.app as app_mod
     from d33d.app import _build_production_design_loop
     from d33d.config.catalogue import Catalogue, ModelEntry, Provider
     from d33d.config.probes import CapabilityResult
     from d33d.config.resolve import RoleResolution
     from d33d.evals import failure_capture as fc
-    import d33d.app as app_mod
-    from pathlib import Path
 
     # Synthetic catalogue / resolution / capability so the wrapper
     # reaches the hook call without touching a real models.yaml on disk.

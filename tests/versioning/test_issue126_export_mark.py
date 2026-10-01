@@ -129,12 +129,14 @@ def test_reexport_updates_to_latest_export_time(app_with_versions):
         first = (
             (await client.get(f"/api/projects/{pid}/versions/{v1['id']}")).json()
         )["exported_at"]
-        import time
+        import asyncio
 
         # The server stamps with second-resolution clock precision
         # (strftime %f), so two immediate calls can share a stamp — sleep
-        # past the boundary rather than assume it.
-        time.sleep(1.05)
+        # past the boundary rather than assume it. An asyncio sleep keeps
+        # the wall time identical while never blocking the event loop
+        # (ASYNC251).
+        await asyncio.sleep(1.05)
         await client.post(f"/api/projects/{pid}/versions/{v1['id']}/export")
         second = (
             (await client.get(f"/api/projects/{pid}/versions/{v1['id']}")).json()

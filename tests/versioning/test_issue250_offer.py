@@ -7,12 +7,12 @@ All fast (stub loops, no LLM, no Docker).
 
 from __future__ import annotations
 
+import sqlite3
 from typing import Any
 
 from d33d.confirm_offer import offer_entry
 from tests.versioning.helpers import (
     create_project,
-    create_version,
     run_async,
 )
 
@@ -24,7 +24,7 @@ def _reopen_conn(app):
     closed = False
     try:
         app.state.conn.raw.execute("SELECT 1")
-    except Exception:
+    except sqlite3.Error:
         closed = True
     if app.state.conn is None or closed:
         import d33d.db as _db
@@ -873,7 +873,7 @@ def test_tier3_offer_and_ack_use_the_same_mm_spelling(app_with_versions):
         svc = app_with_versions.state.versions
         proj = await create_project(client)
         pid = proj["id"]
-        v = await svc.create_version(
+        _v = await svc.create_version(
             pid,
             {"spacer_depth": 40.0},
             param_meta={"spacer_depth": {"label": "Spacer depth", "unit": "mm"}},
@@ -1219,7 +1219,7 @@ def test_chat_tier1_released_axis_offer(app_with_versions):
         # the #312 baseline read (previous version's param value for the
         # changed param) is the carried stated value (12.0) — a genuine
         # change, the tier-1 sentence applies.
-        v2 = await svc.create_version(
+        _v2 = await svc.create_version(
             pid,
             {},
             param_meta={},
@@ -1741,7 +1741,7 @@ def test_chat_yes_after_offer_confirms_param_no_new_version(app_with_versions):
             svc.get_pending_offer(pid),
         )
 
-    status, frames, row, version_count, latest_id, ds_body, loop_n, row_offer = (
+    status, frames, row, version_count, _latest_id, ds_body, loop_n, row_offer = (
         run_async(app_with_versions, _call)
     )
     assert status == 202, status
@@ -1803,7 +1803,7 @@ def test_chat_yes_but_make_it_2mm_is_not_an_acceptance(app_with_versions):
         old = svc.get_version(pid, v["id"])
         return r.status_code, frames, len(timeline), row, old, svc.get_pending_offer(pid)
 
-    status, frames, version_count, row, old, row_offer = run_async(
+    status, _frames, version_count, _row, old, row_offer = run_async(
         app_with_versions, _call
     )
     assert status == 202
@@ -1974,7 +1974,7 @@ def test_carried_forward_confirmed_param_not_re_offered(app_with_versions):
         closed = False
         try:
             app_with_versions.state.conn.raw.execute("SELECT 1")
-        except Exception:
+        except sqlite3.Error:
             closed = True
         if app_with_versions.state.conn is None or closed:
             import d33d.db as _db
@@ -1994,7 +1994,7 @@ def test_carried_forward_confirmed_param_not_re_offered(app_with_versions):
         svc.set_pending_offer(pid, {"version_id": v1["id"], "param": "wall_thickness"})
         # The user accepts (wall_thickness confirmed on v1).
         app_with_versions.state.run_design_loop = _loop
-        r, frames = await _drive_chat(
+        _r, _frames = await _drive_chat(
             app_with_versions, client, pid, {"message": "yes"}
         )
         # The answer path's one-frame source releases its in-flight claim
@@ -2006,15 +2006,15 @@ def test_carried_forward_confirmed_param_not_re_offered(app_with_versions):
             inflight.discard(pid)
         # A second pass creates v2 (the adapter's offer resolution runs
         # against v2 with the carried confirmed set).
-        r2, frames2 = await _drive_chat(
+        _r2, frames2 = await _drive_chat(
             app_with_versions, client, pid, {"message": "add a fillet"}
         )
         v2 = svc.latest_version(pid)
         assert v2["id"] != v1["id"]
         v1_row = svc.get_version(pid, v1["id"])
-        return frames, frames2, v2, v1_row, svc.get_pending_offer(pid)
+        return _frames, frames2, v2, v1_row, svc.get_pending_offer(pid)
 
-    frames, frames2, v2, v1_row, row_offer = run_async(app_with_versions, _call)
+    _frames, frames2, v2, v1_row, row_offer = run_async(app_with_versions, _call)
     # v1 confirmed (read inside the lifespan — the connection is live).
     assert v1_row["confirmed_params"] == {"wall_thickness": 3.0}, v1_row
     # v2's confirmed set is its OWN (NULL — the accepted-offer flow is
@@ -2576,7 +2576,6 @@ def test_chat_block_built_once_per_resolve(app_with_versions):
     from unittest import mock
 
     import d33d.design_state as _ds
-    from d33d.design_state import state_block_for_version
 
     class _TrayStubResult:
         def __init__(self) -> None:

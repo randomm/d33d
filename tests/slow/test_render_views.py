@@ -289,14 +289,10 @@ def _pixel_bbox(
                 n += 1
                 sx += x
                 sy += y
-                if x < minx:
-                    minx = x
-                if x > maxx:
-                    maxx = x
-                if y < miny:
-                    miny = y
-                if y > maxy:
-                    maxy = y
+                minx = min(minx, x)
+                maxx = max(maxx, x)
+                miny = min(miny, y)
+                maxy = max(maxy, y)
     if n == 0:
         return [0, 0, 0, 0], [0.0, 0.0], {
             "left": 0,

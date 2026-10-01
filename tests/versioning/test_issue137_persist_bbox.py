@@ -215,8 +215,8 @@ def test_absent_measurement_persists_null_not_zero(app_with_versions) -> None:
     """A loop pass whose best candidate carries NO measurement (bbox
     ``None``) persists a NULL bbox — the row reads back ``None`` (never a
     zero triple), and the block yields ``stated``."""
-    from d33d.design_loop_events import _version_bbox_extents
     from d33d.design_loop import IterationRecord, Score
+    from d33d.design_loop_events import _version_bbox_extents
 
     record = IterationRecord(
         iteration=1,
@@ -509,7 +509,7 @@ def test_v24_shaped_chat_path_persists_non_null_bbox(app_with_versions) -> None:
         latest = app_with_versions.state.versions.latest_version(pid)
         return frames, latest
 
-    frames, latest = run_async(app_with_versions, _call)
+    _frames, latest = run_async(app_with_versions, _call)
     assert latest is not None, "no version persisted"
     # The decisive assertion: the bbox is NON-NULL (the old code's bug
     # was NULL bbox for this shape).
@@ -540,8 +540,8 @@ def test_measurement_comes_from_best_candidate_not_last() -> None:
     whose render had NO bbox — a syntax-error render): the version's
     measurement is the BEST (passing) candidate's, never the other
     iteration's (which has none)."""
-    from d33d.design_loop import run_design_loop
     from d33d.design_llm import LLMResult
+    from d33d.design_loop import run_design_loop
 
     def _scad_llm():
         return LLMResult(

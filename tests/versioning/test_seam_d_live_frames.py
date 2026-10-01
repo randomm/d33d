@@ -171,7 +171,7 @@ def test_per_view_frame_delivered_while_render_still_running(
 
         try:
             await asyncio.wait_for(_drive(), timeout=DRIVE_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # The render was still blocked (no frame arrived live).
             # Release it so the test can finish and the assertion below
             # can report the failure.
@@ -262,7 +262,7 @@ def test_live_delivery_preserves_frame_order(app_with_versions: Any) -> None:
 
         try:
             await asyncio.wait_for(_drive(), timeout=DRIVE_TIMEOUT_S)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             release.set()
         return frames, observed_before_release
 

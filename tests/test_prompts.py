@@ -47,7 +47,6 @@ def test_design_prompt_instructs_readable_names_and_labels() -> None:
     fillet_size_top bad/good example) and a plain-language label for every
     declared parameter, and to carry a ``parameters`` metadata array in
     the reply."""
-    import d33d.design_loop as dl
 
     # Pull the emission instruction out of the live prompt builder —
     # never a hardcoded copy that can drift from the module.

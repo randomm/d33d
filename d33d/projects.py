@@ -207,7 +207,7 @@ class ChatRequest(BaseModel):
 
         for x in v:
             if isinstance(x, bool) or not isinstance(x, (int, float)):
-                raise ValueError("stated_dims elements must be numbers")
+                raise TypeError("stated_dims elements must be numbers")
             x = float(x)
             if not math.isfinite(x):
                 raise ValueError("stated_dims elements must be finite numbers")

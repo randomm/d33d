@@ -430,7 +430,7 @@ def build_hash(repo_root: Path | None = None) -> str:
         h.update(path.read_bytes())
         h.update(b"\0")
     for key in sorted(_HASHED_BUILD_ARGS):
-        h.update(f"{key}={_HASHED_BUILD_ARGS[key]}".encode("utf-8"))
+        h.update(f"{key}={_HASHED_BUILD_ARGS[key]}".encode())
         h.update(b"\0")
     return h.hexdigest()
 

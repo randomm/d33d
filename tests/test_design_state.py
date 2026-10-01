@@ -21,12 +21,8 @@ Acceptance (issue body + gate resolutions):
 
 from __future__ import annotations
 
-from typing import Any
-
 from d33d.design_state import (
-    AXIS_PARAM_NAMES,
     MAX_STATE_BLOCK_ENTRIES,
-    Provenance,
     StateEntry,
     build_design_state_block,
     format_design_state_block,
@@ -910,7 +906,6 @@ def test_assumed_axis_name_without_stated_evidence_stays_assumed() -> None:
     persisted H evidence stays ``assumed`` (no promotion without a value
     match); the stated H axis row renders alongside."""
     entries = state_block_for_version({"H": 99.0}, None, {"H": 12.0})
-    by_name = {e["name"]: e for e in entries}
     # The model's own param row (H=99, no matching evidence) stays
     # assumed — no name-guessing promotion.
     assumed = [e for e in entries if e["provenance"] == "assumed"]
@@ -2069,7 +2064,8 @@ def test_disagrees_major_constants_exist_and_are_independent_of_bbox() -> None:
     constants in ``d33d.design_loop`` (1 % / 0.5 mm).  They are never
     unified.
     """
-    from d33d.design_loop import BBOX_TOLERANCE_MIN_MM as bbox_min, BBOX_TOLERANCE_REL as bbox_rel
+    from d33d.design_loop import BBOX_TOLERANCE_MIN_MM as bbox_min
+    from d33d.design_loop import BBOX_TOLERANCE_REL as bbox_rel
     from d33d.design_state import (
         DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         DISAGREES_MAJOR_THRESHOLD_REL,
