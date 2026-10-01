@@ -65,6 +65,7 @@ PART_UPLOAD_UNPARSEABLE_DETAIL = (
 PART_UPLOAD_SETTLE_INVALID_DETAIL = (
     "That unit choice isn't valid. Pick mm, cm, or inch — or give one measured axis."
 )
+PART_UPLOAD_COMMIT_FAILED_DETAIL = "The part couldn't be saved. Nothing was changed."
 PART_EXISTS_DETAIL = "This project already has a part."
 
 
@@ -173,6 +174,7 @@ __all__ = [
     "PART_3MF_FILENAME",
     "PART_EXISTS_DETAIL",
     "PART_FILENAME",
+    "PART_UPLOAD_COMMIT_FAILED_DETAIL",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
     "PART_UPLOAD_UNSUPPORTED_DETAIL",

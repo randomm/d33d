@@ -1690,10 +1690,19 @@ def test_3mf_no_unit_defaults_to_mm(app_with_projects):
 
 
 def test_settle_second_update_failure_rolls_back(app_with_projects):
-    """Force the v1 bbox UPDATE (the second UPDATE) to raise → the
-    project's unit_status and the v1's bbox are both unchanged (one
-    transaction, one rollback)."""
+    """Force the settle's transaction to fail (the ``_v1_for_part`` read
+    raises, BEFORE the v1 bbox UPDATE) → 500, and the project's
+    unit_status and the v1's bbox are both unchanged (one transaction,
+    one rollback — the projects UPDATE rolled back with it).
+
+    The failure is injected at ``part_import._v1_for_part`` — the symbol
+    the route's ``_settle_sync`` closure resolves through the
+    ``d33d.part_import`` module globals (the settle route never reaches
+    the connection through a patchable object; the closure's free
+    variables resolve at call time from the module namespace)."""
     import sqlite3 as _sqlite3
+
+    import d33d.part_import as part_import_mod
 
     app = app_with_projects
     data = _stl_bytes(FIXTURES / "holey.stl")
@@ -1705,48 +1714,31 @@ def test_settle_second_update_failure_rolls_back(app_with_projects):
         upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
         assert upload_r.status_code == 201, upload_r.text
         # Read the v1's bbox BEFORE settle.
-        v1_row = app.state.conn.raw.execute(
+        real_raw = app.state.conn.raw
+        v1_row = real_raw.execute(
             "SELECT bbox FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
             (pid,),
         ).fetchone()
         bbox_before = v1_row[0] if v1_row else None
-        unit_status_before = app.state.conn.raw.execute(
+        unit_status_before = real_raw.execute(
             "SELECT part_unit_status FROM projects WHERE id = ?", (pid,)
         ).fetchone()[0]
-        # Force the v1 bbox UPDATE to raise.
-        conn = app.state.conn
-        real_raw = conn.raw
+        # Force the settle's transaction to raise (inside the BEGIN..commit
+        # window, so the projects UPDATE is the statement being rolled back).
+        orig_v1 = part_import_mod._v1_for_part
 
+        def _boom_v1(conn, project_id):
+            raise _sqlite3.OperationalError(
+                "forced settle failure (test)"
+            )
 
-        class _BoomRaw:
-            def __init__(self, real_conn):
-                self._real = real_conn
-
-            def execute(self, sql, *a, **k):
-                if isinstance(sql, str) and "UPDATE versions SET bbox" in sql:
-                    raise _sqlite3.OperationalError("forced bbox update failure (test)")
-                return self._real.execute(sql, *a, **k)
-
-            def commit(self):
-                return self._real.commit()
-
-            def rollback(self):
-                return self._real.rollback()
-
-            def __getattr__(self, name):
-                return getattr(self._real, name)
-
-        boom_raw = _BoomRaw(real_raw)
-        orig_raw_prop = type(conn).raw
-        type(conn).raw = property(lambda self: boom_raw if getattr(self, '_boom2', False) else self._conn)
-        conn._boom2 = True
+        part_import_mod._v1_for_part = _boom_v1
         try:
             settle_r = await client.post(
                 f"/api/projects/{pid}/part/units", json={"unit": "inch"}
             )
         finally:
-            type(conn).raw = orig_raw_prop
-            conn._boom2 = False
+            part_import_mod._v1_for_part = orig_v1
         # Read the state AFTER the failed settle.
         unit_status_after = real_raw.execute(
             "SELECT part_unit_status FROM projects WHERE id = ?", (pid,)
@@ -1884,3 +1876,205 @@ def test_part_upload_unparseable_detail_equals_copy_ts():
     m = re.search(r"unparseable:\s*\n?\s*\"([^\"]+)\"", copy_ts)
     assert m is not None, "copy.ts must define partUpload.unparseable"
     assert PART_UPLOAD_UNPARSEABLE_DETAIL == m.group(1)
+
+
+def test_part_upload_commit_failed_detail_equals_copy_ts():
+    """``PART_UPLOAD_COMMIT_FAILED_DETAIL`` equals ``copy.ts``
+    ``partUpload.commitFailed`` exactly — the FIXED 500 detail the
+    upload/settle routes return (the exception text never reaches the
+    client), pinned here so the wire and the deck cannot drift (the
+    #299 way, as for unsupported/unparseable)."""
+    import pathlib
+    import re
+
+    from d33d.part_http import PART_UPLOAD_COMMIT_FAILED_DETAIL
+
+    copy_ts = (
+        pathlib.Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r"commitFailed:\s*\n?\s*\"([^\"]+)\"", copy_ts)
+    assert m is not None, "copy.ts must define partUpload.commitFailed"
+    assert PART_UPLOAD_COMMIT_FAILED_DETAIL == m.group(1)
+
+
+def test_design_contract_pins_part_upload_commit_failed_key():
+    """The design-contract tripwire pins ``partUpload.commitFailed`` in
+    the copy deck (the fixed 500 sentence for the part-save failure —
+    the two-way agreement with the backend's 500 ``detail``)."""
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).parent.parent
+        / "web" / "src" / "__tests__" / "design-contract.test.ts"
+    ).read_text("utf-8")
+    assert "partUpload.commitFailed" in src
+
+
+# ---------------------------------------------------------------------------
+# The 500 handler returns a FIXED detail (no raw error text to the client)
+# ---------------------------------------------------------------------------
+
+
+def test_import_commit_failure_500_detail_is_fixed_no_raw_text(app_with_projects):
+    """Force ``_commit_versions_file`` to raise with a message carrying a
+    fake path (``/secret/path``). The 500 body must carry ONLY the fixed
+    copy.ts sentence — the raw exception text (the path) must be absent
+    from the response; it stays in the server log only."""
+    import d33d.versions as versions_mod
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "SecretPath"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        original_commit = versions_mod._commit_versions_file
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("failed to commit /secret/path to git")
+
+        versions_mod._commit_versions_file = _boom
+        try:
+            r = await client.post(f"/api/projects/{pid}/part", files=files)
+        finally:
+            versions_mod._commit_versions_file = original_commit
+        return r
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 500, r.text
+    detail = r.json()["detail"]
+    assert detail == "The part couldn't be saved. Nothing was changed."
+    # The raw exception text (the fake path) must not reach the client.
+    assert "/secret/path" not in r.text
+
+
+def test_settle_failure_500_detail_is_fixed_no_raw_text(app_with_projects):
+    """Force the settle's v1 bbox UPDATE to raise with a message carrying
+    a fake path. The 500 body must carry ONLY the fixed copy.ts sentence
+    — the raw text (the path) must be absent from the response."""
+    import sqlite3 as _sqlite3
+
+    import d33d.part_import as part_import_mod
+
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "SettleSecret"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        assert upload_r.status_code == 201, upload_r.text
+
+        # Force the settle's transaction to raise with a message carrying a
+        # fake path — the injection point is ``_v1_for_part`` (the symbol
+        # the ``_settle_sync`` closure resolves from the module globals),
+        # raised INSIDE the BEGIN..commit window.
+        orig_v1 = part_import_mod._v1_for_part
+
+        def _boom_v1(conn, project_id):
+            raise _sqlite3.OperationalError(
+                "bbox update failed at /secret/path"
+            )
+
+        part_import_mod._v1_for_part = _boom_v1
+        try:
+            settle_r = await client.post(
+                f"/api/projects/{pid}/part/units", json={"unit": "inch"}
+            )
+        finally:
+            part_import_mod._v1_for_part = orig_v1
+        return settle_r
+
+    settle_r = _run_async(app_with_projects, _call)
+    assert settle_r.status_code == 500, settle_r.text
+    assert settle_r.json()["detail"] == (
+        "The part couldn't be saved. Nothing was changed."
+    )
+    assert "/secret/path" not in settle_r.text
+
+
+# ---------------------------------------------------------------------------
+# last_activity.ts: the import stamps the real wall-clock ts (not null)
+# ---------------------------------------------------------------------------
+
+
+def test_import_last_activity_ts_is_wall_clock(app_with_projects):
+    """After a successful import, the project's ``last_activity`` column
+    carries a NON-NULL ``ts`` in the same wall-clock ISO format
+    (``strftime('%Y-%m-%dT%H:%M:%fZ','now')``) that ``db.update_project``
+    stamps — a null ts would read as "never active"."""
+    import re as _re
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TsStamp"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        assert upload_r.status_code == 201, upload_r.text
+        la = app_with_projects.state.conn.get_project(pid)["last_activity"]
+        return upload_r, la
+
+    _upload_r, la = _run_async(app_with_projects, _call)
+    assert la is not None
+    assert la["version_id"] is not None
+    assert la["name"] == "Imported box.stl"
+    ts = la["ts"]
+    assert ts is not None, f"last_activity.ts must not be null after import: {la}"
+    # Same wall-clock ISO format db.update_project stamps.
+    assert _re.fullmatch(
+        r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", ts
+    ) is not None, f"ts is not the wall-clock ISO format: {ts!r}"
+
+
+# ---------------------------------------------------------------------------
+# Exception-type leakage: ANY exception (not just git/OS/sqlite) rolls back
+# ---------------------------------------------------------------------------
+
+
+def test_import_subprocess_timeout_expired_rolls_back(app_with_projects):
+    """Force ``_commit_versions_file`` to raise
+    ``subprocess.TimeoutExpired`` (a git timeout — an exception type the
+    old narrow ``except (RuntimeError, OSError, sqlite3.Error)`` did NOT
+    catch). The broadened handler must still: return a 500, roll back the
+    version row + part columns (NULL), close the transaction on the
+    SHARED connection (``in_transaction`` is False afterwards), leave no
+    files behind, and let the retry upload succeed (201)."""
+    import subprocess as _subprocess
+
+    import d33d.versions as versions_mod
+
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "GitTimeout"})
+        pid = r.json()["id"]
+        repo_path = _repo_for(app, pid)
+        files = {"file": ("box.stl", data, "model/stl")}
+        conn = app.state.conn
+        original_commit = versions_mod._commit_versions_file
+
+        def _boom(*_args, **_kwargs):
+            raise _subprocess.TimeoutExpired(cmd="git", timeout=30)
+
+        versions_mod._commit_versions_file = _boom
+        try:
+            r = await client.post(f"/api/projects/{pid}/part", files=files)
+        finally:
+            versions_mod._commit_versions_file = original_commit
+        # Capture the post-failure state BEFORE the retry.
+        state = _state_after_failed_import(conn.raw, pid, repo_path)
+        in_txn = conn.in_transaction
+        retry = await client.post(f"/api/projects/{pid}/part", files=files)
+        return r, retry, state, in_txn
+
+    r, retry, state, in_txn = _run_async(app_with_projects, _call)
+    assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
+    # The shared connection is NOT left mid-transaction.
+    assert in_txn is False, "shared connection left mid-transaction after failure"
+    # No version row, part columns NULL, no files, no versions/ dir.
+    _assert_clean_rollback_state(state)
+    # The retry succeeds (no stuck 409).
+    assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"

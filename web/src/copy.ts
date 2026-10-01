@@ -743,6 +743,11 @@ export const partUpload = {
    *  mesh (or a 3MF zip-bomb). The SPA shows it verbatim. */
   unparseable:
     "That file isn't a readable mesh. Check it opens in another 3D tool and try again.",
+  /** The 500 `detail` body: the part could not be saved (commit / settle
+   *  failure). FIXED sentence — the backend's exception text (paths, git
+   *  output) never reaches the client; it stays in the server log only. */
+  commitFailed:
+    "The part couldn't be saved. Nothing was changed.",
 } as const;
 
 /**

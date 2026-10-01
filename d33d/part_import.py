@@ -66,6 +66,7 @@ from d33d.part_http import (
     PART_3MF_FILENAME,
     PART_EXISTS_DETAIL,
     PART_FILENAME,
+    PART_UPLOAD_COMMIT_FAILED_DETAIL,
     PART_UPLOAD_SETTLE_INVALID_DETAIL,
     PART_UPLOAD_UNPARSEABLE_DETAIL,
     PART_UPLOAD_UNSUPPORTED_DETAIL,
@@ -174,6 +175,19 @@ def create_part_router() -> APIRouter:
         if not content:
             raise HTTPException(status_code=422, detail=PART_UPLOAD_UNPARSEABLE_DETAIL)
 
+        # Release the raw body bytes and the parsed multipart form BEFORE
+        # the CPU-bound decode: only ``content`` (the extracted file field)
+        # plus the decoded mesh then coexist in memory. The form is closed
+        # (its UploadFile holds an open file handle) and both references
+        # are dropped so the large buffers are reclaimable before the
+        # parse/repair thread starts.
+        try:
+            await file.close()
+        finally:
+            form = None
+            buf.clear()
+            del buf, body, file
+
         # 422: the decode gate — parse/repair/measure, run OFF the event
         # loop (``asyncio.to_thread`` — the mesh parse is CPU-bound and
         # must not stall the app's other requests; the zip-bomb check runs
@@ -266,9 +280,17 @@ def create_part_router() -> APIRouter:
             # Nothing persisted: no project part columns, no version row,
             # no committed file, no leftover versions/ dir (the
             # _run_import_create rollback rolled back the row + the part
-            # columns + the files in one transaction).
+            # columns + the files in one transaction). The detail is a
+            # FIXED sentence (copy.ts partUpload.commitFailed) — the
+            # exception text (paths, git output) stays in the server log
+            # only.
+            logger.error(
+                "part upload import commit failed (project_id=%s): %s",
+                project_id,
+                e,
+            )
             raise HTTPException(
-                status_code=500, detail=f"part commit failed: {e}"
+                status_code=500, detail=PART_UPLOAD_COMMIT_FAILED_DETAIL
             ) from e
         except (LookupError, ValueError) as e:
             raise HTTPException(
@@ -320,9 +342,12 @@ def create_part_router() -> APIRouter:
                 )
             scale = settle_scale(unit)
         else:
-            axis = body.get("axis")
-            mm = body.get("mm")
-            if axis not in axis_idx or not _is_positive_number(mm):
+            axis = body["axis"]
+            mm = body["mm"]
+            # The mm positivity check lives in ``_settle_body`` (it owns
+            # the body's shape + value validation); only the axis key is
+            # checked here — the body is already validated.
+            if axis not in axis_idx:
                 raise HTTPException(
                     status_code=422, detail=PART_UPLOAD_SETTLE_INVALID_DETAIL
                 )
@@ -371,13 +396,26 @@ def create_part_router() -> APIRouter:
                     )
                 conn.commit()
             except BaseException:
+                # BaseException (not Exception): a cancellation (Keyboard
+                # Interrupt / asyncio.CancelledError) mid-transaction would
+                # otherwise leave the shared connection open inside the
+                # transaction; the rollback is what must run there.
                 conn.rollback()
                 raise
 
         try:
             await svc._with_project_lock(project_id, lambda: _settle_sync())
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"settle failed: {e}") from e
+            # Fixed detail (copy.ts partUpload.commitFailed): the exception
+            # text (paths, sqlite errors) stays in the server log only.
+            logger.error(
+                "part settle failed (project_id=%s): %s",
+                project_id,
+                e,
+            )
+            raise HTTPException(
+                status_code=500, detail=PART_UPLOAD_COMMIT_FAILED_DETAIL
+            ) from e
 
         updated = conn.get_project(project_id)
         if updated is None:
@@ -421,6 +459,7 @@ async def _settle_body(request: Request) -> dict[str, Any]:
 __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_UPLOAD_BYTES",
+    "PART_UPLOAD_COMMIT_FAILED_DETAIL",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
     "PART_UPLOAD_UNSUPPORTED_DETAIL",

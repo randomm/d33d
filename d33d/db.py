@@ -203,6 +203,9 @@ class Connection:
 
     @property
     def in_transaction(self) -> bool:
+        """Whether the underlying connection is inside an open transaction
+        (tests' rollback assertion — a leaked transaction on the SHARED
+        connection would otherwise stall every later writer)."""
         return self._conn.in_transaction
 
     def close(self) -> None:

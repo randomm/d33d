@@ -827,18 +827,26 @@ class VersionService:
             # Re-point the project pointer + last_activity in the SAME
             # transaction as the version row (NOT via update_project, which
             # commits mid-transaction and would split the commit boundary).
-            # The last_activity ts is set to the version's creation — the
-            # import's wall-clock ts is not available here (the version row
-            # carries the creation, the project column is a convenience).
+            # The last_activity ts is the real wall-clock stamp — the same
+            # strftime('...','now') call db.update_project stamps, so an
+            # import and a design-loop write are indistinguishable in the
+            # column's shape (a null ts would read as "never active").
+            la_ts = self.conn.raw.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            ).fetchone()[0]
             self.conn.raw.execute(
                 "UPDATE projects SET current_version = ?, "
-                "last_activity = ?, updated_at = "
-                "strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?",
+                "last_activity = ?, updated_at = ? WHERE id = ?",
                 (
                     version_id,
                     json.dumps(
-                        {"version_id": version_id, "name": version_name, "ts": None}
+                        {
+                            "ts": la_ts,
+                            "version_id": version_id,
+                            "name": version_name,
+                        }
                     ),
+                    la_ts,
                     project_id,
                 ),
             )
@@ -866,10 +874,17 @@ class VersionService:
                     ),
                 )
             self.conn.commit()
-        except (RuntimeError, OSError, sqlite3.Error) as e:
-            # Roll the whole transaction back (version row + project
-            # pointer + part columns), unlink the written files, remove
-            # the newly created empty versions/ dirs, log one ERROR.
+        except Exception as e:
+            # ANY failure (git commit error, subprocess.TimeoutExpired, a
+            # sqlite error, an unexpected bug) rolls the whole transaction
+            # back (version row + project pointer + part columns), unlinks
+            # the written files, removes the newly created empty versions/
+            # dirs, logs one ERROR. Every step is idempotent and safe on a
+            # connection already in a clean state, so the broad catch
+            # costs nothing the narrow one had. The original exception is
+            # re-raised, wrapped in :class:`ImportCommitFailed` (the route
+            # maps it to a 500 with a FIXED detail — the exception text is
+            # the log's, never the client's).
             self.conn.rollback()
             snapshot_path.unlink(missing_ok=True)
             mesh_path.unlink(missing_ok=True)
@@ -1323,6 +1338,16 @@ class VersionService:
         source_kind: str | None = None,
         commit: bool = True,
     ) -> int:
+        """Insert the version row and (by default) commit it.
+
+        ``commit=False`` (used by ``_run_import_create``) leaves the INSERT
+        open in the caller's transaction: the caller OWNS the commit
+        boundary and must commit or roll back the transaction it started
+        before returning — a bare caller with ``commit=False`` and no
+        matching commit/rollback leaks the transaction on the shared
+        connection. The row id is available immediately either way (the
+        INSERT has run).
+        """
         fork = None
         if forked_from is not None:
             fork = [forked_from[0], forked_from[1]]

@@ -147,6 +147,17 @@ describe("design contract", () => {
     ]);
   });
 
+  it("the copy deck carries the part-save-failure 500 sentence (issue #325)", () => {
+    // Issue #325 final: the upload's ImportCommitFailed 500 and the
+    // settle's failure 500 return ONE fixed sentence — the backend's
+    // exception text (paths, git output) never reaches the client.
+    // The deck key is pinned here so a rename trips both the tripwire
+    // and the backend's own parse test.
+    expect(copy.partUpload.commitFailed).toBe(
+      "The part couldn't be saved. Nothing was changed.",
+    );
+  });
+
   /* ---------------------------------------- W276 */
 
   it("the copy deck carries the axis_params_mismatch failure copy (issue #276)", () => {
