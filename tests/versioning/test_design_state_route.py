@@ -582,3 +582,229 @@ def test_design_state_history_missing_no_version_repo_absent(app_with_versions) 
     body = result.json()
     assert body["history_missing"] is True
     assert body["entries"] == []
+
+
+# ---------------------------------------------------------------------------
+# Issue #325 (ws-design-state): the ``part`` object in the design-state
+# envelope and the measurement suppression for unsettled imports.
+# ---------------------------------------------------------------------------
+
+
+def _set_part_columns(app, pid: int, **kwargs) -> None:
+    """Update the project row's part columns directly (the test fixture
+    creates projects with all part columns NULL; this helper simulates
+    the part-import workstream's writes so the design-state route can be
+    exercised without the full import pipeline)."""
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
+    app.state.conn.raw.execute(
+        f"UPDATE projects SET {sets} WHERE id = ?",
+        (*kwargs.values(), pid),
+    )
+    app.state.conn.raw.commit()
+
+
+def test_design_state_part_null_when_no_import(app_with_versions) -> None:
+    """A project with no imported part → the envelope's ``part`` is
+    ``null`` (the SPA uses the absence to decide not to render the
+    import screens). Existing ``entries`` and ``history_missing`` are
+    unchanged."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        await create_version(client, pid, {"W": 30.0})
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["part"] is None
+    # Entries and history_missing are unchanged.
+    assert len(body["entries"]) > 0
+    assert "history_missing" in body
+
+
+def test_design_state_part_object_present_when_imported(app_with_versions) -> None:
+    """A project with a part row populated (simulating a successful
+    import) → the envelope's ``part`` object carries the import facts:
+    filename, format, unit, unit_status, scale, report (decoded from
+    JSON), and options (decoded from JSON or null)."""
+    import json as _json
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        _set_part_columns(
+            app_with_versions,
+            pid,
+            part_filename="my-part.stl",
+            part_format="stl",
+            part_unit="mm",
+            part_unit_status="assumed",
+            part_scale=1.0,
+            part_report=_json.dumps({
+                "triangles": 12,
+                "bodies": 1,
+                "watertight": True,
+                "gaps_closed": 0,
+                "bbox_file_units": [20.0, 20.0, 20.0],
+            }),
+            part_options=None,
+        )
+        await create_version(client, pid, {"W": 20.0, "D": 20.0, "H": 20.0})
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    part = result.json()["part"]
+    assert part is not None
+    assert part["filename"] == "my-part.stl"
+    assert part["format"] == "stl"
+    assert part["unit"] == "mm"
+    assert part["unit_status"] == "assumed"
+    assert part["scale"] == 1.0
+    # report is decoded from JSON.
+    assert isinstance(part["report"], dict)
+    assert part["report"]["triangles"] == 12
+    assert part["report"]["watertight"] is True
+    # options is null (None in the DB → None in the response).
+    assert part["options"] is None
+
+
+def test_design_state_unsettled_import_no_measurement(app_with_versions) -> None:
+    """An imported part with ``unit_status != 'settled'`` (e.g.
+    ``'assumed'`` or ``'unsettled'``) → the measurement is NOT passed to
+    ``state_block_for_version``: W/D/H axis rows are absent (no
+    ``measured``/``disagrees`` provenance). The version row's bbox may
+    be non-NULL, but the route suppresses it while units are not
+    settled."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        # Simulate an unsettled import (unit_status is not 'settled').
+        _set_part_columns(
+            app_with_versions,
+            pid,
+            part_filename="big-part.stl",
+            part_format="stl",
+            part_unit=None,
+            part_unit_status="unsettled",
+            part_scale=None,
+            part_report=None,
+            part_options=None,
+        )
+        # Create a version with a bbox (simulating the file-unit bbox that
+        # the import records before settlement). The bbox is a tuple
+        # (x, y, z) — the DB stores it as JSON {x, y, z}.
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {"W": 20.0, "D": 20.0, "H": 20.0},
+            bbox=(20.0, 20.0, 20.0),
+        )
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    # The part object is present (the import happened).
+    assert body["part"] is not None
+    assert body["part"]["unit_status"] == "unsettled"
+    # W/D/H axis rows: no ``measured`` or ``disagrees`` entries (the
+    # measurement was suppressed). Any W/D/H entries are ``assumed``
+    # param rows, not ``measured`` axis rows.
+    for entry in body["entries"]:
+        if entry["kind"] == "axis" and entry["name"] in ("W", "D", "H"):
+            assert entry["provenance"] != "measured", (
+                f"{entry['name']} should not be measured while unsettled"
+            )
+            assert entry["provenance"] != "disagrees"
+
+
+def test_design_state_settled_import_yields_measured(app_with_versions) -> None:
+    """An imported part with ``unit_status == 'settled'`` → the route
+    passes the latest version's bbox as the measurement, and W/D/H axis
+    rows render ``measured`` (the mm bbox from the settled import is
+    ground truth — stronger than stated)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        _set_part_columns(
+            app_with_versions,
+            pid,
+            part_filename="settled-part.stl",
+            part_format="stl",
+            part_unit="mm",
+            part_unit_status="settled",
+            part_scale=1.0,
+            part_report=None,
+            part_options=None,
+        )
+        # The settle endpoint would have updated v1's bbox to mm.
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid,
+            {"W": 20.0, "D": 20.0, "H": 20.0},
+            bbox=(20.0, 20.0, 20.0),
+        )
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    body = result.json()
+    part = body["part"]
+    assert part is not None
+    assert part["unit_status"] == "settled"
+    # W/D/H axis rows: with a settled import and a persisted bbox, the
+    # axis rows render ``measured``.
+    by_name = {e["name"]: e for e in body["entries"] if e["kind"] == "axis"}
+    for axis in ("W", "D", "H"):
+        entry = by_name.get(axis)
+        if entry is not None:
+            assert entry["provenance"] == "measured", (
+                f"{axis} should be measured for a settled import: {entry}"
+            )
+
+
+def test_design_state_part_options_decoded(app_with_versions) -> None:
+    """The ``options`` field is JSON-decoded: a project with a non-NULL
+    ``part_options`` column (the unsettled candidate list) returns the
+    decoded list, not the raw JSON string."""
+    import json as _json
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        options = [
+            {"unit": "inch", "scale": 25.4, "bbox_mm": [508.0, 508.0, 508.0]},
+            {"unit": "cm", "scale": 10.0, "bbox_mm": [200.0, 200.0, 200.0]},
+            {"unit": "mm", "scale": 1.0, "bbox_mm": [20.0, 20.0, 20.0]},
+        ]
+        _set_part_columns(
+            app_with_versions,
+            pid,
+            part_filename="tiny-part.stl",
+            part_format="stl",
+            part_unit=None,
+            part_unit_status="unsettled",
+            part_scale=None,
+            part_report=None,
+            part_options=_json.dumps(options),
+        )
+        r = await client.get(f"/api/projects/{pid}/design-state")
+        return r
+
+    result = run_async(app_with_versions, _call)
+    assert result.status_code == 200, result.text
+    part = result.json()["part"]
+    assert part["options"] is not None
+    assert isinstance(part["options"], list)
+    assert len(part["options"]) == 3
+    # The likeliest (in-envelope, ≥ 5 mm) comes first.
+    assert part["options"][0]["unit"] == "inch"

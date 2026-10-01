@@ -71,6 +71,7 @@ from d33d.design_loop_events import (
     _version_render_artifact_dir,
 )
 from d33d.design_state import state_block_for_version
+from d33d.part_import import part_public
 from d33d.projects import repo_present
 
 logger = logging.getLogger(__name__)
@@ -404,7 +405,9 @@ def create_versions_router() -> APIRouter:
         """The design-state block for the project's LATEST version (issue
         #120, consumer 2 — the GET the SPA reads to render the Brief).
 
-        Returns an envelope: ``{"entries": [...], "history_missing": bool}``.
+        Returns an envelope: ``{"entries": [...], "history_missing": bool,
+        "part": {…} | None}`` (the ``part`` object is ``None`` when no
+        part has been imported; see issue #325).
 
         ``entries`` is the same list of entries as before — ``name``,
         ``label``, ``value`` (nullable — ``unknown`` serialises as
@@ -436,7 +439,20 @@ def create_versions_router() -> APIRouter:
         project_row = _project_or_404(svc, project_id)
         latest = svc.latest_version(project_id)
         params = dict(latest["params"]) if latest is not None else None
+        # Measurement (issue #325): for an imported part with unsettled
+        # units, no measurement is passed — W/D/H stay unknown (the
+        # file-unit bbox is not a meaningful mm measurement until the unit
+        # is settled). For a settled import (or a non-import project) the
+        # latest version's persisted bbox is used as before (for a settled
+        # import, settle has already updated v1's bbox to file-bbox ×
+        # scale, i.e. mm — passing the v1's mm bbox as the measurement so
+        # W/D/H axis rows render ``measured``; the mesh is the ground
+        # truth, stronger than stated).
+        _has_part = project_row.get("part_filename") is not None
+        _part_unsettled = _has_part and project_row.get("part_unit_status") != "settled"
         measurement = latest["bbox"] if latest is not None else None
+        if _part_unsettled:
+            measurement = None
         # The persisted per-axis stated set (issue #246): the design-state
         # block's axis rows render ``stated`` from this evidence (and are
         # omitted when it is absent) — read from the persisted row, never
@@ -451,6 +467,11 @@ def create_versions_router() -> APIRouter:
         # (b)) in the SAME block the live prompt renders.
         confirmed = latest["confirmed_params"] if latest is not None else None
         entries = state_block_for_version(params, measurement, stated, param_meta, confirmed)
+        # The part facts (issue #325): the project's imported part (NULL
+        # columns → ``None`` — a project with no part renders ``null``,
+        # never a fabricated empty object; the SPA uses the absence to
+        # decide whether to render the import screens).
+        part = part_public(project_row) if project_row.get("part_filename") else None
         # history_missing (issue #316): the repo directory is absent → the
         # saved design history is gone. Same predicate as
         # storage.repo_present (via the shared repo_present helper) —
@@ -458,6 +479,7 @@ def create_versions_router() -> APIRouter:
         return {
             "entries": entries,
             "history_missing": not repo_present(project_row),
+            "part": part,
         }
 
     # -- design source (the versioned OpenSCAD text) ---------------------------

@@ -571,6 +571,7 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -621,6 +622,7 @@ class VersionService:
                 stated_dims=stated_dims,
                 param_meta=param_meta,
                 confirmed_params=confirmed_params,
+                source_kind=source_kind,
             ),
         )
 
@@ -640,6 +642,7 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -687,6 +690,7 @@ class VersionService:
             stated_dims=stated_dims,
             param_meta=param_meta,
             confirmed_params=confirmed_params,
+            source_kind=source_kind,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -742,6 +746,177 @@ class VersionService:
         if row is None:
             raise LookupError(f"version {version_id} not found")
         return row
+
+    def _run_import_create(
+        self,
+        project_id: int,
+        *,
+        version_name: str,
+        params: dict[ParamValue],
+        message: str,
+        bbox: tuple[float, float, float] | None,
+        source_kind: str,
+        mesh_bytes: bytes,
+        stored_name: str,
+        repo_dir: Path,
+        part_values: dict[str, Any] | None = None,
+    ) -> int:
+        """The import's version create (call under the shared write lock,
+        via ``_with_project_lock`` — the part-upload route wraps it).
+
+        Creates the v1 version row (``source_kind`` recorded) AND writes the
+        imported mesh to ``versions/{id}/{stored_name}`` (the FIXED name —
+        ``part.stl``/``part.3mf``, never the user's filename), committing
+        both files in the SAME commit as the v1's ``params.json`` (one
+        writer, one lock, one commit — the version row and its geometry can
+        never diverge).
+
+        ``part_values`` (the project's part columns: filename, format,
+        unit, unit_status, scale, report, options) is written INSIDE this
+        call, in the SAME write lock + DB transaction as the version row.
+        On ANY failure (git commit failure, sqlite error) the transaction
+        rolls back the version row, the part columns, the committed files,
+        AND the newly created empty ``versions/`` dirs — one ERROR log,
+        one clean state, and a retry upload succeeds (no stuck 409). A
+        commit failure raises :class:`ImportCommitFailed` (the route maps
+        it to a 500).
+        """
+        project = self.conn.get_project(project_id)
+        if project is None:
+            raise LookupError(f"project {project_id} not found")
+
+        version_id = self._insert_version(
+            project_id,
+            params,
+            name=version_name,
+            created_by_message=message,
+            parent=None,
+            restored_from=None,
+            forked_from=None,
+            thumbnail=None,
+            bbox=bbox,
+            source_kind=source_kind,
+            commit=False,
+        )
+        versions_dir = repo_dir / "versions"
+        vdir = versions_dir / str(version_id)
+        snapshot_path = vdir / PARAMS_FILENAME
+        mesh_path = vdir / stored_name
+        try:
+            # One transaction: the version row INSERT (held open by
+            # ``commit=False``) + the project pointer + the part columns.
+            # The git commit happens INSIDE it; on ANY failure (git commit
+            # failure, sqlite error) the transaction rolls back all three
+            # together, the files are unlinked, and the newly created
+            # empty versions/ dirs are removed — one ERROR log, one clean
+            # state, and a retry upload succeeds (no stuck 409).
+            install_text_file_atomic(
+                snapshot_path, json.dumps(params, indent=2, sort_keys=True) + "\n"
+            )
+            vdir.mkdir(parents=True, exist_ok=True)
+            mesh_path.write_bytes(mesh_bytes)
+            commit_subject = (
+                f"import: {_sanitize_commit_message(version_name)}"
+            )
+            _commit_versions_file(
+                repo_dir,
+                versions_dir,
+                f"{version_id}/{PARAMS_FILENAME}",
+                commit_subject,
+            )
+            # Re-point the project pointer + last_activity in the SAME
+            # transaction as the version row (NOT via update_project, which
+            # commits mid-transaction and would split the commit boundary).
+            # The last_activity ts is the real wall-clock stamp — the same
+            # strftime('...','now') call db.update_project stamps, so an
+            # import and a design-loop write are indistinguishable in the
+            # column's shape (a null ts would read as "never active").
+            la_ts = self.conn.raw.execute(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')"
+            ).fetchone()[0]
+            self.conn.raw.execute(
+                "UPDATE projects SET current_version = ?, "
+                "last_activity = ?, updated_at = ? WHERE id = ?",
+                (
+                    version_id,
+                    json.dumps(
+                        {
+                            "ts": la_ts,
+                            "version_id": version_id,
+                            "name": version_name,
+                        }
+                    ),
+                    la_ts,
+                    project_id,
+                ),
+            )
+            if part_values is not None:
+                # The part columns live on the PROJECT (one part per
+                # project) and are written in the SAME transaction as the
+                # version row + project pointer — one commit-or-rollback
+                # boundary, so a failure leaves no half-set state.
+                cols = (
+                    "part_filename = ?, part_format = ?, part_unit = ?, "
+                    "part_unit_status = ?, part_scale = ?, part_report = ?, "
+                    "part_options = ?"
+                )
+                self.conn.raw.execute(
+                    f"UPDATE projects SET {cols} WHERE id = ?",
+                    (
+                        part_values["part_filename"],
+                        part_values["part_format"],
+                        part_values["part_unit"],
+                        part_values["part_unit_status"],
+                        part_values["part_scale"],
+                        part_values["part_report"],
+                        part_values["part_options"],
+                        project_id,
+                    ),
+                )
+            self.conn.commit()
+        except Exception as e:
+            # ANY failure (git commit error, subprocess.TimeoutExpired, a
+            # sqlite error, an unexpected bug) rolls the whole transaction
+            # back (version row + project pointer + part columns), unlinks
+            # the written files, removes the newly created empty versions/
+            # dirs, logs one ERROR. Every step is idempotent and safe on a
+            # connection already in a clean state, so the broad catch
+            # costs nothing the narrow one had. The original exception is
+            # re-raised, wrapped in :class:`ImportCommitFailed` (the route
+            # maps it to a 500 with a FIXED detail — the exception text is
+            # the log's, never the client's).
+            self.conn.rollback()
+            snapshot_path.unlink(missing_ok=True)
+            mesh_path.unlink(missing_ok=True)
+            self._remove_empty_version_dirs(versions_dir)
+            logger.error(
+                "part import rolled back (project_id=%s version_id=%s): %s",
+                project_id,
+                version_id,
+                e,
+            )
+            raise ImportCommitFailed(str(e)) from e
+        return version_id
+
+    def _remove_empty_version_dirs(self, versions_dir: Path) -> None:
+        """Remove newly created (now empty) ``versions/{id}`` dirs — a
+        rolled-back import must leave no repo files OR dirs behind (the
+        retry upload then succeeds; no half-state is observable). Only
+        empty dirs are removed (a non-empty dir holds another version's
+        files and is left alone)."""
+        if not versions_dir.is_dir():
+            return
+        for child in versions_dir.iterdir():
+            if child.is_dir() and not any(child.iterdir()):
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass
+        try:
+            if not any(versions_dir.iterdir()):
+                versions_dir.rmdir()
+        except OSError:
+            pass
 
     async def restore_version(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Non-destructive restore: a NEW forward version with the target's
@@ -1160,7 +1335,19 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
+        commit: bool = True,
     ) -> int:
+        """Insert the version row and (by default) commit it.
+
+        ``commit=False`` (used by ``_run_import_create``) leaves the INSERT
+        open in the caller's transaction: the caller OWNS the commit
+        boundary and must commit or roll back the transaction it started
+        before returning — a bare caller with ``commit=False`` and no
+        matching commit/rollback leaks the transaction on the shared
+        connection. The row id is available immediately either way (the
+        INSERT has run).
+        """
         fork = None
         if forked_from is not None:
             fork = [forked_from[0], forked_from[1]]
@@ -1213,8 +1400,8 @@ class VersionService:
             " (project_id, params, name, created_by_message, parent,"
             "  restored_from, forked_from, thumbnail, bbox,"
             "  render_artifact_dir, stated_dims, param_meta,"
-            "  confirmed_params)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  confirmed_params, source_kind)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -1229,9 +1416,11 @@ class VersionService:
                 stated_dims_json,
                 param_meta_json,
                 confirmed_params_json,
+                source_kind,
             ),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return int(cur.lastrowid or 0)
 
     @staticmethod
@@ -1272,6 +1461,10 @@ class VersionService:
         # degrades honestly — the 3MF route 409s with a clear cause — it
         # is never a guessed directory, never mtime inference).
         out["render_artifact_dir"] = out.get("render_artifact_dir") or None
+        # ``source_kind`` (issue #325): the version's origin (``"import"``
+        # for a part-import v1, ``None`` for a design-loop version — a NULL
+        # is a design-loop origin, never a fabricated ``"design"``).
+        out["source_kind"] = out.get("source_kind") or None
         return out
 
     @staticmethod
@@ -1305,6 +1498,16 @@ class VersionService:
             # as NULL; never a fabricated timestamp).
             "exported_at": version["exported_at"],
         }
+
+
+class ImportCommitFailed(Exception):
+    """The import's version create failed after the row + files were
+    written (the ``_run_import_create`` rollback already rolled back the
+    version row, the project part columns, the committed files, and the
+    newly created ``versions/`` dirs in one transaction — nothing is
+    persisted). The part-upload route maps this to a 500. Distinct from
+    :class:`VersionConflictError` (a 409 race): a commit failure is an
+    infra error, not a user error."""
 
 
 class VersionConflictError(Exception):
@@ -1386,6 +1589,7 @@ def migrate(conn: db_mod.Connection) -> None:
             stated_dims TEXT,
             param_meta TEXT,
             confirmed_params TEXT,
+            source_kind TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -1467,11 +1671,30 @@ def migrate(conn: db_mod.Connection) -> None:
     # reader in ``dimension_protocol.carried_stated_set`` feeds all four
     # production seams (chat, finalize, region edit).
     _ensure_column(conn, "projects", "carried_stated_dims", "TEXT")
+    # ``versions.source_kind`` (issue #325): the version's origin
+    # (``"import"`` for a part-import v1, NULL for a design-loop version).
+    # Nullable with no default; pre-existing rows read back as ``None``
+    # (a design-loop origin, never a fabricated ``"design"``).
+    _ensure_column(conn, "versions", "source_kind", "TEXT")
+    # Part-import project columns (issue #325 — one part per project):
+    # the import facts live on the PROJECT, not per-version. All nullable
+    # with no default (a project with no part has all NULL columns — never
+    # a fabricated empty string or zero). The ``part_report`` and
+    # ``part_options`` columns are JSON (the repair report and the
+    # candidate-unit options, respectively).
+    _ensure_column(conn, "projects", "part_filename", "TEXT")
+    _ensure_column(conn, "projects", "part_format", "TEXT")
+    _ensure_column(conn, "projects", "part_unit", "TEXT")
+    _ensure_column(conn, "projects", "part_unit_status", "TEXT")
+    _ensure_column(conn, "projects", "part_scale", "REAL")
+    _ensure_column(conn, "projects", "part_report", "TEXT")
+    _ensure_column(conn, "projects", "part_options", "TEXT")
 
 
 __all__ = [
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
+    "ImportCommitFailed",
     "ParamValue",
     "VersionConflictError",
     "VersionService",

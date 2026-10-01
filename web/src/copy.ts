@@ -718,9 +718,36 @@ export const export3mf = {
   conflict:
     "A design is still being made — export it once that finishes.",
 
+  /** `error_class: "units_unsettled"` (the 409: an imported part's units
+   *  are not yet settled — the 3MF cannot be exported until the user
+   *  settles the unit). Issue #325. */
+  unitsUnsettled:
+    "The part's units aren't settled yet — settle them to export a 3MF.",
+
   /** The generic fallback: an unlisted/`unknown` class, no `error_class`
    *  (the 404 bodies), or a network failure with no class at all. */
   failed: "The 3MF couldn't be exported.",
+} as const;
+
+/**
+ * Part upload rejection copy (issue #325). When the backend rejects a
+ * part upload, it returns a 422 with `detail` carrying one of these exact
+ * sentences; the SPA surfaces `detail` verbatim (the #299 way). The
+ * design-contract tripwire pins the two-way agreement.
+ */
+export const partUpload = {
+  /** The 400 `detail` body: an unsupported content type / extension. */
+  unsupported:
+    "That file type isn't supported. Upload an STL or 3MF mesh.",
+  /** The 422 `detail` body: an unparseable / empty / non-finite / over-cap
+   *  mesh (or a 3MF zip-bomb). The SPA shows it verbatim. */
+  unparseable:
+    "That file isn't a readable mesh. Check it opens in another 3D tool and try again.",
+  /** The 500 `detail` body: the part could not be saved (commit / settle
+   *  failure). FIXED sentence — the backend's exception text (paths, git
+   *  output) never reaches the client; it stays in the server log only. */
+  commitFailed:
+    "The part couldn't be saved. Nothing was changed.",
 } as const;
 
 /**
@@ -800,6 +827,7 @@ export const copy = {
   export3mf,
   missingStorage,
   photoUpload,
+  partUpload,
 } as const;
 
 export default copy;
