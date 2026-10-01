@@ -906,7 +906,6 @@ def test_assumed_axis_name_without_stated_evidence_stays_assumed() -> None:
     persisted H evidence stays ``assumed`` (no promotion without a value
     match); the stated H axis row renders alongside."""
     entries = state_block_for_version({"H": 99.0}, None, {"H": 12.0})
-    by_name = {e["name"]: e for e in entries}
     # The model's own param row (H=99, no matching evidence) stays
     # assumed — no name-guessing promotion.
     assumed = [e for e in entries if e["provenance"] == "assumed"]

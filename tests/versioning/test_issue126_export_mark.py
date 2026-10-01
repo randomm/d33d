@@ -22,8 +22,6 @@ Semantics pinned here (decided in this ticket, recorded per the ticket's own
 
 from __future__ import annotations
 
-import asyncio
-
 from httpx import ASGITransport, AsyncClient
 
 from tests.versioning.helpers import create_project, create_version, run_async
@@ -131,11 +129,13 @@ def test_reexport_updates_to_latest_export_time(app_with_versions):
         first = (
             (await client.get(f"/api/projects/{pid}/versions/{v1['id']}")).json()
         )["exported_at"]
+        import asyncio
+
         # The server stamps with second-resolution clock precision
         # (strftime %f), so two immediate calls can share a stamp — sleep
-        # past the boundary rather than assume it. asyncio.sleep preserves
-        # the same wall time but lets the event loop run, so it doesn't
-        # block the loop that the awaited client work runs on.
+        # past the boundary rather than assume it. An asyncio sleep keeps
+        # the wall time identical while never blocking the event loop
+        # (ASYNC251).
         await asyncio.sleep(1.05)
         await client.post(f"/api/projects/{pid}/versions/{v1['id']}/export")
         second = (

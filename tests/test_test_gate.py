@@ -86,6 +86,7 @@ def _probe(interp: str, code: str) -> int | None:
             [interp, "-c", code],
             capture_output=True,
             env=_env(),
+            check=False,
         )
     except (FileNotFoundError, OSError):
         return None
@@ -137,6 +138,7 @@ def _run_import_tests(shadow_dir: Path | None) -> subprocess.CompletedProcess:
         cwd=REPO_ROOT,
         capture_output=True,
         env=env,
+        check=False,
     )
 
 
@@ -200,6 +202,7 @@ def test_provenance_guard_safe_path() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         env=_env(),
+        check=False,
     )
     assert result.returncode == 0, (
         f"safe-path check failed: {result.stderr.decode()}"
@@ -244,6 +247,7 @@ def test_provenance_guard_refuses_stale_tree() -> None:
             cwd=REPO_ROOT,
             capture_output=True,
             env=_env(),
+            check=False,
         )
         stderr = result.stderr.decode()
         assert result.returncode != 0, (
@@ -329,6 +333,7 @@ def test_provenance_guard_refuses_main_checkout_from_worktree() -> None:
             cwd=REPO_ROOT,
             capture_output=True,
             env=_env(),
+            check=False,
         )
         stderr = result.stderr.decode()
         assert result.returncode == 4, (

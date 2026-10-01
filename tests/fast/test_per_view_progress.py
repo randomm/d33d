@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import subprocess
 import threading
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -292,7 +292,7 @@ def test_view_events_arrive_in_order_with_index(
         @staticmethod
         def load(*a: Any, **k: Any) -> Any:
             class M:
-                vertices = [0, 1, 2]
+                vertices: ClassVar[list[int]] = [0, 1, 2]
                 is_watertight = True
                 volume = 1000.0
 

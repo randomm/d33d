@@ -509,7 +509,7 @@ def test_v24_shaped_chat_path_persists_non_null_bbox(app_with_versions) -> None:
         latest = app_with_versions.state.versions.latest_version(pid)
         return frames, latest
 
-    frames, latest = run_async(app_with_versions, _call)
+    _frames, latest = run_async(app_with_versions, _call)
     assert latest is not None, "no version persisted"
     # The decisive assertion: the bbox is NON-NULL (the old code's bug
     # was NULL bbox for this shape).

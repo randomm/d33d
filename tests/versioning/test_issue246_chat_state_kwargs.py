@@ -185,7 +185,7 @@ def test_chat_adapter_kwargs_render_the_state_block_in_the_live_prompt():
         state_bbox=state_bbox,
         state_stated=state_stated,
     )
-    text = [p for p in messages[0]["content"] if p.get("type") == "text"][0]["text"]
+    text = next(p for p in messages[0]["content"] if p.get("type") == "text")["text"]
 
     assert "Current design state (mm):" in text
     # The model-emitted parameter renders the assumed mark (never stated).

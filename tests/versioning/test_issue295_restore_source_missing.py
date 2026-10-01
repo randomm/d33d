@@ -158,7 +158,7 @@ def test_restore_lost_design_scad_is_409_source_missing(app_with_versions):
         proj = await create_project(client)
         pid = proj["id"]
         v1 = await _make_source_version(client, app_with_versions, pid, {"W": 20}, "v1")
-        v2 = await create_version(client, pid, {"W": 24}, name="v2")
+        _v2 = await create_version(client, pid, {"W": 24}, name="v2")
         # The design.scad goes away (out-of-band loss).
         _design_scad_for(app_with_versions, pid, v1["id"]).unlink()
         return await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
@@ -181,7 +181,7 @@ def test_restore_pre105_params_only_target_proceeds(app_with_versions):
         proj = await create_project(client)
         pid = proj["id"]
         v1 = await create_version(client, pid, {"W": 20}, name="v1")
-        v2 = await create_version(client, pid, {"W": 24}, name="v2")
+        _v2 = await create_version(client, pid, {"W": 24}, name="v2")
         return await client.post(f"/api/projects/{pid}/versions/{v1['id']}/restore")
 
     r = run_async(app_with_versions, _call)
@@ -219,7 +219,7 @@ def test_noop_restore_409_detail_is_string(app_with_versions):
     async def _call(client):
         proj = await create_project(client)
         pid = proj["id"]
-        v1 = await create_version(client, pid, {"W": 20}, name="v1")
+        _v1 = await create_version(client, pid, {"W": 20}, name="v1")
         v2 = await create_version(client, pid, {"W": 24}, name="v2")
         return await client.post(f"/api/projects/{pid}/versions/{v2['id']}/restore")
 

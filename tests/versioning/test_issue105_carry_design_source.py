@@ -26,8 +26,9 @@ both directions — remove the block → red, remove the source → red).
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from d33d.design_loop import MAX_SCAD_SOURCE_BYTES, run_design_loop
 from d33d.design_source import (
@@ -166,7 +167,7 @@ def test_integration_prompt_contains_parameter_block_and_previous_source():
     previous version's source (proven red in both directions: removing
     either from the prompt builder breaks this test)."""
     prev_source = "diameter = 30;\nsphere(d = diameter);\n"
-    result, captured = _run(
+    _result, captured = _run(
         request="add another sphere underneath, 3cm",
         state_params={"diameter": 30.0},
         design_source=prev_source,
@@ -208,7 +209,7 @@ def test_30_60_regression_previous_sphere_30_visible_in_followup_prompt():
     30 is VISIBLE to the model (and this test fails if the section is
     deleted from the prompt)."""
     prev_source = "diameter = 30;\nsphere(d = diameter);\n"
-    result, captured = _run(
+    _result, captured = _run(
         request="add another sphere underneath, 3cm, overlapping 20%",
         state_params={"diameter": 30.0},
         design_source=prev_source,
@@ -234,7 +235,7 @@ def test_turn1_clean_slate_renders_explicit_no_design_wording():
     'no existing design yet / fresh start / CREATE a complete new design'
     wording — an absent section is indistinguishable from a bug, and the
     wording must not read as an instruction to produce nothing."""
-    result, captured = _run(
+    _result, captured = _run(
         request="make a sphere 3cm in diameter",
         state_params=None,
         design_source=None,
@@ -265,7 +266,7 @@ def test_source_within_bound_is_carried_in_full_verbatim():
     verbatim (every line, no marker, no truncation)."""
     source = "diameter = 30;\nsphere(d = diameter);\ncube([10, 10, 10]);\n"
     assert len(source.encode("utf-8")) <= MAX_SCAD_SOURCE_BYTES
-    result, captured = _run(
+    _result, captured = _run(
         request="edit the sphere",
         state_params={"diameter": 30.0},
         design_source=source,
@@ -291,7 +292,7 @@ def test_source_at_bound_carried_in_full_and_past_bound_truncated_with_marker():
     assert len(at_bound.encode("utf-8")) == MAX_SCAD_SOURCE_BYTES
 
     # AT the bound: carried in full, no marker.
-    result, captured = _run(
+    _result, captured = _run(
         request="edit the sphere",
         state_params={"diameter": 30.0},
         design_source=at_bound,
@@ -304,7 +305,7 @@ def test_source_at_bound_carried_in_full_and_past_bound_truncated_with_marker():
     # PAST the bound: truncated with the visible marker.
     over = at_bound + "\nmodule gone_module() { sphere(d = 50); }\n"
     assert len(over.encode("utf-8")) > MAX_SCAD_SOURCE_BYTES
-    result2, captured2 = _run(
+    _result2, captured2 = _run(
         request="edit the sphere",
         state_params={"diameter": 30.0},
         design_source=over,
@@ -544,17 +545,21 @@ def test_finalize_pass_persists_source_per_version(app_with_versions):
         # Same commit as the params snapshot (one writer, one lock, one
         # commit — the version's geometry and its record cannot diverge).
         # ``git show HEAD`` lists the files in that commit; verify both
-        # files are in the SAME commit.
+        # files are in the SAME commit. The subprocess runs in a worker
+        # thread so the event loop is never blocked (ASYNC221).
         import subprocess
 
-        r4 = subprocess.run(
-            ["git", "-C", str(repo), "show", "--name-only", "--format=",
-             "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        def _git_show_head(repo_path: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                ["git", "-C", repo_path, "show", "--name-only", "--format=",
+                 "HEAD"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+        r4 = await asyncio.to_thread(_git_show_head, str(repo))
         assert r4.returncode == 0, r4.stderr
         assert f"versions/{vid}/params.json" in r4.stdout
         assert f"versions/{vid}/design.scad" in r4.stdout
@@ -579,7 +584,7 @@ def test_chat_pass_persists_source_and_followup_turn_reads_it(app_with_versions)
         failure_reason = None
 
         class _Best:
-            params = {"diameter": 30.0}
+            params: ClassVar[dict[str, float]] = {"diameter": 30.0}
             scad_source = scad
 
         best = _Best()
@@ -736,7 +741,7 @@ def test_set_as_main_follows_pointer_and_source(app_with_versions):
         after = current_version_source(row2, app_with_versions.state.versions)
         return v1, v2, after, repo
 
-    v1, v2, after, repo = run_async(app_with_versions, _call)
+    _v1, _v2, after, _repo = run_async(app_with_versions, _call)
     # The carried design follows the set-as-main pointer move.
     assert after == scad_v1
 
@@ -764,7 +769,7 @@ def test_region_edit_pass_carries_current_design_source(app_with_versions):
         failure_reason = None
 
         class _Best:
-            params = {"diameter": 30.0}
+            params: ClassVar[dict[str, float]] = {"diameter": 30.0}
             scad_source = scad
 
         best = _Best()

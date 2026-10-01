@@ -38,7 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -1354,7 +1354,7 @@ class TestDeterministicComparison:
     a MEASURED axis value is answered from the design state with NO LLM
     call, NO version, and NO design loop."""
 
-    BBOX = {"x": 20.0, "y": 43.9, "z": 12.0}
+    BBOX: ClassVar[dict[str, float]] = {"x": 20.0, "y": 43.9, "z": 12.0}
 
     def _latest(self, stated: dict | None = None) -> dict:
         return _latest_cmp(bbox=dict(self.BBOX), stated=stated)
@@ -2593,7 +2593,7 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
         )
         return r, frames
 
-    r, frames = run_async(app_with_versions, _call)
+    r, _frames = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
     assert loop_called, "the design loop was NOT called for a fresh project"
 
@@ -3460,7 +3460,7 @@ class TestStage2OutcomeWarningLogs:
             return r, frames, pid
 
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
-            r, frames, pid = run_async(app_with_versions, _call)
+            r, _frames, pid = run_async(app_with_versions, _call)
         assert r.status_code == 202, r.text
         assert not loop_called
         stage2_infos = self._stage2_info(caplog)
@@ -3717,7 +3717,7 @@ class TestCapabilityProbeCached:
                 try:
                     await edge("How tall is it now?", [{"name": "H", "value": 12.0}])
                 except Exception:
-                    pass
+                    logging.getLogger(__name__).debug("edge probe failed, retrying", exc_info=True)
             return probe_count["n"], llm.calls
 
         probes, llm_calls = asyncio.run(_call())

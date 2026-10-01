@@ -338,7 +338,7 @@ def test_finalize_pass_yields_measured_design_state(app_with_versions) -> None:
             {(e["kind"], e["name"]): e for e in expected},
         )
 
-    body, expected = run_async(app_with_versions, _call)
+    body, _ = run_async(app_with_versions, _call)
     by_kind_name = {(e["kind"], e["name"]) for e in body}
     # Issue #316 de-dup: the W/D/H-named params (30) all AGREE with their
     # measured extents (30.4/30.0/30.0, within tolerance) → their param
