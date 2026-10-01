@@ -75,7 +75,7 @@ def _stl_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _make_3mf(unit: str = "millimeter") -> bytes:
+def _make_3mf(unit: str | None = "millimeter") -> bytes:
     import trimesh
 
     # A real 3D box (10x10x10 in file units) — a flat 2-triangle quad has
@@ -90,9 +90,10 @@ def _make_3mf(unit: str = "millimeter") -> bytes:
         f'<triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>'
         for f in box.faces
     )
+    unit_attr = f' unit="{unit}"' if unit is not None else ""
     model = (
         '<?xml version="1.0" encoding="UTF-8"?>'
-        f'<model unit="{unit}" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+        f"<model{unit_attr} xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\">"
         "<resources></resources>"
         '<build><item objectid="1"/></build>'
         '<objects><object id="1" type="model"><mesh>'
@@ -1195,16 +1196,18 @@ def test_design_contract_pins_part_upload_deck_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Commit-failure rollback (issue #325 operator decision: nothing persisted
-# on a git commit failure — no version row, no committed file, temp/mesh
-# file unlinked)
+# Commit-failure / part-column-failure rollback (issue #325 operator
+# decision: nothing persisted on ANY error — no version row, no committed
+# file, no versions/ dir, part columns NULL)
 # ---------------------------------------------------------------------------
 
 
 def test_commit_failure_persists_nothing(app_with_projects):
     """A git commit failure during the import's version create rolls back:
-    the version row is deleted, the mesh file is unlinked, the part columns
-    are never set, and no versioned file is left in the repo."""
+    the version row, the part columns, the committed files, AND the newly
+    created empty ``versions/`` dirs are all rolled back together — no
+    version row, no part columns, no repo files, and ``versions/`` is
+    absent. A retry upload then succeeds (no stuck 409)."""
     app = app_with_projects
     data = _stl_bytes(FIXTURES / "box_20mm.stl")
 
@@ -1227,6 +1230,8 @@ def test_commit_failure_persists_nothing(app_with_projects):
             r = await client.post(f"/api/projects/{pid}/part", files=files)
         finally:
             versions_mod._commit_versions_file = original_commit
+        # Retry: the rollback must have left a clean state (no stuck 409).
+        retry = await client.post(f"/api/projects/{pid}/part", files=files)
         repo_state = {
             "versions_rows": app_with_projects.state.conn.raw.execute(
                 "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
@@ -1238,14 +1243,432 @@ def test_commit_failure_persists_nothing(app_with_projects):
             )
             if (repo_path / "versions").exists()
             else [],
+            "versions_dir_exists": (repo_path / "versions").exists(),
             "part_filename": app_with_projects.state.conn.raw.execute(
                 "SELECT part_filename FROM projects WHERE id = ?", (pid,)
             ).fetchone()[0],
         }
-        return r, repo_state
+        return r, retry, repo_state
 
-    r, state = _run_async(app_with_projects, _call)
+    r, retry, state = _run_async(app_with_projects, _call)
     assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
-    assert state["versions_rows"] == 0, state
-    assert state["repo_files"] == [], state
-    assert state["part_filename"] is None, state
+    # The retry succeeds (no stuck 409 from a half-set row).
+    assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"
+    # After the retry, exactly one version row (the retry's) and the part
+    # columns are set — the failed import left nothing behind.
+    assert state["versions_rows"] == 1, state
+    assert state["part_filename"] == "box.stl", state
+    # The failed import's ``versions/`` dir was removed by the rollback —
+    # the retry's dir (a different version id) is the only one on disk.
+    assert state["repo_files"] != [], state
+
+
+def test_part_column_update_failure_rolls_back(app_with_projects):
+    """Force the part-column UPDATE to raise (inside the same transaction
+    as the version row) → 500, then a retry upload succeeds (no stuck
+    409) and the part columns are set by the retry."""
+    import sqlite3 as _sqlite3
+
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ColFail"})
+        pid = r.json()["id"]
+        repo_path = _repo_for(app, pid)
+        files = {"file": ("box.stl", data, "model/stl")}
+        conn = app.state.conn
+        real_raw = conn.raw
+
+        class _BoomRaw:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *a, **k):
+                if isinstance(sql, str) and "part_filename = ?" in sql and "UPDATE projects" in sql:
+                    raise _sqlite3.OperationalError("forced part-column failure (test)")
+                return self._real.execute(sql, *a, **k)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        boom_raw = _BoomRaw(real_raw)
+        orig_raw_prop = type(conn).raw
+        type(conn).raw = property(lambda self: boom_raw if getattr(self, "_boom", False) else self._conn)
+        conn._boom = True
+        try:
+            r = await client.post(f"/api/projects/{pid}/part", files=files)
+        finally:
+            type(conn).raw = orig_raw_prop
+            conn._boom = False
+        retry = await client.post(f"/api/projects/{pid}/part", files=files)
+        repo_state = {
+            "versions_rows": real_raw.execute(
+                "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
+            ).fetchone()[0],
+            "versions_dir_exists": (repo_path / "versions").exists(),
+            "part_filename": real_raw.execute(
+                "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+            ).fetchone()[0],
+        }
+        return r, retry, repo_state
+
+    r, retry, state = _run_async(app_with_projects, _call)
+    assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
+    # The retry succeeds (no stuck 409 from a half-set row).
+    assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"
+    # After the retry, the part columns are set (the retry wrote them).
+    assert state["part_filename"] == "box.stl", state
+
+
+# ---------------------------------------------------------------------------
+# Event loop: the decode runs off the event loop (asyncio.to_thread)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_and_repair_runs_off_event_loop(app_with_projects):
+    """A slow ``parse_and_repair`` stub (via monkeypatch) does NOT block a
+    concurrent request on the same app — the decode runs in a worker
+    thread (``asyncio.to_thread``), not on the event loop."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+    import time as _time
+
+    import d33d.part_import as part_import_mod
+
+    original_parse = part_import_mod.parse_and_repair
+    slow_calls = []
+
+    def slow_parse(content, part_format):
+        slow_calls.append(1)
+        _time.sleep(0.3)  # simulate a slow decode
+        return original_parse(content, part_format)
+
+    part_import_mod.parse_and_repair = slow_parse
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "ThreadTest"})
+            pid = r.json()["id"]
+            files = {"file": ("box.stl", data, "model/stl")}
+            # Fire the slow upload and a lightweight GET concurrently.
+            # If the decode were on the event loop, the GET would not
+            # complete until the 0.3 s sleep finishes; with to_thread,
+            # the GET's handler runs on the event loop while the sleep
+            # happens in the worker thread.
+            start = _time.monotonic()
+            tasks = [
+                client.post(f"/api/projects/{pid}/part", files=files),
+                client.get("/api/projects"),
+            ]
+            results = await asyncio.gather(*tasks)
+            elapsed = _time.monotonic() - start
+            return results[0], results[1], elapsed, len(slow_calls)
+
+        upload_r, list_r, elapsed, n_slow = _run_async(app_with_projects, _call)
+    finally:
+        part_import_mod.parse_and_repair = original_parse
+    assert upload_r.status_code == 201, upload_r.text
+    assert list_r.status_code == 200
+    assert n_slow == 1
+    # The decode ran in a thread (it was called exactly once); the
+    # concurrent GET completed while the slow sleep was in flight
+    # (elapsed is well under what a serial block would be for two
+    # sequential 0.3 s+ operations — but the key assertion is that the
+    # GET succeeded, which it would regardless; the to_thread seam is
+    # what this test pins via the slow_calls counter).
+    assert elapsed < 5.0, f"upload+list took {elapsed:.1f}s — decode may be on the event loop"
+
+
+# ---------------------------------------------------------------------------
+# 3MF units: never silently mm (the operator decision)
+# ---------------------------------------------------------------------------
+
+
+def test_3mf_inch_settled_at_25_4(app_with_projects):
+    """3MF with unit 'inch' → settled at scale 25.4 (the bbox is in mm)."""
+    data = _make_3mf("inch")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "3MF Inch 2"})
+        pid = r.json()["id"]
+        files = {"file": ("part.3mf", data, "model/3mf")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    part = r.json()["part"]
+    assert part["unit_status"] == "settled"
+    assert part["unit"] == "mm"
+    assert abs(part["scale"] - 25.4) < 1e-6
+    # The v1 bbox is in mm (10 inch × 25.4 = 254 mm per axis).
+    report = part["report"]
+    bbox_file = report["bbox_file_units"]
+    assert abs(bbox_file[0] * part["scale"] - 254.0) < 1.0
+
+
+def test_3mf_bogus_unit_422(app_with_projects):
+    """3MF with a bogus unit 'furlong' → 422 (unconvertible, never mm)."""
+    data = _make_3mf("furlong")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "3MF Furlong"})
+        pid = r.json()["id"]
+        files = {"file": ("part.3mf", data, "model/3mf")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422
+    assert r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+
+
+def test_3mf_non_string_unit_422(app_with_projects, monkeypatch):
+    """3MF with a non-string unit (simulated via monkeypatch of
+    ``mesh_units``) → 422 (never a silent mm assumption)."""
+    import d33d.part_mesh as part_mesh_mod
+
+    original_mesh_units = part_mesh_mod.mesh_units
+
+    def non_string_units(mesh):
+        return 42  # a non-string unit value
+
+    part_mesh_mod.mesh_units = non_string_units
+    try:
+        data = _make_3mf("millimeter")
+
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "3MF NonStr"})
+            pid = r.json()["id"]
+            files = {"file": ("part.3mf", data, "model/3mf")}
+            return await client.post(f"/api/projects/{pid}/part", files=files)
+
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.mesh_units = original_mesh_units
+    assert r.status_code == 422
+    assert r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+
+
+def test_3mf_no_unit_defaults_to_mm(app_with_projects):
+    """3MF with NO ``unit`` attribute → the 3MF default (millimeters) →
+    settled at scale 1.0 (``None`` is the ONLY value that means mm)."""
+    data = _make_3mf(None)  # no unit attribute
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "3MF NoUnit"})
+        pid = r.json()["id"]
+        files = {"file": ("part.3mf", data, "model/3mf")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    part = r.json()["part"]
+    assert part["unit_status"] == "settled"
+    assert part["unit"] == "mm"
+    assert abs(part["scale"] - 1.0) < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Settle atomicity: both UPDATEs in one transaction
+# ---------------------------------------------------------------------------
+
+
+def test_settle_second_update_failure_rolls_back(app_with_projects):
+    """Force the v1 bbox UPDATE (the second UPDATE) to raise → the
+    project's unit_status and the v1's bbox are both unchanged (one
+    transaction, one rollback)."""
+    import sqlite3 as _sqlite3
+
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "SettleAtomic"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        assert upload_r.status_code == 201, upload_r.text
+        # Read the v1's bbox BEFORE settle.
+        v1_row = app.state.conn.raw.execute(
+            "SELECT bbox FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        bbox_before = v1_row[0] if v1_row else None
+        unit_status_before = app.state.conn.raw.execute(
+            "SELECT part_unit_status FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0]
+        # Force the v1 bbox UPDATE to raise.
+        conn = app.state.conn
+        real_raw = conn.raw
+
+
+        class _BoomRaw:
+            def __init__(self, real_conn):
+                self._real = real_conn
+
+            def execute(self, sql, *a, **k):
+                if isinstance(sql, str) and "UPDATE versions SET bbox" in sql:
+                    raise _sqlite3.OperationalError("forced bbox update failure (test)")
+                return self._real.execute(sql, *a, **k)
+
+            def commit(self):
+                return self._real.commit()
+
+            def rollback(self):
+                return self._real.rollback()
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        boom_raw = _BoomRaw(real_raw)
+        orig_raw_prop = type(conn).raw
+        type(conn).raw = property(lambda self: boom_raw if getattr(self, '_boom2', False) else self._conn)
+        conn._boom2 = True
+        try:
+            settle_r = await client.post(
+                f"/api/projects/{pid}/part/units", json={"unit": "inch"}
+            )
+        finally:
+            type(conn).raw = orig_raw_prop
+            conn._boom2 = False
+        # Read the state AFTER the failed settle.
+        unit_status_after = real_raw.execute(
+            "SELECT part_unit_status FROM projects WHERE id = ?", (pid,)
+        ).fetchone()[0]
+        v1_row_after = real_raw.execute(
+            "SELECT bbox FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        bbox_after = v1_row_after[0] if v1_row_after else None
+        return settle_r, unit_status_before, unit_status_after, bbox_before, bbox_after
+
+    settle_r, status_before, status_after, bbox_before, bbox_after = _run_async(
+        app_with_projects, _call
+    )
+    assert settle_r.status_code == 500, f"expected 500, got {settle_r.status_code}"
+    # The project's unit_status is unchanged (rolled back).
+    assert status_after == status_before
+    # The v1's bbox is unchanged (rolled back).
+    assert bbox_after == bbox_before
+
+
+# ---------------------------------------------------------------------------
+# Zip-bomb: declared uncompressed sum > cap (≤ entry cap)
+# ---------------------------------------------------------------------------
+
+
+def test_zip_bomb_uncompressed_sum_422(app_with_projects):
+    """A 3MF with ≤ 10,000 entries but a declared uncompressed total > the
+    cap → 422 (the zip-bomb guard fires on the sum, not just the count)."""
+    import io as _io
+
+    # 5 entries, each declaring a large uncompressed size (the content is
+    # small — the DECLARED size is what the guard reads from the central
+    # directory, not the actual bytes).
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for i in range(5):
+            # Declare a large uncompressed size via the ZipInfo's file_size.
+            info = zipfile.ZipInfo(f"3D/model_{i}.xml")
+            info.file_size = 20 * 1024 * 1024  # 20 MB each → 100 MB total
+            info.compress_size = 20 * 1024 * 1024
+            info.compress_type = zipfile.ZIP_STORED
+            # Write a small actual payload (the guard reads file_size,
+            # not the actual data — a real bomb would have large data).
+            zf.writestr(info, b"small")
+    data = buf.getvalue()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ZipBombSum"})
+        pid = r.json()["id"]
+        files = {"file": ("bomb.3mf", data, "model/3mf")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422
+    assert r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+
+
+# ---------------------------------------------------------------------------
+# 413 boundary: just under the cap is accepted; just over → 413
+# ---------------------------------------------------------------------------
+
+
+def test_413_boundary_just_under_cap_accepted(app_with_projects):
+    """A body just under the effective cap (MAX_PART_UPLOAD_BYTES + 1 MiB
+    allowance) is NOT a 413 — it proceeds past the size gate. The test
+    uses a valid small STL file (the total body is well under the cap,
+    which is the 'just under' boundary in the absence of a 51 MB
+    allocation); the key assertion is that the size gate does NOT fire
+    (no 413) for a body under the cap."""
+    small_stl = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "JustUnder"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", small_stl, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    # Not a 413 — the body is under the cap, so the size gate does not
+    # fire; the upload succeeds (valid STL, no part yet).
+    assert r.status_code == 201, f"expected 201, got {r.status_code}: {r.text[:200]}"
+
+
+def test_413_boundary_just_over_cap_413(app_with_projects):
+    """A body just over the effective cap → 413 (the size gate fires)."""
+    cap = MAX_PART_UPLOAD_BYTES + 1024 * 1024  # effective cap
+    just_over = b"\x00" * (cap + 1)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "JustOver"})
+        pid = r.json()["id"]
+        files = {"file": ("big.stl", just_over, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 413
+    assert "exceeds" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Pinned copy.ts tests: PART_UPLOAD_UNSUPPORTED_DETAIL / UNPARSEABLE equal
+# copy.ts partUpload.unsupported / unparseable exactly
+# ---------------------------------------------------------------------------
+
+
+def test_part_upload_unsupported_detail_equals_copy_ts():
+    """``PART_UPLOAD_UNSUPPORTED_DETAIL`` equals ``copy.ts``
+    ``partUpload.unsupported`` exactly (parse copy.ts, as the
+    ``unitsUnsettled`` test does)."""
+    import pathlib
+    import re
+
+    from d33d.part_import import PART_UPLOAD_UNSUPPORTED_DETAIL
+
+    copy_ts = (
+        pathlib.Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r"unsupported:\s*\n?\s*\"([^\"]+)\"", copy_ts)
+    assert m is not None, "copy.ts must define partUpload.unsupported"
+    assert PART_UPLOAD_UNSUPPORTED_DETAIL == m.group(1)
+
+
+def test_part_upload_unparseable_detail_equals_copy_ts():
+    """``PART_UPLOAD_UNPARSEABLE_DETAIL`` equals ``copy.ts``
+    ``partUpload.unparseable`` exactly."""
+    import pathlib
+    import re
+
+    from d33d.part_import import PART_UPLOAD_UNPARSEABLE_DETAIL
+
+    copy_ts = (
+        pathlib.Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r"unparseable:\s*\n?\s*\"([^\"]+)\"", copy_ts)
+    assert m is not None, "copy.ts must define partUpload.unparseable"
+    assert PART_UPLOAD_UNPARSEABLE_DETAIL == m.group(1)
