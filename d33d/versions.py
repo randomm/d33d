@@ -759,6 +759,7 @@ class VersionService:
         mesh_bytes: bytes,
         stored_name: str,
         repo_dir: Path,
+        part_values: dict[str, Any] | None = None,
     ) -> int:
         """The import's version create (call under the shared write lock,
         via ``_with_project_lock`` — the part-upload route wraps it).
@@ -768,10 +769,17 @@ class VersionService:
         ``part.stl``/``part.3mf``, never the user's filename), committing
         both files in the SAME commit as the v1's ``params.json`` (one
         writer, one lock, one commit — the version row and its geometry can
-        never diverge). On commit failure the row is deleted + the mesh
-        file unlinked (the ``_run_create`` rollback contract), so a failed
-        import leaves no version row, no committed file, and no leftover
-        temp file.
+        never diverge).
+
+        ``part_values`` (the project's part columns: filename, format,
+        unit, unit_status, scale, report, options) is written INSIDE this
+        call, in the SAME write lock + DB transaction as the version row.
+        On ANY failure (git commit failure, sqlite error) the transaction
+        rolls back the version row, the part columns, the committed files,
+        AND the newly created empty ``versions/`` dirs — one ERROR log,
+        one clean state, and a retry upload succeeds (no stuck 409). A
+        commit failure raises :class:`ImportCommitFailed` (the route maps
+        it to a 500).
         """
         project = self.conn.get_project(project_id)
         if project is None:
@@ -788,12 +796,20 @@ class VersionService:
             thumbnail=None,
             bbox=bbox,
             source_kind=source_kind,
+            commit=False,
         )
         versions_dir = repo_dir / "versions"
         vdir = versions_dir / str(version_id)
         snapshot_path = vdir / PARAMS_FILENAME
         mesh_path = vdir / stored_name
         try:
+            # One transaction: the version row INSERT (held open by
+            # ``commit=False``) + the project pointer + the part columns.
+            # The git commit happens INSIDE it; on ANY failure (git commit
+            # failure, sqlite error) the transaction rolls back all three
+            # together, the files are unlinked, and the newly created
+            # empty versions/ dirs are removed — one ERROR log, one clean
+            # state, and a retry upload succeeds (no stuck 409).
             install_text_file_atomic(
                 snapshot_path, json.dumps(params, indent=2, sort_keys=True) + "\n"
             )
@@ -808,25 +824,71 @@ class VersionService:
                 f"{version_id}/{PARAMS_FILENAME}",
                 commit_subject,
             )
-        except (RuntimeError, OSError) as e:
+            self.conn.update_project(
+                project_id,
+                current_version=version_id,
+                last_activity=(version_id, version_name),
+            )
+            if part_values is not None:
+                # The part columns live on the PROJECT (one part per
+                # project) and are written in the SAME transaction as the
+                # version row + project pointer — one commit-or-rollback
+                # boundary, so a failure leaves no half-set state.
+                cols = (
+                    "part_filename = ?, part_format = ?, part_unit = ?, "
+                    "part_unit_status = ?, part_scale = ?, part_report = ?, "
+                    "part_options = ?"
+                )
+                self.conn.raw.execute(
+                    f"UPDATE projects SET {cols} WHERE id = ?",
+                    (
+                        part_values["part_filename"],
+                        part_values["part_format"],
+                        part_values["part_unit"],
+                        part_values["part_unit_status"],
+                        part_values["part_scale"],
+                        part_values["part_report"],
+                        part_values["part_options"],
+                        project_id,
+                    ),
+                )
+            self.conn.commit()
+        except (RuntimeError, OSError, sqlite3.Error) as e:
+            # Roll the whole transaction back (version row + project
+            # pointer + part columns), unlink the written files, remove
+            # the newly created empty versions/ dirs, log one ERROR.
+            self.conn.rollback()
             snapshot_path.unlink(missing_ok=True)
             mesh_path.unlink(missing_ok=True)
-            try:
-                vdir.rmdir()
-            except OSError:
-                pass
-            self.conn.raw.execute(
-                "DELETE FROM versions WHERE id = ?", (version_id,)
+            self._remove_empty_version_dirs(versions_dir)
+            logger.error(
+                "part import rolled back (project_id=%s version_id=%s): %s",
+                project_id,
+                version_id,
+                e,
             )
-            self.conn.commit()
             raise ImportCommitFailed(str(e)) from e
-
-        self.conn.update_project(
-            project_id,
-            current_version=version_id,
-            last_activity=(version_id, version_name),
-        )
         return version_id
+
+    def _remove_empty_version_dirs(self, versions_dir: Path) -> None:
+        """Remove newly created (now empty) ``versions/{id}`` dirs — a
+        rolled-back import must leave no repo files OR dirs behind (the
+        retry upload then succeeds; no half-state is observable). Only
+        empty dirs are removed (a non-empty dir holds another version's
+        files and is left alone)."""
+        if not versions_dir.is_dir():
+            return
+        for child in versions_dir.iterdir():
+            if child.is_dir() and not any(child.iterdir()):
+                try:
+                    child.rmdir()
+                except OSError:
+                    pass
+        try:
+            if not any(versions_dir.iterdir()):
+                versions_dir.rmdir()
+        except OSError:
+            pass
 
     async def restore_version(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Non-destructive restore: a NEW forward version with the target's
@@ -1246,6 +1308,7 @@ class VersionService:
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
         source_kind: str | None = None,
+        commit: bool = True,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -1318,7 +1381,8 @@ class VersionService:
                 source_kind,
             ),
         )
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
         return int(cur.lastrowid or 0)
 
     @staticmethod
@@ -1399,16 +1463,13 @@ class VersionService:
 
 
 class ImportCommitFailed(Exception):
-    """The import's version create failed after the row + file were written
-    (the ``_run_create``-style rollback already deleted the row and unlinked
-    the mesh file — nothing is persisted). The part-upload route maps this
-    to a 500. Distinct from :class:`VersionConflictError` (a 409 race): a
-    commit failure is an infra error, not a user error.
-
-    ``d33d.part_import`` re-exports this as its ``ImportCommitError`` alias
-    (the part-import module cannot import ``d33d.versions`` without a cycle:
-    ``versions_routes`` imports ``part_import`` and ``versions_routes`` is
-    imported by ``d33d.app``)."""
+    """The import's version create failed after the row + files were
+    written (the ``_run_import_create`` rollback already rolled back the
+    version row, the project part columns, the committed files, and the
+    newly created ``versions/`` dirs in one transaction — nothing is
+    persisted). The part-upload route maps this to a 500. Distinct from
+    :class:`VersionConflictError` (a 409 race): a commit failure is an
+    infra error, not a user error."""
 
 
 class VersionConflictError(Exception):

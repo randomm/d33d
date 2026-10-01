@@ -71,7 +71,7 @@ from d33d.design_loop_events import (
     _version_render_artifact_dir,
 )
 from d33d.design_state import state_block_for_version
-from d33d.part_import import _decode_part_row
+from d33d.part_import import part_public
 from d33d.projects import repo_present
 
 logger = logging.getLogger(__name__)
@@ -471,7 +471,7 @@ def create_versions_router() -> APIRouter:
         # columns → ``None`` — a project with no part renders ``null``,
         # never a fabricated empty object; the SPA uses the absence to
         # decide whether to render the import screens).
-        part = _decode_part_row(project_row) if project_row.get("part_filename") else None
+        part = part_public(project_row) if project_row.get("part_filename") else None
         # history_missing (issue #316): the repo directory is absent → the
         # saved design history is gone. Same predicate as
         # storage.repo_present (via the shared repo_present helper) —
