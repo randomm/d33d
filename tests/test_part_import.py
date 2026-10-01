@@ -1192,3 +1192,60 @@ def test_design_contract_pins_part_upload_deck_key() -> None:
         / "web" / "src" / "__tests__" / "design-contract.test.ts"
     ).read_text("utf-8")
     assert '"partUpload"' in src
+
+
+# ---------------------------------------------------------------------------
+# Commit-failure rollback (issue #325 operator decision: nothing persisted
+# on a git commit failure — no version row, no committed file, temp/mesh
+# file unlinked)
+# ---------------------------------------------------------------------------
+
+
+def test_commit_failure_persists_nothing(app_with_projects):
+    """A git commit failure during the import's version create rolls back:
+    the version row is deleted, the mesh file is unlinked, the part columns
+    are never set, and no versioned file is left in the repo."""
+    app = app_with_projects
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CommitFail"})
+        pid = r.json()["id"]
+        repo_path = _repo_for(app, pid)
+        files = {"file": ("box.stl", data, "model/stl")}
+        # Force the git commit to fail inside the write lock (module-level
+        # seam in d33d.versions).
+        import d33d.versions as versions_mod
+
+        original_commit = versions_mod._commit_versions_file
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("forced commit failure (test)")
+
+        versions_mod._commit_versions_file = _boom
+        try:
+            r = await client.post(f"/api/projects/{pid}/part", files=files)
+        finally:
+            versions_mod._commit_versions_file = original_commit
+        repo_state = {
+            "versions_rows": app_with_projects.state.conn.raw.execute(
+                "SELECT COUNT(*) FROM versions WHERE project_id = ?", (pid,)
+            ).fetchone()[0],
+            "repo_files": sorted(
+                p.name
+                for p in (repo_path / "versions").rglob("*")
+                if p.is_file()
+            )
+            if (repo_path / "versions").exists()
+            else [],
+            "part_filename": app_with_projects.state.conn.raw.execute(
+                "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+            ).fetchone()[0],
+        }
+        return r, repo_state
+
+    r, state = _run_async(app_with_projects, _call)
+    assert r.status_code == 500, f"expected 500, got {r.status_code}: {r.text}"
+    assert state["versions_rows"] == 0, state
+    assert state["repo_files"] == [], state
+    assert state["part_filename"] is None, state
