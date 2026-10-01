@@ -45,6 +45,7 @@ export interface ExportErrorDisplay {
 const EXPORT_REASONS: Record<string, string> = {
   ...copy.failure.reasons,
   conflict: copy.export3mf.conflict,
+  units_unsettled: copy.export3mf.unitsUnsettled,
 };
 
 function rawDetail(e: unknown): string | undefined {

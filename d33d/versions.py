@@ -747,6 +747,87 @@ class VersionService:
             raise LookupError(f"version {version_id} not found")
         return row
 
+    def _run_import_create(
+        self,
+        project_id: int,
+        *,
+        version_name: str,
+        params: dict[ParamValue],
+        message: str,
+        bbox: tuple[float, float, float] | None,
+        source_kind: str,
+        mesh_bytes: bytes,
+        stored_name: str,
+        repo_dir: Path,
+    ) -> int:
+        """The import's version create (call under the shared write lock,
+        via ``_with_project_lock`` — the part-upload route wraps it).
+
+        Creates the v1 version row (``source_kind`` recorded) AND writes the
+        imported mesh to ``versions/{id}/{stored_name}`` (the FIXED name —
+        ``part.stl``/``part.3mf``, never the user's filename), committing
+        both files in the SAME commit as the v1's ``params.json`` (one
+        writer, one lock, one commit — the version row and its geometry can
+        never diverge). On commit failure the row is deleted + the mesh
+        file unlinked (the ``_run_create`` rollback contract), so a failed
+        import leaves no version row, no committed file, and no leftover
+        temp file.
+        """
+        project = self.conn.get_project(project_id)
+        if project is None:
+            raise LookupError(f"project {project_id} not found")
+
+        version_id = self._insert_version(
+            project_id,
+            params,
+            name=version_name,
+            created_by_message=message,
+            parent=None,
+            restored_from=None,
+            forked_from=None,
+            thumbnail=None,
+            bbox=bbox,
+            source_kind=source_kind,
+        )
+        versions_dir = repo_dir / "versions"
+        vdir = versions_dir / str(version_id)
+        snapshot_path = vdir / PARAMS_FILENAME
+        mesh_path = vdir / stored_name
+        try:
+            install_text_file_atomic(
+                snapshot_path, json.dumps(params, indent=2, sort_keys=True) + "\n"
+            )
+            vdir.mkdir(parents=True, exist_ok=True)
+            mesh_path.write_bytes(mesh_bytes)
+            commit_subject = (
+                f"import: {_sanitize_commit_message(version_name)}"
+            )
+            _commit_versions_file(
+                repo_dir,
+                versions_dir,
+                f"{version_id}/{PARAMS_FILENAME}",
+                commit_subject,
+            )
+        except (RuntimeError, OSError) as e:
+            snapshot_path.unlink(missing_ok=True)
+            mesh_path.unlink(missing_ok=True)
+            try:
+                vdir.rmdir()
+            except OSError:
+                pass
+            self.conn.raw.execute(
+                "DELETE FROM versions WHERE id = ?", (version_id,)
+            )
+            self.conn.commit()
+            raise ImportCommitFailed(str(e)) from e
+
+        self.conn.update_project(
+            project_id,
+            current_version=version_id,
+            last_activity=(version_id, version_name),
+        )
+        return version_id
+
     async def restore_version(self, project_id: int, version_id: int) -> dict[str, Any]:
         """Non-destructive restore: a NEW forward version with the target's
         full snapshot AND its per-version design source (issue #105 — a
@@ -1278,9 +1359,9 @@ class VersionService:
         # degrades honestly — the 3MF route 409s with a clear cause — it
         # is never a guessed directory, never mtime inference).
         out["render_artifact_dir"] = out.get("render_artifact_dir") or None
-        # ``source_kind`` (issue #325): the provenance of the version's
-        # origin — "import" for imported parts, NULL for all others
-        # (design loop, restore, fork). NULL maps to ``None``.
+        # ``source_kind`` (issue #325): the version's origin (``"import"``
+        # for a part-import v1, ``None`` for a design-loop version — a NULL
+        # is a design-loop origin, never a fabricated ``"design"``).
         out["source_kind"] = out.get("source_kind") or None
         return out
 
@@ -1315,6 +1396,19 @@ class VersionService:
             # as NULL; never a fabricated timestamp).
             "exported_at": version["exported_at"],
         }
+
+
+class ImportCommitFailed(Exception):
+    """The import's version create failed after the row + file were written
+    (the ``_run_create``-style rollback already deleted the row and unlinked
+    the mesh file — nothing is persisted). The part-upload route maps this
+    to a 500. Distinct from :class:`VersionConflictError` (a 409 race): a
+    commit failure is an infra error, not a user error.
+
+    ``d33d.part_import`` re-exports this as its ``ImportCommitError`` alias
+    (the part-import module cannot import ``d33d.versions`` without a cycle:
+    ``versions_routes`` imports ``part_import`` and ``versions_routes`` is
+    imported by ``d33d.app``)."""
 
 
 class VersionConflictError(Exception):
@@ -1478,9 +1572,17 @@ def migrate(conn: db_mod.Connection) -> None:
     # reader in ``dimension_protocol.carried_stated_set`` feeds all four
     # production seams (chat, finalize, region edit).
     _ensure_column(conn, "projects", "carried_stated_dims", "TEXT")
-    # Issue #325 — part-import columns on projects: the one-part-per-project
-    # import facts. All nullable, no backfill (a project without a part has
-    # all NULLs — an absent part abstains, never a fabricated value).
+    # ``versions.source_kind`` (issue #325): the version's origin
+    # (``"import"`` for a part-import v1, NULL for a design-loop version).
+    # Nullable with no default; pre-existing rows read back as ``None``
+    # (a design-loop origin, never a fabricated ``"design"``).
+    _ensure_column(conn, "versions", "source_kind", "TEXT")
+    # Part-import project columns (issue #325 — one part per project):
+    # the import facts live on the PROJECT, not per-version. All nullable
+    # with no default (a project with no part has all NULL columns — never
+    # a fabricated empty string or zero). The ``part_report`` and
+    # ``part_options`` columns are JSON (the repair report and the
+    # candidate-unit options, respectively).
     _ensure_column(conn, "projects", "part_filename", "TEXT")
     _ensure_column(conn, "projects", "part_format", "TEXT")
     _ensure_column(conn, "projects", "part_unit", "TEXT")
@@ -1488,15 +1590,13 @@ def migrate(conn: db_mod.Connection) -> None:
     _ensure_column(conn, "projects", "part_scale", "REAL")
     _ensure_column(conn, "projects", "part_report", "TEXT")
     _ensure_column(conn, "projects", "part_options", "TEXT")
-    # Issue #325 — version source provenance: "import" for imported parts,
-    # NULL for all other versions (design loop, restore, fork).
-    _ensure_column(conn, "versions", "source_kind", "TEXT")
 
 
 __all__ = [
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
     "ParamValue",
+    "ImportCommitFailed",
     "VersionConflictError",
     "VersionService",
     "clean_name",

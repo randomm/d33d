@@ -138,6 +138,7 @@ describe("design contract", () => {
       "firstRun",
       "history",
       "missingStorage",
+      "partUpload",
       "passCard",
       "photoUpload",
       "progress",

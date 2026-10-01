@@ -781,6 +781,8 @@ def create_app(
     app.include_router(create_projects_router())
     app.include_router(create_streaming_router())
     app.include_router(create_versions_router())
+    from d33d.part_import import create_part_router
+    app.include_router(create_part_router())
 
     @app.get("/api/settings/credentials")
     async def list_credentials() -> list[dict[str, str]]:
@@ -999,6 +1001,22 @@ def create_app(
         row = conn.get_project(project_id)
         if row is None:
             raise HTTPException(status_code=404, detail="project not found")
+
+        # The units-unsettled 409 (issue #325): an import project whose
+        # part's units are not yet settled refuses the export BEFORE the
+        # render-missing 409 (the SPA's ``exportErrorCopy.ts`` maps the
+        # ``error_class`` to a sentence — ``units_unsettled`` is a new
+        # class with its own copy entry). A settled import with no render
+        # keeps today's render-missing 409 until sub-issue 2.
+        if row.get("part_filename") and row.get("part_unit_status") != "settled":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "error": "the part's units are not settled — settle them "
+                    "before exporting a 3MF",
+                    "error_class": "units_unsettled",
+                },
+            )
 
         app = request.app
         inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
