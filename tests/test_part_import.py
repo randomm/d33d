@@ -1,6 +1,7 @@
 """Part import tests (issue #325).
 
-Covers:
+Covers the upload/settle suite and the model.3mf export gate:
+
 - Content type / extension acceptance (STL binary + ASCII, 3MF)
 - Gate order: 413 (oversize, streamed) → 400 (unsupported type) → 422 (unparseable)
 - Zip-bomb and face-cap guards
@@ -9,9 +10,18 @@ Covers:
 - Unit classification (plausible mm, tiny → options, huge → options, 3MF inch → settled)
 - Settle by unit and by one measurement
 - v1 name "Imported {filename}" and recorded fields
-- Export refused until settled (409 units_unsettled)
+- Export refused until settled (409 units_unsettled, checked BEFORE the
+  render-missing 409 — the render-missing 409 is ``error_class: "conflict"``;
+  the unsettled check must fire first, never masked by it)
+- The units-unsettled 409 is server-side state on the project row: it
+  persists across reloads, fires for "assumed"/"unsettled" alike (only
+  "settled" clears the gate), and a no-part project is unaffected
 - Nothing written on error
 - Re-import → 409 part_exists
+- The web copy: ``export3mf.unitsUnsettled`` is a plain user-facing sentence
+  with no digits and no wire string, and ``exportErrorCopy`` maps the
+  ``units_unsettled`` class to that sentence (pinned here so the two files
+  cannot drift; the design-contract tripwire pins the deck key's presence).
 """
 
 from __future__ import annotations
@@ -106,6 +116,40 @@ def _make_3mf_zip_bomb(entries: int = 11_000) -> bytes:
     return buf.getvalue()
 
 
+def _set_part_columns(
+    conn,
+    project_id: int,
+    *,
+    filename: str = "box.stl",
+    part_format: str = "stl",
+    unit: str | None = "mm",
+    unit_status: str = "assumed",
+    scale: float | None = 1.0,
+) -> None:
+    """Write the part columns directly (the export-gate tests pin the
+    ``GET /model.3mf`` route's reading of the same project row — the
+    units-unsettled 409 is server-side state on the project row, not
+    client state)."""
+    import json
+
+    report = json.dumps(
+        {
+            "triangles": 12,
+            "bodies": 1,
+            "watertight": True,
+            "gaps_closed": 0,
+            "bbox_file_units": [20.0, 20.0, 20.0],
+        }
+    )
+    conn.raw.execute(
+        "UPDATE projects SET part_filename = ?, part_format = ?,"
+        " part_unit = ?, part_unit_status = ?, part_scale = ?,"
+        " part_report = ? WHERE id = ?",
+        (filename, part_format, unit, unit_status, scale, report, project_id),
+    )
+    conn.commit()
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -113,6 +157,7 @@ def _make_3mf_zip_bomb(entries: int = 11_000) -> bytes:
 
 @pytest.fixture
 def app_paths(tmp_path: Path) -> dict[str, Path]:
+    """Isolated DB + master-key + catalogue paths under tmp_path."""
     return {
         "db": tmp_path / "d33d.sqlite3",
         "key": tmp_path / "master.key",
@@ -122,6 +167,9 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
 
 @pytest.fixture
 def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
+    """A ``create_app`` instance with the git path pointed at ``tmp_path``
+    (the part upload's route must be mounted to create a project with a
+    part)."""
     import d33d.db as db_mod
 
     original_default = db_mod._default_git_path
@@ -135,7 +183,6 @@ def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
         return str(base)
 
     db_mod._default_git_path = _tmp_default_git_path
-
     app = create_app(
         app_paths["db"],
         master_key_path=app_paths["key"],
@@ -893,9 +940,258 @@ def test_design_state_part_present_after_import(app_with_projects):
 # ---------------------------------------------------------------------------
 
 
+    db_mod._default_git_path = original_git
+
+
 def test_max_part_upload_bytes_is_50mb():
     assert MAX_PART_UPLOAD_BYTES == 50 * 1024 * 1024
 
 
 def test_max_part_faces_is_2m():
     assert MAX_PART_FACES == 2_000_000
+
+
+# ---------------------------------------------------------------------------
+# Export gate: units-unsettled 409
+# ---------------------------------------------------------------------------
+
+
+def test_export_refused_409_units_unsettled_assumed(app_with_projects) -> None:
+    """An import project whose part's unit status is "assumed" (not
+    settled) → GET /model.3mf returns 409 with ``error_class:
+    "units_unsettled"`` — the check fires BEFORE the render-missing 409
+    (no render is seeded here, so the render-missing 409 WOULD also fire
+    if it were checked first; the units-unsettled 409 must win)."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unsettled part"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        return await client.get(f"/api/projects/{pid}/model.3mf")
+
+    resp = _run_async(app, _call)
+    assert resp.status_code == 409, f"expected 409, got {resp.status_code}: {resp.text}"
+    body = resp.json()
+    assert body["error_class"] == "units_unsettled"
+    assert "error" in body and len(body["error"]) > 0
+    assert resp.headers.get("content-type", "").startswith("application/json")
+
+
+def test_export_refused_409_units_unsettled_unsettled(app_with_projects) -> None:
+    """Unit status "unsettled" (STL with implausible mm) → the same 409
+    ``units_unsettled`` (only "settled" clears the gate)."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unsettled 2"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="unsettled", scale=None)
+        return await client.get(f"/api/projects/{pid}/model.3mf")
+
+    resp = _run_async(app, _call)
+    assert resp.status_code == 409
+    assert resp.json()["error_class"] == "units_unsettled"
+
+
+def test_export_units_unsettled_checked_before_render_missing(
+    app_with_projects, tmp_path: Path
+) -> None:
+    """An unsettled import with a render seeded on disk (a render-missing
+    409 could fire too — it's also a 409 ``conflict``): the
+    units-unsettled 409 fires FIRST, never masked by the render-missing
+    one. The render directory is seeded + the version row pointed at it
+    (the exact setup ``test_no_recorded_render`` in
+    ``tests/test_issue163_3mf_download.py`` relies on), so the
+    render-missing path is reachable — the gate order is what's under
+    test."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Order check"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="unsettled", scale=None)
+        # A version + a render seeded on disk and pointed at by the row —
+        # the render-missing 409's preconditions are met.
+        rv = await client.post(
+            f"/api/projects/{pid}/versions", json={"params": {}}
+        )
+        assert rv.status_code == 201, rv.text
+        rendir = tmp_path / "renders" / "order001"
+        rendir.mkdir(parents=True)
+        (rendir / "model.stl").write_bytes((FIXTURES / "box_20mm.stl").read_bytes())
+        latest = app.state.versions.latest_version(pid)
+        app.state.conn.raw.execute(
+            "UPDATE versions SET render_artifact_dir = ? WHERE id = ?",
+            (str(rendir), latest["id"]),
+        )
+        app.state.conn.commit()
+        return await client.get(f"/api/projects/{pid}/model.3mf")
+
+    resp = _run_async(app, _call)
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["error_class"] == "units_unsettled", (
+        f"units-unsettled 409 must fire before the render-missing 409 "
+        f"(got {body.get('error_class')})"
+    )
+
+
+def test_export_settled_part_is_not_units_unsettled(app_with_projects) -> None:
+    """A settled import (3MF path: unit from the file, converted to mm)
+    with no render → the units_unsettled 409 is GONE; the render-missing
+    409 (``conflict``) stays until sub-issue 2 lands the render path."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Settled 3mf"})
+        pid = r.json()["id"]
+        _set_part_columns(
+            app.state.conn,
+            pid,
+            filename="part.3mf",
+            part_format="3mf",
+            unit="mm",
+            unit_status="settled",
+            scale=25.4,
+        )
+        rv = await client.post(
+            f"/api/projects/{pid}/versions", json={"params": {}}
+        )
+        assert rv.status_code == 201, rv.text
+        return await client.get(f"/api/projects/{pid}/model.3mf")
+
+    resp = _run_async(app, _call)
+    # No version render → the render-missing 409 (conflict), never
+    # units_unsettled.
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body.get("error_class") != "units_unsettled"
+    assert body.get("error_class") == "conflict"
+
+
+def test_export_no_part_project_unaffected(app_with_projects) -> None:
+    """A design-loop project (no part at all) → no units_unsettled 409;
+    the existing no-versions 404 / render-missing 409 behaviour is
+    untouched."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No part"})
+        pid = r.json()["id"]
+        return await client.get(f"/api/projects/{pid}/model.3mf")
+
+    resp = _run_async(app, _call)
+    # No versions at all → the no-versions 404 (not a units_unsettled 409).
+    assert resp.status_code == 404
+    body = resp.json()
+    assert body.get("error_class") != "units_unsettled"
+
+
+def test_export_units_unsettled_persists_across_reload(app_with_projects) -> None:
+    """The units-unsettled 409 is server-side state on the project row —
+    a reload (a second ``_run_async`` against the same app, i.e. a new
+    request after the first response) sees the same 409; it is never
+    client-side state that clears on its own."""
+    app = app_with_projects
+    pid: int
+
+    async def _call(client):
+        nonlocal pid
+        r = await client.post("/api/projects", json={"name": "Reload check"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        first = await client.get(f"/api/projects/{pid}/model.3mf")
+        # A second GET in the same session (state must persist per
+        # request — never cleared by a prior read).
+        second = await client.get(f"/api/projects/{pid}/model.3mf")
+        return first, second
+
+    first, second = _run_async(app, _call)
+    assert first.status_code == 409
+    assert second.status_code == 409
+    assert first.json()["error_class"] == "units_unsettled"
+    assert second.json()["error_class"] == "units_unsettled"
+
+
+def test_export_404_project_not_found_precedes_units_check(app_with_projects) -> None:
+    """A nonexistent project → 404 (the units check reads the row after
+    the 404 — a 404 must never be a 409)."""
+    app = app_with_projects
+
+    async def _call(client):
+        return await client.get("/api/projects/999999/model.3mf")
+
+    resp = _run_async(app, _call)
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The web export copy (copy.ts + exportErrorCopy.ts)
+# ---------------------------------------------------------------------------
+
+
+def test_export3mf_units_unsettled_copy_is_plain_user_facing() -> None:
+    """``export3mf.unitsUnsettled`` is a plain user-facing sentence: no
+    digits, no wire string, no status code, and distinct from the
+    existing ``conflict`` / ``failed`` entries (a second 409 sentence
+    must never read the same as the first)."""
+    import pathlib
+    import re
+
+    copy_ts = (
+        pathlib.Path(__file__).parent.parent
+        / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+
+    m = re.search(
+        r"unitsUnsettled:\s*\n?\s*\"([^\"]+)\"",
+        copy_ts,
+    )
+    assert m is not None, "copy.ts must define export3mf.unitsUnsettled"
+    sentence = m.group(1)
+    assert len(sentence) > 0
+    # No status code / wire string: "3MF" (the format name) is allowed,
+    # but a status code ("409") or the wire string ("units_unsettled")
+    # must never surface to the user.
+    assert "409" not in sentence
+    assert "units_unsettled" not in sentence
+    # Distinct from the other export3mf entries (they are pinned
+    # elsewhere; compare against their literal values here so a
+    # duplicate-string refactor trips).
+    conflict = re.search(
+        r"conflict:\s*\n?\s*\"([^\"]+)\"", copy_ts
+    )
+    assert conflict is not None
+    assert sentence != conflict.group(1)
+
+
+def test_export_error_copy_maps_units_unsettled() -> None:
+    """``exportErrorCopy.ts`` maps the ``units_unsettled`` error class to
+    ``copy.export3mf.unitsUnsettled`` — the mapping line is pinned so the
+    class and the deck entry cannot drift (a new class without a mapping
+    would fall through to the generic ``failed`` sentence, losing the
+    actionable "settle the unit" message)."""
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).parent.parent
+        / "web" / "src" / "lib" / "exportErrorCopy.ts"
+    ).read_text("utf-8")
+    assert "units_unsettled: copy.export3mf.unitsUnsettled" in src
+
+
+def test_design_contract_pins_part_upload_deck_key() -> None:
+    """The design-contract tripwire (the copy-deck key-list assertion)
+    includes ``partUpload`` — the part-upload deck surface exists in
+    ``copy.ts`` and the tripwire's key list would fail without it (the
+    two-way agreement with the backend's 400/422 ``detail`` strings is
+    the ws-part-import workstream's; this pins only that the deck key is
+    in the tripwire's list)."""
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).parent.parent
+        / "web" / "src" / "__tests__" / "design-contract.test.ts"
+    ).read_text("utf-8")
+    assert '"partUpload"' in src

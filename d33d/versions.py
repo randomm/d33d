@@ -1595,6 +1595,7 @@ def migrate(conn: db_mod.Connection) -> None:
 __all__ = [
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
+    "ImportCommitFailed",
     "ParamValue",
     "ImportCommitFailed",
     "VersionConflictError",
