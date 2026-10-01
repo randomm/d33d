@@ -92,6 +92,13 @@ CREATE TABLE IF NOT EXISTS projects (
     source_photo_path TEXT,
     current_version INTEGER,
     last_activity   TEXT    NOT NULL DEFAULT (json('{"ts": null, "version_id": null, "name": null}')),
+    part_filename TEXT,
+    part_format TEXT,
+    part_unit TEXT,
+    part_unit_status TEXT,
+    part_scale REAL,
+    part_report TEXT,
+    part_options TEXT,
     created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     updated_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

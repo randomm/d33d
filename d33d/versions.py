@@ -571,6 +571,7 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> dict[str, Any]:
         """Public create: serialize (per project), then run the create
         body. The body lives in ``_run_create`` so nested callers (restore,
@@ -621,6 +622,7 @@ class VersionService:
                 stated_dims=stated_dims,
                 param_meta=param_meta,
                 confirmed_params=confirmed_params,
+                source_kind=source_kind,
             ),
         )
 
@@ -640,6 +642,7 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> dict[str, Any]:
         """The create body (call under the write lock)."""
         project = self.conn.get_project(project_id)
@@ -687,6 +690,7 @@ class VersionService:
             stated_dims=stated_dims,
             param_meta=param_meta,
             confirmed_params=confirmed_params,
+            source_kind=source_kind,
         )
 
         # Commit the full snapshot to the project's git repo. The version
@@ -1160,6 +1164,7 @@ class VersionService:
         stated_dims: dict[str, float] | None = None,
         param_meta: dict[str, Any] | None = None,
         confirmed_params: dict[str, Any] | None = None,
+        source_kind: str | None = None,
     ) -> int:
         fork = None
         if forked_from is not None:
@@ -1213,8 +1218,8 @@ class VersionService:
             " (project_id, params, name, created_by_message, parent,"
             "  restored_from, forked_from, thumbnail, bbox,"
             "  render_artifact_dir, stated_dims, param_meta,"
-            "  confirmed_params)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "  confirmed_params, source_kind)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project_id,
                 json.dumps(params, sort_keys=True),
@@ -1229,6 +1234,7 @@ class VersionService:
                 stated_dims_json,
                 param_meta_json,
                 confirmed_params_json,
+                source_kind,
             ),
         )
         self.conn.commit()
@@ -1272,6 +1278,10 @@ class VersionService:
         # degrades honestly — the 3MF route 409s with a clear cause — it
         # is never a guessed directory, never mtime inference).
         out["render_artifact_dir"] = out.get("render_artifact_dir") or None
+        # ``source_kind`` (issue #325): the provenance of the version's
+        # origin — "import" for imported parts, NULL for all others
+        # (design loop, restore, fork). NULL maps to ``None``.
+        out["source_kind"] = out.get("source_kind") or None
         return out
 
     @staticmethod
@@ -1386,6 +1396,7 @@ def migrate(conn: db_mod.Connection) -> None:
             stated_dims TEXT,
             param_meta TEXT,
             confirmed_params TEXT,
+            source_kind TEXT,
             created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
             updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
         )
@@ -1467,6 +1478,19 @@ def migrate(conn: db_mod.Connection) -> None:
     # reader in ``dimension_protocol.carried_stated_set`` feeds all four
     # production seams (chat, finalize, region edit).
     _ensure_column(conn, "projects", "carried_stated_dims", "TEXT")
+    # Issue #325 — part-import columns on projects: the one-part-per-project
+    # import facts. All nullable, no backfill (a project without a part has
+    # all NULLs — an absent part abstains, never a fabricated value).
+    _ensure_column(conn, "projects", "part_filename", "TEXT")
+    _ensure_column(conn, "projects", "part_format", "TEXT")
+    _ensure_column(conn, "projects", "part_unit", "TEXT")
+    _ensure_column(conn, "projects", "part_unit_status", "TEXT")
+    _ensure_column(conn, "projects", "part_scale", "REAL")
+    _ensure_column(conn, "projects", "part_report", "TEXT")
+    _ensure_column(conn, "projects", "part_options", "TEXT")
+    # Issue #325 — version source provenance: "import" for imported parts,
+    # NULL for all other versions (design loop, restore, fork).
+    _ensure_column(conn, "versions", "source_kind", "TEXT")
 
 
 __all__ = [
