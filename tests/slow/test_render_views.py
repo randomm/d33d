@@ -1171,3 +1171,102 @@ def test_render_cleanup_removes_container_and_volume(
         f"volume {pinned_volume} still exists after render: {vol_lines[1:]!r}"
     )
 
+
+# ── Part import: render a model that imports the committed part ─────────────
+
+
+def test_render_imports_committed_part(tmp_path: Path) -> None:
+    """A design that does ``import("part.stl");`` renders a model whose
+    harvested STL has the part's bounding box (issue #330 sub-issue 2 —
+    the ``render_for_design_loop`` part wiring's end-to-end gate).
+
+    The committed part (``tests/fixtures/stl/box_20mm.stl``, a 20×20×20
+    mm box) is staged next to the model source and seeded into the render
+    volume as ``/work/part.stl``; the design source ``import("part.stl");``
+    reads it inside the container. The rendered model's bbox must match
+    the part's (the box is centred on the origin by OpenSCAD's import, so
+    the harvested model.stl's bbox is the box's ±10 mm extents — the
+    20 mm per-axis size the part carries).
+
+    The test drives ``render_for_design_loop`` directly with
+    ``part_path`` and ``repo_dir`` set (the same wiring the production
+    closures perform); the worker's part validation and 3MF→STL staging
+    are exercised (the part is an STL, so the staging copy is a straight
+    ``cp`` — no 3MF conversion). The render's ``render_artifact_dir``
+    carries the harvested ``model.stl``; trimesh loads it and the bbox
+    per-axis extents must each be ≈20 mm.
+
+    This is a SLOW test (real Docker render, real OpenSCAD compile of the
+    ``import`` + the part) and is marked ``slow``; it skips when Docker
+    is unreachable (matching the slow-layer convention in this file).
+    """
+    _skip_if_no_docker()
+    import trimesh
+
+    part_src = Path(__file__).resolve().parent.parent.parent / "tests" / "fixtures" / "stl" / "box_20mm.stl"
+    # Stage the part into a repo-like layout the worker's containment
+    # check accepts (part_path inside repo_dir, named ``part.stl``).
+    repo_dir = tmp_path / "repo"
+    versions_dir = repo_dir / "versions" / "1"
+    versions_dir.mkdir(parents=True)
+    part_path = versions_dir / "part.stl"
+    import shutil as _sh
+    _sh.copy2(part_src, part_path)
+
+    # Pin the render name + no-op the image staleness gate (the test only
+    # checks the render pipeline, not the image build).
+    pinned_name = "render-import330"
+    pinned_volume = f"d33d-render-{pinned_name}"
+
+    # Clean up any prior artefacts from a previous run.
+    subprocess.run(["docker", "rm", "-f", pinned_name], capture_output=True, check=False)
+    subprocess.run(["docker", "volume", "rm", "-f", pinned_volume], capture_output=True, check=False)
+
+    # Save + patch new_render_name / _verify_render_worker_image so the
+    # container/volume names are known and the image gate is bypassed.
+    _orig_name = rw.new_render_name
+    _orig_verify = rw._verify_render_worker_image
+    rw.new_render_name = lambda: pinned_name
+    rw._verify_render_worker_image = lambda *a, **kw: None
+    try:
+        scad = 'import("part.stl");\n'
+        result = rw.render_for_design_loop(
+            scad_source=scad,
+            defines={},
+            renders_dir=tmp_path,
+            part_path=part_path,
+            repo_dir=repo_dir,
+        )
+    finally:
+        rw.new_render_name = _orig_name
+        rw._verify_render_worker_image = _orig_verify
+        # Best-effort cleanup of any leftover container/volume (the worker's
+        # finally should have removed both; this is a safety net so a
+        # failed render doesn't leak docker artefacts into later tests).
+        subprocess.run(["docker", "rm", "-f", pinned_name], capture_output=True, check=False)
+        subprocess.run(["docker", "volume", "rm", "-f", pinned_volume], capture_output=True, check=False)
+
+    assert result is not None, "render_for_design_loop returned None"
+    assert result.ok, (
+        f"render failed (error_class={result.error_class}): {result.stderr[:400]}"
+    )
+    # The render's post-harvest step persists the STL + views under
+    # ``render_artifact_dir``; the harvested ``model.stl`` must be present.
+    artifact_dir = Path(result.render_artifact_dir)
+    model_stl = artifact_dir / "model.stl"
+    assert model_stl.is_file(), f"harvested model.stl missing at {model_stl}"
+    m = trimesh.load(str(model_stl))
+    # A Scene (multi-body) flattens to a single mesh via to_mesh().
+    if isinstance(m, trimesh.scene.Scene):
+        m = m.to_mesh()
+    bounds = m.bounds
+    per_axis = [float(bounds[1][i] - bounds[0][i]) for i in range(3)]
+    # The box is 20 mm per axis; the import places it centred on the
+    # origin, so the harvested model.stl's bbox must be ≈20 mm per axis
+    # (±0.5 mm tolerance for the STL export's mesh resolution).
+    for i, extent in enumerate(per_axis):
+        assert abs(extent - 20.0) < 0.5, (
+            f"axis {i} extent {extent} mm — expected ≈20 mm (the part's "
+            f"size); bounds={bounds}"
+        )
+

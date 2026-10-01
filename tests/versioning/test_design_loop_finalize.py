@@ -3026,9 +3026,12 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
         renders_dir=None,
         on_progress=None,
         project_id=None,
+        part_path=None,
+        repo_dir=None,
     ) -> RenderResult:
         # Signature matches render_for_design_loop's positional +
-        # renders_dir/on_progress/project_id kwargs — an extra keyword
+        # renders_dir/on_progress/project_id/part_path/repo_dir kwargs —
+        # an extra keyword
         # argument here is a genuine TypeError, not a swallowed **kwargs
         # (a star-star stub would let the buggy call pass).
         spy_calls["scad_source"] = scad_source
@@ -3036,6 +3039,8 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
         spy_calls["renders_dir"] = renders_dir
         spy_calls["on_progress"] = on_progress
         spy_calls["project_id"] = project_id
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
         return canned
 
     monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
@@ -3089,6 +3094,285 @@ def test_finalize_render_fn_kwarg_contract_matches_render_for_design_loop(
     # The project id flows through (issue #309 observability: the
     # per-failure ERROR log line names the project).
     assert spy_calls["project_id"] == 7
+    # The part wiring (issue #330 sub-issue 2): a project with no part
+    # passes part_path=None (the worker's regression anchor — the whole
+    # subprocess argv sequence is the no-part baseline when the part is
+    # None). repo_dir is None here because the stub project row has no
+    # git_repo_path.
+    assert spy_calls["part_path"] is None
+    assert spy_calls["repo_dir"] is None
+
+
+# ---------------------------------------------------------------------------
+# Part wiring (issue #330 sub-issue 2): the production render_fn closures
+# pass part_path/repo_dir when the project has a part whose units are
+# settled or assumed, and part_path=None when they are unsettled or absent.
+# ---------------------------------------------------------------------------
+
+
+def _make_app_conn_with_project(
+    tmp_path: Path,
+    *,
+    part_filename: str | None = None,
+    part_format: str | None = None,
+    part_unit_status: str | None = None,
+    git_repo_path: str | None = None,
+    versions: int = 0,
+) -> Any:
+    """An in-memory ``db.Connection`` with one project row and ``versions``
+    version rows (the v1 row ``_v1_for_part`` reads). Returns the
+    connection; the project id is always 1 (the first inserted project).
+    """
+    import d33d.db as db_mod
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)  # creates the versions table (the app lifespan does this
+    # in production; a bare :memory: conn needs it explicitly)
+    repo = git_repo_path or str(tmp_path / "repo")
+    pid = conn.create_project(name="p", git_repo_path=repo)
+    for i in range(versions):
+        cur = conn.execute(
+            "INSERT INTO versions (project_id, name, params) "
+            "VALUES (?, ?, ?)",
+            (pid, f"v{i + 1}", "{}"),
+        )
+    if part_filename is not None:
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=? WHERE id=?",
+            (part_filename, part_format, part_unit_status, pid),
+        )
+    return conn
+
+
+def test_finalize_closure_passes_part_path_when_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #330 sub-issue 2 wiring) The finalize seam's
+    ``_finalize_loop_kwargs`` resolves the project row and passes
+    ``part_path`` + ``repo_dir`` to ``render_for_design_loop`` when the
+    project has a part whose units are settled. ``part_path`` is the
+    committed part file (``{git_repo_path}/versions/{v1_id}/part.stl``);
+    ``repo_dir`` is the git repo path. No Docker, no live LLM, no
+    catalogue — the ``render_for_design_loop`` edge is a spy.
+    """
+    import d33d.render_worker as rw_mod
+    import d33d.versions_routes as routes_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    conn = _make_app_conn_with_project(
+        tmp_path,
+        part_filename="part.stl",
+        part_format="stl",
+        part_unit_status="settled",
+        git_repo_path=str(repo),
+        versions=1,
+    )
+    # The v1 version id (the row the part is committed under).
+    v1 = conn.raw.execute(
+        "SELECT id FROM versions WHERE project_id=1 ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    expected_part_path = repo / "versions" / str(v1["id"]) / "part.stl"
+    expected_repo_dir = repo
+
+    spy_calls: dict = {}
+    canned = _default_render()
+
+    def _spy(
+        scad_source: str,
+        defines: dict,
+        renders_dir=None,
+        on_progress=None,
+        project_id=None,
+        part_path=None,
+        repo_dir=None,
+    ) -> RenderResult:
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+    class _VersionsSvc:
+        def get_project(self, project_id: int):
+            # The project row with the part columns set.
+            row = conn.get_project(project_id)
+            return dict(row) if row else None
+
+        def latest_version(self, project_id: int):
+            return None
+
+    class _State:
+        pass
+
+    state = _State()
+    state.db_path = str(tmp_path / "d33d.sqlite3")
+    state.versions = _VersionsSvc()
+    state.catalogue = None
+    state.conn = conn
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    body = routes_mod.FinalizeBody(
+        params=None, name=None, message="make a 20mm wide bracket"
+    )
+
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+    render_fn = kwargs["render_fn"]
+    assert callable(render_fn)
+
+    result = render_fn("W = 20; cube([W]);", {"W": "20"})
+    assert result is canned
+    assert spy_calls["part_path"] == expected_part_path, (
+        f"part_path {spy_calls['part_path']} != {expected_part_path}"
+    )
+    assert spy_calls["repo_dir"] == expected_repo_dir
+
+
+def test_finalize_closure_passes_part_none_when_unsettled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #330 sub-issue 2 wiring) The finalize seam's
+    ``_finalize_loop_kwargs`` passes ``part_path=None`` when the project's
+    part units are ``unsettled`` (the render must proceed part-less — an
+    unsettled part's size is untrusted, so it is never staged into the
+    render volume). ``repo_dir`` is also None.
+    """
+    import d33d.render_worker as rw_mod
+    import d33d.versions_routes as routes_mod
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    conn = _make_app_conn_with_project(
+        tmp_path,
+        part_filename="part.stl",
+        part_format="stl",
+        part_unit_status="unsettled",
+        git_repo_path=str(repo),
+        versions=1,
+    )
+
+    spy_calls: dict = {}
+    canned = _default_render()
+
+    def _spy(
+        scad_source: str,
+        defines: dict,
+        renders_dir=None,
+        on_progress=None,
+        project_id=None,
+        part_path=None,
+        repo_dir=None,
+    ) -> RenderResult:
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+    class _VersionsSvc:
+        def get_project(self, project_id: int):
+            row = conn.get_project(project_id)
+            return dict(row) if row else None
+
+        def latest_version(self, project_id: int):
+            return None
+
+    class _State:
+        pass
+
+    state = _State()
+    state.db_path = str(tmp_path / "d33d.sqlite3")
+    state.versions = _VersionsSvc()
+    state.catalogue = None
+    state.conn = conn
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    body = routes_mod.FinalizeBody(
+        params=None, name=None, message="make a 20mm wide bracket"
+    )
+
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+    render_fn = kwargs["render_fn"]
+    render_fn("W = 20; cube([W]);", {"W": "20"})
+    assert spy_calls["part_path"] is None, (
+        "an unsettled part must NOT be staged into the render volume"
+    )
+    # repo_dir is still set (the project has a git repo path) — the worker
+    # uses it only when part_path is not None (the containment boundary).
+    assert spy_calls["repo_dir"] is not None
+
+
+def test_finalize_closure_passes_part_none_when_no_part(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #330 sub-issue 2 wiring) The finalize seam's
+    ``_finalize_loop_kwargs`` passes ``part_path=None`` when the project
+    has NO part (``part_filename`` is NULL — the common case, a design
+    project that never imported a mesh). The render proceeds part-less.
+    """
+    import d33d.render_worker as rw_mod
+    import d33d.versions_routes as routes_mod
+
+    conn = _make_app_conn_with_project(
+        tmp_path, part_filename=None, git_repo_path=str(tmp_path / "repo"), versions=1
+    )
+    (tmp_path / "repo").mkdir(parents=True)
+
+    spy_calls: dict = {}
+    canned = _default_render()
+
+    def _spy(
+        scad_source: str,
+        defines: dict,
+        renders_dir=None,
+        on_progress=None,
+        project_id=None,
+        part_path=None,
+        repo_dir=None,
+    ) -> RenderResult:
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+    class _VersionsSvc:
+        def get_project(self, project_id: int):
+            row = conn.get_project(project_id)
+            return dict(row) if row else None
+
+        def latest_version(self, project_id: int):
+            return None
+
+    class _State:
+        pass
+
+    state = _State()
+    state.db_path = str(tmp_path / "d33d.sqlite3")
+    state.versions = _VersionsSvc()
+    state.catalogue = None
+    state.conn = conn
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    body = routes_mod.FinalizeBody(
+        params=None, name=None, message="make a 20mm wide bracket"
+    )
+
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+    render_fn = kwargs["render_fn"]
+    render_fn("W = 20; cube([W]);", {"W": "20"})
+    assert spy_calls["part_path"] is None
+    # repo_dir is still set (the project has a git repo path) — the worker
+    # uses it only when part_path is not None (the containment boundary).
+    assert spy_calls["repo_dir"] is not None
 
 
 def test_sse_wide_catch_emits_terminal_error():

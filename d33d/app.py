@@ -1596,13 +1596,68 @@ def _build_production_design_loop():
         # :func:`d33d.versions_routes._finalize_loop_kwargs`.
         data_dir = Path(app_state.db_path).parent
 
+        def _resolve_part_wiring(project_id: Any) -> tuple[Any, Any]:
+            """The design-side part's ``part_path``/``repo_dir`` wiring
+            (issue #330 sub-issue 2 — the production closure's half of the
+            ``render_for_design_loop`` part wiring). The project row is
+            resolved through the app's connection (the production loop is
+            app-scoped — its kwargs carry no pre-fetched project row); the
+            part is passed ONLY when the project has a part whose units are
+            settled or assumed (``part_unit_status`` in
+            ``{"assumed", "settled"}``): ``part_path`` is the committed
+            part file (``{git_repo_path}/versions/{v1}/{part.stl|part.3mf}``
+            — the v1 version row via ``_v1_for_part``; the stored name is
+            the ``part_format``'s fixed constant, never re-derived) and
+            ``repo_dir`` is the git repo path (the worker's containment
+            boundary). Unsettled units, no part, an unreadable row, or a
+            missing v1 row degrade to ``(None, None)`` — the render never
+            raises an unclassified error because of part resolution
+            (issue #330's binding operator decision); the unreadable-row
+            case logs one WARNING naming the project id only (never a
+            path). The closure does NOT scale the part (``part_scale`` is
+            sub-issue 3's domain, not the worker's).
+            """
+            from d33d.part_http import PART_3MF_FILENAME, PART_FILENAME, _v1_for_part
+
+            conn = getattr(app_state, "conn", None)
+            if conn is None:
+                return None, None
+            try:
+                row = conn.get_project(project_id)
+            except Exception:
+                logger.warning(
+                    "design loop for project %s: the project row could not "
+                    "be read — the render proceeds part-less",
+                    project_id,
+                )
+                return None, None
+            if not row or not row.get("part_filename"):
+                return None, None
+            if row.get("part_unit_status") not in ("assumed", "settled"):
+                return None, None
+            v1 = _v1_for_part(conn, project_id)
+            if v1 is None:
+                return None, None
+            name = (
+                PART_3MF_FILENAME
+                if row.get("part_format") == "3mf"
+                else PART_FILENAME
+            )
+            return (
+                Path(row["git_repo_path"]) / "versions" / str(v1["id"]) / name,
+                Path(row["git_repo_path"]),
+            )
+
         def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
+            part_path, repo_dir = _resolve_part_wiring(kwargs.get("project_id"))
             return render_for_design_loop(
                 scad_source,
                 defines,
                 renders_dir=data_dir / "renders",
                 on_progress=kwargs.get("on_progress"),
                 project_id=kwargs.get("project_id"),
+                part_path=part_path,
+                repo_dir=repo_dir,
             )
 
         # Model pre-flight (issue #303): BEFORE any capability probe or
