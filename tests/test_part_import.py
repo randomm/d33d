@@ -391,7 +391,7 @@ def test_zip_bomb_not_a_zip_422(app_with_projects):
 def test_non_finite_vertices_422(app_with_projects):
     """STL with NaN vertices → 422."""
     import struct
-    import numpy as np
+
 
     # Build a binary STL with a NaN vertex (raw bytes — trimesh's process=
     # True would drop the NaN, so we bypass it by building the raw file)
@@ -938,9 +938,6 @@ def test_design_state_part_present_after_import(app_with_projects):
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-
-
-    db_mod._default_git_path = original_git
 
 
 def test_max_part_upload_bytes_is_50mb():

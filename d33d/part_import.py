@@ -54,7 +54,6 @@ from fastapi import APIRouter, HTTPException, Request
 
 from d33d import db as db_mod
 from d33d.print_validation import QIDI_PLUS_5_ENVELOPE_MM
-from d33d.projects import _sanitize_commit_message
 from d33d.versions import ImportCommitFailed
 
 # ---------------------------------------------------------------------------
@@ -614,16 +613,12 @@ def create_part_router() -> APIRouter:
         # 422: the decode gate — parse/repair/measure. The bytes are written
         # to a TEMP file (a ``tempfile`` path — never the user's filename)
         # and unlinked on every failure path (nothing persisted on error).
-        tmp_path: str | None = None
         try:
-            mesh, report, file_unit = parse_and_repair(content, part_format)
+            _mesh, report, file_unit = parse_and_repair(content, part_format)
         except PartUploadError:
             raise HTTPException(
                 status_code=422, detail=PART_UPLOAD_UNPARSEABLE_DETAIL
             )
-        finally:
-            if tmp_path is not None:
-                Path(tmp_path).unlink(missing_ok=True)
 
         # Unit classification (STL: plausible→assumed / else unsettled
         # options; 3MF: the file's unit, converted to mm — always settled).
@@ -832,8 +827,8 @@ def _detect_part_format(content_type: str, filename: str) -> str | None:
 async def _parse_multipart(request: Request, body: bytes):
     """Parse an already-streamed multipart body (the 413 already fired on
     the raw bytes — this never re-reads the stream)."""
-    from starlette.formparsers import MultiPartParser
     from starlette.datastructures import Headers
+    from starlette.formparsers import MultiPartParser
 
     async def _chunked(data: bytes):
         yield data
@@ -885,8 +880,8 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_UPLOAD_BYTES",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
-    "PART_UPLOAD_UNSUPPORTED_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
+    "PART_UPLOAD_UNSUPPORTED_DETAIL",
     "classify_stl_units",
     "create_part_router",
     "parse_and_repair",
