@@ -9,8 +9,17 @@
 #   1. Health check: `docker info` with a wall-clock bound (~10 s).
 #      Success -> exit 0, no log entry.
 #   2. Check failed:
-#      - colima status says NOT running: `colima start` (a stop+start on
-#        an already-dead VM is meaningless).
+#      - Tool pre-flight (strict, issue #326): `command -v docker` and
+#        `command -v colima` run before the lock and before `docker info`.
+#        If EITHER is missing, one ERROR line names the missing tool(s) and
+#        the PATH, no action is taken (no re-forward, no start/stop), and
+#        the script exits 3 — even when docker would be healthy. No lock
+#        directory is created on this path.
+#      - colima status says NOT running (rc 0 plus not-running text):
+#        `colima start` (a stop+start on an already-dead VM is meaningless).
+#        A status probe failure (rc != 0) or unrecognised output is NOT
+#        "not running" — it exits 4 with one ERROR line and no action.
+#        Only a positive not-running report reaches the start path.
 #      - colima status says running: the forward is presumed dead.
 #        Safety rule: the `ssh -O forward` re-forward is attempted
 #        UNCONDITIONALLY — it rides the host-side ControlMaster socket
@@ -26,8 +35,12 @@
 # Exit codes: 0 healthy or healed (docker info answers), 1 heal
 # attempted but docker still doesn't answer, 2 restart was needed but
 # blocked (containers running — the message names the count — or the
-# container probe failed), 64 usage/environment error (unknown flag,
-# garbage numeric override).
+# container probe failed), 3 tools not found (docker and/or colima
+# missing from PATH — no action taken; a misconfiguration to surface on
+# every tick under launchd's minimal PATH), 4 cannot determine VM state
+# (colima status exited non-zero or returned unrecognised output — no
+# action taken), 64 usage/environment error (unknown flag, garbage
+# numeric override).
 # Any other non-zero code means the script aborted mid-run before
 # reaching a decision.
 #
@@ -162,18 +175,33 @@ wait_for_docker() {
     return 1
 }
 
-colima_status_running() {
-    # colima writes its status message to stderr (logrus format:
-    # `time=... level=info msg="colima is running ..."`), NOT stdout.
-    # Capture both streams; a failed probe (non-zero exit) already returns 1.
-    out=$(colima status 2>&1) || return 1
-    # Negative check first: a probe that returns success with "not running"
-    # text must not be misrouted into the running-VM branch (the *running*
-    # substring match would swallow it).
+# colima_status_check — probe `colima status` and classify the result.
+# Sets STATUS_STATE to one of: running, not_running, error.
+# A non-zero exit is an error (real failure), NOT "not running".
+# A zero exit with "not running" text is the positive not-running report.
+# A zero exit with "colima is running" text is the running state.
+# A zero exit with unrecognised text is also an error (cannot determine).
+STATUS_STATE=""
+colima_status_check() {
+    out=$(colima status 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        STATUS_STATE="error"
+        return 0
+    fi
     case "$out" in
-    *"not running"*) return 1 ;;
-    *"colima is running"*) return 0 ;;
-    *) return 1 ;;
+    *"not running"*)
+        STATUS_STATE="not_running"
+        return 0
+        ;;
+    *"colima is running"*)
+        STATUS_STATE="running"
+        return 0
+        ;;
+    *)
+        STATUS_STATE="error"
+        return 0
+        ;;
     esac
 }
 
@@ -296,6 +324,27 @@ main() {
         esac
     done
 
+    # Tool pre-flight guard (issue #326): verify docker and colima are
+    # reachable on PATH before any heal path. Under launchd the default
+    # PATH is /usr/bin:/bin:/usr/sbin:/sbin which lacks /opt/homebrew/bin,
+    # so a missing binary is rc=127 — misread as "VM not running" by the
+    # old status check. This guard fires on the very first tick, before
+    # the lock, before docker info, and takes NO action. A missing tool
+    # is a misconfiguration to surface on every tick.
+    missing_tools=""
+    command -v docker >/dev/null 2>&1 || missing_tools="docker"
+    if ! command -v colima >/dev/null 2>&1; then
+        if [ -n "$missing_tools" ]; then
+            missing_tools="$missing_tools, colima"
+        else
+            missing_tools="colima"
+        fi
+    fi
+    if [ -n "$missing_tools" ]; then
+        log ERROR "tools not found: $missing_tools (PATH=$PATH)"
+        exit 3
+    fi
+
     # 1. Healthy? Exit 0 with no log entry.
     if docker_info_check; then
         exit 0
@@ -346,7 +395,15 @@ main() {
     trap 'rm -f "$LOCK_DIR/pid" 2>/dev/null; rmdir "$LOCK_DIR" 2>/dev/null' \
         EXIT INT TERM
 
-    if colima_status_running; then
+    colima_status_check
+    if [ "$STATUS_STATE" = "error" ]; then
+        # colima status failed (non-zero exit) or returned unrecognised
+        # output — cannot determine VM state. No action taken (exit 4).
+        log ERROR "cannot determine VM state (colima status failed)"
+        exit 4
+    fi
+
+    if [ "$STATUS_STATE" = "running" ]; then
         # Running VM, dead forward. Re-forward is attempted unconditionally:
         # the ssh -O round-trip rides the host-side ControlMaster socket and
         # never touches the VM, so running containers are unaffected. Only

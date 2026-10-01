@@ -14,6 +14,31 @@ WD_TEST_DIR=$(dirname -- "$0")
 WD_TEST_DIR=$(cd "$WD_TEST_DIR" && pwd)
 WD_TEST_DIR=$WD_TEST_DIR . "$(dirname -- "$0")/wd_test_helper.sh"
 
+# A PATH that exposes the stub directory but NOT /opt/homebrew/bin or
+# /usr/local/bin — the only real tools reachable are the stubs plus base
+# system commands (sh, grep, cat, ...). Omitting a stub then makes the
+# tool truly "missing", the way launchd's minimal PATH sees it. This
+# mirrors the exit-3 pre-flight guard (issue #326).
+BARE_PATH="$STUBBIN:/usr/bin:/bin:/usr/sbin:/sbin"
+run_watchdog_bare() {
+    PATH="$BARE_PATH" \
+    HOME="$FAKEHOME" \
+    D33D_WD_LOCKDIR="$LOCKDIR" \
+    D33D_WD_RETRY_COUNT=1 \
+    D33D_WD_RETRY_SLEEP=0 \
+    sh "$WATCHDOG" "$@"
+}
+
+# The "missing tool" cases rely on the stub directory being the ONLY place
+# docker/colima can come from under $BARE_PATH. If the host ever has a real
+# docker or colima on a base-system path (not /opt/homebrew/bin, not
+# /usr/local/bin), it would leak in and defeat the test. This host does not
+# (verified); fail loudly if it ever does.
+if PATH=/usr/bin:/bin:/usr/sbin:/sbin sh -c 'command -v docker || command -v colima' 2>/dev/null; then
+    echo "FATAL: real docker/colima on a base-system path; missing-tool tests would be unsound" >&2
+    exit 1
+fi
+
 # =============================================================================
 # 4. forward dead + status running + containers RUNNING
 #    -> re-forward IS attempted (it does not touch the VM), the restart
@@ -130,13 +155,161 @@ fi
 
 # =============================================================================
 # 7. forward dead + colima status probe fails (rc != 0)
-#    -> cannot determine VM state; dry-run start path, exit 0
+#    -> cannot determine VM state; NO start attempted, exit 4
+#       (issue #326: a status error is never read as "not running")
 # =============================================================================
 reset_state
 make_stubs 1 "ERROR: cannot connect" 1 0 "error: instance not found" 0 ""
 run_watchdog --dry-run
 rc=$?
-check_rc "status probe failure -> exit 0 (dry-run, start not executed)" 0 "$rc"
+check_rc "status probe failure (rc=1) -> exit 4, no start" 4 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "status error logged with exit-4 message" "$LOGFILE" "cannot determine VM state"
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima start\|colima stop\|ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "status-error path must take no action"
+    else
+        pass "status-error path took no action"
+    fi
+fi
+
+# =============================================================================
+# 7b. forward dead + colima status rc=0 with unrecognised text
+#     -> cannot determine VM state; NO start attempted, exit 4
+# =============================================================================
+reset_state
+make_stubs 1 "ERROR: cannot connect" 1 0 "level=fatal msg=boom" 0 ""
+run_watchdog --dry-run
+rc=$?
+check_rc "status rc=0 unrecognised text -> exit 4, no start" 4 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "unrecognised status logged with exit-4 message" "$LOGFILE" "cannot determine VM state"
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima start\|colima stop\|ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "unrecognised-status path must take no action"
+    else
+        pass "unrecognised-status path took no action"
+    fi
+fi
+
+# =============================================================================
+# 30. docker missing from PATH (stub omitted; bare PATH without
+#     /opt/homebrew/bin or /usr/local/bin) -> strict pre-flight exits 3,
+#     one ERROR line naming docker + the PATH, no action, no lock dir
+#     (issue #326)
+# =============================================================================
+reset_state
+# Only colima + ssh stubs present — docker is absent from $BARE_PATH.
+# reset_state does NOT clear the stub binaries, so explicitly remove any
+# docker stub left by a prior make_stubs call.
+rm -f "$STUBBIN/docker"
+cat > "$STUBBIN/colima" <<EOF
+#!/bin/sh
+echo "colima \$*" >> "$WORKROOT/colima.calls"
+case "\$1" in
+    status) printf '%s\n' "$STATUS_RUNNING" >&2; exit 0 ;;
+    *) exit 0 ;;
+esac
+EOF
+cat > "$STUBBIN/ssh" <<EOF
+#!/bin/sh
+echo "ssh \$*" >> "$WORKROOT/actions.log"
+exit 0
+EOF
+chmod +x "$STUBBIN/colima" "$STUBBIN/ssh"
+run_watchdog_bare
+rc=$?
+check_rc "missing docker -> exit 3" 3 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "missing-docker ERROR names docker" "$LOGFILE" "tools not found: docker"
+    check_grep "missing-docker ERROR names the PATH" "$LOGFILE" "PATH="
+    err_count=$(grep -c "ERROR" "$LOGFILE" 2>/dev/null)
+    if [ "$err_count" -eq 1 ]; then
+        pass "missing-docker: exactly one ERROR line"
+    else
+        fail "missing-docker expected 1 ERROR line, got $err_count"
+    fi
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima start\|colima stop\|ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "missing-docker must take no action"
+    else
+        pass "missing-docker took no action"
+    fi
+fi
+if [ ! -d "$LOCKDIR" ]; then
+    pass "missing-docker: no lock dir created"
+else
+    fail "missing-docker: lock dir was created"
+fi
+
+# =============================================================================
+# 31. colima missing while docker is healthy (stub returns rc 0) -> strict
+#     pre-flight exits 3 (guard is not lazy; issue #326 operator decision)
+# =============================================================================
+reset_state
+# Only the docker stub is present — colima is absent from $BARE_PATH.
+rm -f "$STUBBIN/colima" "$STUBBIN/ssh"
+cat > "$STUBBIN/docker" <<EOF
+#!/bin/sh
+echo "docker \$*" >> "$WORKROOT/docker.calls"
+exit 0
+EOF
+chmod +x "$STUBBIN/docker"
+run_watchdog_bare
+rc=$?
+check_rc "missing colima (docker healthy) -> exit 3" 3 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "missing-colima ERROR names colima" "$LOGFILE" "tools not found: colima"
+else
+    fail "missing-colima: log file not written"
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima start\|colima stop\|ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "missing-colima must take no action"
+    else
+        pass "missing-colima took no action"
+    fi
+fi
+if [ ! -d "$LOCKDIR" ]; then
+    pass "missing-colima: no lock dir created"
+else
+    fail "missing-colima: lock dir was created"
+fi
+
+# =============================================================================
+# 32. both docker and colima missing -> exactly ONE ERROR line naming both,
+#     exit 3, no action, no lock dir
+# =============================================================================
+reset_state
+# STUBBIN left empty: neither tool on $BARE_PATH.
+rm -f "$STUBBIN/docker" "$STUBBIN/colima" "$STUBBIN/ssh"
+run_watchdog_bare
+rc=$?
+check_rc "both tools missing -> exit 3" 3 "$rc"
+if [ -f "$LOGFILE" ]; then
+    check_grep "both-missing ERROR names docker" "$LOGFILE" "docker, colima"
+    err_count=$(grep -c "ERROR" "$LOGFILE" 2>/dev/null)
+    if [ "$err_count" -eq 1 ]; then
+        pass "both-missing: exactly one ERROR line"
+    else
+        fail "both-missing expected 1 ERROR line, got $err_count"
+    fi
+fi
+if [ -f "$WORKROOT/actions.log" ]; then
+    if grep -q "colima start\|colima stop\|ssh -O forward" "$WORKROOT/actions.log" 2>/dev/null; then
+        fail "both-missing must take no action"
+    else
+        pass "both-missing took no action"
+    fi
+fi
+if [ ! -d "$LOCKDIR" ]; then
+    pass "both-missing: no lock dir created"
+else
+    fail "both-missing: lock dir was created"
+fi
 
 # =============================================================================
 # 15. unknown flag: script exits 64 (usage error)
