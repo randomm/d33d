@@ -12,9 +12,7 @@ preserved).
 
 from __future__ import annotations
 
-import pytest
-
-from tests.seam_schemas_d import SeamError, validate_frame, validate_frames_stream
+from tests.seam_schemas_d import validate_frame, validate_frames_stream
 
 
 def test_per_view_frames_pass_seam_d_schema() -> None:

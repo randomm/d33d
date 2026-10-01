@@ -31,8 +31,6 @@ from typing import Any
 
 from d33d.design_loop import MAX_SCAD_SOURCE_BYTES, run_design_loop
 from d33d.design_source import (
-    TRUNCATION_MARKER,
-    design_source_lines,
     source_expected,
     source_path_for_version,
     store_version_source,
@@ -41,7 +39,6 @@ from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
     create_project,
     create_version,
-    repo_path_for,
     run_async,
 )
 
@@ -420,7 +417,6 @@ def test_source_expected_true_when_design_scad_deleted(app_with_versions):
     design.scad was deleted out-of-band IS the missing state (the file
     was recorded in the version's commit — the persistent marker says
     a source was written, and it is now gone)."""
-    import shutil as _shutil
 
     from d33d.projects import commit_all
 

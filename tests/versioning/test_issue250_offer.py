@@ -12,7 +12,6 @@ from typing import Any
 from d33d.confirm_offer import offer_entry
 from tests.versioning.helpers import (
     create_project,
-    create_version,
     run_async,
 )
 
@@ -2576,7 +2575,6 @@ def test_chat_block_built_once_per_resolve(app_with_versions):
     from unittest import mock
 
     import d33d.design_state as _ds
-    from d33d.design_state import state_block_for_version
 
     class _TrayStubResult:
         def __init__(self) -> None:

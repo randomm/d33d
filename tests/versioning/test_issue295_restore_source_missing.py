@@ -32,7 +32,6 @@ from typing import Any
 
 from d33d.design_loop import IterationRecord, Score
 from d33d.render_worker import RenderResult
-
 from tests.versioning.helpers import create_project, create_version, run_async
 
 

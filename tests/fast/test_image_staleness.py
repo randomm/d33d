@@ -132,7 +132,7 @@ def test_docker_image_labels_empty_dict_when_unlabeled(
 # --- _verify_render_worker_image ------------------------------------------
 
 
-def _stub_labels(labels: dict[str, str] | None) -> "object":
+def _stub_labels(labels: dict[str, str] | None) -> object:
     """Return a stubbed ``subprocess.run`` for a given label dict.
 
     ``labels=None`` means the image is absent (inspect non-zero).

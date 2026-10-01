@@ -80,7 +80,7 @@ _check_dependencies()
 # same prefix, so a sibling tree at the same filesystem depth cannot slip
 # through a naive prefix check.
 
-import d33d as _d33d  # noqa: E402
+import d33d as _d33d
 
 _THIS_TESTS_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _THIS_TESTS_DIR.parent

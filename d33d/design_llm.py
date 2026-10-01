@@ -48,8 +48,8 @@ from d33d.prompt_hash import canonical_hash
 from d33d.response_shape import response_message_shape
 
 __all__ = [
-    "Dialect",
     "LLM_CALL_TIMEOUT_SECONDS",
+    "Dialect",
     "LLMResult",
     "SenderError",
     "llm_request_body",

@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 from d33d.app import _export_filename, create_app
 from d33d.slicer import SliceDryRunResult

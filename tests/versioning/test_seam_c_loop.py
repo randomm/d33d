@@ -374,7 +374,6 @@ def test_list_versions_failure_degrades_to_empty_baseline(app_with_versions) -> 
     name may then lack its ``-2`` suffix; the version is still made).
     A stub whose ``list_versions`` raises is the tripwire."""
     import asyncio
-    from dataclasses import replace
 
     from d33d.design_loop_events import _resolve_version_create
 

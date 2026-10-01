@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Any
 
 from d33d.design_state import state_block_for_version
 from tests.versioning.helpers import create_project, create_version, run_async
