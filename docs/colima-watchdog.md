@@ -21,6 +21,10 @@ zero running containers).
   watchdog instance is already healing), `2` restart was needed but
   blocked (containers running — the log line names the count — or the
   container probe failed; the safety rule gates only the restart),
+  `3` tools not found (docker and/or colima missing from PATH — no action
+  taken; a misconfiguration to surface on every tick under launchd's
+  minimal PATH), `4` cannot determine VM state (colima status exited
+  non-zero or returned unrecognised output — no action taken),
   `64` usage/environment error (unknown flag, non-numeric env override).
   Any other non-zero code means the script aborted mid-run before
   reaching a decision.
@@ -34,7 +38,10 @@ the script already logs.
 The plist ships with a `__HOME__` template (the home path is never
 hard-coded), and the plist points the agent at
 `__HOME__/Library/Scripts/colima-watchdog.sh` — so the install step copies the
-script next to the agent and substitutes `__HOME__` in one place:
+script next to the agent and substitutes `__HOME__` in one place. The plist
+also sets an `EnvironmentVariables` block with `PATH` including
+`/opt/homebrew/bin` and `/usr/local/bin` (launchd's default PATH lacks these,
+so docker/colima would be rc=127 without it):
 
 ```sh
 REPO=/path/to/d33d   # this repository
@@ -86,6 +93,17 @@ file is left in place.
   its exit status (`colima stop failed (rc=N)`) and the tick ends as
   "not healed" (exit 1) — the log line naming the failing step is the
   diagnostic; the next tick retries.
+- **Every tick logs "tools not found" (exit 3).** The plist's
+  `EnvironmentVariables` PATH block was not applied (e.g. an older plist
+  without the block, or the binary was removed). Verify the plist contains
+  the `EnvironmentVariables` dict with `PATH` starting with
+  `/opt/homebrew/bin` (Apple Silicon) or `/usr/local/bin` (Intel), and that
+  the binary exists at that path. No action is taken on this path — the
+  watchdog exits immediately after logging the error.
+- **`colima status` returns an error (exit 4).** The status probe exited
+  non-zero or returned unrecognised output — the watchdog cannot determine
+  whether the VM is running, stopped, or in some other state. No action is
+  taken. Check `colima status` manually; the next tick retries.
 
 ## Manual use
 
