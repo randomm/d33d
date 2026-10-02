@@ -32,6 +32,7 @@ from d33d.design_prompts import (
     SCREW_SIZE_RE,
     clearance_rows_line,
     design_prompt,
+    import_part_instruction,
     load_bosl2_cheatsheet,
     model_overrides,
     render_module_docs,
@@ -296,3 +297,160 @@ def test_wrap_user_data_frames_data_not_instructions() -> None:
     assert "user content here" in wrapped
     assert "<user_data" in wrapped and "</user_data>" in wrapped
     assert "not instructions" in wrapped or "data only" in wrapped
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 — import-aware prompt (the import section)
+# ---------------------------------------------------------------------------
+
+
+def test_import_part_instruction_renders_scale_from_part_scale():
+    """Issue #332 sub-issue 3: the import instruction renders the scale
+    factor from ``part_scale`` (the settled file→mm factor). A scale of
+    1.0 (mm) renders ``scale(1)``; a scale of 25.4 (inches) renders
+    ``scale(25.4)``. The instruction text lives in one place
+    (``design_prompts``) and is pinned here."""
+    # scale=1.0 (mm): renders scale(1)
+    text_1 = import_part_instruction(1.0)
+    assert 'scale(1) import("part.stl")' in text_1
+    # scale=25.4 (inches): renders scale(25.4)
+    text_254 = import_part_instruction(25.4)
+    assert 'scale(25.4) import("part.stl")' in text_254
+    # scale=10 (cm): renders scale(10)
+    text_10 = import_part_instruction(10.0)
+    assert 'scale(10) import("part.stl")' in text_10
+
+
+def test_import_part_instruction_contains_import_and_add_cut_only():
+    """Issue #332 sub-issue 3: the import instruction states that the part
+    already exists as ``import("part.stl")``, that it must be placed with
+    ``scale(...)`` as the first operation, and that the model may only ADD
+    and CUT — never rebuild, re-model, or resize."""
+    text = import_part_instruction(1.0)
+    assert 'import("part.stl")' in text
+    assert "scale(1)" in text
+    assert "ADD geometry" in text
+    assert "CUT geometry" in text
+    assert "union" in text
+    assert "difference" in text
+    assert "Never rebuild" in text
+    assert "resize" in text
+
+
+def test_import_part_instruction_minimal_skeleton():
+    """Issue #332 sub-issue 3: the import instruction includes a minimal
+    correct skeleton showing ``scale(...) import("part.stl")`` as the
+    first operation."""
+    text = import_part_instruction(25.4)
+    assert "scale(25.4) import(\"part.stl\")" in text
+    assert "union() { ... }" in text
+
+
+def test_design_system_with_part_includes_import_section():
+    """Issue #332 sub-issue 3: ``_design_system`` with a ``part_scale``
+    renders the import section. Without ``part_scale`` (``None``) the
+    prompt is byte-identical to the no-part form (regression anchor)."""
+    import d33d.design_loop as dl
+
+    no_part = dl._design_system(STATED)
+    with_part = dl._design_system(STATED, 1.0)
+    # The import section is present when part_scale is given.
+    assert 'import("part.stl")' in with_part
+    assert "scale(1)" in with_part
+    # Without part_scale the prompt does NOT contain the import section.
+    assert 'import("part.stl")' not in no_part
+    # The no-part prompt is a prefix/subset relationship: the core parts
+    # (ground-truth dims, clearance table) are present in both.
+    for part in ("Ground-truth dimensions", "Screw clearance"):
+        assert part in no_part
+        assert part in with_part
+
+
+def test_design_system_with_part_scale_254_renders_scale_254():
+    """Issue #332 sub-issue 3: a 3MF imported at inches (scale=25.4)
+    renders ``scale(25.4)`` in the system prompt."""
+    import d33d.design_loop as dl
+
+    text = dl._design_system(STATED, 25.4)
+    assert "scale(25.4)" in text
+    assert 'import("part.stl")' in text
+
+
+def test_design_messages_with_part_includes_import_section():
+    """Issue #332 sub-issue 3: ``_design_messages`` with ``part_scale``
+    renders the import section in the user message. Without ``part_scale``
+    the prompt is byte-identical to the no-part form."""
+    import d33d.design_loop as dl
+
+    no_part = dl._design_messages(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated=STATED,
+        repair=None,
+        request="make a part",
+    )
+    with_part = dl._design_messages(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated=STATED,
+        repair=None,
+        request="make a part",
+        part_scale=1.0,
+    )
+    no_text = "\n".join(
+        p["text"] for p in no_part[0]["content"]
+        if isinstance(p, dict) and "text" in p
+    )
+    with_text = "\n".join(
+        p["text"] for p in with_part[0]["content"]
+        if isinstance(p, dict) and "text" in p
+    )
+    # The import section is present in the with-part prompt.
+    assert 'import("part.stl")' in with_text
+    assert "scale(1)" in with_text
+    # The no-part prompt does NOT contain the import section.
+    assert 'import("part.stl")' not in no_text
+    # Both share the common ground-truth line.
+    assert "Reference dimensions" in no_text
+    assert "Reference dimensions" in with_text
+
+
+def test_design_messages_unsettled_part_is_byte_identical_to_no_part():
+    """Issue #332 sub-issue 3: ``part_scale=None`` (no part, or unsettled
+    part) renders byte-identical to the no-part prompt (regression anchor)."""
+    import d33d.design_loop as dl
+
+    no_part = dl._design_messages(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated=STATED,
+        repair=None,
+        request="make a part",
+    )
+    unsettled = dl._design_messages(
+        photo="data:image/png;base64,REF",
+        chat_history=(),
+        stated=STATED,
+        repair=None,
+        request="make a part",
+        part_scale=None,
+    )
+    no_text = "\n".join(
+        p["text"] for p in no_part[0]["content"]
+        if isinstance(p, dict) and "text" in p
+    )
+    unsettled_text = "\n".join(
+        p["text"] for p in unsettled[0]["content"]
+        if isinstance(p, dict) and "text" in p
+    )
+    assert no_text == unsettled_text
+
+
+def test_import_part_lines_none_returns_empty():
+    """Issue #332 sub-issue 3: ``import_part_lines(None)`` returns an
+    empty list (byte-identity regression anchor)."""
+    from d33d.design_loop import import_part_lines
+
+    assert import_part_lines(None) == []
+    assert import_part_lines(1.0) != []
+    assert 'import("part.stl")' in import_part_lines(1.0)[0]

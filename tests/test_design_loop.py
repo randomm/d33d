@@ -2461,3 +2461,180 @@ def test_screw_clearance_direct_check_contract():
     assert _undersize_screw_hole(request, {"W": 60.0, "D": 45.0}, {}) is None
     # Empty request → abstain.
     assert _undersize_screw_hole("", {"hole_d": 4.0}, meta) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 — import guard: post-check (missing import, wrong filename,
+# rescale, resize → repair; correct candidate → pass)
+# ---------------------------------------------------------------------------
+
+
+def _import_scad_llm(scad: str) -> LLMResult:
+    """A T1-shaped design response for import-guard tests."""
+    return _llm_result(
+        content=_t1_tool_call_payload("emit_design", {"scad": scad}),
+        tool_calls=({"name": "emit_design", "arguments": {"scad": scad}},),
+    )
+
+
+def _run_import_loop(
+    llm_script: Sequence[LLMResult],
+    part_scale: float = 1.0,
+    bbox: BboxInfo | None = None,
+    stated: tuple[float, float, float] = (20.0, 25.0, 30.0),
+    render_script: Sequence[RenderResult] | None = None,
+) -> DesignResult:
+    """Run the design loop with an import project (``part_scale`` set) and
+    a scripted LLM/render."""
+    i = {"n": 0}
+    renders = render_script if render_script is not None else [_render()]
+
+    def llm_fn(role, messages, system):
+        return llm_script[min(i["n"], len(llm_script) - 1)]
+
+    def render_fn(scad, defines):
+        r = renders[min(i["n"], len(renders) - 1)]
+        i["n"] += 1
+        return r
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=(lambda r: bbox if r.error_class == "ok" else None),
+        part_scale=part_scale,
+    )
+
+
+def test_import_guard_missing_import_is_repair():
+    """Issue #332: a candidate that does NOT import("part.stl") at all
+    → repair routed via the existing geometrically_wrong class."""
+    llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
+    result = _run_import_loop(llm, part_scale=1.0, bbox=BboxInfo(20.0, 25.0, 30.0))
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[0].repair["failure_class"] == "geometrically_wrong"
+    assert "import" in result.iterations[0].repair["instruction"]
+
+
+def test_import_guard_wrong_filename_is_repair():
+    """Issue #332: a candidate that imports a DIFFERENT filename
+    (e.g. part.3mf) → the import guard detects wrong_import."""
+    from d33d.import_guard import import_guard_violation
+    scad = 'import("part.3mf");\n'
+    det = import_guard_violation(scad, part_scale=1.0)
+    assert det is not None
+    assert det[0] == "wrong_import"
+    assert "part.3mf" in det[1]
+
+
+def test_import_guard_rescaled_import_is_repair():
+    """Issue #332: a candidate that applies a scale() to the import with
+    a factor OTHER than the settled one → the import guard detects rescaled_import."""
+    from d33d.import_guard import import_guard_violation
+    scad = 'scale(2) import("part.stl");\n'
+    det = import_guard_violation(scad, part_scale=1.0)
+    assert det is not None
+    assert det[0] == "rescaled_import"
+    assert "scale" in det[1]
+
+
+def test_import_guard_resized_part_is_repair():
+    """Issue #332: a candidate that calls resize() → the import guard
+    detects resized_part."""
+    from d33d.import_guard import import_guard_violation
+    scad = 'resize([40, 50, 60]) import("part.stl");\n'
+    det = import_guard_violation(scad, part_scale=1.0)
+    assert det is not None
+    assert det[0] == "resized_part"
+    assert "resize" in det[1]
+
+
+def test_import_guard_correct_candidate_no_violation():
+    """Issue #332: a candidate that imports("part.stl") with the correct
+    scale and adds geometry → no import guard violation."""
+    from d33d.import_guard import import_guard_violation
+    scad = 'scale(1) import("part.stl");\nunion() { cube([10, 10, 10]); }\n'
+    det = import_guard_violation(scad, part_scale=1.0)
+    assert det is None
+
+
+def test_import_guard_correct_scale_254_no_violation():
+    """Issue #332: a 3MF imported at inches (scale=25.4) with the correct
+    scale() → no import guard violation."""
+    from d33d.import_guard import import_guard_violation
+    scad = 'scale(25.4) import("part.stl");\n'
+    det = import_guard_violation(scad, part_scale=25.4)
+    assert det is None
+
+
+def test_import_guard_no_part_project_no_guard():
+    """Issue #332: a project with NO part (part_scale=None) — the import
+    guard does not fire (byte-identity regression anchor)."""
+    llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
+    result = _run_import_loop(llm, part_scale=None, bbox=BboxInfo(20.0, 25.0, 30.0))
+    assert result.iterations[0].failure_class is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 — ground truth: score() with part_bbox_mm
+# ---------------------------------------------------------------------------
+
+
+def test_score_with_part_bbox_larger_candidate_passes():
+    """Issue #332: for an import project, a candidate whose bbox is
+    LARGER than the user's stated dims (but matches the part's measured
+    bbox within tolerance) passes the bbox gate (bit 2)."""
+    # Part bbox is 20/25/30, stated is 15/20/25 (smaller — the part is
+    # bigger than stated). A candidate that matches the part's bbox
+    # (20/25/30) should pass bit 2 via the ground-truth baseline.
+    render = _render()
+    bbox = BboxInfo(20.0, 25.0, 30.0, 15000.0)
+    s = score(
+        render,
+        (15.0, 20.0, 25.0),  # stated dims (smaller than part)
+        bbox=bbox,
+        scad_source="W = 20;\ncube([W, 25, 30]);\n",
+        part_bbox_mm=(20.0, 25.0, 30.0),  # part's measured bbox
+    )
+    # Bit 2 (bbox) passes: the candidate matches the part's extent.
+    assert s.bits[2] is True
+
+
+def test_score_with_part_bbox_divergent_candidate_fails():
+    """Issue #332: a candidate whose bbox DIVERGES from the part's extent
+    (beyond tolerance) keeps the stated-dims comparison and fails."""
+    render = _render()
+    bbox = BboxInfo(100.0, 100.0, 100.0, 1000000.0)  # way bigger than part
+    s = score(
+        render,
+        (15.0, 20.0, 25.0),
+        bbox=bbox,
+        scad_source="W = 100;\ncube([W, W, W]);\n",
+        part_bbox_mm=(20.0, 25.0, 30.0),
+    )
+    # Bit 2 fails: the candidate diverges from the part's extent.
+    assert s.bits[2] is False
+
+
+def test_score_no_part_bbox_byte_identical():
+    """Issue #332: without part_bbox_mm (None), the score is byte-identical
+    to today's behaviour (regression anchor)."""
+    render = _render()
+    bbox = BboxInfo(20.0, 25.0, 30.0, 15000.0)
+    s_with = score(
+        render,
+        (15.0, 20.0, 25.0),
+        bbox=bbox,
+        scad_source="W = 20;\ncube([W, 25, 30]);\n",
+        part_bbox_mm=None,
+    )
+    s_without = score(
+        render,
+        (15.0, 20.0, 25.0),
+        bbox=bbox,
+        scad_source="W = 20;\ncube([W, 25, 30]);\n",
+    )
+    assert s_with.bits == s_without.bits
+    assert s_with.rank == s_without.rank

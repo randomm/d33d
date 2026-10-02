@@ -1643,7 +1643,16 @@ async def run_design_loop_with_events(
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
-        "request": (user_message or request_text or "").strip() or request_text,
+        # Issue #332 (sub-issue 3): the caller's ``request_text`` wins when
+        # it DIFFERS from the message (the accepted fill-and-recut offer
+        # appends its explicit instruction to the request text while
+        # ``user_message`` stays the user's own words — the transcript
+        # field). Otherwise the message is authoritative (a blank
+        # ``user_message`` degrades to ``request_text``, as before).
+        "request": (
+            request_text if request_text and request_text != user_message else user_message
+        )
+        or request_text,
         "on_progress": _on_progress,
     }
 
@@ -1675,6 +1684,24 @@ async def run_design_loop_with_events(
     if design_source is not None:
         kwargs["design_source"] = design_source
 
+    # Issue #332 (sub-issue 3) — the import section's inputs: the
+    # project's part (assumed/settled → the ``part_scale`` + the v1's
+    # measured mm bbox, the ground-truth baseline; no part / unsettled →
+    # ``None`` — the byte-identity regression anchor). The single reader
+    # is ``d33d.part_http.part_envelope_with_bbox`` (shared with the
+    # finalize seam — never two divergent copies). A part whose units are
+    # unsettled renders NOTHING (the unsettled pre-route in
+    # ``d33d.projects.post_chat`` has already stopped the loop before
+    # this seam runs).
+    if row is not None:
+        from d33d.part_http import part_envelope_with_bbox
+
+        part_env = part_envelope_with_bbox(row, app.state.conn, app.state.versions)
+        if part_env is not None:
+            kwargs["part_scale"] = part_env["scale"]
+            if part_env.get("bbox_mm") is not None:
+                kwargs["part_bbox_mm"] = part_env["bbox_mm"]
+
     # Issue #295 — the lost-photo notice (the post_chat caller's photo
     # state, carried into the stream): when the project's stored photo
     # was LOST out-of-band (path set, file gone — never a photo-LESS
@@ -1695,7 +1722,7 @@ async def run_design_loop_with_events(
             "stream carries the copy.ts notice",
             project_id,
         )
-        from d33d.projects import PHOTO_MISSING_NOTICE
+        from d33d.design_frames import PHOTO_MISSING_NOTICE
 
         _photo_notice = PHOTO_MISSING_NOTICE
 

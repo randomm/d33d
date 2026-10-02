@@ -23,8 +23,9 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from d33d import fill_recut
 from d33d.app import create_app
-from d33d.projects import (
+from d33d.photo_upload import (
     ALLOWED_CONTENT_TYPES,
     MAX_UPLOAD_BYTES,
     UNDECODABLE_PHOTO_DETAIL,
@@ -590,10 +591,10 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
     a waiter task on the SAME per-project lock while the commit is in
     flight; the waiter must time out (proof the lock is held across the
     commit call, i.e. the route is not bypassing the lock)."""
-    import d33d.projects as projects_mod
+    import d33d.photo_upload as photo_upload_mod
 
     png_bytes = _valid_png_1x1()
-    real_commit_all = projects_mod.commit_all
+    real_commit_all = photo_upload_mod.commit_all
 
     calls: list[int] = []
     probe_results: list[str] = []
@@ -620,10 +621,11 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
         probe_results.append("proj_locked" if proj_lock.locked() else "proj_free")
         real_commit_all(repo_dir, message)
 
-    # The photo route calls commit_all defined in d33d.projects itself, so
-    # monkeypatch the module attribute (the route's local reference to the
-    # function is resolved at call time via the module's global scope).
-    monkeypatch.setattr(projects_mod, "commit_all", _spy_commit)
+    # The photo route calls ``d33d.photo_upload.commit_all`` — imported at
+    # module level from ``d33d.project_git`` — so patch the attribute on
+    # ``d33d.photo_upload`` (the module global the route reads); patching
+    # ``d33d.project_git.commit_all`` would miss the binding.
+    monkeypatch.setattr(photo_upload_mod, "commit_all", _spy_commit)
 
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Lock Test"})
@@ -980,3 +982,694 @@ def test_offer_acceptance_accepts_still_assumed_param_via_same_block(
     latest = svc.latest_version(_pid)
     assert latest["confirmed_params"] == {"wall_thickness": 3.0}
     assert svc.get_pending_offer(_pid) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 (sub-issue 3) — the fill-and-recut boundary pre-route + the
+# unsettled-part guard (chat seam).
+#
+# The fill-and-recut pre-route fires when ALL of issue #332's operator
+# decision (a)–(e) hold: the project has an assumed/settled part (a), the
+# message asks to RESIZE or MOVE an existing feature (b), the noun is in
+# the closed feature-noun set (c), the noun is NOT a token of the design's
+# own current params/labels (d), and the message has no add/create verb
+# (e). "yes"/"Yes, do that" on the pending offer runs the design loop with
+# the explicit fill-and-recut instruction; "no"/"Leave it" clears it.
+# The unsettled-part guard replies with the settle-first copy and never
+# runs the design loop.
+# ---------------------------------------------------------------------------
+
+_SETTLED_PART_PARAMS = {
+    "part_width": 60.0,
+    "part_depth": 45.0,
+    "part_height": 20.0,
+}
+
+
+def _set_part_columns(app: Any, pid: int, *, unit_status: str, scale: float = 1.0):
+    """Set the project's part columns (a part the user brought, units
+    ``unit_status``) directly on the DB — the same UPDATE the #325
+    settle path runs, minus the settle call itself."""
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+        "part_unit='mm', part_unit_status=?, part_scale=? WHERE id=?",
+        (unit_status, scale, pid),
+    )
+    conn.commit()
+
+
+def _release_inflight(app: Any, pid: int):
+    """Release the per-project in-flight design-loop flag (the test's
+    ``async for`` drain of the event source does not run the SSE
+    endpoint's ``finally`` — the flag is the route's state, not the
+    source's, so consecutive chat turns on the same project 409 on a
+    leaked flag; the SSE endpoint's ``finally`` is the production
+    release point, and the test releases it directly between turns).
+    """
+    inflight = getattr(app.state, "design_loop_inflight", None)
+    if inflight is not None:
+        inflight.discard(pid)
+
+
+def _insert_version_direct(app: Any, pid: int, params: dict, param_meta: dict | None = None):
+    """Insert a version row directly (avoids the git repo commit — the
+    pre-route tests only need the params/labels for the discriminator)."""
+    import json
+
+    conn = app.state.conn
+    meta_json = json.dumps(param_meta) if param_meta else None
+    conn.raw.execute(
+        "INSERT INTO versions (project_id, name, params, param_meta) "
+        "VALUES (?, ?, ?, ?)",
+        (pid, "v1", json.dumps(params), meta_json),
+    )
+    conn.commit()
+
+
+def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
+    """(a)–(e) all hold: 'make the big hole 38 mm' on a project with a
+    settled part and no version of its own → the boundary sentence
+    (the spec's hole template, Ø38 mm) as a kind:'answer' done frame, a
+    fill-recut offer recorded server-side, NO design run."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Imported Part"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the big hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "That hole came with your file" in msg, msg
+    assert "Ø38 mm" in msg, msg
+    assert "fill it, then cut a Ø38 mm one on the same axis" in msg, msg
+    # The offer was recorded server-side with the kind discriminator.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 38.0, offer
+
+
+def test_fill_recut_trigger_own_param_noun_not_triggered(app_with_projects):
+    """Operator decision (d): the design's OWN SCAD already owns a slot
+    (a param named slot_width, label 'Slot width' — the token 'slot' is in
+    the design's own feature names), so 'make the slot 5 mm' is a resize
+    of the user's own feature — NOT the imported mesh — and routes
+    normally (no offer, no boundary reply; the design loop would run).
+    The loop is stubbed out (no run_design_loop wiring on the test app),
+    so the loop call must NOT be attempted — the pre-route must NOT fire.
+    We assert the offer is NOT recorded and the reply is NOT the boundary
+    sentence (the frame is the loop's, or the loop setup error — either
+    way, not the fill-recut offer)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Own Slot"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _insert_version_direct(
+            app_with_projects,
+            pid,
+            {"slot_width": 6.0, "slot_length": 20.0},
+            {"slot_width": {"label": "Slot width"}, "slot_length": {"label": "Slot length"}},
+        )
+        # The loop is not wired (test app has no run_design_loop) — the
+        # pre-route must NOT fire (the noun 'slot' is in the design's own
+        # tokens). Whatever frame comes back, it must NOT be the
+        # fill-recut boundary sentence, and no fill-recut offer may be
+        # recorded.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the slot 5 mm"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # No fill-recut offer was recorded.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is None, f"unexpected offer: {offer}"
+    # The reply must NOT be the boundary sentence (the design loop's
+    # error frame or a no-op — the pre-route did NOT fire).
+    done = [d for e, d in frames if e == "done"]
+    for d in done:
+        assert "came with your file" not in d.get("message", ""), d
+
+
+def test_fill_recut_yes_runs_loop_with_instruction(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """'yes' on the pending fill-recut offer: the offer is cleared and
+    the design loop runs with the explicit fill-and-recut instruction
+    appended to the request text (the loop's own import-aware prompt
+    already teaches the fill-then-cut move — the instruction makes the
+    accepted turn's intent explicit). The loop is stubbed via a spy on
+    ``run_design_loop_with_events`` (the test app has no production loop)."""
+    import d33d.chat_loop as chat_loop_mod
+
+    _loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        _loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Yes Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        svc = app_with_projects.state.versions
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None and offer["kind"] == "fill_recut", offer
+        # Second turn: accept.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "yes"}
+        )
+        frames = []
+        source2 = app_with_projects.state.event_sources.get(pid)
+        if source2 is not None:
+            async for event, data in source2:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was called (the fake loop's frames are on the event source)
+    # — the request text carries the fill-and-recut instruction.
+    assert _loop_calls, f"the fake loop was not called; frames: {frames}"
+    captured = _loop_calls[0]
+    rt = captured["request_text"]
+    assert "Fill-and-recut:" in rt, rt
+    assert "hole" in rt, rt
+    assert "38" in rt, rt
+    # The offer was cleared (consumed).
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
+
+
+def test_fill_recut_yes_setup_failure_keeps_offer(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #332 fix round: on the fill-recut "yes" path the pending offer
+    must NOT be lost if the design-loop setup raises. The offer is cleared
+    only once the event source is registered (``chat_loop.run_design_loop``
+    clears it there); when the setup fails, ``post_chat`` restores it so
+    the user's acceptance survives the error. The request errors (500),
+    the in-flight flag is released, and the fill_recut offer is still
+    present."""
+    import d33d.chat_loop as chat_loop_mod
+
+    def _boom_loop(*args, **kwargs):
+        raise RuntimeError("forced loop setup failure (test)")
+
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Lost Yes"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        svc = app_with_projects.state.versions
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None and offer["kind"] == "fill_recut", offer
+        # Second turn: accept — the loop setup is forced to raise.
+        # The ASGI transport surfaces the server exception as a 500 (FastAPI
+        # catches it); if the transport re-raises instead, the test still
+        # passes (the offer-restore logic ran before the raise either way).
+        try:
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "yes"}
+            )
+            status = r2.status_code
+        except RuntimeError:
+            status = 500  # the RuntimeError propagated through the transport
+        inflight = app_with_projects.state.design_loop_inflight
+        return status, pid, inflight
+
+    status, pid, inflight = _run_async(app_with_projects, _call)
+    # The request errored (the setup exception propagated — no 202).
+    assert status != 202, status
+    # The in-flight flag was released (the project is not stuck — the next
+    # attempt can start clean).
+    assert pid not in inflight, "inflight flag leaked after setup failure"
+    # The pending fill_recut offer survived the setup failure — the
+    # acceptance was restored, not lost.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None, "the accepted fill_recut offer was lost"
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 38.0, offer
+
+
+def test_fill_recut_no_clears_offer(app_with_projects):
+    """'no' on the pending fill-recut offer: the offer is cleared, a
+    quiet acknowledgement frame is emitted, and NO design run happens."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        # Second turn: decline.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "no"}
+        )
+        frames = []
+        source2 = app_with_projects.state.event_sources.get(pid)
+        if source2 is not None:
+            async for event, data in source2:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "Understood" in done[0].get("message", ""), done
+    # The offer was cleared.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
+
+
+def test_fill_recut_move_triggers_move_template(app_with_projects):
+    """'move the hole left' triggers the move template (the point-at-the-
+    spot copy), not the resize template."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Move Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "move the hole left"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0]["message"]
+    assert "I can't move it directly" in msg, msg
+    assert "Point at the spot" in msg, msg
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None and offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+
+
+def test_fill_recut_add_verb_not_triggered(app_with_projects):
+    """Operator decision (e): 'add a 38 mm hole' has an add verb — it's an
+    ADD (allowed by rule 4), not a resize — so the pre-route does NOT
+    fire (no offer, no boundary reply)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Add Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "add a 38 mm hole"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # No fill-recut offer was recorded.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "add verb must not record an offer"
+    # No boundary reply (the loop would run — the test app has no loop,
+    # so the frame is a loop error; either way, not the boundary copy).
+    for e, d in frames:
+        if e == "done":
+            assert "came with your file" not in d.get("message", ""), d
+
+
+def test_fill_recut_taller_is_add_not_boundary(app_with_projects):
+    """Operator decision: 'make it 10 mm taller' has no closed-set noun —
+    it's an ADD (the user is adding geometry onto the part), never a
+    boundary case. The pre-route does NOT fire."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Taller Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make it 10 mm taller"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, _ = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "taller is an add, not a boundary"
+
+
+def test_fill_recut_no_part_not_triggered(app_with_projects):
+    """Operator decision (a): a project with NO part — even when the
+    message matches 'make the big hole 38 mm' — does NOT trigger the
+    pre-route (the offer requires BOTH the phrasing AND a settled/assumed
+    part)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Part"})
+        pid = r.json()["id"]
+        # No part columns set — a no-part project.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the big hole 38 mm"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, _ = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "no-part project must not record an offer"
+
+
+def test_unsettled_part_no_design_run(app_with_projects):
+    """Unsettled part (part_unit_status not in {assumed, settled}): the
+    reply is the deterministic 'settle the units first' message and NO
+    design loop runs (no version, no render, inflight flag released)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unsettled"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="unsettled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "Settle the units first" in done[0].get("message", ""), done
+    # No version was created.
+    svc = _svc(app_with_projects)
+    assert svc.latest_version(pid) is None
+
+
+def test_unsettled_part_assumed_status_skips_guard(app_with_projects):
+    """Assumed part (unit_status='assumed') skips the unsettled guard —
+    the pre-route continues to the fill-recut trigger (a settled/assumed
+    part is a valid part for the boundary conversation)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Assumed"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="assumed")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The fill-recut boundary reply (NOT the unsettled guard's reply).
+    msg = done[0].get("message", "")
+    assert "came with your file" in msg, msg
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None and offer["kind"] == "fill_recut", offer
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 fix round: the decimal-token bug, the dropped-distance bug,
+# and the copy.ts two-way parity pins.
+# ---------------------------------------------------------------------------
+
+
+def test_fill_recut_trigger_decimal_size_not_truncated() -> None:
+    """A full decimal token ("38.5") is captured whole — the user's own
+    number is never truncated by trailing punctuation (the pre-fix regex
+    stopped the size capture at the first non-digit, rendering Ø38 for
+    "make the hole 38.5 mm wide, please")."""
+    t = fill_recut.fill_recut_trigger("make the hole 38.5 mm wide, please")
+    assert t is not None
+    assert t["noun"] == "hole"
+    assert t["size"] == 38.5, t
+    assert t["move"] is False
+
+
+def test_fill_recut_trigger_integer_size_rendered_zero() -> None:
+    """An integer number ("38") is captured and rendered as 38 (Ø38), the
+    same value the pre-fix code produced for the integer case (no
+    behaviour change for integers)."""
+    t = fill_recut.fill_recut_trigger("make the big hole 38 mm")
+    assert t is not None
+    assert t["noun"] == "hole"
+    assert t["size"] == 38.0, t
+    # The rendered sentence (the deck's :g spelling — 38.0 renders as 38).
+    s = fill_recut.boundary_sentence(t["noun"], t["size"])
+    assert "Ø38 mm" in s, s
+    assert "Ø38.0" not in s, s
+
+
+def test_fill_recut_trigger_partial_number_not_parsed() -> None:
+    """A trailing-partial number ("38." with no decimal digits) is NOT
+    parsed as a size — no partial number is ever rendered (the pre-fix
+    regex captured "38" from "38." and rendered Ø38 for a number the user
+    did not state)."""
+    t = fill_recut.fill_recut_trigger("make the hole 38.")
+    assert t is None, t
+
+
+def test_fill_recut_move_with_distance_keeps_number() -> None:
+    """A move carrying a distance + direction keeps the user's number and
+    direction (the pre-fix move template dropped the distance —
+    "move the hole 10 mm left" got the point-at-the-spot copy and the 10
+    was silently lost)."""
+    t = fill_recut.fill_recut_trigger("move the hole 10 mm left")
+    assert t is not None
+    assert t["move"] is True
+    assert t["move_distance"] == 10.0, t
+    assert t["direction"] == "left", t
+    s = fill_recut.boundary_sentence(
+        t["noun"],
+        t["size"],
+        move=t["move"],
+        move_distance_mm=t["move_distance"],
+        move_direction=t["direction"],
+    )
+    assert "10 mm left of where it is now" in s, s
+    assert "Point at the spot" not in s, s
+
+
+def test_fill_recut_move_without_distance_uses_point_at_spot() -> None:
+    """A move with NO distance keeps the point-at-the-spot copy (the
+    pre-fix behaviour for the distanceless move — unchanged)."""
+    t = fill_recut.fill_recut_trigger("move the hole left")
+    assert t is not None
+    assert t["move"] is True
+    assert t["move_distance"] is None, t
+    assert t["direction"] is None, t
+    s = fill_recut.boundary_sentence(t["noun"], t["size"], move=t["move"])
+    assert "Point at the spot" in s, s
+    assert "mm" not in s, s
+
+
+def test_fill_recut_offer_dict_carries_only_noun_and_size() -> None:
+    """The server-side pending-offer dict stays the pre-fix shape
+    (kind/noun/size — the #250 reader's contract); the distance +
+    direction are reply-side only and are NOT persisted on the offer
+    (the offer is the fill-and-recut instruction's input — the distance
+    is the user's move phrasing, not a fill-and-recut parameter)."""
+    t = fill_recut.fill_recut_trigger("move the hole 10 mm left")
+    assert t is not None
+    offer = {"kind": "fill_recut", "noun": t["noun"], "size": t["size"]}
+    assert offer == {"kind": "fill_recut", "noun": "hole", "size": None}
+    # The offer's instruction (an accepted move offer runs the loop):
+    instr = fill_recut.fill_and_recut_instruction(offer)
+    assert "hole" in instr
+    assert "10" not in instr  # a move offer has no size to state
+
+
+def test_fill_and_recut_instruction_zero_size_no_clause() -> None:
+    """Issue #332 fix round: a zero size renders NO size clause (the guard
+    is ``isinstance(size, (int, float)) and size > 0``, never truthiness —
+    ``size: 0`` must not render " at 0 mm"). A positive size still renders
+    the clause (unchanged)."""
+    offer_zero = {"kind": "fill_recut", "noun": "hole", "size": 0}
+    instr = fill_recut.fill_and_recut_instruction(offer_zero)
+    assert " at " not in instr, instr
+    # A positive size still renders the clause (unchanged).
+    offer_ok = {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+    instr_ok = fill_recut.fill_and_recut_instruction(offer_ok)
+    assert " at 38 mm" in instr_ok, instr_ok
+
+
+# ---------------------------------------------------------------------------
+# copy.ts two-way parity pins (parse copy.ts, as the existing part-upload
+# detail pins do — the overstated tripwire claim in the old
+# UNSETTLED_PART_REPLY comment is corrected by these pins existing).
+# ---------------------------------------------------------------------------
+
+
+def _copy_ts_text() -> str:
+    return (
+        Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+
+
+def test_unsettled_part_reply_equals_copy_ts() -> None:
+    """``UNSETTLED_PART_REPLY`` equals ``copy.ts``'s
+    ``partUnitsUnsettled`` exactly (parse copy.ts, as the existing
+    part-upload detail pins do)."""
+    import re
+
+    m = re.search(r'partUnitsUnsettled =\s*"([^"]+)"', _copy_ts_text())
+    assert m is not None, "copy.ts must define partUnitsUnsettled"
+    assert fill_recut.UNSETTLED_PART_REPLY == m.group(1)
+
+
+def test_fill_recut_decline_reply_equals_copy_ts() -> None:
+    """``FRILL_DECLINE_REPLY`` equals ``copy.ts``'s ``fillRecut.declined``
+    exactly."""
+    import re
+
+    m = re.search(r'declined:\s*"([^"]+)"', _copy_ts_text())
+    assert m is not None, "copy.ts must define fillRecut.declined"
+    assert fill_recut.FRILL_DECLINE_REPLY == m.group(1)
+
+
+def test_fill_recut_templates_match_copy_ts_fill_recut() -> None:
+    """Every fill-recut boundary template, rendered with fixed sample
+    values, equals ``copy.ts``'s ``fillRecut`` deck function with the
+    same values (parse copy.ts + the backend's own render — the two-way
+    agreement the old comment claimed the design-contract tripwire
+    pinned; the pin lives here, the #250/#260 way)."""
+    import re
+
+    copy_ts = _copy_ts_text()
+
+    # The fillRecut deck block (scope the regex to it so `move` does not
+    # match an unrelated `moved.` elsewhere in the file).
+    fr_start = copy_ts.index("export const fillRecut = {")
+    fr_end = copy_ts.index("} as const;", fr_start)
+    seg = copy_ts[fr_start:fr_end]
+
+    def _deck_fn(name: str) -> str:
+        # Extract the template literal body of `fillRecut.<name>:` — the
+        # backtick-quoted template after the arrow.
+        m = re.search(name + r":[^(]*\([^)]*\)[^(]*=>\s*`([^`]*)`", seg)
+        assert m is not None, f"copy.ts must define fillRecut.{name}"
+        return m.group(1)
+
+    def _render(ts: str, **kwargs) -> str:
+        for k, v in kwargs.items():
+            ts = ts.replace("${" + k + "}", v)
+        return ts
+
+    # The hole/bore diameter resize (dim 38).
+    hole = _render(_deck_fn("holeDiameter"), noun="hole", dim="38")
+    assert hole == fill_recut.boundary_sentence("hole", 38.0)
+
+    # The other-noun resize (dim 5).
+    slot = _render(_deck_fn("nounDimension"), noun="slot", dim="5")
+    assert slot == fill_recut.boundary_sentence("slot", 5.0)
+
+    # The point-at-the-spot move (no distance).
+    move = _render(_deck_fn("move"), noun="hole")
+    assert move == fill_recut.boundary_sentence("hole", None, move=True)
+
+    # The move-with-distance (the new template — the dropped-distance bug
+    # fix, pinned two-way).
+    move_d = _render(
+        _deck_fn("moveWithDistance"), noun="hole", distance="10", direction="left"
+    )
+    assert move_d == fill_recut.boundary_sentence(
+        "hole", None, move=True, move_distance_mm=10.0, move_direction="left"
+    )
+
+    # The no-dimension ask.
+    ask = _render(_deck_fn("noDimension"), noun="hole")
+    assert ask == fill_recut.boundary_sentence("hole", None)
+
+
+def test_design_contract_pins_fill_recut_deck_key() -> None:
+    """The design-contract tripwire's key-list assertion includes the
+    fill-recut deck surface (the copy-deck key-list pins ``fillRecut``
+    and ``partUnitsUnsettled`` — a rename of the deck key trips the
+    tripwire, the #325 way)."""
+    src = (
+        Path(__file__).parent.parent
+        / "web" / "src" / "__tests__" / "design-contract.test.ts"
+    ).read_text("utf-8")
+    assert "fillRecut" in src
+    assert "partUnitsUnsettled" in src

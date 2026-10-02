@@ -47,12 +47,19 @@ interface PassProgressProps {
   /** The per-view progress state reduced from the SSE stream (the
    *  caller owns the reducer; defaults to idle). */
   viewProgress?: ViewProgressState;
+  /** Issue #332: the project has an imported part (a part whose units
+   *  are assumed or settled — an unsettled part never runs a loop at
+   *  all, so it never reaches the progress surface). The expectation
+   *  line keys off this: the bare pass promises 15–30 s; the import
+   *  path must not promise a time window it has not established. */
+  importedPart?: boolean;
 }
 
 export function PassProgress({
   step,
   elapsed,
   viewProgress = INITIAL_VIEW_PROGRESS,
+  importedPart = false,
 }: PassProgressProps) {
   const stageLabel =
     step === "design-loop-start"
@@ -112,6 +119,12 @@ export function PassProgress({
       {counterLine !== null && (
         <span data-testid="view-progress-counter">{counterLine}</span>
       )}
+      {/* The expectation line: the bare pass promises a window; the
+          import path's duration is not established, so it never carries
+          one (issue #332). */}
+      <span data-testid="design-loop-expectation">
+        {importedPart ? copy.progress.expectationImport : copy.progress.expectation}
+      </span>
       <div
         className="design-loop-progress-bar"
         data-testid="design-loop-progress-bar"

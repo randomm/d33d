@@ -22,8 +22,6 @@ git identity.
 from __future__ import annotations
 
 import logging
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -31,119 +29,25 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
+from d33d import fill_recut
+from d33d.chat_frames import answered_frames as _answered_frames
+from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
+from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
+from d33d.design_loop_events import photo_storage_signal
+from d33d.photo_upload import photo_upload_route
+from d33d.project_git import (
+    init_git_repo,
+    remove_repo,
+    repo_present,
+)
 
 logger = logging.getLogger(__name__)
 
-# Issue #261 lexicon feed — the carry-forward merge's cues input.
-from d33d.axis_lexicon import classify as _classify_axis_cues
-from d33d.design_loop_events import (
-    axes_to_gate_triple,
-    photo_data_uri,
-    photo_storage_signal,
-    run_design_loop_with_events,
-    validate_photo_bytes,
-)
-from d33d.dimension_protocol import (
-    carried_stated_set,
-    effective_stated_dims,
-    stated_axes_from_message,
-)
-from d33d.question_answer import ModelUnconfiguredError, route_chat_message
-
-# ---------------------------------------------------------------------------
-# Upload bounds (committed by the issue spec)
-# ---------------------------------------------------------------------------
-
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB — bounded read chunk size
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
-
-# Issue #299 — the 422 detail for an undecodable upload (a verbatim copy of
-# web/src/copy.ts `photoUpload.undecodable` — the SPA renders the 422 body's
-# ``detail`` verbatim, so the two copies must never drift apart). The check
-# order is fixed: content type (400) → size (413) → decode gate (422) →
-# write/commit/DB — a 422 writes nothing, commits nothing, updates nothing.
-UNDECODABLE_PHOTO_DETAIL = (
-    "That file isn't a readable PNG or JPEG image. Try exporting it again."
-)
-
-# Issue #295 — the two fixed copy.ts strings the missing-storage chat
-# pre-routes reply with (verbatim copies of the SPA's copy deck — the
-# design-contract tripwire pins the two-way agreement, the #260 way).
-SAVED_DESIGN_MISSING_REPLY = (
-    "The saved design for this project is missing, so I can't change it. "
-    "Start a new design, or describe it again and I'll make it fresh"
-)
-PHOTO_MISSING_NOTICE = (
-    "Your reference photo for this project is missing, so I'm designing "
-    "from your words alone"
-)
-
-_GIT_USER_EMAIL = "d33d@local"
-_GIT_USER_NAME = "d33d"
-
-# Commit-message messages are stored in the per-project git repo's history,
-# which downstream consumers (git log parsing, shell tooling, template
-# interpolation) treat as data. Sanitize the message text with a strict
-# safe-character filter so user-supplied filenames can never inject newlines
-# or shell metacharacters into the commit history.
-_MAX_COMMIT_MESSAGE_LEN = 200
-
-
-def _sanitize_commit_message(text: str) -> str:
-    """Reduce ``text`` to a single line of safe alnum+``._-`` characters.
-
-    Mirrors the filename-sanitization filter (defensively stricter than the
-    caller needs): any character outside the safe set — including newlines,
-    shell metacharacters, and other punctuation — is dropped, and the result
-    is capped at ``_MAX_COMMIT_MESSAGE_LEN`` characters.
-    """
-    safe = "".join(c for c in text if c.isalnum() or c in "._-")
-    return safe[:_MAX_COMMIT_MESSAGE_LEN]
-
-
-# ---------------------------------------------------------------------------
-# Git helpers (local only, no network)
-# ---------------------------------------------------------------------------
-
-
-def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
-    """Run a git command in ``repo_dir``. Raises on non-zero exit."""
-    cmd = ["git", "-C", str(repo_dir), *args]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=30, check=False
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git {' '.join(args)} failed (rc={result.returncode}): {result.stderr.strip()}"
-        )
-    return result
-
-
-def init_git_repo(repo_dir: Path) -> None:
-    """``git init`` + set local identity. Idempotent (skips if .git exists)."""
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    if not (repo_dir / ".git").exists():
-        _git(repo_dir, "init", "-q")
-        _git(repo_dir, "config", "user.email", _GIT_USER_EMAIL)
-        _git(repo_dir, "config", "user.name", _GIT_USER_NAME)
-
-
-def commit_all(repo_dir: Path, message: str) -> None:
-    """Stage everything and commit. No-op if nothing to commit."""
-    _git(repo_dir, "add", "-A")
-    # Check if there is anything to commit
-    status = _git(repo_dir, "status", "--porcelain")
-    if not status.stdout.strip():
-        return
-    _git(repo_dir, "commit", "-q", "-m", message)
-
-
-def remove_repo(repo_dir: Path) -> None:
-    """Remove the repo directory entirely. No-op if missing."""
-    if repo_dir.is_dir():
-        shutil.rmtree(repo_dir)
-
+# The git primitives live in ``d33d.project_git`` (shared by the
+# photo-upload and design-source routes without the projects → … → projects
+# import cycle); this module re-exports the two design-state notice strings
+# (``PHOTO_MISSING_NOTICE`` / ``SAVED_DESIGN_MISSING_REPLY``, from
+# ``d33d.design_frames``) under their historical names.
 
 # ---------------------------------------------------------------------------
 # Pydantic models for request bodies
@@ -303,72 +207,6 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     }
 
 
-async def _model_unconfigured_frames(env_var: str | None = None):
-    """The model-unconfigured terminal frame (issue #303): ONE ``error``
-    frame — the SAME structured shape the design loop's terminal error
-    frame carries (``reason: model_unconfigured`` + ``env_var`` when known;
-    never the key value). ``error``, not ``done``: a ``done`` frame would
-    render as a plain assistant message, not a failure turn.
-    """
-    from d33d.design_loop import MODEL_UNCONFIGURED
-
-    error_data: dict[str, Any] = {
-        "message": f"Design loop exhausted: {MODEL_UNCONFIGURED}",
-        "reason": MODEL_UNCONFIGURED,
-    }
-    if env_var is not None:
-        error_data["env_var"] = env_var
-    yield ("error", error_data)
-    # The in-flight flag is released by ``d33d.streaming._stream_events``
-    # (the SSE endpoint's ``finally`` — the single release point for every
-    # event source, on every exit path), exactly as for
-    # ``_answered_frames``.
-
-
-async def _answered_frames(
-    answer: str,
-    project_id: int | None = None,
-    app: Any = None,
-    confirm_ack: dict[str, str] | None = None,
-):
-    """The answer-path SSE stream (issue #249): ONE terminal ``done``
-    frame whose ``message`` is the answer text and which carries the
-    additive ``kind: "answer"`` discriminator (design-loop done frames
-    carry no ``kind`` at all — existing frames are byte-identical).
-
-    ``confirm_ack`` (issue #250, the accepted-offer flow only) adds the
-    acknowledgement's ``label``/``value`` as ADDITIVE ``confirm_ack_*``
-    fields on the same done frame — the SPA's ``App.tsx`` renders the
-    value in the mono face (a measurement must never hide inside a
-    sentence). The question-answer path passes ``None`` (no ``confirm_*``
-    keys, byte-identical).
-
-    No token frames, no version-created progress frame: the answer text
-    is delivered exclusively in the done frame's ``message`` (the
-    operator's decision — token frames feed the model-source view, and
-    the SPA renders an ``kind: "answer"`` done frame's ``message``
-    verbatim as a plain assistant chat message)."""
-    done_data: dict[str, Any] = {"message": answer, "kind": "answer"}
-    if confirm_ack is not None:
-        done_data["confirm_ack"] = True
-        done_data["confirm_ack_label"] = confirm_ack["label"]
-        done_data["confirm_ack_value"] = confirm_ack["value"]
-    yield ("done", done_data)
-    # The in-flight flag is released by the STREAM's ``finally``
-    # (``d33d.streaming._stream_events`` — the single release point for
-    # every event source, on every exit path: the SSE endpoint drains in
-    # production; tests that drive the source directly exhaust the same
-    # generator via the SSE endpoint's ``_stream_events``). There is
-    # deliberately no post-yield discard here: a release would have to
-    # happen in generator ``finally`` code (not after the last ``yield`` —
-    # that runs only if the consumer exhausts the generator), and
-    # ``_stream_events``'s ``finally`` already covers every drain path.
-    # A bare ``async for`` over the raw source (bypassing the SSE
-    # endpoint) leaves the flag set by design — the contract is that the
-    # stream endpoint is the sole driver of event sources (its
-    # ``finally`` is the single release point).
-
-
 def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     """The project's live storage signal (issue #295), computed server-side
     from live file checks — the SPA reads it and never recomputes presence
@@ -393,19 +231,6 @@ def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     return {"repo_present": repo_present(row), "photo_present": photo_present}
 
 
-def repo_present(row: dict[str, Any]) -> bool:
-    """The single predicate for "is the project's git repo directory on
-disk?" — the shared check used by both ``_storage_field`` (the project
-GET's ``storage.repo_present``) and the design-state route's
-``history_missing`` flag (issue #316 task-b).
-
-    True when the repo directory exists; False when it is absent (deleted
-    out-of-band, never created, etc.). Computed at call time — it can flip
-    without a new version (the caller must not cache it per-project).
-    """
-    return Path(row["git_repo_path"]).is_dir()
-
-
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
     """A project row with the raw git-repo path removed (git invisibility
     — the on-disk path names a git repo and is never exposed in an API
@@ -423,6 +248,10 @@ def create_projects_router() -> APIRouter:
     at request time (set by the lifespan in ``d33d.app.create_app``).
     """
     router = APIRouter(prefix="/api/projects", tags=["projects"])
+    # The photo-upload route's body lives in ``d33d.photo_upload`` (the
+    # router file stays under the 500-line split threshold; the thin
+    # wiring call is the only thing this file keeps of it).
+    photo_upload_route(router)
 
     @router.post("", status_code=201)
     async def create_project(request: Request, body: ProjectCreate) -> dict[str, Any]:
@@ -565,6 +394,45 @@ def create_projects_router() -> APIRouter:
             )
             return {"status": "accepted"}
 
+        # Issue #332 (sub-issue 3) — the unsettled-part + fill-and-recut
+        # pre-routes (BEFORE the offer/question pre-routes, after the
+        # missing-source check). The module (``d33d.fill_recut``) owns the
+        # whole flow — the unsettled guard, the trigger, the boundary
+        # copy, and the offer build/accept/clear; this route keeps only
+        # the answer-frame plumbing (register the done frame, return the
+        # 202 body) and the accepted-offer instruction (appended to the
+        # request text further down).
+        from d33d.part_http import part_public
+
+        _part = part_public(row) if row.get("part_filename") else None
+        _fill_recut_instruction: str | None = None
+        if _part is not None and _part.get("unit_status") not in ("assumed", "settled"):
+            logger.warning(
+                "chat for project %s: the part's units are unsettled — "
+                "replying with the settle-first notice, no design run",
+                project_id,
+            )
+            app.state.event_sources[project_id] = _answered_frames(
+                fill_recut.UNSETTLED_PART_REPLY
+            )
+            return {"status": "accepted"}
+        _fill_recut = fill_recut.fill_recut_turn(app, project_id, body.message)
+        if _fill_recut is not None:
+            if _fill_recut.get("run_loop"):
+                _fill_recut_instruction = _fill_recut["instruction"]
+                logger.info(
+                    "chat for project %s: fill-and-recut offer accepted — "
+                    "running the design loop with the fill-and-recut "
+                    "instruction (len(message)=%d)",
+                    project_id,
+                    len(body.message),
+                )
+            else:
+                app.state.event_sources[project_id] = _answered_frames(
+                    _fill_recut["answer"]
+                )
+                return {"status": "accepted"}
+
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
         # (the previous turn's design pass offered to confirm param P on
@@ -623,321 +491,37 @@ def create_projects_router() -> APIRouter:
             )
             return {"status": "accepted"}
 
-        # Resolve the loop's stated dimensions (ticket #91; issue #247's
-        # per-axis decision) — the SPA never sends ``stated_dims`` (it
-        # posts only ``message`` + ``chat_history``): the loop receives
-        # the CURRENT run's per-axis confirmed set (the body's explicit
-        # ``stated_dims`` axes when a client sends one, else the
-        # protocol's per-axis extraction of the message). NO persisted
-        # fallback: a follow-up message with no explicit dimension cue
-        # confirms nothing and the gate ABSTAINS (``Score.bbox_abstained``)
-        # — it must not enforce an axis confirmed on an earlier turn
-        # against a candidate the user just asked to change. A PARTIAL
-        # confirmed set is a zero-filled (W, D, H) triple — unconfirmed
-        # axes render as ``not specified`` in the prompt and abstain
-        # per-axis in the bbox gate; ``None`` (abstain entirely) when the
-        # current turn confirmed no axis. This route never reads W/D/H
-        # param keys and never reads a persisted version row for the gate.
+        # The design-loop setup (the per-axis stated-evidence resolution,
+        # the photo capture, and the loop's event-source registration) lives
+        # in ``d33d.chat_loop`` — the thin entry point keeps this router file
+        # under the 500-line split threshold (AGENTS.md).
         chat_history = tuple(body.chat_history or ())
-
-        # Issue #249 — the pre-route (BEFORE the design loop): if the
-        # message is a question AND the project's design state can answer
-        # it, the answer is emitted on the chat stream as a single
-        # terminal done frame (``kind: "answer"`` — the additive
-        # discriminator; no token frames, no version-created frame, no
-        # version). Everything else — including anything ambiguous — goes
-        # to the design loop EXACTLY as today. The route is narrow on
-        # purpose (one stage-1 question detector, one cheap stage-2 LLM
-        # call with a deterministic number guard, a per-LLM-call hard
-        # timeout):
-        # the common case ("make it taller") costs nothing.
         try:
-            answer_route = await route_chat_message(
-                body.message,
-                app.state.versions.latest_version(project_id),
-                answer_edge=getattr(app.state, "answer_question", None),
-                project_id=str(project_id),
-            )
-        except ModelUnconfiguredError as e:
-            # The model pre-flight (issue #303) found the model cannot be
-            # called: the question path emits the SAME structured terminal
-            # error frame the design loop emits (reason
-            # ``model_unconfigured``) — never the COULD_NOT_ANSWER text,
-            # never a silent degrade into an LLM call. No version is
-            # created (the design loop never runs).
-            app.state.event_sources[project_id] = _model_unconfigured_frames(e.env_var)
-            return {"status": "accepted"}
-        except Exception:
-            # The pre-route is best-effort but its failure is fatal to
-            # THIS request (re-raised below): release the claim so the
-            # next attempt can start clean, and log the failure (the
-            # request errors — there is no design-loop fallback for a
-            # pre-route crash). The warning carries lengths only (no
-            # message text — no PII in logs).
-            logger.warning(
-                "question-answer pre-route failed; the request errors "
-                "(inflight flag released, len(message)=%d)",
-                len(body.message),
-                exc_info=True,
-            )
-            inflight.discard(project_id)
-            raise
-        if answer_route is not None:
-            # The event source is registered — the flag stays set
-            # (streaming.py's ``finally`` clears it when the stream is
-            # drained; no event source means no stream to drain it).
-            app.state.event_sources[project_id] = _answered_frames(
-                answer_route["answer"]
-            )
-            return {"status": "accepted"}
-
-        # The per-axis stated evidence — the gate's current-message source
-        # AND what the loop pass persists on the new version row (issue
-        # #246): the body's explicit ``stated_dims`` axes when a client
-        # sends one (the protocol's highest-priority source), else the
-        # protocol's per-axis extraction of the user's own words
-        # (``stated_axes_from_message`` reuses the same ``_extract_stated``
-        # pipeline — partial statements count for the axes they state).
-        # A statement that names no axis is ``{}`` → the version row
-        # persists NULL (abstain, never a fabricated axis row).
-        # The per-axis stated evidence (issue #246/#261) — the SINGLE
-        # value the carry-forward merge helper (``effective_stated_dims``)
-        # feeds BOTH the gate (``axes_to_gate_triple``) and the new
-        # version row's persisted ``stated_dims`` (never two divergent
-        # copies; the raw ``stated_axes_from_message`` result is not used
-        # directly here). The effective set starts as the latest
-        # version's persisted ``stated_dims`` and is adjusted by this
-        # turn's cues: the body's explicit ``stated_dims`` field OVERRIDES
-        # (precedence: body > explicit protocol cues > lexicon — no
-        # release semantics), else the protocol's explicit cues override,
-        # else the closed axis lexicon classifies the message (relative
-        # cues release their axis, global cues release all, absolute cues
-        # set — uncued axes carry forward). A statement that yields no
-        # axis is ``{}`` → the version row persists NULL (never a
-        # fabricated axis row).
-        explicit_body: dict[str, float] | None = None
-        if body.stated_dims is not None:
-            _w, _d, _h = body.stated_dims
-            # ``> 0`` (never truthiness): 0 is the unconfirmed marker
-            explicit_body = {
-                axis: float(value)
-                for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
-                if value > 0
-            } or None
-        _carried = carried_stated_set(app.state.conn, app.state.versions, project_id)
-        if explicit_body is not None:
-            per_axis_stated = effective_stated_dims(_carried, explicit_body)
-        else:
-            _latest = _carried
-            try:
-                _am = stated_axes_from_message(body.message, chat_history)
-                _cues_arg = _am if _am else _classify_axis_cues(body.message)
-            except Exception:
-                # The lexicon feed must never take the project down with
-                # it: a classification failure degrades to the carried
-                # set unchanged (no release, no override — the conservative
-                # outcome). The warning carries lengths only (no message
-                # text — no PII in logs).
-                logger.warning(
-                    "dimension cue resolution failed; carrying the latest "
-                    "stated set unchanged (len(message)=%d)",
-                    len(body.message),
-                    exc_info=True,
-                )
-                _cues_arg = None
-            per_axis_stated = effective_stated_dims(_latest, _cues_arg)
-
-        stated = axes_to_gate_triple(per_axis_stated)
-
-        # The project-level carried set (issue #312): written at the end of
-        # every chat turn (pass or fail — the loop runs asynchronously as an
-        # SSE stream; the write is here because the effective set is final
-        # once cues are resolved, regardless of the loop's outcome). A
-        # failed turn creates no version row, but the user's stated axes
-        # must survive into the next successful version's gate input.
-        try:
-            _json = __import__("json")
-            app.state.conn.raw.execute(
-                "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
-                (_json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
-            )
-            app.state.conn.commit()
-        except Exception:  # the write must never fail the 202
-            logger.debug("carried_stated_dims write failed for project %s", project_id, exc_info=True)
-
-        # Photo: read the project's stored photo NOW (synchronously, before
-        # the 202 response) — the background task runs via asyncio and the
-        # DB may be closed by the time the loop starts (a deleted project
-        # or a closed connection). The photo is captured here as a data URI
-        # (MIME from the extension; missing file → the fixed 1x1
-        # transparent-PNG constant).
-        photo = photo_data_uri(row.get("source_photo_path"))
-
-        # Register the event source synchronously BEFORE the 202 response
-        # (else the client stream terminates on "no active stream" — see
-        # d33d/streaming.py's contract). The adapter is a plain async
-        # generator (not a coroutine): ``event_sources`` maps
-        # project_id -> AsyncIterator of (event, data) tuples.
-        #
-        # The SSE endpoint (GET /api/stream/{project_id}) is the SOLE
-        # driver of this generator — a single async generator cannot be
-        # driven by two concurrent ``async for`` consumers (CPython raises
-        # ``RuntimeError: anext(): asynchronous generator is already
-        # running`` on the second consumer's first ``__anext__``). The
-        # inflight flag is set here (synchronously, before the 202
-        # response) and cleared in the SSE endpoint's ``finally`` when the
-        # generator is exhausted (or an SSE client disconnects).
-        try:
-            events = run_design_loop_with_events(
+            return await chat_loop_run_design_loop(
                 app,
                 project_id,
-                user_message=body.message,
-                stated_dims=stated,
-                stated_axes=per_axis_stated,
-                chat_history=chat_history,
-                photo=photo,
-                request_text=body.message,
+                row,
+                body.message,
+                body.stated_dims,
+                chat_history,
+                _fill_recut_instruction,
             )
         except Exception:
-            # Design-loop setup failed BEFORE an event source was
-            # registered: release the claim so the project is not stuck
-            # (the flag was claimed before the pre-route — see above).
-            inflight.discard(project_id)
-            raise
-        app.state.event_sources[project_id] = events
-        # The flag stays set — the SSE endpoint's ``finally`` clears it
-        # on ALL exit paths (generator exhausted, client disconnect,
-        # exception).
-
-        return {"status": "accepted"}
-
-    @router.post("/{project_id}/photos", status_code=201)
-    async def upload_photo(request: Request, project_id: int) -> dict[str, Any]:
-        """Multipart photo upload (png/jpeg, ≤ 20 MB).
-
-        Accepts a single file field (``file``) in the multipart body.
-        The content type is validated against the allowed set, the file is
-        written to the per-project git repo's ``photos/`` directory, and the
-        ``source_photo_path`` DB column is updated.
-        """
-        conn: db_mod.Connection = request.app.state.conn
-        row = conn.get_project(project_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="project not found")
-
-        # Parse the multipart body to extract the file
-        content_type_header = request.headers.get("content-type", "")
-        if "multipart/form-data" not in content_type_header:
-            raise HTTPException(
-                status_code=400,
-                detail="expected multipart/form-data body",
-            )
-
-        try:
-            form = await request.form()
-        except (LookupError, ValueError, OSError) as e:
-            raise HTTPException(status_code=400, detail=f"multipart parse error: {e}")
-
-        file = form.get("file")
-        if file is None:
-            raise HTTPException(status_code=400, detail="missing 'file' field")
-
-        # Validate content type
-        file_content_type = getattr(file, "content_type", None) or ""
-        if file_content_type not in ALLOWED_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"content type {file_content_type!r} not allowed (must be image/png or image/jpeg)",
-            )
-
-        # Read the file bytes in bounded chunks; abort with 413 as soon as
-        # the running total exceeds the cap (never buffers the whole
-        # upload first — an unbounded read would defeat the limit).
-        buf = bytearray()
-        while True:
-            chunk = await file.read(_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            buf.extend(chunk)
-            if len(buf) > MAX_UPLOAD_BYTES:
-                buf.clear()
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"file exceeds {MAX_UPLOAD_BYTES} byte limit",
+            # The design-loop setup raised BEFORE an event source was
+            # registered (the flag is already released by the setup path):
+            # restore the accepted fill-recut offer so the user's "yes" is
+            # never lost to a setup failure (issue #332 fix round).
+            if _fill_recut is not None and _fill_recut.get("run_loop"):
+                app.state.versions.set_pending_offer(
+                    project_id, _fill_recut.get("accepted_offer")
                 )
-        content = bytes(buf)
-
-        # Issue #299 — the decode gate (AFTER the 20 MB size check, BEFORE
-        # any file write / git commit / DB update): the bytes must decode
-        # as a real PNG or JPEG image with sane dimensions. A failure
-        # writes nothing — no file, no commit, no DB update (same contract
-        # as the 413 path above). The stored extension follows the
-        # DETECTED format (``img.format``), never the declared content type
-        # (a PNG declared ``image/jpeg`` must land on disk as ``.png`` —
-        # otherwise the data-URI MIME would mislabel the bytes).
-        try:
-            suffix = validate_photo_bytes(content)
-        except ValueError:
-            raise HTTPException(status_code=422, detail=UNDECODABLE_PHOTO_DETAIL)
-
-        # Determine a safe filename
-        original_name = getattr(file, "filename", None) or "photo"
-        safe_name = Path(original_name).name  # strip path components
-        safe_name = (
-            "".join(c for c in safe_name if c.isalnum() or c in "._-") or "photo"
-        )
-        # Commit-message text is sanitized separately (stricter, capped) so
-        # the repo's commit history can never carry newlines or shell
-        # metacharacters derived from the user-supplied filename.
-        commit_subject = _sanitize_commit_message(original_name) or "photo"
-        # Ensure the extension matches the DETECTED format (issue #299 —
-        # the decode gate above already guarantees a PNG or JPEG)
-        if "." in safe_name:
-            safe_name = safe_name.rsplit(".", 1)[0] + suffix
-        else:
-            safe_name = safe_name + suffix
-
-        # Write to the repo's photos/ dir
-        repo_path = Path(row["git_repo_path"])
-        photos_dir = repo_path / "photos"
-        photos_dir.mkdir(parents=True, exist_ok=True)
-        dest = photos_dir / safe_name
-        dest.write_bytes(content)
-        size = len(content)
-
-        # Commit the photo to the git repo, under the shared version-write
-        # lock (d33d.versions.VersionService._with_project_lock) so EVERY
-        # git write to this repo — design-source PUT, version create,
-        # set-as-main, and this photo upload — is serialized; concurrent
-        # committers would otherwise collide on ``.git/index.lock``.
-        svc = getattr(request.app.state, "versions", None)
-        try:
-            if svc is not None:
-                await svc._with_project_lock(project_id, lambda: commit_all(
-                    repo_path, f"photo: {commit_subject}"
-                ))
-            else:  # pragma: no cover - the app lifespan always wires it
-                commit_all(repo_path, f"photo: {commit_subject}")
-        except RuntimeError as e:
-            # Clean up the file but keep the repo consistent
-            dest.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"git commit failed: {e}")
-
-        # Persist the path in the DB
-        stored_path = str(dest)
-        conn.update_project(project_id, source_photo_path=stored_path)
-
-        return {
-            "id": project_id,
-            "source_photo_path": stored_path,
-            "size": size,
-        }
+            raise
 
     return router
 
 
 __all__ = [
-    "ALLOWED_CONTENT_TYPES",
-    "MAX_UPLOAD_BYTES",
+    "PHOTO_MISSING_NOTICE",
+    "SAVED_DESIGN_MISSING_REPLY",
     "create_projects_router",
 ]

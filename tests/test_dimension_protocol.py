@@ -1739,3 +1739,66 @@ class TestTriplePerMatchEvaluation:
         assert _has_number("5 cm wide and 12mm tall") is True
         assert _has_number("5 cm wide") is False
         assert _has_number("12mm tall") is True
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 — ground truth: require_dimensions_confirmed with a settled part
+# ---------------------------------------------------------------------------
+
+
+def test_require_dimensions_confirmed_settled_part_closes_gate():
+    """Issue #332 sub-issue 3: when a project has a settled/assumed part,
+    ``require_dimensions_confirmed`` treats the part's measured W/D/H as
+    confirmed — no W/D/H questions are asked, and the gate closes (the
+    design loop runs on the part's ground-truth baseline)."""
+    # No user-stated dims, but a settled part with a known mm bbox.
+    c = require_dimensions_confirmed(
+        ["I want to add a lip to this part"],
+        stated_dims=None,
+        part_scale=1.0,
+        part_bbox_mm=(60.0, 45.0, 20.0),
+    )
+    assert c.confirmed is True
+    assert c.stated_dims == (60.0, 45.0, 20.0)
+    # The fit type falls to the default (the part's fit is the mesh's).
+    assert c.fit_type == "no_fit"
+
+
+def test_require_dimensions_confirmed_no_part_stays_open():
+    """Issue #332 sub-issue 3: without a part, the gate stays open
+    (byte-identity regression anchor)."""
+    c = require_dimensions_confirmed(
+        ["I want to add a lip to this part"],
+        stated_dims=None,
+    )
+    assert c.confirmed is False
+    assert len(c.questions) > 0
+
+
+def test_require_dimensions_confirmed_settled_part_with_partial_user_stated():
+    """Issue #332 sub-issue 3: the part's measured W/D/H fills only the
+    MISSING axes — a user-stated value for an axis is never overridden."""
+    c = require_dimensions_confirmed(
+        ["W is 50"],
+        stated_dims={"W": 50.0},
+        part_scale=1.0,
+        part_bbox_mm=(60.0, 45.0, 20.0),
+    )
+    assert c.confirmed is True
+    # W is the user's 50, D and H are the part's 45/20.
+    assert c.stated_dims == (50.0, 45.0, 20.0)
+
+
+def test_require_dimensions_confirmed_unsetled_part_stays_open():
+    """Issue #332 sub-issue 3: an unsettled part (``part_scale=None``)
+    does NOT fill the gate — the gate stays open (the unsettled
+    pre-route stops the loop before this gate runs). The gate only
+    fills from the part when both ``part_scale`` and ``part_bbox_mm``
+    are present."""
+    c = require_dimensions_confirmed(
+        ["make it bigger"],
+        stated_dims=None,
+        part_scale=None,
+        part_bbox_mm=None,
+    )
+    assert c.confirmed is False
