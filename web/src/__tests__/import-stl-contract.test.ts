@@ -37,6 +37,10 @@ describe("copy.ts Screen 1 strings", () => {
     expect(copy.partUpload.dropLine).toBe("📦 Drop an STL or 3MF here");
   });
 
+  it("partUpload.uploading is verbatim (the in-flight status line)", () => {
+    expect(copy.partUpload.uploading).toBe("Uploading…");
+  });
+
   it("firstRun.fileChooseLine is verbatim", () => {
     expect(copy.firstRun.fileChooseLine).toBe("or choose a file");
   });
@@ -103,5 +107,17 @@ describe("copy.ts Screen 2 strings", () => {
 
   it("partReport.settle is verbatim", () => {
     expect(copy.partReport.settle).toBe("Settle");
+  });
+
+  it("partReport.watertightGaps is singular for n=1", () => {
+    expect(copy.partReport.watertightGaps(1)).toBe(
+      "watertight, after closing 1 small gap",
+    );
+  });
+
+  it("partReport.watertightGaps is plural for n=3", () => {
+    expect(copy.partReport.watertightGaps(3)).toBe(
+      "watertight, after closing 3 small gaps",
+    );
   });
 });

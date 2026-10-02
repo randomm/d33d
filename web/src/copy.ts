@@ -830,6 +830,9 @@ export const partUpload = {
    *  output) never reaches the client; it stays in the server log only. */
   commitFailed:
     "The part couldn't be saved. Nothing was changed.",
+  /** The upload-in-flight status line (the label swaps to it while the
+   *  part upload is in flight). */
+  uploading: "Uploading…",
 } as const;
 
 /**
@@ -865,6 +868,9 @@ export const partReport = {
   settle: "Settle",
   /** The 409 part_exists detail (re-import attempt). */
   partExists: "This project already has a part.",
+  /** The watertight-with-gaps form: "watertight, after closing {n} small gap(s)". */
+  watertightGaps: (n: number): string =>
+    `watertight, after closing ${n} small gap${n === 1 ? "" : "s"}`,
 } as const;
 
 /**

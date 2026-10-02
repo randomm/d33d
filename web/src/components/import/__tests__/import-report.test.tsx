@@ -48,11 +48,33 @@ describe("ImportReport — the import report (issue #334, D6)", () => {
     expect(metrics).toContain("not watertight");
   });
 
-  it("renders the watertight-positive form when watertight is true", () => {
+  it("renders the watertight-positive form when watertight is true and no gaps closed", () => {
     const client = makeClient();
-    const part: PartReportInfo = { ...unsettledPart, report: { ...unsettledPart.report!, watertight: true } };
+    const part: PartReportInfo = { ...unsettledPart, report: { ...unsettledPart.report!, watertight: true, gaps_closed: 0 } };
     render(<ImportReport part={part} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
     expect(screen.getByTestId("import-report-metrics").textContent).toContain("watertight");
+    // The plain form — no "after closing" suffix.
+    expect(screen.getByTestId("import-report-metrics").textContent).not.toContain("after closing");
+  });
+
+  it("renders 'watertight, after closing 1 small gap' (singular) when watertight + gaps_closed=1", () => {
+    const client = makeClient();
+    const part: PartReportInfo = { ...unsettledPart, report: { ...unsettledPart.report!, watertight: true, gaps_closed: 1 } };
+    render(<ImportReport part={part} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
+    expect(screen.getByTestId("import-report-metrics").textContent).toContain(
+      "watertight, after closing 1 small gap",
+    );
+    // Singular — not "gaps".
+    expect(screen.getByTestId("import-report-metrics").textContent).not.toContain("1 small gaps");
+  });
+
+  it("renders 'watertight, after closing 3 small gaps' (plural) when watertight + gaps_closed=3", () => {
+    const client = makeClient();
+    const part: PartReportInfo = { ...unsettledPart, report: { ...unsettledPart.report!, watertight: true, gaps_closed: 3 } };
+    render(<ImportReport part={part} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
+    expect(screen.getByTestId("import-report-metrics").textContent).toContain(
+      "watertight, after closing 3 small gaps",
+    );
   });
 
   it("an unsettled part shows the waiting line, the options in given order, and no W-D-H number", () => {

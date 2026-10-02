@@ -124,11 +124,14 @@ export function ImportReport({
       ? fileBbox.map((e) => e * scale)
       : null;
 
+  const gapsClosed = report ? report.gaps_closed : 0;
   const watertightLine =
     watertight === null
       ? null
       : watertight
-        ? "watertight"
+        ? gapsClosed > 0
+          ? copy.partReport.watertightGaps(gapsClosed)
+          : "watertight"
         : "not watertight";
 
   return (

@@ -77,7 +77,8 @@ import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
-import { detailText as partUploadDetailText } from "./components/upload/PartUpload";
+import { usePartUpload } from "./components/upload/usePartUpload";
+import { usePartStl } from "./hooks/usePartStl";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
@@ -1473,53 +1474,24 @@ export default function App({ client }: AppProps) {
     [refetchDesignState],
   );
 
-  // The Screen 1 file card's drop / pick handler (issue #334, D5): the
-  // chosen STL/3MF is uploaded through the SAME ensureProject latch as the
-  // first send / photo path (lazy creation before any /part POST). A dropped
-  // .stl is a PART — it never goes to the photo path; a dropped .png never
-  // creates a part (the file card accepts only .stl/.3mf).
-  const partUploadClientRef = useRef<ApiClient | null>(null);
-  partUploadClientRef.current = apiClient;
+  // The Screen 1 file card's drop / pick handler (issue #334, D5) and the
+  // chat-pane upload surface share ONE upload path (usePartUpload): the
+  // .stl/.3mf guard, the ensure-project latch routing, the POST, and the
+  // verbatim-detail error reduction all live there — a dropped .stl is a
+  // PART (it never goes to the photo path); a dropped .png never creates
+  // a part (the file card accepts only .stl/.3mf).
+  const uploadPart = usePartUpload({
+    projectId,
+    ensureProject,
+    client: apiClient,
+    onSuccess: handlePartUploaded,
+    onError: (message, detail) =>
+      setStreamError({ message, detail, retryable: false }),
+    onProjectCreationFailure: handleProjectCreationFailure,
+  });
   const handlePartFile = useCallback(
-    async (file: File) => {
-      const name = file.name.toLowerCase();
-      if (!name.endsWith(".stl") && !name.endsWith(".3mf")) {
-        setStreamError({
-          message: copy.partUpload.unsupported,
-          detail: copy.partUpload.unsupported,
-          retryable: false,
-        });
-        return;
-      }
-      const doUpload = async (pid: number) => {
-        const api = partUploadClientRef.current ?? new ApiClient();
-        try {
-          await api.uploadPart(pid, file);
-          handlePartUploaded(pid);
-        } catch (e) {
-          // The verbatim-detail reduction is shared with the chat-pane
-          // upload surface (PartUpload's exported `detailText`) — one place
-          // answers "is this a part, and what does this error say".
-          const detail = partUploadDetailText(e);
-          setStreamError({
-            message: detail,
-            detail,
-            retryable: false,
-          });
-        }
-      };
-      if (projectId !== null) {
-        await doUpload(projectId);
-        return;
-      }
-      try {
-        const id = await ensureProject();
-        await doUpload(id);
-      } catch (e) {
-        handleProjectCreationFailure(e);
-      }
-    },
-    [projectId, ensureProject, handlePartUploaded, handleProjectCreationFailure],
+    (file: File) => void uploadPart(file),
+    [uploadPart],
   );
 
   // Issue #193: the "exactly one composer" invariant. FirstRun carries the
@@ -1532,41 +1504,12 @@ export default function App({ client }: AppProps) {
   // source branch). The STL is in FILE units; the viewer's mesh is the
   // part itself, and the caption / export-gating reflect the unit status.
   // A 404 (no part) or 409 (source missing) leaves the part-viewer empty.
-  const [partStlData, setPartStlData] = useState<ArrayBuffer | null>(null);
-  const partStlSeqRef = useRef(0);
-  // The part's semantic identity (the served bytes are deterministic in
-  // these): refetch only when the part actually changed — never on an
-  // object-identity change (every design-state refetch allocates a fresh
-  // `part`; the STL would otherwise restart per refetch).
+  // The fetch lives in usePartStl (the abort + sequence guard + the
+  // identity key that stops a refetch-allocation from restarting it).
   const partStlKey = designStatePart
     ? `${designStatePart.filename}:${designStatePart.format}:${designStatePart.unit_status}:${designStatePart.scale}`
     : null;
-  useEffect(() => {
-    if (projectId === null || partStlKey === null) {
-      setPartStlData(null);
-      return;
-    }
-    const seq = ++partStlSeqRef.current;
-    // The in-flight fetch is aborted on cleanup (a stale response can never
-    // overwrite a newer project's state; an abandoned request stops here).
-    const controller = new AbortController();
-    setPartStlData(null);
-    apiClient
-      .fetchPartStl(projectId, controller.signal)
-      .then((buf) => {
-        if (!controller.signal.aborted && seq === partStlSeqRef.current) setPartStlData(buf);
-      })
-      .catch((e) => {
-        // A missing / unreadable part leaves the viewer empty (the report
-        // still renders its honest state) — never a fabricated model.
-        if (controller.signal.aborted || seq !== partStlSeqRef.current) return;
-        console.warn("part.stl fetch failed:", e);
-        setPartStlData(null);
-      });
-    return () => {
-      controller.abort();
-    };
-  }, [projectId, partStlKey, apiClient]);
+  const partStlData = usePartStl(projectId, partStlKey, apiClient);
   // Screen 2 (the import report) is the active screen whenever a part
   // exists (the design-state envelope's `part`). FirstRun is suppressed
   // while Screen 2 is up (the same centred space; never both).

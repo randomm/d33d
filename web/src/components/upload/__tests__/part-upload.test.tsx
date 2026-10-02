@@ -1,7 +1,8 @@
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { PartUpload } from "../PartUpload";
-import { ApiClient, ApiError } from "../../../lib/api";
+import { ApiError } from "../../../lib/api";
+import type { ApiClient, PartReportInfo } from "../../../lib/api";
 import copy from "../../../copy";
 
 /** A File with the given name. */
@@ -9,9 +10,27 @@ function makeFile(name: string): File {
   return new File([new ArrayBuffer(8)], name, { type: "model/stl" });
 }
 
+/** A minimal PartReportInfo matching the declared uploadPart contract
+ *  (the mock was `part: null`, which the type forbids). */
+const partReport: PartReportInfo = {
+  filename: "gear.stl",
+  format: "stl",
+  unit: "mm",
+  unit_status: "settled",
+  scale: 1,
+  report: {
+    triangles: 12,
+    bodies: 1,
+    watertight: true,
+    gaps_closed: 0,
+    bbox_file_units: [20, 20, 20],
+  },
+  options: null,
+};
+
 function makeClient(overrides: { uploadPart?: ReturnType<typeof vi.fn> } = {}): ApiClient {
   return {
-    uploadPart: vi.fn().mockResolvedValue({ id: 7, version_id: 1, part: null }),
+    uploadPart: vi.fn().mockResolvedValue({ id: 7, version_id: 1, part: partReport }),
     ...overrides,
   } as unknown as ApiClient;
 }

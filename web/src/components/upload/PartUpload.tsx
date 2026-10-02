@@ -153,7 +153,7 @@ export function PartUpload({
         accept={ACCEPT}
         data-testid="part-file-input"
         onChange={handleFileChange}
-        aria-label="Import an STL or 3MF file"
+        aria-label="Import an STL or 3MF file (chat pane)"
         style={{ display: "none" }}
         id="part-file-input"
       />
@@ -163,7 +163,7 @@ export function PartUpload({
         data-testid="part-upload-label"
       >
         {state === "uploading" ? (
-          <span data-testid="part-upload-status">Uploading…</span>
+          <span data-testid="part-upload-status">{copy.partUpload.uploading}</span>
         ) : (
           <span>{copy.partUpload.dropLine}</span>
         )}

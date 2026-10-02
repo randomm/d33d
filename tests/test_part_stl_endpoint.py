@@ -21,12 +21,14 @@ import io
 import zipfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from d33d.app import create_app
 from d33d.part_import import MAX_PART_UPLOAD_BYTES
+from d33d.part_mesh import PartUploadError, read_part_file_atomic
 
 FIXTURES = Path(__file__).parent / "fixtures" / "stl"
 
@@ -287,8 +289,49 @@ def test_part_stl_413_over_cap(app_with_projects):
 
 
 # ---------------------------------------------------------------------------
-# Containment (the operator decision's reuse of _validate_part_path)
+# Containment (the operator decision's reuse of the shared render-staging
+# validation + the atomic O_NOFOLLOW read, the render worker's standard)
 # ---------------------------------------------------------------------------
+
+
+def test_part_stl_atomic_read_closes_toctou_symlink_swap(app_with_projects):
+    """C1 regression (the render staging's own test shape): the atomic read
+    rejects a symlink swapped in after the lstat-based validation passes,
+    and the outside bytes never leak. This is the O_NOFOLLOW open + fstat
+    the endpoint now shares with the render path — validate-then-read
+    (``Path.stat()``/``read_bytes()``) would have served the outside file."""
+    data = (FIXTURES / "box_20mm.stl").read_bytes()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "toctou test"})
+        pid = r.json()["id"]
+        await _upload_part(client, pid, data, "box.stl", "model/stl")
+        committed = _v1_part_path(app_with_projects, pid)
+        repo_dir = committed.parent.parent
+        # Validate passes on the legitimate file (the lstat pre-open check).
+        from d33d.part_mesh import validate_part_path
+
+        assert validate_part_path(committed, repo_dir) is None
+        # Attack: swap the committed file for a symlink pointing outside.
+        outside_file = repo_dir.parent / f"outside-{pid}.stl"
+        outside_file.write_bytes(b"SECRET OUTSIDE CONTENT")
+        committed.unlink()
+        committed.symlink_to(outside_file)
+        # The atomic read must refuse (O_NOFOLLOW) and never return the
+        # outside bytes — the endpoint maps the OSError to 409.
+        try:
+            read_part_file_atomic(committed, MAX_PART_UPLOAD_BYTES)
+        except OSError:
+            pass
+        else:
+            raise AssertionError("atomic read followed a swapped-in symlink")
+        return await client.get(f"/api/projects/{pid}/part.stl")
+
+    resp = _run_async(app_with_projects, _call)
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"]["code"] == "source_missing"
+    assert b"SECRET OUTSIDE CONTENT" not in resp.content
 
 
 def test_part_stl_rejects_symlink_escaping_repo(app_with_projects):
@@ -374,3 +417,106 @@ def test_part_stl_etag_304_when_unchanged(app_with_projects):
     assert third.status_code == 200
     assert third.content == first.content  # unchanged bytes
     assert third.headers["etag"] == first.headers["etag"]
+
+
+def test_part_stl_unsettled_serves_verbatim_via_shared_resolver(app_with_projects):
+    """An UNSETTLED part's committed file is served verbatim, resolved
+    through the shared ``resolve_v1_part_path`` — the fallback that used to
+    re-derive the in-repo layout inline is gone; this proves the one path
+    rule still resolves the unsettled case (404s would mean the resolver
+    lost the unsettled path). The upload is ``over_envelope.stl`` (the
+    genuinely unsettled fixture — box_20mm settles to mm on upload, so it
+    is not a valid unsettled case)."""
+    data = (FIXTURES / "over_envelope.stl").read_bytes()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "unsettled-shared"})
+        pid = r.json()["id"]
+        r = await client.post(
+            f"/api/projects/{pid}/part", files={"file": ("big.stl", data, "model/stl")}
+        )
+        part = r.json()["part"]
+        assert part["unit_status"] == "unsettled"
+        resp = await client.get(f"/api/projects/{pid}/part.stl")
+        return resp
+
+    resp = _run_async(app_with_projects, _call)
+    assert resp.status_code == 200
+    assert resp.content == data  # verbatim file units (no scale yet)
+
+
+def test_part_stl_304_never_reads_file(app_with_projects):
+    """The 304 is answered from the fstat-derived ETag BEFORE any read: a
+    matching If-None-Match returns 304 with the file-read helper never
+    called (the cheap stat is the whole cost of an unchanged repeat)."""
+    data = (FIXTURES / "box_20mm.stl").read_bytes()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "etag-noread"})
+        pid = r.json()["id"]
+        await _upload_part(client, pid, data, "box.stl", "model/stl")
+        first = await client.get(f"/api/projects/{pid}/part.stl")
+        etag = first.headers["etag"]
+        with patch(
+            "d33d.part_import.read_part_file_atomic",
+            side_effect=AssertionError("read on 304"),
+        ):
+            second = await client.get(
+                f"/api/projects/{pid}/part.stl",
+                headers={"If-None-Match": etag},
+            )
+        return first, second
+
+    first, second = _run_async(app_with_projects, _call)
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert second.content == b""
+
+
+def test_part_stl_etag_changes_after_settle(app_with_projects):
+    """The ETag is derived from st_size/st_mtime_ns + scale, so settling the
+    unit (which records part_scale) changes the tag even for unchanged
+    bytes — a stale tag never matches a rescaled part."""
+    data = (FIXTURES / "box_20mm.stl").read_bytes()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "etag-settle"})
+        pid = r.json()["id"]
+        await _upload_part(client, pid, data, "box.stl", "model/stl")
+        first = await client.get(f"/api/projects/{pid}/part.stl")
+        await _settle_by_axis(client, pid, "W", 40.0)
+        second = await client.get(f"/api/projects/{pid}/part.stl")
+        return first, second
+
+    first, second = _run_async(app_with_projects, _call)
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.headers["etag"] != second.headers["etag"]
+
+
+def test_part_stl_conversion_failure_maps_409(app_with_projects):
+    """A committed part whose bytes no longer parse (a corrupt 3MF, a
+    ragged export) maps to 409 source_missing — never a raw 500. The
+    conversion's PartUploadError is the closed failure type; a raw
+    TypeError is caught and re-raised as the same type in
+    ``_scaled_stl_sync``."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "convert-fail"})
+        pid = r.json()["id"]
+        await _upload_part(
+            client, pid, (FIXTURES / "box_20mm.stl").read_bytes(), "box.stl", "model/stl"
+        )
+        # Force the conversion to fail (corrupt committed bytes would do
+        # the same; the patch keeps the test deterministic).
+        with patch(
+            "d33d.part_import.load_part_geometry",
+            side_effect=PartUploadError("unparseable stl: corrupt"),
+        ):
+            resp = await client.get(f"/api/projects/{pid}/part.stl")
+        return resp
+
+    resp = _run_async(app_with_projects, _call)
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["detail"]["code"] == "source_missing"

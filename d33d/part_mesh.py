@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import io
 import math
+import os
+import stat
 import zipfile
 from typing import Any
 
@@ -44,12 +46,93 @@ MAX_PART_ZIP_ENTRIES = 10_000
 MAX_PART_ZIP_UNCOMPRESSED = 50 * 1024 * 1024  # 50 MB
 
 
+def validate_part_path(part_path, repo_dir) -> str | None:
+    """Validate the part path for containment and name. Returns an error
+    message string on failure, or ``None`` when all checks pass.
+
+    The SHARED containment check the render staging (``d33d.render_worker``)
+    and the part.stl endpoint both use (the operator decision: "reuse the
+    render-staging validation"), so the rule lives in ONE module — the
+    worker and the API route both import from here, never from each other.
+
+    Checks (all must pass):
+    1. ``part_path`` must be a regular file (a missing path is rejected
+       here — the lstat that proves it is a regular file doubles as the
+       symlink check: a symlink lstat reports S_IFLNK, never the file mode).
+    2. ``part_path`` itself must not be a symlink.
+    3. ``part_path.resolve()`` must be inside ``repo_dir.resolve()``.
+    4. No path component between ``repo_dir`` and ``part_path`` may be a
+       symlink resolving outside ``repo_dir``.
+    5. ``part_path``'s name must be exactly ``part.stl`` or ``part.3mf``.
+    """
+    # Name check (exact, case-sensitive).
+    if part_path.name not in ("part.stl", "part.3mf"):
+        return f"part filename must be exactly 'part.stl' or 'part.3mf', got '{part_path.name}'"
+
+    # Regular-file + symlink check on the part itself (lstat — does not
+    # follow links; a symlink reports S_IFLNK here, never a file mode, so
+    # one lstat covers both the "regular file" and "not a symlink" rules).
+    try:
+        st = part_path.lstat()
+    except OSError as e:
+        return f"part path does not exist or is inaccessible: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        # Covers symlink (S_IFLNK), directory, and special files in one
+        # check — a symlink lstat never reports REG.
+        if stat.S_ISLNK(st.st_mode):
+            return f"part path is a symlink: {part_path.name}"
+        return f"part path is not a regular file: {part_path.name}"
+
+    # Containment: resolved part must be inside resolved repo_dir.
+    try:
+        resolved_repo = repo_dir.resolve()
+        resolved_part = part_path.resolve()
+    except OSError as e:
+        return f"cannot resolve part or repo path: {e}"
+    if not resolved_part.is_relative_to(resolved_repo):
+        return "part path is outside the project repo directory"
+
+    # Symlink component check: walk each path component of part_path BELOW
+    # repo_dir on the RAW (unresolved) path; any symlink whose target
+    # resolves outside repo_dir is rejected (a symlinked parent escaping
+    # the containment boundary); components at/above repo_depth are the
+    # caller's filesystem prefix (on macOS /var → /private/var sits there)
+    # — out of boundary.
+    repo_depth = len(repo_dir.parts)
+    raw = part_path if part_path.is_absolute() else repo_dir / part_path
+    for i in range(1, len(raw.parts)):
+        if i < repo_depth and raw.is_absolute():
+            continue  # strictly above the repo's own depth — out of boundary
+        component = raw.joinpath(*raw.parts[:i])
+        try:
+            if component.is_symlink():
+                target = component.resolve()
+                if not target.is_relative_to(resolved_repo):
+                    return (
+                        f"path component {component.name} is a symlink "
+                        "escaping the repo"
+                    )
+        except OSError:
+            return f"path component {component.name} is inaccessible"
+
+    return None
+
+
 class PartUploadError(ValueError):
     """A part upload failed the decode gate (unparseable, empty,
     non-finite, over the face cap, zip-bomb, or an unconvertible 3MF
     unit). The route maps it to the 422 with the verbatim
     ``partUpload.unparseable`` detail — nothing is persisted on the way
     out."""
+
+
+class PartFileTooLargeError(OSError):
+    """The committed part file exceeds the size cap (``max_bytes``).
+
+    A distinct ``OSError`` subtype so callers (the part.stl endpoint's
+    413 mapping, the render worker's staging) can map by TYPE instead of
+    string-matching the message. The message is informative but never
+    parsed. Carries ``errno = 28`` (EDQUOT)."""
 
 
 def _boundary_loops(mesh: trimesh.Trimesh) -> int:
@@ -200,6 +283,34 @@ def load_part_geometry(data: bytes, part_format: str) -> trimesh.Trimesh:
     return loaded
 
 
+def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
+    """Read the validated committed part file via an O_NOFOLLOW fd.
+
+    The atomic half of the shared containment standard (the lstat-based
+    :func:`validate_part_path` is the pre-open check; THIS is what makes it
+    mean something under a concurrent swap): the file is opened with
+    ``O_RDONLY | O_NOFOLLOW`` and the size cap is checked against
+    ``os.fstat(fd)`` — the actually-opened file, not the path — so a symlink
+    swapped in between validation and the read cannot redirect it to a file
+    outside the repo. ``OSError`` (vanished path, or a symlink that slipped
+    in — the O_NOFOLLOW refusal) propagates to the caller, which maps it to
+    its own error contract."""
+    fd = os.open(str(part_path), os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise OSError(f"part is not a regular file at read time: {part_path.name}")
+        if st.st_size > max_bytes:
+            raise PartFileTooLargeError(
+                28,  # EDQUOT — file too large
+                f"part file is {st.st_size} bytes; max {max_bytes}",
+                str(part_path),
+            )
+        return os.read(fd, st.st_size) if st.st_size > 0 else b""
+    finally:
+        os.close(fd)
+
+
 def parse_and_repair(
     data: bytes, part_format: str
 ) -> tuple[trimesh.Trimesh, dict[str, Any], str | None]:
@@ -327,8 +438,11 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_ZIP_ENTRIES",
     "MAX_PART_ZIP_UNCOMPRESSED",
+    "PartFileTooLargeError",
     "PartUploadError",
     "load_part_geometry",
     "mesh_units",
     "parse_and_repair",
+    "read_part_file_atomic",
+    "validate_part_path",
 ]

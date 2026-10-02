@@ -214,8 +214,43 @@ def resolve_part_paths(
     v1 = _v1_for_part(conn, row["id"])
     if v1 is None:
         return None, repo_dir
+    return _v1_part_path(repo_dir, v1, row), repo_dir
+
+
+def resolve_v1_part_path(
+    row: dict[str, Any] | None, conn: db_mod.Connection | None
+) -> tuple[Path | None, Path | None]:
+    """resolve_part_paths`` minus the unit-status gate — the ONE place the
+    ``{repo}/versions/{v1}/{part.stl|part.3mf}`` layout is constructed, so a
+    layout change lands in one function no matter who derives it.
+
+    ``row`` is the ALREADY-ACQUIRED project row (``None`` → ``(None, None)``).
+    A project with no part, no repo path, or a missing v1 row degrades
+    ``part_path`` to ``None`` (``repo_dir`` still set); an UNSETTLED part's
+    committed file still resolves (the part.stl endpoint serves it verbatim
+    — the render path's settled/assumed-only gate is ``resolve_part_paths``,
+    not this)."""
+    repo_dir: Path | None = (
+        Path(row["git_repo_path"])
+        if row is not None and row.get("git_repo_path")
+        else None
+    )
+    if row is None or conn is None or not row.get("part_filename") or repo_dir is None:
+        return None, repo_dir
+    v1 = _v1_for_part(conn, row["id"])
+    if v1 is None:
+        return None, repo_dir
+    return _v1_part_path(repo_dir, v1, row), repo_dir
+
+
+def _v1_part_path(repo_dir: Path, v1: dict[str, Any], row: dict[str, Any]) -> Path:
+    """The committed part file's in-repo path for the project's v1 row.
+
+    The fixed layout — ``{repo}/versions/{v1_id}/{part.stl|part.3mf}`` — the
+    stored name is the ``part_format``'s fixed constant, never re-derived.
+    Shared by ``resolve_part_paths`` and ``resolve_v1_part_path``."""
     name = PART_3MF_FILENAME if row.get("part_format") == "3mf" else PART_FILENAME
-    return repo_dir / "versions" / str(v1["id"]) / name, repo_dir
+    return repo_dir / "versions" / str(v1["id"]) / name
 
 
 def _v1_for_part(conn: db_mod.Connection, project_id: int) -> dict[str, Any] | None:
@@ -311,4 +346,5 @@ __all__ = [
     "part_envelope_with_bbox",
     "part_public",
     "resolve_part_paths",
+    "resolve_v1_part_path",
 ]

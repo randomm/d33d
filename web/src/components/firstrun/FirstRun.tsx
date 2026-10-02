@@ -346,7 +346,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
               data-testid="first-run-file-input"
               ref={fileInputRef}
               onChange={handleFileSelect}
-              aria-label="Import an STL or 3MF file"
+              aria-label="Import an STL or 3MF file (file card)"
               style={{ display: "none" }}
             />
           </section>
