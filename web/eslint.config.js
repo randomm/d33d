@@ -57,6 +57,15 @@ export default [
     },
   },
   {
+    // Issue #336: the .mjs scripts under web/scripts (the run-vitest
+    // wrapper and the parent watchdog) run under plain Node, not the
+    // browser — they need the Node globals (process, setTimeout).
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
+  {
     // off (structural, test-scoped only): `require('three')` inside vi.mock
     // factory callbacks is deliberate — the factories run before the module
     // under test is imported, and a top-level `import ... from "three"` in

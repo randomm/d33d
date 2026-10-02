@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "vitest run",
+    "test": "node scripts/run-vitest.mjs",
     "test:watch": "vitest",
     "test:e2e": "npm run build && playwright test",
     "lint": "eslint .",
