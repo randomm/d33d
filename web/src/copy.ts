@@ -159,6 +159,22 @@ export const brief = {
    *  agreeing param rows are hidden behind it. Singular-aware. */
   moreParameters: (count: number): string =>
     `${count} more parameter${count === 1 ? "" : "s"}`,
+
+  /** The zone header for "The part you brought" (issue #338, operator
+   *  decision 1). Rendered only when the design-state `part` block is
+   *  present. */
+  partBroughtHeader: "The part you brought",
+  /** The zone header for "Your changes" (issue #338, operator decision 1).
+   *  Rendered only when the zone has at least one row. */
+  yourChangesHeader: "Your changes",
+  /** The note under the W/D/H rows of "The part you brought" (issue #338,
+   *  operator decision 1). {units} is the settled unit (mm / cm / inch).
+   *  Rendered only for a settled part. */
+  partBroughtNote: (units: string): string =>
+    `Measured, in ${units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
+  /** The W/D/H value cell when the part's units are unsettled (issue #338).
+   *  Never a number, never 0. */
+  waitingOnUnits: "waiting on units",
 } as const;
 
 export const passCard = {

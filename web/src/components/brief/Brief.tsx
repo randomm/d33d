@@ -47,7 +47,8 @@
 import { useState } from "react";
 import copy, { mm } from "../../copy";
 import { MARKER_COLOR } from "../../lib/marker";
-import type { DesignStateEntry, ProjectStorage } from "../../lib/api";
+import type { DesignStateEntry, PartReportInfo, ProjectStorage } from "../../lib/api";
+import { splitBriefZones, type BriefPartRow } from "./BriefZones";
 
 /** Above this many rows the resolved list collapses to one honest count
  *  (the "not a list that grows" rule — design answer 1). */
@@ -133,6 +134,11 @@ interface BriefProps {
   /** A live region pin (the region bar owns the task) — the Brief
    *  collapses to its chip whatever the window size says. */
   hasLivePin?: boolean;
+  /** Issue #338: the design-state `part` block. When present the Brief
+   *  splits into "The part you brought" (W/D/H, never folded) and
+   *  "Your changes" (the normal stated/assumed rows). When absent the
+   *  Brief renders exactly as before — a single list, no zone headers. */
+  part?: PartReportInfo | null;
   /** The resolved module id from a pending region pick — the matching
    *  Brief row is outlined in the marker colour (taken as an inline style
    *  from MARKER_COLOR — no CSS token, by design / W17). The outline
@@ -202,6 +208,7 @@ export function Brief({
   highlightModuleId,
   storage,
   historyMissing,
+  part,
   onAsk,
   onChange,
   onShowOnModel,
@@ -252,6 +259,70 @@ export function Brief({
         e.provenance === "assumed"),
   );
   const showGroups = !chip && collapsible.length > MAX_LIST_ROWS;
+
+  // Issue #338: the two-zone split. When `part` is present the resolved
+  // list splits into "The part you brought" (W/D/H from part.bbox_mm, never
+  // folded) and "Your changes" (the normal stated/assumed rows, which DO
+  // fold behind MAX_LIST_ROWS). When `part` is null the zone has no part
+  // rows and `hasPart` is false — the single-list shape is byte-identical
+  // to the pre-#338 layout.
+  const zones = splitBriefZones(resolved, part ?? null);
+
+  /** Render one W/D/H part row. The value is `null` while the part's
+   *  units are unsettled — the row shows the "waiting on units" control,
+   *  never a number. */
+  const renderPartRow = (row: BriefPartRow) => {
+    const valueCell =
+      row.value === null ? (
+        <span className="brief-value" data-testid="brief-value">
+          {copy.brief.waitingOnUnits}
+        </span>
+      ) : (
+        <span
+          className="brief-value"
+          data-testid="brief-value"
+          style={{ fontFamily: "var(--font-mono)" }}
+        >
+          {mm(row.value)}
+        </span>
+      );
+    return (
+      <div
+        key={row.axis}
+        className="brief-row"
+        data-testid={`brief-part-row-${row.axis}`}
+        data-provenance="measured"
+      >
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
+        >
+          <span
+            data-testid="brief-mark"
+            style={{
+              flex: "0 0 auto",
+              display: "inline-block",
+              ...MARKS.measured,
+            }}
+          />
+          <span
+            style={{
+              flex: "1 1 auto",
+              color: "var(--color-fg)",
+              fontSize: 14,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              fontFamily: "var(--font-ui)",
+            }}
+          >
+            {copy.brief.axisLabel[row.axis] ?? row.axis}
+          </span>
+          {valueCell}
+        </div>
+      </div>
+    );
+  };
+
   const renderRow = (entry: DesignStateEntry) => {
     const label = rowLabel(entry);
     const name = entry.name;
@@ -611,11 +682,96 @@ export function Brief({
             </div>
           )}
 
-          {showGroups ? (
-            // Above MAX_LIST_ROWS the collapsible rows do not grow — the
-            // never-grouped rows (axis, disagrees) always render, and the
-            // settled param rows fold behind ONE honest count that the
-            // disclosure button reveals (issue #274).
+          {zones.hasPart ? (
+            // Issue #338, operator decision 1: two zones. "The part you
+            // brought" (W/D/H from part.bbox_mm, NEVER folded) is rendered
+            // first; "Your changes" (the normal stated/assumed rows) folds
+            // behind its own MAX_LIST_ROWS count.
+            <>
+              {zones.partRows.length > 0 && (
+                <div className="brief-zone-part">
+                  <h3
+                    className="brief-zone-header"
+                    data-testid="brief-zone-part-header"
+                    style={{
+                      margin: "8px 0 4px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      color: "var(--color-fg-2)",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    {copy.brief.partBroughtHeader}
+                  </h3>
+                  {zones.partRows.map((row) => renderPartRow(row))}
+                  {zones.partNote !== null && (
+                    <p
+                      className="brief-zone-part-note"
+                      data-testid="brief-zone-part-note"
+                      style={{
+                        margin: "4px 0 0",
+                        fontSize: 12,
+                        color: "var(--color-fg-2)",
+                      }}
+                    >
+                      {zones.partNote}
+                    </p>
+                  )}
+                </div>
+              )}
+              {zones.showChangesHeader && (
+                <h3
+                  className="brief-zone-header"
+                  data-testid="brief-zone-changes-header"
+                  style={{
+                    margin: "8px 0 4px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--color-fg-2)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                  }}
+                >
+                  {copy.brief.yourChangesHeader}
+                </h3>
+              )}
+              <div className="brief-rows" data-testid="brief-rows">
+                {zones.changeRows
+                  .filter((r) => !r.collapsed)
+                  .map((r) => renderRow(r.entry))}
+              </div>
+              {zones.changesCount !== null && (
+                <div className="brief-groups" data-testid="brief-groups">
+                  <button
+                    type="button"
+                    className="brief-groups-count"
+                    data-testid="brief-groups-count"
+                    aria-expanded={groupsOpen}
+                    aria-label={copy.brief.moreParameters(zones.changesCount)}
+                    onClick={() => setGroupsOpen((open) => !open)}
+                    style={{
+                      border: "1px solid var(--color-hairline)",
+                      borderRadius: 6,
+                      background: "transparent",
+                      color: "var(--color-fg-2)",
+                      fontSize: 13,
+                      cursor: "pointer",
+                      padding: "2px 8px",
+                    }}
+                  >
+                    {copy.brief.moreParameters(zones.changesCount)}
+                  </button>
+                  {groupsOpen &&
+                    zones.changeRows
+                      .filter((r) => r.collapsed)
+                      .map((r) => renderRow(r.entry))}
+                </div>
+              )}
+            </>
+          ) : showGroups ? (
+            // No part — single list, the pre-#338 shape. Above MAX_LIST_ROWS
+            // the collapsible rows fold behind ONE honest count (issue #274).
             <>
               <div className="brief-rows" data-testid="brief-rows">
                 {resolved

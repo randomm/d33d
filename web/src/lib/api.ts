@@ -203,6 +203,10 @@ export interface PartReportInfo {
   unit: string | null;
   unit_status: "assumed" | "settled" | "unsettled";
   scale: number | null;
+  /** Issue #338, operator decision 2: the part's settled-unit mm extents
+   *  [w, d, h]. `null` while the part's units are unsettled (the Brief's
+   *  W/D/H rows show "waiting on units" in that case, never a number). */
+  bbox_mm?: number[] | null;
   report: {
     triangles: number;
     bodies: number;
