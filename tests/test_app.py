@@ -87,6 +87,33 @@ def app_paths(tmp_path: Path) -> dict[str, Path]:
 
 
 @pytest.fixture
+def app_with_projects(app_paths: dict[str, Path], tmp_path: Path):
+    """A ``create_app`` instance with the git path pointed at ``tmp_path``
+    (the part upload's route must be mounted to create a project with a
+    part)."""
+    import d33d.db as db_mod
+
+    original_default = db_mod._default_git_path
+
+    def _tmp_default_git_path(name: str) -> str:
+        import uuid
+
+        slug = uuid.uuid4().hex[:12]
+        base = tmp_path / "repos" / slug
+        base.mkdir(parents=True, exist_ok=True)
+        return str(base)
+
+    db_mod._default_git_path = _tmp_default_git_path
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+    )
+    yield app
+    db_mod._default_git_path = original_default
+
+
+@pytest.fixture
 def app(app_paths: dict[str, Path], tmp_path: Path):
     """A ``create_app`` instance pointing at the isolated paths.
 
@@ -954,6 +981,420 @@ def test_region_edit_rejects_empty_instruction(app):
 
     r = _run_async(app, _call)
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Region-edit wire — hit_point_mm / face_normal (issue #338, operator
+# decisions 4–5)
+# ---------------------------------------------------------------------------
+
+
+def _svc(app: Any) -> Any:
+    """The app's version service on a LIVE connection (reconnect after a
+    previous ``_run_async`` teardown closed the handle)."""
+    svc = app.state.versions
+    try:
+        svc.conn.raw.execute("SELECT 1")
+        return svc
+    except Exception:
+        import d33d.db as db_mod
+        from d33d import versions as versions_mod
+
+        fresh = db_mod.connect(app.state.db_path)
+        versions_mod.migrate(fresh)
+        app.state.conn = fresh
+        fresh_svc = versions_mod.VersionService(fresh)
+        app.state.versions = fresh_svc
+        return fresh_svc
+
+
+def _set_part_columns(app: Any, pid: int, *, unit_status: str) -> None:
+    """Set the project's part columns directly on the DB (the same UPDATE
+    the #325 settle path runs, minus the settle call)."""
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+        "part_unit='mm', part_unit_status=?, part_scale=1.0 WHERE id=?",
+        (unit_status, pid),
+    )
+    conn.commit()
+
+
+def test_region_edit_accepts_hit_point_and_face_normal(app):
+    """A region edit with ``hit_point_mm`` and ``face_normal`` is accepted
+    (202), and both fields are added to the grounding text the design loop
+    receives. The stub loop captures the ``request_text`` kwarg."""
+    captured: dict[str, Any] = {}
+
+    class _PassResult:
+        status = "pass"
+        best = None
+
+    async def _stub_loop(app, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _PassResult()
+
+    app.state.run_design_loop = _stub_loop
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(
+                hit_point_mm=[12.0, 0.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        source = app.state.event_sources.get(project_id)
+        if source is not None:
+            async for _event, _data in source:
+                pass
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    assert "request" in captured, "stub loop not invoked with request kwarg"
+    rt = captured["request"]
+    assert "Pick hit point in mm: 12, 0, 20" in rt, rt
+    assert "Picked face normal (unit, world space): 0, 1, 0" in rt, rt
+
+
+def test_region_edit_hit_point_only_still_accepted(app):
+    """``hit_point_mm`` without ``face_normal`` is accepted (both are
+    optional). The grounding text has the hit point but not the normal."""
+    captured: dict[str, Any] = {}
+
+    class _PassResult:
+        status = "pass"
+        best = None
+
+    async def _stub_loop(app, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return _PassResult()
+
+    app.state.run_design_loop = _stub_loop
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(hit_point_mm=[5.0, 3.0, 7.0]),
+        )
+        source = app.state.event_sources.get(project_id)
+        if source is not None:
+            async for _event, _data in source:
+                pass
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    assert r.status_code == 202, r.text
+    rt = captured.get("request", "")
+    assert "Pick hit point in mm: 5, 3, 7" in rt, rt
+    assert "face normal" not in rt, rt
+
+
+def test_region_edit_rejects_non_unit_face_normal(app):
+    """A ``face_normal`` whose length is outside 1±0.01 is rejected with
+    422 (a non-unit normal is a client defect the loop cannot use)."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(face_normal=[2.0, 0.0, 0.0]),
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422
+
+
+def test_region_edit_rejects_non_finite_hit_point(app):
+    """A non-finite ``hit_point_mm`` component is rejected (422 — the same
+    wire-format discipline as ``PointLocation``). We test with a NaN string
+    which pydantic will reject as a type error (422)."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        body = _region_edit_body(hit_point_mm=["NaN", 0.0, 0.0])
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=body,
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422, r.text
+
+
+def test_region_edit_face_normal_within_tolerance_accepted(app):
+    """A ``face_normal`` with length within 1±0.01 is accepted (202)."""
+
+    class _PassResult:
+        status = "pass"
+        best = None
+
+    async def _stub_loop(app, **kwargs: Any) -> Any:
+        return _PassResult()
+
+    app.state.run_design_loop = _stub_loop
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        # length = sqrt(0.5^2 + 0.5^2) ≈ 0.707 — outside tolerance → 422
+        r = await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=_region_edit_body(face_normal=[0.999, 0.0, 0.0]),
+        )
+        source = app.state.event_sources.get(project_id)
+        if source is not None:
+            async for _event, _data in source:
+                pass
+        return project_id, r
+
+    project_id, r = _run_async(app, _call)
+    # 0.999 is within 1±0.01 → accepted
+    assert r.status_code == 202, r.text
+
+
+def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
+    """For a project with an imported part, the region-edit route runs the
+    fill_recut trigger BEFORE any loop. On trigger: no loop runs, the
+    offer is stored as pending, and the boundary sentence is the answer.
+    The stub loop is spied to confirm it is NOT called."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Imported Part"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[12.0, 0.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    # The boundary sentence is the answer
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "That hole came with your file" in msg, msg
+    assert "Ø38 mm" in msg, msg
+    # The offer was recorded server-side
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None, "offer not recorded"
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 38.0, offer
+
+
+def test_region_edit_fill_recut_no_normal_degradation(app_with_projects, monkeypatch):
+    """A region edit with ``hit_point_mm`` but NO ``face_normal`` that
+    triggers the boundary gets NO axis-dependent offer: the reply says
+    the feature came with the file + the can't-tell-axis copy, no offer
+    stored, no loop runs."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Normal"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[12.0, 0.0, 20.0],
+                # face_normal NOT sent
+            ),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    # The no-normal degradation reply
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "came with your file" in msg, msg
+    assert "I can't tell that feature's axis from where you pointed" in msg, msg
+    # NO offer stored
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is None, f"offer should not be stored, got: {offer}"
+
+
+def test_region_edit_fill_recut_yes_runs_loop(app_with_projects, monkeypatch):
+    """A region edit that is a clean 'yes' on a LIVE fill-recut offer runs
+    the loop with the fill-and-recut instruction. The offer is cleared."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Yes Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        svc = app_with_projects.state.versions
+        svc.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0,
+                  "axis": [0.0, 1.0, 0.0]}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was called with the fill-and-recut instruction
+    assert loop_calls, "the design loop was not called"
+    rt = loop_calls[0].get("request_text", "")
+    assert "Fill-and-recut:" in rt, rt
+    assert "hole" in rt, rt
+    assert "38" in rt, rt
+    # The offer was cleared
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "offer not cleared"
+
+
+def test_region_edit_fill_recut_decline_clears_offer(app_with_projects, monkeypatch):
+    """A region edit that is a clean 'no' on a LIVE fill-recut offer clears
+    the offer and replies quietly. No loop runs."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        svc = app_with_projects.state.versions
+        svc.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="leave it"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    # The decline acknowledgement
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    assert "leaving the part as it is" in done[0]["message"], done
+    # The offer was cleared
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "offer not cleared"
+
+
+def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatch):
+    """A region edit on a project WITHOUT a part falls through the fill-recut
+    pre-route (no trigger possible) and runs the design loop normally."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Part"})
+        pid = r.json()["id"]
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make it bigger"),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop WAS called (fallthrough)
+    assert loop_calls, "the design loop was not called"
+    rt = loop_calls[0].get("request_text", "")
+    assert "make it bigger" in rt, rt
 
 
 def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):
