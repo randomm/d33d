@@ -79,6 +79,16 @@ PHOTO_MISSING_NOTICE = (
     "from your words alone"
 )
 
+#: Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
+#: of the copy.ts sentence — the design-contract tripwire pins the
+#: two-way agreement). The units are not settled; the design loop must
+#: not run until the user settles them.
+UNSETTLED_PART_REPLY = (
+    "The part's units aren't settled yet, so I can't work on it. "
+    "Settle the units first — pick mm, cm, or inch, or give one measured "
+    "axis — and then I can add and cut on it."
+)
+
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
 
@@ -562,6 +572,27 @@ def create_projects_router() -> APIRouter:
             )
             app.state.event_sources[project_id] = _answered_frames(
                 SAVED_DESIGN_MISSING_REPLY
+            )
+            return {"status": "accepted"}
+
+        # Issue #332 (sub-issue 3) — the unsettled-part pre-route (BEFORE
+        # the offer/question pre-routes, after the missing-source check):
+        # when the project has a part whose units are NOT assumed/settled
+        # (i.e. `part_unit_status` is "unsettled" or otherwise not in the
+        # assumed/settled pair), the reply is a deterministic copy.ts
+        # sentence as a kind:"answer" done frame — no design loop, no
+        # render, no version. A no-part project skips this pre-route.
+        from d33d.part_http import part_public
+
+        _part = part_public(row) if row.get("part_filename") else None
+        if _part is not None and _part.get("unit_status") not in ("assumed", "settled"):
+            logger.warning(
+                "chat for project %s: the part's units are unsettled — "
+                "replying with the settle-first notice, no design run",
+                project_id,
+            )
+            app.state.event_sources[project_id] = _answered_frames(
+                UNSETTLED_PART_REPLY
             )
             return {"status": "accepted"}
 

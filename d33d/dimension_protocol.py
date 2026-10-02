@@ -800,6 +800,8 @@ def require_dimensions_confirmed(
     stated_dims: dict[str, Any] | None,
     *,
     ai_suggested: dict[str, float] | None = None,
+    part_scale: float | None = None,
+    part_bbox_mm: tuple[float, float, float] | None = None,
 ) -> DimensionClarification:
     """The CLARIFY-before-code gate.
 
@@ -827,6 +829,30 @@ def require_dimensions_confirmed(
             cv = _coerce(ai_suggested[a])
             if cv is not None:
                 suggested[a] = cv
+
+    # Issue #332 (sub-issue 3) — the settled/assumed part's W/D/H are
+    # MEASURED ground truth (the v1's mm bbox, file bbox × scale, as
+    # recorded): the gate does NOT ask the user to state them ("don't
+    # ask what the mesh already measures"). The part's extent fills the
+    # missing axes (only the axes the user has not stated — a stated
+    # value for a NEW feature, or a correction, is never overridden);
+    # ``fit_type`` falls to the default ``no_fit`` (the part's fit is the
+    # mesh's, not a new interface). The gate closes on the part's
+    # measured W/D/H + the default fit — the design loop runs on the
+    # part's ground-truth baseline, not on a fabricated user statement.
+    # ``None`` part (no part, or an unsettled part — the unsettled
+    # pre-route stops the loop before this gate runs) leaves the
+    # behaviour verbatim (the byte-identity regression anchor).
+    if missing and part_bbox_mm is not None:
+        part = tuple(
+            float(part_bbox_mm[i]) for i in range(len(DIMENSION_AXES))
+        )
+        for axis, value in zip(DIMENSION_AXES, part):
+            if axis in missing and value > 0:
+                stated[axis] = value
+        missing = tuple(a for a in DIMENSION_AXES if a not in stated)
+        if fit_type is None:
+            fit_type = "no_fit"
 
     if missing or fit_type is None:
         return DimensionClarification(

@@ -1052,6 +1052,20 @@ def _finalize_loop_kwargs(
 
     design_source = current_version_source(row, app.state.versions)
 
+    # Issue #332 (sub-issue 3) — the import section's inputs (the SAME
+    # single reader the chat seam uses, ``part_envelope_with_bbox``): the
+    # project's part's settled file→mm scale + the v1's measured mm bbox
+    # (the ground-truth baseline). ``None`` part / unsettled → no kwargs
+    # (the byte-identity regression anchor; the unsettled pre-route in
+    # ``post_chat`` has already stopped the chat path, and a finalize on
+    # an unsettled part is a 409 at export — the loop itself is not the
+    # place that stops it).
+    part_env: dict[str, Any] | None = None
+    if row.get("part_filename"):
+        from d33d.part_http import part_envelope_with_bbox
+
+        part_env = part_envelope_with_bbox(row, app.state.conn, app.state.versions)
+
     # ``request`` must be non-empty: the hook builds a FailureEvent from
     # it (``min_length=1``) and an empty string would silently drop the
     # failures.jsonl line for an exhausted loop.
@@ -1070,7 +1084,7 @@ def _finalize_loop_kwargs(
             model = ""
     prompt_version = canonical_hash(role="design", messages=[])
 
-    return {
+    out: dict[str, Any] = {
         "photo": photo,
         "chat_history": (),
         "stated_dims": stated_dims,
@@ -1086,6 +1100,13 @@ def _finalize_loop_kwargs(
         "state_confirmed": state_confirmed,
         "design_source": design_source,
     }
+    # The import section's kwargs (issue #332, sub-issue 3) — additive:
+    # the no-part case adds nothing (byte-identical loop call to today).
+    if part_env is not None:
+        out["part_scale"] = part_env["scale"]
+        if part_env.get("bbox_mm") is not None:
+            out["part_bbox_mm"] = part_env["bbox_mm"]
+    return out
 
 
 def _loop_takes_app(run_loop: Any) -> bool:

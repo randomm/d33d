@@ -96,6 +96,7 @@ __all__ = [
     "reset_renderer_preflight_cache",
     "run_design_loop",
     "run_design_loop_async",
+    "import_part_lines",
     "scad_looks_valid",
     "scad_title",
     "score",
@@ -425,6 +426,40 @@ def best_match_component(
     return tuple(ranked[0][:3])
 
 
+def _bbox_target(
+    stated: tuple[float, float, float],
+    bbox: BboxInfo | None,
+    part_bbox_mm: tuple[float, float, float] | None,
+) -> tuple[float, float, float]:
+    """The bbox gate's per-axis target for the run (issue #332, sub-issue 3).
+
+    The pure decision the loop's ``score()`` calls before the gate: the
+    part's measured mm extents (v1 bbox × part_scale, as recorded —
+    ``part_bbox_mm``) ARE the ground truth for an import project. When
+    the candidate's bbox matches the part's own extent within the gate's
+    own tolerance (add/cut worked only on the surface — a 0.6 mm lip, a
+    1 mm split offset), the gate measures against the PART's extent: a
+    marginally larger add/cut candidate must not fail for being "larger
+    than the user's stated dims" (the mesh measures itself). A candidate
+    whose bbox DIVERGES beyond the tolerance (re-modelled, moved, or
+    rebuilt) keeps the stated-dims comparison (it fails — the mesh is
+    fixed). ``part_bbox_mm is None`` (no import project) returns
+    ``stated`` unchanged — today's behaviour verbatim (the no-part
+    regression anchor, byte-identical prompts AND gate semantics).
+    """
+    if (
+        part_bbox_mm is not None
+        and bbox is not None
+        and all(
+            abs(extent - part_extent)
+            <= max(BBOX_TOLERANCE_REL * part_extent, BBOX_TOLERANCE_MIN_MM)
+            for extent, part_extent in zip((bbox.x, bbox.y, bbox.z), part_bbox_mm)
+        )
+    ):
+        return (part_bbox_mm[0], part_bbox_mm[1], part_bbox_mm[2])
+    return stated
+
+
 def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
     """True iff every rendered axis the user CONFIRMED is within
     max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).
@@ -703,6 +738,7 @@ def score(
     scad_source: str = "",
     param_meta: dict[str, Any] | None = None,
     named_params: dict[str, float] | None = None,
+    part_bbox_mm: tuple[float, float, float] | None = None,
 ) -> Score:
     """The pinned monotone-comparable improvement metric.
 
@@ -747,10 +783,15 @@ def score(
     the old all-or-nothing meaning ("all axes unknown") is a strict
     subset of the new one.
     """
+    # Issue #332 (sub-issue 3): the bbox gate's target — the part's
+    # measured mm extent when this is an import project and the
+    # candidate's bbox matches the part (add/cut on the surface), else
+    # the stated triple (unchanged — see :func:`_bbox_target`).
+    _bbox_stated = _bbox_target(stated_dims, bbox, part_bbox_mm)
     bits = (
         render.error_class == "ok",
         _views_non_blank(render),
-        bbox is not None and _bbox_within_tolerance(bbox, stated_dims),
+        bbox is not None and _bbox_within_tolerance(bbox, _bbox_stated),
         _named_params_present(scad_source, stated_dims),
         _axis_params_match_geometry(
             bbox,
@@ -797,6 +838,19 @@ def is_best(candidate: Score, incumbent: Score) -> bool:
 # ``design_prompts`` imports ``design_loop`` at module top (for
 # ``_dim_axis_list``), so a top-level ``from d33d.design_prompts import …``
 # here would create a real cycle — the deferred import breaks it.
+
+#: The import guard's repair instruction (issue #332, sub-issue 3): the
+#: single definition of the fix the routed ``geometrically_wrong``
+#: directive carries when the guard fires (the module owns the detection,
+#: this constant owns the fix text — the #317 split, kept in one place).
+PART_IMPORT_INSTRUCTION_FIX = (
+    'every candidate on this project must build on the imported part: '
+    'scale(<the settled file-to-mm factor>) import("part.stl") is the '
+    "first operation, and you may only ADD (union) or CUT (difference) "
+    "on top of it — never rebuild, re-model, resize, or scale the imported "
+    "mesh any other way."
+)
+
 
 def _undersize_screw_hole(
     request: str,
@@ -878,19 +932,29 @@ def _dim_axis_list(stated: tuple[float, float, float]) -> str:
     )
 
 
-def _design_system(stated: tuple[float, float, float]) -> str:
+def _design_system(
+    stated: tuple[float, float, float], part_scale: float | None = None
+) -> str:
     """Short imperative design-role system prompt (neutral delimiters).
 
     Carries the metric screw-clearance table (issue #317) rendered from
     the SINGLE definition in ``d33d.design_prompts`` — the same table
     ``design_prompt`` renders and the loop's post-check reads, so the
-    clearance numbers live in exactly one module."""
+    clearance numbers live in exactly one module.
+
+    ``part_scale`` (issue #332, sub-issue 3): the project's settled
+    file→mm factor when the part is assumed/settled. When present, the
+    import-aware section (``import_part_instruction`` — the SINGLE
+    definition in ``d33d.design_prompts``) is appended; when ``None``
+    (no part, or an unsettled part — the caller never runs a loop on an
+    unsettled part) the prompt is byte-identical to today."""
     from d33d.design_prompts import (
         SCREW_CLEARANCE_INSTRUCTION,
         clearance_rows_line,
+        import_part_instruction,
     )
 
-    return (
+    system = (
         "You are a parametric CAD designer. "
         f"Ground-truth dimensions in mm: {_dim_axis_list(stated)}. "
         "Never invent a fit-critical number. Every dimension and any FDM "
@@ -898,8 +962,11 @@ def _design_system(stated: tuple[float, float, float]) -> str:
         "Screw clearance (through-holes), in mm: "
         f"{clearance_rows_line()}. "
         f"{SCREW_CLEARANCE_INSTRUCTION} "
-        "Reply with exactly one fenced JSON block and nothing else."
     )
+    if part_scale is not None:
+        system += import_part_instruction(part_scale) + " "
+    system += "Reply with exactly one fenced JSON block and nothing else."
+    return system
 
 
 def _design_state_lines(
@@ -977,7 +1044,9 @@ def _design_state_lines(
     return lines
 
 
-def _design_source_lines(design_source: str | None) -> list[str]:
+def _design_source_lines(
+    design_source: str | None, part_scale: float | None = None
+) -> list[str]:
     """The current-design source prompt lines (issue #105).
 
     Thin caller over the SHARED section builder (``d33d.design_source.
@@ -986,10 +1055,51 @@ def _design_source_lines(design_source: str | None) -> list[str]:
     renders the explicit clean-slate wording; a string renders the
     labelled, size-bounded source (truncated with a VISIBLE marker past
     ``MAX_SCAD_SOURCE_BYTES``).
+
+    ``part_scale`` (issue #332, sub-issue 3): for an import project the
+    v1 design source is ``None`` (the mesh IS the design — v1 has no
+    ``.scad``). The clean-slate wording would then tell the model to "
+    CREATE a complete new design", contradicting the import section — so
+    when the part is wired, the ``None`` case renders the import-section
+    header instead (a string source — a v2+ candidate that must import
+    the part — renders unchanged through the shared builder).
     """
+    if design_source is not None:
+        from d33d.design_source import design_source_lines
+
+        return design_source_lines(design_source)
+    if part_scale is not None:
+        from d33d.design_source import design_source_lines as _ds_lines
+
+        header = _ds_lines(None)[0].split(":")[0] + ":"
+        return [
+            header
+            + " the project's imported part — it is MESH, not text (the "
+            + f"design source is the file's own geometry: scale({part_scale:g}) "
+            + 'import("part.stl") is the design; ADD/CUT onto it, never '
+            + "rebuild it)"
+        ]
     from d33d.design_source import design_source_lines
 
     return design_source_lines(design_source)
+
+
+def import_part_lines(part_scale: float | None) -> list[str]:
+    """The import section's prompt lines (issue #332, sub-issue 3).
+
+    ``part_scale`` is the project's settled file→mm factor when the part
+    is assumed/settled (``1.0`` for an mm part), else ``None`` (no part,
+    or an unsettled part — the loop never runs on an unsettled part).
+    ``None`` renders NOTHING (the byte-identity regression anchor: the
+    no-part and unsettled-part prompts are byte-identical to today);
+    a factor renders :func:`d33d.design_prompts.import_part_instruction`
+    (the SINGLE definition, ``scale({:g})`` included) as its own line.
+    """
+    if part_scale is None:
+        return []
+    from d33d.design_prompts import import_part_instruction
+
+    return [import_part_instruction(part_scale)]
 
 
 def _design_messages(
@@ -1005,6 +1115,7 @@ def _design_messages(
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
+    part_scale: float | None = None,
 ) -> list[dict[str, Any]]:
     """The design-role message list: the current user's REQUEST as the
     first line of the user text (issue #97: the current message used to be
@@ -1020,7 +1131,17 @@ def _design_messages(
     the current instruction from the prior-context ``chat:`` lines and
     from the dimensions. Empty/blank requests render no line at all (the
     legacy shape — a caller that supplies no request, e.g. an old stub,
-    builds the exact prompt it always built)."""
+    builds the exact prompt it always built).
+
+    ``part_scale`` (issue #332, sub-issue 3): the project's settled
+    file→mm factor when the part is assumed/settled — ``None`` (no part,
+    or an unsettled part) renders the EXACT prompt of today (the
+    byte-identity regression anchor); a factor renders the import section
+    (``import_part_lines`` — the single definition in
+    ``d33d.design_prompts``) right after the design-state block, and the
+    clean-slate design-source wording becomes the import-aware one (the
+    v1 mesh IS the design source; see :func:`_design_source_lines`).
+    """
     lines: list[str] = []
     if request and request.strip():
         lines.append(f"Request: {request}")
@@ -1043,13 +1164,17 @@ def _design_messages(
             state_confirmed,
         )
     )
+    # The import section (issue #332, sub-issue 3): rendered AFTER the
+    # state block, BEFORE the design-source section — ``None`` renders
+    # nothing (byte-identical to today).
+    lines.extend(import_part_lines(part_scale))
     # The current design source (issue #105): the previous version's
     # actual SCAD, rendered between the state block and the reference
     # dimensions (same insertion point as the state block). One mechanism,
     # one wording for both the chat and region-edit paths — the loop is
     # the shared prompt builder, and ``design_source`` is supplied by
     # every caller that knows the project.
-    lines.extend(_design_source_lines(design_source))
+    lines.extend(_design_source_lines(design_source, part_scale))
     lines.append(f"Reference dimensions (mm, ground truth): {_dim_axis_list(stated)}")
     lines.append(
         "Emit parametric OpenSCAD. Start the file with one comment line "
@@ -1347,6 +1472,8 @@ async def run_design_loop_async(
     state_confirmed: dict[str, Any] | None = None,
     on_progress: OnProgressFn | None = None,
     design_source: str | None = None,
+    part_scale: float | None = None,
+    part_bbox_mm: tuple[float, float, float] | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
 ) -> DesignResult:
@@ -1438,8 +1565,9 @@ async def run_design_loop_async(
                 state_meta=state_meta,
                 state_confirmed=state_confirmed,
                 design_source=design_source,
+                part_scale=part_scale,
             ),
-            _design_system(stated_dims),
+            _design_system(stated_dims, part_scale),
         )
         design_hash = scad.prompt_hash
         if log is not None:
@@ -1499,6 +1627,7 @@ async def run_design_loop_async(
             scad_source=scad_source,
             param_meta=extract_param_meta(scad),
             named_params=_scad_params(scad_source),
+            part_bbox_mm=part_bbox_mm,
         )
 
         # Failure routing: tagged, structured, NEVER terminal. Compile
@@ -1581,6 +1710,41 @@ async def run_design_loop_async(
                     )
                     if directive is not None:
                         next_repair = directive.to_dict()
+
+        # Issue #332 (sub-issue 3): the import guard's deterministic
+        # post-check — an ok render on an import project whose candidate
+        # does not build on the part (missing import, wrong filename,
+        # rescale, or resize) is a repair BEFORE the pass return, routed
+        # through the EXISTING ``geometrically_wrong`` class (no new
+        # error_class) via ``route_repair`` — the same shape as the #317
+        # screw-hole check, which rides on the same branch.
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and part_scale is not None
+        ):
+            from d33d.import_guard import import_guard_violation
+
+            _guard_det = import_guard_violation(
+                scad_source, part_scale=part_scale
+            )
+            if _guard_det is not None:
+                _reason, _detail = _guard_det
+                _ax_classified = ClassifiedFailure(
+                    failure_class="geometrically_wrong",
+                    evidence=_detail,
+                    repairable=True,
+                )
+                directive = route_repair(
+                    classified=_ax_classified, scad_source=scad_source
+                )
+                if directive is not None:
+                    failure_class = "geometrically_wrong"
+                    _next_repair = directive.to_dict()
+                    _next_repair["instruction"] = (
+                        f"{_detail} — {PART_IMPORT_INSTRUCTION_FIX}"
+                    )
+                    next_repair = _next_repair
 
         # Issue #317: an ok render whose gates are green can still carry an
         # undersize metric-screw hole (hole size is not a gate bit).  The
@@ -1778,6 +1942,8 @@ def run_design_loop(
     state_meta: dict[str, Any] | None = None,
     state_confirmed: dict[str, Any] | None = None,
     design_source: str | None = None,
+    part_scale: float | None = None,
+    part_bbox_mm: tuple[float, float, float] | None = None,
     renderer_check: Callable[[], bool] | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
@@ -1804,6 +1970,8 @@ def run_design_loop(
             state_meta=state_meta,
             state_confirmed=state_confirmed,
             design_source=design_source,
+            part_scale=part_scale,
+            part_bbox_mm=part_bbox_mm,
             renderer_check=renderer_check,
         )
     )

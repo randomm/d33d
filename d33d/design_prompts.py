@@ -37,6 +37,7 @@ from typing import Any
 
 from d33d.config.catalogue import Catalogue, resolve_call_params
 from d33d.design_loop import _dim_axis_list
+from d33d.import_guard import PART_STL_NAME
 
 __all__ = [
     "BOSL2_CHEATSHEET_PATH",
@@ -46,6 +47,7 @@ __all__ = [
     "SCREW_SIZE_RE",
     "clearance_rows_line",
     "design_prompt",
+    "import_part_instruction",
     "load_bosl2_cheatsheet",
     "model_overrides",
     "render_module_docs",
@@ -126,6 +128,42 @@ def clearance_rows_line(table: dict[str, float] = METRIC_SCREW_CLEARANCE_MM) -> 
     is the table's (size ascending by construction).
     """
     return ", ".join(f"{size} = {mm:g} mm" for size, mm in table.items())
+
+
+#: The import-part instruction (issue #332, sub-issue 3): the SINGLE
+#: definition of the text both design prompts render when the project's
+#: part is assumed/settled — the part already exists on disk as
+#: ``import("part.stl")`` in the file's own units, it is placed with the
+#: settled file→mm ``scale()`` as the FIRST operation so all further work
+#: is in mm, and the model may only ADD (union) or CUT (difference) on it
+#: — never rebuild, re-model or resize the imported mesh. The skeleton
+#: shows the minimal correct form. One place, rendered from ``part_scale``
+#: (the #317 single-definition pattern; the ``scale(...)`` factor renders
+#: as ``{part_scale:g}`` so a settled 25.4 renders ``scale(25.4)`` and an
+#: mm part renders ``scale(1)``).
+def import_part_instruction(part_scale: float) -> str:
+    """The import-aware prompt section (issue #332), rendered from the
+    project's settled file→mm factor.
+
+    ``part_scale`` is the settled file→mm factor (1.0 for an mm part). The
+    text always carries ``scale({part_scale:g})`` — including for 1.0 —
+    so the prompt has ONE form and the post-check accepts the settled
+    factor (numeric, within ``SCALE_FACTOR_TOL``) and rejects any other.
+    """
+    return (
+        "The project's imported part already exists on disk as "
+        f"import(\"{PART_STL_NAME}\") — that is the part, in its file's own "
+        "units. Place it as the FIRST operation, scaled to millimetres: "
+        f"scale({part_scale:g}) import(\"{PART_STL_NAME}\") — every "
+        "further operation works in mm. On top of that part you may only "
+        "ADD geometry (union: lips, bosses, tabs, extend, split for the "
+        "bed) and CUT geometry (difference: drill, slot, recess, split). "
+        "Never rebuild, re-model, or resize the "
+        "imported mesh — it is fixed geometry with no parameters. "
+        "Minimal correct skeleton:\n"
+        f"    scale({part_scale:g}) import(\"{PART_STL_NAME}\")\n"
+        "    union() { ... }"
+    )
 
 
 #: The design-role system prompt's fixed, short imperative core (spec: short

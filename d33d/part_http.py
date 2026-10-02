@@ -74,6 +74,74 @@ PART_EXISTS_DETAIL = "This project already has a part."
 # ---------------------------------------------------------------------------
 
 
+def part_envelope(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The design-loop's part facts for ONE project row (issue #332, sub-issue 3).
+
+    The single source both loop seams read (``d33d.design_loop_events``'s
+    chat adapter and ``d33d.versions_routes``'s finalize ``_finalize_loop_
+    kwargs``) — never two divergent copies. ``None`` (no part row, or a
+    part whose units are NOT assumed/settled — an unsettled part never
+    runs a loop, and a part-less project keeps today's prompt byte-
+    verbatim) renders nothing; a positive ``scale`` returns
+    ``{"scale": part_scale, "bbox_mm": <the v1's measured mm extents>,
+    ...}`` — the loop's ``part_scale`` (the prompt's ``scale(...)`` and
+    the import guard's settled factor) and ``part_bbox_mm`` (the bbox
+    gate's ground-truth baseline, the v1 row's persisted bbox — file bbox
+    × scale as recorded at import/settle). A part with a positive scale
+    whose v1 row carries no bbox (a measurement the write path could not
+    obtain) degrades ``bbox_mm`` to ``None`` (the gate abstains on the
+    part's baseline — the stated dims still apply).
+    """
+    if row is None or not row.get("part_filename"):
+        return None
+    status = row.get("part_unit_status")
+    if status not in ("assumed", "settled"):
+        return None
+    scale = row.get("part_scale")
+    if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
+        return None
+    return {"scale": float(scale), "bbox_mm": None, "filename": row.get("part_filename")}
+
+
+def part_envelope_with_bbox(
+    row: dict[str, Any] | None,
+    conn: db_mod.Connection | None,
+    versions: Any = None,
+) -> dict[str, Any] | None:
+    """:func:`part_envelope` with the v1's measured mm bbox resolved (issue #332, sub-issue 3).
+
+    The seams that have the project row AND the app's connection use this
+    variant: the v1 row's persisted ``bbox`` (the file bbox × scale, as
+    recorded at import/settle) fills ``bbox_mm`` — the bbox gate's ground-
+    truth baseline. The v1 row is read through the ``versions`` service's
+    ``latest_version`` (the same decoded row the design-state route and
+    the loop adapter use — JSON-decoded, consistent with every other
+    design-state reader). ``None`` row / part / unsettled / non-positive
+    scale returns ``None`` (the no-part and unsettled regressions —
+    byte-identical prompt, no loop, never an error). A part with a
+    positive scale whose v1 row is missing or carries no bbox degrades
+    ``bbox_mm`` to ``None`` (the gate abstains on the part's baseline; the
+    stated dims still apply — never a fabricated measurement).
+    """
+    env = part_envelope(row)
+    if env is None or versions is None:
+        return env
+    v1 = versions.latest_version(row.get("id"))
+    if v1 is None:
+        return env
+    raw = v1.get("bbox")
+    if not isinstance(raw, dict):
+        return env
+    axes = [raw.get(name) for name in ("x", "y", "z")]
+    if not all(
+        isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 for v in axes
+    ):
+        return env
+    env = dict(env)
+    env["bbox_mm"] = (float(axes[0]), float(axes[1]), float(axes[2]))
+    return env
+
+
 def part_public(row: dict[str, Any]) -> dict[str, Any] | None:
     """The project row's part facts as a public object (``None`` when the
     project has no part — the NULL columns decode to ``None``, never a
@@ -221,6 +289,8 @@ __all__ = [
     "_is_positive_number",
     "_parse_multipart",
     "_v1_for_part",
+    "part_envelope",
+    "part_envelope_with_bbox",
     "part_public",
     "resolve_part_paths",
 ]
