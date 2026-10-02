@@ -16,10 +16,16 @@
 //   parent watchdog (web/vitest.watchdog.ts + scripts/parent-watchdog.mjs),
 //   which kills the vitest group within ~2 s once it sees the wrapper gone.
 //   The wrapper advertises its own pid via D33D_TEST_WRAPPER_PID.
+// - The vitest binary is resolved to an ABSOLUTE path (via createRequire
+//   from the wrapper's own location), so the spawn never depends on PATH —
+//   a bare `vitest` is only findable when node_modules/.bin is on PATH
+//   (e.g. under `npm run`); a direct `node scripts/run-vitest.mjs` with a
+//   minimal PATH would otherwise ENOENT.
 // - Exit code: vitest's own code on normal completion; 128 + signal number
 //   when interrupted (SIGTERM → 143, SIGINT → 130, SIGHUP → 129).
 
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 
 const GRACE_MS = 3000;
 
@@ -27,7 +33,27 @@ const GRACE_MS = 3000;
 // space-separated argv, so the fixture is a tiny node script instead of the
 // real vitest (the wrapper must never run the outer suite's own vitest).
 const testCommand = process.env.D33D_TEST_COMMAND ? process.env.D33D_TEST_COMMAND.split(" ") : null;
-const baseCommand = testCommand ?? ["vitest", "run"];
+
+// Resolve the real vitest binary to an ABSOLUTE path so the spawn never
+// depends on PATH. Under `npm run`, node_modules/.bin is on PATH, but a
+// direct `node scripts/run-vitest.mjs` can have a minimal PATH and would
+// ENOENT on a bare `vitest`. We resolve from the wrapper's own location via
+// createRequire: it finds the local vitest regardless of PATH. The bin is
+// the vitest package's `vitest.mjs` (its declared bin entry).
+function resolveVitestBin() {
+  try {
+    const requireHere = createRequire(import.meta.url);
+    const vitestPkg = requireHere.resolve("vitest/package.json");
+    const vitestDir = vitestPkg.slice(0, vitestPkg.lastIndexOf("/"));
+    return `${vitestDir}/vitest.mjs`;
+  } catch {
+    // No local vitest resolvable (e.g. no node_modules) — fall back to a
+    // bare `vitest` so the usual PATH lookup still applies.
+    return "vitest";
+  }
+}
+const vitestBin = resolveVitestBin();
+const baseCommand = testCommand ?? [vitestBin, "run"];
 const forwardedArgs = process.argv.slice(2);
 
 const child = spawn(baseCommand[0], [...baseCommand.slice(1), ...forwardedArgs], {
