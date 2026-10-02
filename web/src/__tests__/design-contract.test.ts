@@ -876,6 +876,54 @@ describe("design contract", () => {
     expect(copy.progress.repairAttempt(3, max, "x")).toMatch(/last one/);
   });
 
+  /* ---------------------------------------- W332 */
+
+  it("the progress copy never promises 15–30 s on the import path (issue #332)", () => {
+    // The spec: "progress copy must not promise 15–30 s on this path."
+    // The bare pass's `expectation` keeps the window; the import path
+    // gets its own line (`expectationImport`) that carries no time
+    // window at all — a duration the system has not established is
+    // never invented. The conditional lives in PassProgress (keys off
+    // its `importedPart` prop), so the tripwire pins both halves: the
+    // deck strings AND the render-site condition (the #250 way: the
+    // tripwire reads both sides).
+    // The bare pass keeps its window (the one case where the number is
+    // honest).
+    expect(copy.progress.expectation).toBe(
+      "Usually 15–30\u202Fs. You will see it change.",
+    );
+    // The import path's line: no digit, no window, no promise of a
+    // duration.
+    expect(copy.progress.expectationImport).toBeTruthy();
+    expect(copy.progress.expectationImport).not.toMatch(/\d/);
+    // It still says the work is visible — the line is not silent.
+    expect(copy.progress.expectationImport).toContain("You will see it change");
+    // The two lines are distinct honest statements.
+    expect(copy.progress.expectationImport).not.toBe(copy.progress.expectation);
+
+    // The render site: PassProgress renders the expectation line
+    // conditionally on `importedPart` — the tripwire reads the
+    // component's source so a wiring change that unconditionally
+    // renders `expectation` (or drops the conditional) fails here.
+    const passSrc = readFileSync(
+      join(SRC, "components/progress/PassProgress.tsx"),
+      "utf8",
+    );
+    expect(passSrc).toMatch(/expectationImport/);
+    expect(passSrc).toMatch(/expectation\b/);
+    // The conditional is present: the line selects on importedPart.
+    expect(passSrc).toMatch(/importedPart\s*\?\s*copy\.progress\.expectationImport\s*:\s*copy\.progress\.expectation/);
+
+    // The component test pins the DOM: the 15–30 s line renders for a
+    // bare pass and NEVER renders on the import path.
+    const passTest = readFileSync(
+      join(SRC, "components/progress/__tests__/pass-progress.test.tsx"),
+      "utf8",
+    );
+    expect(passTest).toMatch(/importedPart/);
+    expect(passTest).toMatch(/15–30/);
+  });
+
   /* --------------------------------------------------------------- W17 */
 
   it("the marker colour has exactly one home", () => {

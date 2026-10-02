@@ -212,3 +212,29 @@ describe("PassProgress — the honest counter (issue #118)", () => {
     expect(idle.total).toBe(0);
   });
 });
+
+describe("PassProgress — the expectation line (issue #332)", () => {
+  it("shows the 15–30 s expectation for a bare pass (no imported part)", () => {
+    render(<PassProgress step="design-loop-pass" elapsed={5} />);
+    const line = screen.getByTestId("design-loop-expectation").textContent;
+    expect(line).toBe(copy.progress.expectation);
+    expect(line).toContain("15–30");
+  });
+
+  it("never shows the 15–30 s promise on the import path", () => {
+    render(<PassProgress step="design-loop-pass" elapsed={5} importedPart />);
+    const line = screen.getByTestId("design-loop-expectation").textContent;
+    // The import path's duration is not established: no time window.
+    expect(line).toBe(copy.progress.expectationImport);
+    expect(line).not.toContain("15–30");
+    // The two lines are distinct honest statements.
+    expect(copy.progress.expectationImport).not.toBe(copy.progress.expectation);
+  });
+
+  it("the import expectation still says the work is visible, not silent", () => {
+    render(<PassProgress step="design-loop-pass" elapsed={5} importedPart />);
+    expect(screen.getByTestId("design-loop-expectation").textContent).toContain(
+      "You will see it change",
+    );
+  });
+});

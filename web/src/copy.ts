@@ -232,7 +232,18 @@ export const progress = {
   attemptLine: (attempt: number, max: number): string =>
     attempt <= 1 ? "Attempt 1 of up to 3" : `Attempt ${attempt} of up to ${max}`,
 
+  /** The default pass time expectation. Shown only when the project has
+   *  no imported part (PassProgress keys off the `importedPart` prop):
+   *  a bare from-scratch pass is the one that usually lands in 15–30 s.
+   *  Issue #332: the import path is slower (the part seeds the render
+   *  volume and its bbox is the gate's ground truth), so on that path no
+   *  copy may promise a time window — `expectationImport` carries no
+   *  number at all, the honest statement for a path whose duration is
+   *  not established. */
   expectation: "Usually 15–30\u202Fs. You will see it change.",
+  /** The import path's expectation: no 15–30 s promise — the duration
+   *  is not established, and this line never invents one. */
+  expectationImport: "It takes a little longer when I'm working around your import. You will see it change.",
   stop: "Stop",
 
   /** An auto-repair round is announced, never hidden.
