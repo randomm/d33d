@@ -1055,8 +1055,11 @@ class VersionService:
 
     def get_pending_offer(self, project_id: int) -> dict[str, Any] | None:
         """The project's outstanding offer (``{"version_id": int,
-        "param": str}``), or ``None`` (no pending offer — NULL or
-        malformed row degrades to no offer, never a raise)."""
+        "param": str}`` for the #250 param offer, or the issue #332
+        fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
+        "size": float | None}`` — the ``kind`` discriminator is ADDITIVE:
+        a param-shaped row has no ``kind``), or ``None`` (no pending offer
+        — NULL or malformed row degrades to no offer, never a raise)."""
         row = self.conn.raw.execute(
             "SELECT pending_offer FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
@@ -1073,41 +1076,75 @@ class VersionService:
             return None
         version_id = doc.get("version_id")
         param = doc.get("param")
-        if (
-            not isinstance(version_id, int)
-            or isinstance(version_id, bool)
-            or not isinstance(param, str)
-            or not param
-        ):
-            return None
-        return {"version_id": version_id, "param": param}
+        if isinstance(version_id, int) and not isinstance(version_id, bool):
+            if isinstance(param, str) and param:
+                return {"version_id": version_id, "param": param}
+        # The issue #332 fill-and-recut variant (the ``kind`` discriminator
+        # keeps the #250 param-offer readers from reading a fill-recut row
+        # as a param offer — a fill-recut doc has no ``param``): validated
+        # to ``{"kind": "fill_recut", "noun": str, "size": float | None}``.
+        if doc.get("kind") == "fill_recut":
+            noun = doc.get("noun")
+            if isinstance(noun, str) and noun:
+                size = doc.get("size")
+                return {
+                    "kind": "fill_recut",
+                    "noun": noun,
+                    "size": (
+                        float(size)
+                        if isinstance(size, (int, float))
+                        and not isinstance(size, bool)
+                        and size > 0
+                        else None
+                    ),
+                }
+        return None
 
     def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None:
         """Persist (or clear, with ``None``) the project's pending offer.
 
-        ``offer`` is ``{"version_id": int, "param": str}`` — the caller
-        validates the param is a real assumed param of that version
-        (``d33d.confirm_offer``); the writer stores the JSON as-is
+        ``offer`` is ``{"version_id": int, "param": str}`` (the #250 param
+        offer — the caller validates the param is a real assumed param of
+        that version, ``d33d.confirm_offer``) or the issue #332
+        fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
+        "size": float | None}``; the writer stores the JSON as-is
         (``None`` → NULL, the cleared state).
 
         Shape guard (input validation at the boundary): a non-``None``
-        offer must carry an ``int`` ``version_id`` (``bool`` excluded —
-        ``isinstance(True, int)`` is true and a bool is never a version
-        id) and a NON-EMPTY ``str`` ``param``; anything else is a
-        contract violation and raises ``ValueError`` (never silently
-        persisted — a malformed row would degrade to no offer on read
-        anyway, but the raise is the early, loud failure)."""
+        offer must be EITHER a param-shaped row (an ``int`` ``version_id``
+        — ``bool`` excluded — and a NON-EMPTY ``str`` ``param``) OR a
+        fill-recut row (``kind == "fill_recut"``, a non-empty ``str``
+        ``noun``, and — when present — a positive numeric ``size``);
+        anything else is a contract violation and raises ``ValueError``
+        (never silently persisted — a malformed row would degrade to no
+        offer on read anyway, but the raise is the early, loud failure)."""
         if offer is not None:
-            version_id = offer.get("version_id")
-            param = offer.get("param")
-            if not isinstance(version_id, int) or isinstance(version_id, bool):
-                raise ValueError(
-                    f"pending offer's version_id must be an int, got {version_id!r}"
-                )
-            if not isinstance(param, str) or not param:
-                raise ValueError(
-                    f"pending offer's param must be a non-empty str, got {param!r}"
-                )
+            if offer.get("kind") == "fill_recut":
+                noun = offer.get("noun")
+                if not isinstance(noun, str) or not noun:
+                    raise ValueError(
+                        f"fill-recut offer's noun must be a non-empty str, got {noun!r}"
+                    )
+                size = offer.get("size")
+                if size is not None and not (
+                    isinstance(size, (int, float))
+                    and not isinstance(size, bool)
+                    and size > 0
+                ):
+                    raise ValueError(
+                        f"fill-recut offer's size must be a positive number, got {size!r}"
+                    )
+            else:
+                version_id = offer.get("version_id")
+                param = offer.get("param")
+                if not isinstance(version_id, int) or isinstance(version_id, bool):
+                    raise ValueError(
+                        f"pending offer's version_id must be an int, got {version_id!r}"
+                    )
+                if not isinstance(param, str) or not param:
+                    raise ValueError(
+                        f"pending offer's param must be a non-empty str, got {param!r}"
+                    )
         raw = json.dumps(offer) if offer else None
         self.conn.raw.execute(
             "UPDATE projects SET pending_offer = ? WHERE id = ?",

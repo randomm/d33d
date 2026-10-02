@@ -980,3 +980,424 @@ def test_offer_acceptance_accepts_still_assumed_param_via_same_block(
     latest = svc.latest_version(_pid)
     assert latest["confirmed_params"] == {"wall_thickness": 3.0}
     assert svc.get_pending_offer(_pid) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 (sub-issue 3) — the fill-and-recut boundary pre-route + the
+# unsettled-part guard (chat seam).
+#
+# The fill-and-recut pre-route fires when ALL of issue #332's operator
+# decision (a)–(e) hold: the project has an assumed/settled part (a), the
+# message asks to RESIZE or MOVE an existing feature (b), the noun is in
+# the closed feature-noun set (c), the noun is NOT a token of the design's
+# own current params/labels (d), and the message has no add/create verb
+# (e). "yes"/"Yes, do that" on the pending offer runs the design loop with
+# the explicit fill-and-recut instruction; "no"/"Leave it" clears it.
+# The unsettled-part guard replies with the settle-first copy and never
+# runs the design loop.
+# ---------------------------------------------------------------------------
+
+_SETTLED_PART_PARAMS = {
+    "part_width": 60.0,
+    "part_depth": 45.0,
+    "part_height": 20.0,
+}
+
+
+def _set_part_columns(app: Any, pid: int, *, unit_status: str, scale: float = 1.0):
+    """Set the project's part columns (a part the user brought, units
+    ``unit_status``) directly on the DB — the same UPDATE the #325
+    settle path runs, minus the settle call itself."""
+    conn = app.state.conn
+    conn.raw.execute(
+        "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+        "part_unit='mm', part_unit_status=?, part_scale=? WHERE id=?",
+        (unit_status, scale, pid),
+    )
+    conn.commit()
+
+
+def _release_inflight(app: Any, pid: int):
+    """Release the per-project in-flight design-loop flag (the test's
+    ``async for`` drain of the event source does not run the SSE
+    endpoint's ``finally`` — the flag is the route's state, not the
+    source's, so consecutive chat turns on the same project 409 on a
+    leaked flag; the SSE endpoint's ``finally`` is the production
+    release point, and the test releases it directly between turns).
+    """
+    inflight = getattr(app.state, "design_loop_inflight", None)
+    if inflight is not None:
+        inflight.discard(pid)
+
+
+def _insert_version_direct(app: Any, pid: int, params: dict, param_meta: dict | None = None):
+    """Insert a version row directly (avoids the git repo commit — the
+    pre-route tests only need the params/labels for the discriminator)."""
+    import json
+
+    conn = app.state.conn
+    meta_json = json.dumps(param_meta) if param_meta else None
+    conn.raw.execute(
+        "INSERT INTO versions (project_id, name, params, param_meta) "
+        "VALUES (?, ?, ?, ?)",
+        (pid, "v1", json.dumps(params), meta_json),
+    )
+    conn.commit()
+
+
+def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
+    """(a)–(e) all hold: 'make the big hole 38 mm' on a project with a
+    settled part and no version of its own → the boundary sentence
+    (the spec's hole template, Ø38 mm) as a kind:'answer' done frame, a
+    fill-recut offer recorded server-side, NO design run."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Imported Part"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the big hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "That hole came with your file" in msg, msg
+    assert "Ø38 mm" in msg, msg
+    assert "fill it, then cut a Ø38 mm one on the same axis" in msg, msg
+    # The offer was recorded server-side with the kind discriminator.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 38.0, offer
+
+
+def test_fill_recut_trigger_own_param_noun_not_triggered(app_with_projects):
+    """Operator decision (d): the design's OWN SCAD already owns a slot
+    (a param named slot_width, label 'Slot width' — the token 'slot' is in
+    the design's own feature names), so 'make the slot 5 mm' is a resize
+    of the user's own feature — NOT the imported mesh — and routes
+    normally (no offer, no boundary reply; the design loop would run).
+    The loop is stubbed out (no run_design_loop wiring on the test app),
+    so the loop call must NOT be attempted — the pre-route must NOT fire.
+    We assert the offer is NOT recorded and the reply is NOT the boundary
+    sentence (the frame is the loop's, or the loop setup error — either
+    way, not the fill-recut offer)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Own Slot"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        _insert_version_direct(
+            app_with_projects,
+            pid,
+            {"slot_width": 6.0, "slot_length": 20.0},
+            {"slot_width": {"label": "Slot width"}, "slot_length": {"label": "Slot length"}},
+        )
+        # The loop is not wired (test app has no run_design_loop) — the
+        # pre-route must NOT fire (the noun 'slot' is in the design's own
+        # tokens). Whatever frame comes back, it must NOT be the
+        # fill-recut boundary sentence, and no fill-recut offer may be
+        # recorded.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the slot 5 mm"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # No fill-recut offer was recorded.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is None, f"unexpected offer: {offer}"
+    # The reply must NOT be the boundary sentence (the design loop's
+    # error frame or a no-op — the pre-route did NOT fire).
+    done = [d for e, d in frames if e == "done"]
+    for d in done:
+        assert "came with your file" not in d.get("message", ""), d
+
+
+def test_fill_recut_yes_runs_loop_with_instruction(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """'yes' on the pending fill-recut offer: the offer is cleared and
+    the design loop runs with the explicit fill-and-recut instruction
+    appended to the request text (the loop's own import-aware prompt
+    already teaches the fill-then-cut move — the instruction makes the
+    accepted turn's intent explicit). The loop is stubbed via a spy on
+    ``run_design_loop_with_events`` (the test app has no production loop)."""
+    import d33d.projects as projects_mod
+
+    _loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        _loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(projects_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Yes Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        svc = app_with_projects.state.versions
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None and offer["kind"] == "fill_recut", offer
+        # Second turn: accept.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "yes"}
+        )
+        frames = []
+        source2 = app_with_projects.state.event_sources.get(pid)
+        if source2 is not None:
+            async for event, data in source2:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was called (the fake loop's frames are on the event source)
+    # — the request text carries the fill-and-recut instruction.
+    assert _loop_calls, f"the fake loop was not called; frames: {frames}"
+    captured = _loop_calls[0]
+    rt = captured["request_text"]
+    assert "Fill-and-recut:" in rt, rt
+    assert "hole" in rt, rt
+    assert "38" in rt, rt
+    # The offer was cleared (consumed).
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
+
+
+def test_fill_recut_no_clears_offer(app_with_projects):
+    """'no' on the pending fill-recut offer: the offer is cleared, a
+    quiet acknowledgement frame is emitted, and NO design run happens."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        # Second turn: decline.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "no"}
+        )
+        frames = []
+        source2 = app_with_projects.state.event_sources.get(pid)
+        if source2 is not None:
+            async for event, data in source2:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "Understood" in done[0].get("message", ""), done
+    # The offer was cleared.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
+
+
+def test_fill_recut_move_triggers_move_template(app_with_projects):
+    """'move the hole left' triggers the move template (the point-at-the-
+    spot copy), not the resize template."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Move Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "move the hole left"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0]["message"]
+    assert "I can't move it directly" in msg, msg
+    assert "Point at the spot" in msg, msg
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None and offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+
+
+def test_fill_recut_add_verb_not_triggered(app_with_projects):
+    """Operator decision (e): 'add a 38 mm hole' has an add verb — it's an
+    ADD (allowed by rule 4), not a resize — so the pre-route does NOT
+    fire (no offer, no boundary reply)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Add Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "add a 38 mm hole"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # No fill-recut offer was recorded.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "add verb must not record an offer"
+    # No boundary reply (the loop would run — the test app has no loop,
+    # so the frame is a loop error; either way, not the boundary copy).
+    for e, d in frames:
+        if e == "done":
+            assert "came with your file" not in d.get("message", ""), d
+
+
+def test_fill_recut_taller_is_add_not_boundary(app_with_projects):
+    """Operator decision: 'make it 10 mm taller' has no closed-set noun —
+    it's an ADD (the user is adding geometry onto the part), never a
+    boundary case. The pre-route does NOT fire."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Taller Flow"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make it 10 mm taller"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "taller is an add, not a boundary"
+
+
+def test_fill_recut_no_part_not_triggered(app_with_projects):
+    """Operator decision (a): a project with NO part — even when the
+    message matches 'make the big hole 38 mm' — does NOT trigger the
+    pre-route (the offer requires BOTH the phrasing AND a settled/assumed
+    part)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Part"})
+        pid = r.json()["id"]
+        # No part columns set — a no-part project.
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the big hole 38 mm"}
+        )
+        frames = []
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None, "no-part project must not record an offer"
+
+
+def test_unsettled_part_no_design_run(app_with_projects):
+    """Unsettled part (part_unit_status not in {assumed, settled}): the
+    reply is the deterministic 'settle the units first' message and NO
+    design loop runs (no version, no render, inflight flag released)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Unsettled"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="unsettled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert "Settle the units first" in done[0].get("message", ""), done
+    # No version was created.
+    svc = _svc(app_with_projects)
+    assert svc.latest_version(pid) is None
+
+
+def test_unsettled_part_assumed_status_skips_guard(app_with_projects):
+    """Assumed part (unit_status='assumed') skips the unsettled guard —
+    the pre-route continues to the fill-recut trigger (a settled/assumed
+    part is a valid part for the boundary conversation)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Assumed"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="assumed")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The fill-recut boundary reply (NOT the unsettled guard's reply).
+    msg = done[0].get("message", "")
+    assert "came with your file" in msg, msg
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None and offer["kind"] == "fill_recut", offer

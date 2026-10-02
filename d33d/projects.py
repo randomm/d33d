@@ -22,6 +22,7 @@ git identity.
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -88,6 +89,208 @@ UNSETTLED_PART_REPLY = (
     "Settle the units first — pick mm, cm, or inch, or give one measured "
     "axis — and then I can add and cut on it."
 )
+
+# ---------------------------------------------------------------------------
+# Issue #332 (sub-issue 3) — the fill-and-recut boundary pre-route: copy,
+# the closed feature-noun set, and the deterministic trigger detector.
+# ---------------------------------------------------------------------------
+
+#: The closed feature-noun set a resize/move request can target (issue
+#: #332's operator decision (b)+(c)): an imported feature is phrased from
+#: the USER'S WORDS, and only these nouns are recognised feature names on
+#: a part the user brought. Defined ONCE here — the pre-route, the copy
+#: templates, and the tests all read this single constant.
+FEATURE_NOUNS = frozenset(
+    {
+        "hole",
+        "holes",
+        "slot",
+        "slots",
+        "boss",
+        "post",
+        "tab",
+        "recess",
+        "pocket",
+        "cutout",
+        "notch",
+        "groove",
+        "bore",
+        "counterbore",
+    }
+)
+
+#: The add/create verbs that turn a feature message into an ADD (an add
+#: goes to the design loop — rule 4 forbids only RESIZING the imported
+#: mesh, not adding onto it; issue #332's operator decision (e)).
+_ADD_VERB_RE = re.compile(
+    r"\b(?:add|drill|cut\s+a\s+new|make\s+a\s+new|put\s+a)\b", re.IGNORECASE
+)
+
+#: The resize/move phrasings the trigger scans for (operator decision (b)):
+#: "make the <noun> N mm", "make the <noun> bigger/smaller/wider", "resize
+#: the <noun>", "move the <noun> …". The dimension, when present, is an
+#: mm-formatted number (the deck's mm() spelling the SPA sends, or a bare
+#: number + "mm") — substituted into the boundary copy, never invented.
+_FRILL_RESIZE_RE = re.compile(
+    r"\b(?:make|resize)\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
+    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?P<size>\d+(?:\.\d+)?)(?:\s*mm)?\b",
+    re.IGNORECASE,
+)
+_FRILL_BIGGER_RE = re.compile(
+    r"\b(?:make|resize)\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
+    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?:bigger|smaller|wider|narrower)\b",
+    re.IGNORECASE,
+)
+_FRILL_MOVE_RE = re.compile(
+    r"\bmove\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
+    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?P<where>left|right|up|down|over|out|in|here|there)\b",
+    re.IGNORECASE,
+)
+
+
+def _fill_recut_boundary_sentence(
+    noun: str, size_mm: float | None, move: bool = False
+) -> str:
+    """The spec's boundary sentence, templated (issue #332's operator
+    decision: a CLOSED set of templates with the user's noun and dimension
+    substituted — mono-formatted mm, never invented).
+
+    The four shapes, in the operator decision's order:
+
+    * hole/bore with a diameter — the UX spec's sentence VERBATIM
+      ("fill it, then cut a Ø{d} mm one on the same axis");
+    * other noun with a dimension — "fill it, then cut a new {noun} at
+      {dimension} in the same place";
+    * move — "fill it, then cut a new one where you want it. Point at the
+      spot, or tell me where.";
+    * no dimension given — the ask ("How big should the {noun} be?").
+    """
+    if move:
+        return (
+            f"That {noun} came with your file, so I can't move it directly — "
+            "the file has no parameters for me to change. What I can do: "
+            "fill it, then cut a new one where you want it. Point at the spot, "
+            "or tell me where."
+        )
+    if size_mm is None:
+        return (
+            f"How big should the {noun} be? It came with your file, so I'll "
+            "fill it and cut a new one at that size."
+        )
+    dim = f"{size_mm:g}"
+    if noun in ("hole", "holes", "bore", "counterbore"):
+        return (
+            f"That {noun} came with your file, so I can't resize it directly — "
+            "the file has no parameters for me to change. What I can do: "
+            f"fill it, then cut a Ø{dim} mm one on the same axis. It'll look "
+            "the same, and you'll see it as a change in the history."
+        )
+    return (
+        f"That {noun} came with your file, so I can't resize it directly — "
+        "the file has no parameters for me to change. What I can do: "
+        f"fill it, then cut a new {noun} at {dim} mm in the same place. "
+        "It'll look the same, and you'll see it as a change in the history."
+    )
+
+
+def _fill_recut_trigger(message: str) -> dict[str, Any] | None:
+    """The deterministic fill-and-recut trigger for ONE chat message
+    (issue #332's operator decision): ``None`` when the message does not
+    ask to RESIZE or MOVE an imported feature, else
+    ``{"noun": <closed-set noun>, "size": <mm float or None>, "move": bool}``.
+
+    Fires only when ALL of the operator decision's (b)–(e) hold:
+
+    * (b) the message asks to resize or move an existing feature
+      ("make the <noun> N mm", "make the <noun> bigger/smaller", "resize
+      the <noun>", "move the <noun> …") — "taller"/"wider the part" is an
+      ADD (no closed-set noun) and never triggers;
+    * (c) the noun is in :data:`FEATURE_NOUNS` (a closed set, defined
+      once — never a free-form noun match);
+    * (e) the message has no add/create verb ("add a 38 mm hole" is an
+      add and goes to the design loop).
+
+    (a) — the project has an assumed/settled part — and (d) — the noun
+    does not match a param name/label of the CURRENT version (a feature
+    the user added is not the imported mesh) — are caller-side checks
+    that need the project row / the latest version's params, which this
+    pure helper does not take."
+    """
+    if _ADD_VERB_RE.search(message):
+        return None
+    m = _FRILL_RESIZE_RE.search(message)
+    if m is not None:
+        return {
+            "noun": m.group("noun").lower(),
+            "size": float(m.group("size")),
+            "move": False,
+        }
+    m = _FRILL_BIGGER_RE.search(message)
+    if m is not None:
+        return {"noun": m.group("noun").lower(), "size": None, "move": False}
+    m = _FRILL_MOVE_RE.search(message)
+    if m is not None:
+        return {"noun": m.group("noun").lower(), "size": None, "move": True}
+    return None
+
+
+def _own_feature_names(latest: dict[str, Any] | None) -> set[str]:
+    """The lower-cased param names, labels, and SINGLE-WORD label tokens of
+    the CURRENT version's own params (issue #332's operator decision (d):
+    a resize of a feature the user added — a param in the design's own
+    SCAD — behaves as today and never triggers the fill-and-recut offer).
+
+    Token match on the design's own params: a param named ``hole_diameter``
+    (label "Hole diameter") contributes the token ``hole`` to the set, so
+    "make the hole 38 mm" does NOT trigger when the design's own SCAD
+    already owns a hole param — the user is resizing their own feature, not
+    the imported mesh. ``None`` row → empty set (no design of its own yet
+    — the part's features are the only features)."""
+    names: set[str] = set()
+    if not latest:
+        return names
+    params = latest.get("params") or {}
+    meta = latest.get("param_meta") or {}
+    for key in params:
+        names.add(str(key).lower())
+        m = meta.get(key) or {}
+        label = m.get("label")
+        if isinstance(label, str) and label:
+            for token in label.lower().split():
+                names.add(token)
+    return names
+
+
+def _is_clean_yes(message: str) -> bool:
+    """The fill-and-recut offer's acceptance predicate (issue #332's
+    operator decision: "yes" / "Yes, do that" run the loop). A clean
+    affirmation via the shared heuristic (``_is_clean_affirmation`` —
+    short, no question mark, no negation, no hedge — "yes but make it 2
+    mm" is NOT an acceptance)."""
+    from d33d.dimension_protocol import _is_clean_affirmation
+
+    return _is_clean_affirmation(message)
+
+
+def _is_clean_no(message: str) -> bool:
+    """The fill-and-recut offer's decline predicate (issue #332's operator
+    decision: "no" / "Leave it" clear the offer). A short turn carrying a
+    negation token ("no"/"not"/...) or the "leave it" phrase, with no
+    question mark and no affirmative token."""
+    low = message.lower()
+    if "?" in low:
+        return False
+    if re.search(r"\bleave (it|that)\b", low):
+        return True
+    if re.search(
+        r"\b(confirm|confirmed|yes|yep|correct|right|accept|ok|okay)\b", low
+    ):
+        return False
+    return bool(
+        re.search(
+            r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low
+        )
+    )
 
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
@@ -596,6 +799,106 @@ def create_projects_router() -> APIRouter:
             )
             return {"status": "accepted"}
 
+        # Issue #332 (sub-issue 3) — the fill-and-recut pre-route (BEFORE
+        # the offer/question pre-routes, after the unsettled-part check):
+        # when the project has an assumed/settled part and the message
+        # asks to RESIZE or MOVE one of the part's OWN features (a noun
+        # from the closed feature-noun set that is NOT a param name or
+        # label of the design's own current version — operator decision
+        # (b)–(e)), the reply is the spec's templated boundary sentence
+        # from copy.ts as a kind:"answer" done frame, and a fill-recut
+        # offer is recorded server-side (the pending-offer field, with
+        # the kind discriminator so the #250 param-offer route never
+        # reads it back as a param offer — the #250 writer is
+        # param-shaped only, so a fill-recut doc lapses to None there
+        # and lapses here too). "yes"/[Yes, do that] on the pending
+        # offer runs the design loop with an explicit fill-and-recut
+        # instruction (the request text carries it); "no"/[Leave it]
+        # clears the offer. Anything else (no part, own-param noun, an
+        # add phrasing, no trigger) falls through to the existing routes
+        # exactly as today.
+        _fill_recut_instruction: str | None = None
+        if _part is not None and _part.get("unit_status") in ("assumed", "settled"):
+            from d33d.part_http import PART_FILENAME
+
+            _versions = app.state.versions
+            pending = _versions.get_pending_offer(project_id)
+            if pending is not None and pending.get("kind") == "fill_recut":
+                # A LIVE fill-recut offer (server-side state, never parsed
+                # from the client's chat). "yes" runs the design loop with
+                # the explicit fill-and-recut instruction (the offer is
+                # CLEARED — a consumed offer is a consumed offer); "no"
+                # clears the offer and replies quietly (a done frame, no
+                # design run); anything else supersedes the offer (cleared,
+                # re-evaluated below as a fresh turn).
+                if _is_clean_yes(body.message):
+                    _fr_offer = dict(pending)
+                    _versions.set_pending_offer(project_id, None)
+                    _fr_noun = str(_fr_offer.get("noun") or "feature")
+                    _fr_size = _fr_offer.get("size")
+                    _fr_size_str = f" at {_fr_size:g} mm" if _fr_size else ""
+                    _fill_recut_instruction = (
+                        "Fill-and-recut: union a solid over the existing "
+                        f"{_fr_noun} of the imported part, then difference "
+                        f"the new {_fr_noun}{_fr_size_str} on the same "
+                        "axis/location. Never resize the imported mesh "
+                        f"itself — import(\"{PART_FILENAME}\") stays as "
+                        "brought."
+                    )
+                    logger.info(
+                        "chat for project %s: fill-and-recut offer "
+                        "accepted — running the design loop with the "
+                        "fill-and-recut instruction (len(message)=%d)",
+                        project_id,
+                        len(body.message),
+                    )
+                    pending = None
+                elif _is_clean_no(body.message):
+                    _versions.set_pending_offer(project_id, None)
+                    logger.info(
+                        "chat for project %s: fill-and-recut offer "
+                        "declined — offer cleared (len(message)=%d)",
+                        project_id,
+                        len(body.message),
+                    )
+                    app.state.event_sources[project_id] = _answered_frames(
+                        "Understood — leaving the part as it is."
+                    )
+                    return {"status": "accepted"}
+                else:
+                    # A new message supersedes the pending offer: clear it
+                    # and re-evaluate THIS message as a fresh turn (it may
+                    # itself be a fresh trigger).
+                    _versions.set_pending_offer(project_id, None)
+                    pending = None
+            if pending is None:
+                trigger = _fill_recut_trigger(body.message)
+                if trigger is not None:
+                    _own = _own_feature_names(_versions.latest_version(project_id))
+                    if trigger["noun"] not in _own:
+                        _versions.set_pending_offer(
+                            project_id,
+                            {
+                                "kind": "fill_recut",
+                                "noun": trigger["noun"],
+                                "size": trigger["size"],
+                            },
+                        )
+                        _sentence = _fill_recut_boundary_sentence(
+                            trigger["noun"], trigger["size"], trigger["move"]
+                        )
+                        logger.info(
+                            "chat for project %s: fill-and-recut trigger "
+                            "(noun=%r, size=%r, move=%r) — reply with the "
+                            "boundary sentence, offer recorded, no design run",
+                            project_id,
+                            trigger["noun"],
+                            trigger["size"],
+                            trigger["move"],
+                        )
+                        app.state.event_sources[project_id] = _answered_frames(_sentence)
+                        return {"status": "accepted"}
+
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
         # (the previous turn's design pass offered to confirm param P on
@@ -818,6 +1121,18 @@ def create_projects_router() -> APIRouter:
         # inflight flag is set here (synchronously, before the 202
         # response) and cleared in the SSE endpoint's ``finally`` when the
         # generator is exhausted (or an SSE client disconnects).
+        # Issue #332 (sub-issue 3) — the accepted fill-and-recut offer's
+        # explicit instruction rides the request text (the ``request``
+        # kwarg the adapter's prompt renders as the "Request:" line — the
+        # loop's own import-aware prompt (``_design_system`` with
+        # ``part_scale``) already teaches the fill-then-cut move from the
+        # settled import; the instruction makes the accepted turn's intent
+        # explicit to the model). ``user_message`` stays the user's own
+        # words (the transcript field) — only the request text gains the
+        # appended instruction.
+        _request_text = body.message
+        if _fill_recut_instruction is not None:
+            _request_text = f"{body.message}\n{_fill_recut_instruction}"
         try:
             events = run_design_loop_with_events(
                 app,
@@ -827,7 +1142,7 @@ def create_projects_router() -> APIRouter:
                 stated_axes=per_axis_stated,
                 chat_history=chat_history,
                 photo=photo,
-                request_text=body.message,
+                request_text=_request_text,
             )
         except Exception:
             # Design-loop setup failed BEFORE an event source was

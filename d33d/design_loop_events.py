@@ -1643,7 +1643,16 @@ async def run_design_loop_with_events(
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
-        "request": (user_message or request_text or "").strip() or request_text,
+        # Issue #332 (sub-issue 3): the caller's ``request_text`` wins when
+        # it DIFFERS from the message (the accepted fill-and-recut offer
+        # appends its explicit instruction to the request text while
+        # ``user_message`` stays the user's own words — the transcript
+        # field). Otherwise the message is authoritative (a blank
+        # ``user_message`` degrades to ``request_text``, as before).
+        "request": (
+            request_text if request_text and request_text != user_message else user_message
+        )
+        or request_text,
         "on_progress": _on_progress,
     }
 
