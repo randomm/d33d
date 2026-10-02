@@ -2078,3 +2078,117 @@ def test_import_subprocess_timeout_expired_rolls_back(app_with_projects):
     _assert_clean_rollback_state(state)
     # The retry succeeds (no stuck 409).
     assert retry.status_code == 201, f"retry failed: {retry.status_code} {retry.text}"
+
+
+# ---------------------------------------------------------------------------
+# resolve_part_paths: the shared part-wiring helper (issue #330)
+# ---------------------------------------------------------------------------
+
+
+def _conn_with_project_and_v1(
+    tmp_path: Path, *, part: tuple[str, str, str] | None = None
+):
+    """An in-memory connection with one project (git repo under tmp_path) and
+    one version row (the v1 row ``_v1_for_part`` reads). ``part`` is
+    (filename, format, unit_status) or ``None``."""
+    import d33d.db as db_mod
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params) VALUES (?, ?, ?)",
+        (pid, "v1", "{}"),
+    )
+    if part is not None:
+        filename, pformat, status = part
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=? WHERE id=?",
+            (filename, pformat, status, pid),
+        )
+    return conn
+
+
+def test_resolve_part_paths_settled_stl_wires_v1_path(tmp_path: Path):
+    """Settled STL part → (versions/{v1}/part.stl, git_repo_path)."""
+    from d33d.part_http import resolve_part_paths
+
+    conn = _conn_with_project_and_v1(
+        tmp_path, part=("part.stl", "stl", "settled")
+    )
+    row = conn.get_project(1)
+    v1 = conn.raw.execute(
+        "SELECT id FROM versions WHERE project_id=1 ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    part_path, repo_dir = resolve_part_paths(row, conn)
+    assert part_path == Path(row["git_repo_path"]) / "versions" / str(v1["id"]) / "part.stl"
+    assert repo_dir == Path(row["git_repo_path"])
+
+
+def test_resolve_part_paths_assumed_3mf_wires_v1_path(tmp_path: Path):
+    """Assumed 3MF part → (versions/{v1}/part.3mf, git_repo_path)."""
+    from d33d.part_http import resolve_part_paths
+
+    conn = _conn_with_project_and_v1(tmp_path, part=("part.3mf", "3mf", "assumed"))
+    row = conn.get_project(1)
+    v1 = conn.raw.execute(
+        "SELECT id FROM versions WHERE project_id=1 ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    part_path, repo_dir = resolve_part_paths(row, conn)
+    assert part_path == Path(row["git_repo_path"]) / "versions" / str(v1["id"]) / "part.3mf"
+    assert repo_dir == Path(row["git_repo_path"])
+
+
+def test_resolve_part_paths_unsettled_part_path_none_repo_set(tmp_path: Path):
+    """Unsettled part → (None, git_repo_path) — repo_dir is still set."""
+    from d33d.part_http import resolve_part_paths
+
+    conn = _conn_with_project_and_v1(
+        tmp_path, part=("part.stl", "stl", "unsettled")
+    )
+    row = conn.get_project(1)
+    part_path, repo_dir = resolve_part_paths(row, conn)
+    assert part_path is None
+    assert repo_dir == Path(row["git_repo_path"])
+
+
+def test_resolve_part_paths_no_part_row_none_repo_set(tmp_path: Path):
+    """Project with no part → (None, git_repo_path)."""
+    from d33d.part_http import resolve_part_paths
+
+    conn = _conn_with_project_and_v1(tmp_path)
+    row = conn.get_project(1)
+    part_path, repo_dir = resolve_part_paths(row, conn)
+    assert part_path is None
+    assert repo_dir == Path(row["git_repo_path"])
+
+
+def test_resolve_part_paths_no_row_both_none():
+    """Unreadable row (None) → (None, None)."""
+    from d33d.part_http import resolve_part_paths
+
+    part_path, repo_dir = resolve_part_paths(None, None)
+    assert part_path is None
+    assert repo_dir is None
+
+
+def test_resolve_part_paths_missing_v1_row_part_none_repo_set(tmp_path: Path):
+    """Settled part but no v1 version row → (None, git_repo_path)."""
+    import d33d.db as db_mod
+    from d33d.part_http import resolve_part_paths
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit_status=? "
+        "WHERE id=?",
+        ("part.stl", "stl", "settled", pid),
+    )
+    row = conn.get_project(pid)
+    part_path, repo_dir = resolve_part_paths(row, conn)
+    assert part_path is None
+    assert repo_dir == Path(row["git_repo_path"])

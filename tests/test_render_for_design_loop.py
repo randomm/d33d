@@ -1432,6 +1432,69 @@ def test_3mf_export_failure_maps_to_artifact_error_not_raise(
     assert calls == [], f"docker was invoked after a staging failure: {calls}"
 
 
+def test_over_face_cap_3mf_is_artifact_error_zero_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A committed part.3mf whose total face count (across all geometries,
+    before flattening) exceeds the import's ``MAX_PART_FACES`` cap is
+    rejected at render staging with ``artifact_error`` — ZERO docker calls
+    and nothing staged. The cap is the SAME named constant the upload's
+    ``parse_and_repair`` enforces (``MAX_PART_FACES`` is monkeypatched to a
+    small number; the box 3MF's 12 faces exceed it)."""
+    import d33d.part_mesh as pm
+
+    calls: list[list[str]] = []
+    staged: dict = {"stl": None}
+
+    def _explode(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        for i, tok in enumerate(argv):
+            if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host:ro"):
+                host = tok[: -len(":/host:ro")]
+                staged["stl"] = Path(host) / "src" / "part.stl"
+        if argv[:3] == ["docker", "volume", "create"]:
+            raise ValueError("staging must fail before any docker call")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _explode)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-330fc01")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+    monkeypatch.setattr(pm, "MAX_PART_FACES", 10)  # the box has 12 faces
+
+    repo = tmp_path / "repo"
+    (repo / "versions" / "1").mkdir(parents=True)
+    part = repo / "versions" / "1" / "part.3mf"
+    part.write_bytes(_make_3mf_box_bytes())
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part, repo_dir=repo
+    )
+    assert result.error_class == "artifact_error", (
+        f"over-cap 3MF must be artifact_error, got {result.error_class}"
+    )
+    assert "faces" in result.stderr, result.stderr
+    # The cap fired at staging — zero docker invocations of any kind.
+    assert calls == [], f"docker was invoked on an over-cap 3MF: {calls}"
+    assert staged["stl"] is None or not staged["stl"].is_file(), (
+        "an over-cap 3MF must not be staged"
+    )
+
+
+def test_over_face_cap_still_enforced_on_upload_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``parse_and_repair`` still enforces ``MAX_PART_FACES`` via the SAME
+    shared check (``_assert_face_cap``) the render staging uses — a 3MF
+    over the (monkeypatched) cap raises ``PartUploadError``."""
+    import d33d.part_mesh as pm
+
+    monkeypatch.setattr(pm, "MAX_PART_FACES", 10)  # the box has 12 faces
+    data = _make_3mf_box_bytes()
+    with pytest.raises(pm.PartUploadError, match="faces"):
+        pm.parse_and_repair(data, "3mf")
+
+
 # ---------------------------------------------------------------------------
 # Issue #330 round 2: TOCTOU (C1) + UnboundLocalError (I1) + size cap (I2)
 # ---------------------------------------------------------------------------
@@ -1562,10 +1625,12 @@ def test_staging_oserror_before_import_no_unboundlocalerror(
 def test_staging_size_cap_enforced_on_stl_branch(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """I2: a committed part.stl exceeding MAX_PART_BYTES (the #325 upload
-    bound, 50 MB) is rejected at render time with a clear error string —
-    not silently copied into the render volume."""
-    from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as cap
+    """I2: a committed part.stl exceeding the shared size cap
+    (``MAX_PART_UPLOAD_BYTES``, the #325 upload bound — the single named
+    constant the upload route and the render staging share) is rejected at
+    render time with a clear error string — not silently copied into the
+    render volume."""
+    from d33d.part_http import MAX_PART_UPLOAD_BYTES as cap
 
     repo = tmp_path / "repo"
     vdir = repo / "versions" / "1"
@@ -1578,7 +1643,7 @@ def test_staging_size_cap_enforced_on_stl_branch(
     src_dir.mkdir()
     result = rw._stage_part_stl(part, src_dir)
     assert result is not None, (
-        "staging must reject a part exceeding MAX_PART_BYTES at render time"
+        "staging must reject a part exceeding the size cap at render time"
     )
     assert "max" in result or "exceeds" in result or "bytes" in result, (
         f"error message should mention the size cap: {result}"
@@ -1593,7 +1658,7 @@ def test_staging_size_cap_enforced_on_3mf_branch(
     """I2: the size cap also applies to 3MF files (not just the 3MF
     zip-bomb guard on the unpacked content — a large 3MF file itself must
     be rejected before any conversion work begins)."""
-    from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as cap
+    from d33d.part_http import MAX_PART_UPLOAD_BYTES as cap
 
     repo = tmp_path / "repo"
     vdir = repo / "versions" / "1"
@@ -1605,7 +1670,7 @@ def test_staging_size_cap_enforced_on_3mf_branch(
     src_dir.mkdir()
     result = rw._stage_part_stl(part, src_dir)
     assert result is not None, (
-        "staging must reject a 3MF exceeding MAX_PART_BYTES at render time"
+        "staging must reject a 3MF exceeding the size cap at render time"
     )
     staged = src_dir / "part.stl"
     assert not staged.is_file()

@@ -1599,27 +1599,22 @@ def _build_production_design_loop():
         def _resolve_part_wiring(project_id: Any) -> tuple[Any, Any]:
             """The design-side part's ``part_path``/``repo_dir`` wiring
             (issue #330 sub-issue 2 — the production closure's half of the
-            ``render_for_design_loop`` part wiring). The project row is
-            resolved through the app's connection (the production loop is
-            app-scoped — its kwargs carry no pre-fetched project row); the
-            part is passed ONLY when the project has a part whose units are
-            settled or assumed (``part_unit_status`` in
-            ``{"assumed", "settled"}``): ``part_path`` is the committed
-            part file (``{git_repo_path}/versions/{v1}/{part.stl|part.3mf}``
-            — the v1 version row via ``_v1_for_part``; the stored name is
-            the ``part_format``'s fixed constant, never re-derived) and
-            ``repo_dir`` is the git repo path (the worker's containment
-            boundary). Unsettled units, no part, an unreadable row, or a
-            missing v1 row degrade to ``(None, None)`` — the render never
-            raises an unclassified error because of part resolution
-            (issue #330's binding operator decision); the unreadable-row
-            case logs one WARNING naming the project id only (never a
-            path). The closure does NOT scale the part (``part_scale`` is
-            sub-issue 3's domain, not the worker's).
+            ``render_for_design_loop`` part wiring). Row acquisition lives
+            here (the production loop is app-scoped — its kwargs carry no
+            pre-fetched project row, so the row is read through the app's
+            connection); the binding decision itself is the shared helper
+            :func:`d33d.part_http.resolve_part_paths`. An unreadable row
+            (no connection, or the read raises ``sqlite3.Error`` — a
+            closed/broken handle) degrades to ``part_path=None`` with one
+            WARNING naming the project id only (never a path); the render
+            never raises an unclassified error because of part resolution
+            (issue #330's binding operator decision). The closure does NOT
+            scale the part (``part_scale`` is sub-issue 3's domain, not
+            the worker's).
             """
             import sqlite3
 
-            from d33d.part_http import PART_3MF_FILENAME, PART_FILENAME, _v1_for_part
+            from d33d.part_http import resolve_part_paths
 
             conn = getattr(app_state, "conn", None)
             if conn is None:
@@ -1632,7 +1627,7 @@ def _build_production_design_loop():
                     "be read — the render proceeds part-less",
                     project_id,
                 )
-                return None, None
+                return resolve_part_paths(None, None)
             try:
                 row = conn.get_project(project_id)
             except sqlite3.Error:
@@ -1646,23 +1641,8 @@ def _build_production_design_loop():
                     "be read — the render proceeds part-less",
                     project_id,
                 )
-                return None, None
-            if not row or not row.get("part_filename"):
-                return None, None
-            if row.get("part_unit_status") not in ("assumed", "settled"):
-                return None, None
-            v1 = _v1_for_part(conn, project_id)
-            if v1 is None:
-                return None, None
-            name = (
-                PART_3MF_FILENAME
-                if row.get("part_format") == "3mf"
-                else PART_FILENAME
-            )
-            return (
-                Path(row["git_repo_path"]) / "versions" / str(v1["id"]) / name,
-                Path(row["git_repo_path"]),
-            )
+                return resolve_part_paths(None, None)
+            return resolve_part_paths(row, conn)
 
         def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
             part_path, repo_dir = _resolve_part_wiring(kwargs.get("project_id"))

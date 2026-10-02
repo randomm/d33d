@@ -872,7 +872,7 @@ def _finalize_loop_kwargs(
         effective_stated_dims,
         stated_axes_from_message,
     )
-    from d33d.part_http import PART_3MF_FILENAME, PART_FILENAME
+    from d33d.part_http import resolve_part_paths
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
@@ -888,21 +888,16 @@ def _finalize_loop_kwargs(
         #
         # The design-side part's ``part_path``/``repo_dir`` wiring (issue
         # #330 sub-issue 2 — the finalize seam's half of the
-        # ``render_for_design_loop`` part wiring): the project row is
-        # resolved through the app's existing connection; the part is
-        # passed ONLY when the project has a part whose units are settled
-        # or assumed (``part_unit_status`` in ``{"assumed", "settled"}``):
-        # ``part_path`` is the committed part file (``{git_repo_path}/
-        # versions/{v1}/{part.stl|part.3mf}`` — the v1 version row via
-        # ``_v1_for_part``; the stored name is the ``part_format``'s fixed
-        # constant, never re-derived) and ``repo_dir`` is the git repo
-        # path (the worker's containment boundary). An unreadable row,
-        # no part, or unsettled units degrade to ``part_path=None`` with
-        # one WARNING (project id only) for the unreadable-row case —
-        # the render never raises an unclassified error because of part
-        # resolution (issue #330's binding operator decision). The closure
-        # does NOT scale the part (``part_scale`` is sub-issue 3's domain,
-        # not the worker's).
+        # ``render_for_design_loop`` part wiring): row acquisition lives
+        # here (the row is read through the app's existing connection;
+        # an unreadable row degrades to ``part_path=None`` with one
+        # WARNING, project id only, never a path); the binding decision
+        # itself is the shared helper
+        # :func:`d33d.part_http.resolve_part_paths` (issue #330's binding
+        # operator decision — the render never raises an unclassified
+        # error because of part resolution). The closure does NOT scale
+        # the part (``part_scale`` is sub-issue 3's domain, not the
+        # worker's).
         import sqlite3
 
         try:
@@ -919,30 +914,7 @@ def _finalize_loop_kwargs(
                 project_id,
             )
             proj_row = None
-        part_path: Path | None = None
-        if (
-            proj_row is not None
-            and proj_row.get("part_filename")
-            and proj_row.get("part_unit_status") in ("assumed", "settled")
-            and proj_row.get("git_repo_path")
-        ):
-            from d33d.part_http import _v1_for_part
-
-            v1 = _v1_for_part(app.state.conn, project_id)
-            if v1 is not None:
-                name = (
-                    PART_3MF_FILENAME
-                    if proj_row.get("part_format") == "3mf"
-                    else PART_FILENAME
-                )
-                part_path = (
-                    Path(proj_row["git_repo_path"]) / "versions" / str(v1["id"]) / name
-                )
-        repo_dir = (
-            Path(proj_row["git_repo_path"])
-            if proj_row is not None and proj_row.get("git_repo_path")
-            else None
-        )
+        part_path, repo_dir = resolve_part_paths(proj_row, app.state.conn)
         return render_for_design_loop(
             scad_source,
             defines,

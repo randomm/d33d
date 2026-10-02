@@ -94,6 +94,44 @@ def part_public(row: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def resolve_part_paths(
+    row: dict[str, Any] | None, conn: db_mod.Connection | None
+) -> tuple[Path | None, Path | None]:
+    """The design-side part's ``(part_path, repo_dir)`` wiring (issue #330)
+    — the one decision both production render closures (``d33d.app``'s
+    ``_loop`` and ``d33d.versions_routes``'s finalize ``_render_fn``) used
+    to duplicate. ``row`` is the ALREADY-ACQUIRED project row (``None``
+    when the caller could not read it — the caller owns the acquisition and
+    the unreadable-row WARNING). The part is wired ONLY when the project
+    has a part whose units are settled or assumed (``part_unit_status`` in
+    ``{"assumed", "settled"}``): ``part_path`` is the committed part file
+    (``{git_repo_path}/versions/{v1}/{part.stl|part.3mf}`` — the v1 version
+    row via ``_v1_for_part``; the stored name is the ``part_format``'s fixed
+    constant, never re-derived) and ``repo_dir`` is the git repo path (the
+    worker's containment boundary). No part, unsettled units, a missing v1
+    row, or no repo path degrade ``part_path`` to ``None`` — ``repo_dir``
+    is still set (``None`` only for a missing row or repo path). The
+    caller does NOT scale the part (``part_scale`` is sub-issue 3's
+    domain, not the worker's).
+    """
+    repo_dir: Path | None = (
+        Path(row["git_repo_path"]) if row is not None and row.get("git_repo_path") else None
+    )
+    if (
+        row is None
+        or conn is None
+        or not row.get("part_filename")
+        or row.get("part_unit_status") not in ("assumed", "settled")
+        or not row.get("git_repo_path")
+    ):
+        return None, repo_dir
+    v1 = _v1_for_part(conn, row["id"])
+    if v1 is None:
+        return None, repo_dir
+    name = PART_3MF_FILENAME if row.get("part_format") == "3mf" else PART_FILENAME
+    return repo_dir / "versions" / str(v1["id"]) / name, repo_dir
+
+
 def _v1_for_part(conn: db_mod.Connection, project_id: int) -> dict[str, Any] | None:
     """The project's v1 (the import's) version row — the row the settle
     updates its mm bbox on, and the row the design-state route reads the
@@ -184,4 +222,5 @@ __all__ = [
     "_parse_multipart",
     "_v1_for_part",
     "part_public",
+    "resolve_part_paths",
 ]

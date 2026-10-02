@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from d33d.data_dir import default_data_dir, guard_real_data_path
-from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as MAX_PART_BYTES
+from d33d.part_http import MAX_PART_UPLOAD_BYTES
 from d33d.part_mesh import PartUploadError, load_part_geometry
 
 logger = logging.getLogger(__name__)
@@ -1495,21 +1495,12 @@ def _validate_part_path(
     if not resolved_part.is_relative_to(resolved_repo):
         return "part path is outside the project repo directory"
 
-    # Symlink component check: walk each path component of part_path
-    # BELOW repo_dir, on the UNRESOLVED part path (a component that is
-    # itself a symlink must not be resolved away before the check); any
-    # symlink whose target resolves outside repo_dir is rejected (a
-    # symlinked parent escaping the containment boundary). Components at
-    # or above repo_dir are the caller's own filesystem prefix (and on
-    # macOS the /var → /private/var symlink sits there) — they cannot
-    # contain the part, so they are not part of the containment boundary.
-    # Walk part_path BELOW repo_dir, using the RAW (unresolved) path for
-    # the components under the repo (a symlinked component under the repo
-    # must keep its raw location in the walk). Components at or above
-    # repo_dir's own depth are the caller's filesystem prefix — out of
-    # boundary (the resolved containment check above already pinned the
-    # final location; on macOS /var → /private/var sits there and is not
-    # part of the containment boundary).
+    # Symlink component check: walk each path component of part_path BELOW
+    # repo_dir on the RAW (unresolved) path; any symlink whose target
+    # resolves outside repo_dir is rejected (a symlinked parent escaping
+    # the containment boundary); components at/above repo_depth are the
+    # caller's filesystem prefix (on macOS /var → /private/var sits there)
+    # — out of boundary.
     repo_depth = len(repo_dir.parts)
     raw = part_path if part_path.is_absolute() else repo_dir / part_path
     for i in range(1, len(raw.parts)):
@@ -1544,10 +1535,11 @@ def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
       drift), written as STL bytes. The 3MF unit is never consulted here
       (unit scaling is sub-issue 3 of epic #283).
 
-    Both branches enforce a size cap (MAX_PART_BYTES) on the source file
-    before copying/converting (the #325 upload bound is also enforced at
-    render time — a hand-committed or re-replaced file under the repo is
-    not silently allowed to flow into the render volume).
+    Both branches enforce the shared size cap (``MAX_PART_UPLOAD_BYTES``,
+    the single named constant the upload route and this staging path
+    share) on the source file before copying/converting — a hand-committed
+    or re-replaced file under the repo is not silently allowed to flow into
+    the render volume.
 
     Returns an error message string on failure, or ``None`` on success.
     """
@@ -1563,9 +1555,9 @@ def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode):
             return f"part is not a regular file at staging time: {part_path.name}"
-        if st.st_size > MAX_PART_BYTES:
+        if st.st_size > MAX_PART_UPLOAD_BYTES:
             return (
-                f"part file is {st.st_size} bytes; max {MAX_PART_BYTES} "
+                f"part file is {st.st_size} bytes; max {MAX_PART_UPLOAD_BYTES} "
                 f"(the #325 upload bound, enforced at render time)"
             )
         data = os.read(fd, st.st_size) if st.st_size > 0 else b""
