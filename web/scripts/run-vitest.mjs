@@ -27,6 +27,7 @@
 //   when interrupted (SIGTERM → 143, SIGINT → 130, SIGHUP → 129).
 
 import { execFileSync, spawn } from "node:child_process";
+import { confirmGroupGone } from "./kill-confirm.mjs";
 import { resolveCommand } from "./resolve-command.mjs";
 
 const GRACE_MS = 3000;
@@ -44,13 +45,15 @@ const forwardedArgs = process.argv.slice(2);
 
 // ---------------------------------------------------------------------------
 // Group-death probing (used on the child's exit path to confirm the group is
-// gone before the wrapper exits).
+// gone before the wrapper exits). The decision logic itself is the pure
+// `confirmGroupGone` in ./kill-confirm.mjs; the wrappers below are the
+// real-process bindings.
 // ---------------------------------------------------------------------------
 
 // ESRCH means the process (or group) is already gone — exactly what we
 // want on the kill path. EPERM can be transient while the group is
-// mid-teardown; swallow it too so the confirmation probe (killGroupAndConfirm)
-// always runs and makes the actual decision. Any other error propagates.
+// mid-teardown; swallow it too so the confirmation probe always runs and
+// makes the actual decision. Any other error propagates.
 function killIgnoreESRCH(target, signal) {
   try {
     process.kill(target, signal);
@@ -100,10 +103,10 @@ const waitBuf = new Int32Array(new SharedArrayBuffer(4));
 /**
  * Kill the child group, then confirm it is actually gone before returning.
  * EPERM on the kill is treated as "the group is mid-teardown"; the probe
- * below decides. If the group has been unprobeable (EPERM and no `ps`)
- * for more than 2 s, the message is written to stderr and the wrapper
- * returns so the caller exits with the child's code on the normal path
- * (or 128 + signal on the signal path) — the watchdog remains the backstop.
+ * below decides. If the group is unprobeable (EPERM and no `ps`) past the
+ * grace, `confirmGroupGone` logs and returns false — the wrapper then
+ * exits with the child's code (or 128 + signal on the signal path) and
+ * the watchdog remains the backstop. The confirmation never throws.
  */
 function killGroupAndConfirm(pid) {
   // Kill the child directly first: the child can also be a member of the
@@ -114,25 +117,16 @@ function killGroupAndConfirm(pid) {
   killIgnoreESRCH(pid, "SIGTERM");
   killIgnoreESRCH(-pid, "SIGTERM");
 
-  const start = Date.now();
-  for (;;) {
-    if (groupProbeESRCH(pid)) {
-      return;
-    }
-    if (Date.now() - start > 2000) {
-      const empty = psGroupEmpty(pid);
-      if (empty === true) {
-        return;
-      }
-      console.error(
-        `d33d: child group ${pid} unprobeable after 2 s (kill -pgid EPERM and ` +
-          (empty === null ? "ps unavailable" : "ps still lists the group") +
-          "; continuing to exit, the parent watchdog remains the backstop.",
-      );
-      return;
-    }
-    Atomics.wait(waitBuf, 0, 0, 50);
-  }
+  confirmGroupGone(
+    {
+      probe: () => groupProbeESRCH(pid),
+      ps: () => psGroupEmpty(pid),
+      now: Date.now,
+      sleep: (ms) => Atomics.wait(waitBuf, 0, 0, ms),
+      log: (line) => console.error(`d33d: child group ${pid} unprobeable — ${line}`),
+    },
+    { graceMs: 2000, tickMs: 50 },
+  );
 }
 
 const child = spawn(baseCommand[0], [...baseCommand.slice(1), ...forwardedArgs], {
@@ -185,11 +179,16 @@ function onSignal(exitCode) {
   // the child survives. A kill that throws (e.g. EPERM while the group is
   // mid-teardown) must not drop the timer: log it and let the escalation
   // retry on the next tick.
+  // If this kill throws (e.g. EPERM while the group is mid-teardown) the
+  // escalation below still runs: it re-issues the group kill as SIGKILL,
+  // logs the failure, and exits with the signal's code regardless. The
+  // kill can never orphan the group: the SIGKILL escalation is independent
+  // of the SIGTERM's success, and the parent watchdog is the final backstop.
   try {
     killGroup("SIGTERM");
   } catch (err) {
     console.error(
-      "d33d: wrapper group kill (SIGTERM) failed; will retry on the grace tick: " +
+      "d33d: wrapper group kill (SIGTERM) failed; SIGKILL escalation still armed: " +
         (err && err.message ? err.message : String(err)),
     );
   }

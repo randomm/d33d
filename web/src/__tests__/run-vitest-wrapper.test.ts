@@ -350,6 +350,105 @@ test("watchdog: startWatchdog retries the kill when it throws, then clears the t
   }
 }, 10000);
 
+// ---------------------------------------------------------------------------
+// killGroupAndConfirm direct tests (pure — no real process group)
+// ---------------------------------------------------------------------------
+
+test("confirmGroupGone: the unprobeable branch never throws, logs, and the wrapper exit code is the child's code on the normal path", async () => {
+  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+
+  // Injected clock: the group stays unprobeable (probe -> false) past the
+  // grace; ps reports it still lists the group. The confirmation must log
+  // (not throw, not hide) and return "not confirmed".
+  const logs: string[] = [];
+  let nowMs = 0;
+  const deps = {
+    probe: () => false,
+    ps: () => false,
+    now: () => nowMs,
+    sleep: (ms: number) => {
+      nowMs += ms;
+    },
+    log: (line: string) => logs.push(line),
+  };
+
+  let result: unknown;
+  expect(() => {
+    result = confirmGroupGone(deps, { graceMs: 2000, tickMs: 50 });
+  }).not.toThrow();
+
+  expect(result).toBe(false); // not confirmed
+  expect(logs.length).toBe(1);
+  expect(logs[0]).toContain("still lists the group");
+  expect(logs[0]).toContain("backstop");
+
+  // The wrapper's exit code on the normal path is `code ?? 0` — the child's
+  // own code passes through unchanged regardless of whether confirmation
+  // succeeded. This is covered by the "failing fixture: the child's exit
+  // code passes through" test (exit 3) below, which drives the real
+  // confirmGroupGone path through the production wrapper against a fixture.
+  // No separate pure-function exit-code test is needed: the exit-code logic
+  // is `process.exit(code ?? 0)` in run-vitest.mjs, not part of the
+  // confirmGroupGone pure function.
+});
+
+test("confirmGroupGone: the unprobeable branch logs (ps unavailable) and the wrapper exit code is 128 + signo on the signal path", async () => {
+  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+
+  const logs: string[] = [];
+  let nowMs = 0;
+  const deps = {
+    probe: () => false,
+    ps: () => null, // ps unavailable
+    now: () => nowMs,
+    sleep: (ms: number) => {
+      nowMs += ms;
+    },
+    log: (line: string) => logs.push(line),
+  };
+
+  expect(() => confirmGroupGone(deps, { graceMs: 2000, tickMs: 50 })).not.toThrow();
+  expect(logs.length).toBe(1);
+  expect(logs[0]).toContain("ps unavailable");
+  expect(logs[0]).toContain("backstop");
+
+  // The wrapper's exit code on the signal path is `interruptCode` (143/
+  // 130/129) — the interruption code always wins, never the child's own
+  // code. This is covered by the SIGTERM/SIGINT/SIGHUP fixture tests
+  // below, which drive the production wrapper end-to-end.
+});
+
+test("confirmGroupGone: the probeable branch returns confirmed without logging", async () => {
+  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+
+  const logs: string[] = [];
+  // Probe immediately confirms the group is gone — no ps, no log, no throw.
+  const confirmed = confirmGroupGone(
+    { probe: () => true, ps: () => null, now: () => 0, sleep: () => {}, log: (l) => logs.push(l) },
+    { graceMs: 2000, tickMs: 50 },
+  );
+  expect(confirmed).toBe(true);
+  expect(logs).toEqual([]);
+
+  // And the ps-fallback path: probe never ESRCHes, past the grace ps says
+  // the group is empty → confirmed, no log.
+  let psT = 0;
+  const confirmedViaPs = confirmGroupGone(
+    {
+      probe: () => false,
+      ps: () => true,
+      now: () => psT,
+      sleep: (ms: number) => {
+        psT += ms;
+      },
+      log: (l: string) => logs.push(l),
+    },
+    { graceMs: 2000, tickMs: 50 },
+  );
+  expect(confirmedViaPs).toBe(true);
+  expect(logs).toEqual([]);
+});
+
 test("watchdog: checkParent kills the group on ESRCH (injected probe)", async () => {
   const { checkParent } = await loadWatchdog();
   const signals: string[] = [];
