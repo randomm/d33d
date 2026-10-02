@@ -485,6 +485,14 @@ export interface RegionEditRequest {
   point: RegionEditPoint;
   /** The user's free-text edit instruction for the selected region. */
   instruction: string;
+  /** The pick's mm hit point [x, y, z] (issue #338) — sent for picks on
+   *  imported geometry so the design loop's grounding text names the exact
+   *  millimetre location. Optional; all values must be finite. */
+  hit_point_mm?: [number, number, number];
+  /** The world-space unit face normal [nx, ny, nz] (issue #338) — the
+   *  axis the fill-and-recut offer uses. Optional; must be unit length
+   *  within 1±0.01. */
+  face_normal?: [number, number, number];
 }
 
 /**

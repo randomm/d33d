@@ -660,14 +660,91 @@ describe('ModelViewer module', () => {
 // Single-click region picking (#98)
 // ---------------------------------------------------------------------------
 
+/** A single raycast hit for the resolvePointPick unit tests. `object` is
+ *  a three.js-like object (name + the world matrix the normal is
+ *  transformed by); `point` is the mm hit point; `face.normal` is a
+ *  Vector3-like in local space (null for an edge-only hit). */
+interface FakeHit {
+  object: {
+    name: string;
+    matrixWorld: { normal: (v: { x: number; y: number; z: number }) => { x: number; y: number; z: number } };
+  };
+  point: { x: number; y: number; z: number };
+  face: { normal: import('three').Vector3 | null } | null;
+}
+
+/** The identity world matrix — a unit normal stays a unit normal. The
+ *  pick CONTRACT tests exercise the normal's world-space transform, so a
+ *  fake mesh that applies no rotation keeps the normal as-is (the real
+ *  Z-up → Y-up turn is an orthogonal rotation that preserves length, which
+ *  is the property `normalize()` + the degenerate guard depend on). */
+function identityMatrixWorld() {
+  return {
+    normal(v: { x: number; y: number; z: number }) {
+      return { x: v.x, y: v.y, z: v.z };
+    },
+  };
+}
+
+/** Build a Vector3-like with clone/transformDirection/normalize from a
+ *  plain coordinate. `transformDirection` applies the mesh's world-matrix
+ *  normal (the identity in these tests), then `normalize` scales to unit
+ *  length (leaving zero/NaN as-is so the degenerate guard is exercised). */
+function makeVec(
+  x: number,
+  y: number,
+  z: number,
+  matrixWorld: FakeHit["object"]["matrixWorld"],
+) {
+  let cur = { x, y, z };
+  return {
+    clone() {
+      return this;
+    },
+    transformDirection(_m: unknown) {
+      cur = matrixWorld.normal(cur);
+      return this;
+    },
+    normalize() {
+      const len = Math.hypot(cur.x, cur.y, cur.z);
+      if (len > 0) cur = { x: cur.x / len, y: cur.y / len, z: cur.z / len };
+      return this;
+    },
+    get x() {
+      return cur.x;
+    },
+    get y() {
+      return cur.y;
+    },
+    get z() {
+      return cur.z;
+    },
+  } as unknown as import('three').Vector3;
+}
+
+function makeHit(
+  overrides: Partial<{
+    name: string;
+    point: { x: number; y: number; z: number };
+    faceNormal: { x: number; y: number; z: number } | null;
+    matrixWorld: FakeHit["object"]["matrixWorld"];
+  }> = {},
+): FakeHit {
+  const m = overrides.matrixWorld ?? identityMatrixWorld();
+  const fn = overrides.faceNormal;
+  return {
+    object: { name: overrides.name ?? "", matrixWorld: m },
+    point: overrides.point ?? { x: 0, y: 0, z: 0 },
+    face: overrides.faceNormal === undefined ? { normal: null } : { normal: fn ? makeVec(fn.x, fn.y, fn.z, m) : null },
+  };
+}
+
 /** A minimal fake THREE.Raycaster/Camera pair for resolvePointPick
  *  unit tests — these test the pick CONTRACT (hit only on geometry,
  *  nearest-hit module bonus, no-.colour structural), not the three.js
  *  internals (which are exercised by the mocked module above for the
  *  loader/disposal tests). */
-function makeFakeRaycaster(
-  hits: { object: { name: string } }[],
-) {
+function makeFakeRaycaster(hits: FakeHit[]) {
   return {
     setFromCamera: vi.fn(),
     intersectObjects: vi.fn(() => hits),
@@ -691,7 +768,7 @@ describe('resolvePointPick', () => {
   });
 
   it('hits unnamed geometry (a streamed STL) with a null module bonus — selection is never blocked by an absent name', () => {
-    const raycaster = makeFakeRaycaster([{ object: { name: '' } }]);
+    const raycaster = makeFakeRaycaster([makeHit({ name: '' })]);
     const camera = {} as unknown as import('three').Camera;
     const result = resolvePointPick(
       { x: 100, y: 100 },
@@ -709,8 +786,8 @@ describe('resolvePointPick', () => {
     // Two overlapping modules; nearest-first order means only the first
     // element counts — the occluded one is invisible at that pixel.
     const raycaster = makeFakeRaycaster([
-      { object: { name: 'curl_4' } }, // nearest
-      { object: { name: 'ear_wire' } }, // occluded behind curl_4
+      makeHit({ name: 'curl_4' }), // nearest
+      makeHit({ name: 'ear_wire' }), // occluded behind curl_4
     ]);
     const camera = {} as unknown as import('three').Camera;
     const result = resolvePointPick(
@@ -726,7 +803,7 @@ describe('resolvePointPick', () => {
   });
 
   it('casts through the live camera/viewport: setFromCamera is called with the NDC-converted point', () => {
-    const raycaster = makeFakeRaycaster([{ object: { name: '' } }]);
+    const raycaster = makeFakeRaycaster([makeHit({ name: '' })]);
     const camera = {} as unknown as import('three').Camera;
     resolvePointPick(
       { x: 50, y: 50 },
@@ -771,8 +848,8 @@ describe('resolvePointPick', () => {
     const pointA = { x: FRACTION.x * sizeA.width, y: FRACTION.y * sizeA.height };
     const pointB = { x: FRACTION.x * sizeB.width, y: FRACTION.y * sizeB.height };
 
-    const raycasterA = makeFakeRaycaster([{ object: { name: 'module_a' } }]);
-    const raycasterB = makeFakeRaycaster([{ object: { name: 'module_b' } }]);
+    const raycasterA = makeFakeRaycaster([makeHit({ name: 'module_a' })]);
+    const raycasterB = makeFakeRaycaster([makeHit({ name: 'module_b' })]);
 
     resolvePointPick(pointA, sizeA.width, sizeA.height, camera, raycasterA as unknown as import('three').Raycaster, {} as unknown as import('three').Object3D);
     resolvePointPick(pointB, sizeB.width, sizeB.height, camera, raycasterB as unknown as import('three').Raycaster, {} as unknown as import('three').Object3D);
@@ -804,5 +881,75 @@ describe('resolvePointPick', () => {
     const fnSource = source.slice(fnStart, fnEnd === -1 ? undefined : fnEnd);
     expect(fnSource).not.toMatch(/\.color\b/);
     expect(fnSource).toContain('.name');
+  });
+
+  it('returns the mm hit point for a face hit (issue #338)', () => {
+    const raycaster = makeFakeRaycaster([makeHit({ point: { x: 12, y: 0, z: 20 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.hitPointMm).toEqual({ x: 12, y: 0, z: 20 });
+  });
+
+  it('returns the world-space unit face normal for a face hit (issue #338)', () => {
+    // A non-unit local normal is transformed to world space and
+    // normalized — the contract is a UNIT world-space normal, so a scaled
+    // local normal comes back at unit length.
+    const raycaster = makeFakeRaycaster([makeHit({ faceNormal: { x: 0, y: 0, z: 3 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.faceNormal).toEqual({ x: 0, y: 0, z: 1 });
+  });
+
+  it('returns a null normal (never fabricated) for an edge-only hit (issue #338)', () => {
+    // An edge-only hit has a `face` of null — no face normal exists, so the
+    // result carries a null normal rather than a guessed axis.
+    const raycaster = makeFakeRaycaster([makeHit({ point: { x: 5, y: 5, z: 5 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.hit).toBe(true);
+    expect(result.faceNormal).toBeNull();
+  });
+
+  it('returns a null normal for a degenerate (zero) face normal — never a guessed axis (issue #338)', () => {
+    // A zero-length face normal is degenerate: normalize() leaves it zero,
+    // and the guard reports null instead of fabricating a unit vector.
+    const raycaster = makeFakeRaycaster([makeHit({ faceNormal: { x: 0, y: 0, z: 0 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.faceNormal).toBeNull();
+  });
+
+  it('returns null hit point and null normal when the click misses all geometry (issue #338)', () => {
+    const raycaster = makeFakeRaycaster([]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 10, y: 10 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.hit).toBe(false);
+    expect(result.hitPointMm).toBeNull();
+    expect(result.faceNormal).toBeNull();
   });
 });

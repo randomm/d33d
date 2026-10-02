@@ -144,6 +144,14 @@ interface PendingRegionSelection {
   viewId: RegionEditViewId;
   moduleIds: string[];
   point: { x: number; y: number };
+  /** The pick's mm hit point (issue #338) — sent to the region-edit wire
+   *  when the pick landed on imported geometry. */
+  hitPointMm?: { x: number; y: number; z: number } | null;
+  /** The world-space unit face normal (issue #338) — sent to the wire as
+   *  the fill-and-recut offer's axis. */
+  faceNormal?: { x: number; y: number; z: number } | null;
+  /** The pick landed on an imported part (issue #338). */
+  onImportedPart?: boolean;
 }
 
 interface AppProps {
@@ -283,6 +291,14 @@ export default function App({ client }: AppProps) {
   // envelope; the settle response body is never authoritative (D8's
   // refetch-then-render contract). Null until the design-state resolves.
   const [designStatePart, setDesignStatePart] = useState<PartReportInfo | null>(null);
+  // Mirrors `designStatePart` in a ref so the stable-deps `handlePointPick`
+  // callback can read the latest part without re-binding (issue #338: the
+  // pick handler needs to know whether the pick landed on an imported part
+  // to decide whether to carry the mm hit point + face normal to the wire).
+  const designStatePartRef = useRef<PartReportInfo | null>(null);
+  useEffect(() => {
+    designStatePartRef.current = designStatePart;
+  }, [designStatePart]);
   // Issue #316: the design-state envelope's `history_missing` flag (true
   // when the project's repo directory is absent — the same predicate as
   // `storage.repo_present`). `true` alone (a failed project-GET storage
@@ -726,12 +742,20 @@ export default function App({ client }: AppProps) {
         // instruction. The pending selection is attached to whichever chat
         // message the user sends next (see handleSendMessage), or via the
         // bar's own Apply/Enter path.
+        // Issue #338: for picks on imported geometry, carry the mm hit point
+        // and world-space face normal so the region-edit wire sends them
+        // (the design-loop grounding text names the exact location; the
+        // face normal rides as the fill-and-recut offer's axis).
+        const onImportedPart = designStatePartRef.current !== null;
         pendingSelectionGenerationRef.current += 1;
         setPendingSelection({
           thumbnail: `data:image/png;base64,${markedPngBase64}`,
           viewId: "front",
           moduleIds,
           point: event.point,
+          hitPointMm: pick.hitPointMm,
+          faceNormal: pick.faceNormal,
+          onImportedPart,
         });
       } catch (e) {
         const detail = e instanceof Error ? e.message : "unknown error";
@@ -970,6 +994,33 @@ export default function App({ client }: AppProps) {
             marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
             point: selectionToAttach.point,
             instruction: trimmed,
+            // Issue #338: for picks on imported geometry, carry the mm hit
+            // point and the world-space face normal (the design-loop
+            // grounding text + the fill-and-recut offer's axis). Omitted
+            // when the pick did not land on a usable face (normal null) or
+            // no mm point was resolved.
+            ...(selectionToAttach.onImportedPart
+              ? {
+                  ...(selectionToAttach.hitPointMm
+                    ? {
+                        hit_point_mm: [
+                          selectionToAttach.hitPointMm.x,
+                          selectionToAttach.hitPointMm.y,
+                          selectionToAttach.hitPointMm.z,
+                        ] as [number, number, number],
+                      }
+                    : {}),
+                  ...(selectionToAttach.faceNormal
+                    ? {
+                        face_normal: [
+                          selectionToAttach.faceNormal.x,
+                          selectionToAttach.faceNormal.y,
+                          selectionToAttach.faceNormal.z,
+                        ] as [number, number, number],
+                      }
+                    : {}),
+                }
+              : {}),
           })
           .then(() => {
             // 202 Accepted means the request was validated and the design

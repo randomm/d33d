@@ -23,6 +23,12 @@ export interface RegionEditBarSelection {
   viewId: RegionEditViewId;
   moduleIds: string[];
   point: { x: number; y: number };
+  /** The pick landed on an imported part (issue #338) — drives the
+   *  "on the part you brought" chip. */
+  onImportedPart?: boolean;
+  /** The millimetre-space hit point under the click (issue #338), shown in
+   *  the mono face as "x 12.0 · y 0.0 · z 20.0 mm" when present. */
+  hitPointMm?: { x: number; y: number; z: number } | null;
 }
 
 interface RegionEditBarProps {
@@ -236,6 +242,36 @@ export function RegionEditBar({
         {/* The resolved module chip + the pose hint. The module name
             is in mono (the raw detail); the sentence is in the UI face. */}
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+          {selection.onImportedPart && (
+            <span
+              data-testid="region-edit-imported-chip"
+              style={{
+                fontSize: 11,
+                color: "var(--color-fg-2)",
+                padding: "2px 6px",
+                background: "rgba(255,255,255,0.08)",
+                borderRadius: 4,
+                display: "inline-block",
+                width: "fit-content",
+              }}
+            >
+              {copy.region.onImportedPart}
+            </span>
+          )}
+          {selection.onImportedPart &&
+            selection.hitPointMm !== null &&
+            selection.hitPointMm !== undefined && (
+            <span
+              data-testid="region-edit-hitpoint"
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                color: "var(--color-fg-2)",
+              }}
+            >
+              {`x ${selection.hitPointMm.x.toFixed(1)} · y ${selection.hitPointMm.y.toFixed(1)} · z ${selection.hitPointMm.z.toFixed(1)} mm`}
+            </span>
+          )}
           {moduleChip !== null && (
             <span
               data-testid="region-edit-module-chip"

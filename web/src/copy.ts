@@ -415,6 +415,10 @@ export const region = {
   missedGeometry: "Click on the model to point at a part.",
   notLoaded: "Model not loaded yet — click again once it appears.",
   pending: "A point is selected. Finish in the bar on the model, or press Esc.",
+  /** The chip shown when the pick landed on an imported part (issue #338):
+   *  the point is on the part the user brought, not on a generated module.
+   *  The mm hit point that follows is in the mono face. */
+  onImportedPart: "on the part you brought",
 } as const;
 
 export const history = {
