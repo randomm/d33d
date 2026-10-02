@@ -1391,6 +1391,47 @@ def test_corrupt_3mf_is_artifact_error_zero_docker(
     assert left_over["stl"] is None or not left_over["stl"].is_file()
 
 
+def test_3mf_export_failure_maps_to_artifact_error_not_raise(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 3MF that LOADS fine but whose export fails maps to
+    artifact_error (never a raise into the design loop) and never fires a
+    subprocess call. Regression for the #330 noqa sweep: the staging
+    failure path must keep working once the broad catch is replaced with
+    the specific exception set (PartUploadError / OSError / ValueError —
+    trimesh raises ValueError for an unknown exporter)."""
+    import trimesh as _trimesh
+
+    repo = tmp_path / "repo"
+    (repo / "versions" / "1").mkdir(parents=True)
+    part = repo / "versions" / "1" / "part.3mf"
+    part.write_bytes(_make_3mf_box_bytes())
+
+    def _explode(self, file_obj, *a, **kw) -> None:
+        raise ValueError("stl exporter not available!")
+
+    monkeypatch.setattr(_trimesh.Trimesh, "export", _explode)
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part, repo_dir=repo
+    )
+    assert result.error_class == "artifact_error", (
+        f"export failure must be artifact_error, got {result.error_class}"
+    )
+    assert "3MF to STL conversion failed" in result.stderr, result.stderr
+    # Staging precedes EVERY docker call — zero subprocess invocations.
+    assert calls == [], f"docker was invoked after a staging failure: {calls}"
+
+
 # ---------------------------------------------------------------------------
 # Issue #330: cleanup (#280) mirrors with a part present.
 # ---------------------------------------------------------------------------

@@ -3375,6 +3375,119 @@ def test_finalize_closure_passes_part_none_when_no_part(
     assert spy_calls["repo_dir"] is not None
 
 
+def test_finalize_closure_unreadable_row_degrades_to_none_and_warns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #330 sub-issue 2 wiring) An unreadable project row (the row
+    read raises sqlite3.Error — a closed/broken handle) degrades to
+    part_path=None + repo_dir=None, logs ONE WARNING naming the project id
+    (never a path), and never raises into the loop.
+
+    Regression for the #330 noqa sweep: the unreadable-row guard catches
+    ``sqlite3.Error`` (specific) rather than a bare ``Exception`` — the
+    degraded path still fires for the real closed-handle case.
+    """
+    import sqlite3 as _sqlite3
+
+    import d33d.render_worker as rw_mod
+    import d33d.versions_routes as routes_mod
+
+    spy_calls: dict = {}
+    canned = _default_render()
+
+    def _spy(
+        scad_source: str,
+        defines: dict,
+        renders_dir=None,
+        on_progress=None,
+        project_id=None,
+        part_path=None,
+        repo_dir=None,
+    ) -> RenderResult:
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+    # The OUTER _finalize_loop_kwargs calls both app.state.versions.get_project
+    # and app.state.conn.get_project (via carried_stated_set). Those must
+    # succeed. The INNER render_fn closure's wiring calls
+    # app.state.versions.get_project AGAIN (for part resolution) — that's
+    # where the broken handle raises. Simulate: versions service returns a
+    # valid row on the first call (outer path), then raises on the second
+    # call (inner wiring). The conn is fine (outer path only).
+    call_count = {"n": 0}
+
+    class _FlakyVersionsSvc:
+        def get_project(self, project_id: int):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # First call (outer path): return a valid row with no part
+                return {"id": project_id, "current_version": None, "part_filename": None}
+            # Second call (inner wiring): broken handle
+            raise _sqlite3.OperationalError("closed")
+
+        def latest_version(self, project_id: int):
+            return None
+
+    class _State:
+        pass
+
+    state = _State()
+    state.db_path = str(tmp_path / "d33d.sqlite3")
+    state.versions = _FlakyVersionsSvc()
+    state.catalogue = None
+
+    class _GoodConn:
+        def get_project(self, project_id):
+            return {"id": project_id, "carried_stated_dims": None}
+
+    state.conn = _GoodConn()
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    body = routes_mod.FinalizeBody(params=None, name=None, message="make a part")
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 7, body)
+    render_fn = kwargs["render_fn"]
+    result = render_fn("W = 20; cube([W]);", {"W": "20"})
+    assert result is canned  # the closure did NOT raise
+    assert spy_calls["part_path"] is None
+    assert spy_calls["repo_dir"] is None
+
+    # Exactly one WARNING from the part-wiring path, naming the project id
+    # and never a path.
+    warns = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "could not" in r.getMessage()
+    ]
+    assert len(warns) == 1, f"expected 1 unreadable-row WARNING, got: {[r.getMessage() for r in caplog.records]}"
+    msg = warns[0].getMessage()
+    assert "7" in msg  # the project id is named
+    assert "/" not in msg  # never a path
+
+
+def _spy_render(monkeypatch: pytest.MonkeyPatch, spy_calls: dict, canned: RenderResult) -> None:
+    import d33d.render_worker as rw_mod
+
+    def _spy(
+        scad_source: str,
+        defines: dict,
+        renders_dir=None,
+        on_progress=None,
+        project_id=None,
+        part_path=None,
+        repo_dir=None,
+    ) -> RenderResult:
+        spy_calls["part_path"] = part_path
+        spy_calls["repo_dir"] = repo_dir
+        return canned
+
+    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+
+
 def test_sse_wide_catch_emits_terminal_error():
     """The SSE stream's broad catch emits a terminal error frame when the
     event source raises an unhandled exception (e.g. KeyError)."""

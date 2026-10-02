@@ -1549,14 +1549,21 @@ def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
         # 3MF → STL conversion via the shared guarded loader (raises
         # PartUploadError on any failure — caught below and mapped to an
         # artifact_error string; never a PartUploadError leak).
-        from d33d.part_mesh import load_part_geometry
+        from d33d.part_mesh import PartUploadError, load_part_geometry
 
         mesh = load_part_geometry(part_path.read_bytes(), "3mf")
         if len(mesh.faces) == 0:
             return "3MF mesh is empty"
-        mesh.export(str(target), file_type="stl")
+        # ``ValueError`` (trimesh's "exporter not available") and
+        # ``OSError`` (a vanished staging dir) round out the concrete set:
+        # the guarded loader raises PartUploadError, trimesh export raises
+        # ValueError on an unknown exporter, file I/O raises OSError.
+        try:
+            mesh.export(str(target), file_type="stl")
+        except (PartUploadError, ValueError, OSError) as e:
+            return f"3MF to STL conversion failed: {e}"
         return None
-    except Exception as e:  # noqa: BLE001 — any load/export failure is an artifact_error, never a raise into the loop
+    except (OSError, ValueError, PartUploadError) as e:
         return f"3MF to STL conversion failed: {e}"
 
 

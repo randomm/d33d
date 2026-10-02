@@ -903,9 +903,16 @@ def _finalize_loop_kwargs(
         # resolution (issue #330's binding operator decision). The closure
         # does NOT scale the part (``part_scale`` is sub-issue 3's domain,
         # not the worker's).
+        import sqlite3
+
         try:
             proj_row = app.state.versions.get_project(project_id)
-        except Exception:  # noqa: BLE001 — an unreadable row must degrade to no part, never raise into the loop
+        except sqlite3.Error:
+            # A closed/broken handle is an unreadable row — degrade to no
+            # part (the render proceeds part-less); never raise into the
+            # design loop. (``TypeError``/``AttributeError`` — a
+            # non-Connection object where one was expected — is a wiring
+            # bug, not an unreadable row: let it surface.)
             logger.warning(
                 "design loop for project %s: the project row could not "
                 "be read — the render proceeds part-less",

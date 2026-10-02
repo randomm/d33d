@@ -1617,6 +1617,8 @@ def _build_production_design_loop():
             path). The closure does NOT scale the part (``part_scale`` is
             sub-issue 3's domain, not the worker's).
             """
+            import sqlite3
+
             from d33d.part_http import PART_3MF_FILENAME, PART_FILENAME, _v1_for_part
 
             conn = getattr(app_state, "conn", None)
@@ -1624,7 +1626,12 @@ def _build_production_design_loop():
                 return None, None
             try:
                 row = conn.get_project(project_id)
-            except Exception:  # noqa: BLE001 — an unreadable row must degrade to no part, never raise into the loop
+            except sqlite3.Error:
+                # A closed/broken handle is an unreadable row — degrade to no
+                # part (the render proceeds part-less); never raise into the
+                # design loop. (``TypeError``/``AttributeError`` — a
+                # non-Connection object where a Connection was expected —
+                # is a wiring bug, not an unreadable row: let it surface.)
                 logger.warning(
                     "design loop for project %s: the project row could not "
                     "be read — the render proceeds part-less",
