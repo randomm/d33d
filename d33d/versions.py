@@ -1076,9 +1076,13 @@ class VersionService:
             return None
         version_id = doc.get("version_id")
         param = doc.get("param")
-        if isinstance(version_id, int) and not isinstance(version_id, bool):
-            if isinstance(param, str) and param:
-                return {"version_id": version_id, "param": param}
+        if (
+            isinstance(version_id, int)
+            and not isinstance(version_id, bool)
+            and isinstance(param, str)
+            and param
+        ):
+            return {"version_id": version_id, "param": param}
         # The issue #332 fill-and-recut variant (the ``kind`` discriminator
         # keeps the #250 param-offer readers from reading a fill-recut row
         # as a param offer — a fill-recut doc has no ``param``): validated

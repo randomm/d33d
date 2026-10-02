@@ -1317,7 +1317,7 @@ def test_fill_recut_taller_is_add_not_boundary(app_with_projects):
                     break
         return r2.status_code, pid, frames
 
-    status, pid, frames = _run_async(app_with_projects, _call)
+    status, pid, _ = _run_async(app_with_projects, _call)
     assert status == 202, status
     svc = _svc(app_with_projects)
     assert svc.get_pending_offer(pid) is None, "taller is an add, not a boundary"
@@ -1345,7 +1345,7 @@ def test_fill_recut_no_part_not_triggered(app_with_projects):
                     break
         return r2.status_code, pid, frames
 
-    status, pid, frames = _run_async(app_with_projects, _call)
+    status, pid, _ = _run_async(app_with_projects, _call)
     assert status == 202, status
     svc = _svc(app_with_projects)
     assert svc.get_pending_offer(pid) is None, "no-part project must not record an offer"

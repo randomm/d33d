@@ -27,11 +27,11 @@ from __future__ import annotations
 import re
 
 __all__ = [
+    "PART_STL_NAME",
+    "SCALE_FACTOR_TOL",
     "import_guard_violation",
     "part_import_call",
     "part_scale_call",
-    "PART_STL_NAME",
-    "SCALE_FACTOR_TOL",
 ]
 
 #: The single filename the render worker seeds the committed part as
