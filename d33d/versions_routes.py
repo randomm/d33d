@@ -872,6 +872,7 @@ def _finalize_loop_kwargs(
         effective_stated_dims,
         stated_axes_from_message,
     )
+    from d33d.part_http import resolve_part_paths
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
@@ -884,12 +885,44 @@ def _finalize_loop_kwargs(
         # renders_dir so the worker's post-harvest step actually fires in
         # production (the bare ``render_for_design_loop`` reference would
         # leave ``renders_dir`` unset and fall back to the global default).
+        #
+        # The design-side part's ``part_path``/``repo_dir`` wiring (issue
+        # #330 sub-issue 2 — the finalize seam's half of the
+        # ``render_for_design_loop`` part wiring): row acquisition lives
+        # here (the row is read through the app's existing connection;
+        # an unreadable row degrades to ``part_path=None`` with one
+        # WARNING, project id only, never a path); the binding decision
+        # itself is the shared helper
+        # :func:`d33d.part_http.resolve_part_paths` (issue #330's binding
+        # operator decision — the render never raises an unclassified
+        # error because of part resolution). The closure does NOT scale
+        # the part (``part_scale`` is sub-issue 3's domain, not the
+        # worker's).
+        import sqlite3
+
+        try:
+            proj_row = app.state.versions.get_project(project_id)
+        except sqlite3.Error:
+            # A closed/broken handle is an unreadable row — degrade to no
+            # part (the render proceeds part-less); never raise into the
+            # design loop. (``TypeError``/``AttributeError`` — a
+            # non-Connection object where one was expected — is a wiring
+            # bug, not an unreadable row: let it surface.)
+            logger.warning(
+                "design loop for project %s: the project row could not "
+                "be read — the render proceeds part-less",
+                project_id,
+            )
+            proj_row = None
+        part_path, repo_dir = resolve_part_paths(proj_row, app.state.conn)
         return render_for_design_loop(
             scad_source,
             defines,
             renders_dir=project_renders_dir(data_dir, project_id),
             on_progress=on_progress,
             project_id=project_id,
+            part_path=part_path,
+            repo_dir=repo_dir,
         )
 
     async def _noop_llm_fn(*args: Any, **kwargs: Any) -> Any:

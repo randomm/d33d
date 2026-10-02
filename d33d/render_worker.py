@@ -51,6 +51,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from d33d.data_dir import default_data_dir, guard_real_data_path
+from d33d.part_http import MAX_PART_UPLOAD_BYTES
+from d33d.part_mesh import PartUploadError, load_part_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -1449,6 +1452,143 @@ def _log_render_failure(
     )
 
 
+def _validate_part_path(
+    part_path: Path, repo_dir: Path
+) -> str | None:
+    """Validate the part path for containment and name. Returns an error
+    message string on failure, or ``None`` when all checks pass.
+
+    Checks (all must pass):
+    1. ``part_path`` must be a regular file (a missing path is rejected
+       here — the lstat that proves it is a regular file doubles as the
+       symlink check: a symlink lstat reports S_IFLNK, never the file mode).
+    2. ``part_path`` itself must not be a symlink.
+    3. ``part_path.resolve()`` must be inside ``repo_dir.resolve()``.
+    4. No path component between ``repo_dir`` and ``part_path`` may be a
+       symlink resolving outside ``repo_dir``.
+    5. ``part_path``'s name must be exactly ``part.stl`` or ``part.3mf``.
+    """
+    # Name check (exact, case-sensitive).
+    if part_path.name not in ("part.stl", "part.3mf"):
+        return f"part filename must be exactly 'part.stl' or 'part.3mf', got '{part_path.name}'"
+
+    # Regular-file + symlink check on the part itself (lstat — does not
+    # follow links; a symlink reports S_IFLNK here, never a file mode, so
+    # one lstat covers both the "regular file" and "not a symlink" rules).
+    try:
+        st = part_path.lstat()
+    except OSError as e:
+        return f"part path does not exist or is inaccessible: {e}"
+    if not stat.S_ISREG(st.st_mode):
+        # Covers symlink (S_IFLNK), directory, and special files in one
+        # check — a symlink lstat never reports REG.
+        if stat.S_ISLNK(st.st_mode):
+            return f"part path is a symlink: {part_path.name}"
+        return f"part path is not a regular file: {part_path.name}"
+
+    # Containment: resolved part must be inside resolved repo_dir.
+    try:
+        resolved_repo = repo_dir.resolve()
+        resolved_part = part_path.resolve()
+    except OSError as e:
+        return f"cannot resolve part or repo path: {e}"
+    if not resolved_part.is_relative_to(resolved_repo):
+        return "part path is outside the project repo directory"
+
+    # Symlink component check: walk each path component of part_path BELOW
+    # repo_dir on the RAW (unresolved) path; any symlink whose target
+    # resolves outside repo_dir is rejected (a symlinked parent escaping
+    # the containment boundary); components at/above repo_depth are the
+    # caller's filesystem prefix (on macOS /var → /private/var sits there)
+    # — out of boundary.
+    repo_depth = len(repo_dir.parts)
+    raw = part_path if part_path.is_absolute() else repo_dir / part_path
+    for i in range(1, len(raw.parts)):
+        if i < repo_depth and raw.is_absolute():
+            continue  # strictly above the repo's own depth — out of boundary
+        component = raw.joinpath(*raw.parts[:i])
+        try:
+            if component.is_symlink():
+                target = component.resolve()
+                if not target.is_relative_to(resolved_repo):
+                    return (
+                        f"path component {component.name} is a symlink "
+                        "escaping the repo"
+                    )
+        except OSError:
+            return f"path component {component.name} is inaccessible"
+
+    return None
+
+
+def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
+    """Stage the part as ``part.stl`` in ``src_dir``.
+
+    - ``part.stl``: copied via an O_NOFOLLOW fd opened + fstat'd ATOMIC with
+      the read (TOCTOU-safe — a symlink swapped in between ``_validate_part_path``
+      and this read cannot redirect the copy to an outside file).
+    - ``part.3mf``: read via the same O_NOFOLLOW fd (TOCTOU-safe), then
+      converted to STL on the host via the shared guarded loader
+      ``d33d.part_mesh.load_part_geometry`` (zip-bomb guard + trimesh load
+      + Scene.to_mesh flattening — the SAME loader the upload route's
+      ``parse_and_repair`` uses for the load step, so the two paths cannot
+      drift), written as STL bytes. The 3MF unit is never consulted here
+      (unit scaling is sub-issue 3 of epic #283).
+
+    Both branches enforce the shared size cap (``MAX_PART_UPLOAD_BYTES``,
+    the single named constant the upload route and this staging path
+    share) on the source file before copying/converting — a hand-committed
+    or re-replaced file under the repo is not silently allowed to flow into
+    the render volume.
+
+    Returns an error message string on failure, or ``None`` on success.
+    """
+    target = src_dir / "part.stl"
+    try:
+        # Open with O_NOFOLLOW so a symlink swapped in between validate and
+        # stage cannot redirect the read; fstat the fd (the actually-opened
+        # file, not the path) to verify regular-file + size cap atomically.
+        fd = os.open(str(part_path), os.O_RDONLY | os.O_NOFOLLOW)
+    except (OSError, ValueError) as e:
+        return f"part staging failed: {e}"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return f"part is not a regular file at staging time: {part_path.name}"
+        if st.st_size > MAX_PART_UPLOAD_BYTES:
+            return (
+                f"part file is {st.st_size} bytes; max {MAX_PART_UPLOAD_BYTES} "
+                f"(the #325 upload bound, enforced at render time)"
+            )
+        data = os.read(fd, st.st_size) if st.st_size > 0 else b""
+    except OSError as e:
+        return f"part staging failed: {e}"
+    finally:
+        os.close(fd)
+
+    try:
+        if part_path.name == "part.stl":
+            target.write_bytes(data)
+            return None
+        # 3MF → STL conversion via the shared guarded loader (raises
+        # PartUploadError on any failure — caught below and mapped to an
+        # artifact_error string; never a PartUploadError leak).
+        mesh = load_part_geometry(data, "3mf")
+        if len(mesh.faces) == 0:
+            return "3MF mesh is empty"
+        # ``ValueError`` (trimesh's "exporter not available") and
+        # ``OSError`` (a vanished staging dir) round out the concrete set:
+        # the guarded loader raises PartUploadError, trimesh export raises
+        # ValueError on an unknown exporter, file I/O raises OSError.
+        try:
+            mesh.export(str(target), file_type="stl")
+        except (PartUploadError, ValueError, OSError) as e:
+            return f"3MF to STL conversion failed: {e}"
+        return None
+    except (PartUploadError, ValueError, OSError) as e:
+        return f"3MF to STL conversion failed: {e}"
+
+
 def render_for_design_loop(
     scad_source: str,
     defines: dict[str, str],
@@ -1456,6 +1596,8 @@ def render_for_design_loop(
     on_progress: Any = None,
     repo_root: Path | None = None,
     project_id: int | None = None,
+    part_path: Path | None = None,
+    repo_dir: Path | None = None,
 ) -> RenderResult:
     """One render-worker run for the design loop (issue #4's pipeline).
 
@@ -1466,6 +1608,21 @@ def render_for_design_loop(
     7-class ``error_class`` enum. Any exception in the pipeline is a
     ``container_error`` — a loop render failure is a classified render
     outcome, never an unclassified raise.
+
+    ``part_path`` (issue #330): an optional path to the project's committed
+    part (``part.stl`` or ``part.3mf``). When given, the part is validated
+    (containment within ``repo_dir``, no symlinks, name check) and staged
+    (copied, or converted 3MF→STL on the host) in the host staging directory
+    BEFORE any docker call.
+    A 3MF is converted to STL on the host (the worker never seeds or emits
+    a 3MF). Validation or conversion failure returns ``artifact_error``
+    with zero subprocess invocations. ``repo_dir`` is the containment
+    boundary (the project's git repo directory); when ``part_path`` is
+    given and ``repo_dir`` is ``None``, the result is ``artifact_error``
+    ("part containment boundary missing").
+
+    When ``part_path`` is ``None`` the entire subprocess argv sequence and
+    seed script are byte-identical to the no-part case.
 
     On a non-zero render exit the worker harvests the on-volume
     /work/render.log tail (issue #309 — the entrypoint redirects
@@ -1509,6 +1666,55 @@ def render_for_design_loop(
     # SSE adapter) can learn from ``RenderResult.render_artifact_dir``.
     persist_base = Path(renders_dir) if renders_dir is not None else _render_persist_base()
     render_key = uuid.uuid4().hex[:8]
+    # Part validation (issue #330): runs BEFORE the image staleness gate
+    # and BEFORE any subprocess call. Any failure returns artifact_error
+    # with zero docker invocations (an invalid part + a stale image must
+    # land in artifact_error, never in the staleness gate's container_error).
+    if part_path is not None:
+        if repo_dir is None:
+            return RenderResult(
+                ok=False,
+                exit_code=1,
+                duration_ms=0,
+                error_class="artifact_error",
+                stderr="part containment boundary missing: repo_dir is required when part_path is given",
+                stl=None,
+                csg=None,
+                views=(),
+            )
+        part_err = _validate_part_path(part_path, repo_dir)
+        if part_err is not None:
+            return RenderResult(
+                ok=False,
+                exit_code=1,
+                duration_ms=0,
+                error_class="artifact_error",
+                stderr=f"part validation failed: {part_err}",
+                stl=None,
+                csg=None,
+                views=(),
+            )
+        # Stage the part (copy, or 3MF→STL on the host) BEFORE the image
+        # staleness gate and before ANY docker call: a conversion failure
+        # (corrupt 3MF, TOCTOU — the file changed between validate and
+        # stage) is an artifact_error with zero subprocess invocations.
+        with tempfile.TemporaryDirectory(dir=_render_host_tmp_base()) as _stage_tmp:
+            _stage_src = Path(_stage_tmp) / "src"
+            _stage_src.mkdir()
+            stage_err = _stage_part_stl(part_path, _stage_src)
+            if stage_err is not None:
+                return RenderResult(
+                    ok=False,
+                    exit_code=1,
+                    duration_ms=0,
+                    error_class="artifact_error",
+                    stderr=f"part staging failed: {stage_err}",
+                    stl=None,
+                    csg=None,
+                    views=(),
+                )
+            staged_part = _stage_src / "part.stl"
+            staged_part_bytes = staged_part.read_bytes()
     try:
         # Pre-render staleness guard (issue #236): the render-worker image
         # must carry BUILD_HASH_LABEL == build_hash() before any expensive
@@ -1564,9 +1770,33 @@ def render_for_design_loop(
             (src / "params.json").write_text(
                 json.dumps({"defines": params.defines}), encoding="utf-8"
             )
+            # Part staging (issue #330): the part was already staged and
+            # converted above (validation + staging both precede the image
+            # gate and any docker call). Stage the validated, converted
+            # STL bytes into THIS render's host staging dir (the seed
+            # helper's ro /host mount — STL parts: a straight copy; 3MF
+            # parts: host-converted; the design-side name is always
+            # import("part.stl")).
+            if part_path is not None:
+                (src / "part.stl").write_bytes(staged_part_bytes)
             # Copy the source into the named volume via a helper container
             # (named volumes are only writable from a container bound to
-            # them — no host bind mounts).
+            # them — no host bind mounts). The part line rides the same
+            # ro /host mount; chown stays last. No part: byte-identical
+            # to today's script.
+            if part_path is not None:
+                seed_script = (
+                    "cp /host/src/model.scad /work/model.scad && "
+                    "cp /host/src/params.json /work/params.json && "
+                    "cp /host/src/part.stl /work/part.stl && "
+                    "chown 1000:1000 /work"
+                )
+            else:
+                seed_script = (
+                    "cp /host/src/model.scad /work/model.scad && "
+                    "cp /host/src/params.json /work/params.json && "
+                    "chown 1000:1000 /work"
+                )
             helper_argv = [
                 "docker",
                 "run",
@@ -1580,11 +1810,7 @@ def render_for_design_loop(
                 "busybox:latest",
                 "sh",
                 "-c",
-                (
-                    "cp /host/src/model.scad /work/model.scad && "
-                    "cp /host/src/params.json /work/params.json && "
-                    "chown 1000:1000 /work"
-                ),
+                seed_script,
             ]
             helper_proc = subprocess.run(
                 helper_argv, capture_output=True, check=False
@@ -1606,33 +1832,55 @@ def render_for_design_loop(
                 )
             # Post-seed verification: the source file must actually be in the
             # volume before the (much more expensive) render worker launches.
-            verify_argv = [
-                "docker",
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--volume",
-                f"{volume}:/work",
-                "busybox:latest",
-                "test",
-                "-f",
-                "/work/model.scad",
-            ]
+            if part_path is not None:
+                verify_argv = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--volume",
+                    f"{volume}:/work",
+                    "busybox:latest",
+                    "sh",
+                    "-c",
+                    "test -f /work/model.scad && test -f /work/part.stl",
+                ]
+            else:
+                verify_argv = [
+                    "docker",
+                    "run",
+                    "--rm",
+                    "--network",
+                    "none",
+                    "--volume",
+                    f"{volume}:/work",
+                    "busybox:latest",
+                    "test",
+                    "-f",
+                    "/work/model.scad",
+                ]
             verify_proc = subprocess.run(
                 verify_argv, capture_output=True, check=False
             )
             if verify_proc.returncode != 0:
                 duration_ms = int((time.monotonic() - start) * 1000)
+                if part_path is not None:
+                    verify_msg = (
+                        "seed verification failed: /work/model.scad or "
+                        "/work/part.stl missing in volume " + volume
+                    )
+                else:
+                    verify_msg = (
+                        "seed verification failed: /work/model.scad missing "
+                        "in volume " + volume
+                    )
                 return RenderResult(
                     ok=False,
                     exit_code=verify_proc.returncode,
                     duration_ms=duration_ms,
                     error_class="container_error",
-                    stderr=(
-                        "seed verification failed: /work/model.scad missing "
-                        "in volume " + volume
-                    ),
+                    stderr=verify_msg,
                     stl=None,
                     csg=None,
                     views=(),
