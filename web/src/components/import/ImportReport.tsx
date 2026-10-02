@@ -24,7 +24,7 @@
  * the mono face; prose in the UI face.
  */
 
-import { useState, type ChangeEvent } from "react";
+import { useState } from "react";
 import { ApiClient, ApiError, type PartReportInfo } from "../../lib/api";
 import copy, { mm } from "../../copy";
 
@@ -335,7 +335,7 @@ export function ImportReport({
                   min="0"
                   step="any"
                   value={escapeMm}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setEscapeMm(e.target.value)}
+                  onChange={(e) => setEscapeMm(e.target.value)}
                   placeholder={copy.partReport.escapePlaceholder}
                   aria-label={copy.partReport.axisLabels[escapeAxis]}
                   style={{

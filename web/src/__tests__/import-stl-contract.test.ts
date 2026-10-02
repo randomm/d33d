@@ -33,6 +33,10 @@ describe("copy.ts Screen 1 strings", () => {
     expect(copy.firstRun.fileDropLine).toBe("Drop an STL or 3MF here");
   });
 
+  it("partUpload.dropLine is verbatim (the chat-pane drop area's own copy, distinct from firstRun.fileDropLine)", () => {
+    expect(copy.partUpload.dropLine).toBe("📦 Drop an STL or 3MF here");
+  });
+
   it("firstRun.fileChooseLine is verbatim", () => {
     expect(copy.firstRun.fileChooseLine).toBe("or choose a file");
   });

@@ -39,8 +39,10 @@ const ACCEPT = ".stl,.3mf";
 
 /** Reduce an upload/creation failure to the verbatim `detail` the blocked
  *  state renders. A FastAPI body carries `{detail}` — a string, or the
- *  structured `{code, message}` object the 409s carry. */
-function detailText(e: unknown): string {
+ *  structured `{code, message}` object the 409s carry. Exported: the
+ *  Screen 1 file-card path (App's `handlePartFile`) shares this reduction
+ *  so one place answers "what does this upload error say". */
+export function detailText(e: unknown): string {
   if (e instanceof ApiError) {
     const d = e.detail;
     if (typeof d === "string") return d;
@@ -163,7 +165,7 @@ export function PartUpload({
         {state === "uploading" ? (
           <span data-testid="part-upload-status">Uploading…</span>
         ) : (
-          <span>📦 {copy.firstRun.fileDropLine}</span>
+          <span>{copy.partUpload.dropLine}</span>
         )}
       </label>
       {state === "error" && errorDetail && (

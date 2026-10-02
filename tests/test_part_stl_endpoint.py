@@ -148,7 +148,6 @@ def test_part_stl_assumed_scale_is_applied(app_with_projects):
     resp = _run_async(app_with_projects, _call)
     assert resp.status_code == 200, resp.text
     assert resp.headers["content-type"] == "model/stl"
-    import trimesh
 
     mesh = _mesh_from_stl_bytes(resp.content)
     assert mesh is not None
@@ -339,3 +338,39 @@ def test_part_stl_rejects_path_traversal_name(app_with_projects):
     assert resp.status_code == 409
     body = resp.json()
     assert body["detail"]["code"] == "source_missing"
+
+
+# ---------------------------------------------------------------------------
+# ETag / conditional GET (the derived bytes are deterministic — no re-parse)
+# ---------------------------------------------------------------------------
+
+
+def test_part_stl_etag_304_when_unchanged(app_with_projects):
+    """A repeat GET with ``If-None-Match`` matching the ETag answers 304
+    with an empty body (the derived bytes are deterministic in committed
+    file + scale — no re-parse / re-scale / re-export / re-download). A
+    mismatched tag still answers 200 with the bytes and the ETag header."""
+    data = (FIXTURES / "box_20mm.stl").read_bytes()
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "etag test"})
+        pid = r.json()["id"]
+        await _upload_part(client, pid, data, "box.stl", "model/stl")
+        first = await client.get(f"/api/projects/{pid}/part.stl")
+        etag = first.headers["etag"]
+        second = await client.get(
+            f"/api/projects/{pid}/part.stl",
+            headers={"If-None-Match": f'"etag", {etag}'},
+        )
+        third = await client.get(
+            f"/api/projects/{pid}/part.stl", headers={"If-None-Match": '"stale"'}
+        )
+        return first, second, third
+
+    first, second, third = _run_async(app_with_projects, _call)
+    assert first.status_code == 200
+    assert second.status_code == 304
+    assert second.content == b""  # a 304 carries no body
+    assert third.status_code == 200
+    assert third.content == first.content  # unchanged bytes
+    assert third.headers["etag"] == first.headers["etag"]

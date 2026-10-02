@@ -77,6 +77,7 @@ import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
+import { detailText as partUploadDetailText } from "./components/upload/PartUpload";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
@@ -1496,14 +1497,10 @@ export default function App({ client }: AppProps) {
           await api.uploadPart(pid, file);
           handlePartUploaded(pid);
         } catch (e) {
-          const detail =
-            e instanceof ApiError
-              ? typeof e.detail === "string"
-                ? e.detail
-                : e.message
-              : e instanceof Error
-                ? e.message
-                : String(e);
+          // The verbatim-detail reduction is shared with the chat-pane
+          // upload surface (PartUpload's exported `detailText`) — one place
+          // answers "is this a part, and what does this error say".
+          const detail = partUploadDetailText(e);
           setStreamError({
             message: detail,
             detail,
@@ -1537,35 +1534,47 @@ export default function App({ client }: AppProps) {
   // A 404 (no part) or 409 (source missing) leaves the part-viewer empty.
   const [partStlData, setPartStlData] = useState<ArrayBuffer | null>(null);
   const partStlSeqRef = useRef(0);
+  // The part's semantic identity (the served bytes are deterministic in
+  // these): refetch only when the part actually changed — never on an
+  // object-identity change (every design-state refetch allocates a fresh
+  // `part`; the STL would otherwise restart per refetch).
+  const partStlKey = designStatePart
+    ? `${designStatePart.filename}:${designStatePart.format}:${designStatePart.unit_status}:${designStatePart.scale}`
+    : null;
   useEffect(() => {
-    if (projectId === null || designStatePart === null) {
+    if (projectId === null || partStlKey === null) {
       setPartStlData(null);
       return;
     }
     const seq = ++partStlSeqRef.current;
-    let cancelled = false;
+    // The in-flight fetch is aborted on cleanup (a stale response can never
+    // overwrite a newer project's state; an abandoned request stops here).
+    const controller = new AbortController();
     setPartStlData(null);
     apiClient
-      .fetchPartStl(projectId)
+      .fetchPartStl(projectId, controller.signal)
       .then((buf) => {
-        if (!cancelled && seq === partStlSeqRef.current) setPartStlData(buf);
+        if (!controller.signal.aborted && seq === partStlSeqRef.current) setPartStlData(buf);
       })
       .catch((e) => {
         // A missing / unreadable part leaves the viewer empty (the report
         // still renders its honest state) — never a fabricated model.
-        if (!cancelled && seq === partStlSeqRef.current) {
-          console.warn("part.stl fetch failed:", e);
-          setPartStlData(null);
-        }
+        if (controller.signal.aborted || seq !== partStlSeqRef.current) return;
+        console.warn("part.stl fetch failed:", e);
+        setPartStlData(null);
       });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
-  }, [projectId, designStatePart, apiClient]);
+  }, [projectId, partStlKey, apiClient]);
   // Screen 2 (the import report) is the active screen whenever a part
   // exists (the design-state envelope's `part`). FirstRun is suppressed
   // while Screen 2 is up (the same centred space; never both).
   const isScreen2 = designStatePart !== null;
+  // The single derivation of "are the part's units settled?" — drives BOTH
+  // the PlateBackdrop suppression and the ImportReport caption so the
+  // unsettled-caption invariant (plate hidden ⇔ caption shown) can't drift.
+  const partUnsettled = isScreen2 && designStatePart.unit_status !== "settled";
 
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the
@@ -1702,8 +1711,7 @@ export default function App({ client }: AppProps) {
           Issue #334 (D7): the plate is HIDDEN while the part's units are
           unsettled (the caption says the size is unknown); it is restored
           once settled. */}
-      {envelope !== null && !panelsHidden &&
-        !(designStatePart !== null && designStatePart.unit_status !== "settled") && (
+      {envelope !== null && !panelsHidden && !partUnsettled && (
         <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} verified={envelope.verified} />
       )}
 
@@ -1717,7 +1725,7 @@ export default function App({ client }: AppProps) {
           projectId={projectId}
           client={apiClient}
           onSettled={() => refetchDesignState()}
-          showPlate={designStatePart.unit_status === "settled"}
+          showPlate={!partUnsettled}
         />
       )}
 

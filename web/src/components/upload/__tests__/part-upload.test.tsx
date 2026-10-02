@@ -109,6 +109,14 @@ describe("PartUpload (issue #334, D5)", () => {
     await waitFor(() => expect(screen.getByTestId("part-upload-error").textContent).toBe(detail));
   });
 
+  it("the drop-area label renders its own copy (partUpload.dropLine, not firstRun's)", () => {
+    const client = makeClient();
+    render(<PartUpload projectId={7} client={client} />);
+    expect(screen.getByTestId("part-upload-label").textContent).toBe(
+      copy.partUpload.dropLine,
+    );
+  });
+
   it("rejects a non-STL/3MF client-side (the unsupported copy, not a POST)", async () => {
     const client = makeClient();
     const file = makeFile("photo.png");

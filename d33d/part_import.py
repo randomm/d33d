@@ -52,12 +52,13 @@ bbox as the measurement once settled, so W/D/H render ``measured``
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from d33d import db as db_mod
 from d33d.part_http import (
@@ -93,6 +94,27 @@ from d33d.part_units import (
 from d33d.versions import ImportCommitFailed
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Shared derive path: load → optional scale → binary STL (the part.stl
+# endpoint's 3MF and scale-applied STL branches both run through this one
+# function, so the guarded load and the export live in one place).
+# ---------------------------------------------------------------------------
+
+
+def _scaled_stl_sync(raw: bytes, fmt: str, scale: float | None) -> bytes:
+    """Load the committed part bytes (shared guard: face-cap, zip-bomb),
+    optionally scale by ``part_scale``, and re-export as binary STL.
+
+    ``trimesh.Mesh.export(file_type="stl")`` returns ``bytes`` — never
+    ``str`` — so the result goes straight into the response body."""
+    mesh = load_part_geometry(raw, fmt)
+    if scale is not None:
+        mesh = mesh.copy()
+        mesh.apply_scale(scale)
+    return mesh.export(file_type="stl")
+
 
 # ---------------------------------------------------------------------------
 # Router factory
@@ -429,8 +451,12 @@ def create_part_router() -> APIRouter:
 
     # -- GET /{project_id}/part.stl ------------------------------------------
 
-    @router.get("/{project_id}/part.stl")
-    async def download_part_stl(request: Request, project_id: int) -> dict[str, Any]:
+    @router.get("/{project_id}/part.stl", response_model=None)
+    # Nominal annotation (file-wide looseness, pre-existing on the upload
+    # route): the route always returns a ``Response`` on 200 — never a dict.
+    async def download_part_stl(
+        request: Request, project_id: int
+    ) -> Response | dict[str, Any]:
         """Serve the project's committed part as binary STL, in mm.
 
         3MF parts are converted on the host via
@@ -443,6 +469,12 @@ def create_part_router() -> APIRouter:
         — the SPA hides the plate in that state, so the absolute scale is
         never shown alongside it.
 
+        The 50 MB cap is checked against the file's ``stat`` size BEFORE the
+        bytes are read (no buffer churn on an oversize file), and the
+        ETag is ``sha1(bytes + ":" + scale)`` (the derived bytes are
+        deterministic in committed file + scale, so an unchanged part
+        answers a 304 without re-parsing / re-scaling / re-exporting).
+
         Response codes:
           - 404: the project does not exist, or has no part
           - 409: the repo or committed file is missing (the ``source_missing``
@@ -450,8 +482,6 @@ def create_part_router() -> APIRouter:
           - 200: ``Response`` with binary STL bytes, ``model/stl`` content
             type, and a body size cap (50 MB — the same bound as upload).
         """
-        from fastapi import Response
-
         conn: db_mod.Connection = request.app.state.conn
         row = conn.get_project(project_id)
         if row is None:
@@ -496,6 +526,24 @@ def create_part_router() -> APIRouter:
                     detail={"code": "source_missing", "message": "the part file is not on disk"},
                 )
 
+        # Size cap from the ``stat`` BEFORE any read: the SPA loads this via
+        # the STL loader, so a pathologically large file would OOM the
+        # browser (50 MB matches the upload cap) — the bound must hold for a
+        # hand-committed file as well, not just uploads.
+        try:
+            size = part_path.stat().st_size
+        except OSError as e:
+            logger.error("part.stl stat failed (project_id=%s): %s", project_id, e)
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "source_missing", "message": "the part file is not on disk"},
+            ) from e
+        if size > MAX_PART_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"part file exceeds {MAX_PART_UPLOAD_BYTES} byte limit",
+            )
+
         try:
             raw = part_path.read_bytes()
         except OSError as e:
@@ -504,14 +552,6 @@ def create_part_router() -> APIRouter:
                 status_code=409,
                 detail={"code": "source_missing", "message": "the part file is not on disk"},
             ) from e
-
-        # Size cap: the SPA loads this via the STL loader; a pathologically
-        # large file would OOM the browser. 50 MB matches the upload cap.
-        if len(raw) > MAX_PART_UPLOAD_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"part file exceeds {MAX_PART_UPLOAD_BYTES} byte limit",
-            )
 
         # Unit scaling (the operator decision): assumed or settled parts
         # are served with ``part_scale`` applied — the geometry IS in mm, so
@@ -525,16 +565,14 @@ def create_part_router() -> APIRouter:
             if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and candidate > 0:
                 scale = float(candidate)
 
+        def _scaled_stl(raw: bytes, fmt: str) -> bytes:
+            return _scaled_stl_sync(raw, fmt, scale)
+
+        stl_bytes: bytes
         if part_format == "3mf":
             # Convert 3MF → STL on the host (shared load path, no new parser).
             try:
-                mesh = await asyncio.to_thread(load_part_geometry, raw, "3mf")
-                if scale is not None:
-                    mesh = mesh.copy()
-                    mesh.apply_scale(scale)
-                stl_bytes = mesh.export(file_type="stl")
-                if isinstance(stl_bytes, str):
-                    stl_bytes = stl_bytes.encode()
+                stl_bytes = await asyncio.to_thread(_scaled_stl, raw, "3mf")
             except PartUploadError as e:
                 logger.error("part.stl 3MF conversion failed (project_id=%s): %s", project_id, e)
                 raise HTTPException(
@@ -546,39 +584,45 @@ def create_part_router() -> APIRouter:
                     status_code=409,
                     detail={"code": "source_missing", "message": "the part file is empty"},
                 )
-            return Response(
-                content=stl_bytes,
-                media_type="model/stl",
-                headers={"Content-Disposition": 'attachment; filename="part.stl"'},
-            )
-
-        # STL: scale the committed bytes through the shared guarded loader
-        # (the face-cap guard applies to a hand-committed file as well), or
-        # serve them verbatim when the units are unsettled.
-        if scale is not None:
+        elif scale is not None:
+            # STL with a scale: re-derive through the shared guarded loader
+            # (the face-cap + zip-bomb guards apply to a hand-committed file
+            # as well — this path does not pass through the upload guards).
             try:
-                mesh = await asyncio.to_thread(load_part_geometry, raw, "stl")
-                mesh = mesh.copy()
-                mesh.apply_scale(scale)
-                stl_bytes = mesh.export(file_type="stl")
-                if isinstance(stl_bytes, str):
-                    stl_bytes = stl_bytes.encode()
+                stl_bytes = await asyncio.to_thread(_scaled_stl, raw, "stl")
             except PartUploadError as e:
                 logger.error("part.stl scaling failed (project_id=%s): %s", project_id, e)
                 raise HTTPException(
                     status_code=409,
                     detail={"code": "source_missing", "message": "the part file could not be read"},
                 ) from e
-            return Response(
-                content=stl_bytes,
-                media_type="model/stl",
-                headers={"Content-Disposition": 'attachment; filename="part.stl"'},
-            )
+        else:
+            # Unsettled STL: serve the committed bytes verbatim (file units —
+            # the SPA hides the plate, so no scale is ever shown alongside it).
+            stl_bytes = raw
+
+        # ETag: the served bytes are deterministic in committed file + scale.
+        # A repeat request with a matching If-None-Match answers a 304 with
+        # no body (no re-parse/re-scale/re-export, no re-download).
+        etag = hashlib.sha1(raw + b":" + repr(scale).encode("ascii")).hexdigest()
+        etag_header = '"' + etag + '"'
+        # A conditional GET (If-None-Match carrying this tag, optionally
+        # comma-listed) answers 304 with no body — unchanged bytes cost a
+        # header round trip, no re-parse / re-scale / re-export / re-download.
+        if request.headers.get("if-none-match") is not None:
+            candidates = {
+                c.strip() for c in request.headers["if-none-match"].split(",")
+            }
+            if etag_header in candidates or "*" in candidates:
+                return Response(status_code=304, headers={"ETag": etag_header})
 
         return Response(
-            content=raw,
+            content=stl_bytes,
             media_type="model/stl",
-            headers={"Content-Disposition": 'attachment; filename="part.stl"'},
+            headers={
+                "ETag": etag_header,
+                "Content-Disposition": 'attachment; filename="part.stl"',
+            },
         )
 
     return router

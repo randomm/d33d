@@ -815,6 +815,9 @@ export const partUnitsUnsettled =
  * design-contract tripwire pins the two-way agreement.
  */
 export const partUpload = {
+  /** The chat-pane drop-area label (the part upload surface, distinct from
+   *  the first-run drop area's `firstRun.fileDropLine`). */
+  dropLine: "📦 Drop an STL or 3MF here",
   /** The 400 `detail` body: an unsupported content type / extension. */
   unsupported:
     "That file type isn't supported. Upload an STL or 3MF mesh.",
