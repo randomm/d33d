@@ -159,7 +159,7 @@ export function Export3MF({
           filename renders in mono (`.mono-face`), as inert text. */}
       {part !== null && part !== undefined && (
         <div className="export-3mf-note" data-testid="export-3mf-note">
-          {"Contains geometry from "}
+          {copy.shell.exportContainsGeometryPrefix}
           <span className="mono-face" data-testid="export-3mf-note-filename">
             {part.filename}
           </span>

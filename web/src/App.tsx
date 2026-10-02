@@ -1819,6 +1819,7 @@ export default function App({ client }: AppProps) {
           inset={OVERLAY_INSET_PX}
           conversationCollapsed={conversationCollapsed}
           entries={designState}
+          part={designStatePart}
           refreshFailed={designStateStale}
           historyMissing={designStateHistoryMissing}
           storage={projectStorage}

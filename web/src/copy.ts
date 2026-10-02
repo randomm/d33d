@@ -714,9 +714,11 @@ export const shell = {
   send: "Send",
   export: "Export 3MF",
   exportVersion: (version: string): string => `Export ${version}`,
-  /** The export note under the button when the project has an imported
-   *  part (issue #338): the 3MF contains geometry from the file the user
-   *  brought — the filename renders in mono, as inert text. */
+  /** The static lead-in for the export note (issue #338). */
+  exportContainsGeometryPrefix: "Contains geometry from ",
+  /** The full export note sentence (issue #338): the 3MF contains geometry
+   *  from the file the user brought. The component renders the filename in
+   *  its own mono `<span>` (splitting at the prefix) so it stays inert. */
   exportContainsGeometry: (filename: string): string =>
     `Contains geometry from ${filename}`,
   /** Only rendered once validation has actually passed. Never a default. */

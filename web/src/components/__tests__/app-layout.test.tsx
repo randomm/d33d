@@ -1106,6 +1106,19 @@ describe("App Brief wiring (issue #123)", () => {
     expect(appSrc).toMatch(/hasPart=\{[^}]*designStatePart[^}]*null\}/);
   });
 
+  it("App passes part={designStatePart} to the Brief so the two-zone split is reachable (issue #338)", () => {
+    // The critical wiring: the two-zone Brief (issue #338) is dead code
+    // unless App threads the design-state envelope's `part` block into the
+    // <Brief> render site. A wiring change that forgets `part=` here leaves
+    // `part` undefined → null → the two-zone layout never renders in
+    // production, even though the unit tests (brief-zones.test.tsx) pass by
+    // calling <Brief part={...}> directly. This tripwire pins the render
+    // site: App's `part={designStatePart}` must be present.
+    const appSrc = readFileSync(join(__dirname, "..", "..", "App.tsx"), "utf8");
+    // The Brief render site passes the design-state part block:
+    expect(appSrc).toMatch(/part=\{designStatePart\}/);
+  });
+
   it("the design-state envelope's history_missing flag drives the brief-saved-missing banner (issue #316)", async () => {
     // The web-wire half of the missing-history signal: the design-state
     // response's `history_missing: true` (the wire source, ORed with
