@@ -1624,7 +1624,7 @@ def _build_production_design_loop():
                 return None, None
             try:
                 row = conn.get_project(project_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 — an unreadable row must degrade to no part, never raise into the loop
                 logger.warning(
                     "design loop for project %s: the project row could not "
                     "be read — the render proceeds part-less",

@@ -17,6 +17,7 @@ version had.
 
 from __future__ import annotations
 
+import io as _io
 import logging
 import subprocess
 from pathlib import Path
@@ -904,3 +905,591 @@ def test_qa_shape_container_error_when_no_markers_anywhere(
     monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp-2"))
     result = rw.render_for_design_loop("cube(10);", {}, project_id=42)
     assert result.error_class == "container_error"
+
+
+# ---------------------------------------------------------------------------
+# Issue #330: optional part_path / repo_dir — the None-path regression
+# anchor, the part-aware seed/verify, and the pre-docker validation.
+# ---------------------------------------------------------------------------
+
+
+class _FakeTrimeshModule:
+    """Module-level stand-in for ``trimesh`` on the ``ok`` test paths
+    (the harvested STL load must return a non-degenerate mesh without
+    parsing real bytes)."""
+
+    load = staticmethod(lambda *a, **kw: _FakeMesh())
+
+
+def _make_part_repo(tmp_path: Path, name: str = "part.stl") -> tuple[Path, Path]:
+    """A minimal repo dir with a committed part inside versions/1/."""
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    (vdir / name).write_bytes(b"solid test\nendsolid test\n")
+    return vdir / name, repo
+
+
+def _run_render_record(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    render_name: str,
+    *,
+    part_path: Path | None = None,
+    repo_dir: Path | None = None,
+    render_exit: int = 0,
+    render_stderr: bytes = b"",
+):
+    """Run render_for_design_loop with a recording subprocess stub.
+
+    Returns (result, calls). The render worker call (the --memory argv)
+    exits with ``render_exit``; every other docker call succeeds. A
+    successful harvest side-effect is simulated so the ok path is
+    exercisable."""
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            return subprocess.CompletedProcess(
+                args=argv, returncode=render_exit, stdout=b"", stderr=render_stderr
+            )
+        if "cp /work/model.stl /host/" in " ".join(argv):
+            for i, tok in enumerate(argv):
+                if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host"):
+                    _harvest_side_effect(argv, Path(tok.rsplit(":", 1)[0]))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: render_name)
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "trimesh", _FakeTrimeshModule)
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part_path, repo_dir=repo_dir
+    )
+    return result, calls
+
+
+def _seed_script_of(calls: list[list[str]]) -> str:
+    scripts = [c[-1] for c in calls if "busybox:latest" in c and "sh" in c and "cp /host/src" in c[-1]]
+    assert scripts, f"no seed helper recorded: {calls}"
+    return scripts[0]
+
+
+NO_PART_SEED_SCRIPT = (
+    "cp /host/src/model.scad /work/model.scad && "
+    "cp /host/src/params.json /work/params.json && "
+    "chown 1000:1000 /work"
+)
+PART_SEED_SCRIPT = (
+    "cp /host/src/model.scad /work/model.scad && "
+    "cp /host/src/params.json /work/params.json && "
+    "cp /host/src/part.stl /work/part.stl && "
+    "chown 1000:1000 /work"
+)
+
+
+def test_none_path_argv_and_seed_byte_identical(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With part_path=None the ENTIRE subprocess argv sequence (volume
+    create, seed helper, verify, render) and the seed script text are
+    byte-identical to today's no-part render — the regression anchor."""
+    _result, calls = _run_render_record(
+        monkeypatch, tmp_path, "render-330np01"
+    )
+    # The full argv sequence: volume create, seed helper, verify, render.
+    assert calls[0] == ["docker", "volume", "create", "d33d-render-render-330np01"]
+    seed = _seed_script_of(calls)
+    assert seed == NO_PART_SEED_SCRIPT, f"seed script drifted: {seed!r}"
+    verify_calls = [
+        c for c in calls
+        if c[:2] == ["docker", "run"] and "busybox:latest" in c and "sh" not in c
+    ]
+    assert len(verify_calls) == 1
+    assert verify_calls[0] == [
+        "docker", "run", "--rm", "--network", "none",
+        "--volume", "d33d-render-render-330np01:/work",
+        "busybox:latest", "test", "-f", "/work/model.scad",
+    ], f"verify argv drifted: {verify_calls[0]}"
+    render_calls = [
+        c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c
+    ]
+    assert len(render_calls) == 1
+    assert render_calls[0] == rw.build_docker_argv(
+        image=rw.RENDER_WORKER_IMAGE, name="render-330np01",
+        workdir_volume="d33d-render-render-330np01",
+        params=rw.RenderParams(),
+    )
+
+
+def test_part_seed_script_and_verify(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With a part: the seed script carries the part cp line BEFORE the
+    final chown, and the post-seed verify is the single combined
+    ``sh -c "test -f /work/model.scad && test -f /work/part.stl"``."""
+    part, repo = _make_part_repo(tmp_path)
+    _result, calls = _run_render_record(
+        monkeypatch, tmp_path, "render-330pv01", part_path=part, repo_dir=repo
+    )
+    seed = _seed_script_of(calls)
+    assert seed == PART_SEED_SCRIPT, f"seed script drifted: {seed!r}"
+    assert "cp /host/src/part.stl /work/part.stl" in seed
+    assert seed.index("cp /host/src/part.stl /work/part.stl") < seed.index("chown 1000:1000 /work")
+    verify_calls = [
+        c for c in calls
+        if c[:2] == ["docker", "run"] and "busybox:latest" in c
+        and "sh" in c and "test -f /work" in c[-1]
+    ]
+    assert len(verify_calls) == 1
+    assert verify_calls[0] == [
+        "docker", "run", "--rm", "--network", "none",
+        "--volume", "d33d-render-render-330pv01:/work",
+        "busybox:latest", "sh", "-c",
+        "test -f /work/model.scad && test -f /work/part.stl",
+    ], f"verify argv drifted: {verify_calls[0]}"
+
+
+def test_part_render_argv_byte_identical_to_no_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The render argv (build_docker_argv output) with a part present is
+    byte-identical to the no-part render argv — no new mount, no host
+    part path in the argv."""
+    part, repo = _make_part_repo(tmp_path)
+    _r1, calls1 = _run_render_record(
+        monkeypatch, tmp_path, "render-330ri01", part_path=part, repo_dir=repo
+    )
+    _r2, calls2 = _run_render_record(
+        monkeypatch, tmp_path, "render-330ri02"
+    )
+    render1 = next(
+        c for c in calls1 if c[:2] == ["docker", "run"] and "--memory" in c
+    )
+    render2 = next(
+        c for c in calls2 if c[:2] == ["docker", "run"] and "--memory" in c
+    )
+    assert len(render1) == len(render2)
+    for a, b in zip(render1, render2):
+        # The container name (and the volume derived from it) is the only
+        # per-run element; everything else must be byte-identical.
+        if a.replace("render-330ri01", "X") != b.replace("render-330ri02", "X"):
+            assert a == b, f"argv element differs: {a!r} vs {b!r}"
+    assert "part" not in " ".join(render1).lower(), (
+        f"part path leaked into the render argv: {render1}"
+    )
+
+
+def test_part_staged_into_src_dir_and_no_part_leftover_on_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A successful render with a part: src/part.stl existed at seed time
+    (proven by the seed helper's own success — a missing file would fail
+    the cp and the helper exits non-zero → container_error)."""
+    part, repo = _make_part_repo(tmp_path)
+    result, _calls = _run_render_record(
+        monkeypatch, tmp_path, "render-330st01", part_path=part, repo_dir=repo
+    )
+    assert "seed helper failed" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Issue #330: validation rejections — all BEFORE any subprocess call.
+# ---------------------------------------------------------------------------
+
+
+def _run_rejection(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **kwargs):
+    """Run with a subprocess stub that RECORDS every call; validation
+    failures must leave the recording empty (zero subprocess invocations)."""
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    result = rw.render_for_design_loop("cube(10);", {}, **kwargs)
+    return result, calls
+
+
+@pytest.mark.parametrize(
+    ("setup", "label"),
+    [
+        pytest.param(
+            lambda t: (_outside_dir_part(t), t / "repo"),
+            "part outside repo",
+            id="outside-repo",
+        ),
+        pytest.param(
+            lambda t: (_symlinked_part(t), t / "repo"),
+            "symlinked part file",
+            id="symlink-file",
+        ),
+        pytest.param(
+            lambda t: (_symlinked_parent(t), t / "repo"),
+            "symlinked parent escaping repo",
+            id="symlink-parent",
+        ),
+        pytest.param(
+            lambda t: (_dir_instead_of_file(t), t / "repo"),
+            "directory instead of file",
+            id="dir-not-file",
+        ),
+        pytest.param(
+            lambda t: (_make_part_repo(t, "model.stl")[0], t / "repo"),
+            "wrong name model.stl",
+            id="wrong-name-model-stl",
+        ),
+        pytest.param(
+            lambda t: (_make_part_repo(t, "part.STL")[0], t / "repo"),
+            "wrong name part.STL",
+            id="wrong-name-part-stl",
+        ),
+        pytest.param(
+            lambda t: (_make_part_repo(t, "part.obj")[0], t / "repo"),
+            "wrong name part.obj",
+            id="wrong-name-part-obj",
+        ),
+    ],
+)
+def test_part_validation_rejection_artifact_error_zero_subprocess(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, setup, label
+) -> None:
+    """Issue #330: validation runs before the image staleness gate and
+    before any docker call — {label} → artifact_error with ZERO
+    subprocess calls."""
+    part, repo = setup(tmp_path / "case")
+    (tmp_path / "case" / "repo").mkdir(parents=True, exist_ok=True)
+    result, calls = _run_rejection(
+        monkeypatch, tmp_path, part_path=part, repo_dir=repo
+    )
+    assert result.error_class == "artifact_error", (
+        f"{label}: expected artifact_error, got {result.error_class} ({result.stderr})"
+    )
+    assert calls == [], f"{label}: subprocess was invoked: {calls}"
+
+
+def _symlinked_part(tmp: Path) -> Path:
+    real = tmp / "real.stl"
+    real.parent.mkdir(parents=True, exist_ok=True)
+    real.write_bytes(b"x")
+    link = tmp / "part.stl"
+    link.symlink_to(real)
+    return link
+
+
+def _outside_dir_part(tmp: Path) -> Path:
+    """A valid part OUTSIDE the repo dir (the repo is tmp/'repo')."""
+    p = tmp / "outside" / "part.stl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"x")
+    return p
+
+
+def _symlinked_parent(tmp: Path) -> Path:
+    # The repo is tmp/'repo' (created by the test); the symlinked dir
+    # 'versions' lives UNDER the repo and escapes it.
+    repo = tmp / "repo"
+    repo.mkdir(parents=True, exist_ok=True)
+    outside_dir = tmp / "outside"
+    outside_dir.mkdir(parents=True, exist_ok=True)
+    real = outside_dir / "part.stl"
+    real.write_bytes(b"x")
+    link = repo / "versions"  # a symlinked dir under the repo
+    link.symlink_to(outside_dir, target_is_directory=True)
+    return link / "part.stl"
+
+
+def _dir_instead_of_file(tmp: Path) -> Path:
+    d = tmp / "part.stl"
+    d.mkdir(parents=True)
+    return d
+
+
+def test_part_path_without_repo_dir_is_artifact_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """part_path given + repo_dir=None → artifact_error ("part containment
+    boundary missing"), zero subprocess calls."""
+    part, _repo = _make_part_repo(tmp_path)
+    result, calls = _run_rejection(monkeypatch, tmp_path, part_path=part)
+    assert result.error_class == "artifact_error"
+    assert "part containment boundary missing" in result.stderr
+    assert calls == []
+
+
+def test_invalid_part_plus_stale_image_is_artifact_error_no_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An invalid part + a stale (mismatched) image → artifact_error with
+    ZERO docker calls — no `docker image inspect` (part validation runs
+    BEFORE the image staleness gate)."""
+    called: dict = {"image_gate": 0}
+
+    def _gate(*a: Any, **kw: Any) -> None:
+        called["image_gate"] += 1
+        raise RuntimeError("image stale (should never be consulted)")
+
+    calls: list[list[str]] = []
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "_verify_render_worker_image", _gate)
+    _part, repo = _make_part_repo(tmp_path)
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=repo / "nope" / "part.stl", repo_dir=repo
+    )
+    assert result.error_class == "artifact_error"
+    assert called["image_gate"] == 0, "image gate was consulted before part validation"
+    assert calls == [], f"docker was invoked: {calls}"
+
+
+# ---------------------------------------------------------------------------
+# Issue #330: 3MF → STL conversion on the host.
+# ---------------------------------------------------------------------------
+
+
+def _make_3mf_box_bytes() -> bytes:
+    """A real 3MF (10mm box) built at test time with trimesh — no static
+    .3mf fixture exists in the repo."""
+    import io as _io
+    import zipfile as _zipfile
+
+    import trimesh as _trimesh
+
+    box = _trimesh.creation.box((10.0, 10.0, 10.0))
+    vxml = "".join(
+        f'<vertex x="{v[0]:.6f}" y="{v[1]:.6f}" z="{v[2]:.6f}"/>' for v in box.vertices
+    )
+    fxml = "".join(
+        f'<triangle v1="{f[0]}" v2="{f[1]}" v3="{f[2]}"/>' for f in box.faces
+    )
+    model = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02">'
+        "<resources></resources>"
+        '<build><item objectid="1"/></build>'
+        '<objects><object id="1" type="model"><mesh>'
+        f"<vertices>{vxml}</vertices>"
+        f"<triangles>{fxml}</triangles>"
+        "</mesh></object></objects></model>"
+    )
+    buf = _io.BytesIO()
+    with _zipfile.ZipFile(buf, "w", _zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", b"types")
+        zf.writestr("_rels/.rels", b"rels")
+        zf.writestr("3D/3dmodel.model", model.encode())
+    return buf.getvalue()
+
+
+def test_3mf_part_converted_to_stl_staged_into_src(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A part.3mf is ALWAYS converted to STL on the host via the guarded
+    loader (the zip-bomb guard + trimesh load + Scene.to_mesh flatten) and
+    staged as src/part.stl — the staged bytes are a valid STL with the
+    source mesh's bbox."""
+    import trimesh as _trimesh
+
+    repo = tmp_path / "repo"
+    (repo / "versions" / "1").mkdir(parents=True)
+    part = repo / "versions" / "1" / "part.3mf"
+    part.write_bytes(_make_3mf_box_bytes())
+
+    staged: dict = {"stl_bytes": None}
+
+    def _record(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        if "cp /host/src" in " ".join(argv):
+            # The seed helper mounts THIS render's staging dir as ro /host
+            # (the mount token is ``{host_path}:/host:ro`` — the host path
+            # is everything before the ``:/host`` segment); capture the
+            # staged part.stl's bytes while the staging dir still exists.
+            joined = " ".join(argv)
+            if ":/host:ro" in joined:
+                for tok in argv:
+                    if tok.endswith(":/host:ro"):
+                        host = tok[: -len(":/host:ro")]
+                        candidate = Path(host) / "src" / "part.stl"
+                        if candidate.is_file():
+                            staged["stl_bytes"] = candidate.read_bytes()
+        if "cp /work/model.stl /host/" in " ".join(argv):
+            for tok in argv:
+                if tok.endswith(":/host"):
+                    _harvest_side_effect(argv, Path(tok[: -len(":/host")]))
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-330mf01")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part, repo_dir=repo
+    )
+    # REAL trimesh did the 3MF→STL staging (no stub); the staged bytes
+    # were captured at seed-helper time (the staging dir is torn down
+    # right after). They must be a valid STL with the source's bbox.
+    assert staged["stl_bytes"] is not None, (
+        f"staged part.stl not seen at seed time (result: {result})"
+    )
+    mesh = _trimesh.load(_io.BytesIO(staged["stl_bytes"]), file_type="stl")
+    mesh.merge_vertices()
+    assert len(mesh.faces) > 0
+    extents = tuple(float(e) for e in mesh.extents)
+    for e in extents:
+        assert 9.0 <= e <= 11.0, f"staged STL bbox drifted: {extents}"
+
+
+def test_corrupt_3mf_is_artifact_error_zero_docker(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A corrupt (non-zip) part.3mf → artifact_error, ZERO docker calls,
+    and no part.stl left behind in the src dir (the staging failure
+    returns before the seed helper runs; the TemporaryDirectory tears
+    down anything partial)."""
+    calls: list[list[str]] = []
+    left_over: dict = {"stl": None}
+
+    def _explode(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        for i, tok in enumerate(argv):
+            if i > 0 and argv[i - 1] == "--volume" and tok.endswith(":/host:ro"):
+                host = tok[: -len(":/host:ro")]
+                left_over["stl"] = Path(host) / "src" / "part.stl"
+        if argv[:3] == ["docker", "volume", "create"]:
+            raise ValueError("staging must fail before any docker call")
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(rw.subprocess, "run", _explode)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-330mf02")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    repo = tmp_path / "repo"
+    (repo / "versions" / "1").mkdir(parents=True)
+    part = repo / "versions" / "1" / "part.3mf"
+    part.write_bytes(b"this is not a zip at all")
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part, repo_dir=repo
+    )
+    assert result.error_class == "artifact_error"
+    assert "3MF to STL conversion failed" in result.stderr or "part staging failed" in result.stderr
+    # The volume create (the pipeline's FIRST docker call) was never
+    # reached — zero docker invocations of any kind.
+    assert calls == [], f"docker was invoked on a corrupt 3MF: {calls}"
+    assert left_over["stl"] is None or not left_over["stl"].is_file()
+
+
+# ---------------------------------------------------------------------------
+# Issue #330: cleanup (#280) mirrors with a part present.
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_removes_container_and_volume_on_success_with_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    part, repo = _make_part_repo(tmp_path)
+    _result, calls = _run_render_record(
+        monkeypatch, tmp_path, "render-330cl01", part_path=part, repo_dir=repo
+    )
+    name = "render-330cl01"
+    volume = f"d33d-render-{name}"
+    assert [c for c in calls if c == ["docker", "rm", "-f", name]]
+    assert [
+        c for c in calls if c == ["docker", "volume", "rm", "-f", volume]
+    ]
+
+
+def test_cleanup_removes_container_and_volume_on_error_with_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    part, repo = _make_part_repo(tmp_path)
+    result, calls = _run_render_record(
+        monkeypatch,
+        tmp_path,
+        "render-330cl02",
+        part_path=part,
+        repo_dir=repo,
+        render_exit=1,
+        render_stderr=b"ERROR: x",
+    )
+    name = "render-330cl02"
+    volume = f"d33d-render-{name}"
+    assert result.error_class == "syntax_error"
+    assert ["docker", "rm", "-f", name] in calls
+    assert [
+        "docker", "volume", "rm", "-f", volume
+    ] in calls
+
+
+def test_cleanup_removes_container_and_volume_on_timeout_with_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A render that times out with a part present: container + volume are
+    still removed (the #280 cleanup mirror)."""
+    part, repo = _make_part_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def _record(
+        argv: list[str], *a: Any, **kw: Any
+    ) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        if argv[:2] == ["docker", "run"] and "--memory" in argv:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=kw.get("timeout", 120))
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _record)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-330cl03")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    result = rw.render_for_design_loop(
+        "cube(10);", {}, part_path=part, repo_dir=repo
+    )
+    name = "render-330cl03"
+    volume = f"d33d-render-{name}"
+    assert result.error_class == "timeout"
+    assert ["docker", "rm", "-f", name] in calls
+    assert ["docker", "volume", "rm", "-f", volume] in calls
+
+
+def test_cleanup_removes_container_and_volume_on_exception_with_part(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unexpected subprocess exception (docker binary missing) with a
+    part present: container + volume cleanup still fires (the #280 cleanup
+    mirror for the exception path)."""
+    part, repo = _make_part_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def _explode(argv: list[str], *a: Any, **kw: Any) -> subprocess.CompletedProcess:
+        calls.append(argv)
+        if argv[:3] == ["docker", "volume", "create"]:
+            raise AttributeError("simulated unexpected failure mid-pipeline")
+        return subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout=b"", stderr=b""
+        )
+
+    monkeypatch.setattr(rw.subprocess, "run", _explode)
+    monkeypatch.setattr(rw, "new_render_name", lambda: "render-330cl04")
+    monkeypatch.setattr(rw, "_verify_render_worker_image", lambda *a, **kw: None)
+    monkeypatch.setenv("D33D_RENDER_TMP", str(tmp_path / "render-tmp"))
+
+    with pytest.raises(AttributeError, match="simulated unexpected failure"):
+        rw.render_for_design_loop("cube(10);", {}, part_path=part, repo_dir=repo)
+
+    volume = "d33d-render-render-330cl04"
+    assert ["docker", "volume", "rm", "-f", volume] in calls

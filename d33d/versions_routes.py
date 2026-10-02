@@ -872,15 +872,13 @@ def _finalize_loop_kwargs(
         effective_stated_dims,
         stated_axes_from_message,
     )
+    from d33d.part_http import PART_3MF_FILENAME, PART_FILENAME
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
 
     app = request.app
     db_path = getattr(app.state, "db_path", None)
     data_dir = Path(db_path).parent if db_path is not None else Path(".")
-
-    row = app.state.versions.get_project(project_id)
-    assert row is not None  # already 404'd above
 
     def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
         # Project-scoped persistence (issue #72): bind the per-project
@@ -890,42 +888,54 @@ def _finalize_loop_kwargs(
         #
         # The design-side part's ``part_path``/``repo_dir`` wiring (issue
         # #330 sub-issue 2 — the finalize seam's half of the
-        # ``render_for_design_loop`` part wiring): the part is passed ONLY
-        # when the project has a part whose units are settled or assumed
-        # (``part_unit_status`` in ``{"assumed", "settled"}``): ``part_path``
-        # is the committed part file (``{git_repo_path}/versions/{v1}/
-        # {part.stl|part.3mf}`` — the v1 version row via ``_v1_for_part``;
-        # the stored name is the ``part_format``'s fixed constant, never
-        # re-derived) and ``repo_dir`` is the git repo path (the worker's
-        # containment boundary). Unsettled units, no part, a missing v1
-        # row, or a project with no repo path degrade to ``None`` — the
-        # render never raises an unclassified error because of part
+        # ``render_for_design_loop`` part wiring): the project row is
+        # resolved through the app's existing connection; the part is
+        # passed ONLY when the project has a part whose units are settled
+        # or assumed (``part_unit_status`` in ``{"assumed", "settled"}``):
+        # ``part_path`` is the committed part file (``{git_repo_path}/
+        # versions/{v1}/{part.stl|part.3mf}`` — the v1 version row via
+        # ``_v1_for_part``; the stored name is the ``part_format``'s fixed
+        # constant, never re-derived) and ``repo_dir`` is the git repo
+        # path (the worker's containment boundary). An unreadable row,
+        # no part, or unsettled units degrade to ``part_path=None`` with
+        # one WARNING (project id only) for the unreadable-row case —
+        # the render never raises an unclassified error because of part
         # resolution (issue #330's binding operator decision). The closure
         # does NOT scale the part (``part_scale`` is sub-issue 3's domain,
         # not the worker's).
-        part_path = None
-        if (
-            row.get("part_filename")
-            and row.get("part_unit_status") in ("assumed", "settled")
-            and row.get("git_repo_path")
-        ):
-            from d33d.part_http import (
-                PART_3MF_FILENAME,
-                PART_FILENAME,
-                _v1_for_part,
+        try:
+            proj_row = app.state.versions.get_project(project_id)
+        except Exception:  # noqa: BLE001 — an unreadable row must degrade to no part, never raise into the loop
+            logger.warning(
+                "design loop for project %s: the project row could not "
+                "be read — the render proceeds part-less",
+                project_id,
             )
+            proj_row = None
+        part_path: Path | None = None
+        if (
+            proj_row is not None
+            and proj_row.get("part_filename")
+            and proj_row.get("part_unit_status") in ("assumed", "settled")
+            and proj_row.get("git_repo_path")
+        ):
+            from d33d.part_http import _v1_for_part
 
             v1 = _v1_for_part(app.state.conn, project_id)
             if v1 is not None:
                 name = (
                     PART_3MF_FILENAME
-                    if row.get("part_format") == "3mf"
+                    if proj_row.get("part_format") == "3mf"
                     else PART_FILENAME
                 )
                 part_path = (
-                    Path(row["git_repo_path"]) / "versions" / str(v1["id"]) / name
+                    Path(proj_row["git_repo_path"]) / "versions" / str(v1["id"]) / name
                 )
-        repo_dir = Path(row["git_repo_path"]) if row.get("git_repo_path") else None
+        repo_dir = (
+            Path(proj_row["git_repo_path"])
+            if proj_row is not None and proj_row.get("git_repo_path")
+            else None
+        )
         return render_for_design_loop(
             scad_source,
             defines,
@@ -941,6 +951,9 @@ def _finalize_loop_kwargs(
             "finalize route llm_fn must never be called "
             "(the production closure builds its own llm_fn)"
         )
+
+    row = app.state.versions.get_project(project_id)
+    assert row is not None  # already 404'd above
 
     # The photo gate (issue #299 — the finalize seam's twin of the chat
     # path's ``photo_data_uri`` / ``photo_lost`` gate, #295): the

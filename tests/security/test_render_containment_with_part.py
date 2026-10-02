@@ -195,11 +195,11 @@ def test_with_part_part_path_not_in_render_argv(
         c for c in calls if c[:2] == ["docker", "run"] and "--memory" in c
     )
     flat = " ".join(render_argv)
-    # The part's parent dir (versions/1) should not appear in the render argv.
+    # The part's host path (or its repo) must never appear in the render
+    # argv — the part rides only the seed helper's ro /host mount.
     assert str(repo) not in flat, (
         f"repo path leaked into render argv: {render_argv}"
     )
-    assert "part.stl" not in flat or "part.stl" == "part.stl", (
-        "The part filename appearing in the render argv is expected only as a "
-        "path component, not as a full host path"
+    assert str(part) not in flat, (
+        f"part host path leaked into render argv: {render_argv}"
     )

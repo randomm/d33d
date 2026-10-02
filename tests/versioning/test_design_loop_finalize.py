@@ -3132,7 +3132,7 @@ def _make_app_conn_with_project(
     repo = git_repo_path or str(tmp_path / "repo")
     pid = conn.create_project(name="p", git_repo_path=repo)
     for i in range(versions):
-        cur = conn.execute(
+        conn.execute(
             "INSERT INTO versions (project_id, name, params) "
             "VALUES (?, ?, ?)",
             (pid, f"v{i + 1}", "{}"),

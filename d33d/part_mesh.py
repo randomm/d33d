@@ -146,6 +146,37 @@ def mesh_units(mesh: Any) -> str | None:
     raise PartUploadError(f"mesh has a non-string unit {units!r}")
 
 
+def load_part_geometry(data: bytes, part_format: str) -> trimesh.Trimesh:
+    """Guarded load + flatten for the RENDER staging path (issue #330).
+
+    The render worker's 3MF→STL staging needs only the guarded load
+    (zip-bomb guard for 3MF, explicit file_type loader) plus the
+    Scene→``to_mesh`` flatten — NOT the upload's full repair chain
+    (``parse_and_repair`` runs merge/pymeshfix/fix_normals and the unit
+    validation, which is the upload route's concern, not the worker's).
+    ``PartUploadError`` is the closed failure type: the staging caller maps
+    it to an ``artifact_error`` RenderResult.
+    """
+    try:
+        if part_format == "3mf":
+            _check_zip_bomb(data)
+            loaded = trimesh.load(io.BytesIO(data), file_type="3mf")
+        else:
+            loaded = trimesh.load(io.BytesIO(data), file_type="stl")
+    except PartUploadError:
+        raise
+    except Exception as e:
+        raise PartUploadError(f"unparseable {part_format}: {e}") from e
+
+    # Flatten to a single mesh (a Scene is a multi-body import —
+    # ``to_mesh`` concatenates; the worker never seeds or emits a 3MF).
+    if isinstance(loaded, trimesh.Scene):
+        if not loaded.geometry:
+            raise PartUploadError("3MF has no geometry")
+        return loaded.to_mesh()
+    return loaded
+
+
 def parse_and_repair(
     data: bytes, part_format: str
 ) -> tuple[trimesh.Trimesh, dict[str, Any], str | None]:
@@ -279,6 +310,7 @@ __all__ = [
     "MAX_PART_ZIP_ENTRIES",
     "MAX_PART_ZIP_UNCOMPRESSED",
     "PartUploadError",
+    "load_part_geometry",
     "mesh_units",
     "parse_and_repair",
 ]
