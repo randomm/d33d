@@ -21,6 +21,10 @@ Acceptance (issue body + gate resolutions):
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
+
 from d33d.design_state import (
     MAX_STATE_BLOCK_ENTRIES,
     StateEntry,
@@ -2549,3 +2553,205 @@ def test_qa_box_stated_provenance_survives_collapse() -> None:
     assert "Width (W) = 40 (stated by the user)" in text
     assert "Depth (D) = 40" in text
     assert "Height (H) = 12" in text
+
+
+# ---------------------------------------------------------------------------
+# Issue #338 (backend-b): the design-state ``part`` block gains ``bbox_mm``
+# ([w, d, h] in mm, derived from the settled unit, ``null`` while
+# unsettled) plus the existing ``filename``. The Brief reads only these
+# plus the existing ``unit``/``unit_status`` — this pin locks the shape.
+# ---------------------------------------------------------------------------
+
+
+def _insert_version_row(app, project_id: int, bbox: dict | None, name: str) -> int:
+    """Insert a version row directly (simulating the import's v1 — the
+    ``versions.source_kind``/``bbox`` columns the design-state route
+    reads). Returns the new row's id."""
+    import json as _json
+
+    bbox_json = _json.dumps(bbox) if bbox else None
+    cur = app.state.conn.raw.execute(
+        "INSERT INTO versions (project_id, params, name, bbox, source_kind)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (project_id, "{}", name, bbox_json, "import"),
+    )
+    app.state.conn.raw.commit()
+    return int(cur.lastrowid or 0)
+
+
+@pytest.fixture
+def app_paths338(tmp_path: Path) -> dict[str, Path]:
+    return {
+        "db": tmp_path / "d33d.sqlite3",
+        "key": tmp_path / "master.key",
+        "cat": tmp_path / "models.yaml",
+    }
+
+
+@pytest.fixture
+def app_with_versions338(app_paths338: dict[str, Path], tmp_path: Path):
+    """A ``create_app`` instance (the same construction as the versioning
+    conftest's ``app_with_versions`` — the versioning conftest does not
+    reach this top-level test file, so it is defined here): git repos
+    redirected to tmp so the per-project repos are cleaned up by pytest.
+    """
+    import d33d.db as db_mod
+
+    original_default = db_mod._default_git_path
+
+    def _tmp_default_git_path(name: str) -> str:
+        import uuid
+
+        slug = uuid.uuid4().hex[:12]
+        base = tmp_path / "repos" / slug
+        base.mkdir(parents=True, exist_ok=True)
+        return str(base)
+
+    db_mod._default_git_path = _tmp_default_git_path
+
+    from d33d.app import create_app
+
+    app = create_app(
+        app_paths338["db"],
+        master_key_path=app_paths338["key"],
+        catalogue_path=app_paths338["cat"],
+    )
+    yield app
+    db_mod._default_git_path = original_default
+
+
+def _design_state_via_live_app(app, coro_factory):
+    """Drive an async app under a fresh event loop (the file is otherwise
+    pure-unit — this is the one consumer of a live route)."""
+    import asyncio
+
+    from httpx import ASGITransport, AsyncClient
+
+    async def _run():
+        async with app.router.lifespan_context(app):
+            client = AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            )
+            async with client:
+                return await coro_factory(client)
+
+    return asyncio.run(_run())
+
+
+def test_design_state_part_block_carries_bbox_mm_and_filename(
+    app_with_versions338,
+) -> None:
+    """A SETTLED import → the design-state ``part`` block's ``bbox_mm``
+    is the [w, d, h] mm triple derived from the settled unit (the v1
+    row's persisted mm bbox — file bbox × scale), ``filename`` is the
+    sanitized display name, and the existing ``unit``/``unit_status``
+    are still present (the Brief reads only these four plus nothing
+    else)."""
+    app = app_with_versions338
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "338 settled"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        conn = app.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename = ?, part_format = ?,"
+            " part_unit = ?, part_unit_status = ?, part_scale = ?" " WHERE id = ?",
+            ("box_20mm.stl", "stl", "mm", "settled", 1.0, pid),
+        )
+        conn.commit()
+        # The v1 (the import's) row — the settled mm bbox lives here.
+        _insert_version_row(app, pid, {"x": 20.0, "y": 10.0, "z": 5.0}, "Imported box_20mm.stl")
+        return await client.get(f"/api/projects/{pid}/design-state")
+
+    r = _design_state_via_live_app(app, _call)
+    assert r.status_code == 200, r.text
+    part = r.json()["part"]
+    assert part is not None
+    # bbox_mm: the v1's persisted mm bbox, in [w, d, h] order.
+    assert part["bbox_mm"] == [20.0, 10.0, 5.0]
+    # filename: the display name (never a path component, issue #325).
+    assert part["filename"] == "box_20mm.stl"
+    # The existing unit/unit_status the Brief also reads — unchanged.
+    assert part["unit"] == "mm"
+    assert part["unit_status"] == "settled"
+
+
+def test_design_state_part_block_bbox_mm_null_while_unsettled(
+    app_with_versions338,
+) -> None:
+    """An UNSETTLED import → the design-state ``part`` block's ``bbox_mm``
+    is ``null`` (the file-unit bbox is not a meaningful mm measurement
+    until the unit is settled — never a confident number), and the block
+    still carries the filename and unit_status."""
+    app = app_with_versions338
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "338 unsettled"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        conn = app.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename = ?, part_format = ?,"
+            " part_unit_status = ? WHERE id = ?",
+            ("big.stl", "stl", "unsettled", pid),
+        )
+        conn.commit()
+        # The v1 row carries a FILE-unit bbox (the import records it
+        # pre-settle) — it must NOT leak through as mm.
+        _insert_version_row(app, pid, {"x": 600.0, "y": 400.0, "z": 200.0}, "Imported big.stl")
+        return await client.get(f"/api/projects/{pid}/design-state")
+
+    r = _design_state_via_live_app(app, _call)
+    assert r.status_code == 200, r.text
+    part = r.json()["part"]
+    assert part is not None
+    assert part["bbox_mm"] is None
+    assert part["filename"] == "big.stl"
+    assert part["unit_status"] == "unsettled"
+
+
+def test_design_state_part_block_bbox_mm_reads_v1_not_latest(
+    app_with_versions338,
+) -> None:
+    """Once a v2+ exists, the latest version's bbox is the previous
+    candidate's own extents — the part block must read the V1's persisted
+    mm bbox (the import's ground truth), never the latest."""
+    import json as _json
+
+    app = app_with_versions338
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "338 v1 not latest"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        conn = app.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename = ?, part_format = ?,"
+            " part_unit = ?, part_unit_status = ?, part_scale = ?" " WHERE id = ?",
+            ("box.stl", "stl", "mm", "settled", 1.0, pid),
+        )
+        conn.commit()
+        # v1 (the import): the 20 mm box.
+        _insert_version_row(app, pid, {"x": 20.0, "y": 20.0, "z": 20.0}, "Imported box.stl")
+        # v2 (a later candidate): different extents — the wrong number to
+        # surface as the part's bbox.
+        conn.raw.execute(
+            "INSERT INTO versions (project_id, params, name, bbox)"
+            " VALUES (?, ?, ?, ?)",
+            (
+                pid,
+                _json.dumps({"W": 30.0}),
+                "candidate 2",
+                _json.dumps({"x": 30.0, "y": 30.0, "z": 30.0}),
+            ),
+        )
+        conn.commit()
+        return await client.get(f"/api/projects/{pid}/design-state")
+
+    r = _design_state_via_live_app(app, _call)
+    assert r.status_code == 200, r.text
+    part = r.json()["part"]
+    assert part is not None
+    # The V1's mm bbox — not the latest candidate's 30 mm extents.
+    assert part["bbox_mm"] == [20.0, 20.0, 20.0]

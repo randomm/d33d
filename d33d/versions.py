@@ -1538,6 +1538,14 @@ class VersionService:
             # when it has never been exported (pre-change rows read back
             # as NULL; never a fabricated timestamp).
             "exported_at": version["exported_at"],
+            # The version's origin (issue #325; issue #338 public pin):
+            # ``"import"`` for a part-import v1, ``None`` for a design-
+            # loop version. A NULL is a design-loop origin, never a
+            # fabricated ``"design"`` — the SPA uses it to pick the
+            # "v1 — Imported {filename}" history label (falling back to
+            # ``name`` when the design-state part filename is
+            # unavailable).
+            "source_kind": version.get("source_kind"),
         }
 
 
