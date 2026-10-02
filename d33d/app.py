@@ -1623,6 +1623,15 @@ def _build_production_design_loop():
 
             conn = getattr(app_state, "conn", None)
             if conn is None:
+                # No app connection — the project row cannot be read.
+                # Same observability as the sqlite3.Error path (one WARNING,
+                # project id only, no path) — the docstring's "one WARNING"
+                # claim holds for both unreadable-row shapes.
+                logger.warning(
+                    "design loop for project %s: the project row could not "
+                    "be read — the render proceeds part-less",
+                    project_id,
+                )
                 return None, None
             try:
                 row = conn.get_project(project_id)

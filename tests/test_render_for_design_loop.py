@@ -1433,6 +1433,185 @@ def test_3mf_export_failure_maps_to_artifact_error_not_raise(
 
 
 # ---------------------------------------------------------------------------
+# Issue #330 round 2: TOCTOU (C1) + UnboundLocalError (I1) + size cap (I2)
+# ---------------------------------------------------------------------------
+
+
+def test_toctou_symlink_swap_cannot_escape_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C1 regression: validate passes on a legitimate part.stl; attacker
+    unlinks it and symlinks the same path to an outside file; staging must
+    return artifact_error (O_NOFOLLOW open rejects the symlink) and the
+    outside bytes must NOT be staged. The fix is O_NOFOLLOW on the open —
+    a symlink swapped in between validate and open is rejected at open time,
+    not at the earlier lstat.
+    """
+    # Outside secret file.
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    secret = outside_dir / "secret.stl"
+    secret.write_bytes(b"SECRET OUTSIDE CONTENT")
+
+    # Legitimate repo + part.
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    part = vdir / "part.stl"
+    part.write_bytes(b"solid legit\nendsolid legit\n")
+
+    # Validate passes on the legitimate file (pre-swap).
+    err = rw._validate_part_path(part, repo)
+    assert err is None, f"validation must pass on legitimate file: {err}"
+
+    # Attack: unlink the legitimate part, replace with a symlink to outside.
+    part.unlink()
+    part.symlink_to(secret)
+
+    # Staging must fail with a string (never a UnboundLocalError, never a
+    # successful copy of the outside file). The O_NOFOLLOW open rejects the
+    # symlink → OSError → caught → returns an error string.
+    src_dir = tmp_path / "staging-src"
+    src_dir.mkdir()
+    result = rw._stage_part_stl(part, src_dir)
+    assert result is not None, (
+        "staging must reject a symlink swapped in after validation"
+    )
+    # The outside file's content must NOT appear in the staged output.
+    staged = src_dir / "part.stl"
+    if staged.is_file():
+        assert staged.read_bytes() != b"SECRET OUTSIDE CONTENT", (
+            "outside file content leaked into staging — TOCTOU escape"
+        )
+
+
+def test_toctou_3mf_symlink_swap_cannot_escape_staging(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """C1 regression for the 3MF branch: same TOCTOU attack vector on
+    part.3mf — validate passes, attacker swaps to a symlink, staging
+    rejects (O_NOFOLLOW) and the outside bytes are NOT staged."""
+    outside_dir = tmp_path / "outside3mf"
+    outside_dir.mkdir()
+    secret = outside_dir / "outside.3mf"
+    secret.write_bytes(b"NOT-A-ZIP-SECRET-3MF")
+
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    part = vdir / "part.3mf"
+    part.write_bytes(b"fake-valid-3mf-bytes-for-validate")
+
+    # For validation to pass the file just needs to exist (lstat is the
+    # gate; the 3MF content is only read during staging). Validate first:
+    err = rw._validate_part_path(part, repo)
+    assert err is None, f"validation must pass: {err}"
+
+    part.unlink()
+    part.symlink_to(secret)
+
+    src_dir = tmp_path / "staging-src"
+    src_dir.mkdir()
+    result = rw._stage_part_stl(part, src_dir)
+    assert result is not None, (
+        "staging must reject a symlink swapped in after validation (3MF)"
+    )
+    staged = src_dir / "part.stl"
+    if staged.is_file():
+        assert staged.read_bytes() != b"NOT-A-ZIP-SECRET-3MF"
+
+
+def test_staging_oserror_before_import_no_unboundlocalerror(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """I1 regression: an OSError on the STL branch (e.g., the src_dir is
+    removed between mkdir and copy) must return a string error, not raise
+    UnboundLocalError. The pre-fix code had ``from d33d.part_mesh import
+    PartUploadError`` inside the outer try; if the STL branch's copy2
+    raised OSError before the import line, the outer ``except (OSError,
+    ValueError, PartUploadError)`` would compile PartUploadError as a
+    local and raise UnboundLocalError.
+
+    Fix: the import is now at module level, so PartUploadError is always
+    defined when the except clause is evaluated."""
+    # Simulate: part exists in a valid repo, but src_dir vanishes before
+    # the copy (OSError on the open or write).
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    part = vdir / "part.stl"
+    part.write_bytes(b"solid x\nendsolid x\n")
+
+    # Use a src_dir that doesn't exist (os.open on the target write will
+    # fail with FileNotFoundError — a subclass of OSError).
+    non_existent_src = tmp_path / "does-not-exist"
+
+    # Must NOT raise UnboundLocalError; must return a string.
+    try:
+        result = rw._stage_part_stl(part, non_existent_src)
+    except UnboundLocalError as e:
+        pytest.fail(
+            f"UnboundLocalError raised — I1 regression not fixed: {e}"
+        )
+    # The result is either a string (the OSError on src_dir write was
+    # caught) or None if os.open succeeded on the source (it does exist)
+    # but the write to a non-existent parent fails. Either way: no raise.
+    assert result is None or isinstance(result, str)
+
+
+def test_staging_size_cap_enforced_on_stl_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """I2: a committed part.stl exceeding MAX_PART_BYTES (the #325 upload
+    bound, 50 MB) is rejected at render time with a clear error string —
+    not silently copied into the render volume."""
+    from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as cap
+
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    part = vdir / "part.stl"
+    # Just over the cap.
+    part.write_bytes(b"x" * (cap + 1))
+
+    src_dir = tmp_path / "staging-src"
+    src_dir.mkdir()
+    result = rw._stage_part_stl(part, src_dir)
+    assert result is not None, (
+        "staging must reject a part exceeding MAX_PART_BYTES at render time"
+    )
+    assert "max" in result or "exceeds" in result or "bytes" in result, (
+        f"error message should mention the size cap: {result}"
+    )
+    staged = src_dir / "part.stl"
+    assert not staged.is_file(), "oversized part must not be staged"
+
+
+def test_staging_size_cap_enforced_on_3mf_branch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """I2: the size cap also applies to 3MF files (not just the 3MF
+    zip-bomb guard on the unpacked content — a large 3MF file itself must
+    be rejected before any conversion work begins)."""
+    from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as cap
+
+    repo = tmp_path / "repo"
+    vdir = repo / "versions" / "1"
+    vdir.mkdir(parents=True)
+    part = vdir / "part.3mf"
+    part.write_bytes(b"x" * (cap + 1))
+
+    src_dir = tmp_path / "staging-src"
+    src_dir.mkdir()
+    result = rw._stage_part_stl(part, src_dir)
+    assert result is not None, (
+        "staging must reject a 3MF exceeding MAX_PART_BYTES at render time"
+    )
+    staged = src_dir / "part.stl"
+    assert not staged.is_file()
+
+
+# ---------------------------------------------------------------------------
 # Issue #330: cleanup (#280) mirrors with a part present.
 # ---------------------------------------------------------------------------
 

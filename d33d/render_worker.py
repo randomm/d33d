@@ -63,6 +63,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from d33d.data_dir import default_data_dir, guard_real_data_path
+from d33d.part_mesh import MAX_PART_ZIP_UNCOMPRESSED as MAX_PART_BYTES
+from d33d.part_mesh import PartUploadError, load_part_geometry
 
 logger = logging.getLogger(__name__)
 
@@ -1531,27 +1533,55 @@ def _validate_part_path(
 def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
     """Stage the part as ``part.stl`` in ``src_dir``.
 
-    - ``part.stl``: copied as-is.
-    - ``part.3mf``: converted to STL on the host via the shared guarded
-      loader ``d33d.part_mesh.load_part_geometry`` (zip-bomb guard +
-      trimesh load + Scene.to_mesh flattening — the SAME loader the upload
-      route's ``parse_and_repair`` uses for the load step, so the two
-      paths cannot drift), written as STL bytes. The 3MF unit is never
-      consulted here (unit scaling is sub-issue 3 of epic #283).
+    - ``part.stl``: copied via an O_NOFOLLOW fd opened + fstat'd ATOMIC with
+      the read (TOCTOU-safe — a symlink swapped in between ``_validate_part_path``
+      and this read cannot redirect the copy to an outside file).
+    - ``part.3mf``: read via the same O_NOFOLLOW fd (TOCTOU-safe), then
+      converted to STL on the host via the shared guarded loader
+      ``d33d.part_mesh.load_part_geometry`` (zip-bomb guard + trimesh load
+      + Scene.to_mesh flattening — the SAME loader the upload route's
+      ``parse_and_repair`` uses for the load step, so the two paths cannot
+      drift), written as STL bytes. The 3MF unit is never consulted here
+      (unit scaling is sub-issue 3 of epic #283).
+
+    Both branches enforce a size cap (MAX_PART_BYTES) on the source file
+    before copying/converting (the #325 upload bound is also enforced at
+    render time — a hand-committed or re-replaced file under the repo is
+    not silently allowed to flow into the render volume).
 
     Returns an error message string on failure, or ``None`` on success.
     """
     target = src_dir / "part.stl"
     try:
+        # Open with O_NOFOLLOW so a symlink swapped in between validate and
+        # stage cannot redirect the read; fstat the fd (the actually-opened
+        # file, not the path) to verify regular-file + size cap atomically.
+        fd = os.open(str(part_path), os.O_RDONLY | os.O_NOFOLLOW)
+    except (OSError, ValueError) as e:
+        return f"part staging failed: {e}"
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return f"part is not a regular file at staging time: {part_path.name}"
+        if st.st_size > MAX_PART_BYTES:
+            return (
+                f"part file is {st.st_size} bytes; max {MAX_PART_BYTES} "
+                f"(the #325 upload bound, enforced at render time)"
+            )
+        data = os.read(fd, st.st_size) if st.st_size > 0 else b""
+    except OSError as e:
+        return f"part staging failed: {e}"
+    finally:
+        os.close(fd)
+
+    try:
         if part_path.name == "part.stl":
-            shutil.copy2(part_path, target)
+            target.write_bytes(data)
             return None
         # 3MF → STL conversion via the shared guarded loader (raises
         # PartUploadError on any failure — caught below and mapped to an
         # artifact_error string; never a PartUploadError leak).
-        from d33d.part_mesh import PartUploadError, load_part_geometry
-
-        mesh = load_part_geometry(part_path.read_bytes(), "3mf")
+        mesh = load_part_geometry(data, "3mf")
         if len(mesh.faces) == 0:
             return "3MF mesh is empty"
         # ``ValueError`` (trimesh's "exporter not available") and
@@ -1563,7 +1593,7 @@ def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
         except (PartUploadError, ValueError, OSError) as e:
             return f"3MF to STL conversion failed: {e}"
         return None
-    except (OSError, ValueError, PartUploadError) as e:
+    except (PartUploadError, ValueError, OSError) as e:
         return f"3MF to STL conversion failed: {e}"
 
 
