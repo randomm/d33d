@@ -938,6 +938,22 @@ describe("design contract", () => {
     );
     expect(passTest).toMatch(/importedPart/);
     expect(passTest).toMatch(/15–30/);
+
+    // App wiring (issue #338): the App-level part state (the design-state
+    // envelope's `part`) feeds the render site — the import path's line is
+    // selected whenever the project HAS a part. The App-level proof lives
+    // in web/src/components/__tests__/app-layout.test.tsx; the tripwire
+    // pins the render site: `hasPart` (App's part-existence) drives
+    // `importedPart` at the PassProgress call site.
+    const paneSrc = readFileSync(
+      join(SRC, "components/chat/ConversationPane.tsx"),
+      "utf8",
+    );
+    expect(paneSrc).toMatch(/importedPart=\{hasPart\}/);
+    // The pane's `hasPart` prop is App's part-existence, not a second
+    // source: it is optional (no part ⇒ no import path) and documented
+    // as such.
+    expect(paneSrc).toMatch(/hasPart\?:\s*boolean/);
   });
 
   /* --------------------------------------------------------------- W17 */

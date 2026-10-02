@@ -455,6 +455,10 @@ export const history = {
    *  edges (rise-backs). */
   riserParent: "built from the previous version",
   riserRestored: "restored from an earlier version",
+  /** The v1 label for an imported part (issue #338): "v1 — Imported "
+   *  followed by the filename, which renders in mono, ellipsis-truncated,
+   *  with a full-name title attribute, and is never interpreted. */
+  imported: "Imported",
 } as const;
 
 export const firstRun = {
@@ -690,6 +694,11 @@ export const shell = {
   send: "Send",
   export: "Export 3MF",
   exportVersion: (version: string): string => `Export ${version}`,
+  /** The export note under the button when the project has an imported
+   *  part (issue #338): the 3MF contains geometry from the file the user
+   *  brought — the filename renders in mono, as inert text. */
+  exportContainsGeometry: (filename: string): string =>
+    `Contains geometry from ${filename}`,
   /** Only rendered once validation has actually passed. Never a default. */
   validated: (checks: number): string =>
     `Watertight · in millimetres · ${checks} checks passed`,

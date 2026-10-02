@@ -790,4 +790,16 @@ button.chat-send-btn:disabled {
   color: var(--color-blocked);
 }
 
+/* The export note (issue #338): "contains geometry from {filename}" under
+   the button, shown only when the project has a part. The filename renders
+   in the mono face — numbers and filenames in mono, prose in the UI face. */
+.export-3mf-note {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+}
+.export-3mf-note .mono-face {
+  font-family: var(--font-mono);
+}
+
 

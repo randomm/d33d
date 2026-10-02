@@ -154,6 +154,17 @@ export function Export3MF({
       >
         {state === "downloading" ? "Exporting…" : copy.shell.export}
       </button>
+      {/* Issue #338: the export note — the 3MF contains geometry from the
+          file the user brought. Shown only when the project has a part; the
+          filename renders in mono (`.mono-face`), as inert text. */}
+      {part !== null && part !== undefined && (
+        <div className="export-3mf-note" data-testid="export-3mf-note">
+          {"Contains geometry from "}
+          <span className="mono-face" data-testid="export-3mf-note-filename">
+            {part.filename}
+          </span>
+        </div>
+      )}
       {state === "error" && error && (
         <div className="export-3mf-error" data-testid="export-3mf-error">
           <span className="export-3mf-error-message">{error}</span>

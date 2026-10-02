@@ -18,6 +18,8 @@
  * boundary (avoid re-mocking three.js wholesale here).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
@@ -1083,6 +1085,25 @@ describe("App Brief wiring (issue #123)", () => {
     expect(chip.textContent).toContain("Width · 60.0\u202Fmm");
     expect(chip.textContent).toContain("Depth · 45.0\u202Fmm");
     expect(chip.textContent).toContain("Height · 80.0\u202Fmm");
+  });
+
+  it("App passes importedPart to PassProgress whenever the project has a part (issue #338)", () => {
+    // App-level proof of the import-path wiring (issue #338 / the W332
+    // design-contract cross-pin): the design-state envelope's `part` IS
+    // the source of PassProgress's `importedPart` — the render site is
+    // ConversationPane's `importedPart={hasPart}`, where App passes
+    // `hasPart={designStatePart !== null}`.
+    //
+    // The design-contract test pins the render-site expression; this
+    // test pins the DATA FLOW half: App reads the envelope's `part` into
+    // state, and passes `designStatePart !== null` as `hasPart` down to
+    // the pane. A wiring change that drops the part fetch or forgets to
+    // pass `hasPart` fails here.
+    const appSrc = readFileSync(join(__dirname, "..", "..", "App.tsx"), "utf8");
+    // App reads the envelope's part into state:
+    expect(appSrc).toMatch(/setDesignStatePart\(envelope\.part/);
+    // And it reaches the conversation pane as `hasPart` from that state:
+    expect(appSrc).toMatch(/hasPart=\{[^}]*designStatePart[^}]*null\}/);
   });
 
   it("the design-state envelope's history_missing flag drives the brief-saved-missing banner (issue #316)", async () => {
