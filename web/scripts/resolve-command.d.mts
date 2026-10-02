@@ -6,4 +6,4 @@
  * @param url - `import.meta.url` of the calling module (the wrapper).
  * @returns the argv for `spawn(argv[0], argv.slice(1), ...)`.
  */
-export declare function resolveCommand(env: Record<string, string | undefined>, url: string): string[];
+export declare function resolveCommand(env: NodeJS.ProcessEnv, url: string): string[];

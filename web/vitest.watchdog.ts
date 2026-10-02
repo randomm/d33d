@@ -13,13 +13,11 @@
 // When D33D_TEST_WRAPPER_PID is unset (CI, a direct `vitest` invocation),
 // the watchdog does nothing.
 
-import { startWatchdog } from "./scripts/parent-watchdog.mjs";
-
-const wrapperPid = process.env.D33D_TEST_WRAPPER_PID;
+import { parseWrapperPid, startWatchdog } from "./scripts/parent-watchdog.mjs";
 
 export default async function watchdogSetup() {
-  const pid = wrapperPid ? Number(wrapperPid) : NaN;
-  if (!Number.isInteger(pid) || pid <= 0) {
+  const pid = parseWrapperPid(process.env.D33D_TEST_WRAPPER_PID);
+  if (pid === null) {
     return () => {};
   }
   return startWatchdog(

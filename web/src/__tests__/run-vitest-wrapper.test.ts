@@ -13,6 +13,9 @@
 // D33D_TEST_COMMAND + D33D_TEST_MODE=1 overrides what the wrapper spawns in
 // the fixture cases.
 //
+// The watchdog logic (web/scripts/parent-watchdog.mjs) is tested purely,
+// with injected probes/timers — no real watchdog process is ever started.
+//
 // The final test ("REAL: SIGKILL…") IS the real path: it is self-contained
 // (a tiny vitest project in a tempdir whose globalSetup points at the real
 // vitest.watchdog.ts) and drives the actual production wrapper → vitest →
@@ -28,15 +31,24 @@ const SETTLE_MS = 300;
 
 // The watchdog module is plain .mjs (outside tsconfig's src/ rootDir); import
 // it dynamically to avoid the missing-declaration error.
-async function loadWatchdog() {
+type WatchdogModule = {
+  checkParent: (
+    probe: (p: number, s: number | string) => void,
+    pid: number,
+    kill: (s: string) => void,
+  ) => "alive" | "dead";
+  parseWrapperPid: (raw: string | undefined, warn?: (line: string) => void) => number | null;
+  startWatchdog: (
+    probe: (p: number, s: number | string) => void,
+    pid: number,
+    killGroup: (s: string) => void,
+    opts?: { pollMs?: number; _interval?: unknown },
+  ) => () => void;
+};
+
+async function loadWatchdog(): Promise<WatchdogModule> {
   const mod: unknown = await import("../../scripts/parent-watchdog.mjs");
-  return mod as {
-    checkParent: (
-      probe: (p: number, s: number | string) => void,
-      pid: number,
-      kill: (s: string) => void,
-    ) => "alive" | "dead";
-  };
+  return mod as unknown as WatchdogModule;
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +275,120 @@ setTimeout(() => {}, 300000);
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// Watchdog pure-logic tests (injected probes/timers — no real process)
+// ---------------------------------------------------------------------------
+
+test("watchdog: startWatchdog retries the kill when it throws, then clears the timer", async () => {
+  const { startWatchdog } = await loadWatchdog();
+
+  // Spy on the global interval: startWatchdog's default timer is the global
+  // setInterval, and the clear happens via the global clearInterval.
+  // Capture the callback so the test drives ticks synchronously, and flag
+  // the clear when it targets the fake timer.
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  const fakeTimer = { kind: "fake-watchdog-timer" } as unknown as ReturnType<typeof setInterval>;
+  const captured: { cb?: () => void } = {};
+  let cleared = false;
+  Object.defineProperty(globalThis, "setInterval", {
+    configurable: true,
+    value: (cb: Parameters<typeof setInterval>[0], _ms?: Parameters<typeof setInterval>[1]) => {
+      captured.cb = cb as () => void;
+      return fakeTimer;
+    },
+  });
+  Object.defineProperty(globalThis, "clearInterval", {
+    configurable: true,
+    value: (t: unknown) => {
+      if (t === fakeTimer) {
+        cleared = true;
+      }
+    },
+  });
+  try {
+    const probe = (): never => {
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    };
+    const killCalls: string[] = [];
+    const killGroup = (s: string) => {
+      killCalls.push(s);
+      if (killCalls.length === 1) {
+        // First kill throws (simulated EPERM mid-teardown); the watchdog
+        // must keep the timer running and the streak, so the next tick
+        // retries the kill.
+        throw new Error("EPERM (simulated mid-teardown)");
+      }
+    };
+
+    const teardown = startWatchdog(probe, 12345, killGroup);
+
+    // Tick 1: streak 1 < 2, no kill yet, timer not cleared.
+    captured.cb?.();
+    expect(killCalls).toEqual([]);
+    expect(cleared).toBe(false);
+
+    // Tick 2: streak 2 → kill throws → timer must still be armed.
+    captured.cb?.();
+    expect(killCalls).toEqual(["SIGKILL"]);
+    expect(cleared).toBe(false);
+
+    // Tick 3: streak 3 ≥ 2 → kill succeeds → timer cleared.
+    captured.cb?.();
+    expect(killCalls).toEqual(["SIGKILL", "SIGKILL"]);
+    expect(cleared).toBe(true);
+
+    teardown();
+  } finally {
+    Object.defineProperty(globalThis, "setInterval", {
+      configurable: true,
+      value: realSetInterval,
+    });
+    Object.defineProperty(globalThis, "clearInterval", {
+      configurable: true,
+      value: realClearInterval,
+    });
+  }
+}, 10000);
+
+test("watchdog: checkParent kills the group on ESRCH (injected probe)", async () => {
+  const { checkParent } = await loadWatchdog();
+  const signals: string[] = [];
+  const killed = checkParent(
+    () => {
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    },
+    42,
+    (s) => signals.push(s),
+  );
+  expect(killed).toBe("dead");
+  expect(signals).toEqual(["SIGKILL"]);
+
+  const alive = checkParent(() => {}, 42, (s) => signals.push(s));
+  expect(alive).toBe("alive");
+  expect(signals).toEqual(["SIGKILL"]);
+}, 5000);
+
+test("watchdog: parseWrapperPid warns on a bad pid and disables the watchdog", async () => {
+  const { parseWrapperPid } = await loadWatchdog();
+  const valid = parseWrapperPid("12345", () => {
+    throw new Error("should not warn");
+  });
+  expect(valid).toBe(12345);
+
+  expect(parseWrapperPid(undefined, () => {})).toBeNull();
+
+  for (const bad of ["", "abc", "0", "-5", "1.5"]) {
+    const warnings: string[] = [];
+    const r = parseWrapperPid(bad, (line) => warnings.push(line));
+    expect(r).toBeNull();
+    expect(warnings.length).toBe(1);
+    expect(warnings[0]).toContain("D33D_TEST_WRAPPER_PID");
+  }
+}, 5000);
+
+// ---------------------------------------------------------------------------
+// Wrapper fixture tests (spawn the wrapper against fixtures, never the real
+// outer suite)
 // ---------------------------------------------------------------------------
 
 test("SIGTERM reaps the wrapper's whole process group, exit 143", async () => {
@@ -374,7 +499,7 @@ test("D33D_TEST_MODE unset: D33D_TEST_COMMAND is ignored (pure unit test)", asyn
 
   // 1. D33D_TEST_MODE unset, D33D_TEST_COMMAND set — override ignored.
   const unsetCmd = resolveCommand(
-    { D33D_TEST_MODE: undefined, D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    { D33D_TEST_MODE: undefined, D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" } as NodeJS.ProcessEnv,
     wrapperUrl,
   );
   expect(unsetCmd.length).toBe(2);
@@ -384,21 +509,21 @@ test("D33D_TEST_MODE unset: D33D_TEST_COMMAND is ignored (pure unit test)", asyn
 
   // 2. D33D_TEST_MODE empty string — also not "1", override ignored.
   const emptyCmd = resolveCommand(
-    { D33D_TEST_MODE: "", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    { D33D_TEST_MODE: "", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" } as NodeJS.ProcessEnv,
     wrapperUrl,
   );
   expect(emptyCmd).toEqual(unsetCmd);
 
   // 3. D33D_TEST_MODE="1" + D33D_TEST_COMMAND set — override honoured.
   const onCmd = resolveCommand(
-    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" } as NodeJS.ProcessEnv,
     wrapperUrl,
   );
   expect(onCmd).toEqual(["node", "/tmp/sentinel.mjs"]);
 
   // 4. D33D_TEST_MODE="1" but D33D_TEST_COMMAND unset — real vitest fallback.
   const modeOnly = resolveCommand(
-    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: undefined },
+    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: undefined } as NodeJS.ProcessEnv,
     wrapperUrl,
   );
   expect(modeOnly).toEqual(unsetCmd);
@@ -476,7 +601,7 @@ setTimeout(() => process.exit(0), 100);
  *
  * The only test in this file that drives the actual production path. It is
  * self-contained: it builds a TINY vitest project in a tempdir (symlinking
- * the outer node_modules so no install is needed), whose vitest.config.ts
+ * the outer node_modules so no install is needed), whose vitest.config.mjs
  * points `globalSetup` at the REAL `./vitest.watchdog.ts` (absolute path).
  * It then spawns the wrapper pointed at that project, SIGKILLs the wrapper
  * once the inner vitest has forked workers, and asserts the entire inner

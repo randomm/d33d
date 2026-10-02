@@ -47,12 +47,15 @@ const forwardedArgs = process.argv.slice(2);
 // gone before the wrapper exits).
 // ---------------------------------------------------------------------------
 
+// ESRCH means the process (or group) is already gone — exactly what we
+// want on the kill path. EPERM can be transient while the group is
+// mid-teardown; swallow it too so the confirmation probe (killGroupAndConfirm)
+// always runs and makes the actual decision. Any other error propagates.
 function killIgnoreESRCH(target, signal) {
   try {
     process.kill(target, signal);
   } catch (err) {
-    // ESRCH: the process (or group) is already gone — exactly what we want.
-    if (!err || err.code !== "ESRCH") {
+    if (!err || (err.code !== "ESRCH" && err.code !== "EPERM")) {
       throw err;
     }
   }
@@ -90,12 +93,17 @@ function psGroupEmpty(pgid) {
   }
 }
 
+// Shared by every confirmation sleep — Atomics.wait needs an Int32Array
+// over a SharedArrayBuffer; reuse it instead of allocating per iteration.
+const waitBuf = new Int32Array(new SharedArrayBuffer(4));
+
 /**
  * Kill the child group, then confirm it is actually gone before returning.
  * EPERM on the kill is treated as "the group is mid-teardown"; the probe
  * below decides. If the group has been unprobeable (EPERM and no `ps`)
- * for more than 2 s we fail fast with a clear message — no blind retry to
- * the full timeout.
+ * for more than 2 s, the message is written to stderr and the wrapper
+ * returns so the caller exits with the child's code on the normal path
+ * (or 128 + signal on the signal path) — the watchdog remains the backstop.
  */
 function killGroupAndConfirm(pid) {
   // Kill the child directly first: the child can also be a member of the
@@ -116,12 +124,14 @@ function killGroupAndConfirm(pid) {
       if (empty === true) {
         return;
       }
-      throw new Error(
-        `child group ${pid} unprobeable after 2 s (kill -pgid EPERM and ` +
-          (empty === null ? "ps unavailable" : "ps still lists the group"),
+      console.error(
+        `d33d: child group ${pid} unprobeable after 2 s (kill -pgid EPERM and ` +
+          (empty === null ? "ps unavailable" : "ps still lists the group") +
+          "; continuing to exit, the parent watchdog remains the backstop.",
       );
+      return;
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    Atomics.wait(waitBuf, 0, 0, 50);
   }
 }
 
@@ -172,10 +182,26 @@ function onSignal(exitCode) {
   // SIGTERM now, SIGKILL after the grace period, in case the child traps it.
   // The grace timer is intentionally ref'd (not unref'd): it keeps the
   // wrapper alive through the grace window so the escalation can fire if
-  // the child survives.
-  killGroup("SIGTERM");
+  // the child survives. A kill that throws (e.g. EPERM while the group is
+  // mid-teardown) must not drop the timer: log it and let the escalation
+  // retry on the next tick.
+  try {
+    killGroup("SIGTERM");
+  } catch (err) {
+    console.error(
+      "d33d: wrapper group kill (SIGTERM) failed; will retry on the grace tick: " +
+        (err && err.message ? err.message : String(err)),
+    );
+  }
   setTimeout(() => {
-    killGroup("SIGKILL");
+    try {
+      killGroup("SIGKILL");
+    } catch (err) {
+      console.error(
+        "d33d: wrapper group kill (SIGKILL) failed: " +
+          (err && err.message ? err.message : String(err)),
+      );
+    }
     process.exit(exitCode);
   }, GRACE_MS);
 }
