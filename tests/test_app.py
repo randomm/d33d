@@ -996,7 +996,7 @@ def _svc(app: Any) -> Any:
     try:
         svc.conn.raw.execute("SELECT 1")
         return svc
-    except Exception:
+    except Exception:  # noqa: BLE001
         import d33d.db as db_mod
         from d33d import versions as versions_mod
 
@@ -1051,7 +1051,7 @@ def test_region_edit_accepts_hit_point_and_face_normal(app):
                 pass
         return project_id, r
 
-    project_id, r = _run_async(app, _call)
+    _pid, r = _run_async(app, _call)
     assert r.status_code == 202, r.text
     assert "request" in captured, "stub loop not invoked with request kwarg"
     rt = captured["request"]
@@ -1086,7 +1086,7 @@ def test_region_edit_hit_point_only_still_accepted(app):
                 pass
         return project_id, r
 
-    project_id, r = _run_async(app, _call)
+    _pid, r = _run_async(app, _call)
     assert r.status_code == 202, r.text
     rt = captured.get("request", "")
     assert "Pick hit point in mm: 5, 3, 7" in rt, rt
@@ -1150,7 +1150,7 @@ def test_region_edit_face_normal_within_tolerance_accepted(app):
                 pass
         return project_id, r
 
-    project_id, r = _run_async(app, _call)
+    _pid, r = _run_async(app, _call)
     # 0.999 is within 1±0.01 → accepted
     assert r.status_code == 202, r.text
 
@@ -1299,7 +1299,7 @@ def test_region_edit_fill_recut_yes_runs_loop(app_with_projects, monkeypatch):
                     break
         return pid, r2.status_code, frames
 
-    pid, status, frames = _run_async(app_with_projects, _call)
+    _pid, status, _frames = _run_async(app_with_projects, _call)
     assert status == 202, status
     # The loop was called with the fill-and-recut instruction
     assert loop_calls, "the design loop was not called"
@@ -1309,7 +1309,7 @@ def test_region_edit_fill_recut_yes_runs_loop(app_with_projects, monkeypatch):
     assert "38" in rt, rt
     # The offer was cleared
     svc = _svc(app_with_projects)
-    assert svc.get_pending_offer(pid) is None, "offer not cleared"
+    assert svc.get_pending_offer(_pid) is None, "offer not cleared"
 
 
 def test_region_edit_fill_recut_decline_clears_offer(app_with_projects, monkeypatch):
@@ -1389,7 +1389,7 @@ def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatc
                     break
         return pid, r2.status_code, frames
 
-    pid, status, frames = _run_async(app_with_projects, _call)
+    _pid, status, _frames = _run_async(app_with_projects, _call)
     assert status == 202, status
     # The loop WAS called (fallthrough)
     assert loop_calls, "the design loop was not called"

@@ -77,7 +77,7 @@ import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
-import { usePartUpload } from "./components/upload/usePartUpload";
+import { usePartUpload } from "./components/upload/PartUpload";
 import { usePartStl } from "./hooks/usePartStl";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
@@ -1275,6 +1275,13 @@ export default function App({ client }: AppProps) {
                       : "";
                   const isAck =
                     data.confirm_ack !== undefined && ackLabel.length > 0;
+                  // Issue #338 (decision 7): the fill-and-recut offer's done
+                  // frame carries the additive `fill_recut_offer` field — the
+                  // placeholder renders the boundary sentence with the
+                  // [Yes, do that] / [Leave it] buttons (the offer is stored
+                  // server-side as the pending offer; the buttons send the
+                  // acceptance/decline through the existing chat offer path).
+                  const isFillRecutOffer = data.fill_recut_offer === true;
                   return {
                     ...m,
                     streaming: false,
@@ -1283,6 +1290,9 @@ export default function App({ client }: AppProps) {
                       : isReal && m.content === ""
                         ? { content: isAnswer ? msg : copy.passCard.summary }
                         : {}),
+                    ...(isFillRecutOffer
+                      ? { fillRecutOffer: { pending: true } }
+                      : {}),
                   };
                 }),
               );
@@ -1850,6 +1860,7 @@ export default function App({ client }: AppProps) {
           onCompareSelect={handleCompareSelect}
           onOpenSheet={(id) => setSheetOpenFor(id)}
           sheetOpenFor={sheetOpenFor}
+          part={designStatePart}
         />
       )}
 
@@ -1889,6 +1900,7 @@ export default function App({ client }: AppProps) {
           onPin={handleVersionPin}
           onCompareSelect={handleCompareSelect}
           onClose={() => setSheetOpenFor(null)}
+          part={designStatePart}
         />
       )}
 

@@ -470,6 +470,10 @@ export const history = {
   /** The pinned variants' mark: which one was kept, dimmed — the version's
    *  own message is the why (no separate pin_reason field exists). */
   pinnedMark: (version: string): string => `${version} · pinned`,
+  /** The prefix of the imported-part version label (issue #338,
+   *  decision 8): "v1 — Imported {filename}" — the version slot +
+   *  dash + the word, before the mono filename span. */
+  importedLabelPrefix: "v1 — Imported ",
   /** The riser graph's legend entries. The graph itself is the version graph
    *  the timeline returns: parent edges (the main line) and restored_from
    *  edges (rise-backs). */
@@ -819,6 +823,23 @@ export const fillRecut = {
   /** The quiet decline acknowledgement (a clean "no" on the pending
    *  fill-recut offer). */
   declined: "Understood — leaving the part as it is.",
+
+  /** The no-normal degradation reply (issue #338, decision 6): a region
+   *  edit that triggers the boundary WITHOUT a face normal gets NO
+   *  axis-dependent offer — the reply says the feature came with the
+   *  file, then this sentence. No offer is stored, no buttons, no loop.
+   *  The backend's FRILL_NO_NORMAL_REPLY carries the same sentence
+   *  (the parity pin in tests/test_projects.py). */
+  noNormal:
+    "That feature came with your file, so I can't resize it directly — the file has no parameters for me to change. I can't tell that feature's axis from where you pointed — pin a flat face on it and I'll offer to fill it and recut it on the same axis.",
+
+  /** The fill-and-recut offer's acceptance button (issue #338, decision
+   *  7): sends the acceptance through the existing chat offer path, which
+   *  runs the loop. */
+  offerYes: "Yes, do that",
+  /** The fill-and-recut offer's decline button (issue #338, decision 7):
+   *  clears the pending offer, no loop. */
+  offerNo: "Leave it",
 } as const;
 
 /**

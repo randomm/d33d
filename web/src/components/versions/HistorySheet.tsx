@@ -33,7 +33,7 @@
  * round-trips changes.
  */
 
-import type { VersionCompare, VersionTimelineEntry } from "../../lib/api";
+import type { VersionCompare, VersionTimelineEntry, PartReportInfo } from "../../lib/api";
 import { VersionTimeline } from "./VersionTimeline";
 import { VariantGallery } from "./VariantGallery";
 import { CompareView } from "./CompareView";
@@ -66,6 +66,11 @@ interface HistorySheetProps {
   onCompareSelect: (versionId: number) => void;
   /** Called to close the sheet (back to the filmstrip). */
   onClose: () => void;
+  /** The project's imported part (design-state envelope's `part`). When
+   *  present, the v1 entry whose `source_kind` is `import` renders
+   *  "v1 — Imported {filename}" (issue #338, decision 8). `null`/absent
+   *  leaves every entry on its existing `name`. */
+  part?: PartReportInfo | null;
 }
 
 export function HistorySheet({
@@ -79,6 +84,7 @@ export function HistorySheet({
   onPin,
   onCompareSelect,
   onClose,
+  part,
 }: HistorySheetProps) {
   return (
     <div
@@ -134,6 +140,7 @@ export function HistorySheet({
         onRestore={onRestore}
         onPin={onPin}
         onCompareSelect={onCompareSelect}
+        part={part}
       />
 
       {/* The pinned variants gallery (the pin action's browse surface). */}

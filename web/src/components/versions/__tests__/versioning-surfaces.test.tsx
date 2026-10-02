@@ -80,6 +80,7 @@ const TIMELINE: VersionTimelineEntry[] = [
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: null,
+  source_kind: null,
   },
   {
     id: 2,
@@ -95,6 +96,7 @@ const TIMELINE: VersionTimelineEntry[] = [
     created_at: "2026-01-02T00:00:00Z",
     diff_count: 1,
     exported_at: null,
+  source_kind: null,
   },
 ];
 
@@ -135,6 +137,7 @@ const TIMELINE_WITH_RESTORE: VersionTimelineEntry[] = [
     created_at: "2026-01-03T00:00:00Z",
     diff_count: 1,
     exported_at: null,
+  source_kind: null,
   },
 ];
 

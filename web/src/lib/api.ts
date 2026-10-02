@@ -90,6 +90,11 @@ export interface VersionTimelineEntry {
    *  server-side state, so the filmstrip mark survives a page reload.
    *  `null` when the version was never exported. */
   exported_at: string | null;
+  /** The version's origin (issue #325): `"import"` for a part-import v1,
+   *  `null` for a design-loop version (a null is a design-loop origin,
+   *  never a fabricated `"design"`). The SPA uses this to render the
+   *  "v1 — Imported {filename}" label (issue #338, decision 8). */
+  source_kind: string | null;
 }
 
 /**

@@ -33,6 +33,7 @@ function entry(
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: exported_at ?? null,
+    source_kind: null,
     ...rest,
   };
 }
@@ -340,3 +341,59 @@ describe("Filmstrip", () => {
   });
 });
 
+
+
+// ---------------------------------------------------------------------------
+// Issue #338 (decision 8) — the "v1 — Imported {filename}" history label
+// ---------------------------------------------------------------------------
+
+describe("Filmstrip — imported version label (issue #338)", () => {
+  const part = {
+    filename: "bracket.stl",
+    format: "stl" as const,
+    unit: "mm",
+    unit_status: "settled" as const,
+    scale: 1,
+    report: null,
+    options: null,
+    bbox_mm: null,
+  };
+
+  it("renders 'v1 — Imported {filename}' for an import slot, filename in mono", () => {
+    const versions = [entry(1, { source_kind: "import" })];
+    render(<Filmstrip {...baseProps({ versions })} part={part} />);
+    const label = screen.getByTestId("version-imported-label");
+    expect(label.textContent).toContain("v1 — Imported ");
+    expect(label.textContent).toContain("bracket.stl");
+    const filenameEl = screen.getByTestId("version-imported-filename");
+    expect(filenameEl.classList).toContain("mono-face");
+    expect(filenameEl.getAttribute("title")).toBe("bracket.stl");
+  });
+
+  it("renders the bare name for a non-import slot (no label change)", () => {
+    const versions = [entry(1, { source_kind: null })];
+    render(<Filmstrip {...baseProps({ versions })} part={part} />);
+    expect(screen.queryByTestId("version-imported-label")).toBeNull();
+    expect(screen.getByTestId("version-label-fallback")).toBeTruthy();
+  });
+
+  it("falls back to the version's name when part.filename is unavailable", () => {
+    const versions = [entry(1, { source_kind: "import", name: "Imported bracket.stl" })];
+    render(<Filmstrip {...baseProps({ versions })} part={null} />);
+    const fallback = screen.getByTestId("version-label-fallback");
+    expect(fallback.textContent).toBe("Imported bracket.stl");
+  });
+
+  it("renders a hostile filename as inert text (never interpreted)", () => {
+    const hostilePart = {
+      ...part,
+      filename: "../../;rm -rf $HOME `id` <img src=x onerror=alert(1)>",
+    };
+    const versions = [entry(1, { source_kind: "import" })];
+    render(<Filmstrip {...baseProps({ versions })} part={hostilePart} />);
+    const filenameEl = screen.getByTestId("version-imported-filename");
+    expect(filenameEl.textContent).toContain("<img src=x onerror=alert(1)>");
+    expect(filenameEl.querySelector("script")).toBeNull();
+    expect(filenameEl.getAttribute("title")).toBe(hostilePart.filename);
+  });
+});

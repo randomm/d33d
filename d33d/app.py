@@ -84,8 +84,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from d33d import db, slicer
-from d33d import print_validation as _print_validation
 from d33d import fill_recut as fill_recut_mod
+from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
 from d33d.chat_frames import answered_frames
 from d33d.config import ModelCatalogueLoader, hot_reload
@@ -1349,6 +1349,11 @@ def create_app(
                 face_normal=tuple(body.face_normal) if body.face_normal else None,
             )
         if fill_result is not None:
+            # A fresh boundary trigger (no live offer to accept/decline)
+            # surfaces the offer — the SPA renders the boundary sentence
+            # with the [Yes, do that] / [Leave it] buttons (issue #338,
+            # decision 7). The decline reply is plain (no buttons).
+            _is_fresh_trigger = fill_result["answer"] != fill_recut_mod.FRILL_DECLINE_REPLY
             if fill_result.get("run_loop"):
                 # A clean acceptance of a LIVE fill-recut offer: the
                 # loop runs with the fill-and-recut instruction (the
@@ -1391,7 +1396,8 @@ def create_app(
             # released here (the no-run reply contract: nothing keeps it
             # after this point).
             app.state.event_sources[project_id] = answered_frames(
-                fill_result["answer"]
+                fill_result["answer"],
+                fill_recut_offer=_is_fresh_trigger,
             )
             inflight.discard(project_id)
             return JSONResponse(

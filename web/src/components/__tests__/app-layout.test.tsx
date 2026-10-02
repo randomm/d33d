@@ -253,6 +253,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: null,
+      source_kind: null,
     },
   ]);
   // The export's completion moment (issue #126) POSTs the mark to the
@@ -273,6 +274,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: "2026-01-02T00:00:00Z",
+    source_kind: null,
   });
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
   vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
@@ -441,6 +443,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     const blob = new Blob(["fake 3mf"], { type: "model/3mf" });
@@ -463,6 +466,7 @@ describe("App layout", () => {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: "2026-01-02T00:00:00Z",
+      source_kind: null,
     });
     const listVersions = vi
       .spyOn(client, "listVersions")
@@ -481,6 +485,7 @@ describe("App layout", () => {
           created_at: "2026-01-01T00:00:00Z",
           diff_count: 0,
           exported_at: null,
+      source_kind: null,
         },
       ]);
 
@@ -521,6 +526,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
@@ -582,6 +588,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
 
@@ -613,6 +620,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "streamEvents").mockImplementation(
@@ -650,6 +658,7 @@ describe("App layout", () => {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: null,
+      source_kind: null,
     };
     // The design loop is driven the same way the other stream tests do:
     // capture the handler object streamEvents receives and dispatch the
@@ -889,6 +898,7 @@ describe("App restore 409 wiring (issue #295)", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
       {
         id: 2,
@@ -904,6 +914,7 @@ describe("App restore 409 wiring (issue #295)", () => {
         created_at: "2026-01-02T00:00:00Z",
         diff_count: 1,
         exported_at: null,
+      source_kind: null,
       },
     ];
     const fetchMock = vi.fn().mockResolvedValue(
@@ -4665,6 +4676,7 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "getProject").mockResolvedValue({

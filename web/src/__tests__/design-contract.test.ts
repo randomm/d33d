@@ -1623,6 +1623,7 @@ describe("design contract", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+        source_kind: null,
       },
       {
         id: 2,
@@ -1638,6 +1639,7 @@ describe("design contract", () => {
         created_at: "2026-01-02T00:00:00Z",
         diff_count: 1,
         exported_at: null,
+        source_kind: null,
       },
     ];
     const strip = render(
@@ -2297,5 +2299,36 @@ describe("the lost-photo notice reaches the user (issue #295, fix batch)", () =>
     );
     expect(noticeMsgEl).not.toBeNull();
     expect(noticeMsgEl?.textContent).toContain(noticeMessage);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Issue #338 (decision 12) — design-contract pins for the new copy
+// ---------------------------------------------------------------------------
+
+describe("design contract — issue #338 new copy", () => {
+  it("pins the two-zone Brief copy (decision 1)", () => {
+    expect(copy.brief.partBroughtHeader).toBe("The part you brought");
+    expect(copy.brief.waitingOnUnits).toBe("waiting on units");
+    expect(copy.brief.yourChangesHeader).toBe("Your changes");
+  });
+
+  it("pins the export note copy (decision 9)", () => {
+    expect(copy.shell.exportContainsGeometryPrefix).toBe("Contains geometry from ");
+  });
+
+  it("pins the imported history label prefix (decision 8)", () => {
+    expect(copy.history.importedLabelPrefix).toBe("v1 — Imported ");
+  });
+
+  it("pins the region-edit imported-geometry chip (decision 3)", () => {
+    expect(copy.region.onImportedPart).toBe("on the part you brought");
+  });
+
+  it("pins the fill-recut no-normal degradation + offer buttons (decisions 6 + 7)", () => {
+    expect(copy.fillRecut.noNormal).toContain("I can't tell that feature's axis");
+    expect(copy.fillRecut.offerYes).toBe("Yes, do that");
+    expect(copy.fillRecut.offerNo).toBe("Leave it");
   });
 });

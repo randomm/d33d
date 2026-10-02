@@ -48,6 +48,7 @@ async def answered_frames(
     project_id: int | None = None,
     app: Any = None,
     confirm_ack: dict[str, str] | None = None,
+    fill_recut_offer: bool = False,
 ):
     """The answer-path SSE stream (issue #249): ONE terminal ``done``
     frame whose ``message`` is the answer text and which carries the
@@ -61,6 +62,13 @@ async def answered_frames(
     sentence). The question-answer path passes ``None`` (no ``confirm_*``
     keys, byte-identical).
 
+    ``fill_recut_offer`` (issue #338, decision 7): when True, the done
+    frame carries the additive ``fill_recut_offer`` field — the SPA's
+    ``App.tsx`` renders the boundary sentence with the [Yes, do that] /
+    [Leave it] buttons (the offer is stored server-side as the pending
+    offer; the buttons send the acceptance/decline through the existing
+    chat offer path). Default False (byte-identical for non-offer frames).
+
     No token frames, no version-created progress frame: the answer text
     is delivered exclusively in the done frame's ``message`` (the
     operator's decision — token frames feed the model-source view, and
@@ -71,6 +79,8 @@ async def answered_frames(
         done_data["confirm_ack"] = True
         done_data["confirm_ack_label"] = confirm_ack["label"]
         done_data["confirm_ack_value"] = confirm_ack["value"]
+    if fill_recut_offer:
+        done_data["fill_recut_offer"] = True
     yield ("done", done_data)
     # The in-flight flag is released by the STREAM's ``finally``
     # (``d33d.streaming._stream_events`` — the single release point for

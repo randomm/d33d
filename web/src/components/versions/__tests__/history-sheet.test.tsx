@@ -53,6 +53,7 @@ const SHEET_VERSIONS: VersionTimelineEntry[] = [
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: null,
+  source_kind: null,
   },
   {
     id: 2,
@@ -68,6 +69,7 @@ const SHEET_VERSIONS: VersionTimelineEntry[] = [
     created_at: "2026-01-02T00:00:00Z",
     diff_count: 1,
     exported_at: null,
+  source_kind: null,
   },
   {
     id: 3,
@@ -83,6 +85,7 @@ const SHEET_VERSIONS: VersionTimelineEntry[] = [
     created_at: "2026-01-03T00:00:00Z",
     diff_count: 1,
     exported_at: null,
+  source_kind: null,
   },
 ];
 

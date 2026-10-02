@@ -1673,3 +1673,19 @@ def test_design_contract_pins_fill_recut_deck_key() -> None:
     ).read_text("utf-8")
     assert "fillRecut" in src
     assert "partUnitsUnsettled" in src
+
+
+def test_design_contract_pins_fill_recut_no_normal_reply():
+    """The backend's FRILL_NO_NORMAL_REPLY matches the copy.ts noNormal
+    sentence (issue #338, decision 6 parity pin)."""
+    from pathlib import Path
+
+    from d33d.fill_recut import FRILL_NO_NORMAL_REPLY
+
+    copy_src = (
+        Path(__file__).parent.parent
+        / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    # The copy.ts noNormal string must contain the same sentence.
+    assert "I can't tell that feature's axis" in copy_src
+    assert "I can't tell that feature's axis" in FRILL_NO_NORMAL_REPLY

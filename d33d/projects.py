@@ -429,7 +429,7 @@ def create_projects_router() -> APIRouter:
                 )
             else:
                 app.state.event_sources[project_id] = _answered_frames(
-                    _fill_recut["answer"]
+                    _fill_recut["answer"], fill_recut_offer=True
                 )
                 return {"status": "accepted"}
 

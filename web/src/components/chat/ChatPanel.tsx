@@ -24,6 +24,7 @@ import { PassCard } from "./PassCard";
 import { FLEX_FILL } from "./flexFill";
 import type { DisplayError } from "../../lib/errorMapping";
 import { FailureTurn } from "../failure/FailureTurn";
+import copy from "../../copy";
 
 // The marker colour's single home is lib/marker.ts (issue #110); the name
 // is re-exported here for existing consumers.
@@ -71,6 +72,13 @@ export interface ChatMessage {
    *  The offer message itself ("I assumed {value} for {label}…") renders
    *  as an ordinary plain message — no marker, no extra fields. */
   confirmAck?: { label: string; value: string };
+  /** Issue #338 (decision 7): present when this plain assistant message is
+   *  a fill-and-recut offer (the region-edit or chat-route trigger fired).
+   *  The message renders the boundary sentence + the [Yes, do that] / [Leave
+   *  it] buttons. `pending` is true while the offer is still the server's
+   *  pending offer (buttons enabled); false after either button is pressed
+   *  or the offer is no longer pending (buttons disabled). */
+  fillRecutOffer?: { pending: boolean };
 }
 
 interface ChatPanelProps {
@@ -187,6 +195,54 @@ export function ChatPanel({
                     style={{ fontFamily: "var(--font-mono)" }}
                   >
                     {msg.confirmAck.value}.
+                  </span>
+                </span>
+              ) : msg.fillRecutOffer ? (
+                // Issue #338 (decision 7): the fill-and-recut offer renders
+                // the boundary sentence + the [Yes, do that] / [Leave it]
+                // buttons. Yes sends the acceptance through the existing
+                // chat offer path (runs the loop); Leave it sends the
+                // decline (clears the pending offer, no loop). Both buttons
+                // disable after either is pressed, or once the offer is no
+                // longer pending.
+                <span className="chat-msg-content" data-testid="fill-recut-offer-msg">
+                  <span className="chat-msg-offer-sentence">{msg.content}</span>
+                  <span className="chat-msg-offer-buttons" data-testid="fill-recut-offer-buttons">
+                    <button
+                      type="button"
+                      data-testid="fill-recut-offer-yes"
+                      disabled={!msg.fillRecutOffer.pending}
+                      onClick={() => onSend(copy.fillRecut.offerYes)}
+                      style={{
+                        margin: "8px 8px 0 0",
+                        padding: "4px 12px",
+                        border: "none",
+                        borderRadius: 4,
+                        backgroundColor: "#0969da",
+                        color: "#ffffff",
+                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
+                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                      }}
+                    >
+                      {copy.fillRecut.offerYes}
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="fill-recut-offer-no"
+                      disabled={!msg.fillRecutOffer.pending}
+                      onClick={() => onSend(copy.fillRecut.offerNo)}
+                      style={{
+                        padding: "4px 12px",
+                        border: "none",
+                        borderRadius: 4,
+                        backgroundColor: "rgba(255, 255, 255, 0.2)",
+                        color: "#ffffff",
+                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
+                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                      }}
+                    >
+                      {copy.fillRecut.offerNo}
+                    </button>
                   </span>
                 </span>
               ) : (
