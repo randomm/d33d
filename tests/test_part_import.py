@@ -2192,3 +2192,121 @@ def test_resolve_part_paths_missing_v1_row_part_none_repo_set(tmp_path: Path):
     part_path, repo_dir = resolve_part_paths(row, conn)
     assert part_path is None
     assert repo_dir == Path(row["git_repo_path"])
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 fix round — the ground-truth bbox is the V1 row's, never the
+# latest version's
+# ---------------------------------------------------------------------------
+
+
+def _conn_with_import_and_v2(tmp_path: Path):
+    """An in-memory connection with a settled mm part whose v1 bbox is
+    20×20×20 (the box_20mm.stl import) and a v2 whose recorded bbox is
+    20×20×30 (a larger candidate, e.g. after adding a lip). Returns the
+    connection, the project row, and a versions service wired to the
+    connection (``latest_version`` returns the v2 row)."""
+    import json
+
+    import d33d.db as db_mod
+    from d33d.versions import VersionService
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v1", "{}", json.dumps({"x": 20.0, "y": 20.0, "z": 20.0})),
+    )
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v2", "{}", json.dumps({"x": 20.0, "y": 20.0, "z": 30.0})),
+    )
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit=?, "
+        "part_unit_status=?, part_scale=? WHERE id=?",
+        ("part.stl", "stl", "mm", "settled", 1.0, pid),
+    )
+    conn.commit()
+    row = conn.get_project(pid)
+    return conn, row, VersionService(conn)
+
+
+def test_part_envelope_with_bbox_uses_v1_not_latest(tmp_path: Path):
+    """The gate's ground-truth baseline is the V1 row's bbox. Once a v2
+    exists with a larger recorded bbox (the previous candidate's own
+    extents), ``part_envelope_with_bbox`` must still report the v1's
+    20×20×20 — NOT the latest version's 20×20×30 (which would silently
+    turn the baseline into the candidate it is supposed to check)."""
+    from d33d.part_http import part_envelope_with_bbox
+
+    conn, row, versions = _conn_with_import_and_v2(tmp_path)
+    env = part_envelope_with_bbox(row, conn, versions)
+    assert env is not None
+    assert env["scale"] == 1.0
+    assert env["bbox_mm"] == (20.0, 20.0, 20.0), env
+
+
+def test_part_envelope_with_bbox_v1_only(tmp_path: Path):
+    """A project with ONLY the v1 row (no v2) still resolves the bbox
+    (the single-version case — unchanged by the v1 fix)."""
+    import json
+
+    import d33d.db as db_mod
+    from d33d.part_http import part_envelope_with_bbox
+    from d33d.versions import VersionService
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v1", "{}", json.dumps({"x": 20.0, "y": 20.0, "z": 20.0})),
+    )
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit=?, "
+        "part_unit_status=?, part_scale=? WHERE id=?",
+        ("part.stl", "stl", "mm", "settled", 1.0, pid),
+    )
+    conn.commit()
+    row = conn.get_project(pid)
+    env = part_envelope_with_bbox(row, conn, VersionService(conn))
+    assert env is not None
+    assert env["bbox_mm"] == (20.0, 20.0, 20.0), env
+
+
+def test_part_envelope_with_bbox_v1_no_bbox_degrades(tmp_path: Path):
+    """A v1 row with NO recorded bbox (the measurement could not be
+    obtained at import) degrades ``bbox_mm`` to ``None`` — the gate
+    abstains on the part's baseline (the stated dims still apply); the
+    v2's bbox is NEVER substituted in."""
+    import json
+
+    import d33d.db as db_mod
+    from d33d.part_http import part_envelope_with_bbox
+    from d33d.versions import VersionService
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v1", "{}", None),
+    )
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v2", "{}", json.dumps({"x": 20.0, "y": 20.0, "z": 30.0})),
+    )
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit=?, "
+        "part_unit_status=?, part_scale=? WHERE id=?",
+        ("part.stl", "stl", "mm", "settled", 1.0, pid),
+    )
+    conn.commit()
+    row = conn.get_project(pid)
+    env = part_envelope_with_bbox(row, conn, VersionService(conn))
+    assert env is not None
+    assert env["bbox_mm"] is None, env

@@ -1069,11 +1069,10 @@ def _design_source_lines(
 
         return design_source_lines(design_source)
     if part_scale is not None:
-        from d33d.design_source import design_source_lines as _ds_lines
+        from d33d.design_source import DESIGN_SOURCE_HEADER
 
-        header = _ds_lines(None)[0].split(":")[0] + ":"
         return [
-            header
+            DESIGN_SOURCE_HEADER
             + " the project's imported part — it is MESH, not text (the "
             + f"design source is the file's own geometry: scale({part_scale:g}) "
             + 'import("part.stl") is the design; ADD/CUT onto it, never '

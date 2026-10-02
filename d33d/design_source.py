@@ -54,6 +54,13 @@ from d33d.design_loop import MAX_SCAD_SOURCE_BYTES
 #: version's params.json sibling; both land in the same commit).
 SOURCE_FILENAME = "design.scad"
 
+#: The fixed header of the design-source prompt section (issue #105). ONE
+#: definition — ``design_source_lines`` renders it and
+#: ``d33d.design_loop``'s import-project variant (the v1 mesh IS the
+#: design source line) reuses it, so the two wordings can never drift
+#: apart in their header.
+DESIGN_SOURCE_HEADER = "Current design source (OpenSCAD):"
+
 #: The visible marker appended when a carried source exceeds
 #: :data:`MAX_SCAD_SOURCE_BYTES` (never a silent truncation — the model
 #: must know it is seeing a partial file).
@@ -243,7 +250,7 @@ def design_source_lines(source: str | None) -> list[str]:
     (the tests pin it as a substring; it carries no inline colon-prefixed
     value — the clean-slate and carry cases each emit their own body line).
     """
-    HEADER = "Current design source (OpenSCAD):"
+    HEADER = DESIGN_SOURCE_HEADER
     if source is None:
         return [
             HEADER
@@ -289,6 +296,7 @@ def store_version_source(
 
 
 __all__ = [
+    "DESIGN_SOURCE_HEADER",
     "SOURCE_FILENAME",
     "TRUNCATION_MARKER",
     "current_version_source",

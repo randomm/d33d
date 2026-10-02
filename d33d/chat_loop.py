@@ -21,6 +21,8 @@ import logging
 from typing import Any
 
 from d33d.axis_lexicon import classify as _classify_axis_cues
+from d33d.chat_frames import answered_frames as _answered_frames
+from d33d.chat_frames import model_unconfigured_frames as _model_unconfigured_frames
 from d33d.design_loop_events import (
     axes_to_gate_triple,
     photo_data_uri,
@@ -63,6 +65,12 @@ async def run_design_loop(
     setup-failure path (re-raised to the caller) and on the
     ``stated_dims``/loop-setup failure — every other path keeps the flag
     (the SSE endpoint's ``finally`` clears it when the stream drains).
+
+    Issue #332 fix round: the caller's accepted fill-recut offer
+    (``fill_recut_instruction is not None``) is NOT cleared until this
+    function registers the design-loop event source — if the setup
+    below raises, the caller restores the offer (the acceptance must
+    not be lost to a setup failure).
     """
     inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
     if inflight is None:
@@ -95,7 +103,6 @@ async def run_design_loop(
     # detector, one cheap stage-2 LLM call with a deterministic number
     # guard, a per-LLM-call hard timeout): the common case ("make it
     # taller") costs nothing.
-    from d33d.projects import _answered_frames, _model_unconfigured_frames
     from d33d.question_answer import (
         ModelUnconfiguredError,
         route_chat_message,
@@ -267,6 +274,11 @@ async def run_design_loop(
         inflight.discard(project_id)
         raise
     app.state.event_sources[project_id] = events
+    # The fill-recut offer (cleared by the caller for the accepted turn
+    # BEFORE this call) is now CONSUMED: the event source registered
+    # successfully, so the acceptance is no longer at risk.
+    if fill_recut_instruction is not None:
+        app.state.versions.set_pending_offer(project_id, None)
     # The flag stays set — the SSE endpoint's ``finally`` clears it
     # on ALL exit paths (generator exhausted, client disconnect,
     # exception).

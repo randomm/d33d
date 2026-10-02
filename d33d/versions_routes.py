@@ -72,7 +72,7 @@ from d33d.design_loop_events import (
 )
 from d33d.design_state import state_block_for_version
 from d33d.part_import import part_public
-from d33d.projects import repo_present
+from d33d.project_git import repo_present
 
 logger = logging.getLogger(__name__)
 
@@ -526,7 +526,7 @@ def create_versions_router() -> APIRouter:
         async def _write_and_commit() -> None:
             versions_mod.install_text_file_atomic(path, source)
             try:
-                from d33d.projects import commit_all as _commit_all
+                from d33d.project_git import commit_all as _commit_all
                 _commit_all(repo_dir, "design source update")
             except RuntimeError as e:
                 # Undo the atomic install so the working tree is clean —

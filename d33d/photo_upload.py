@@ -21,6 +21,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from d33d import db as db_mod
 from d33d.design_loop_events import validate_photo_bytes
+from d33d.project_git import commit_all, sanitize_commit_message
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -36,24 +37,10 @@ UNDECODABLE_PHOTO_DETAIL = (
     "That file isn't a readable PNG or JPEG image. Try exporting it again."
 )
 
-# Commit-message messages are stored in the per-project git repo's history,
-# which downstream consumers (git log parsing, shell tooling, template
-# interpolation) treat as data. Sanitize the message text with a strict
-# safe-character filter so user-supplied filenames can never inject newlines
-# or shell metacharacters into the commit history.
-_MAX_COMMIT_MESSAGE_LEN = 200
-
-
-def _sanitize_commit_message(text: str) -> str:
-    """Reduce ``text`` to a single line of safe alnum+``._-`` characters.
-
-    Mirrors the filename-sanitization filter (defensively stricter than the
-    caller needs): any character outside the safe set — including newlines,
-    shell metacharacters, and other punctuation — is dropped, and the
-    result is capped at ``_MAX_COMMIT_MESSAGE_LEN`` characters.
-    """
-    safe = "".join(c for c in text if c.isalnum() or c in "._-")
-    return safe[:_MAX_COMMIT_MESSAGE_LEN]
+# Commit-message text is sanitized with ``d33d.project_git``'s strict
+# safe-character filter (the one definition the photo-upload and
+# version-write paths share — user-supplied filenames can never inject
+# newlines or shell metacharacters into the repo's commit history).
 
 
 async def _upload_photo(request: Request, project_id: int) -> dict[str, Any]:
@@ -64,19 +51,10 @@ async def _upload_photo(request: Request, project_id: int) -> dict[str, Any]:
     written to the per-project git repo's ``photos/`` directory, and the
     ``source_photo_path`` DB column is updated.
 
-    The commit runs through ``d33d.projects.commit_all`` — imported lazily
-    INSIDE the function (after ``d33d.projects`` is fully loaded, so the
-    import never participates in the photo-upload → projects → … import
-    chain at module-load time; it is a runtime lookup, not a module-level
-    cycle). The attribute is read at call time, so a test's
-    ``monkeypatch.setattr(projects_mod, "commit_all", ...)`` still reaches
-    the seam the same way it did before the move (the patched value is
-    what runs).
+    The commit runs through ``d33d.project_git.commit_all`` — imported at
+    module level (the git primitives live in their own module, so the
+    photo-upload route has no import cycle with ``d33d.projects`` at all).
     """
-    import d33d.projects as projects_mod  # lazy: avoids the photo_upload → projects module-load cycle
-
-
-
     conn: db_mod.Connection = request.app.state.conn
     row = conn.get_project(project_id)
     if row is None:
@@ -146,7 +124,7 @@ async def _upload_photo(request: Request, project_id: int) -> dict[str, Any]:
     # Commit-message text is sanitized separately (stricter, capped) so
     # the repo's commit history can never carry newlines or shell
     # metacharacters derived from the user-supplied filename.
-    commit_subject = _sanitize_commit_message(original_name) or "photo"
+    commit_subject = sanitize_commit_message(original_name) or "photo"
     # Ensure the extension matches the DETECTED format (issue #299 —
     # the decode gate above already guarantees a PNG or JPEG)
     if "." in safe_name:
@@ -168,14 +146,13 @@ async def _upload_photo(request: Request, project_id: int) -> dict[str, Any]:
     # set-as-main, and this photo upload — is serialized; concurrent
     # committers would otherwise collide on ``.git/index.lock``.
     svc = getattr(request.app.state, "versions", None)
-    _commit_impl = projects_mod.commit_all
     try:
         if svc is not None:
-            await svc._with_project_lock(project_id, lambda: _commit_impl(
+            await svc._with_project_lock(project_id, lambda: commit_all(
                 repo_path, f"photo: {commit_subject}"
             ))
         else:  # pragma: no cover - the app lifespan always wires it
-            _commit_impl(repo_path, f"photo: {commit_subject}")
+            commit_all(repo_path, f"photo: {commit_subject}")
     except RuntimeError as e:
         # Clean up the file but keep the repo consistent
         dest.unlink(missing_ok=True)

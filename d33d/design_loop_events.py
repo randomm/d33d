@@ -1722,7 +1722,7 @@ async def run_design_loop_with_events(
             "stream carries the copy.ts notice",
             project_id,
         )
-        from d33d.projects import PHOTO_MISSING_NOTICE
+        from d33d.design_frames import PHOTO_MISSING_NOTICE
 
         _photo_notice = PHOTO_MISSING_NOTICE
 

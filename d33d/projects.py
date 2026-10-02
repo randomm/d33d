@@ -22,8 +22,6 @@ git identity.
 from __future__ import annotations
 
 import logging
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -32,97 +30,28 @@ from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
 from d33d import fill_recut
+from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
+from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
 from d33d.photo_upload import photo_upload_route
+from d33d.project_git import (
+    init_git_repo,
+    remove_repo,
+    repo_present,
+)
 
 logger = logging.getLogger(__name__)
 
-# Issue #295 — the two fixed copy.ts strings the missing-storage chat
-# pre-routes reply with (verbatim copies of the SPA's copy deck — the
-# design-contract tripwire pins the two-way agreement, the #260 way).
-SAVED_DESIGN_MISSING_REPLY = (
-    "The saved design for this project is missing, so I can't change it. "
-    "Start a new design, or describe it again and I'll make it fresh"
-)
-PHOTO_MISSING_NOTICE = (
-    "Your reference photo for this project is missing, so I'm designing "
-    "from your words alone"
-)
-
-# The unsettled-part reply + the whole fill-and-recut pre-route (copy,
-# closed feature-noun set, trigger, offer build/accept/clear) live in
-# ``d33d.fill_recut`` (the single entry point ``fill_recut_turn``).
-_GIT_USER_EMAIL = "d33d@local"
-_GIT_USER_NAME = "d33d"
-
-# ---------------------------------------------------------------------------
-# Commit-message sanitization (the photo-upload and version-write paths
-# share ONE definition — the upload's copy moved to ``d33d.photo_upload``;
-# ``d33d.versions`` imports it from here under its original name, so this
-# module re-exports it. It is NOT a feature shimm: the module's own
-# ``commit_all`` and the test spies both reach the function via this
-# module's namespace).
-# ---------------------------------------------------------------------------
-
-
-_MAX_COMMIT_MESSAGE_LEN = 200
-
-
-def _sanitize_commit_message(text: str) -> str:
-    """Reduce ``text`` to a single line of safe alnum+``._-`` characters.
-
-    Mirrors the filename-sanitization filter (defensively stricter than the
-    caller needs): any character outside the safe set — including newlines,
-    shell metacharacters, and other punctuation — is dropped, and the result
-    is capped at ``_MAX_COMMIT_MESSAGE_LEN`` characters.
-    """
-    safe = "".join(c for c in text if c.isalnum() or c in "._-")
-    return safe[:_MAX_COMMIT_MESSAGE_LEN]
-
-
-# ---------------------------------------------------------------------------
-# Git helpers (local only, no network)
-# ---------------------------------------------------------------------------
-
-
-def _git(repo_dir: Path, *args: str) -> subprocess.CompletedProcess:
-    """Run a git command in ``repo_dir``. Raises on non-zero exit."""
-    cmd = ["git", "-C", str(repo_dir), *args]
-    result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=30, check=False
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"git {' '.join(args)} failed (rc={result.returncode}): {result.stderr.strip()}"
-        )
-    return result
-
-
-def init_git_repo(repo_dir: Path) -> None:
-    """``git init`` + set local identity. Idempotent (skips if .git exists)."""
-    repo_dir.mkdir(parents=True, exist_ok=True)
-    if not (repo_dir / ".git").exists():
-        _git(repo_dir, "init", "-q")
-        _git(repo_dir, "config", "user.email", _GIT_USER_EMAIL)
-        _git(repo_dir, "config", "user.name", _GIT_USER_NAME)
-
-
-def commit_all(repo_dir: Path, message: str) -> None:
-    """Stage everything and commit. No-op if nothing to commit."""
-    _git(repo_dir, "add", "-A")
-    # Check if there is anything to commit
-    status = _git(repo_dir, "status", "--porcelain")
-    if not status.stdout.strip():
-        return
-    _git(repo_dir, "commit", "-q", "-m", message)
-
-
-def remove_repo(repo_dir: Path) -> None:
-    """Remove the repo directory entirely. No-op if missing."""
-    if repo_dir.is_dir():
-        shutil.rmtree(repo_dir)
-
+# The per-project git repo primitives (``init_git_repo`` /
+# ``commit_all`` / ``remove_repo`` / ``repo_present``) and the
+# commit-message sanitizer now live in ``d33d.project_git`` (shared by
+# the photo-upload and design-source routes without the projects →
+# … → projects import cycle). This module re-exports them under their
+# historical names — ``d33d.versions`` imports ``_sanitize_commit_message``
+# from here, and the photo-upload and version-write tests patch/spy the
+# ``commit_all`` attribute on this module — so monkeypatch seams keep
+# reaching the same functions.
 
 # ---------------------------------------------------------------------------
 # Pydantic models for request bodies
@@ -282,72 +211,6 @@ async def _confirm_offer_route(app: Any, project_id: int, message: str):
     }
 
 
-async def _model_unconfigured_frames(env_var: str | None = None):
-    """The model-unconfigured terminal frame (issue #303): ONE ``error``
-    frame — the SAME structured shape the design loop's terminal error
-    frame carries (``reason: model_unconfigured`` + ``env_var`` when known;
-    never the key value). ``error``, not ``done``: a ``done`` frame would
-    render as a plain assistant message, not a failure turn.
-    """
-    from d33d.design_loop import MODEL_UNCONFIGURED
-
-    error_data: dict[str, Any] = {
-        "message": f"Design loop exhausted: {MODEL_UNCONFIGURED}",
-        "reason": MODEL_UNCONFIGURED,
-    }
-    if env_var is not None:
-        error_data["env_var"] = env_var
-    yield ("error", error_data)
-    # The in-flight flag is released by ``d33d.streaming._stream_events``
-    # (the SSE endpoint's ``finally`` — the single release point for every
-    # event source, on every exit path), exactly as for
-    # ``_answered_frames``.
-
-
-async def _answered_frames(
-    answer: str,
-    project_id: int | None = None,
-    app: Any = None,
-    confirm_ack: dict[str, str] | None = None,
-):
-    """The answer-path SSE stream (issue #249): ONE terminal ``done``
-    frame whose ``message`` is the answer text and which carries the
-    additive ``kind: "answer"`` discriminator (design-loop done frames
-    carry no ``kind`` at all — existing frames are byte-identical).
-
-    ``confirm_ack`` (issue #250, the accepted-offer flow only) adds the
-    acknowledgement's ``label``/``value`` as ADDITIVE ``confirm_ack_*``
-    fields on the same done frame — the SPA's ``App.tsx`` renders the
-    value in the mono face (a measurement must never hide inside a
-    sentence). The question-answer path passes ``None`` (no ``confirm_*``
-    keys, byte-identical).
-
-    No token frames, no version-created progress frame: the answer text
-    is delivered exclusively in the done frame's ``message`` (the
-    operator's decision — token frames feed the model-source view, and
-    the SPA renders an ``kind: "answer"`` done frame's ``message``
-    verbatim as a plain assistant chat message)."""
-    done_data: dict[str, Any] = {"message": answer, "kind": "answer"}
-    if confirm_ack is not None:
-        done_data["confirm_ack"] = True
-        done_data["confirm_ack_label"] = confirm_ack["label"]
-        done_data["confirm_ack_value"] = confirm_ack["value"]
-    yield ("done", done_data)
-    # The in-flight flag is released by the STREAM's ``finally``
-    # (``d33d.streaming._stream_events`` — the single release point for
-    # every event source, on every exit path: the SSE endpoint drains in
-    # production; tests that drive the source directly exhaust the same
-    # generator via the SSE endpoint's ``_stream_events``). There is
-    # deliberately no post-yield discard here: a release would have to
-    # happen in generator ``finally`` code (not after the last ``yield`` —
-    # that runs only if the consumer exhausts the generator), and
-    # ``_stream_events``'s ``finally`` already covers every drain path.
-    # A bare ``async for`` over the raw source (bypassing the SSE
-    # endpoint) leaves the flag set by design — the contract is that the
-    # stream endpoint is the sole driver of event sources (its
-    # ``finally`` is the single release point).
-
-
 def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     """The project's live storage signal (issue #295), computed server-side
     from live file checks — the SPA reads it and never recomputes presence
@@ -370,19 +233,6 @@ def _storage_field(row: dict[str, Any]) -> dict[str, Any]:
     # so the project list endpoint never full-decodes per row.
     photo_present = photo_storage_signal(row.get("source_photo_path"))
     return {"repo_present": repo_present(row), "photo_present": photo_present}
-
-
-def repo_present(row: dict[str, Any]) -> bool:
-    """The single predicate for "is the project's git repo directory on
-disk?" — the shared check used by both ``_storage_field`` (the project
-GET's ``storage.repo_present``) and the design-state route's
-``history_missing`` flag (issue #316 task-b).
-
-    True when the repo directory exists; False when it is absent (deleted
-    out-of-band, never created, etc.). Computed at call time — it can flip
-    without a new version (the caller must not cache it per-project).
-    """
-    return Path(row["git_repo_path"]).is_dir()
 
 
 def _public_project_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -650,19 +500,32 @@ def create_projects_router() -> APIRouter:
         # in ``d33d.chat_loop`` — the thin entry point keeps this router file
         # under the 500-line split threshold (AGENTS.md).
         chat_history = tuple(body.chat_history or ())
-        return await chat_loop_run_design_loop(
-            app,
-            project_id,
-            row,
-            body.message,
-            body.stated_dims,
-            chat_history,
-            _fill_recut_instruction,
-        )
+        try:
+            return await chat_loop_run_design_loop(
+                app,
+                project_id,
+                row,
+                body.message,
+                body.stated_dims,
+                chat_history,
+                _fill_recut_instruction,
+            )
+        except Exception:
+            # The design-loop setup raised BEFORE an event source was
+            # registered (the flag is already released by the setup path):
+            # restore the accepted fill-recut offer so the user's "yes" is
+            # never lost to a setup failure (issue #332 fix round).
+            if _fill_recut is not None and _fill_recut.get("run_loop"):
+                app.state.versions.set_pending_offer(
+                    project_id, _fill_recut.get("accepted_offer")
+                )
+            raise
 
     return router
 
 
 __all__ = [
+    "PHOTO_MISSING_NOTICE",
+    "SAVED_DESIGN_MISSING_REPLY",
     "create_projects_router",
 ]

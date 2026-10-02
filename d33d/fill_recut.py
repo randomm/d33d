@@ -335,7 +335,11 @@ def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
 
     noun = str(offer.get("noun") or "feature")
     size = offer.get("size")
-    size_str = f" at {size:g} mm" if size else ""
+    size_str = (
+        f" at {size:g} mm"
+        if isinstance(size, (int, float)) and size > 0
+        else ""
+    )
     return (
         "Fill-and-recut: union a solid over the existing "
         f"{noun} of the imported part, then difference "
@@ -386,19 +390,22 @@ def fill_recut_turn(
     versions = app.state.versions
     pending = versions.get_pending_offer(project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
-        # A LIVE fill-recut offer. "yes" runs the design loop with the
-        # explicit fill-and-recut instruction (the offer is CLEARED — a
-        # consumed offer is a consumed offer); "no" clears the offer and
-        # replies quietly (a done frame, no design run); anything else
-        # supersedes the offer (cleared, re-evaluated below as a fresh
-        # turn).
+        # A LIVE fill-recut offer. "yes" CLEARS the offer (the accepted
+        # acceptance is the loop's — the caller registers the design loop
+        # and clears the offer there once the event source is up; if the
+        # setup fails, the offer is restored so the acceptance is never
+        # lost) and runs the loop with the explicit fill-and-recut
+        # instruction; "no" clears the offer and replies quietly (a done
+        # frame, no design run — nothing can fail after this point, so
+        # the clear is safe here); anything else supersedes the offer
+        # (cleared, re-evaluated below as a fresh turn).
         if is_clean_yes(message):
-            versions.set_pending_offer(project_id, None)
             return {
                 "kind": "answer",
                 "answer": None,
                 "run_loop": True,
                 "instruction": fill_and_recut_instruction(pending),
+                "accepted_offer": pending,
             }
         if is_clean_no(message):
             versions.set_pending_offer(project_id, None)

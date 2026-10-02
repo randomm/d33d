@@ -55,7 +55,7 @@ from typing import Any
 
 from d33d import db as db_mod
 from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
-from d33d.projects import _sanitize_commit_message
+from d33d.project_git import sanitize_commit_message as _sanitize_commit_message
 
 logger = logging.getLogger(__name__)
 

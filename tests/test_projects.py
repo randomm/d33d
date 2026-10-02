@@ -591,10 +591,10 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
     a waiter task on the SAME per-project lock while the commit is in
     flight; the waiter must time out (proof the lock is held across the
     commit call, i.e. the route is not bypassing the lock)."""
-    import d33d.projects as projects_mod
+    import d33d.photo_upload as photo_upload_mod
 
     png_bytes = _valid_png_1x1()
-    real_commit_all = projects_mod.commit_all
+    real_commit_all = photo_upload_mod.commit_all
 
     calls: list[int] = []
     probe_results: list[str] = []
@@ -621,10 +621,11 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
         probe_results.append("proj_locked" if proj_lock.locked() else "proj_free")
         real_commit_all(repo_dir, message)
 
-    # The photo route calls commit_all defined in d33d.projects itself, so
-    # monkeypatch the module attribute (the route's local reference to the
-    # function is resolved at call time via the module's global scope).
-    monkeypatch.setattr(projects_mod, "commit_all", _spy_commit)
+    # The photo route calls ``d33d.photo_upload.commit_all`` (imported at
+    # module level from ``d33d.project_git``), so monkeypatch the module
+    # attribute in ``d33d.photo_upload`` — the route's ``commit_all`` binds
+    # to the same module global the spy replaces.
+    monkeypatch.setattr(photo_upload_mod, "commit_all", _spy_commit)
 
     async def _call(client):
         create_r = await client.post("/api/projects", json={"name": "Lock Test"})
@@ -1197,6 +1198,70 @@ def test_fill_recut_yes_runs_loop_with_instruction(
     assert svc.get_pending_offer(pid) is None
 
 
+def test_fill_recut_yes_setup_failure_keeps_offer(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #332 fix round: on the fill-recut "yes" path the pending offer
+    must NOT be lost if the design-loop setup raises. The offer is cleared
+    only once the event source is registered (``chat_loop.run_design_loop``
+    clears it there); when the setup fails, ``post_chat`` restores it so
+    the user's acceptance survives the error. The request errors (500),
+    the in-flight flag is released, and the fill_recut offer is still
+    present."""
+    import d33d.chat_loop as chat_loop_mod
+
+    def _boom_loop(*args, **kwargs):
+        raise RuntimeError("forced loop setup failure (test)")
+
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Lost Yes"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: trigger the offer.
+        await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _ in source:
+                pass
+        _release_inflight(app_with_projects, pid)
+        svc = app_with_projects.state.versions
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None and offer["kind"] == "fill_recut", offer
+        # Second turn: accept — the loop setup is forced to raise.
+        # The ASGI transport surfaces the server exception as a 500 (FastAPI
+        # catches it); if the transport re-raises instead, the test still
+        # passes (the offer-restore logic ran before the raise either way).
+        try:
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "yes"}
+            )
+            status = r2.status_code
+        except RuntimeError:
+            status = 500  # the RuntimeError propagated through the transport
+        inflight = app_with_projects.state.design_loop_inflight
+        return status, pid, inflight
+
+    status, pid, inflight = _run_async(app_with_projects, _call)
+    # The request errored (the setup exception propagated — no 202).
+    assert status != 202, status
+    # The in-flight flag was released (the project is not stuck — the next
+    # attempt can start clean).
+    assert pid not in inflight, "inflight flag leaked after setup failure"
+    # The pending fill_recut offer survived the setup failure — the
+    # acceptance was restored, not lost.
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None, "the accepted fill_recut offer was lost"
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 38.0, offer
+
+
 def test_fill_recut_no_clears_offer(app_with_projects):
     """'no' on the pending fill-recut offer: the offer is cleared, a
     quiet acknowledgement frame is emitted, and NO design run happens."""
@@ -1493,6 +1558,20 @@ def test_fill_recut_offer_dict_carries_only_noun_and_size() -> None:
     instr = fill_recut.fill_and_recut_instruction(offer)
     assert "hole" in instr
     assert "10" not in instr  # a move offer has no size to state
+
+
+def test_fill_and_recut_instruction_zero_size_no_clause() -> None:
+    """Issue #332 fix round: a zero size renders NO size clause (the guard
+    is ``isinstance(size, (int, float)) and size > 0``, never truthiness —
+    ``size: 0`` must not render " at 0 mm"). A positive size still renders
+    the clause (unchanged)."""
+    offer_zero = {"kind": "fill_recut", "noun": "hole", "size": 0}
+    instr = fill_recut.fill_and_recut_instruction(offer_zero)
+    assert " at " not in instr, instr
+    # A positive size still renders the clause (unchanged).
+    offer_ok = {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+    instr_ok = fill_recut.fill_and_recut_instruction(offer_ok)
+    assert " at 38 mm" in instr_ok, instr_ok
 
 
 # ---------------------------------------------------------------------------

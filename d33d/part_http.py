@@ -87,10 +87,11 @@ def part_envelope(row: dict[str, Any] | None) -> dict[str, Any] | None:
     ...}`` — the loop's ``part_scale`` (the prompt's ``scale(...)`` and
     the import guard's settled factor) and ``part_bbox_mm`` (the bbox
     gate's ground-truth baseline, the v1 row's persisted bbox — file bbox
-    × scale as recorded at import/settle). A part with a positive scale
-    whose v1 row carries no bbox (a measurement the write path could not
-    obtain) degrades ``bbox_mm`` to ``None`` (the gate abstains on the
-    part's baseline — the stated dims still apply).
+    × scale as recorded at import/settle — read from the V1 row, never
+    from the latest version's). A part with a positive scale whose v1 row
+    carries no bbox (a measurement the write path could not obtain)
+    degrades ``bbox_mm`` to ``None`` (the gate abstains on the part's
+    baseline — the stated dims still apply).
     """
     if row is None or not row.get("part_filename"):
         return None
@@ -106,30 +107,43 @@ def part_envelope(row: dict[str, Any] | None) -> dict[str, Any] | None:
 def part_envelope_with_bbox(
     row: dict[str, Any] | None,
     conn: db_mod.Connection | None,
-    versions: Any = None,
+    versions: Any = None,  # legacy seam parameter (the v1 row is read directly now)
 ) -> dict[str, Any] | None:
     """:func:`part_envelope` with the v1's measured mm bbox resolved (issue #332, sub-issue 3).
 
     The seams that have the project row AND the app's connection use this
     variant: the v1 row's persisted ``bbox`` (the file bbox × scale, as
     recorded at import/settle) fills ``bbox_mm`` — the bbox gate's ground-
-    truth baseline. The v1 row is read through the ``versions`` service's
-    ``latest_version`` (the same decoded row the design-state route and
-    the loop adapter use — JSON-decoded, consistent with every other
-    design-state reader). ``None`` row / part / unsettled / non-positive
-    scale returns ``None`` (the no-part and unsettled regressions —
-    byte-identical prompt, no loop, never an error). A part with a
-    positive scale whose v1 row is missing or carries no bbox degrades
-    ``bbox_mm`` to ``None`` (the gate abstains on the part's baseline; the
-    stated dims still apply — never a fabricated measurement).
+    truth baseline. The v1 row is read explicitly through
+    :func:`_v1_for_part` (the import's own row — NOT ``versions.
+    latest_version``: once a v2+ exists, the latest row's bbox is the
+    previous candidate's own extents, not the import's). ``None`` row /
+    part / unsettled / non-positive scale returns ``None`` (the no-part
+    and unsettled regressions — byte-identical prompt, no loop, never an
+    error). A part with a positive scale whose v1 row is missing or
+    carries no bbox degrades ``bbox_mm`` to ``None`` (the gate abstains
+    on the part's baseline; the stated dims still apply — never a
+    fabricated measurement).
     """
     env = part_envelope(row)
-    if env is None or versions is None:
+    if env is None or conn is None:
         return env
-    v1 = versions.latest_version(row.get("id"))
+    # The ground-truth baseline is the V1 row's bbox — read the v1 row
+    # explicitly (the import's own measurement). ``versions.
+    # latest_version`` would be WRONG here: once the user adds a feature
+    # (v2+), the latest row's recorded bbox is the previous candidate's
+    # own extents, and the gate's baseline would silently become the
+    # candidate it is supposed to check (issue #332 fix round).
+    v1 = _v1_for_part(conn, row.get("id"))
     if v1 is None:
         return env
     raw = v1.get("bbox")
+    if raw is None:
+        return env
+    try:
+        raw = json.loads(raw)
+    except (TypeError, ValueError):
+        return env
     if not isinstance(raw, dict):
         return env
     axes = [raw.get(name) for name in ("x", "y", "z")]

@@ -375,7 +375,7 @@ def test_source_expected_false_when_repo_and_source_present(app_with_versions):
     """A project with a version whose design.scad is on disk is NOT the
     missing state (the normal case — the source is present and the
     project is healthy)."""
-    from d33d.projects import commit_all
+    from d33d.project_git import commit_all
 
     async def _call(client):
         proj = await create_project(client)
@@ -419,7 +419,7 @@ def test_source_expected_true_when_design_scad_deleted(app_with_versions):
     was recorded in the version's commit — the persistent marker says
     a source was written, and it is now gone)."""
 
-    from d33d.projects import commit_all
+    from d33d.project_git import commit_all
 
     async def _call(client):
         proj = await create_project(client)
@@ -486,7 +486,7 @@ def test_store_version_source_writes_per_version_file_and_survives_restart(
         # Commit the per-version source (the production path commits it in
         # the version's commit — this direct-write test commits it on its
         # own so the git log assertion has a commit to read).
-        from d33d.projects import commit_all
+        from d33d.project_git import commit_all
 
         commit_all(repo, "version 7 design source (test)")
         return repo

@@ -985,9 +985,9 @@ def test_design_source_commit_failure_leaves_no_uncommitted_source(
     def _fail_commit(repo_dir, message: str) -> None:
         raise RuntimeError("git commit failed (simulated index.lock collision)")
 
-    import d33d.projects as projects_mod
+    import d33d.project_git as project_git_mod
 
-    monkeypatch.setattr(projects_mod, "commit_all", _fail_commit)
+    monkeypatch.setattr(project_git_mod, "commit_all", _fail_commit)
 
     async def _call(client):
         proj = await create_project(client)
@@ -2431,8 +2431,8 @@ def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
     the log line)."""
     import logging as _logging
 
+    from d33d.design_frames import PHOTO_MISSING_NOTICE
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
-    from d33d.projects import PHOTO_MISSING_NOTICE
 
     captured: dict = {}
 
@@ -2516,8 +2516,8 @@ def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp
     """
     import logging as _logging
 
+    from d33d.design_frames import PHOTO_MISSING_NOTICE
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
-    from d33d.projects import PHOTO_MISSING_NOTICE
 
     captured: dict = {}
 
@@ -2598,7 +2598,7 @@ def test_chat_missing_design_source_reply_no_run(app_with_versions):
     as held by a design loop."""
     import shutil as _shutil
 
-    from d33d.projects import SAVED_DESIGN_MISSING_REPLY
+    from d33d.design_frames import SAVED_DESIGN_MISSING_REPLY
 
     loop_called = [False]
 

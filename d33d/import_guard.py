@@ -140,14 +140,14 @@ def part_scale_call(scad_source: str, part_scale: float) -> tuple[bool, str | No
     for m in _SCALE_RE.finditer(scad_source):
         # A scale binds to the import when it directly precedes an import
         # call (whitespace only between the closing paren and ``import``)
-        # — the transform's child is the imported mesh.
+        # — the transform's child is the imported mesh. The source slice is
+        # computed once per scale (the span list is shared).
         binds_to_import = any(
             scad_source[end : m.start()].strip() == "" for _, end in import_spans
         )
         if binds_to_import and not _scale_ok(m.group(1), part_scale):
             return False, f"scale({m.group(1)})"
     return True, None
-
 
 def import_guard_violation(
     scad_source: str, *, part_scale: float
