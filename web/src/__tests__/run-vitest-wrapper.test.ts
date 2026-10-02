@@ -10,7 +10,8 @@
 //     └── child  (detached → leads its own group, pgid == child.pid)
 //           └── grandchild (inherits the child's group)
 //
-// D33D_TEST_COMMAND overrides what the wrapper spawns in the fixture cases.
+// D33D_TEST_COMMAND + D33D_TEST_MODE=1 overrides what the wrapper spawns in
+// the fixture cases.
 //
 // The final test ("REAL: SIGKILL…") IS the real path: it is self-contained
 // (a tiny vitest project in a tempdir whose globalSetup points at the real
@@ -19,15 +20,23 @@
 
 import { expect, test } from "vitest";
 import { spawn } from "node:child_process";
-import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+const SETTLE_MS = 300;
 
 // The watchdog module is plain .mjs (outside tsconfig's src/ rootDir); import
 // it dynamically to avoid the missing-declaration error.
 async function loadWatchdog() {
   const mod: unknown = await import("../../scripts/parent-watchdog.mjs");
-  return mod as { checkParent: (probe: (p: number, s: number | string) => void, pid: number, kill: (s: string) => void) => "alive" | "dead" };
+  return mod as {
+    checkParent: (
+      probe: (p: number, s: number | string) => void,
+      pid: number,
+      kill: (s: string) => void,
+    ) => "alive" | "dead";
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -61,6 +70,38 @@ function waitForReady(w: Wrapper, timeoutMs = 15000): Promise<void> {
     };
     tick();
   });
+}
+
+/**
+ * Poll until the predicate returns true, or timeout.
+ *
+ * @param fn - the predicate to check
+ * @param timeoutMs - max time to wait
+ * @param intervalMs - poll interval (default 50 ms)
+ * @param label - description for error messages
+ * @param fallbackValue - value returned on timeout (for non-assertion polls)
+ */
+async function pollUntil<T>(
+  fn: () => boolean | T | null,
+  timeoutMs: number,
+  intervalMs = 50,
+  label = "condition",
+  fallbackValue?: T,
+): Promise<T | undefined> {
+  const start = Date.now();
+  for (;;) {
+    const r = fn();
+    if (r === true || (r !== null && r !== undefined && r !== false)) {
+      return r as T;
+    }
+    if (Date.now() - start > timeoutMs) {
+      if (fallbackValue !== undefined) {
+        return fallbackValue;
+      }
+      throw new Error(`${label} not satisfied after ${timeoutMs} ms`);
+    }
+    await sleep(intervalMs);
+  }
 }
 
 /**
@@ -135,12 +176,38 @@ function fixtureSource(code: string): string {
 const WRAPPER = `${process.cwd()}/scripts/run-vitest.mjs`;
 const WEB_ROOT = process.cwd();
 
+/**
+ * Best-effort cleanup of stale d336-real-* dirs in tmpdir.
+ * A symlink is removed via rmSync(link, { force: true }) which removes
+ * only the link, not the target.
+ */
+function cleanStaleRealDirs(): void {
+  let entries: string[];
+  try {
+    entries = readdirSync(tmpdir());
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (!entry.startsWith("d336-real-")) {
+      continue;
+    }
+    const p = join(tmpdir(), entry);
+    try {
+      rmSync(p, { recursive: true, force: true });
+    } catch {
+      // best-effort
+    }
+  }
+}
+
 function startWrapper(fixturePath: string, extraArgs: string[] = []): Wrapper {
   const child = spawn(process.execPath, [WRAPPER, ...extraArgs], {
     detached: true, // the wrapper runs in its own group, never the runner's
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      D33D_TEST_MODE: "1",
       D33D_TEST_COMMAND: `${process.execPath} ${fixturePath}`,
     },
   });
@@ -195,19 +262,6 @@ setTimeout(() => {}, 300000);
 `);
 }
 
-function watchdogFixture(): string {
-  return fixtureSource(`
-import { spawn } from "node:child_process";
-const gc = spawn(${JSON.stringify(process.execPath)}, [
-  ${JSON.stringify("-e")},
-  "setTimeout(()=>{},300000)",
-], { stdio: "ignore" });
-console.log("childpid " + process.pid);
-console.log("ready");
-setTimeout(() => {}, 300000);
-`);
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -220,7 +274,7 @@ test("SIGTERM reaps the wrapper's whole process group, exit 143", async () => {
   const res = await w.done;
   expect(res.code).toBe(143);
   await groupDead(childPid, 8000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 20000);
 
 test("SIGINT reaps the wrapper's whole process group, exit 130", async () => {
@@ -231,7 +285,7 @@ test("SIGINT reaps the wrapper's whole process group, exit 130", async () => {
   const res = await w.done;
   expect(res.code).toBe(130);
   await groupDead(childPid, 8000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 20000);
 
 test("SIGHUP reaps the wrapper's whole process group, exit 129", async () => {
@@ -242,11 +296,11 @@ test("SIGHUP reaps the wrapper's whole process group, exit 129", async () => {
   const res = await w.done;
   expect(res.code).toBe(129);
   await groupDead(childPid, 8000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 20000);
 
 test("SIGKILL to the wrapper: the watchdog reaps the group within the bound", async () => {
-  const w = startWrapper(watchdogFixture());
+  const w = startWrapper(sleepFixture());
   await waitForReady(w);
   const childPid = childPidOf(w);
   const wrapperPid = w.pid;
@@ -291,7 +345,64 @@ test("SIGKILL to the wrapper: the watchdog reaps the group within the bound", as
     },
   );
   expect(verdict).toBe("dead");
-  await sleep(300);
+  await sleep(SETTLE_MS);
+}, 20000);
+
+test("D33D_TEST_MODE=1 and D33D_TEST_COMMAND are honoured", async () => {
+  // A fixture that prints a sentinel.
+  const fix = fixtureSource(`
+console.log("childpid " + process.pid);
+console.log("ready");
+console.log("SENTINEL_FROM_FIXTURE");
+setTimeout(() => process.exit(0), 100);
+`);
+  const w = startWrapper(fix);
+  await w.done;
+  expect(w.stdout()).toContain("SENTINEL_FROM_FIXTURE");
+}, 20000);
+
+test("D33D_TEST_MODE unset: D33D_TEST_COMMAND is ignored (production path)", async () => {
+  // D33D_TEST_MODE is NOT "1", so the wrapper must ignore D33D_TEST_COMMAND
+  // and run the real vitest bin. We verify by spawning the wrapper in a temp
+  // cwd (no vitest config there, so the real vitest fails quickly) and
+  // asserting the sentinel from D33D_TEST_COMMAND never appeared in output.
+  const { mkdtempSync: mkd } = await import("node:fs");
+  const sentinel = fixtureSource(`
+console.log("SENTINEL_WOULD_NOT_RUN");
+console.log("childpid " + process.pid);
+console.log("ready");
+setTimeout(() => process.exit(0), 100);
+`);
+  const emptyCwd = mkd(join(tmpdir(), "d336-empty-"));
+  try {
+    const child = spawn(process.execPath, [WRAPPER], {
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        // D33D_TEST_COMMAND is set but D33D_TEST_MODE is empty (not "1")
+        D33D_TEST_COMMAND: `${process.execPath} ${sentinel}`,
+        D33D_TEST_MODE: "",
+      },
+      cwd: emptyCwd,
+    });
+    let out = "";
+    let errOut = "";
+    child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
+    child.stderr?.on("data", (d: Buffer) => { errOut += d.toString(); });
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("wrapper did not exit within 15 s"));
+      }, 15000);
+      child.on("exit", () => { clearTimeout(timer); resolve(); });
+      child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    });
+    // The sentinel was NOT executed — the wrapper did not honour the override.
+    expect(out + errOut).not.toContain("SENTINEL_WOULD_NOT_RUN");
+  } finally {
+    try { rmSync(emptyCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 }, 20000);
 
 test("fixture traps SIGTERM: the wrapper escalates to SIGKILL after the grace", async () => {
@@ -302,7 +413,7 @@ test("fixture traps SIGTERM: the wrapper escalates to SIGKILL after the grace", 
   const res = await w.done;
   expect(res.code).toBe(143);
   await groupDead(childPid, 8000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 25000);
 
 test("normal completion: no orphans, exit code 0 passes through", async () => {
@@ -322,7 +433,7 @@ console.log("ready");
   const res = await w.done;
   expect(res.code).toBe(0);
   await groupDead(childPid, 5000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 20000);
 
 test("failing fixture: the child's exit code passes through", async () => {
@@ -337,7 +448,7 @@ setTimeout(() => process.exit(3), 100);
   const res = await w.done;
   expect(res.code).toBe(3);
   await groupDead(childPid, 5000);
-  await sleep(300);
+  await sleep(SETTLE_MS);
 }, 20000);
 
 test("extra arguments are forwarded to the spawned command", async () => {
@@ -364,7 +475,7 @@ setTimeout(() => process.exit(0), 100);
  * points `globalSetup` at the REAL `./vitest.watchdog.ts` (absolute path).
  * It then spawns the wrapper pointed at that project, SIGKILLs the wrapper
  * once the inner vitest has forked workers, and asserts the entire inner
- * vitest group (main + every fork worker) is gone within ~3 s — proving the
+ * vitest group (main + every fork worker) is gone within ~5 s — proving the
  * registered watchdog fires end-to-end, not just the fixture-driven logic
  * above.
  *
@@ -377,6 +488,9 @@ test(
   async () => {
     const { symlinkSync } = await import("node:fs");
     const { execFileSync } = await import("node:child_process");
+
+    // Best-effort cleanup of stale d336-real-* dirs from prior runs.
+    cleanStaleRealDirs();
 
     // A tiny vitest project in a tempdir. globalSetup points at the REAL
     // watchdog so the registered globalSetup is the production code.
@@ -423,9 +537,9 @@ export default defineConfig({
     // Symlink the outer node_modules so `vitest` resolves without an install.
     symlinkSync(join(WEB_ROOT, "node_modules"), join(project, "node_modules"), "dir");
 
-    // Spawn the wrapper against the tempdir project. No D33D_TEST_COMMAND and
-    // no forwarded args: the wrapper spawns the REAL `vitest run` (the
-    // hardcoded base command), which resolves via the symlinked
+    // Spawn the wrapper against the tempdir project. No D33D_TEST_MODE and
+    // no D33D_TEST_COMMAND: the wrapper spawns the REAL `vitest run` (the
+    // resolved base command), which resolves via the symlinked
     // node_modules/.bin prepended to PATH and loads the project's own
     // vitest.config.mjs (globalSetup → the real watchdog). The inner vitest
     // honours D33D_TEST_WRAPPER_PID, so the watchdog fires on SIGKILL.
@@ -450,30 +564,24 @@ export default defineConfig({
     const wrapperPid = child.pid as number;
 
     // Wait until the inner vitest main (the wrapper's child) appears.
-    const vitestMain = await new Promise<number | null>((resolve) => {
-      const start = Date.now();
-      const tick = () => {
+    const vitestMain = await pollUntil<number | null>(
+      () => {
         try {
           const rows = execFileSync("ps", ["-axo", "pid,ppid"], { encoding: "utf8" })
             .split("\n")
             .map((l) => l.trim().split(/\s+/))
             .filter((c) => c.length >= 2);
           const main = rows.find((c) => c[1] === String(wrapperPid));
-          if (main) {
-            resolve(Number(main[0]));
-            return;
-          }
+          return main ? Number(main[0]) : null;
         } catch {
-          // ignore, retry
+          return null;
         }
-        if (Date.now() - start > 30000) {
-          resolve(null);
-          return;
-        }
-        setTimeout(tick, 100);
-      };
-      tick();
-    });
+      },
+      30000,
+      100,
+      "vitest main",
+      null,
+    );
     if (!vitestMain) {
       cleanup();
       await done.catch(() => {});
@@ -484,30 +592,24 @@ export default defineConfig({
 
     // Wait for at least one fork worker to join the group (proof the run is
     // in progress and globalSetup has executed before workers are spawned).
-    const hasWorker = await new Promise<boolean>((resolve) => {
-      const start = Date.now();
-      const tick = () => {
+    const hasWorker = await pollUntil<boolean>(
+      () => {
         try {
           const rows = execFileSync("ps", ["-axo", "pid,pgid"], { encoding: "utf8" })
             .split("\n")
             .map((l) => l.trim().split(/\s+/))
             .filter((c) => c.length >= 2);
           const inGroup = rows.filter((c) => c[1] === String(vitestMain));
-          if (inGroup.length >= 2) {
-            resolve(true);
-            return;
-          }
+          return inGroup.length >= 2;
         } catch {
-          // ignore
+          return false;
         }
-        if (Date.now() - start > 30000) {
-          resolve(false);
-          return;
-        }
-        setTimeout(tick, 100);
-      };
-      tick();
-    });
+      },
+      30000,
+      100,
+      "fork worker in group",
+      false,
+    );
     if (!hasWorker) {
       cleanup();
       await done.catch(() => {});
@@ -520,16 +622,18 @@ export default defineConfig({
     expect(pidAlive(vitestMain)).toBe(true);
 
     // SIGKILL the wrapper. The registered watchdog (vitest.watchdog.ts,
-    // polling every 1 s) must SIGKILL vitest's own group within ~1 s + margin.
+    // polling every 1 s, requires two consecutive ESRCH polls) must SIGKILL
+    // vitest's own group within ~2 s + margin.
     process.kill(wrapperPid, "SIGKILL");
     await pidDead(wrapperPid, 5000);
 
-    // Whole vitest group dead within 3 s. If the watchdog did not fire this
-    // times out → the test fails, exactly the failure mode #336 must catch.
-    await groupDead(vitestMain, 3000);
+    // Whole vitest group dead within 5 s (two ESRCH polls ≈ 2 s + margin).
+    // If the watchdog did not fire this times out → the test fails, exactly
+    // the failure mode #336 must catch.
+    await groupDead(vitestMain, 5000);
 
     await done.catch(() => {});
-    await sleep(300);
+    await sleep(SETTLE_MS);
     cleanup();
   },
   120000,
