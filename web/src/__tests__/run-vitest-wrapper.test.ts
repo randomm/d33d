@@ -361,49 +361,54 @@ setTimeout(() => process.exit(0), 100);
   expect(w.stdout()).toContain("SENTINEL_FROM_FIXTURE");
 }, 20000);
 
-test("D33D_TEST_MODE unset: D33D_TEST_COMMAND is ignored (production path)", async () => {
-  // D33D_TEST_MODE is NOT "1", so the wrapper must ignore D33D_TEST_COMMAND
-  // and run the real vitest bin. We verify by spawning the wrapper in a temp
-  // cwd (no vitest config there, so the real vitest fails quickly) and
-  // asserting the sentinel from D33D_TEST_COMMAND never appeared in output.
-  const { mkdtempSync: mkd } = await import("node:fs");
-  const sentinel = fixtureSource(`
-console.log("SENTINEL_WOULD_NOT_RUN");
-console.log("childpid " + process.pid);
-console.log("ready");
-setTimeout(() => process.exit(0), 100);
-`);
-  const emptyCwd = mkd(join(tmpdir(), "d336-empty-"));
-  try {
-    const child = spawn(process.execPath, [WRAPPER], {
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        // D33D_TEST_COMMAND is set but D33D_TEST_MODE is empty (not "1")
-        D33D_TEST_COMMAND: `${process.execPath} ${sentinel}`,
-        D33D_TEST_MODE: "",
-      },
-      cwd: emptyCwd,
-    });
-    let out = "";
-    let errOut = "";
-    child.stdout?.on("data", (d: Buffer) => { out += d.toString(); });
-    child.stderr?.on("data", (d: Buffer) => { errOut += d.toString(); });
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        child.kill("SIGKILL");
-        reject(new Error("wrapper did not exit within 15 s"));
-      }, 15000);
-      child.on("exit", () => { clearTimeout(timer); resolve(); });
-      child.on("error", (err) => { clearTimeout(timer); reject(err); });
-    });
-    // The sentinel was NOT executed — the wrapper did not honour the override.
-    expect(out + errOut).not.toContain("SENTINEL_WOULD_NOT_RUN");
-  } finally {
-    try { rmSync(emptyCwd, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
-}, 20000);
+test("D33D_TEST_MODE unset: D33D_TEST_COMMAND is ignored (pure unit test)", async () => {
+  // Pure unit test of the env-gating logic — never spawns any real vitest.
+  // The wrapper's gate lives in web/scripts/resolve-command.mjs as
+  // `resolveCommand(env, url)`. With D33D_TEST_MODE unset (or anything but
+  // "1") and D33D_TEST_COMMAND set, the override MUST be ignored and the
+  // resolved real vitest bin + "run" returned. That is the exact
+  // "production path" the negative test was meant to guard, without the
+  // orphan risk of actually spawning vitest (see issue #336).
+  const { resolveCommand } = await import("../../scripts/resolve-command.mjs");
+  const wrapperUrl = new URL("file://" + WRAPPER).href;
+
+  // 1. D33D_TEST_MODE unset, D33D_TEST_COMMAND set — override ignored.
+  const unsetCmd = resolveCommand(
+    { D33D_TEST_MODE: undefined, D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    wrapperUrl,
+  );
+  expect(unsetCmd.length).toBe(2);
+  expect(unsetCmd[1]).toBe("run");
+  expect(unsetCmd[0]).not.toBe("node");
+  expect(unsetCmd[0]).not.toContain("sentinel");
+
+  // 2. D33D_TEST_MODE empty string — also not "1", override ignored.
+  const emptyCmd = resolveCommand(
+    { D33D_TEST_MODE: "", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    wrapperUrl,
+  );
+  expect(emptyCmd).toEqual(unsetCmd);
+
+  // 3. D33D_TEST_MODE="1" + D33D_TEST_COMMAND set — override honoured.
+  const onCmd = resolveCommand(
+    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: "node /tmp/sentinel.mjs" },
+    wrapperUrl,
+  );
+  expect(onCmd).toEqual(["node", "/tmp/sentinel.mjs"]);
+
+  // 4. D33D_TEST_MODE="1" but D33D_TEST_COMMAND unset — real vitest fallback.
+  const modeOnly = resolveCommand(
+    { D33D_TEST_MODE: "1", D33D_TEST_COMMAND: undefined },
+    wrapperUrl,
+  );
+  expect(modeOnly).toEqual(unsetCmd);
+
+  // 5. The resolved vitest bin is an absolute path (PATH-independent).
+  //    This is the production-path guarantee: a stray D33D_TEST_COMMAND
+  //    can never redirect `npm test`.
+  expect(unsetCmd[0].startsWith("/")).toBe(true);
+  expect(unsetCmd[0]).toContain("vitest");
+});
 
 test("fixture traps SIGTERM: the wrapper escalates to SIGKILL after the grace", async () => {
   const w = startWrapper(trapFixture());

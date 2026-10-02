@@ -27,46 +27,19 @@
 //   when interrupted (SIGTERM → 143, SIGINT → 130, SIGHUP → 129).
 
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { resolveCommand } from "./resolve-command.mjs";
 
 const GRACE_MS = 3000;
 
-// The command to spawn. Overridable by the tests via D33D_TEST_COMMAND:
-// space-separated argv, so the fixture is a tiny node script instead of the
-// real vitest (the wrapper must never run the outer suite's own vitest).
-// The override is honoured ONLY when D33D_TEST_MODE=1 is also set — a stray
-// D33D_TEST_COMMAND in a production environment must never redirect the
-// production `npm test` run.
-const testCommand =
-  process.env.D33D_TEST_MODE === "1" && process.env.D33D_TEST_COMMAND
-    ? process.env.D33D_TEST_COMMAND.split(" ")
-    : null;
-
-// Resolve the real vitest binary to an ABSOLUTE path so the spawn never
-// depends on PATH. Under `npm run`, node_modules/.bin is on PATH, but a
-// direct `node scripts/run-vitest.mjs` can have a minimal PATH and would
-// ENOENT on a bare `vitest`. We resolve from the wrapper's own location via
-// createRequire: it finds the local vitest regardless of PATH. The bin is
-// the vitest package's `vitest.mjs` (its declared bin entry).
-function resolveVitestBin() {
-  try {
-    const requireHere = createRequire(import.meta.url);
-    const vitestPkg = requireHere.resolve("vitest/package.json");
-    const pkg = JSON.parse(readFileSync(vitestPkg, "utf8"));
-    const binEntry = typeof pkg.bin === "string" ? pkg.bin : pkg.bin?.vitest;
-    if (typeof binEntry === "string") {
-      const vitestDir = vitestPkg.slice(0, vitestPkg.lastIndexOf("/"));
-      return `${vitestDir}/${binEntry}`;
-    }
-  } catch {
-    // No local vitest resolvable (e.g. no node_modules) — fall back to a
-    // bare `vitest` so the usual PATH lookup still applies.
-  }
-  return "vitest";
-}
-const vitestBin = resolveVitestBin();
-const baseCommand = testCommand ?? [vitestBin, "run"];
+// The command to spawn. Delegates to the pure `resolveCommand` in
+// ./resolve-command.mjs (unit-tested without spawning any real vitest —
+// see the adversarial review for the "never spawn the real suite from a
+// test" rule).
+//
+// Semantics: D33D_TEST_COMMAND is honoured ONLY when D33D_TEST_MODE === "1".
+// Otherwise the real vitest bin is resolved from the wrapper's own location
+// (PATH-independent), then `"run"` is appended.
+const baseCommand = resolveCommand(process.env, import.meta.url);
 const forwardedArgs = process.argv.slice(2);
 
 // ---------------------------------------------------------------------------
