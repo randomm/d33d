@@ -42,7 +42,7 @@ type WatchdogModule = {
     probe: (p: number, s: number | string) => void,
     pid: number,
     killGroup: (s: string) => void,
-    opts?: { pollMs?: number; _interval?: unknown },
+    opts?: { pollMs?: number; _interval?: unknown; log?: (line: string) => void },
   ) => () => void;
 };
 
@@ -278,7 +278,7 @@ setTimeout(() => {}, 300000);
 // Watchdog pure-logic tests (injected probes/timers — no real process)
 // ---------------------------------------------------------------------------
 
-test("watchdog: startWatchdog retries the kill when it throws, then clears the timer", async () => {
+test("watchdog: startWatchdog retries the kill when it throws, logs the retry, then clears the timer", async () => {
   const { startWatchdog } = await loadWatchdog();
 
   // Spy on the global interval: startWatchdog's default timer is the global
@@ -310,6 +310,7 @@ test("watchdog: startWatchdog retries the kill when it throws, then clears the t
       throw Object.assign(new Error("gone"), { code: "ESRCH" });
     };
     const killCalls: string[] = [];
+    const retryLogs: string[] = [];
     const killGroup = (s: string) => {
       killCalls.push(s);
       if (killCalls.length === 1) {
@@ -320,7 +321,7 @@ test("watchdog: startWatchdog retries the kill when it throws, then clears the t
       }
     };
 
-    const teardown = startWatchdog(probe, 12345, killGroup);
+    const teardown = startWatchdog(probe, 12345, killGroup, { log: (line) => retryLogs.push(line) });
 
     // Tick 1: streak 1 < 2, no kill yet, timer not cleared.
     captured.cb?.();
@@ -336,6 +337,12 @@ test("watchdog: startWatchdog retries the kill when it throws, then clears the t
     captured.cb?.();
     expect(killCalls).toEqual(["SIGKILL", "SIGKILL"]);
     expect(cleared).toBe(true);
+
+    // The failed kill was logged exactly once (via the injected log) and
+    // not thrown, so the timer survived to retry on the next tick.
+    expect(retryLogs.length).toBe(1);
+    expect(retryLogs[0]).toContain("watchdog group kill failed");
+    expect(retryLogs[0]).toContain("EPERM (simulated mid-teardown)");
 
     teardown();
   } finally {
@@ -355,14 +362,15 @@ test("watchdog: startWatchdog retries the kill when it throws, then clears the t
 // ---------------------------------------------------------------------------
 
 test("confirmGroupGone: the unprobeable branch never throws, logs, and the wrapper exit code is the child's code on the normal path", async () => {
-  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+  const { killGroupGone } = await import("../../scripts/kill-confirm.mjs");
 
-  // Injected clock: the group stays unprobeable (probe -> false) past the
-  // grace; ps reports it still lists the group. The confirmation must log
-  // (not throw, not hide) and return "not confirmed".
   const logs: string[] = [];
+  const kills: Array<[number, string]> = [];
   let nowMs = 0;
   const deps = {
+    kill: (pid: number, signal: string) => {
+      kills.push([pid, signal]);
+    },
     probe: () => false,
     ps: () => false,
     now: () => nowMs,
@@ -374,8 +382,11 @@ test("confirmGroupGone: the unprobeable branch never throws, logs, and the wrapp
 
   let result: unknown;
   expect(() => {
-    result = confirmGroupGone(deps, { graceMs: 2000, tickMs: 50 });
+    result = killGroupGone(deps, 99, { graceMs: 2000, tickMs: 50 });
   }).not.toThrow();
+
+  // The one kill path delivered SIGTERM to the child, then the group.
+  expect(kills).toEqual([[99, "SIGTERM"], [-99, "SIGTERM"]]);
 
   expect(result).toBe(false); // not confirmed
   expect(logs.length).toBe(1);
@@ -393,11 +404,12 @@ test("confirmGroupGone: the unprobeable branch never throws, logs, and the wrapp
 });
 
 test("confirmGroupGone: the unprobeable branch logs (ps unavailable) and the wrapper exit code is 128 + signo on the signal path", async () => {
-  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+  const { killGroupGone } = await import("../../scripts/kill-confirm.mjs");
 
   const logs: string[] = [];
   let nowMs = 0;
   const deps = {
+    kill: () => {},
     probe: () => false,
     ps: () => null, // ps unavailable
     now: () => nowMs,
@@ -407,7 +419,7 @@ test("confirmGroupGone: the unprobeable branch logs (ps unavailable) and the wra
     log: (line: string) => logs.push(line),
   };
 
-  expect(() => confirmGroupGone(deps, { graceMs: 2000, tickMs: 50 })).not.toThrow();
+  expect(() => killGroupGone(deps, 99, { graceMs: 2000, tickMs: 50 })).not.toThrow();
   expect(logs.length).toBe(1);
   expect(logs[0]).toContain("ps unavailable");
   expect(logs[0]).toContain("backstop");
@@ -419,12 +431,20 @@ test("confirmGroupGone: the unprobeable branch logs (ps unavailable) and the wra
 });
 
 test("confirmGroupGone: the probeable branch returns confirmed without logging", async () => {
-  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+  const { killGroupGone } = await import("../../scripts/kill-confirm.mjs");
 
   const logs: string[] = [];
   // Probe immediately confirms the group is gone — no ps, no log, no throw.
-  const confirmed = confirmGroupGone(
-    { probe: () => true, ps: () => null, now: () => 0, sleep: () => {}, log: (l) => logs.push(l) },
+  const confirmed = killGroupGone(
+    {
+      kill: () => {},
+      probe: () => true,
+      ps: () => null,
+      now: () => 0,
+      sleep: () => {},
+      log: (l: string) => logs.push(l),
+    },
+    99,
     { graceMs: 2000, tickMs: 50 },
   );
   expect(confirmed).toBe(true);
@@ -433,8 +453,9 @@ test("confirmGroupGone: the probeable branch returns confirmed without logging",
   // And the ps-fallback path: probe never ESRCHes, past the grace ps says
   // the group is empty → confirmed, no log.
   let psT = 0;
-  const confirmedViaPs = confirmGroupGone(
+  const confirmedViaPs = killGroupGone(
     {
+      kill: () => {},
       probe: () => false,
       ps: () => true,
       now: () => psT,
@@ -443,10 +464,90 @@ test("confirmGroupGone: the probeable branch returns confirmed without logging",
       },
       log: (l: string) => logs.push(l),
     },
+    99,
     { graceMs: 2000, tickMs: 50 },
   );
   expect(confirmedViaPs).toBe(true);
   expect(logs).toEqual([]);
+});
+
+test("killChildAndGroup: one kill path — a failing first kill never skips the second, ESRCH is silent, other errnos are logged not thrown", async () => {
+  const { killChildAndGroup } = await import("../../scripts/kill-confirm.mjs");
+
+  // 1. The first kill (the child) throws EPERM: the second kill (the
+  //    group) must STILL run, the failure is logged via the injected log,
+  //    and nothing throws — the wrapper's escalation/signal/exit paths
+  //    rely on this.
+  const perm = Object.assign(new Error("EPERM (simulated mid-teardown)"), { code: "EPERM" });
+  const permKills: number[] = [];
+  const permLogs: string[] = [];
+  let permThrew = false;
+  try {
+    killChildAndGroup(
+      {
+        kill: (target: number) => {
+          permKills.push(target);
+          if (target > 0) {
+            throw perm;
+          }
+        },
+        log: (line: string) => permLogs.push(line),
+      },
+      42,
+      "SIGTERM",
+    );
+  } catch {
+    permThrew = true;
+  }
+  expect(permThrew).toBe(false);
+  expect(permKills).toEqual([42, -42]); // group kill ran despite the EPERM
+  expect(permLogs.length).toBe(1);
+  expect(permLogs[0]).toContain("EPERM (simulated mid-teardown)");
+
+  // 2. ESRCH on both kills: silent, no throw.
+  const esrchLogs: string[] = [];
+  let esrchThrew = false;
+  try {
+    killChildAndGroup(
+      {
+        kill: () => {
+          throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        },
+        log: (line: string) => esrchLogs.push(line),
+      },
+      7,
+      "SIGKILL",
+    );
+  } catch {
+    esrchThrew = true;
+  }
+  expect(esrchThrew).toBe(false);
+  expect(esrchLogs).toEqual([]);
+
+  // 3. Any other errno: logged (once per kill), never thrown.
+  const otherKills: number[] = [];
+  const otherLogs: string[] = [];
+  let otherThrew = false;
+  try {
+    killChildAndGroup(
+      {
+        kill: (target: number) => {
+          otherKills.push(target);
+          throw Object.assign(new Error("EACCES (simulated)"), { code: "EACCES" });
+        },
+        log: (line: string) => otherLogs.push(line),
+      },
+      7,
+      "SIGKILL",
+    );
+  } catch {
+    otherThrew = true;
+  }
+  expect(otherThrew).toBe(false);
+  expect(otherKills).toEqual([7, -7]);
+  expect(otherLogs.length).toBe(2);
+  expect(otherLogs[0]).toContain("EACCES (simulated)");
+  expect(otherLogs[1]).toContain("EACCES (simulated)");
 });
 
 test("watchdog: checkParent kills the group on ESRCH (injected probe)", async () => {
@@ -533,26 +634,7 @@ test("SIGKILL to the wrapper: the watchdog reaps the group within the bound", as
   // The wrapper is dead, but the kernel may not have reaped it yet (a
   // zombie's pid still answers a signal-0 probe), so poll until its pid
   // is unresolvable (ESRCH) before driving the watchdog.
-  await new Promise<void>((resolve, reject) => {
-    const start = Date.now();
-    const tick = () => {
-      try {
-        process.kill(wrapperPid, 0);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ESRCH") {
-          resolve();
-          return;
-        }
-        throw err;
-      }
-      if (Date.now() - start > 5000) {
-        reject(new Error("wrapper pid still alive after SIGKILL"));
-        return;
-      }
-      setTimeout(tick, 50);
-    };
-    tick();
-  });
+  await pidDead(wrapperPid, 5000);
   // The group must still be alive — nothing has reaped it yet (the wrapper
   // cannot catch SIGKILL; the watchdog is the only path to reaping here).
   expect(pidAlive(childPid)).toBe(true);
@@ -701,7 +783,8 @@ setTimeout(() => process.exit(0), 100);
  * The only test in this file that drives the actual production path. It is
  * self-contained: it builds a TINY vitest project in a tempdir (symlinking
  * the outer node_modules so no install is needed), whose vitest.config.mjs
- * points `globalSetup` at the REAL `./vitest.watchdog.ts` (absolute path).
+ * (the temp project's own config, written by the test) points globalSetup
+ * at the REAL `./vitest.watchdog.ts` (absolute path).
  * It then spawns the wrapper pointed at that project, SIGKILLs the wrapper
  * once the inner vitest has forked workers, and asserts the entire inner
  * vitest group (main + every fork worker) is gone within ~5 s — proving the
@@ -793,7 +876,7 @@ export default defineConfig({
     const wrapperPid = child.pid as number;
 
     // Wait until the inner vitest main (the wrapper's child) appears.
-    const vitestMain = await pollUntil<number | null>(
+    const vitestMain = await pollUntil(
       () => {
         try {
           const rows = execFileSync("ps", ["-axo", "pid,ppid"], { encoding: "utf8" })
@@ -821,7 +904,7 @@ export default defineConfig({
 
     // Wait for at least one fork worker to join the group (proof the run is
     // in progress and globalSetup has executed before workers are spawned).
-    const hasWorker = await pollUntil<boolean>(
+    const hasWorker = await pollUntil(
       () => {
         try {
           const rows = execFileSync("ps", ["-axo", "pid,pgid"], { encoding: "utf8" })

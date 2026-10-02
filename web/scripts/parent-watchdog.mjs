@@ -97,10 +97,17 @@ export function parseWrapperPid(raw, warn = (line) => console.error(line)) {
  * @param {number} [opts.pollMs=1000] - interval between polls.
  * @param {ReturnType<typeof setInterval>} [opts._interval] - injectable
  *   timer (tests); defaults to `setInterval`.
+ * @param {(line: string) => void} [opts.log] - where the retry warning
+ *   goes; defaults to `console.error`.
  * @returns {() => void} a teardown that clears the interval. The caller
  *   must invoke it in the corresponding globalTeardown.
  */
-export function startWatchdog(probe, pid, killGroup, { pollMs = 1000, _interval } = {}) {
+export function startWatchdog(
+  probe,
+  pid,
+  killGroup,
+  { pollMs = 1000, _interval, log = (line) => console.error(line) } = {},
+) {
   let eSrchStreak = 0;
   let timer =
     _interval ??
@@ -119,7 +126,7 @@ export function startWatchdog(probe, pid, killGroup, { pollMs = 1000, _interval 
           // mid-teardown). Keep the timer armed and the streak: the next
           // tick retries the kill. The teardown clears the timer if the
           // kill never succeeds.
-          console.error(
+          log(
             "d33d: watchdog group kill failed; will retry on the next tick: " +
               (err && err.message ? err.message : String(err)),
           );

@@ -26,5 +26,5 @@ export declare function startWatchdog(
   probe: (pid: number, signal: number | string) => void,
   pid: number,
   killGroup: (signal: string) => void,
-  opts?: { pollMs?: number },
+  opts?: { pollMs?: number; _interval?: unknown; log?: (line: string) => void },
 ): () => void;

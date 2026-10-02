@@ -27,7 +27,7 @@
 //   when interrupted (SIGTERM → 143, SIGINT → 130, SIGHUP → 129).
 
 import { execFileSync, spawn } from "node:child_process";
-import { confirmGroupGone } from "./kill-confirm.mjs";
+import { killChildAndGroup, killGroupGone } from "./kill-confirm.mjs";
 import { resolveCommand } from "./resolve-command.mjs";
 
 const GRACE_MS = 3000;
@@ -49,20 +49,6 @@ const forwardedArgs = process.argv.slice(2);
 // `confirmGroupGone` in ./kill-confirm.mjs; the wrappers below are the
 // real-process bindings.
 // ---------------------------------------------------------------------------
-
-// ESRCH means the process (or group) is already gone — exactly what we
-// want on the kill path. EPERM can be transient while the group is
-// mid-teardown; swallow it too so the confirmation probe always runs and
-// makes the actual decision. Any other error propagates.
-function killIgnoreESRCH(target, signal) {
-  try {
-    process.kill(target, signal);
-  } catch (err) {
-    if (!err || (err.code !== "ESRCH" && err.code !== "EPERM")) {
-      throw err;
-    }
-  }
-}
 
 /** True if `process.kill(-pgid, 0)` reports the group gone (ESRCH). */
 function groupProbeESRCH(pgid) {
@@ -100,31 +86,37 @@ function psGroupEmpty(pgid) {
 // over a SharedArrayBuffer; reuse it instead of allocating per iteration.
 const waitBuf = new Int32Array(new SharedArrayBuffer(4));
 
+// The wrapper's single kill path: kill the child pid, then `-pid`, via the
+// pure `killChildAndGroup`. Never throws — the escalation, the signal
+// handler and the exit handler all rely on the second kill always running.
+// (ESRCH is silent by construction; a non-ESRCH errno on a dying group is
+// already reflected in the confirmation log below, so no separate line.)
+const KILL_DEPS = {
+  kill: (target, signal) => process.kill(target, signal),
+  log: () => {},
+};
+
 /**
- * Kill the child group, then confirm it is actually gone before returning.
- * EPERM on the kill is treated as "the group is mid-teardown"; the probe
- * below decides. If the group is unprobeable (EPERM and no `ps`) past the
- * grace, `confirmGroupGone` logs and returns false — the wrapper then
- * exits with the child's code (or 128 + signal on the signal path) and
- * the watchdog remains the backstop. The confirmation never throws.
+ * Kill the child group on the normal-completion path, then confirm it is
+ * actually gone before the wrapper exits. The decision logic is the pure
+ * `killGroupGone` in ./kill-confirm.mjs (SIGTERM to child + group, then
+ * confirm with an EPERM → `ps` fallback); the bindings below are the
+ * real-process ones. If the group is unprobeable (EPERM and no `ps`) past
+ * the grace, `confirmGroupGone` logs and returns false — the wrapper then
+ * exits with the child's code and the parent watchdog remains the
+ * backstop. The confirmation never throws.
  */
 function killGroupAndConfirm(pid) {
-  // Kill the child directly first: the child can also be a member of the
-  // wrapper's own process group (inherited from npm's group), in which case
-  // a bare group kill on the child's pid can EPERM; the direct kill always
-  // reaches the leader. The group kill then takes any fork workers the
-  // child spawned (they inherit the child's group, not the wrapper's).
-  killIgnoreESRCH(pid, "SIGTERM");
-  killIgnoreESRCH(-pid, "SIGTERM");
-
-  confirmGroupGone(
+  killGroupGone(
     {
+      ...KILL_DEPS,
       probe: () => groupProbeESRCH(pid),
       ps: () => psGroupEmpty(pid),
       now: Date.now,
       sleep: (ms) => Atomics.wait(waitBuf, 0, 0, ms),
       log: (line) => console.error(`d33d: child group ${pid} unprobeable — ${line}`),
     },
+    pid,
     { graceMs: 2000, tickMs: 50 },
   );
 }
@@ -145,26 +137,7 @@ function killGroup(signal) {
   if (!child.pid) {
     return;
   }
-  // Kill the child directly first: the child can also be a member of the
-  // wrapper's own process group (inherited from npm's group), in which case
-  // a bare group kill on the child's pid can EPERM; the direct kill always
-  // reaches the leader. The group kill then takes any fork workers the
-  // child spawned (they inherit the child's group, not the wrapper's).
-  try {
-    process.kill(child.pid, signal);
-  } catch (err) {
-    if (!err || err.code !== "ESRCH") {
-      throw err;
-    }
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch (err) {
-    // ESRCH: the group is already gone — exactly what we want.
-    if (!err || err.code !== "ESRCH") {
-      throw err;
-    }
-  }
+  killChildAndGroup(KILL_DEPS, child.pid, signal);
 }
 
 function onSignal(exitCode) {
@@ -173,34 +146,15 @@ function onSignal(exitCode) {
   }
   interrupted = true;
   interruptCode = exitCode;
-  // SIGTERM now, SIGKILL after the grace period, in case the child traps it.
-  // The grace timer is intentionally ref'd (not unref'd): it keeps the
-  // wrapper alive through the grace window so the escalation can fire if
-  // the child survives. A kill that throws (e.g. EPERM while the group is
-  // mid-teardown) must not drop the timer: log it and let the escalation
-  // retry on the next tick.
-  // If this kill throws (e.g. EPERM while the group is mid-teardown) the
-  // escalation below still runs: it re-issues the group kill as SIGKILL,
-  // logs the failure, and exits with the signal's code regardless. The
-  // kill can never orphan the group: the SIGKILL escalation is independent
-  // of the SIGTERM's success, and the parent watchdog is the final backstop.
-  try {
-    killGroup("SIGTERM");
-  } catch (err) {
-    console.error(
-      "d33d: wrapper group kill (SIGTERM) failed; SIGKILL escalation still armed: " +
-        (err && err.message ? err.message : String(err)),
-    );
-  }
+  // SIGTERM now; SIGKILL fires once after the grace, whatever the SIGTERM's
+  // outcome (killChildAndGroup never throws, so a failed SIGTERM cannot
+  // drop the escalation). Retries on kill failure exist only in the parent
+  // watchdog. The grace timer is intentionally ref'd (not unref'd): it
+  // keeps the wrapper alive through the grace window so the escalation can
+  // fire if the child traps SIGTERM.
+  killGroup("SIGTERM");
   setTimeout(() => {
-    try {
-      killGroup("SIGKILL");
-    } catch (err) {
-      console.error(
-        "d33d: wrapper group kill (SIGKILL) failed: " +
-          (err && err.message ? err.message : String(err)),
-      );
-    }
+    killGroup("SIGKILL");
     process.exit(exitCode);
   }, GRACE_MS);
 }
@@ -210,7 +164,7 @@ process.on("SIGINT", () => onSignal(130));
 process.on("SIGHUP", () => onSignal(129));
 
 // On the wrapper's own exit (any reason), make sure the group is dead too.
-// Idempotent: the kill swallows ESRCH.
+// killChildAndGroup never throws, so this handler can never throw.
 process.on("exit", () => {
   killGroup("SIGTERM");
 });
