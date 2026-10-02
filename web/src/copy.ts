@@ -741,6 +741,67 @@ export const export3mf = {
 } as const;
 
 /**
+ * Fill-and-recut boundary copy (issue #332, sub-issue 3). When a project
+ * has an assumed/settled part and the user asks to RESIZE or MOVE one of
+ * the part's own features (a closed-set noun that is NOT a param of the
+ * design's own current version), the chat replies with ONE of these fixed
+ * sentences — the noun and any number arrive from the USER'S OWN words
+ * (substituted, never invented). The backend builds the wire string from
+ * its own templates (`d33d.fill_recut`'s `FRILL_*_REPLY` constants) and
+ * the SPA renders the done frame's `message` verbatim; the deck carries
+ * the templates so the parity test can pin that the deck's and the
+ * server's sentences match in substance (the same two-way pin the
+ * `confirmOffer` and `deterministicAnswer` decks carry).
+ *
+ * `noun` is the closed-set feature noun (hole, slot, boss, …).
+ * `dim` / `distance` arrive mono-formatted (the user's own number, the
+ * `:g` spelling — `38` or `38.5`). `direction` is the user's own
+ * where-word (left, right, up, …).
+ */
+export const fillRecut = {
+  /** The point-at-the-spot move reply (a move request with no distance).
+   *  `noun` is the user's own closed-set feature noun. */
+  move: (noun: string): string =>
+    `That ${noun} came with your file, so I can't move it directly — the file has no parameters for me to change. What I can do: fill it, then cut a new one where you want it. Point at the spot, or tell me where.`,
+
+  /** The move-with-distance reply (a move request carrying the user's
+   *  own distance + direction — the number and direction are kept, never
+   *  dropped). `distance` is mono-formatted; `direction` is the user's
+   *  own where-word. */
+  moveWithDistance: (noun: string, distance: string, direction: string): string =>
+    `That ${noun} came with your file, so I can't move it directly — the file has no parameters for me to change. What I can do: fill it, then cut a new one ${distance} mm ${direction} of where it is now. It'll look the same, and you'll see it as a change in the history.`,
+
+  /** The hole/bore diameter resize reply (the UX spec's sentence —
+   *  `dim` is the user's own number, mono-formatted). */
+  holeDiameter: (noun: string, dim: string): string =>
+    `That ${noun} came with your file, so I can't resize it directly — the file has no parameters for me to change. What I can do: fill it, then cut a Ø${dim} mm one on the same axis. It'll look the same, and you'll see it as a change in the history.`,
+
+  /** The other-noun resize reply (`dim` is the user's own number,
+   *  mono-formatted). */
+  nounDimension: (noun: string, dim: string): string =>
+    `That ${noun} came with your file, so I can't resize it directly — the file has no parameters for me to change. What I can do: fill it, then cut a new ${noun} at ${dim} mm in the same place. It'll look the same, and you'll see it as a change in the history.`,
+
+  /** The no-dimension ask (the user named a feature but no size). */
+  noDimension: (noun: string): string =>
+    `How big should the ${noun} be? It came with your file, so I'll fill it and cut a new one at that size.`,
+
+  /** The quiet decline acknowledgement (a clean "no" on the pending
+   *  fill-recut offer). */
+  declined: "Understood — leaving the part as it is.",
+} as const;
+
+/**
+ * The unsettled-part chat reply (issue #332, sub-issue 3). When the
+ * project has a part whose units are NOT assumed/settled, the chat
+ * replies with this fixed sentence before any design loop runs — the
+ * units are not settled; the loop must wait for the user to settle
+ * them. The backend's `UNSETTLED_PART_REPLY` carries the same sentence
+ * (the parity test pins the two-way agreement, the #299 way).
+ */
+export const partUnitsUnsettled =
+  "The part's units aren't settled yet, so I can't work on it. Settle the units first — pick mm, cm, or inch, or give one measured axis — and then I can add and cut on it.";
+
+/**
  * Part upload rejection copy (issue #325). When the backend rejects a
  * part upload, it returns a 422 with `detail` carrying one of these exact
  * sentences; the SPA surfaces `detail` verbatim (the #299 way). The
@@ -839,6 +900,8 @@ export const copy = {
   missingStorage,
   photoUpload,
   partUpload,
+  fillRecut,
+  partUnitsUnsettled,
 } as const;
 
 export default copy;

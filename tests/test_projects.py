@@ -23,8 +23,9 @@ from typing import Any
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from d33d import fill_recut
 from d33d.app import create_app
-from d33d.projects import (
+from d33d.photo_upload import (
     ALLOWED_CONTENT_TYPES,
     MAX_UPLOAD_BYTES,
     UNDECODABLE_PHOTO_DETAIL,
@@ -1140,7 +1141,7 @@ def test_fill_recut_yes_runs_loop_with_instruction(
     already teaches the fill-then-cut move — the instruction makes the
     accepted turn's intent explicit). The loop is stubbed via a spy on
     ``run_design_loop_with_events`` (the test app has no production loop)."""
-    import d33d.projects as projects_mod
+    import d33d.chat_loop as chat_loop_mod
 
     _loop_calls: list[dict[str, Any]] = []
 
@@ -1149,7 +1150,7 @@ def test_fill_recut_yes_runs_loop_with_instruction(
         yield ("progress", {"step": "design-loop-start"})
         yield ("done", {"message": "ok", "kind": "loop_done"})
 
-    monkeypatch.setattr(projects_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
     app_with_projects.state.answer_question = None
 
     async def _call(client):
@@ -1401,3 +1402,195 @@ def test_unsettled_part_assumed_status_skips_guard(app_with_projects):
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
     assert offer is not None and offer["kind"] == "fill_recut", offer
+
+
+# ---------------------------------------------------------------------------
+# Issue #332 fix round: the decimal-token bug, the dropped-distance bug,
+# and the copy.ts two-way parity pins.
+# ---------------------------------------------------------------------------
+
+
+def test_fill_recut_trigger_decimal_size_not_truncated() -> None:
+    """A full decimal token ("38.5") is captured whole — the user's own
+    number is never truncated by trailing punctuation (the pre-fix regex
+    stopped the size capture at the first non-digit, rendering Ø38 for
+    "make the hole 38.5 mm wide, please")."""
+    t = fill_recut.fill_recut_trigger("make the hole 38.5 mm wide, please")
+    assert t is not None
+    assert t["noun"] == "hole"
+    assert t["size"] == 38.5, t
+    assert t["move"] is False
+
+
+def test_fill_recut_trigger_integer_size_rendered_zero() -> None:
+    """An integer number ("38") is captured and rendered as 38 (Ø38), the
+    same value the pre-fix code produced for the integer case (no
+    behaviour change for integers)."""
+    t = fill_recut.fill_recut_trigger("make the big hole 38 mm")
+    assert t is not None
+    assert t["noun"] == "hole"
+    assert t["size"] == 38.0, t
+    # The rendered sentence (the deck's :g spelling — 38.0 renders as 38).
+    s = fill_recut.boundary_sentence(t["noun"], t["size"])
+    assert "Ø38 mm" in s, s
+    assert "Ø38.0" not in s, s
+
+
+def test_fill_recut_trigger_partial_number_not_parsed() -> None:
+    """A trailing-partial number ("38." with no decimal digits) is NOT
+    parsed as a size — no partial number is ever rendered (the pre-fix
+    regex captured "38" from "38." and rendered Ø38 for a number the user
+    did not state)."""
+    t = fill_recut.fill_recut_trigger("make the hole 38.")
+    assert t is None, t
+
+
+def test_fill_recut_move_with_distance_keeps_number() -> None:
+    """A move carrying a distance + direction keeps the user's number and
+    direction (the pre-fix move template dropped the distance —
+    "move the hole 10 mm left" got the point-at-the-spot copy and the 10
+    was silently lost)."""
+    t = fill_recut.fill_recut_trigger("move the hole 10 mm left")
+    assert t is not None
+    assert t["move"] is True
+    assert t["move_distance"] == 10.0, t
+    assert t["direction"] == "left", t
+    s = fill_recut.boundary_sentence(
+        t["noun"],
+        t["size"],
+        move=t["move"],
+        move_distance_mm=t["move_distance"],
+        move_direction=t["direction"],
+    )
+    assert "10 mm left of where it is now" in s, s
+    assert "Point at the spot" not in s, s
+
+
+def test_fill_recut_move_without_distance_uses_point_at_spot() -> None:
+    """A move with NO distance keeps the point-at-the-spot copy (the
+    pre-fix behaviour for the distanceless move — unchanged)."""
+    t = fill_recut.fill_recut_trigger("move the hole left")
+    assert t is not None
+    assert t["move"] is True
+    assert t["move_distance"] is None, t
+    assert t["direction"] is None, t
+    s = fill_recut.boundary_sentence(t["noun"], t["size"], move=t["move"])
+    assert "Point at the spot" in s, s
+    assert "mm" not in s, s
+
+
+def test_fill_recut_offer_dict_carries_only_noun_and_size() -> None:
+    """The server-side pending-offer dict stays the pre-fix shape
+    (kind/noun/size — the #250 reader's contract); the distance +
+    direction are reply-side only and are NOT persisted on the offer
+    (the offer is the fill-and-recut instruction's input — the distance
+    is the user's move phrasing, not a fill-and-recut parameter)."""
+    t = fill_recut.fill_recut_trigger("move the hole 10 mm left")
+    assert t is not None
+    offer = {"kind": "fill_recut", "noun": t["noun"], "size": t["size"]}
+    assert offer == {"kind": "fill_recut", "noun": "hole", "size": None}
+    # The offer's instruction (an accepted move offer runs the loop):
+    instr = fill_recut.fill_and_recut_instruction(offer)
+    assert "hole" in instr
+    assert "10" not in instr  # a move offer has no size to state
+
+
+# ---------------------------------------------------------------------------
+# copy.ts two-way parity pins (parse copy.ts, as the existing part-upload
+# detail pins do — the overstated tripwire claim in the old
+# UNSETTLED_PART_REPLY comment is corrected by these pins existing).
+# ---------------------------------------------------------------------------
+
+
+def _copy_ts_text() -> str:
+    return (
+        Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+
+
+def test_unsettled_part_reply_equals_copy_ts() -> None:
+    """``UNSETTLED_PART_REPLY`` equals ``copy.ts``'s
+    ``partUnitsUnsettled`` exactly (parse copy.ts, as the existing
+    part-upload detail pins do)."""
+    import re
+
+    m = re.search(r'partUnitsUnsettled =\s*"([^"]+)"', _copy_ts_text())
+    assert m is not None, "copy.ts must define partUnitsUnsettled"
+    assert fill_recut.UNSETTLED_PART_REPLY == m.group(1)
+
+
+def test_fill_recut_decline_reply_equals_copy_ts() -> None:
+    """``FRILL_DECLINE_REPLY`` equals ``copy.ts``'s ``fillRecut.declined``
+    exactly."""
+    import re
+
+    m = re.search(r'declined:\s*"([^"]+)"', _copy_ts_text())
+    assert m is not None, "copy.ts must define fillRecut.declined"
+    assert fill_recut.FRILL_DECLINE_REPLY == m.group(1)
+
+
+def test_fill_recut_templates_match_copy_ts_fill_recut() -> None:
+    """Every fill-recut boundary template, rendered with fixed sample
+    values, equals ``copy.ts``'s ``fillRecut`` deck function with the
+    same values (parse copy.ts + the backend's own render — the two-way
+    agreement the old comment claimed the design-contract tripwire
+    pinned; the pin lives here, the #250/#260 way)."""
+    import re
+
+    copy_ts = _copy_ts_text()
+
+    # The fillRecut deck block (scope the regex to it so `move` does not
+    # match an unrelated `moved.` elsewhere in the file).
+    fr_start = copy_ts.index("export const fillRecut = {")
+    fr_end = copy_ts.index("} as const;", fr_start)
+    seg = copy_ts[fr_start:fr_end]
+
+    def _deck_fn(name: str) -> str:
+        # Extract the template literal body of `fillRecut.<name>:` — the
+        # backtick-quoted template after the arrow.
+        m = re.search(name + r":[^(]*\([^)]*\)[^(]*=>\s*`([^`]*)`", seg)
+        assert m is not None, f"copy.ts must define fillRecut.{name}"
+        return m.group(1)
+
+    def _render(ts: str, **kwargs) -> str:
+        for k, v in kwargs.items():
+            ts = ts.replace("${" + k + "}", v)
+        return ts
+
+    # The hole/bore diameter resize (dim 38).
+    hole = _render(_deck_fn("holeDiameter"), noun="hole", dim="38")
+    assert hole == fill_recut.boundary_sentence("hole", 38.0)
+
+    # The other-noun resize (dim 5).
+    slot = _render(_deck_fn("nounDimension"), noun="slot", dim="5")
+    assert slot == fill_recut.boundary_sentence("slot", 5.0)
+
+    # The point-at-the-spot move (no distance).
+    move = _render(_deck_fn("move"), noun="hole")
+    assert move == fill_recut.boundary_sentence("hole", None, move=True)
+
+    # The move-with-distance (the new template — the dropped-distance bug
+    # fix, pinned two-way).
+    move_d = _render(
+        _deck_fn("moveWithDistance"), noun="hole", distance="10", direction="left"
+    )
+    assert move_d == fill_recut.boundary_sentence(
+        "hole", None, move=True, move_distance_mm=10.0, move_direction="left"
+    )
+
+    # The no-dimension ask.
+    ask = _render(_deck_fn("noDimension"), noun="hole")
+    assert ask == fill_recut.boundary_sentence("hole", None)
+
+
+def test_design_contract_pins_fill_recut_deck_key() -> None:
+    """The design-contract tripwire's key-list assertion includes the
+    fill-recut deck surface (the copy-deck key-list pins ``fillRecut``
+    and ``partUnitsUnsettled`` — a rename of the deck key trips the
+    tripwire, the #325 way)."""
+    src = (
+        Path(__file__).parent.parent
+        / "web" / "src" / "__tests__" / "design-contract.test.ts"
+    ).read_text("utf-8")
+    assert "fillRecut" in src
+    assert "partUnitsUnsettled" in src

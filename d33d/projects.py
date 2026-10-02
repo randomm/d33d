@@ -22,7 +22,6 @@ git identity.
 from __future__ import annotations
 
 import logging
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -32,41 +31,12 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, field_validator
 
 from d33d import db as db_mod
+from d33d import fill_recut
+from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
+from d33d.design_loop_events import photo_storage_signal
+from d33d.photo_upload import photo_upload_route
 
 logger = logging.getLogger(__name__)
-
-# Issue #261 lexicon feed — the carry-forward merge's cues input.
-from d33d.axis_lexicon import classify as _classify_axis_cues
-from d33d.design_loop_events import (
-    axes_to_gate_triple,
-    photo_data_uri,
-    photo_storage_signal,
-    run_design_loop_with_events,
-    validate_photo_bytes,
-)
-from d33d.dimension_protocol import (
-    carried_stated_set,
-    effective_stated_dims,
-    stated_axes_from_message,
-)
-from d33d.question_answer import ModelUnconfiguredError, route_chat_message
-
-# ---------------------------------------------------------------------------
-# Upload bounds (committed by the issue spec)
-# ---------------------------------------------------------------------------
-
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024  # 20 MB
-_READ_CHUNK_BYTES = 1024 * 1024  # 1 MiB — bounded read chunk size
-ALLOWED_CONTENT_TYPES = {"image/png", "image/jpeg"}
-
-# Issue #299 — the 422 detail for an undecodable upload (a verbatim copy of
-# web/src/copy.ts `photoUpload.undecodable` — the SPA renders the 422 body's
-# ``detail`` verbatim, so the two copies must never drift apart). The check
-# order is fixed: content type (400) → size (413) → decode gate (422) →
-# write/commit/DB — a 422 writes nothing, commits nothing, updates nothing.
-UNDECODABLE_PHOTO_DETAIL = (
-    "That file isn't a readable PNG or JPEG image. Try exporting it again."
-)
 
 # Issue #295 — the two fixed copy.ts strings the missing-storage chat
 # pre-routes reply with (verbatim copies of the SPA's copy deck — the
@@ -80,226 +50,22 @@ PHOTO_MISSING_NOTICE = (
     "from your words alone"
 )
 
-#: Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
-#: of the copy.ts sentence — the design-contract tripwire pins the
-#: two-way agreement). The units are not settled; the design loop must
-#: not run until the user settles them.
-UNSETTLED_PART_REPLY = (
-    "The part's units aren't settled yet, so I can't work on it. "
-    "Settle the units first — pick mm, cm, or inch, or give one measured "
-    "axis — and then I can add and cut on it."
-)
-
-# ---------------------------------------------------------------------------
-# Issue #332 (sub-issue 3) — the fill-and-recut boundary pre-route: copy,
-# the closed feature-noun set, and the deterministic trigger detector.
-# ---------------------------------------------------------------------------
-
-#: The closed feature-noun set a resize/move request can target (issue
-#: #332's operator decision (b)+(c)): an imported feature is phrased from
-#: the USER'S WORDS, and only these nouns are recognised feature names on
-#: a part the user brought. Defined ONCE here — the pre-route, the copy
-#: templates, and the tests all read this single constant.
-FEATURE_NOUNS = frozenset(
-    {
-        "hole",
-        "holes",
-        "slot",
-        "slots",
-        "boss",
-        "post",
-        "tab",
-        "recess",
-        "pocket",
-        "cutout",
-        "notch",
-        "groove",
-        "bore",
-        "counterbore",
-    }
-)
-
-#: The add/create verbs that turn a feature message into an ADD (an add
-#: goes to the design loop — rule 4 forbids only RESIZING the imported
-#: mesh, not adding onto it; issue #332's operator decision (e)).
-_ADD_VERB_RE = re.compile(
-    r"\b(?:add|drill|cut\s+a\s+new|make\s+a\s+new|put\s+a)\b", re.IGNORECASE
-)
-
-#: The resize/move phrasings the trigger scans for (operator decision (b)):
-#: "make the <noun> N mm", "make the <noun> bigger/smaller/wider", "resize
-#: the <noun>", "move the <noun> …". The dimension, when present, is an
-#: mm-formatted number (the deck's mm() spelling the SPA sends, or a bare
-#: number + "mm") — substituted into the boundary copy, never invented.
-_FRILL_RESIZE_RE = re.compile(
-    r"\b(?:make|resize)\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
-    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?P<size>\d+(?:\.\d+)?)(?:\s*mm)?\b",
-    re.IGNORECASE,
-)
-_FRILL_BIGGER_RE = re.compile(
-    r"\b(?:make|resize)\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
-    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?:bigger|smaller|wider|narrower)\b",
-    re.IGNORECASE,
-)
-_FRILL_MOVE_RE = re.compile(
-    r"\bmove\b[^.,;!?]{0,40}?(?:the\s+|a\s+)?"
-    r"(?P<noun>" + "|".join(sorted(FEATURE_NOUNS)) + r")\b[^.!?]*?\b(?P<where>left|right|up|down|over|out|in|here|there)\b",
-    re.IGNORECASE,
-)
-
-
-def _fill_recut_boundary_sentence(
-    noun: str, size_mm: float | None, move: bool = False
-) -> str:
-    """The spec's boundary sentence, templated (issue #332's operator
-    decision: a CLOSED set of templates with the user's noun and dimension
-    substituted — mono-formatted mm, never invented).
-
-    The four shapes, in the operator decision's order:
-
-    * hole/bore with a diameter — the UX spec's sentence VERBATIM
-      ("fill it, then cut a Ø{d} mm one on the same axis");
-    * other noun with a dimension — "fill it, then cut a new {noun} at
-      {dimension} in the same place";
-    * move — "fill it, then cut a new one where you want it. Point at the
-      spot, or tell me where.";
-    * no dimension given — the ask ("How big should the {noun} be?").
-    """
-    if move:
-        return (
-            f"That {noun} came with your file, so I can't move it directly — "
-            "the file has no parameters for me to change. What I can do: "
-            "fill it, then cut a new one where you want it. Point at the spot, "
-            "or tell me where."
-        )
-    if size_mm is None:
-        return (
-            f"How big should the {noun} be? It came with your file, so I'll "
-            "fill it and cut a new one at that size."
-        )
-    dim = f"{size_mm:g}"
-    if noun in ("hole", "holes", "bore", "counterbore"):
-        return (
-            f"That {noun} came with your file, so I can't resize it directly — "
-            "the file has no parameters for me to change. What I can do: "
-            f"fill it, then cut a Ø{dim} mm one on the same axis. It'll look "
-            "the same, and you'll see it as a change in the history."
-        )
-    return (
-        f"That {noun} came with your file, so I can't resize it directly — "
-        "the file has no parameters for me to change. What I can do: "
-        f"fill it, then cut a new {noun} at {dim} mm in the same place. "
-        "It'll look the same, and you'll see it as a change in the history."
-    )
-
-
-def _fill_recut_trigger(message: str) -> dict[str, Any] | None:
-    """The deterministic fill-and-recut trigger for ONE chat message
-    (issue #332's operator decision): ``None`` when the message does not
-    ask to RESIZE or MOVE an imported feature, else
-    ``{"noun": <closed-set noun>, "size": <mm float or None>, "move": bool}``.
-
-    Fires only when ALL of the operator decision's (b)–(e) hold:
-
-    * (b) the message asks to resize or move an existing feature
-      ("make the <noun> N mm", "make the <noun> bigger/smaller", "resize
-      the <noun>", "move the <noun> …") — "taller"/"wider the part" is an
-      ADD (no closed-set noun) and never triggers;
-    * (c) the noun is in :data:`FEATURE_NOUNS` (a closed set, defined
-      once — never a free-form noun match);
-    * (e) the message has no add/create verb ("add a 38 mm hole" is an
-      add and goes to the design loop).
-
-    (a) — the project has an assumed/settled part — and (d) — the noun
-    does not match a param name/label of the CURRENT version (a feature
-    the user added is not the imported mesh) — are caller-side checks
-    that need the project row / the latest version's params, which this
-    pure helper does not take."
-    """
-    if _ADD_VERB_RE.search(message):
-        return None
-    m = _FRILL_RESIZE_RE.search(message)
-    if m is not None:
-        return {
-            "noun": m.group("noun").lower(),
-            "size": float(m.group("size")),
-            "move": False,
-        }
-    m = _FRILL_BIGGER_RE.search(message)
-    if m is not None:
-        return {"noun": m.group("noun").lower(), "size": None, "move": False}
-    m = _FRILL_MOVE_RE.search(message)
-    if m is not None:
-        return {"noun": m.group("noun").lower(), "size": None, "move": True}
-    return None
-
-
-def _own_feature_names(latest: dict[str, Any] | None) -> set[str]:
-    """The lower-cased param names, labels, and SINGLE-WORD label tokens of
-    the CURRENT version's own params (issue #332's operator decision (d):
-    a resize of a feature the user added — a param in the design's own
-    SCAD — behaves as today and never triggers the fill-and-recut offer).
-
-    Token match on the design's own params: a param named ``hole_diameter``
-    (label "Hole diameter") contributes the token ``hole`` to the set, so
-    "make the hole 38 mm" does NOT trigger when the design's own SCAD
-    already owns a hole param — the user is resizing their own feature, not
-    the imported mesh. ``None`` row → empty set (no design of its own yet
-    — the part's features are the only features)."""
-    names: set[str] = set()
-    if not latest:
-        return names
-    params = latest.get("params") or {}
-    meta = latest.get("param_meta") or {}
-    for key in params:
-        names.add(str(key).lower())
-        m = meta.get(key) or {}
-        label = m.get("label")
-        if isinstance(label, str) and label:
-            for token in label.lower().split():
-                names.add(token)
-    return names
-
-
-def _is_clean_yes(message: str) -> bool:
-    """The fill-and-recut offer's acceptance predicate (issue #332's
-    operator decision: "yes" / "Yes, do that" run the loop). A clean
-    affirmation via the shared heuristic (``_is_clean_affirmation`` —
-    short, no question mark, no negation, no hedge — "yes but make it 2
-    mm" is NOT an acceptance)."""
-    from d33d.dimension_protocol import _is_clean_affirmation
-
-    return _is_clean_affirmation(message)
-
-
-def _is_clean_no(message: str) -> bool:
-    """The fill-and-recut offer's decline predicate (issue #332's operator
-    decision: "no" / "Leave it" clear the offer). A short turn carrying a
-    negation token ("no"/"not"/...) or the "leave it" phrase, with no
-    question mark and no affirmative token."""
-    low = message.lower()
-    if "?" in low:
-        return False
-    if re.search(r"\bleave (it|that)\b", low):
-        return True
-    if re.search(
-        r"\b(confirm|confirmed|yes|yep|correct|right|accept|ok|okay)\b", low
-    ):
-        return False
-    return bool(
-        re.search(
-            r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low
-        )
-    )
-
+# The unsettled-part reply + the whole fill-and-recut pre-route (copy,
+# closed feature-noun set, trigger, offer build/accept/clear) live in
+# ``d33d.fill_recut`` (the single entry point ``fill_recut_turn``).
 _GIT_USER_EMAIL = "d33d@local"
 _GIT_USER_NAME = "d33d"
 
-# Commit-message messages are stored in the per-project git repo's history,
-# which downstream consumers (git log parsing, shell tooling, template
-# interpolation) treat as data. Sanitize the message text with a strict
-# safe-character filter so user-supplied filenames can never inject newlines
-# or shell metacharacters into the commit history.
+# ---------------------------------------------------------------------------
+# Commit-message sanitization (the photo-upload and version-write paths
+# share ONE definition — the upload's copy moved to ``d33d.photo_upload``;
+# ``d33d.versions`` imports it from here under its original name, so this
+# module re-exports it. It is NOT a feature shimm: the module's own
+# ``commit_all`` and the test spies both reach the function via this
+# module's namespace).
+# ---------------------------------------------------------------------------
+
+
 _MAX_COMMIT_MESSAGE_LEN = 200
 
 
@@ -636,6 +402,10 @@ def create_projects_router() -> APIRouter:
     at request time (set by the lifespan in ``d33d.app.create_app``).
     """
     router = APIRouter(prefix="/api/projects", tags=["projects"])
+    # The photo-upload route's body lives in ``d33d.photo_upload`` (the
+    # router file stays under the 500-line split threshold; the thin
+    # wiring call is the only thing this file keeps of it).
+    photo_upload_route(router)
 
     @router.post("", status_code=201)
     async def create_project(request: Request, body: ProjectCreate) -> dict[str, Any]:
@@ -778,16 +548,18 @@ def create_projects_router() -> APIRouter:
             )
             return {"status": "accepted"}
 
-        # Issue #332 (sub-issue 3) — the unsettled-part pre-route (BEFORE
-        # the offer/question pre-routes, after the missing-source check):
-        # when the project has a part whose units are NOT assumed/settled
-        # (i.e. `part_unit_status` is "unsettled" or otherwise not in the
-        # assumed/settled pair), the reply is a deterministic copy.ts
-        # sentence as a kind:"answer" done frame — no design loop, no
-        # render, no version. A no-part project skips this pre-route.
+        # Issue #332 (sub-issue 3) — the unsettled-part + fill-and-recut
+        # pre-routes (BEFORE the offer/question pre-routes, after the
+        # missing-source check). The module (``d33d.fill_recut``) owns the
+        # whole flow — the unsettled guard, the trigger, the boundary
+        # copy, and the offer build/accept/clear; this route keeps only
+        # the answer-frame plumbing (register the done frame, return the
+        # 202 body) and the accepted-offer instruction (appended to the
+        # request text further down).
         from d33d.part_http import part_public
 
         _part = part_public(row) if row.get("part_filename") else None
+        _fill_recut_instruction: str | None = None
         if _part is not None and _part.get("unit_status") not in ("assumed", "settled"):
             logger.warning(
                 "chat for project %s: the part's units are unsettled — "
@@ -795,109 +567,25 @@ def create_projects_router() -> APIRouter:
                 project_id,
             )
             app.state.event_sources[project_id] = _answered_frames(
-                UNSETTLED_PART_REPLY
+                fill_recut.UNSETTLED_PART_REPLY
             )
             return {"status": "accepted"}
-
-        # Issue #332 (sub-issue 3) — the fill-and-recut pre-route (BEFORE
-        # the offer/question pre-routes, after the unsettled-part check):
-        # when the project has an assumed/settled part and the message
-        # asks to RESIZE or MOVE one of the part's OWN features (a noun
-        # from the closed feature-noun set that is NOT a param name or
-        # label of the design's own current version — operator decision
-        # (b)–(e)), the reply is the spec's templated boundary sentence
-        # from copy.ts as a kind:"answer" done frame, and a fill-recut
-        # offer is recorded server-side (the pending-offer field, with
-        # the kind discriminator so the #250 param-offer route never
-        # reads it back as a param offer — the #250 writer is
-        # param-shaped only, so a fill-recut doc lapses to None there
-        # and lapses here too). "yes"/[Yes, do that] on the pending
-        # offer runs the design loop with an explicit fill-and-recut
-        # instruction (the request text carries it); "no"/[Leave it]
-        # clears the offer. Anything else (no part, own-param noun, an
-        # add phrasing, no trigger) falls through to the existing routes
-        # exactly as today.
-        _fill_recut_instruction: str | None = None
-        if _part is not None and _part.get("unit_status") in ("assumed", "settled"):
-            from d33d.part_http import PART_FILENAME
-
-            _versions = app.state.versions
-            pending = _versions.get_pending_offer(project_id)
-            if pending is not None and pending.get("kind") == "fill_recut":
-                # A LIVE fill-recut offer (server-side state, never parsed
-                # from the client's chat). "yes" runs the design loop with
-                # the explicit fill-and-recut instruction (the offer is
-                # CLEARED — a consumed offer is a consumed offer); "no"
-                # clears the offer and replies quietly (a done frame, no
-                # design run); anything else supersedes the offer (cleared,
-                # re-evaluated below as a fresh turn).
-                if _is_clean_yes(body.message):
-                    _fr_offer = dict(pending)
-                    _versions.set_pending_offer(project_id, None)
-                    _fr_noun = str(_fr_offer.get("noun") or "feature")
-                    _fr_size = _fr_offer.get("size")
-                    _fr_size_str = f" at {_fr_size:g} mm" if _fr_size else ""
-                    _fill_recut_instruction = (
-                        "Fill-and-recut: union a solid over the existing "
-                        f"{_fr_noun} of the imported part, then difference "
-                        f"the new {_fr_noun}{_fr_size_str} on the same "
-                        "axis/location. Never resize the imported mesh "
-                        f"itself — import(\"{PART_FILENAME}\") stays as "
-                        "brought."
-                    )
-                    logger.info(
-                        "chat for project %s: fill-and-recut offer "
-                        "accepted — running the design loop with the "
-                        "fill-and-recut instruction (len(message)=%d)",
-                        project_id,
-                        len(body.message),
-                    )
-                    pending = None
-                elif _is_clean_no(body.message):
-                    _versions.set_pending_offer(project_id, None)
-                    logger.info(
-                        "chat for project %s: fill-and-recut offer "
-                        "declined — offer cleared (len(message)=%d)",
-                        project_id,
-                        len(body.message),
-                    )
-                    app.state.event_sources[project_id] = _answered_frames(
-                        "Understood — leaving the part as it is."
-                    )
-                    return {"status": "accepted"}
-                else:
-                    # A new message supersedes the pending offer: clear it
-                    # and re-evaluate THIS message as a fresh turn (it may
-                    # itself be a fresh trigger).
-                    _versions.set_pending_offer(project_id, None)
-                    pending = None
-            if pending is None:
-                trigger = _fill_recut_trigger(body.message)
-                if trigger is not None:
-                    _own = _own_feature_names(_versions.latest_version(project_id))
-                    if trigger["noun"] not in _own:
-                        _versions.set_pending_offer(
-                            project_id,
-                            {
-                                "kind": "fill_recut",
-                                "noun": trigger["noun"],
-                                "size": trigger["size"],
-                            },
-                        )
-                        _sentence = _fill_recut_boundary_sentence(
-                            trigger["noun"], trigger["size"], trigger["move"]
-                        )
-                        logger.info(
-                            "chat for project %s: fill-and-recut trigger "
-                            "(noun=%r, size=%r, move=%r) — reply with the "
-                            "boundary sentence, offer recorded, no design run",
-                            project_id,
-                            trigger["noun"],
-                            trigger["size"],
-                            trigger["move"],
-                        )
-                        app.state.event_sources[project_id] = _answered_frames(_sentence)
-                        return {"status": "accepted"}
+        _fill_recut = fill_recut.fill_recut_turn(app, project_id, body.message)
+        if _fill_recut is not None:
+            if _fill_recut.get("run_loop"):
+                _fill_recut_instruction = _fill_recut["instruction"]
+                logger.info(
+                    "chat for project %s: fill-and-recut offer accepted — "
+                    "running the design loop with the fill-and-recut "
+                    "instruction (len(message)=%d)",
+                    project_id,
+                    len(body.message),
+                )
+            else:
+                app.state.event_sources[project_id] = _answered_frames(
+                    _fill_recut["answer"]
+                )
+                return {"status": "accepted"}
 
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
@@ -957,333 +645,24 @@ def create_projects_router() -> APIRouter:
             )
             return {"status": "accepted"}
 
-        # Resolve the loop's stated dimensions (ticket #91; issue #247's
-        # per-axis decision) — the SPA never sends ``stated_dims`` (it
-        # posts only ``message`` + ``chat_history``): the loop receives
-        # the CURRENT run's per-axis confirmed set (the body's explicit
-        # ``stated_dims`` axes when a client sends one, else the
-        # protocol's per-axis extraction of the message). NO persisted
-        # fallback: a follow-up message with no explicit dimension cue
-        # confirms nothing and the gate ABSTAINS (``Score.bbox_abstained``)
-        # — it must not enforce an axis confirmed on an earlier turn
-        # against a candidate the user just asked to change. A PARTIAL
-        # confirmed set is a zero-filled (W, D, H) triple — unconfirmed
-        # axes render as ``not specified`` in the prompt and abstain
-        # per-axis in the bbox gate; ``None`` (abstain entirely) when the
-        # current turn confirmed no axis. This route never reads W/D/H
-        # param keys and never reads a persisted version row for the gate.
+        # The design-loop setup (the per-axis stated-evidence resolution,
+        # the photo capture, and the loop's event-source registration) lives
+        # in ``d33d.chat_loop`` — the thin entry point keeps this router file
+        # under the 500-line split threshold (AGENTS.md).
         chat_history = tuple(body.chat_history or ())
-
-        # Issue #249 — the pre-route (BEFORE the design loop): if the
-        # message is a question AND the project's design state can answer
-        # it, the answer is emitted on the chat stream as a single
-        # terminal done frame (``kind: "answer"`` — the additive
-        # discriminator; no token frames, no version-created frame, no
-        # version). Everything else — including anything ambiguous — goes
-        # to the design loop EXACTLY as today. The route is narrow on
-        # purpose (one stage-1 question detector, one cheap stage-2 LLM
-        # call with a deterministic number guard, a per-LLM-call hard
-        # timeout):
-        # the common case ("make it taller") costs nothing.
-        try:
-            answer_route = await route_chat_message(
-                body.message,
-                app.state.versions.latest_version(project_id),
-                answer_edge=getattr(app.state, "answer_question", None),
-                project_id=str(project_id),
-            )
-        except ModelUnconfiguredError as e:
-            # The model pre-flight (issue #303) found the model cannot be
-            # called: the question path emits the SAME structured terminal
-            # error frame the design loop emits (reason
-            # ``model_unconfigured``) — never the COULD_NOT_ANSWER text,
-            # never a silent degrade into an LLM call. No version is
-            # created (the design loop never runs).
-            app.state.event_sources[project_id] = _model_unconfigured_frames(e.env_var)
-            return {"status": "accepted"}
-        except Exception:
-            # The pre-route is best-effort but its failure is fatal to
-            # THIS request (re-raised below): release the claim so the
-            # next attempt can start clean, and log the failure (the
-            # request errors — there is no design-loop fallback for a
-            # pre-route crash). The warning carries lengths only (no
-            # message text — no PII in logs).
-            logger.warning(
-                "question-answer pre-route failed; the request errors "
-                "(inflight flag released, len(message)=%d)",
-                len(body.message),
-                exc_info=True,
-            )
-            inflight.discard(project_id)
-            raise
-        if answer_route is not None:
-            # The event source is registered — the flag stays set
-            # (streaming.py's ``finally`` clears it when the stream is
-            # drained; no event source means no stream to drain it).
-            app.state.event_sources[project_id] = _answered_frames(
-                answer_route["answer"]
-            )
-            return {"status": "accepted"}
-
-        # The per-axis stated evidence — the gate's current-message source
-        # AND what the loop pass persists on the new version row (issue
-        # #246): the body's explicit ``stated_dims`` axes when a client
-        # sends one (the protocol's highest-priority source), else the
-        # protocol's per-axis extraction of the user's own words
-        # (``stated_axes_from_message`` reuses the same ``_extract_stated``
-        # pipeline — partial statements count for the axes they state).
-        # A statement that names no axis is ``{}`` → the version row
-        # persists NULL (abstain, never a fabricated axis row).
-        # The per-axis stated evidence (issue #246/#261) — the SINGLE
-        # value the carry-forward merge helper (``effective_stated_dims``)
-        # feeds BOTH the gate (``axes_to_gate_triple``) and the new
-        # version row's persisted ``stated_dims`` (never two divergent
-        # copies; the raw ``stated_axes_from_message`` result is not used
-        # directly here). The effective set starts as the latest
-        # version's persisted ``stated_dims`` and is adjusted by this
-        # turn's cues: the body's explicit ``stated_dims`` field OVERRIDES
-        # (precedence: body > explicit protocol cues > lexicon — no
-        # release semantics), else the protocol's explicit cues override,
-        # else the closed axis lexicon classifies the message (relative
-        # cues release their axis, global cues release all, absolute cues
-        # set — uncued axes carry forward). A statement that yields no
-        # axis is ``{}`` → the version row persists NULL (never a
-        # fabricated axis row).
-        explicit_body: dict[str, float] | None = None
-        if body.stated_dims is not None:
-            _w, _d, _h = body.stated_dims
-            # ``> 0`` (never truthiness): 0 is the unconfirmed marker
-            explicit_body = {
-                axis: float(value)
-                for axis, value in zip(("W", "D", "H"), (_w, _d, _h))
-                if value > 0
-            } or None
-        _carried = carried_stated_set(app.state.conn, app.state.versions, project_id)
-        if explicit_body is not None:
-            per_axis_stated = effective_stated_dims(_carried, explicit_body)
-        else:
-            _latest = _carried
-            try:
-                _am = stated_axes_from_message(body.message, chat_history)
-                _cues_arg = _am if _am else _classify_axis_cues(body.message)
-            except Exception:
-                # The lexicon feed must never take the project down with
-                # it: a classification failure degrades to the carried
-                # set unchanged (no release, no override — the conservative
-                # outcome). The warning carries lengths only (no message
-                # text — no PII in logs).
-                logger.warning(
-                    "dimension cue resolution failed; carrying the latest "
-                    "stated set unchanged (len(message)=%d)",
-                    len(body.message),
-                    exc_info=True,
-                )
-                _cues_arg = None
-            per_axis_stated = effective_stated_dims(_latest, _cues_arg)
-
-        stated = axes_to_gate_triple(per_axis_stated)
-
-        # The project-level carried set (issue #312): written at the end of
-        # every chat turn (pass or fail — the loop runs asynchronously as an
-        # SSE stream; the write is here because the effective set is final
-        # once cues are resolved, regardless of the loop's outcome). A
-        # failed turn creates no version row, but the user's stated axes
-        # must survive into the next successful version's gate input.
-        try:
-            _json = __import__("json")
-            app.state.conn.raw.execute(
-                "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
-                (_json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
-            )
-            app.state.conn.commit()
-        except Exception:  # the write must never fail the 202
-            logger.debug("carried_stated_dims write failed for project %s", project_id, exc_info=True)
-
-        # Photo: read the project's stored photo NOW (synchronously, before
-        # the 202 response) — the background task runs via asyncio and the
-        # DB may be closed by the time the loop starts (a deleted project
-        # or a closed connection). The photo is captured here as a data URI
-        # (MIME from the extension; missing file → the fixed 1x1
-        # transparent-PNG constant).
-        photo = photo_data_uri(row.get("source_photo_path"))
-
-        # Register the event source synchronously BEFORE the 202 response
-        # (else the client stream terminates on "no active stream" — see
-        # d33d/streaming.py's contract). The adapter is a plain async
-        # generator (not a coroutine): ``event_sources`` maps
-        # project_id -> AsyncIterator of (event, data) tuples.
-        #
-        # The SSE endpoint (GET /api/stream/{project_id}) is the SOLE
-        # driver of this generator — a single async generator cannot be
-        # driven by two concurrent ``async for`` consumers (CPython raises
-        # ``RuntimeError: anext(): asynchronous generator is already
-        # running`` on the second consumer's first ``__anext__``). The
-        # inflight flag is set here (synchronously, before the 202
-        # response) and cleared in the SSE endpoint's ``finally`` when the
-        # generator is exhausted (or an SSE client disconnects).
-        # Issue #332 (sub-issue 3) — the accepted fill-and-recut offer's
-        # explicit instruction rides the request text (the ``request``
-        # kwarg the adapter's prompt renders as the "Request:" line — the
-        # loop's own import-aware prompt (``_design_system`` with
-        # ``part_scale``) already teaches the fill-then-cut move from the
-        # settled import; the instruction makes the accepted turn's intent
-        # explicit to the model). ``user_message`` stays the user's own
-        # words (the transcript field) — only the request text gains the
-        # appended instruction.
-        _request_text = body.message
-        if _fill_recut_instruction is not None:
-            _request_text = f"{body.message}\n{_fill_recut_instruction}"
-        try:
-            events = run_design_loop_with_events(
-                app,
-                project_id,
-                user_message=body.message,
-                stated_dims=stated,
-                stated_axes=per_axis_stated,
-                chat_history=chat_history,
-                photo=photo,
-                request_text=_request_text,
-            )
-        except Exception:
-            # Design-loop setup failed BEFORE an event source was
-            # registered: release the claim so the project is not stuck
-            # (the flag was claimed before the pre-route — see above).
-            inflight.discard(project_id)
-            raise
-        app.state.event_sources[project_id] = events
-        # The flag stays set — the SSE endpoint's ``finally`` clears it
-        # on ALL exit paths (generator exhausted, client disconnect,
-        # exception).
-
-        return {"status": "accepted"}
-
-    @router.post("/{project_id}/photos", status_code=201)
-    async def upload_photo(request: Request, project_id: int) -> dict[str, Any]:
-        """Multipart photo upload (png/jpeg, ≤ 20 MB).
-
-        Accepts a single file field (``file``) in the multipart body.
-        The content type is validated against the allowed set, the file is
-        written to the per-project git repo's ``photos/`` directory, and the
-        ``source_photo_path`` DB column is updated.
-        """
-        conn: db_mod.Connection = request.app.state.conn
-        row = conn.get_project(project_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="project not found")
-
-        # Parse the multipart body to extract the file
-        content_type_header = request.headers.get("content-type", "")
-        if "multipart/form-data" not in content_type_header:
-            raise HTTPException(
-                status_code=400,
-                detail="expected multipart/form-data body",
-            )
-
-        try:
-            form = await request.form()
-        except (LookupError, ValueError, OSError) as e:
-            raise HTTPException(status_code=400, detail=f"multipart parse error: {e}")
-
-        file = form.get("file")
-        if file is None:
-            raise HTTPException(status_code=400, detail="missing 'file' field")
-
-        # Validate content type
-        file_content_type = getattr(file, "content_type", None) or ""
-        if file_content_type not in ALLOWED_CONTENT_TYPES:
-            raise HTTPException(
-                status_code=400,
-                detail=f"content type {file_content_type!r} not allowed (must be image/png or image/jpeg)",
-            )
-
-        # Read the file bytes in bounded chunks; abort with 413 as soon as
-        # the running total exceeds the cap (never buffers the whole
-        # upload first — an unbounded read would defeat the limit).
-        buf = bytearray()
-        while True:
-            chunk = await file.read(_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            buf.extend(chunk)
-            if len(buf) > MAX_UPLOAD_BYTES:
-                buf.clear()
-                raise HTTPException(
-                    status_code=413,
-                    detail=f"file exceeds {MAX_UPLOAD_BYTES} byte limit",
-                )
-        content = bytes(buf)
-
-        # Issue #299 — the decode gate (AFTER the 20 MB size check, BEFORE
-        # any file write / git commit / DB update): the bytes must decode
-        # as a real PNG or JPEG image with sane dimensions. A failure
-        # writes nothing — no file, no commit, no DB update (same contract
-        # as the 413 path above). The stored extension follows the
-        # DETECTED format (``img.format``), never the declared content type
-        # (a PNG declared ``image/jpeg`` must land on disk as ``.png`` —
-        # otherwise the data-URI MIME would mislabel the bytes).
-        try:
-            suffix = validate_photo_bytes(content)
-        except ValueError:
-            raise HTTPException(status_code=422, detail=UNDECODABLE_PHOTO_DETAIL)
-
-        # Determine a safe filename
-        original_name = getattr(file, "filename", None) or "photo"
-        safe_name = Path(original_name).name  # strip path components
-        safe_name = (
-            "".join(c for c in safe_name if c.isalnum() or c in "._-") or "photo"
+        return await chat_loop_run_design_loop(
+            app,
+            project_id,
+            row,
+            body.message,
+            body.stated_dims,
+            chat_history,
+            _fill_recut_instruction,
         )
-        # Commit-message text is sanitized separately (stricter, capped) so
-        # the repo's commit history can never carry newlines or shell
-        # metacharacters derived from the user-supplied filename.
-        commit_subject = _sanitize_commit_message(original_name) or "photo"
-        # Ensure the extension matches the DETECTED format (issue #299 —
-        # the decode gate above already guarantees a PNG or JPEG)
-        if "." in safe_name:
-            safe_name = safe_name.rsplit(".", 1)[0] + suffix
-        else:
-            safe_name = safe_name + suffix
-
-        # Write to the repo's photos/ dir
-        repo_path = Path(row["git_repo_path"])
-        photos_dir = repo_path / "photos"
-        photos_dir.mkdir(parents=True, exist_ok=True)
-        dest = photos_dir / safe_name
-        dest.write_bytes(content)
-        size = len(content)
-
-        # Commit the photo to the git repo, under the shared version-write
-        # lock (d33d.versions.VersionService._with_project_lock) so EVERY
-        # git write to this repo — design-source PUT, version create,
-        # set-as-main, and this photo upload — is serialized; concurrent
-        # committers would otherwise collide on ``.git/index.lock``.
-        svc = getattr(request.app.state, "versions", None)
-        try:
-            if svc is not None:
-                await svc._with_project_lock(project_id, lambda: commit_all(
-                    repo_path, f"photo: {commit_subject}"
-                ))
-            else:  # pragma: no cover - the app lifespan always wires it
-                commit_all(repo_path, f"photo: {commit_subject}")
-        except RuntimeError as e:
-            # Clean up the file but keep the repo consistent
-            dest.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail=f"git commit failed: {e}")
-
-        # Persist the path in the DB
-        stored_path = str(dest)
-        conn.update_project(project_id, source_photo_path=stored_path)
-
-        return {
-            "id": project_id,
-            "source_photo_path": stored_path,
-            "size": size,
-        }
 
     return router
 
 
 __all__ = [
-    "ALLOWED_CONTENT_TYPES",
-    "MAX_UPLOAD_BYTES",
     "create_projects_router",
 ]

@@ -134,10 +134,12 @@ describe("design contract", () => {
       "deterministicAnswer",
       "export3mf",
       "failure",
+      "fillRecut",
       "firstPass",
       "firstRun",
       "history",
       "missingStorage",
+      "partUnitsUnsettled",
       "partUpload",
       "passCard",
       "photoUpload",
@@ -145,6 +147,19 @@ describe("design contract", () => {
       "region",
       "shell",
     ]);
+    // Issue #332 (sub-issue 3): the fill-recut deck surface exists in the
+    // copy deck and the tripwire's key list would fail without it (the
+    // two-way agreement with the backend's `FRILL_*` constants and
+    // `UNSETTLED_PART_REPLY` is the fill-and-recut workstream's; this
+    // pins that the deck keys are in the tripwire's list, the #325 way).
+    expect(copy.fillRecut).toBeDefined();
+    expect(copy.fillRecut.move).toBeDefined();
+    expect(copy.fillRecut.moveWithDistance).toBeDefined();
+    expect(copy.fillRecut.holeDiameter).toBeDefined();
+    expect(copy.fillRecut.nounDimension).toBeDefined();
+    expect(copy.fillRecut.noDimension).toBeDefined();
+    expect(copy.fillRecut.declined).toBeDefined();
+    expect(copy.partUnitsUnsettled).toBeDefined();
   });
 
   it("the copy deck carries the part-save-failure 500 sentence (issue #325)", () => {
