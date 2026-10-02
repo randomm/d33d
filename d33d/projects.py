@@ -43,15 +43,11 @@ from d33d.project_git import (
 
 logger = logging.getLogger(__name__)
 
-# The per-project git repo primitives (``init_git_repo`` /
-# ``commit_all`` / ``remove_repo`` / ``repo_present``) and the
-# commit-message sanitizer now live in ``d33d.project_git`` (shared by
-# the photo-upload and design-source routes without the projects →
-# … → projects import cycle). This module re-exports them under their
-# historical names — ``d33d.versions`` imports ``_sanitize_commit_message``
-# from here, and the photo-upload and version-write tests patch/spy the
-# ``commit_all`` attribute on this module — so monkeypatch seams keep
-# reaching the same functions.
+# The git primitives live in ``d33d.project_git`` (shared by the
+# photo-upload and design-source routes without the projects → … → projects
+# import cycle); this module re-exports the two design-state notice strings
+# (``PHOTO_MISSING_NOTICE`` / ``SAVED_DESIGN_MISSING_REPLY``, from
+# ``d33d.design_frames``) under their historical names.
 
 # ---------------------------------------------------------------------------
 # Pydantic models for request bodies

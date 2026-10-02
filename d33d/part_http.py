@@ -117,7 +117,8 @@ def part_envelope_with_bbox(
     truth baseline. The v1 row is read explicitly through
     :func:`_v1_for_part` (the import's own row — NOT ``versions.
     latest_version``: once a v2+ exists, the latest row's bbox is the
-    previous candidate's own extents, not the import's). ``None`` row /
+    previous candidate's own extents, not the import's) and its ``bbox``
+    column is the RAW sqlite JSON string, decoded here. ``None`` row /
     part / unsettled / non-positive scale returns ``None`` (the no-part
     and unsettled regressions — byte-identical prompt, no loop, never an
     error). A part with a positive scale whose v1 row is missing or
@@ -137,13 +138,16 @@ def part_envelope_with_bbox(
     v1 = _v1_for_part(conn, row.get("id"))
     if v1 is None:
         return env
+    # The v1 row comes back from sqlite raw: ``bbox`` is a JSON string
+    # (a dict if the row ever arrives pre-decoded). Decode exactly once.
     raw = v1.get("bbox")
     if raw is None:
         return env
-    try:
-        raw = json.loads(raw)
-    except (TypeError, ValueError):
-        return env
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return env
     if not isinstance(raw, dict):
         return env
     axes = [raw.get(name) for name in ("x", "y", "z")]

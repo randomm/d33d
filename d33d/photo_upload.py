@@ -9,7 +9,11 @@ fixed: content type (400) → size (413) → decode gate (422) → write /
 commit / DB — a 422 writes nothing, commits nothing, updates nothing.
 
 ``d33d.projects`` keeps only the ``@router`` wiring (the thin
-``photo_upload_route(router)`` call).
+``photo_upload_route(router)`` call). The module re-exports the two
+design-state notice strings (``PHOTO_MISSING_NOTICE`` /
+``SAVED_DESIGN_MISSING_REPLY``, from ``d33d.design_frames``) under their
+historical names — the photo-upload route reads ``commit_all`` from
+``d33d.project_git`` via its own module-level import.
 """
 
 from __future__ import annotations

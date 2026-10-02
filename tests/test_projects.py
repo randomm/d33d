@@ -621,10 +621,10 @@ def test_upload_photo_commit_serialized_by_shared_write_lock(app_with_projects, 
         probe_results.append("proj_locked" if proj_lock.locked() else "proj_free")
         real_commit_all(repo_dir, message)
 
-    # The photo route calls ``d33d.photo_upload.commit_all`` (imported at
-    # module level from ``d33d.project_git``), so monkeypatch the module
-    # attribute in ``d33d.photo_upload`` — the route's ``commit_all`` binds
-    # to the same module global the spy replaces.
+    # The photo route calls ``d33d.photo_upload.commit_all`` — imported at
+    # module level from ``d33d.project_git`` — so patch the attribute on
+    # ``d33d.photo_upload`` (the module global the route reads); patching
+    # ``d33d.project_git.commit_all`` would miss the binding.
     monkeypatch.setattr(photo_upload_mod, "commit_all", _spy_commit)
 
     async def _call(client):

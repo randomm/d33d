@@ -2204,12 +2204,10 @@ def _conn_with_import_and_v2(tmp_path: Path):
     """An in-memory connection with a settled mm part whose v1 bbox is
     20×20×20 (the box_20mm.stl import) and a v2 whose recorded bbox is
     20×20×30 (a larger candidate, e.g. after adding a lip). Returns the
-    connection, the project row, and a versions service wired to the
-    connection (``latest_version`` returns the v2 row)."""
+    connection and the project row."""
     import json
 
     import d33d.db as db_mod
-    from d33d.versions import VersionService
     from d33d.versions import migrate as _migrate
 
     conn = db_mod.Connection(":memory:")
@@ -2230,7 +2228,7 @@ def _conn_with_import_and_v2(tmp_path: Path):
     )
     conn.commit()
     row = conn.get_project(pid)
-    return conn, row, VersionService(conn)
+    return conn, row
 
 
 def test_part_envelope_with_bbox_uses_v1_not_latest(tmp_path: Path):
@@ -2241,8 +2239,8 @@ def test_part_envelope_with_bbox_uses_v1_not_latest(tmp_path: Path):
     turn the baseline into the candidate it is supposed to check)."""
     from d33d.part_http import part_envelope_with_bbox
 
-    conn, row, versions = _conn_with_import_and_v2(tmp_path)
-    env = part_envelope_with_bbox(row, conn, versions)
+    conn, row = _conn_with_import_and_v2(tmp_path)
+    env = part_envelope_with_bbox(row, conn)
     assert env is not None
     assert env["scale"] == 1.0
     assert env["bbox_mm"] == (20.0, 20.0, 20.0), env
@@ -2255,7 +2253,6 @@ def test_part_envelope_with_bbox_v1_only(tmp_path: Path):
 
     import d33d.db as db_mod
     from d33d.part_http import part_envelope_with_bbox
-    from d33d.versions import VersionService
     from d33d.versions import migrate as _migrate
 
     conn = db_mod.Connection(":memory:")
@@ -2272,7 +2269,50 @@ def test_part_envelope_with_bbox_v1_only(tmp_path: Path):
     )
     conn.commit()
     row = conn.get_project(pid)
-    env = part_envelope_with_bbox(row, conn, VersionService(conn))
+    env = part_envelope_with_bbox(row, conn)
+    assert env is not None
+    assert env["bbox_mm"] == (20.0, 20.0, 20.0), env
+
+
+def test_part_envelope_with_bbox_decoded_v1_row(tmp_path: Path):
+    """A v1 row handed in already JSON-decoded (the ``bbox`` column is a
+    dict, not a sqlite JSON string) resolves the bbox too — the decode is
+    applied exactly once, never twice. The old unconditional
+    ``json.loads`` would raise ``TypeError`` on a dict and silently
+    degrade ``bbox_mm`` to ``None`` (the gate would abstain on a real
+    baseline); the guard must not silently drop a decoded row."""
+    import json
+    from unittest.mock import patch
+
+    import d33d.db as db_mod
+    from d33d import part_http
+    from d33d.part_http import part_envelope_with_bbox
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v1", "{}", json.dumps({"x": 20.0, "y": 20.0, "z": 20.0})),
+    )
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit=?, "
+        "part_unit_status=?, part_scale=? WHERE id=?",
+        ("part.stl", "stl", "mm", "settled", 1.0, pid),
+    )
+    conn.commit()
+    row = conn.get_project(pid)
+    # Pre-decode the raw row's bbox column (the production reader returns
+    # it as a JSON string; this simulates a caller that hands in the dict).
+    v1_id = conn.raw.execute(
+        "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+        (pid,),
+    ).fetchone()[0]
+    decoded = dict(conn.raw.execute("SELECT * FROM versions WHERE id = ?", (v1_id,)).fetchone())
+    decoded["bbox"] = json.loads(decoded["bbox"])
+    with patch.object(part_http, "_v1_for_part", return_value=decoded):
+        env = part_envelope_with_bbox(row, conn)
     assert env is not None
     assert env["bbox_mm"] == (20.0, 20.0, 20.0), env
 
@@ -2286,7 +2326,6 @@ def test_part_envelope_with_bbox_v1_no_bbox_degrades(tmp_path: Path):
 
     import d33d.db as db_mod
     from d33d.part_http import part_envelope_with_bbox
-    from d33d.versions import VersionService
     from d33d.versions import migrate as _migrate
 
     conn = db_mod.Connection(":memory:")
@@ -2307,6 +2346,6 @@ def test_part_envelope_with_bbox_v1_no_bbox_degrades(tmp_path: Path):
     )
     conn.commit()
     row = conn.get_project(pid)
-    env = part_envelope_with_bbox(row, conn, VersionService(conn))
+    env = part_envelope_with_bbox(row, conn)
     assert env is not None
     assert env["bbox_mm"] is None, env

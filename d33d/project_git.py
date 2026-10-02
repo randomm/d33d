@@ -10,9 +10,9 @@ guards: the photo-upload, design-source, and version-write paths share
 ONE definition (user-supplied filenames must never inject newlines or
 shell metacharacters into the per-project repo's commit history).
 
-``d33d.projects`` re-exports ``_sanitize_commit_message`` under its
-historical name (``d33d.versions`` imports it from there) and keeps the
-``repo_present`` predicate it owns.
+``d33d.versions`` imports ``sanitize_commit_message`` from here (aliased
+as ``_sanitize_commit_message``); ``d33d.projects`` re-exports the two
+design-state notice strings under their historical names.
 """
 
 from __future__ import annotations
