@@ -51,7 +51,6 @@ import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -64,7 +63,14 @@ from typing import Any, Literal
 
 from d33d.data_dir import default_data_dir, guard_real_data_path
 from d33d.part_http import MAX_PART_UPLOAD_BYTES
-from d33d.part_mesh import PartUploadError, load_part_geometry
+from d33d.part_mesh import (
+    PartUploadError,
+    load_part_geometry,
+    read_part_file_atomic,
+)
+from d33d.part_mesh import (
+    validate_part_path as _validate_part_path_impl,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1455,70 +1461,11 @@ def _log_render_failure(
 def _validate_part_path(
     part_path: Path, repo_dir: Path
 ) -> str | None:
-    """Validate the part path for containment and name. Returns an error
-    message string on failure, or ``None`` when all checks pass.
-
-    Checks (all must pass):
-    1. ``part_path`` must be a regular file (a missing path is rejected
-       here — the lstat that proves it is a regular file doubles as the
-       symlink check: a symlink lstat reports S_IFLNK, never the file mode).
-    2. ``part_path`` itself must not be a symlink.
-    3. ``part_path.resolve()`` must be inside ``repo_dir.resolve()``.
-    4. No path component between ``repo_dir`` and ``part_path`` may be a
-       symlink resolving outside ``repo_dir``.
-    5. ``part_path``'s name must be exactly ``part.stl`` or ``part.3mf``.
-    """
-    # Name check (exact, case-sensitive).
-    if part_path.name not in ("part.stl", "part.3mf"):
-        return f"part filename must be exactly 'part.stl' or 'part.3mf', got '{part_path.name}'"
-
-    # Regular-file + symlink check on the part itself (lstat — does not
-    # follow links; a symlink reports S_IFLNK here, never a file mode, so
-    # one lstat covers both the "regular file" and "not a symlink" rules).
-    try:
-        st = part_path.lstat()
-    except OSError as e:
-        return f"part path does not exist or is inaccessible: {e}"
-    if not stat.S_ISREG(st.st_mode):
-        # Covers symlink (S_IFLNK), directory, and special files in one
-        # check — a symlink lstat never reports REG.
-        if stat.S_ISLNK(st.st_mode):
-            return f"part path is a symlink: {part_path.name}"
-        return f"part path is not a regular file: {part_path.name}"
-
-    # Containment: resolved part must be inside resolved repo_dir.
-    try:
-        resolved_repo = repo_dir.resolve()
-        resolved_part = part_path.resolve()
-    except OSError as e:
-        return f"cannot resolve part or repo path: {e}"
-    if not resolved_part.is_relative_to(resolved_repo):
-        return "part path is outside the project repo directory"
-
-    # Symlink component check: walk each path component of part_path BELOW
-    # repo_dir on the RAW (unresolved) path; any symlink whose target
-    # resolves outside repo_dir is rejected (a symlinked parent escaping
-    # the containment boundary); components at/above repo_depth are the
-    # caller's filesystem prefix (on macOS /var → /private/var sits there)
-    # — out of boundary.
-    repo_depth = len(repo_dir.parts)
-    raw = part_path if part_path.is_absolute() else repo_dir / part_path
-    for i in range(1, len(raw.parts)):
-        if i < repo_depth and raw.is_absolute():
-            continue  # strictly above the repo's own depth — out of boundary
-        component = raw.joinpath(*raw.parts[:i])
-        try:
-            if component.is_symlink():
-                target = component.resolve()
-                if not target.is_relative_to(resolved_repo):
-                    return (
-                        f"path component {component.name} is a symlink "
-                        "escaping the repo"
-                    )
-        except OSError:
-            return f"path component {component.name} is inaccessible"
-
-    return None
+    """Validate the part path for containment and name (a thin delegate to
+    the shared :func:`d33d.part_mesh.validate_part_path` — the ONE owner of
+    the rule, so the render-staging path and the part.stl endpoint can never
+    drift; the worker keeps the name for its own callers/tests)."""
+    return _validate_part_path_impl(part_path, repo_dir)
 
 
 def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
@@ -1545,26 +1492,13 @@ def _stage_part_stl(part_path: Path, src_dir: Path) -> str | None:
     """
     target = src_dir / "part.stl"
     try:
-        # Open with O_NOFOLLOW so a symlink swapped in between validate and
-        # stage cannot redirect the read; fstat the fd (the actually-opened
-        # file, not the path) to verify regular-file + size cap atomically.
-        fd = os.open(str(part_path), os.O_RDONLY | os.O_NOFOLLOW)
-    except (OSError, ValueError) as e:
-        return f"part staging failed: {e}"
-    try:
-        st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            return f"part is not a regular file at staging time: {part_path.name}"
-        if st.st_size > MAX_PART_UPLOAD_BYTES:
-            return (
-                f"part file is {st.st_size} bytes; max {MAX_PART_UPLOAD_BYTES} "
-                f"(the #325 upload bound, enforced at render time)"
-            )
-        data = os.read(fd, st.st_size) if st.st_size > 0 else b""
+        # The shared atomic read: an O_NOFOLLOW fd opened + fstat'd with
+        # the read (TOCTOU-safe — a symlink swapped in between
+        # ``_validate_part_path`` and this read cannot redirect it to an
+        # outside file). The 50 MB shared cap rides the same fd.
+        data = read_part_file_atomic(part_path, MAX_PART_UPLOAD_BYTES)
     except OSError as e:
         return f"part staging failed: {e}"
-    finally:
-        os.close(fd)
 
     try:
         if part_path.name == "part.stl":

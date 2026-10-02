@@ -33,6 +33,7 @@ vi.mock("react-konva", () => ({
 }));
 import { ConversationPane } from "../ConversationPane";
 import type { ChatMessage } from "../ChatPanel";
+import { ApiClient } from "../../../lib/api";
 import type { VersionTimelineEntry } from "../../../lib/api";
 import type { ViewProgressState } from "../../../lib/viewProgress";
 import type { DisplayError } from "../../../lib/errorMapping";
@@ -113,6 +114,8 @@ function renderPane(overrides: PaneOverrides = {}) {
       onPhotoUploaded={onPhotoUploaded}
       onPhotoError={onPhotoError}
       onEnsureProject={onEnsureProject}
+      onPartUploaded={vi.fn()}
+      partClient={vi.mocked(new ApiClient())}
     />,
   );
   return { onCollapsedChange, onSend, onCompareSelect, onOpenSheet, onPhotoUploaded, onPhotoError, ...result };

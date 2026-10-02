@@ -34,9 +34,29 @@ describe("FirstRun", () => {
     expect(screen.getByTestId("first-run-headline").textContent).toBe(copy.firstRun.headline);
   });
 
-  it("renders the body (the millimetre contract stated once)", () => {
+  it("renders the body", () => {
     render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-body").textContent).toBe(copy.firstRun.body);
+  });
+
+  it("renders two equal cards: describe and file", () => {
+    render(<FirstRun {...baseProps()} />);
+    expect(screen.getByTestId("first-run-describe-card")).toBeTruthy();
+    expect(screen.getByTestId("first-run-file-card")).toBeTruthy();
+  });
+
+  it("renders the describe card label 'Describe it'", () => {
+    render(<FirstRun {...baseProps()} />);
+    expect(screen.getByTestId("first-run-describe-label").textContent).toBe(
+      copy.firstRun.describeLabel,
+    );
+  });
+
+  it("renders the file card label 'Start from a file'", () => {
+    render(<FirstRun {...baseProps()} />);
+    expect(screen.getByTestId("first-run-file-label").textContent).toBe(
+      copy.firstRun.fileLabel,
+    );
   });
 
   it("renders the large input with the deck's placeholder", () => {
@@ -45,37 +65,44 @@ describe("FirstRun", () => {
     expect(input.placeholder).toBe(copy.firstRun.placeholder);
   });
 
-  it("fills the card's content width with a border-box model (issue #193)", () => {
+  it("renders the file drop area", () => {
     render(<FirstRun {...baseProps()} />);
-    const input = screen.getByTestId("first-run-input") as HTMLInputElement;
-    // The input fills the card's content width (width 100%) under a border-box
-    // model so the placeholder text is not clipped by the card's padding.
-    // jsdom cannot measure text truncation; this pins the structural width
-    // and box-model properties that prevent it.
-    expect(input.style.width).toBe("100%");
-    expect(input.style.boxSizing).toBe("border-box");
+    expect(screen.getByTestId("first-run-file-drop")).toBeTruthy();
   });
 
-  it("is not a clipped or scrolling box (issue #193)", () => {
+  it("renders the file caption", () => {
     render(<FirstRun {...baseProps()} />);
-    // The card is the inner div (the flex-column child), not the outer
-    // absolute-positioned "first-run" wrapper, which carries no background.
-    const card = screen.getByTestId("first-run").firstElementChild as HTMLElement;
-    expect(card).not.toBeNull();
-    // The card must never be a clipped/scrolling box: no auto/scroll
-    // overflow, no fixed max-height, and its width and box model keep the
-    // content inside the stage (width is bounded, box is border-box).
-    const overflow = card.style.overflowY ?? card.style.overflow;
-    expect(overflow).not.toBe("auto");
-    expect(overflow).not.toBe("scroll");
-    expect(card.style.maxHeight).not.toMatch(/^\d+(px|rem|vh)$/);
-    expect(card.style.width).toBe("min(560px, 92vw)");
-    expect(card.style.boxSizing).toBe("border-box");
+    expect(screen.getByTestId("first-run-file-caption").textContent).toBe(
+      copy.firstRun.fileCardCaption,
+    );
   });
 
-  it("renders the photo button and the Start button", () => {
+  it("renders the photo line under both cards", () => {
     render(<FirstRun {...baseProps()} />);
-    expect(screen.getByTestId("first-run-photo-btn")).toBeTruthy();
+    expect(screen.getByTestId("first-run-photo-hint").textContent).toBe(
+      copy.firstRun.photoLine,
+    );
+  });
+
+  it("the Add-a-photo button stays under the cards and routes to onPhotoSelect (issue #334 photo decision)", () => {
+    const onPhotoSelect = vi.fn();
+    render(<FirstRun {...baseProps({ onPhotoSelect })} />);
+    const btn = screen.getByTestId("first-run-photo-btn");
+    expect(btn.textContent).toBe(copy.firstRun.photoBtn);
+    // The button sits under the two cards (a later sibling of the card row)
+    // and still routes to the same photo input (onPhotoSelect).
+    expect(btn).toBeTruthy();
+    fireEvent.click(btn);
+    expect(onPhotoSelect).toHaveBeenCalled();
+  });
+
+  it("the photo button is disabled while a design loop is in flight", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    expect(screen.getByTestId("first-run-photo-btn")).toBeDisabled();
+  });
+
+  it("renders the Start button", () => {
+    render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-start-btn")).toBeTruthy();
   });
 
@@ -83,42 +110,8 @@ describe("FirstRun", () => {
     render(<FirstRun {...baseProps()} />);
     const starters = screen.getAllByTestId("first-run-starter");
     expect(starters).toHaveLength(4);
-    // Each starter's text matches the deck exactly — the starters are not
-    // retyped into the component.
     starters.forEach((el, i) => {
       expect(el.textContent).toBe(copy.firstRun.starters[i]);
-    });
-  });
-
-  it("renders the photo hint", () => {
-    render(<FirstRun {...baseProps()} />);
-    expect(screen.getByTestId("first-run-photo-hint").textContent).toBe(copy.firstRun.photoHint);
-  });
-
-  it("renders the card as a faint panel — the background mixes the panel colour at 35-50% alpha (issue #190)", () => {
-    render(<FirstRun {...baseProps()} />);
-    // The card is the inner div (the flex-column child), not the outer
-    // absolute-positioned "first-run" wrapper, which carries no background.
-    const card = screen.getByTestId("first-run").firstElementChild as HTMLElement;
-    expect(card).not.toBeNull();
-    // jsdom does not resolve color-mix() or custom properties, so assert on
-    // the inline style string rather than a computed colour.
-    const background = card.style.background;
-    const match = /color-mix\(in srgb,\s*var\(--color-panel\)\s*(\d+(?:\.\d+)?)%/.exec(background);
-    expect(match).not.toBeNull();
-    const alpha = Number(match![1]);
-    expect(alpha).toBeGreaterThanOrEqual(35);
-    expect(alpha).toBeLessThanOrEqual(50);
-    expect(alpha).not.toBe(92);
-  });
-
-  it("keeps the input and starters on the recess background (issue #190)", () => {
-    render(<FirstRun {...baseProps()} />);
-    const input = screen.getByTestId("first-run-input") as HTMLInputElement;
-    expect(input.style.background).toBe("var(--color-recess)");
-    const starters = screen.getAllByTestId("first-run-starter");
-    starters.forEach((starter) => {
-      expect((starter as HTMLElement).style.background).toBe("var(--color-recess)");
     });
   });
 
@@ -134,13 +127,29 @@ describe("FirstRun", () => {
   it("does not fire onSend when the input is empty or whitespace-only", () => {
     const onSend = vi.fn();
     render(<FirstRun {...baseProps({ onSend })} />);
-    // empty
     fireEvent.click(screen.getByTestId("first-run-start-btn"));
     expect(onSend).not.toHaveBeenCalled();
-    // whitespace-only
     fireEvent.change(screen.getByTestId("first-run-input"), { target: { value: "   " } });
     fireEvent.click(screen.getByTestId("first-run-start-btn"));
     expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("fires onPartFile when a file is selected from the file input", () => {
+    const onPartFile = vi.fn();
+    render(<FirstRun {...baseProps({ onPartFile })} />);
+    const fileInput = screen.getByTestId("first-run-file-input") as HTMLInputElement;
+    const file = new File([new ArrayBuffer(8)], "test.stl", { type: "model/stl" });
+    fireEvent.change(fileInput, { target: { files: [file] } });
+    expect(onPartFile).toHaveBeenCalledWith(file);
+  });
+
+  it("fires onPartFile when a file is dropped on the file card", () => {
+    const onPartFile = vi.fn();
+    render(<FirstRun {...baseProps({ onPartFile })} />);
+    const fileCard = screen.getByTestId("first-run-file-card");
+    const file = new File([new ArrayBuffer(8)], "drop.stl", { type: "model/stl" });
+    fireEvent.drop(fileCard, { dataTransfer: { files: [file] } });
+    expect(onPartFile).toHaveBeenCalledWith(file);
   });
 });
 

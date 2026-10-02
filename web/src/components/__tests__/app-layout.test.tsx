@@ -923,7 +923,7 @@ describe("App restore 409 wiring (issue #295)", () => {
       storage: { repo_present: true, photo_present: null },
     });
     // The design-state fetch must not hit the stubbed fetch either.
-    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false });
+    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false, part: null });
     (client as unknown as { fetchImpl: typeof fetch }).fetchImpl = fetchMock;
 
     render(<App client={client} />);
@@ -1142,7 +1142,7 @@ describe("App Brief wiring (issue #123)", () => {
   });
 
   it("refetches the design-state block on the version-created frame (issue #123)", async () => {
-    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({ entries: [], history_missing: false, part: null } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
@@ -1188,7 +1188,7 @@ describe("App Brief wiring (issue #123)", () => {
     // uses a fixed [] mock (the refetch would return the same value) and a
     // second send to drive the refetch; this test uses a sequence mock to
     // verify the transition from empty to populated.
-    vi.spyOn(client, "getDesignState").mockResolvedValueOnce({ entries: [], history_missing: false }).mockResolvedValue({
+    vi.spyOn(client, "getDesignState").mockResolvedValueOnce({ entries: [], history_missing: false, part: null }).mockResolvedValue({
       entries: [
         { name: "W", label: "Width", value: 60, unit: "mm", provenance: "stated" },
         { name: "D", label: "Depth", value: 45, unit: "mm", provenance: "stated" },
@@ -1234,7 +1234,7 @@ describe("App Brief wiring (issue #123)", () => {
       history_missing: false,
     } as Awaited<ReturnType<ApiClient["getDesignState"]>>;
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce({ entries: [], history_missing: false }) // mount-time: empty
+      .mockResolvedValueOnce({ entries: [], history_missing: false, part: null }) // mount-time: empty
       .mockRejectedValueOnce(new Error("network blip")) // version-created: rejects
       .mockResolvedValue(populated); // retry: populated rows
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
@@ -1322,7 +1322,7 @@ describe("App Brief wiring (issue #123)", () => {
     });
     const unusedHang = new Promise<Awaited<ReturnType<ApiClient["getDesignState"]>>>(() => {});
     vi.spyOn(client, "getDesignState")
-      .mockResolvedValueOnce({ entries: [], history_missing: false }) // mount-time, request 1
+      .mockResolvedValueOnce({ entries: [], history_missing: false, part: null }) // mount-time, request 1
       .mockReturnValue(staleHang) // version-created #1, request 2 — hangs
       .mockResolvedValueOnce(freshRows) // version-created #2, request 3
       .mockReturnValue(unusedHang); // safety net: never consumed
@@ -1706,7 +1706,7 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
           json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
         });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false, part: null }) });
     }));
     // makeClient's listVersions stub returns one version — that would hide
     // the first-run screen (isFirstRun needs zero versions). The photo IS
@@ -1715,6 +1715,7 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     vi.spyOn(client, "getDesignState").mockResolvedValue({
       entries: [],
       history_missing: false,
+      part: null,
     } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
@@ -1754,7 +1755,7 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
           json: async () => ({ source_photo_path: "/data/projects/7/photos/a.png" }),
         });
       }
-      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false }) });
+      return Promise.resolve({ ok: true, status: 200, json: async () => ({ entries: [], history_missing: false, part: null }) });
     }));
 
     render(<App client={client} />);
@@ -1793,6 +1794,7 @@ describe("App project lifecycle (lazy creation — issue #192)", () => {
     vi.spyOn(client, "getDesignState").mockResolvedValue({
       entries: [],
       history_missing: false,
+      part: null,
     } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
 
     render(<App client={client} />);
@@ -2310,7 +2312,7 @@ describe("App photo upload wiring", () => {
         return Promise.resolve({
           ok: true,
           status: 200,
-          json: async () => ({ entries: [], history_missing: false }),
+          json: async () => ({ entries: [], history_missing: false, part: null }),
         });
       },
     );
@@ -4406,14 +4408,13 @@ describe("App first-run screen (issue #128, W14)", () => {
     });
   });
 
-  it("states the millimetre contract exactly once", async () => {
+  it("states the first-run body exactly once", async () => {
     render(<App client={client} />);
     expect(client.createProject).not.toHaveBeenCalled();
-    // The contract sentence ("Everything here is in millimetres…") lives in
-    // copy.firstRun.body and must appear exactly once in the app DOM — this
-    // surface is the only place it is not yet a constraint.
+    // The body text from copy.firstRun.body must appear exactly once in the
+    // app DOM — the two-card layout's single explanatory sentence.
     const occurrences = (screen.getByTestId("app-stage").textContent ?? "")
-      .split("Everything here is in millimetres")
+      .split(copy.firstRun.body)
       .length - 1;
     expect(occurrences).toBe(1);
   });
@@ -4546,5 +4547,152 @@ describe("App first-run screen (issue #128, W14)", () => {
     const emptyOverlay = screen.getByTestId("viewer-empty");
     expect(emptyOverlay).toBeTruthy();
     expect(emptyOverlay.textContent).toBe(copy.shell.viewerEmpty);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Screen 2 (issue #334): the imported part drives the viewport
+// ---------------------------------------------------------------------------
+
+describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
+  const partStub = (overrides: Record<string, unknown> = {}) => ({
+    filename: "box.stl",
+    format: "stl",
+    unit: "mm",
+    unit_status: "assumed",
+    scale: 1,
+    report: {
+      triangles: 12,
+      bodies: 1,
+      watertight: true,
+      gaps_closed: 0,
+      bbox_file_units: [20, 20, 20],
+    },
+    options: null,
+    ...overrides,
+  });
+
+  let client: ApiClient;
+  const partBytes = new Uint8Array([0x88, 0x08, 0x99, 0xaa]).buffer;
+
+  beforeEach(() => {
+    client = makeClient();
+  });
+
+  it("unsettled: the plate hides, the report mounts, the viewer data comes from part.stl, export is disabled, and the photo button is gone", async () => {
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "unsettled", unit: null, scale: null }),
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    const fetchSpy = vi
+      .spyOn(client, "fetchPartStl")
+      .mockResolvedValue(partBytes as ArrayBuffer);
+
+    await settleModelMount(client);
+    // A part is present → Screen 2 (the import report) is up.
+    expect(screen.getByTestId("import-report")).toBeTruthy();
+    // The plate hides while unsettled (the caption says the size is unknown).
+    expect(screen.queryByTestId("plate-backdrop")).toBeNull();
+    // The unsettled caption renders.
+    expect(screen.getByTestId("import-report-unsettled-caption").textContent).toBe(
+      copy.partReport.unsettledCaption,
+    );
+    // The viewport data comes from part.stl (the fetch fired; the mock viewer
+    // has the fetched bytes — data-has-data=true, format stl).
+    expect(fetchSpy).toHaveBeenCalled();
+    const viewer = screen.getByTestId("model-viewer-mock");
+    expect(viewer.getAttribute("data-has-data")).toBe("true");
+    expect(viewer.getAttribute("data-format")).toBe("stl");
+    // Export is disabled while unsettled (the D8 gate).
+    expect(screen.getByTestId("export-3mf-button")).toBeDisabled();
+    // FirstRun is suppressed (never both) — its photo button is gone.
+    expect(screen.queryByTestId("first-run")).toBeNull();
+    expect(screen.queryByTestId("first-run-photo-btn")).toBeNull();
+  });
+
+  it("settled: the plate returns and export is enabled (D7/D8)", async () => {
+    // A version exists so the export button's versionId is defined (the
+    // D8 gate is the only thing that can disable it once the version
+    // exists — the part is settled, so the gate lifts).
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      },
+    ]);
+    vi.spyOn(client, "getProject").mockResolvedValue({
+      ...PROJECT,
+      storage: { repo_present: true, photo_present: null },
+    });
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "settled" }), // the settled plate state
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "fetchPartStl").mockResolvedValue(partBytes as ArrayBuffer);
+
+    // Use settleModelMount to create the project (the design-state effect
+    // requires a resolved project id — the App's mount-time fetch is a
+    // no-op until the project exists).
+    await settleModelMount(client);
+    // The version-created frame's design-state refetch may race the
+    // initial mount-time fetch — wait for the import report to appear.
+    await waitFor(() => {
+      expect(screen.queryByTestId("import-report")).toBeTruthy();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId("import-report")).toBeTruthy();
+    // The unsettled caption is gone (the part is settled, not unsettled).
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
+    // Export is enabled: the version exists AND the part is settled (the
+    // D8 gate lifts for a settled part).
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
+  it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: null,
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+
+    render(<App client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // FirstRun is up (no part) — its photo button is present and still
+    // routes to the same photo input (the left pane's frozen testid).
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    const btn = screen.getByTestId("first-run-photo-btn");
+    expect(btn).toBeTruthy();
+    const labelEl = document.querySelector<HTMLLabelElement>('label[for="photo-file-input"]');
+    expect(labelEl).not.toBeNull();
+    const clicked = vi.fn();
+    // The button's onClick routes to label[htmlfor="photo-file-input"].click()
+    // — spy on the label's click to prove the routing.
+    const origClick = labelEl?.click.bind(labelEl);
+    if (labelEl) {
+      (labelEl as unknown as { click: () => void }).click = clicked as never;
+    }
+    fireEvent.click(btn);
+    expect(clicked).toHaveBeenCalled();
+    // Restore.
+    if (labelEl && origClick) {
+      (labelEl as unknown as { click: () => void }).click = origClick as never;
+    }
   });
 });

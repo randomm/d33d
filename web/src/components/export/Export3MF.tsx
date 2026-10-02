@@ -19,6 +19,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ApiClient } from "../../lib/api";
+import type { PartReportInfo } from "../../lib/api";
 import { displayExportError } from "../../lib/exportErrorCopy";
 import { copy } from "../../copy";
 
@@ -37,6 +38,12 @@ interface Export3MFProps {
    *  download mid-loop (the version being created is not yet exportable),
    *  so the button is disabled until the loop completes. */
   inFlight?: boolean;
+  /** Issue #334 (D8): the project's imported part (the design-state
+   *  envelope's `part`). When present and `unit_status !== "settled"` the
+   *  export is disabled (the 3MF cannot be built until the units are
+   *  settled — the backend 409s it with `units_unsettled`). `null`/absent
+   *  (no part) leaves the existing version-based gating untouched. */
+  part?: PartReportInfo | null;
   /** Injectable API client (test seam). Defaults to a same-origin ApiClient. */
   client?: ApiClient;
   /** Fires exactly once, AFTER a successful download. Failed/cancelled
@@ -52,6 +59,7 @@ export function Export3MF({
   versionId,
   versionName,
   inFlight = false,
+  part,
   client,
   onExported,
 }: Export3MFProps) {
@@ -92,6 +100,13 @@ export function Export3MF({
     versionName ?? (versionId !== undefined ? `v${versionId}` : "current"),
   );
 
+  // Issue #334 (D8): an unsettled imported part blocks the export — the
+  // 3MF cannot be built until `unit_status === "settled"` (the backend 409s
+  // it with `units_unsettled`). No part (undefined/null) leaves the existing
+  // version-based gating untouched.
+  const partUnsettled =
+    part !== null && part !== undefined && part.unit_status !== "settled";
+
   const handleExport = async () => {
     setState("downloading");
     setError(null);
@@ -129,7 +144,11 @@ export function Export3MF({
         data-testid="export-3mf-button"
         onClick={() => void handleExport()}
         disabled={
-          versionId === undefined || inFlight || lastDownloadFailed || state === "downloading"
+          versionId === undefined ||
+          inFlight ||
+          lastDownloadFailed ||
+          state === "downloading" ||
+          partUnsettled
         }
         aria-label={copy.shell.export}
       >

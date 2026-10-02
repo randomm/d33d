@@ -235,6 +235,89 @@ describe("photo upload", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Part upload + unit settlement + part.stl (issue #334)
+// ---------------------------------------------------------------------------
+
+describe("part upload (issue #334)", () => {
+  const PART = {
+    filename: "box.stl",
+    format: "stl",
+    unit: "mm",
+    unit_status: "assumed",
+    scale: 1,
+    report: {
+      triangles: 12,
+      bodies: 1,
+      watertight: true,
+      gaps_closed: 0,
+      bbox_file_units: [20, 20, 20],
+    },
+    options: null,
+  };
+
+  it("uploadPart POSTs multipart to /api/projects/{id}/part with a file field", async () => {
+    fake.enqueue(json(201, { id: 1, version_id: 1, part: PART }));
+    const f = new File([new Uint8Array(42)], "box.stl", { type: "model/stl" });
+    const r = await client.uploadPart(1, f);
+    expect(r.version_id).toBe(1);
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/part");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeInstanceOf(FormData);
+    const field = (init.body as FormData).get("file");
+    expect(field).toBeInstanceOf(File);
+    expect((field as File).name).toBe("box.stl");
+  });
+
+  it("uploadPart rejects a non-.stl/.3mf file before any request is made", async () => {
+    const f = new File([new Uint8Array(1)], "photo.png", { type: "image/png" });
+    await expect(client.uploadPart(1, f)).rejects.toBeInstanceOf(ApiError);
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("uploadPart surfaces the 409 part_exists detail", async () => {
+    fake.enqueue(json(409, { detail: "A part already exists: 'box.stl'" }));
+    const f = new File([new Uint8Array(1)], "dup.stl", { type: "model/stl" });
+    await expect(client.uploadPart(1, f)).rejects.toMatchObject({
+      status: 409,
+      detail: "A part already exists: 'box.stl'",
+    });
+  });
+
+  it("setPartUnit POSTs {unit} to /api/projects/{id}/part/units", async () => {
+    fake.enqueue(json(200, { id: 1, part: PART, bbox_mm: [20, 20, 20] }));
+    await client.setPartUnit(1, "inch");
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/part/units");
+    expect(JSON.parse(init.body as string)).toEqual({ unit: "inch" });
+  });
+
+  it("setPartAxisMeasurement POSTs {axis, mm} to /api/projects/{id}/part/units", async () => {
+    fake.enqueue(json(200, { id: 1, part: PART, bbox_mm: [10, 20, 20] }));
+    await client.setPartAxisMeasurement(1, "D", 42);
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/part/units");
+    expect(JSON.parse(init.body as string)).toEqual({ axis: "D", mm: 42 });
+  });
+
+  it("fetchPartStl GETs /api/projects/{id}/part.stl and resolves the ArrayBuffer", async () => {
+    const bytes = new Uint8Array([0, 1, 2, 3]);
+    fake.enqueue(new Response(bytes, { status: 200, headers: { "Content-Type": "model/stl" } }));
+    const buf = await client.fetchPartStl(1);
+    expect(buf).toBeInstanceOf(ArrayBuffer);
+    expect(new Uint8Array(buf)).toEqual(bytes);
+    const { url, init } = lastCall();
+    expect(url).toBe("http://api.test/api/projects/1/part.stl");
+    expect(init.method).toBe("GET");
+  });
+
+  it("fetchPartStl surfaces a 409 (the source-missing shape)", async () => {
+    fake.enqueue(json(409, { detail: { code: "source_missing", message: "the part file is not on disk" } }));
+    await expect(client.fetchPartStl(1)).rejects.toMatchObject({ status: 409 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Region-scoped edit request (issue #7, task-c; design-loop wiring by
 // issue #68)
 // ---------------------------------------------------------------------------
@@ -408,6 +491,43 @@ describe("getDesignState", () => {
       status: 500,
       detail: "Internal Server Error",
     });
+  });
+
+  it("the envelope's `part` deserialises as null when no part (issue #334)", async () => {
+    fake.enqueue(json(200, { entries: [], history_missing: false, part: null }));
+    const result = await client.getDesignState(1);
+    expect(result.part).toBeNull();
+  });
+
+  it("the envelope's `part` carries unit_status/report/options when present (issue #334)", async () => {
+    fake.enqueue(
+      json(200, {
+        entries: [],
+        history_missing: false,
+        part: {
+          filename: "box.stl",
+          format: "stl",
+          unit: null,
+          unit_status: "unsettled",
+          scale: null,
+          report: {
+            triangles: 12,
+            bodies: 2,
+            watertight: false,
+            gaps_closed: 1,
+            bbox_file_units: [100, 100, 100],
+          },
+          options: [
+            { unit: "mm", scale: 1, extents_mm: [100, 100, 100], fits_envelope: true, at_least_5mm: true },
+          ],
+        },
+      }),
+    );
+    const result = await client.getDesignState(1);
+    expect(result.part).not.toBeNull();
+    expect(result.part?.unit_status).toBe("unsettled");
+    expect(result.part?.report?.triangles).toBe(12);
+    expect(result.part?.options).toHaveLength(1);
   });
 });
 

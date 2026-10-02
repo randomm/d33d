@@ -15,7 +15,17 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Export3MF } from "../Export3MF";
 import { ApiClient, ApiError } from "../../../lib/api";
+import type { PartReportInfo } from "../../../lib/api";
 import { copy } from "../../../copy";
+
+/** An injected ApiClient whose downloadModel3MF returns a 3MF Blob. */
+function makeClient(): ApiClient {
+  const client = new ApiClient();
+  client.downloadModel3MF = vi
+    .fn()
+    .mockResolvedValue(new Blob(["x"], { type: "model/3mf" })) as never;
+  return client;
+}
 
 const projectId = 42;
 
@@ -35,6 +45,57 @@ describe("Export3MF", () => {
     clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, "click")
       .mockImplementation(() => {});
+  });
+
+  it("issue #334 (D8): a settled part leaves export enabled", () => {
+    const client = makeClient();
+    const settled: PartReportInfo = {
+      filename: "part.stl",
+      format: "stl",
+      unit: "mm",
+      unit_status: "settled",
+      scale: 1,
+      report: null,
+      options: null,
+    };
+    render(<Export3MF projectId={7} versionId={3} part={settled} client={client} />);
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
+  it("issue #334 (D8): an unsettled part disables export (the 3MF cannot be built)", () => {
+    const client = makeClient();
+    const unsettled: PartReportInfo = {
+      filename: "part.stl",
+      format: "stl",
+      unit: null,
+      unit_status: "unsettled",
+      scale: null,
+      report: null,
+      options: null,
+    };
+    render(<Export3MF projectId={7} versionId={3} part={unsettled} client={client} />);
+    expect(screen.getByTestId("export-3mf-button")).toBeDisabled();
+  });
+
+  it("issue #334 (D8): an assumed (not settled) part disables export", () => {
+    const client = makeClient();
+    const assumed: PartReportInfo = {
+      filename: "part.stl",
+      format: "stl",
+      unit: "mm",
+      unit_status: "assumed",
+      scale: 1,
+      report: null,
+      options: null,
+    };
+    render(<Export3MF projectId={7} versionId={3} part={assumed} client={client} />);
+    expect(screen.getByTestId("export-3mf-button")).toBeDisabled();
+  });
+
+  it("issue #334 (D8): no part (null) leaves the existing version gating (enabled)", () => {
+    const client = makeClient();
+    render(<Export3MF projectId={7} versionId={3} part={null} client={client} />);
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
   afterEach(() => {
