@@ -183,10 +183,41 @@ export interface DesignStateEntry {
  * value). The Brief's `brief-saved-missing` banner fires from
  * `history_missing === true` OR `storage.repo_present === false`, rendered
  * once (issue #316 operator decision: one banner, no new copy).
+ *
+ * `part` (issue #325): the project's imported part facts — `null` when
+ * no part has been imported. The SPA uses the part's `unit_status` to
+ * drive the Screen 2 UI (settled / assumed / unsettled) and to decide
+ * whether to show the unsettled viewport caption and disable export.
  */
+export interface PartOption {
+  unit: string;
+  scale: number;
+  extents_mm: number[];
+  fits_envelope: boolean;
+  at_least_5mm: boolean;
+}
+
+export interface PartReportInfo {
+  filename: string;
+  format: string;
+  unit: string | null;
+  unit_status: "assumed" | "settled" | "unsettled";
+  scale: number | null;
+  report: {
+    triangles: number;
+    bodies: number;
+    watertight: boolean;
+    gaps_closed: number;
+    bbox_file_units: number[];
+  } | null;
+  options: PartOption[] | null;
+}
+
 export interface DesignStateEnvelope {
   entries: DesignStateEntry[];
   history_missing: boolean;
+  /** The project's imported part (issue #325) — `null` when no part. */
+  part: PartReportInfo | null;
 }
 
 /**
@@ -909,6 +940,72 @@ export class ApiClient {
       input,
       201,
     );
+  }
+
+  // -- part upload + unit settlement (issue #325/#334) ---------------------
+
+  /**
+   * Upload the project's part (STL or 3MF, ≤ 50 MB server-side).
+   */
+  async uploadPart(
+    id: number,
+    file: File,
+    signal?: AbortSignal,
+  ): Promise<{ id: number; version_id: number; part: PartReportInfo }> {
+    const name = file.name.toLowerCase();
+    if (!name.endsWith(".stl") && !name.endsWith(".3mf")) {
+      throw new ApiError(0, `file must be .stl or .3mf`);
+    }
+    const form = new FormData();
+    form.append("file", file);
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/part`,
+      { method: "POST", body: form, signal },
+    );
+    if (!res.ok) await throwFor(res);
+    return (await res.json()) as { id: number; version_id: number; part: PartReportInfo };
+  }
+
+  /**
+   * Settle the part's units by choosing a unit (mm | cm | inch).
+   */
+  async setPartUnit(
+    id: number,
+    unit: "mm" | "cm" | "inch",
+  ): Promise<{ id: number; part: PartReportInfo; bbox_mm: number[] }> {
+    return this.request(
+      "POST",
+      `/api/projects/${id}/part/units`,
+      { unit },
+    );
+  }
+
+  /**
+   * Settle the part's units by giving one real measurement.
+   */
+  async setPartAxisMeasurement(
+    id: number,
+    axis: "W" | "D" | "H",
+    mm: number,
+  ): Promise<{ id: number; part: PartReportInfo; bbox_mm: number[] }> {
+    return this.request(
+      "POST",
+      `/api/projects/${id}/part/units`,
+      { axis, mm },
+    );
+  }
+
+  /**
+   * Fetch the project's committed part as binary STL (issue #334).
+   * 3MF parts are converted on the host.
+   */
+  async fetchPartStl(id: number, signal?: AbortSignal): Promise<ArrayBuffer> {
+    const res = await this.fetchImpl(
+      `${this.baseUrl}/api/projects/${id}/part.stl`,
+      { method: "GET", signal },
+    );
+    if (!res.ok) await throwFor(res);
+    return await res.arrayBuffer();
   }
 
   // -- 3MF export (follow-up wiring) ---------------------------------------------

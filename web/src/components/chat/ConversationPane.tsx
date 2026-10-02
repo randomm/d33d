@@ -20,6 +20,7 @@ import {
 } from "./ChatPanel";
 import { FLEX_FILL } from "./flexFill";
 import { PhotoUpload } from "../upload/PhotoUpload";
+import { PartUpload } from "../upload/PartUpload";
 import { DimensionCanvas } from "../canvas/DimensionCanvas";
 import { PassProgress } from "../progress/PassProgress";
 import { FailureCard } from "../failure/FailureCard";
@@ -82,6 +83,15 @@ interface ConversationPaneProps {
    *  ensureProject), routed to PhotoUpload so a photo chosen before any
    *  message creates the project instead of bailing "No project selected". */
   onEnsureProject: () => Promise<number>;
+  /** Issue #334 (D5): the part-upload success handler (the design-state
+   *  refetch so Screen 2 mounts). Routed to the PartUpload control. */
+  onPartUploaded: (projectId: number) => void;
+  /** Issue #334 (D5): the injected ApiClient for the part upload. */
+  partClient: import("../../lib/api").ApiClient;
+  /** Issue #334 (D5): a part exists (the part upload control is shown only
+   *  on the first run; once a part exists the Screen 2 report owns the
+   *  surface). */
+  hasPart?: boolean;
 }
 
 export function ConversationPane({
@@ -110,6 +120,9 @@ export function ConversationPane({
   onPhotoUploaded,
   onPhotoError,
   onEnsureProject,
+  onPartUploaded,
+  partClient,
+  hasPart = false,
 }: ConversationPaneProps) {
   return (
     <div
@@ -246,10 +259,20 @@ export function ConversationPane({
                 step={designLoopStep}
                 elapsed={designLoopElapsed}
                 viewProgress={viewProgress}
+                importedPart={hasPart}
               />
             )}
             {streamError && <FailureCard error={streamError} />}
             <div style={{ flex: "0 0 auto" }}>
+              {!hasPart && (
+                <PartUpload
+                  projectId={projectId ?? undefined}
+                  onEnsureProject={onEnsureProject}
+                  onUploaded={onPartUploaded}
+                  onError={(msg) => onPhotoError(msg)}
+                  client={partClient}
+                />
+              )}
               <PhotoUpload
                 projectId={projectId ?? undefined}
                 onEnsureProject={onEnsureProject}

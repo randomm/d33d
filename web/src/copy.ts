@@ -459,8 +459,17 @@ export const history = {
 
 export const firstRun = {
   headline: "What do you need to print?",
-  body: "Describe the part and the measurements you actually know. Everything here is in millimetres — give dimensions in mm: “30 mm”, not “3 cm”.",
-  placeholder: "A bracket to hold a 34 mm curtain rod 45 mm off the wall…",
+  body: "Describe it from scratch, or start from a file you already have and tell me what to change.",
+  describeLabel: "Describe it",
+  fileLabel: "Start from a file",
+  placeholder: "A bracket for a 34 mm curtain rod, two M4 screws…",
+  fileCardCaption:
+    "The file becomes the part. I can add to it and cut from it — drill, slot, extend, split it for the bed. I can't resize what's already in it.",
+  fileDropLine: "Drop an STL or 3MF here",
+  fileChooseLine: "or choose a file",
+  photoBtn: "Add a photo",
+  photoLine:
+    "A photo is different: it's a reference to design against, not the part itself.",
   start: "Start",
   startersLabel: "Or start from one of these",
   starters: [
@@ -469,8 +478,6 @@ export const firstRun = {
     "A knob for a 6\u202Fmm D‑shaft",
     "A channel to hide four cables along a desk edge",
   ],
-  photoHint:
-    "Got the thing it has to fit? Drop a photo in and say how wide something in it is — that is what turns a picture into millimetres.",
   plateCaption: (x: number, y: number, z: number): string =>
     `${x} × ${y} × ${z}\u202Fmm`,
   plateNote: "the volume every design is checked against — slicing stays in Orca",
@@ -823,6 +830,41 @@ export const partUpload = {
 } as const;
 
 /**
+ * Screen 2 copy (issue #334, sub-issue 4): the part read report and
+ * the unit-settlement UI. All strings pinned by design-contract.test.ts.
+ */
+export const partReport = {
+  /** "I read {filename}" — the report header. */
+  iRead: (filename: string): string => `I read ${filename}`,
+  /** The W/D/H row when units are unsettled. Never a number. */
+  waitingOnUnits: "waiting on units",
+  /** The assumed-mm line: "I read it as millimetres: {W} × {D} × {H} mm. If it's in inches, tell me." */
+  assumedLine: (w: string, d: string, h: string): string =>
+    `I read it as millimetres: ${w} × ${d} × ${h}. If it's in inches, tell me.`,
+  /** The one-tap change link. */
+  changeUnits: "Change the units",
+  /** The unit option labels. */
+  unitLabels: {
+    inch: "Inches",
+    cm: "Centimetres",
+    mm: "Millimetres — it really is that small",
+  } as Record<string, string>,
+  /** The escape line. */
+  escapeLine:
+    "Or tell me one real measurement — “the base is 60 mm wide” — and I'll scale from that.",
+  /** The escape input placeholder. */
+  escapePlaceholder: "e.g. the base is 60 mm wide",
+  /** The unsettled viewport caption. */
+  unsettledCaption: "The shape is known. Its size isn't, until the units are.",
+  /** The axis labels for the escape input. */
+  axisLabels: { W: "Width", D: "Depth", H: "Height" } as Record<string, string>,
+  /** The settle button. */
+  settle: "Settle",
+  /** The 409 part_exists detail (re-import attempt). */
+  partExists: "This project already has a part.",
+} as const;
+
+/**
  * Missing-storage copy (issue #295). Two distinct sentences:
  * - `photoMissing`: the fixed copy.ts string the backend emits on the
  *   SSE `notice` frame (a non-terminal frame before the terminal
@@ -900,6 +942,7 @@ export const copy = {
   missingStorage,
   photoUpload,
   partUpload,
+  partReport,
   fillRecut,
   partUnitsUnsettled,
 } as const;

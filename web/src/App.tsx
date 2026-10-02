@@ -58,6 +58,7 @@ import {
   type DesignStateEntry,
   type DesignStateEnvelope,
   type Envelope,
+  type PartReportInfo,
   type ProjectStorage,
 } from "./lib/api";
 import copy from "./copy";
@@ -75,6 +76,7 @@ import {
 import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
+import { ImportReport } from "./components/import/ImportReport";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
@@ -273,6 +275,12 @@ export default function App({ client }: AppProps) {
   // design. A fetch that RESOLVES (even `[]` — no version yet, or an
   // empty-params version) is a legitimate answer and is never retried.
   const [designState, setDesignState] = useState<DesignStateEntry[]>([]);
+  // The design-state envelope's `part` (issue #334, D8): the project's
+  // imported part — `null` when no part. Screen 2 (the import report + unit
+  // settlement) renders the report / options / W-D-H ONLY from this
+  // envelope; the settle response body is never authoritative (D8's
+  // refetch-then-render contract). Null until the design-state resolves.
+  const [designStatePart, setDesignStatePart] = useState<PartReportInfo | null>(null);
   // Issue #316: the design-state envelope's `history_missing` flag (true
   // when the project's repo directory is absent — the same predicate as
   // `storage.repo_present`). `true` alone (a failed project-GET storage
@@ -322,6 +330,7 @@ export default function App({ client }: AppProps) {
     const applyEnvelope = (envelope: DesignStateEnvelope) => {
       if (isStale()) return;
       setDesignState(envelope.entries ?? []);
+      setDesignStatePart(envelope.part ?? null);
       setDesignStateHistoryMissing(envelope.history_missing === true);
       setDesignStateStale(false);
     };
@@ -451,13 +460,9 @@ export default function App({ client }: AppProps) {
   // The viewer's mounted data (issue #69 / #107), derived ONCE from the
   // single source of truth (streamModelData): a streamed STL, or an
   // EXPLICIT null when nothing has been streamed — the viewer's empty
-  // state, never a stand-in model. The format is "stl" in both branches
-  // (the only model that ever reaches the viewer is a streamed STL; the
-  // GLB loader remains available to ModelViewer and its tests, but no
-  // production source feeds it anymore).
-  const viewerSource = streamModelData
-    ? { data: streamModelData, format: "stl" as const }
-    : { data: null, format: "stl" as const };
+  // state, never a stand-in model. (The viewer's source is derived later,
+  // near the render — Screen 2 (a part) vs the stream-driven design-loop
+  // STL (issue #107) — see `viewerSource` below.)
   // A point selection that has been picked (marked PNG) but not yet sent
   // — the instruction is the user's own free text, which the server
   // requires non-empty (`RegionEditRequest.instruction`,
@@ -1457,10 +1462,118 @@ export default function App({ client }: AppProps) {
     setPhotoDimensions({ width, height });
   }, []);
 
+  // The part-upload success path (issue #334, D5): the part is stored
+  // server-side — refetch the design state so the `part` envelope (Screen 2
+  // the report / options / W-D-H render from) reflects the new part.
+  const handlePartUploaded = useCallback(
+    (projectIdOverride: number) => {
+      refetchDesignState(projectIdOverride);
+    },
+    [refetchDesignState],
+  );
+
+  // The Screen 1 file card's drop / pick handler (issue #334, D5): the
+  // chosen STL/3MF is uploaded through the SAME ensureProject latch as the
+  // first send / photo path (lazy creation before any /part POST). A dropped
+  // .stl is a PART — it never goes to the photo path; a dropped .png never
+  // creates a part (the file card accepts only .stl/.3mf).
+  const partUploadClientRef = useRef<ApiClient | null>(null);
+  partUploadClientRef.current = apiClient;
+  const handlePartFile = useCallback(
+    async (file: File) => {
+      const name = file.name.toLowerCase();
+      if (!name.endsWith(".stl") && !name.endsWith(".3mf")) {
+        setStreamError({
+          message: copy.partUpload.unsupported,
+          detail: copy.partUpload.unsupported,
+          retryable: false,
+        });
+        return;
+      }
+      const doUpload = async (pid: number) => {
+        const api = partUploadClientRef.current ?? new ApiClient();
+        try {
+          await api.uploadPart(pid, file);
+          handlePartUploaded(pid);
+        } catch (e) {
+          const detail =
+            e instanceof ApiError
+              ? typeof e.detail === "string"
+                ? e.detail
+                : e.message
+              : e instanceof Error
+                ? e.message
+                : String(e);
+          setStreamError({
+            message: detail,
+            detail,
+            retryable: false,
+          });
+        }
+      };
+      if (projectId !== null) {
+        await doUpload(projectId);
+        return;
+      }
+      try {
+        const id = await ensureProject();
+        await doUpload(id);
+      } catch (e) {
+        handleProjectCreationFailure(e);
+      }
+    },
+    [projectId, ensureProject, handlePartUploaded, handleProjectCreationFailure],
+  );
+
   // Issue #193: the "exactly one composer" invariant. FirstRun carries the
   // only composer while this is true; ChatPanel's is hidden. Both sites read
   // THIS boolean so they cannot drift into a state with no composer at all.
   const isFirstRun = versions.length === 0 && messages.length === 0;
+
+  // Issue #334 (D7): Screen 2 loads the project's committed part as binary
+  // STL through `GET /part.stl` (the ModelViewer's STL loader — a new
+  // source branch). The STL is in FILE units; the viewer's mesh is the
+  // part itself, and the caption / export-gating reflect the unit status.
+  // A 404 (no part) or 409 (source missing) leaves the part-viewer empty.
+  const [partStlData, setPartStlData] = useState<ArrayBuffer | null>(null);
+  const partStlSeqRef = useRef(0);
+  useEffect(() => {
+    if (projectId === null || designStatePart === null) {
+      setPartStlData(null);
+      return;
+    }
+    const seq = ++partStlSeqRef.current;
+    let cancelled = false;
+    setPartStlData(null);
+    apiClient
+      .fetchPartStl(projectId)
+      .then((buf) => {
+        if (!cancelled && seq === partStlSeqRef.current) setPartStlData(buf);
+      })
+      .catch((e) => {
+        // A missing / unreadable part leaves the viewer empty (the report
+        // still renders its honest state) — never a fabricated model.
+        if (!cancelled && seq === partStlSeqRef.current) {
+          console.warn("part.stl fetch failed:", e);
+          setPartStlData(null);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, designStatePart, apiClient]);
+  // Screen 2 (the import report) is the active screen whenever a part
+  // exists (the design-state envelope's `part`). FirstRun is suppressed
+  // while Screen 2 is up (the same centred space; never both).
+  const isScreen2 = designStatePart !== null;
+
+  // The viewport source: Screen 2 (a part exists) shows the imported part
+  // (part.stl — D7); otherwise the stream-driven design-loop STL (the
+  // pre-pass empty state, issue #107).
+  const viewerData = isScreen2 ? partStlData : streamModelData;
+  const viewerSource = viewerData
+    ? { data: viewerData, format: "stl" as const }
+    : { data: null, format: "stl" as const };
 
 
   // Below the floor the app says so plainly rather than degrading (issue
@@ -1542,7 +1655,7 @@ export default function App({ client }: AppProps) {
         <ModelViewer
           data={viewerSource.data}
           format={viewerSource.format}
-          hideEmptyState={isFirstRun}
+          hideEmptyState={isFirstRun || isScreen2}
           onReady={handleViewerReady}
           onLoaded={handleViewerLoaded}
           onOrbitStart={handleOrbitStart}
@@ -1562,7 +1675,7 @@ export default function App({ client }: AppProps) {
           moment the user has no idea what to type. The build plate is
           drawn to scale behind it; the screen goes away once the
           conversation starts. Hidden with the other panels on backslash. */}
-      {isFirstRun && !panelsHidden && (
+      {isFirstRun && !isScreen2 && !panelsHidden && (
         <FirstRun
           onSend={handleSendMessage}
           onPhotoSelect={() => {
@@ -1572,11 +1685,12 @@ export default function App({ client }: AppProps) {
             // does not fire change without a file chosen, and the input is
             // display:none).
             const label = document.querySelector<HTMLLabelElement>(
-              'label[htmlfor="photo-file-input"]',
+              'label[for="photo-file-input"]',
             );
             if (label) label.click();
           }}
           inFlight={designLoopInFlight}
+          onPartFile={(file) => void handlePartFile(file)}
         />
       )}
 
@@ -1584,9 +1698,27 @@ export default function App({ client }: AppProps) {
           scale from the envelope the API reports; behind the first-run
           column, very low contrast — the constraint as a room, not a
           warning. The keep-out notch is NOT drawn: the envelope route
-          does not expose it, and this surface must not infer it. */}
-      {envelope !== null && !panelsHidden && (
+          does not expose it, and this surface must not infer it.
+          Issue #334 (D7): the plate is HIDDEN while the part's units are
+          unsettled (the caption says the size is unknown); it is restored
+          once settled. */}
+      {envelope !== null && !panelsHidden &&
+        !(designStatePart !== null && designStatePart.unit_status !== "settled") && (
         <PlateBackdrop x={envelope.x} y={envelope.y} z={envelope.z} verified={envelope.verified} />
+      )}
+
+      {/* Layer 10 — Screen 2 (issue #334, D6/D7): the import report +
+          unit settlement. Shown whenever a part exists (the design-state
+          envelope's `part`) — the same centred space FirstRun owns, never
+          both. Hidden with the other panels on backslash. */}
+      {isScreen2 && !panelsHidden && designStatePart && (
+        <ImportReport
+          part={designStatePart}
+          projectId={projectId}
+          client={apiClient}
+          onSettled={() => refetchDesignState()}
+          showPlate={designStatePart.unit_status === "settled"}
+        />
       )}
 
       {/* Layer 20 — the conversation (chat + upload + errors). Floats over
@@ -1671,6 +1803,9 @@ export default function App({ client }: AppProps) {
               retryable: false,
             })
           }
+          onPartUploaded={handlePartUploaded}
+          partClient={apiClient}
+          hasPart={designStatePart !== null}
         />
       )}
 
@@ -1807,6 +1942,7 @@ export default function App({ client }: AppProps) {
             projectName={projectName}
             versionId={versions.length > 0 ? versions[versions.length - 1].id : undefined}
             inFlight={designLoopInFlight}
+            part={designStatePart}
             client={apiClient}
             onExported={(vid) => void handleExported(vid)}
           />

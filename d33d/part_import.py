@@ -80,6 +80,7 @@ from d33d.part_http import (
 from d33d.part_mesh import (
     MAX_PART_FACES,
     PartUploadError,
+    load_part_geometry,
     parse_and_repair,
 )
 from d33d.part_units import (
@@ -425,6 +426,160 @@ def create_part_router() -> APIRouter:
             "part": part_public(updated),
             "bbox_mm": mm_bbox,
         }
+
+    # -- GET /{project_id}/part.stl ------------------------------------------
+
+    @router.get("/{project_id}/part.stl")
+    async def download_part_stl(request: Request, project_id: int) -> dict[str, Any]:
+        """Serve the project's committed part as binary STL, in mm.
+
+        3MF parts are converted on the host via
+        ``d33d.part_mesh.load_part_geometry`` (the shared guard: face-cap,
+        zip-bomb, no new parsing path). When ``part_unit_status`` is assumed
+        or settled the mesh's vertices are scaled by the project's
+        ``part_scale`` (the same factor the render worker applies via
+        ``scale(...) import("part.stl")``), so the served geometry is in mm;
+        when the units are unsettled the file is served verbatim (file units)
+        — the SPA hides the plate in that state, so the absolute scale is
+        never shown alongside it.
+
+        Response codes:
+          - 404: the project does not exist, or has no part
+          - 409: the repo or committed file is missing (the ``source_missing``
+            shape, reusing the #295 error class)
+          - 200: ``Response`` with binary STL bytes, ``model/stl`` content
+            type, and a body size cap (50 MB — the same bound as upload).
+        """
+        from fastapi import Response
+
+        conn: db_mod.Connection = request.app.state.conn
+        row = conn.get_project(project_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="project not found")
+
+        if not row.get("part_filename"):
+            raise HTTPException(status_code=404, detail="project has no part")
+
+        from d33d.part_http import resolve_part_paths
+        from d33d.render_worker import _validate_part_path
+
+        part_path, repo_dir = resolve_part_paths(row, conn)
+        if part_path is None:
+            # The v1 row is missing, or the part is unsettled (in which case
+            # the file is still committed but ``resolve_part_paths`` returns
+            # ``None`` because it only wires settled/assumed parts for the
+            # render path). For the SPA viewer, we need the file even when
+            # unsettled, so resolve it directly.
+            from d33d.part_http import _v1_for_part as _v1
+            v1 = _v1(conn, project_id)
+            if v1 is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "source_missing", "message": "the part file is not on disk"},
+                )
+            name = (
+                PART_3MF_FILENAME if row.get("part_format") == "3mf" else PART_FILENAME
+            )
+            repo = Path(row["git_repo_path"])
+            part_path = repo / "versions" / str(v1["id"]) / name
+            repo_dir = repo
+
+        # Containment + symlink + name validation (the operator decision:
+        # "Reuse the render-staging validation (_validate_part_path) rather
+        # than re-implementing it").
+        if repo_dir is not None:
+            validation_err = _validate_part_path(part_path, repo_dir)
+            if validation_err is not None:
+                logger.error("part.stl validation failed (project_id=%s): %s", project_id, validation_err)
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "source_missing", "message": "the part file is not on disk"},
+                )
+
+        try:
+            raw = part_path.read_bytes()
+        except OSError as e:
+            logger.error("part.stl read failed (project_id=%s): %s", project_id, e)
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "source_missing", "message": "the part file is not on disk"},
+            ) from e
+
+        # Size cap: the SPA loads this via the STL loader; a pathologically
+        # large file would OOM the browser. 50 MB matches the upload cap.
+        if len(raw) > MAX_PART_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"part file exceeds {MAX_PART_UPLOAD_BYTES} byte limit",
+            )
+
+        # Unit scaling (the operator decision): assumed or settled parts
+        # are served with ``part_scale`` applied — the geometry IS in mm, so
+        # the viewer renders it with the build plate and the report's mm
+        # numbers agree. Unsettled (or a missing/invalid scale) serves the
+        # file verbatim — the SPA hides the plate while unsettled.
+        part_format = row.get("part_format") or "stl"
+        scale: float | None = None
+        if row.get("part_unit_status") in ("assumed", "settled"):
+            candidate = row.get("part_scale")
+            if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and candidate > 0:
+                scale = float(candidate)
+
+        if part_format == "3mf":
+            # Convert 3MF → STL on the host (shared load path, no new parser).
+            try:
+                mesh = await asyncio.to_thread(load_part_geometry, raw, "3mf")
+                if scale is not None:
+                    mesh = mesh.copy()
+                    mesh.apply_scale(scale)
+                stl_bytes = mesh.export(file_type="stl")
+                if isinstance(stl_bytes, str):
+                    stl_bytes = stl_bytes.encode()
+            except PartUploadError as e:
+                logger.error("part.stl 3MF conversion failed (project_id=%s): %s", project_id, e)
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "source_missing", "message": "the part file could not be read"},
+                ) from e
+            if not stl_bytes:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "source_missing", "message": "the part file is empty"},
+                )
+            return Response(
+                content=stl_bytes,
+                media_type="model/stl",
+                headers={"Content-Disposition": 'attachment; filename="part.stl"'},
+            )
+
+        # STL: scale the committed bytes through the shared guarded loader
+        # (the face-cap guard applies to a hand-committed file as well), or
+        # serve them verbatim when the units are unsettled.
+        if scale is not None:
+            try:
+                mesh = await asyncio.to_thread(load_part_geometry, raw, "stl")
+                mesh = mesh.copy()
+                mesh.apply_scale(scale)
+                stl_bytes = mesh.export(file_type="stl")
+                if isinstance(stl_bytes, str):
+                    stl_bytes = stl_bytes.encode()
+            except PartUploadError as e:
+                logger.error("part.stl scaling failed (project_id=%s): %s", project_id, e)
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "source_missing", "message": "the part file could not be read"},
+                ) from e
+            return Response(
+                content=stl_bytes,
+                media_type="model/stl",
+                headers={"Content-Disposition": 'attachment; filename="part.stl"'},
+            )
+
+        return Response(
+            content=raw,
+            media_type="model/stl",
+            headers={"Content-Disposition": 'attachment; filename="part.stl"'},
+        )
 
     return router
 
