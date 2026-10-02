@@ -939,12 +939,19 @@ describe("design contract", () => {
     expect(passTest).toMatch(/importedPart/);
     expect(passTest).toMatch(/15–30/);
 
-    // App wiring (issue #338): the App-level part state (the design-state
-    // envelope's `part`) feeds the render site — the import path's line is
-    // selected whenever the project HAS a part. The App-level proof lives
-    // in web/src/components/__tests__/app-layout.test.tsx; the tripwire
-    // pins the render site: `hasPart` (App's part-existence) drives
-    // `importedPart` at the PassProgress call site.
+    // App wiring (issue #338, operator decision 10 ONLY): the App-level
+    // part state (the design-state envelope's `part`) feeds PassProgress's
+    // render site — the import path's expectation line is selected whenever
+    // the project HAS a part. The App-level proof lives in
+    // web/src/components/__tests__/app-layout.test.tsx; this tripwire pins
+    // the ConversationPane render site: `importedPart={hasPart}`, where
+    // App passes `hasPart={designStatePart !== null}`.
+    //
+    // NOTE: this is decision 10 (progress copy on the import path) only.
+    // The decision-8 history label ("v1 — Imported {filename}" in the
+    // filmstrip / timeline / history sheet) is a SEPARATE surface that
+    // needs `source_kind` on the version wire and is NOT wired in this
+    // diff — do not read this tripwire as covering it.
     const paneSrc = readFileSync(
       join(SRC, "components/chat/ConversationPane.tsx"),
       "utf8",

@@ -475,10 +475,6 @@ export const history = {
    *  edges (rise-backs). */
   riserParent: "built from the previous version",
   riserRestored: "restored from an earlier version",
-  /** The v1 label for an imported part (issue #338): "v1 — Imported "
-   *  followed by the filename, which renders in mono, ellipsis-truncated,
-   *  with a full-name title attribute, and is never interpreted. */
-  imported: "Imported",
 } as const;
 
 export const firstRun = {
@@ -714,13 +710,10 @@ export const shell = {
   send: "Send",
   export: "Export 3MF",
   exportVersion: (version: string): string => `Export ${version}`,
-  /** The static lead-in for the export note (issue #338). */
+  /** The static lead-in for the export note (issue #338). The component
+   *  appends the filename in its own mono `<span>` (never interpolated into
+   *  a sentence string) so a hostile filename stays inert text. */
   exportContainsGeometryPrefix: "Contains geometry from ",
-  /** The full export note sentence (issue #338): the 3MF contains geometry
-   *  from the file the user brought. The component renders the filename in
-   *  its own mono `<span>` (splitting at the prefix) so it stays inert. */
-  exportContainsGeometry: (filename: string): string =>
-    `Contains geometry from ${filename}`,
   /** Only rendered once validation has actually passed. Never a default. */
   validated: (checks: number): string =>
     `Watertight · in millimetres · ${checks} checks passed`,

@@ -304,11 +304,13 @@ export function BriefZoneLayout({
           {copy.brief.yourChangesHeader}
         </h3>
       )}
-      <div className="brief-rows" data-testid="brief-rows">
-        {zones.changeRows
-          .filter((r) => !r.collapsed)
-          .map((r) => renderChangeRow(r.entry))}
-      </div>
+      {zones.changeRows.some((r) => !r.collapsed) && (
+        <div className="brief-rows" data-testid="brief-rows">
+          {zones.changeRows
+            .filter((r) => !r.collapsed)
+            .map((r) => renderChangeRow(r.entry))}
+        </div>
+      )}
       {zones.changesCount !== null && (
         <div className="brief-groups" data-testid="brief-groups">
           <button
