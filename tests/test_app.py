@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import sqlite3
 import textwrap
 import uuid
 from pathlib import Path
@@ -996,7 +997,7 @@ def _svc(app: Any) -> Any:
     try:
         svc.conn.raw.execute("SELECT 1")
         return svc
-    except Exception:  # noqa: BLE001
+    except sqlite3.Error:
         import d33d.db as db_mod
         from d33d import versions as versions_mod
 

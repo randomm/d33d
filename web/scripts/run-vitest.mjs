@@ -26,8 +26,8 @@
 // - Exit code: vitest's own code on normal completion; 128 + signal number
 //   when interrupted (SIGTERM → 143, SIGINT → 130, SIGHUP → 129).
 
-import { execFileSync, spawn } from "node:child_process";
-import { killChildAndGroup, killGroupGone } from "./kill-confirm.mjs";
+import { spawn } from "node:child_process";
+import { killChildAndGroup, killGroupGone, psGroupEmpty } from "./kill-confirm.mjs";
 import { resolveCommand } from "./resolve-command.mjs";
 
 const GRACE_MS = 3000;
@@ -60,28 +60,6 @@ function groupProbeESRCH(pgid) {
   }
 }
 
-/**
- * True if `ps` reports no process whose pgid is `pgid`. This is the EPERM
- * fallback: `process.kill(-pgid, 0)` can EPERM when the group leader is
- * gone but members are mid-reap; asking `ps` for membership is reliable
- * because every process of a dying group is inspectable (or already gone).
- * Returns null when `ps` is unavailable (the caller must not assume).
- */
-function psGroupEmpty(pgid) {
-  try {
-    const out = execFileSync("ps", ["-axo", "pgid="], { encoding: "utf8" });
-    const seen = new Set(
-      out
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean),
-    );
-    return !seen.has(String(pgid));
-  } catch {
-    return null;
-  }
-}
-
 // Shared by every confirmation sleep — Atomics.wait needs an Int32Array
 // over a SharedArrayBuffer; reuse it instead of allocating per iteration.
 const waitBuf = new Int32Array(new SharedArrayBuffer(4));
@@ -89,11 +67,12 @@ const waitBuf = new Int32Array(new SharedArrayBuffer(4));
 // The wrapper's single kill path: kill the child pid, then `-pid`, via the
 // pure `killChildAndGroup`. Never throws — the escalation, the signal
 // handler and the exit handler all rely on the second kill always running.
-// (ESRCH is silent by construction; a non-ESRCH errno on a dying group is
-// already reflected in the confirmation log below, so no separate line.)
+// (ESRCH is silent by construction; a non-ESRCH errno is written to stderr
+// via `log` so a failed kill on the signal or exit path is visible to the
+// operator instead of swallowed.)
 const KILL_DEPS = {
   kill: (target, signal) => process.kill(target, signal),
-  log: () => {},
+  log: (line) => console.error(line),
 };
 
 /**

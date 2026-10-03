@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
-    FRILL_DECLINE_REPLY,
+    FILL_RECUT_DECLINE_REPLY,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
@@ -211,7 +211,7 @@ def _handle_live_offer(
         versions.set_pending_offer(project_id, None)
         return {
             "kind": "answer",
-            "answer": FRILL_DECLINE_REPLY,
+            "answer": FILL_RECUT_DECLINE_REPLY,
             "run_loop": False,
             "outcome": "decline",
         }

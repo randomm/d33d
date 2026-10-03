@@ -80,7 +80,7 @@ FRILL_NO_DIMENSION_REPLY = (
     "fill it and cut a new one at that size."
 )
 #: The quiet decline acknowledgement (a clean "no" on the pending offer).
-FRILL_DECLINE_REPLY = "Understood — leaving the part as it is."
+FILL_RECUT_DECLINE_REPLY = "Understood — leaving the part as it is."
 
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
@@ -452,7 +452,7 @@ def fill_recut_turn(
             versions.set_pending_offer(project_id, None)
             return {
                 "kind": "answer",
-                "answer": FRILL_DECLINE_REPLY,
+                "answer": FILL_RECUT_DECLINE_REPLY,
                 "run_loop": False,
                 "outcome": "decline",
             }
@@ -493,7 +493,7 @@ def fill_recut_turn(
 
 __all__ = [
     "FEATURE_NOUNS",
-    "FRILL_DECLINE_REPLY",
+    "FILL_RECUT_DECLINE_REPLY",
     "FRILL_HOLE_DIAMETER_REPLY",
     "FRILL_MOVE_DISTANCE_REPLY",
     "FRILL_MOVE_REPLY",

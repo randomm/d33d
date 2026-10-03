@@ -717,7 +717,7 @@ export const shell = {
   /** The static lead-in for the export note (issue #338). The component
    *  appends the filename in its own mono `<span>` (never interpolated into
    *  a sentence string) so a hostile filename stays inert text. */
-  exportContainsGeometryPrefix: "Contains geometry from ",
+  exportContainsGeometryPrefix: "contains geometry from ",
   /** Only rendered once validation has actually passed. Never a default. */
   validated: (checks: number): string =>
     `Watertight · in millimetres · ${checks} checks passed`,
