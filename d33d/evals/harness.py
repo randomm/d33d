@@ -81,7 +81,7 @@ from typing import Any, Protocol
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase
+from d33d.evals.case_schema import CaseKind, GoldenCase
 from d33d.evals.gates import EvalFailureClass, GateResult
 from d33d.evals.guard_gate import import_guard_result
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
@@ -159,7 +159,7 @@ def _render_fn_accepts_part_kwargs(render_fn: Any) -> bool:
 
 @dataclass(frozen=True)
 class CaseOutcome:
-    """The harness's per-case result — one row of the run report.
+    """The harness's per-case result — one row of the run report (see :attr:`ok` for the verdict rule).
 
     ``gates`` maps the gate labels to :class:`GateResult` (absent gates
     were not reached — a short-circuit). ``scad_source`` is the design
@@ -168,16 +168,10 @@ class CaseOutcome:
     (structural enforcement of gates-before-judge). ``failure_class`` is
     the closed-enum class the case failed with (``None`` when the case
     passed).
-
-    Note (issue #340): a case that never reached the gate phase (a
-    staging problem or a design-call failure) carries ``failure_class``
-    with no gates — issue #340 made ``ok`` treat that as a failure, so
-    ``failure_class`` set with an empty ``gates`` map is no longer
-    ``ok=True``.
     """
 
     case_id: str
-    kind: str
+    kind: CaseKind
     prompt_version: str
     prompt_sha256: str
     request: str
@@ -212,28 +206,35 @@ class CaseOutcome:
             return True
         return self.judge.passed
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_gates: bool = True) -> dict[str, Any]:
         """JSON-serialisable row for the run report.
 
-        The ``gates`` mapping preserves the phase order of
-        ``self.gates``; the report aggregator re-orders each row via
+        The ``gates`` mapping (when included) preserves the phase order
+        of ``self.gates``; the report aggregator re-orders each row via
         :func:`d33d.evals.report.case_gate_order` (the kind's pre-check
         gate first — ``import_guard`` for ``imported_part`` — then the
         base 1->7 order) when it builds the row.
+
+        ``include_gates=False`` serializes the outcome's scalar fields
+        only, so a caller can supply the ``gates`` mapping itself (the
+        report builds the row exactly once — see
+        :func:`d33d.evals.report.build_report`).
         """
-        return {
+        row = {
             "case_id": self.case_id,
             "kind": self.kind,
             "prompt_version": self.prompt_version,
             "prompt_sha256": self.prompt_sha256,
             "request": self.request,
             "scad_source": self.scad_source,
-            "gates": {name: g.to_dict() for name, g in self.gates.items()},
             "judge": self.judge.to_dict() if self.judge is not None else None,
             "failure_class": self.failure_class,
             "detail": self.detail,
             "ok": self.ok,
         }
+        if include_gates:
+            row["gates"] = {name: g.to_dict() for name, g in self.gates.items()}
+        return row
 
 
 # ---------------------------------------------------------------------------

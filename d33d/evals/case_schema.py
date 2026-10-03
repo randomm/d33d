@@ -79,12 +79,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.part_ref import PartRef, part_of
 
-#: The seven deterministic gates, in the fixed ticket order. Gates 1–7
-#: run before any judge; the judge is stage 8 (the last stage, not a
-#: gate) and is out of scope for the golden-set schema — it is a
-#: holdout-only concern of the harness.
-# Distinct from ``d33d.evals.gates.GATE_NAMES`` (the 5 gates gates.py
-#: itself implements) — this 7-name list is the declare-able taxonomy.
+#: The 7 declare-able gate taxonomy, in the fixed ticket order (gates
+#: 1–7 run before any judge; the judge is stage 8 and out of scope for
+#: the golden-set schema — a holdout-only concern of the harness).
 GATE_NAMES: tuple[str, ...] = (
     "compile",
     "stl_export",
@@ -94,6 +91,16 @@ GATE_NAMES: tuple[str, ...] = (
     "slice_dry_run",
     "region_containment",
 )
+
+#: The closed set of golden-set case kinds (issue #340: named alias).
+CaseKind = Literal[
+    "primitive",
+    "red_region_edit",
+    "boolean_topology",
+    "photo_recreation",
+    "adversarial",
+    "imported_part",
+]
 
 #: Pre-check gates, keyed by the case kind that triggers them (issue
 #: #340): ``import_guard`` runs inside the gate phase of every
@@ -212,14 +219,7 @@ class GoldenCase(BaseModel):
     """One golden-set case (one JSON file under ``evals/cases/``)."""
 
     case_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
-    kind: Literal[
-        "primitive",
-        "red_region_edit",
-        "boolean_topology",
-        "photo_recreation",
-        "adversarial",
-        "imported_part",
-    ]
+    kind: CaseKind
     prompt: PromptPin
     request: str = Field(min_length=1)
 

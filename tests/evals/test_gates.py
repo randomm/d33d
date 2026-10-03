@@ -421,7 +421,7 @@ def test_runner_all_pass(box_20mm):
         expected_dims={"x": 20, "y": 20, "z": 20},
     )
     assert report.ok is True
-    for gate in eg.GATE_NAMES:
+    for gate in eg.IMPLEMENTED_GATE_NAMES:
         assert report.gate(gate).status == "pass", f"gate {gate} failed"
 
 
@@ -527,7 +527,7 @@ def test_runner_to_dict_is_serializable(box_20mm):
     assert d["case_id"] == "test-serialise"
     assert d["ok"] is True
     assert "gates" in d
-    for name in eg.GATE_NAMES:
+    for name in eg.IMPLEMENTED_GATE_NAMES:
         assert name in d["gates"]
         assert d["gates"][name]["status"] == "pass"
 

@@ -29,14 +29,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from d33d.evals.case_schema import GATE_NAMES, KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
 
+if TYPE_CHECKING:
+    from d33d.evals.case_schema import CaseKind
 
-def case_gate_order(case_kind: str) -> tuple[str, ...]:
+
+def case_gate_order(case_kind: CaseKind) -> tuple[str, ...]:
     """The ordered gate labels for a case's report row (issue #340).
 
     The kind's pre-check gate (``import_guard`` for ``imported_part``
@@ -228,9 +231,10 @@ def build_report(
     counts: dict[str, int] = {}
     passed = 0
     for outcome in outcomes:
-        row = outcome.to_dict()
+        ordered = _ordered_gate_names(outcome)
+        row = outcome.to_dict(include_gates=False)
         row["gates"] = {
-            name: outcome.gates[name].to_dict() for name in _ordered_gate_names(outcome)
+            name: outcome.gates[name].to_dict() for name in ordered
         }
         rows[outcome.case_id] = row
         if outcome.ok:
