@@ -75,7 +75,7 @@ import base64
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
@@ -95,16 +95,32 @@ DEFAULT_CONFIG_PATH = Path("evals") / "promptfoo.config.yaml"
 #: ``Authorization`` header) — never in a message or a report.
 RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 
-#: The render seam (issue #108): one OpenSCAD source string in, one
-#: ``RenderResult``-shaped render-worker result out (``error_class``,
-#: ``stderr``, ``stl``). The caller injects the real Docker worker
-#: (``d33d.render_worker.render_for_design_loop``) for live runs and a
-#: stub for hermetic tests. The harness never shells into Docker itself.
-#: The optional ``part_path`` / ``repo_dir`` kwargs stage an imported
-#: part fixture (issue #340); render stubs that don't take them are
-#: still valid (the harness only forwards them when a case carries a
-#: ``part``).
-RenderFn = Callable[[str], Any]
+class RenderFn(Protocol):
+    """The render seam (issue #108): one OpenSCAD source string in, one
+    ``RenderResult``-shaped render-worker result out (``error_class``,
+    ``stderr``, ``stl``). The caller injects the real Docker worker
+    (``d33d.render_worker.render_for_design_loop``) for live runs and a
+    stub for hermetic tests. The harness never shells into Docker itself.
+
+    Contract (issue #340): render functions used with ``imported_part``
+    cases MUST accept the ``part_path`` / ``repo_dir`` kwargs — the
+    harness passes them as keyword arguments whenever a case carries a
+    ``part`` (the fixture staged into the render volume as part.stl
+    so the candidate's ``import("part.stl")`` resolves). Part-less
+    cases call ``render_fn(scad_source)`` with no kwargs, but a render
+    function shared across a mixed run must therefore accept both
+    (e.g. ``def render_fn(scad_source, *, part_path=None, repo_dir=None)``);
+    a stub that takes only ``scad_source`` will ``TypeError`` the first
+    time it is handed an imported-part case.
+    """
+
+    def __call__(
+        self,
+        scad_source: str,
+        *,
+        part_path: Path | None = ...,
+        repo_dir: Path | None = ...,
+    ) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -138,8 +154,18 @@ class CaseOutcome:
 
     @property
     def ok(self) -> bool:
-        """The case's overall verdict: gates ok AND (when the judge ran)
-        the judge passed."""
+        """The case's overall verdict: no recorded failure, gates ok, AND
+        (when the judge ran) the judge passed.
+
+        A case that never reached the gate phase (a staging problem in
+        ``evals/run.py`` — an escape/non-.stl/missing fixture, issue
+        #340 — or a design-call failure) carries a ``failure_class``
+        and no gates; that is a failure, not a pass — ``failure_class``
+        is the outcome's authoritative failure record, so it fails the
+        case even when no gate row was recorded.
+        """
+        if self.failure_class is not None:
+            return False
         if not self.gates_ok:
             return False
         if self.judge is None:
@@ -147,7 +173,14 @@ class CaseOutcome:
         return self.judge.passed
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-serialisable row for the run report."""
+        """JSON-serialisable row for the run report.
+
+        The ``gates`` mapping preserves the phase order of
+        ``self.gates``; the report aggregator re-orders each row via
+        :func:`d33d.evals.report.case_gate_order` (the kind's pre-check
+        gate first — ``import_guard`` for ``imported_part`` — then the
+        base 1->7 order) when it builds the row.
+        """
         return {
             "case_id": self.case_id,
             "kind": self.kind,
@@ -600,6 +633,8 @@ async def run_case(
     # An imported-part case stages its fixture as part.stl so the
     # candidate's import("part.stl") resolves (issue #340); the other
     # cases render exactly as before (no part, byte-identical argv).
+    # The kwargs are passed ONLY when part_path is not None (the
+    # RenderFn contract: imported-part-capable fns accept both).
     if part_path is not None:
         render_result = render_fn(scad_source, part_path=part_path, repo_dir=part_repo_dir)
     else:

@@ -19,7 +19,12 @@ import importlib.util
 import json
 from pathlib import Path
 
-from d33d.evals.case_schema import GATE_NAMES, load_golden_set, verify_seed
+from d33d.evals.case_schema import (
+    GATE_NAMES,
+    KIND_PRECHECK_GATES,
+    load_golden_set,
+    verify_seed,
+)
 from d33d.evals.harness import run_case_gates
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -60,8 +65,34 @@ def test_imported_part_cases_parse_and_pin_fixture() -> None:
         assert case.part is not None, f"{cid}: no part ref"
         assert case.part.fixture == "evals/cases/fixtures/part.stl"
         assert case.part.scale == 1.0
+        # gate_expectations name only the base seven gates — the
+        # import_guard pre-check is implied by the kind (single source:
+        # KIND_PRECHECK_GATES), never declared in the case file.
+        precheck = KIND_PRECHECK_GATES.get(case.kind)
         for gate in case.gate_expectations:
             assert gate in GATE_NAMES
+            assert gate != precheck, f"{cid}: {gate!r} is a kind pre-check gate"
+
+
+def test_import_guard_is_in_the_gate_registry() -> None:
+    """import_guard is the imported_part kind's pre-check gate and the
+    report's gate order carries it, ordered first (issue #340)."""
+    from d33d.evals.report import GATE_ORDER, case_gate_order
+
+    assert KIND_PRECHECK_GATES == {"imported_part": "import_guard"}
+    assert "import_guard" not in GATE_NAMES  # implied, not declared
+    assert "import_guard" not in GATE_ORDER
+    order = case_gate_order("imported_part")
+    assert order[0] == "import_guard"  # ordered first
+    assert order[1:] == GATE_ORDER
+    # a kind without a pre-check keeps the base order unchanged
+    assert case_gate_order("primitive") == GATE_ORDER
+    # and every declared gate is one the registry knows (base + pre-checks)
+    known = set(GATE_NAMES) | set(KIND_PRECHECK_GATES.values())
+    cases = _load()
+    for cid, case in cases.items():
+        for gate in case.gate_expectations:
+            assert gate in known, f"{cid}: unknown gate {gate!r}"
 
 
 def test_fixture_exists_under_1mb_and_parses_watertight() -> None:
@@ -254,6 +285,188 @@ def test_gate_phase_passes_compliant_candidate() -> None:
         scad_source='scale(1) import("part.stl");\ndifference() { scale(1) import("part.stl"); cylinder(h=40, d=12); }',
     )
     assert gates["import_guard"].status == "pass"
+
+
+# ---------------------------------------------------------------------------
+# (b2) per-case containment: staging problems fail the case, never the run
+# ---------------------------------------------------------------------------
+
+
+def _write_cases(tmp_path: Path, cases: list[dict]) -> Path:
+    """Write case files (with a real, pinned prompt file) into a temp dir."""
+    import hashlib
+
+    prompts_dir = tmp_path / "prompts"
+    prompts_dir.mkdir(exist_ok=True)
+    prompt = prompts_dir / "p.md"
+    prompt.write_text("# prompt v1", encoding="utf-8")
+    pin = hashlib.sha256(prompt.read_bytes()).hexdigest()
+    cases_dir = tmp_path / "cases"
+    cases_dir.mkdir(exist_ok=True)
+    for c in cases:
+        doc = {
+            "prompt": {
+                "prompt_version": "v1",
+                "path": str(prompt),
+                "sha256": pin,
+            },
+            "gate_expectations": ["compile"],
+        }
+        doc.update(c)
+        (cases_dir / f"{c['case_id']}.json").write_text(
+            json.dumps(doc), encoding="utf-8"
+        )
+    return cases_dir
+
+
+def _llm_factory():
+    """The stub LLM call. First call per run is the design call — return
+    OpenSCAD. Subsequent calls are the judge — return a passing verdict
+    (the stub render fn has no STL/views, so the judge's content must be
+    JSON it can parse). The bad cases never reach the judge (they fail
+    at staging), so the normal case's judge call is the 2nd call."""
+    state = {"calls": 0}
+
+    async def factory(request_body):
+        state["calls"] += 1
+        content = (
+            'scale(1) import("part.stl");'
+            if state["calls"] == 1
+            else '{"pass": true, "reason": "stub verdict"}'
+        )
+
+        class R:
+            def json(self):
+                return {"choices": [{"message": {"content": content}}]}
+
+        return R()
+
+    return factory
+
+
+def _run(tmp_path: Path, cases: list[dict], render_fn=None):
+    import asyncio
+
+    run = _load_run_module()
+    if render_fn is None:
+
+        def render_fn(scad_source, **kwargs):
+            return _RenderResult()
+
+    return asyncio.run(
+        run._run_all(
+            repo_root=REPO_ROOT,
+            config={},
+            request_factory=_llm_factory(),
+            model_id="m",
+            cases_dir=_write_cases(tmp_path, cases),
+            render_fn=render_fn,
+        )
+    )
+
+
+def test_escaping_fixture_yields_failure_outcome_other_cases_run(tmp_path: Path):
+    """A ``../`` fixture escape is that case's failure — the run, the other
+    case, and the report are all unaffected (issue #340 per-case
+    containment)."""
+    import json as _json
+
+    report = _run(
+        tmp_path,
+        [
+            {
+                "case_id": "escape-bad",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {
+                    "fixture": "evals/cases/fixtures/../part.stl",
+                    "scale": 1.0,
+                },
+            },
+            {
+                "case_id": "normal-box",
+                "kind": "primitive",
+                "request": "a box",
+            },
+        ],
+    )
+    report_doc = _json.loads(report)
+    cases = report_doc["cases"]
+    bad = cases["escape-bad"]
+    assert bad["ok"] is False
+    assert bad["failure_class"] == "artifact_error"
+    assert "escapes" in bad["detail"]
+    # the other case still ran and still passes
+    good = cases["normal-box"]
+    assert good["ok"] is True
+    assert good["gates"]["compile"]["status"] == "pass"
+    assert report_doc["summary"]["total"] == 2
+    assert report_doc["summary"]["passed"] == 1
+
+
+def test_non_stl_fixture_yields_failure_outcome_other_cases_run(tmp_path: Path):
+    """A ``.3mf`` fixture (3MF staging is out of scope) is that case's
+    failure — the run, the other case, and the report are unaffected."""
+    import json as _json
+
+    report = _run(
+        tmp_path,
+        [
+            {
+                "case_id": "bad-ext",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {
+                    "fixture": "evals/cases/fixtures/part.3mf",
+                    "scale": 1.0,
+                },
+            },
+            {
+                "case_id": "normal-box",
+                "kind": "primitive",
+                "request": "a box",
+            },
+        ],
+    )
+    report_doc = _json.loads(report)
+    cases = report_doc["cases"]
+    bad = cases["bad-ext"]
+    assert bad["ok"] is False
+    assert bad["failure_class"] == "artifact_error"
+    assert "must be an STL file" in bad["detail"]
+    good = cases["normal-box"]
+    assert good["ok"] is True
+    assert report_doc["summary"]["passed"] == 1
+
+
+def test_missing_fixture_yields_failure_outcome(tmp_path: Path):
+    import json as _json
+
+    report = _run(
+        tmp_path,
+        [
+            {
+                "case_id": "missing-fix",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {
+                    "fixture": "evals/cases/fixtures/no-such.stl",
+                    "scale": 1.0,
+                },
+            },
+            {
+                "case_id": "normal-box",
+                "kind": "primitive",
+                "request": "a box",
+            },
+        ],
+    )
+    cases = _json.loads(report)["cases"]
+    bad = cases["missing-fix"]
+    assert bad["ok"] is False
+    assert bad["failure_class"] == "artifact_error"
+    assert "missing on disk" in bad["detail"]
+    assert cases["normal-box"]["ok"] is True
 
 
 def test_gate_phase_skips_guard_for_non_import_kind() -> None:

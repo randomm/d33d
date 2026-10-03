@@ -18,10 +18,14 @@ case's settlement behavior.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from d33d.part_mesh import PartUploadError
 from d33d.part_units import classify_stl_units, mm_factor_for_unit
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Known extents of the git-tracked fixtures (verified via trimesh):
 # tests/fixtures/stl/box_20mm.stl → (20, 20, 20); holey.stl → (20, 20, 20);
@@ -48,9 +52,17 @@ def test_plausible_stl_assumed_mm() -> None:
     assert result["scale"] == 1.0
 
 
-def test_plausible_stl_fixture_assumed_mm() -> None:
-    """The imported-part fixture's known extents settle to mm by assumption."""
-    result = classify_stl_units(BOX_20MM_EXTENTS)
+def test_plausible_stl_fixture_assumed_mm(tmp_path: Path) -> None:
+    """The imported-part fixture's REAL extents (loaded with trimesh)
+    settle to mm by assumption."""
+    import trimesh
+
+    fixture = REPO_ROOT / "evals" / "cases" / "fixtures" / "part.stl"
+    assert fixture.is_file(), f"fixture missing: {fixture}"
+    mesh = trimesh.load(str(fixture), process=False)
+    mesh.merge_vertices()
+    extents = tuple(float(v) for v in mesh.extents)
+    result = classify_stl_units(extents)
     assert result["status"] == "assumed"
     assert result["scale"] == pytest.approx(1.0)
 

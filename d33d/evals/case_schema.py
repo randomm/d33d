@@ -96,6 +96,16 @@ GATE_NAMES: tuple[str, ...] = (
     "region_containment",
 )
 
+#: Pre-check gates, keyed by the case kind that triggers them (issue
+#: #340): ``import_guard`` runs inside the gate phase of every
+#: ``imported_part`` case (the candidate must import the seeded part at
+#: the settled scale and never resize it) BEFORE the declared
+#: ``gate_expectations`` run, but it is NOT declared in
+#: ``gate_expectations`` — it is implied by the kind. The report orders
+#: it first (the ``GATE_ORDER`` in ``d33d.evals.report`` prepends the
+#: kind's pre-check gate when present).
+KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
+
 #: Gate 6/7 N/A markers: a gate reports N/A (neither pass nor hard fail)
 #: when its delegate is absent — gate 6 when no headless slicer is
 #: invocable, gate 7 when #7's 2D→3D convention has not landed.
@@ -416,14 +426,17 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
             violations.append(f"kind {kind!r}: expected {expected} cases, got {actual}")
 
     for cid, c in cases.items():
-        if c.kind == "imported_part" and c.part is None:
-            violations.append(f"{cid}: imported_part case missing its part ref")
-        elif c.kind == "imported_part" and c.part is not None:
-            fixture = (repo_root / c.part.fixture) if repo_root is not None else None
-            if fixture is None or not fixture.is_file():
-                violations.append(
-                    f"{cid}: part fixture {c.part.fixture!r} missing on disk"
+        if c.kind == "imported_part":
+            if c.part is None:
+                violations.append(f"{cid}: imported_part case missing its part ref")
+            else:
+                fixture = (
+                    (repo_root / c.part.fixture) if repo_root is not None else None
                 )
+                if fixture is None or not fixture.is_file():
+                    violations.append(
+                        f"{cid}: part fixture {c.part.fixture!r} missing on disk"
+                    )
 
     for cid, c in cases.items():
         if c.kind == "red_region_edit":

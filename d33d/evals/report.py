@@ -31,11 +31,13 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from d33d.evals.case_schema import KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
 
-#: The gate labels, in the pinned 1->7 order (the report's per-case row
-#: carries at most these keys).
+#: The base gate labels, in the pinned 1->7 order — the gates a case
+#: may DECLARE in ``gate_expectations`` (see
+#: ``d33d.evals.case_schema.GATE_NAMES``).
 GATE_ORDER: tuple[str, ...] = (
     "compile",
     "stl_export",
@@ -45,6 +47,20 @@ GATE_ORDER: tuple[str, ...] = (
     "slice_dry_run",
     "region_containment",
 )
+
+
+def case_gate_order(case_kind: str) -> tuple[str, ...]:
+    """The ordered gate labels for a case's report row (issue #340).
+
+    The kind's pre-check gate (``import_guard`` for ``imported_part``
+    cases — see ``d33d.evals.case_schema.KIND_PRECHECK_GATES``) is
+    ordered FIRST, before the base 1->7 gates it precedes in the gate
+    phase; kinds without a pre-check get the base order unchanged. The
+    report's per-case row carries at most these keys (absent gates
+    were not reached — a short-circuit).
+    """
+    pre = KIND_PRECHECK_GATES.get(case_kind)
+    return (pre, *GATE_ORDER) if pre is not None else GATE_ORDER
 
 
 @dataclass(frozen=True)
@@ -179,6 +195,22 @@ class RunReport:
         return json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=False, indent=2)
 
 
+def _order_gate_row(outcome: CaseOutcome) -> None:
+    """Re-order an outcome's ``gates`` mapping in the kind's gate order
+    (in place; ``CaseOutcome`` is frozen but its ``gates`` dict is not)
+    so :meth:`CaseOutcome.to_dict` emits the row in the order the gate
+    phase ran."""
+    ordered = case_gate_order(outcome.kind)
+    by_name = dict(outcome.gates)
+    ordered_gates: dict = {}
+    for name in ordered:
+        if name in by_name:
+            ordered_gates[name] = by_name.pop(name)
+    ordered_gates.update(by_name)  # any unexpected gate, last
+    outcome.gates.clear()
+    outcome.gates.update(ordered_gates)
+
+
 def build_report(
     outcomes: list[CaseOutcome],
     *,
@@ -194,6 +226,11 @@ def build_report(
     ``unclassified_syntax_error`` in the design-loop vocabulary) so the
     report reads in the taxonomy the design loop already uses.
 
+    Each row's ``gates`` mapping is ordered by :func:`case_gate_order`
+    (the kind's pre-check gate first — ``import_guard`` for
+    ``imported_part`` — then the base 1->7 order), so the row reads in
+    the order the gate phase ran.
+
     ``ts`` defaults to the current UTC time (deterministic in tests via
     the argument).
     """
@@ -201,6 +238,7 @@ def build_report(
     counts: dict[str, int] = {}
     passed = 0
     for outcome in outcomes:
+        _order_gate_row(outcome)
         rows[outcome.case_id] = outcome.to_dict()
         if outcome.ok:
             passed += 1
