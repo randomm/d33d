@@ -28,7 +28,10 @@ def import_guard_result(reason: str, detail: str) -> GateResult:
     part at the settled scale, or resized it) is an artifact-quality
     defect on a successfully-rendered candidate — always tagged
     ``artifact_error``, checked through the same :func:`assert_taggable`
-    invariant as every other gate in the ``gates`` module.
+    invariant as every other gate in the ``gates`` module. The design loop
+    (``d33d/design_loop.py``) routes the same violation as
+    ``geometrically_wrong``; the eval tags it ``artifact_error`` because the
+    eval's closed report taxonomy has no ``geometrically_wrong``.
     """
     assert_taggable(IMPORT_GUARD_GATE, "artifact_error")
     return GateResult(

@@ -187,11 +187,19 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     if case.part is None:
         return None, None
     part = part_of(case)
-    violation = check_fixture_containment(repo_root, str(part.fixture))
+    try:
+        violation = check_fixture_containment(repo_root, str(part.fixture))
+    except (OSError, ValueError) as e:
+        return None, f"case {case.case_id}: {e}"
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
     try:
         resolved = (repo_root / part.fixture).resolve()
+        if not resolved.is_file():
+            return (
+                None,
+                f"case {case.case_id}: part fixture {part.fixture!r} is missing on disk",
+            )
     except (OSError, ValueError) as e:
         return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}: {e}"
     return resolved, None
@@ -250,15 +258,6 @@ async def _run_all(
         part_path, staging_error = _stage_fixture(repo_root, case)
         if staging_error is not None:
             outcomes.append(_staging_outcome(case, staging_error))
-            continue
-        if part_path is not None and not part_path.is_file():
-            outcomes.append(
-                _staging_outcome(
-                    case,
-                    f"case {case.case_id}: part fixture "
-                    f"{part_of(case).fixture!r} is missing on disk",
-                )
-            )
             continue
         outcome = await run_case(
             case=case,

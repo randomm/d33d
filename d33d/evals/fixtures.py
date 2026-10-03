@@ -44,7 +44,7 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
             f"part fixture {fixture!r} must be an STL file (the worker seeds "
             "part.stl); 3MF staging is out of scope for the eval harness"
         )
-    root = repo_root.resolve()
+    root = repo_root.resolve()  # resolved once; reused for every path below
     if (root / fixture).is_symlink():
         return f"part fixture {fixture!r} is a symlink; symlinks are rejected outright"
     fixtures_dir = (root / "evals" / "cases" / "fixtures").resolve()

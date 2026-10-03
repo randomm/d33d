@@ -85,19 +85,27 @@ class _RenderResult:
 
 
 def _llm_factory():
-    """The stub LLM call. First call per run is the design call — return
-    OpenSCAD. Subsequent calls are the judge — return a passing verdict
-    (the stub render fn has no STL/views, so the judge's content must be
-    JSON it can parse). The bad cases never reach the judge (they fail
-    at staging), so the normal case's judge call is the 2nd call."""
-    state = {"calls": 0}
+    """The stub LLM call, keyed on the REQUEST, never on call order.
+
+    The judge request's SYSTEM message is ``d33d.evals.judge.JUDGE_PROMPT``
+    (a fixed constant), while the design request's system message is the
+    case's hash-pinned prompt file. Discriminating on the system prompt
+    means a normal case placed ANYWHERE in the set still gets the design
+    response for its design call — the previous call counter made the
+    design-vs-judge decision depend on case order.
+
+    The judge gets a passing verdict (the stub render fn has no
+    STL/views, so the judge's content must be JSON it can parse)."""
+
+    from d33d.evals.judge import JUDGE_PROMPT
 
     async def factory(request_body):
-        state["calls"] += 1
+        system = request_body["messages"][0]["content"]
+        is_judge = system == JUDGE_PROMPT
         content = (
-            'scale(1) import("part.stl");'
-            if state["calls"] == 1
-            else '{"pass": true, "reason": "stub verdict"}'
+            '{"pass": true, "reason": "stub verdict"}'
+            if is_judge
+            else 'scale(1) import("part.stl");'
         )
 
         class R:

@@ -9,6 +9,8 @@ Verifies — without calling a model, Docker, or the network:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from d33d.design_prompts import import_part_instruction
@@ -23,6 +25,7 @@ from tests.evals._casefile_helpers import (
     FIXTURE,
     IMPORT_CASE_IDS,
     REPO_ROOT,
+    _run,
 )
 
 
@@ -137,6 +140,32 @@ def test_verify_seed_flags_missing_fixture() -> None:
     case.part.fixture = "evals/cases/fixtures/missing.stl"
     violations = verify_seed(cases, REPO_ROOT)
     assert any("missing.stl" in v for v in violations)
+
+
+def test_normal_case_first_still_gets_design_response(tmp_path: Path):
+    """The stub factory keys its response on the REQUEST, not on a
+    per-run call counter: a normal case placed FIRST (before a failing
+    case) still gets the OpenSCAD design response and passes, and the
+    same is true when it is placed SECOND — the old call-counter stub
+    handed the judge JSON to whichever case ran first (issue #340 fix
+    round)."""
+    import json as _json
+
+    normal = {"case_id": "normal-box", "kind": "primitive", "request": "a box"}
+    bad = {
+        "case_id": "bad-ext",
+        "kind": "imported_part",
+        "request": "drill",
+        "part": {"fixture": "evals/cases/fixtures/part.3mf", "scale": 1.0},
+    }
+    for ordering in ([normal, bad], [bad, normal]):
+        report_doc = _json.loads(_run(tmp_path, ordering))
+        row = report_doc["cases"]["normal-box"]
+        assert row["ok"] is True, (
+            f"normal case ran in position {1 if ordering[0] is normal else 2}: "
+            f"{row['detail']}"
+        )
+        assert row["gates"]["compile"]["status"] == "pass"
 
 
 def test_imported_part_case_requires_part() -> None:

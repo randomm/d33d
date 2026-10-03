@@ -267,6 +267,50 @@ def test_missing_fixture_yields_failure_outcome(tmp_path: Path):
     assert cases["normal-box"]["ok"] is True
 
 
+def test_is_file_oserror_is_a_staging_outcome_not_an_abort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A filesystem error from the post-staging ``is_file()`` check
+    (e.g. ``PermissionError``) is the case's ``artifact_error`` staging
+    outcome — it never escapes the case loop, and the normal case plus
+    the report are unaffected (issue #340 staging sweep)."""
+    import json as _json
+
+    real_is_file = Path.is_file
+
+    def _raise(self, *args, **kwargs):
+        # Poison ONLY the fixture path itself: the run also stats case
+        # files and the catalogue, and those must keep working.
+        if self.name == "part.stl":
+            raise PermissionError("permission denied")
+        return real_is_file(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", _raise)
+    report = _run(
+        tmp_path,
+        [
+            {
+                "case_id": "bad-fs-import",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {"fixture": "evals/cases/fixtures/part.stl", "scale": 1.0},
+            },
+            {"case_id": "normal-box", "kind": "primitive", "request": "a box"},
+        ],
+    )
+    report_doc = _json.loads(report)
+    cases = report_doc["cases"]
+    bad = cases["bad-fs-import"]
+    assert bad["ok"] is False
+    assert bad["failure_class"] == "artifact_error"
+    assert "fixture staging" in bad["detail"]
+    good = cases["normal-box"]
+    assert good["ok"] is True
+    assert good["gates"]["compile"]["status"] == "pass"
+    assert report_doc["summary"]["total"] == 2
+    assert report_doc["summary"]["passed"] == 1
+
+
 def test_check_fixture_containment_rejects_symlink_outright(tmp_path: Path):
     """A symlinked fixture is rejected outright (before ``resolve()``
     follows it) — even when the target stays inside
