@@ -1510,69 +1510,94 @@ def test_project_pointer_update_failure_rolls_back(app_with_projects):
 # ---------------------------------------------------------------------------
 
 
-def test_parse_and_repair_runs_off_event_loop(app_with_projects):
-    """A slow ``parse_and_repair`` stub (via monkeypatch) does NOT block a
-    concurrent request on the same app — the decode runs in a worker
-    thread (``asyncio.to_thread``), not on the event loop."""
-    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+def test_parse_and_repair_runs_off_event_loop(
+    app_with_projects, monkeypatch
+) -> None:
+    """A slow ``parse_and_repair`` stub does NOT block a concurrent
+    request on the same app — the decode runs in a worker thread
+    (``asyncio.to_thread``), not on the event loop.
+
+    Two invariants make the probe robust regardless of what earlier
+    tests did in the same pytest process (issue #344):
+
+    1. **Pre-import warm-up.** ``d33d.part_mesh`` (which imports numpy
+       and trimesh at module top — heavy native-extension loads) is
+       imported once at session start by the autouse ``_preimport_part_mesh``
+       fixture in ``tests/conftest.py``. If the *first* trimesh import in
+       the process landed inside this test's ``to_thread`` worker, the
+       multi-second import cost would stretch the measured window even
+       although the decode itself is off the loop — the exact Linux-CI
+       failure (a GET measured at 0.38–0.49 s against the 0.3 s sleep
+       after the eval staging tests had already pulled in
+       ``d33d.evals.gates`` → trimesh in an unusual session order).
+       The session-wide warm-up removes that variable.
+
+    2. **Completion-order discriminator, not a wall-clock bound.** The
+       probe is a completion-ORDER list (the same shape as
+       ``test_app.py::test_module_registry_does_not_block_the_event_loop``):
+       the lightweight GET must COMPLETE before the slow upload. With
+       the decode off the loop, the GET's handler runs on the event loop
+       the moment the upload reaches the decode ``await``. If the decode
+       ran ON the loop, its 0.3 s ``time.sleep`` would block every other
+       handler — the GET could only complete after the upload. A wall
+       clock bound on the GET is not an off-loop proof (a serial decode
+       still finishes in ~0.3 s total, passing any loose total bound),
+       and it is not stable across runner/scheduler variance — the order
+       list is stable either way.
+
+    The patch is installed via the pytest ``monkeypatch`` fixture, not a
+    manual save/restore: a manual patch + ``finally`` leaves a window
+    (between the patch and the ``try``) where an error could leave the
+    patched attribute in place for the next test in the session."""
     import time as _time
 
     import d33d.part_import as part_import_mod
 
     original_parse = part_import_mod.parse_and_repair
-    slow_calls = []
+    slow_calls: list[int] = []
 
-    def slow_parse(content, part_format):
+    def slow_parse(content: bytes, part_format: str):
         slow_calls.append(1)
-        _time.sleep(0.3)  # simulate a slow decode
+        _time.sleep(0.3)  # simulate a slow decode (worker thread)
         return original_parse(content, part_format)
 
-    part_import_mod.parse_and_repair = slow_parse
-    try:
-        async def _call(client):
-            r = await client.post("/api/projects", json={"name": "ThreadTest"})
-            pid = r.json()["id"]
-            files = {"file": ("box.stl", data, "model/stl")}
-            # Fire the slow upload and a lightweight GET concurrently.
-            # DISCRIMINATOR (not a total-elapsed bound — a serial, on-loop
-            # decode still finishes in ~0.3 s total, which passes any
-            # loose total bound): the GET's completion is measured against
-            # the 0.3 s decode sleep. With the decode OFF the loop
-            # (asyncio.to_thread), the GET's handler runs on the event
-            # loop the moment the upload reaches the decode await, i.e.
-            # it completes a small epsilon BEFORE the 0.3 s sleep ends.
-            # If the decode ran ON the loop, the sleep would block every
-            # other handler — the GET could not complete until the sleep
-            # finished, so its completion time would be >= the sleep
-            # length (plus the upload's pre-decode overhead).
-            t0 = _time.monotonic()
+    monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse)
 
-            async def _list():
-                r = await client.get("/api/projects")
-                return r, _time.monotonic() - t0
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
 
-            results = await asyncio.gather(
-                client.post(f"/api/projects/{pid}/part", files=files),
-                _list(),
-            )
-            return results[0], results[1][0], results[1][1], len(slow_calls)
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ThreadTest"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
 
-        upload_r, list_r, list_elapsed, n_slow = _run_async(app_with_projects, _call)
-    finally:
-        part_import_mod.parse_and_repair = original_parse
+        order: list[str] = []
+
+        async def _slow_request():
+            resp = await client.post(f"/api/projects/{pid}/part", files=files)
+            order.append("slow")
+            return resp
+
+        async def _fast_request():
+            # Let the upload handler reach the decode await before the
+            # GET is dispatched (the GET must not win trivially because
+            # the upload has not started yet).
+            await asyncio.sleep(0.05)
+            resp = await client.get("/api/projects")
+            order.append("fast")
+            return resp
+
+        upload_r, list_r = await asyncio.gather(_slow_request(), _fast_request())
+        return upload_r, list_r, order
+
+    upload_r, list_r, order = _run_async(app_with_projects, _call)
     assert upload_r.status_code == 201, upload_r.text
     assert list_r.status_code == 200
-    assert n_slow == 1
-    # The GET completed strictly before the 0.3 s decode sleep ended
-    # (the upload reached the decode await a small epsilon before t0,
-    # so an off-loop decode's GET finishes at a few ms — never after
-    # the full sleep). 0.25 s leaves a large margin under the sleep
-    # while being far above any scheduling jitter.
-    assert list_elapsed < 0.25, (
-        f"GET /api/projects took {list_elapsed:.3f}s — it should have "
-        "completed while the 0.3 s decode slept in a worker thread; >= the "
-        "sleep length means the decode blocked the event loop"
-    )
+    assert len(slow_calls) == 1
+    # If the decode ran ON the event loop, the 0.3 s sleep inside the
+    # worker-stub would block every other handler: the GET (dispatched
+    # 50 ms after the upload, itself near-instant) could only complete
+    # AFTER the upload. Off the loop, the GET completes first.
+    assert order == ["fast", "slow"], order
 
 
 # ---------------------------------------------------------------------------
