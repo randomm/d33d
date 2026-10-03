@@ -189,4 +189,20 @@ describe("PartUpload (issue #334, D5)", () => {
       expect((client.uploadPart as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(7, file),
     );
   });
+
+  it("surfaces the no-project copy when no latch is provided (never a POST)", async () => {
+    const client = makeClient();
+    const file = makeFile("part.stl");
+    const onError = vi.fn();
+    render(<PartUpload onUploaded={vi.fn()} onError={onError} client={client} />);
+    fireEvent.change(screen.getByTestId("part-file-input"), {
+      target: { files: [file] },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId("part-upload-error").textContent).toBe(
+        copy.shell.projectCreationFailed(copy.shell.noProject),
+      ),
+    );
+    expect(client.uploadPart).not.toHaveBeenCalled();
+  });
 });

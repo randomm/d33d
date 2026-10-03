@@ -467,6 +467,11 @@ def create_projects_router() -> APIRouter:
             offer_route = await _confirm_offer_route(app, project_id, body.message)
         except Exception:
             inflight.discard(project_id)
+            logger.exception(
+                "chat for project %s: the offer-acceptance pre-route failed "
+                "— the in-flight flag is released",
+                project_id,
+            )
             raise
         if offer_route is not None:
             # The event source is registered — the flag stays set

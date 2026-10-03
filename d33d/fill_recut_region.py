@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from fastapi.responses import JSONResponse
 
@@ -70,10 +70,10 @@ FILL_RECUT_NO_NORMAL_REPLY = (
 #:   source is registered (restored on a setup failure), present ONLY on the
 #:   ``accept`` outcome.
 class FillResult(TypedDict, total=False):
-    kind: str
+    kind: Literal["answer"]
     answer: str | None
     run_loop: bool
-    outcome: str
+    outcome: Literal["accept", "decline", "fresh_offer", "no_normal"]
     instruction: str
     accepted_offer: dict[str, Any]
 
@@ -166,7 +166,11 @@ def _handle_live_offer(
     supersedes the offer (cleared) and falls through to the fresh
     trigger evaluation (this function returns ``None`` so the caller
     runs it). The ``pending`` offer is passed in (the caller already
-    fetched it) so the reader is not called a second time."""
+    fetched it) so the reader is not called a second time.
+
+    Deliberate twin of :func:`d33d.fill_recut.fill_recut_turn`'s matching
+    branch — the chat seam's live-offer handling (accept / decline /
+    supersede) — kept in lockstep by the parity tests."""
     if is_clean_yes(instruction):
         return {
             "kind": "answer",
@@ -230,10 +234,10 @@ def _handle_fresh_trigger(
 def region_edit_preroute(
     app: Any,
     project_id: int,
+    *,
     row: dict[str, Any] | None,
     part: dict[str, Any] | None,
     instruction: str,
-    *,
     face_normal: tuple[float, float, float] | None,
     start_loop: Callable[..., Any],
     loop_kwargs: dict[str, Any],
@@ -352,7 +356,18 @@ def _handle_acceptance(
         raise
     register_event_source(app, project_id, events)
     if accepted_offer is not None:
-        app.state.versions.set_pending_offer(project_id, None)
+        # Best-effort: the source is registered, so the stream owns the
+        # in-flight flag from here — a clear failure is logged and
+        # swallowed, never re-raised (the loop already runs).
+        try:
+            app.state.versions.set_pending_offer(project_id, None)
+        except Exception:
+            logger.exception(
+                "region-edit for project %s: clearing the accepted "
+                "fill-recut offer after registration failed — the loop "
+                "runs with the offer still pending",
+                project_id,
+            )
     # No inflight.discard here — the event source is registered, so the
     # stream's finally is the single release point.
     return JSONResponse(
@@ -369,8 +384,8 @@ def _handle_answer(
     """The boundary-trigger / no-normal-degradation / clean-decline
     path: ONE answer frame, NO loop, NO version. The event source (an
     ``answered_frames`` generator) is registered synchronously; the
-    stream's ``finally`` releases the in-flight flag when the generator
-    is exhausted — the single release point (no explicit discard here).
+    in-flight flag is released when the stream's ``finally`` runs (once
+    the generator is exhausted) — there is no explicit discard here.
 
     Only a FRESH boundary trigger (``outcome == "fresh_offer"``) surfaces
     the offer — the SPA renders the boundary sentence with the [Yes, do

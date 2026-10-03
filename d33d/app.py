@@ -1379,9 +1379,9 @@ def create_app(
         pre_routed = fill_recut_region_mod.region_edit_preroute(
             app,
             project_id,
-            row,
-            _part,
-            body.instruction,
+            row=row,
+            part=_part,
+            instruction=body.instruction,
             face_normal=tuple(body.face_normal) if body.face_normal else None,
             start_loop=_start_loop,  # patchable at the module seam
             loop_kwargs=loop_kwargs,
@@ -1390,16 +1390,23 @@ def create_app(
         if pre_routed is not None:
             return pre_routed
 
-        # The fill-recut pre-route falls through (no part, or no
-        # trigger): the design loop runs exactly as today.
-        events = run_design_loop_with_events(app, project_id, **loop_kwargs)
-        # Register the event source SYNCHRONOUSLY before the 202 response
-        # (else the client's GET /api/stream/{id} sees no active source).
-        # The SSE endpoint is the sole driver of the generator; the
-        # in-flight flag was claimed at the top of the route (before the
-        # pre-route — the chat route's contract), so there is no re-add
-        # here; the SSE endpoint's ``finally`` is the single release point.
-        register_event_source(app, project_id, events)
+        try:
+            events = run_design_loop_with_events(app, project_id, **loop_kwargs)
+            # Register the event source SYNCHRONOUSLY before the 202
+            # response (else the client's GET /api/stream/{id} sees no
+            # active source). The SSE endpoint is the sole driver of the
+            # generator; the in-flight flag was claimed at the top of the
+            # route (before the pre-route — the chat route's contract), so
+            # there is no re-add here.
+            register_event_source(app, project_id, events)
+        except Exception:
+            inflight.discard(project_id)
+            logger.exception(
+                "region-edit for project %s: design-loop setup failed — "
+                "the in-flight flag is released",
+                project_id,
+            )
+            raise
 
         return JSONResponse(
             status_code=202,

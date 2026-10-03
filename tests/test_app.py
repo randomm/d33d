@@ -1497,6 +1497,61 @@ def test_region_edit_fill_recut_preroute_failure_releases_flag(
     _run_async(app_with_projects, _call)
 
 
+def test_region_edit_fallthrough_loop_setup_failure_releases_flag(
+    app_with_projects, monkeypatch
+):
+    """A design-loop SETUP failure on the region-edit FALL-THROUGH path
+    (no part — the fill-recut pre-route returns ``None``) releases the
+    in-flight flag (claimed at the top of the route) and re-raises: the
+    project is not 409-blocked — a follow-up region edit is not 409."""
+    from starlette.exceptions import HTTPException
+
+    import d33d.design_loop_events as dle_mod
+
+    def _boom(*args, **kwargs):
+        # Raised on the FALL-THROUGH call (the project has no part, so
+        # the pre-route returns None and the route calls the loop
+        # directly). Re-raised as a 500 through the route.
+        raise HTTPException(status_code=500, detail="forced (test)")
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Part Boom"})
+        pid = r.json()["id"]
+        # No part columns — the fill-recut pre-route falls through (no
+        # part), so the route calls the (boom) loop directly.
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make it bigger"),
+        )
+        assert r2.status_code == 500, r2.text
+        inflight = app_with_projects.state.design_loop_inflight
+        assert pid not in inflight, "inflight flag leaked after fall-through setup failure"
+        return True
+
+    _run_async(app_with_projects, _call)
+
+    # Now with a stub loop, a follow-up region edit is NOT 409-blocked.
+    def _fake_loop(app, pid, **kwargs):
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _follow(client):
+        r = await client.post("/api/projects", json={"name": "No Part OK"})
+        pid = r.json()["id"]
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make it bigger"),
+        )
+        assert r2.status_code == 202, r2.text
+        return True
+
+    _run_async(app_with_projects, _follow)
+
+
 def test_region_edit_answer_path_released_by_stream(app_with_projects, monkeypatch):
     """Single release point (item 2): the region-edit ANSWER path
     (boundary trigger — no loop) releases the in-flight flag via the
@@ -1576,6 +1631,58 @@ def test_region_edit_loop_setup_failure_releases_flag_and_restores_offer(
         assert offer is not None, "the accepted offer was lost to a setup failure"
         assert offer["kind"] == "fill_recut", offer
         return r2.status_code
+
+    _run_async(app_with_projects, _call)
+
+
+def test_region_edit_accept_clear_failure_is_best_effort(
+    app_with_projects, monkeypatch
+):
+    """On the region-edit accept path, a post-registration offer-clear
+    failure is logged and swallowed (best-effort) — the response is a 202
+    and the event source is registered (the loop runs). The in-flight flag
+    is left alone: the stream's ``finally`` owns it from registration."""
+    import d33d.design_loop_events as dle_mod
+    import d33d.versions as versions_mod
+
+    def _fake_loop(app, pid, **kwargs):
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    _orig_set = versions_mod.VersionService.set_pending_offer
+
+    def _boom_set(self, project_id, offer):
+        # Only the post-registration clear (offer is None) raises; the
+        # setup-failure restore path (a non-None offer) is unaffected.
+        if offer is None:
+            raise RuntimeError("forced clear failure (test)")
+        return _orig_set(self, project_id, offer)
+
+    monkeypatch.setattr(versions_mod.VersionService, "set_pending_offer", _boom_set)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Clear Fails"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        svc = app_with_projects.state.versions
+        svc.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        # 202 despite the clear failure — the loop runs.
+        assert r2.status_code == 202, r2.text
+        # The event source IS registered (the loop runs).
+        source = app_with_projects.state.event_sources.get(pid)
+        assert source is not None, "the event source was not registered"
+        # The in-flight flag is HELD — the stream's finally owns it.
+        inflight = app_with_projects.state.design_loop_inflight
+        assert pid in inflight, "flag released before the stream drained"
+        return True
 
     _run_async(app_with_projects, _call)
 
@@ -1819,9 +1926,9 @@ def test_region_edit_no_part_preroute_returns_none(app_with_projects, monkeypatc
     result = fr_mod.region_edit_preroute(
         app_with_projects,
         _pid,
-        None,
-        None,
-        "make it bigger",
+        row=None,
+        part=None,
+        instruction="make it bigger",
         face_normal=None,
         start_loop=_fake_loop,
         loop_kwargs={},
