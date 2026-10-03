@@ -44,7 +44,7 @@
  * bookkeeping.
  */
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import copy from "../../copy";
 import type { DesignStateEntry, PartReportInfo, ProjectStorage } from "../../lib/api";
 import { splitBriefZones, BriefZoneLayout } from "./BriefZones";
@@ -163,7 +163,10 @@ export function Brief({
   // fold behind MAX_LIST_ROWS). When `part` is null the zone has no part
   // rows and `hasPart` is false — the single-list shape is byte-identical
   // to the pre-#338 layout.
-  const zones = splitBriefZones(resolved, part ?? null);
+  const zones = useMemo(() => splitBriefZones(resolved, part ?? null), [
+    resolved,
+    part,
+  ]);
 
   // The change row renderer, now the extracted <BriefRow> component (issue
   // #338: the two-zone addition must not grow Brief.tsx, so the row and its

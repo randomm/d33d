@@ -1665,6 +1665,59 @@ def test_fill_and_recut_instruction_zero_size_no_clause() -> None:
     assert " at 38 mm" in instr_ok, instr_ok
 
 
+def test_fill_and_recut_instruction_invalid_axis_no_clause() -> None:
+    """Issue #338 final fix round: the instruction builder validates the
+    axis with the SAME ``valid_axis`` the reader uses, so a non-finite
+    (``nan``) or non-unit (``1e6``) axis — a malformed offer dict read
+    straight from storage — yields NO axis clause rather than leaking a
+    bad vector into the instruction. A valid unit axis keeps the clause."""
+    import math
+
+    nan_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [math.nan, 0.0, 0.0]}
+    nan_instr = fill_recut.fill_and_recut_instruction(nan_offer)
+    assert "axis " not in nan_instr, nan_instr
+
+    nonunit_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [1e6, 0.0, 0.0]}
+    nonunit_instr = fill_recut.fill_and_recut_instruction(nonunit_offer)
+    assert "axis " not in nonunit_instr, nonunit_instr
+
+    unit_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [0.0, 0.0, 1.0]}
+    unit_instr = fill_recut.fill_and_recut_instruction(unit_offer)
+    assert " (axis 0, 0, 1)" in unit_instr, unit_instr
+
+
+def test_register_event_source_warns_on_overwrite(caplog) -> None:
+    """Issue #338 final fix round: ``register_event_source`` pops any
+    previously-registered source and LOGS A WARNING when one existed (a
+    stale, still-live source about to be dropped); a first registration
+    is silent. The single release point is still the SSE endpoint's
+    ``finally`` — this only surfaces the overlap."""
+    import types
+
+    from d33d.chat_frames import register_event_source
+
+    state = types.SimpleNamespace(event_sources={})
+    app = types.SimpleNamespace(state=state)
+    caplog.clear()
+
+    # First registration: no previous source, silent.
+    register_event_source(app, 1, "source-a")
+    assert list(caplog.messages) == [], caplog.messages
+
+    # Second registration: a previous source exists → warning.
+    register_event_source(app, 1, "source-b")
+    assert any(
+        "dropping" in m or "previous event" in m for m in caplog.messages
+    ), caplog.messages
+    # The new source is the one now registered.
+    assert state.event_sources[1] == "source-b"
+
+    # A different project id (no prior source) stays silent.
+    caplog.clear()
+    register_event_source(app, 2, "source-c")
+    assert list(caplog.messages) == [], caplog.messages
+
+
 # ---------------------------------------------------------------------------
 # copy.ts two-way parity pins (parse copy.ts, as the existing part-upload
 # detail pins do — the overstated tripwire claim in the old

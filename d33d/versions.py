@@ -67,6 +67,11 @@ logger = logging.getLogger(__name__)
 #: The region-edit wire's face-normal length tolerance (issue #338 operator decision 4).
 NORMAL_LENGTH_TOLERANCE = 0.01
 
+#: The version row's origin discriminator for a part-import v1
+#: (``versions.source_kind``; ``None`` for a design-loop version). Owned
+#: here so ``part_import`` and this module never drift on the literal.
+SOURCE_KIND_IMPORT = "import"
+
 #: Max display name length (auto-names are derived to this).
 NAME_MAX_LEN = 40
 
@@ -359,16 +364,18 @@ def validate_params(params: dict[str, Any]) -> list[str]:
     return sorted(k for k, v in params.items() if not _valid_param_value(v))
 
 
-def _valid_axis(value: Any) -> bool:
+def valid_axis(value: Any) -> bool:
     """``True`` iff ``value`` is a 3-element list/tuple of finite numbers
     of UNIT length (the issue #338 fill-recut offer's ``axis`` — the
     region-edit pick's face normal). ``bool`` is excluded (a ``bool`` is
     an ``int``); a wrong length, a non-numeric entry, a non-finite entry
     (``NaN``/``inf``), or a vector whose length is outside
     1±``NORMAL_LENGTH_TOLERANCE`` (the wire's face-normal check, shared
-    constant from ``d33d.fill_recut_region``) is invalid — such an axis
-    is dropped on read (the offer still returns without it) rather than
-    leaking a malformed axis into the fill-and-recut instruction."""
+    constant owned by this module — ``d33d.versions``) is invalid — such
+    an axis is dropped on read (the offer still returns without it) rather
+    than leaking a malformed axis into the fill-and-recut instruction.
+    This module is the owner of the axis validation; the fill-and-recut
+    instruction builder reuses it so the two sites never diverge."""
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         return False
     for component in value:
@@ -1138,7 +1145,7 @@ class VersionService:
                     ),
                 }
                 axis = doc.get("axis")
-                if _valid_axis(axis):
+                if valid_axis(axis):
                     offer["axis"] = [float(v) for v in axis]
                 return offer
         return None
@@ -1784,6 +1791,7 @@ def migrate(conn: db_mod.Connection) -> None:
 __all__ = [
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
+    "SOURCE_KIND_IMPORT",
     "ImportCommitFailed",
     "ParamValue",
     "VersionConflictError",
@@ -1797,5 +1805,6 @@ __all__ = [
     "param_diff_name",
     "resolve_version_name",
     "sanitize_dimension_phrase",
+    "valid_axis",
     "validate_params",
 ]

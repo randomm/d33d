@@ -26,7 +26,7 @@ from typing import Any, TypedDict
 
 from fastapi.responses import JSONResponse
 
-from d33d.chat_frames import answered_frames
+from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
     FRILL_DECLINE_REPLY,
     boundary_sentence,
@@ -36,7 +36,6 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
-from d33d.versions import NORMAL_LENGTH_TOLERANCE
 
 logger = logging.getLogger(__name__)
 
@@ -234,9 +233,11 @@ def region_edit_preroute(
     row: dict[str, Any] | None,
     part: dict[str, Any] | None,
     instruction: str,
+    *,
     face_normal: tuple[float, float, float] | None,
     start_loop: Callable[..., Any],
     loop_kwargs: dict[str, Any],
+    inflight: set[int],
 ) -> JSONResponse | None:
     """The region-edit route's fill-and-recut pre-route, end to end
     (issue #338, operator decision 5).
@@ -268,10 +269,6 @@ def region_edit_preroute(
     point (as before); this function only releases on the pre-route's
     own no-source failure exits.
     """
-    inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
-    if inflight is None:
-        inflight = set()
-        app.state.design_loop_inflight = inflight
     try:
         fill_result = fill_recut_region_edit(
             app,
@@ -353,7 +350,7 @@ def _handle_acceptance(
             project_id,
         )
         raise
-    app.state.event_sources[project_id] = events
+    register_event_source(app, project_id, events)
     if accepted_offer is not None:
         app.state.versions.set_pending_offer(project_id, None)
     # No inflight.discard here — the event source is registered, so the
@@ -384,9 +381,10 @@ def _handle_answer(
     not render offer buttons for an offer that was never stored).
     """
     is_fresh_trigger = fill_result.get("outcome") == "fresh_offer"
-    app.state.event_sources[project_id] = answered_frames(
-        fill_result["answer"],
-        fill_recut_offer=is_fresh_trigger,
+    register_event_source(
+        app,
+        project_id,
+        answered_frames(fill_result["answer"], fill_recut_offer=is_fresh_trigger),
     )
     return JSONResponse(
         status_code=202,
@@ -396,7 +394,6 @@ def _handle_answer(
 
 __all__ = [
     "FILL_RECUT_NO_NORMAL_REPLY",
-    "NORMAL_LENGTH_TOLERANCE",
     "fill_recut_region_edit",
     "region_edit_preroute",
 ]

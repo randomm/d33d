@@ -1817,7 +1817,15 @@ def test_region_edit_no_part_preroute_returns_none(app_with_projects, monkeypatc
     _pid = _run_async(app_with_projects, _call)
     # Call the pre-route directly with part=None (no part) → None.
     result = fr_mod.region_edit_preroute(
-        app_with_projects, _pid, None, None, "make it bigger", None, _fake_loop, {}
+        app_with_projects,
+        _pid,
+        None,
+        None,
+        "make it bigger",
+        face_normal=None,
+        start_loop=_fake_loop,
+        loop_kwargs={},
+        inflight=set(),
     )
     assert result is None, "preroute must return None (fall through) when no part"
     assert "part" in seen, "the decision was not reached for the no-part project"

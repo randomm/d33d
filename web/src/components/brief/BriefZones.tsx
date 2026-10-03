@@ -27,10 +27,9 @@
 
 import { Fragment } from "react";
 import type { ReactNode } from "react";
-import { rowIdentity } from "./briefRowHelpers";
+import { rowIdentity, MARKS } from "./briefRowHelpers";
 import copy, { mm } from "../../copy";
 import type { DesignStateEntry, PartReportInfo } from "../../lib/api";
-import { MARKS } from "./briefRowHelpers";
 
 /** The threshold the "Your changes" rows fold behind (the same constant
  *  the single list uses). */

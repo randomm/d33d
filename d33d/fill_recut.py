@@ -24,6 +24,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from d33d.versions import valid_axis
+
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
 # of the copy.ts sentence — the parity test in
 # ``tests/test_projects.py`` pins the two-way agreement against
@@ -345,13 +347,17 @@ def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     # components — names the same axis the offer text promised. A
     # chat-route offer has no axis (``None``): the clause is omitted
     # and the instruction is byte-identical to pre-#338 (the chat
-    # route's #332 behaviour is unchanged).
+    # route's #332 behaviour is unchanged). The axis is validated with
+    # the SAME ``valid_axis`` the reader (``d33d.versions.get_pending_offer``)
+    # uses, so a non-finite or non-unit axis (a corrupt row read straight
+    # from storage) yields NO axis clause rather than leaking a malformed
+    # vector into the instruction.
     axis = offer.get("axis")
-    axis_str = (
-        f" (axis {axis[0]:g}, {axis[1]:g}, {axis[2]:g})"
-        if isinstance(axis, (list, tuple)) and len(axis) == 3
-        else ""
-    )
+    if valid_axis(axis):
+        axis = [float(v) for v in axis]
+        axis_str = f" (axis {axis[0]:g}, {axis[1]:g}, {axis[2]:g})"
+    else:
+        axis_str = ""
     return (
         "Fill-and-recut: union a solid over the existing "
         f"{noun} of the imported part, then difference "

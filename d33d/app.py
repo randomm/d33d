@@ -87,6 +87,7 @@ from d33d import db, slicer
 from d33d import fill_recut_region as fill_recut_region_mod
 from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
+from d33d.chat_frames import register_event_source
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
     Catalogue,
@@ -1381,9 +1382,10 @@ def create_app(
             row,
             _part,
             body.instruction,
-            tuple(body.face_normal) if body.face_normal else None,
-            _start_loop,  # the loop adapter (patchable at the module seam)
-            loop_kwargs,
+            face_normal=tuple(body.face_normal) if body.face_normal else None,
+            start_loop=_start_loop,  # patchable at the module seam
+            loop_kwargs=loop_kwargs,
+            inflight=inflight,
         )
         if pre_routed is not None:
             return pre_routed
@@ -1397,7 +1399,7 @@ def create_app(
         # in-flight flag was claimed at the top of the route (before the
         # pre-route — the chat route's contract), so there is no re-add
         # here; the SSE endpoint's ``finally`` is the single release point.
-        app.state.event_sources[project_id] = events
+        register_event_source(app, project_id, events)
 
         return JSONResponse(
             status_code=202,

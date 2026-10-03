@@ -16,9 +16,40 @@ them from here).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-__all__ = ["answered_frames", "model_unconfigured_frames"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "answered_frames",
+    "model_unconfigured_frames",
+    "register_event_source",
+]
+
+
+def register_event_source(app: Any, project_id: int, source: Any) -> None:
+    """Register ``source`` as the project's SSE event source, logging a
+    warning (issue #338) when a STALE source is already registered.
+
+    The design loop, the answer path, and the region-edit pre-route all
+    install a source via ``app.state.event_sources[project_id] = ...``.
+    An unconditional overwrite silently drops a previous, still-live
+    source (e.g. a loop that never drained before a fresh accept). The
+    helper centralises that write so the dropped-source case is at least
+    LOGGED (the operator decision — the single release point is still the
+    SSE endpoint's ``finally``; this only surfaces the overlap).
+    """
+    event_sources = app.state.event_sources
+    previous = event_sources.pop(project_id, None)
+    if previous is not None:
+        logger.warning(
+            "register_event_source for project %s: a previous event "
+            "source was already registered — dropping it in favour of the "
+            "new source (the prior stream may have been left undrained)",
+            project_id,
+        )
+    event_sources[project_id] = source
 
 
 async def model_unconfigured_frames(env_var: str | None = None):
