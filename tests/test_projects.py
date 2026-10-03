@@ -1302,6 +1302,97 @@ def test_fill_recut_no_clears_offer(app_with_projects):
     assert svc.get_pending_offer(pid) is None
 
 
+def test_fill_recut_turn_failure_releases_inflight_flag(app_with_projects, monkeypatch):
+    """Fix-round MEDIUM: the fill-recut pre-route runs AFTER the in-flight
+    claim but BEFORE an event source is registered. When
+    ``fill_recut.fill_recut_turn`` raises, the flag must be released (the
+    stream's ``finally`` never runs) — a leaked flag would 409 every
+    follow-up chat for the project. The test forces the pre-route to
+    raise (monkeypatch), asserts the flag is released, and asserts a
+    follow-up chat is NOT 409-blocked."""
+    import d33d.fill_recut as _fr
+
+    def _boom_turn(*args, **kwargs):
+        raise RuntimeError("forced fill-recut pre-route failure (test)")
+
+    monkeypatch.setattr(_fr, "fill_recut_turn", _boom_turn)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Pre-route Boom"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: the fill-recut pre-route is forced to raise.
+        # The ASGI transport re-raises server exceptions to the client
+        # (no 500 wrapping), so the RuntimeError propagates to here.
+        try:
+            await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+            )
+            status = 202  # unreachable if the pre-route raised
+        except RuntimeError:
+            status = 500
+        # The flag must NOT be held after the pre-route failure.
+        inflight = app_with_projects.state.design_loop_inflight
+        held = pid in inflight
+        # The follow-up chat must NOT 409 — the flag must be released.
+        # The monkeypatch is still in place, so the follow-up will also
+        # raise (the pre-route re-fires) — but NOT with a 409.
+        try:
+            r3 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+            )
+            followup = r3.status_code
+        except RuntimeError:
+            followup = 500  # the forced-raise, NOT a 409
+        return status, pid, held, followup
+
+    status, _pid, held, followup = _run_async(app_with_projects, _call)
+    # The first request errored (the pre-route exception propagated).
+    assert status != 202, status
+    # The in-flight flag was NOT held after the pre-route failure.
+    assert not held, "inflight flag leaked after fill-recut pre-route failure"
+    # The follow-up chat was NOT 409-blocked (the flag was released).
+    assert followup != 409, f"follow-up chat was 409-blocked: {followup}"
+
+
+def test_stored_axis_outside_unit_tolerance_dropped(app_with_projects):
+    """Fix-round MEDIUM: a stored fill-recut offer whose axis is outside
+    the unit-length range (1±NORMAL_LENGTH_TOLERANCE) reads back WITHOUT
+    an axis. A 1e6-unit axis is clearly not a face normal — the wire
+    validator and the reader must agree on rejecting it."""
+    import json as _json
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Huge Axis"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET pending_offer = ? WHERE id = ?",
+            (
+                _json.dumps(
+                    {
+                        "kind": "fill_recut",
+                        "noun": "hole",
+                        "size": 38.0,
+                        "axis": [1e6, 0.0, 0.0],
+                    }
+                ),
+                pid,
+            ),
+        )
+        conn.commit()
+        svc = _svc(app_with_projects)
+        offer = svc.get_pending_offer(pid)
+        return pid, offer
+
+    _pid, offer = _run_async(app_with_projects, _call)
+    assert offer is not None, "the offer must still be returned"
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert "axis" not in offer, f"axis outside unit tolerance leaked: {offer}"
+
+
 def test_fill_recut_move_triggers_move_template(app_with_projects):
     """'move the hole left' triggers the move template (the point-at-the-
     spot copy), not the resize template."""

@@ -25,9 +25,12 @@
  * folded — they always render.
  */
 
+import { Fragment } from "react";
 import type { ReactNode } from "react";
+import { rowIdentity } from "./briefRowHelpers";
 import copy, { mm } from "../../copy";
 import type { DesignStateEntry, PartReportInfo } from "../../lib/api";
+import { MARKS } from "./briefRowHelpers";
 
 /** The threshold the "Your changes" rows fold behind (the same constant
  *  the single list uses). */
@@ -237,18 +240,7 @@ export function BriefZoneLayout({
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
         >
-          <span
-            data-testid="brief-mark"
-            style={{
-              flex: "0 0 auto",
-              display: "inline-block",
-              width: 8,
-              height: 8,
-              borderRadius: "50%",
-              border: "1px solid var(--color-faint)",
-              backgroundColor: "transparent",
-            }}
-          />
+          <span data-testid="brief-mark" style={{ flex: "0 0 auto", display: "inline-block", ...MARKS.measured }} />
           <span
             style={{
               flex: "1 1 auto",
@@ -309,9 +301,9 @@ export function BriefZoneLayout({
           {zones.changeRows
             .filter((r) => !r.collapsed)
             .map((r) => (
-              <div key={`${r.entry.kind}-${r.entry.name}`}>
+              <Fragment key={rowIdentity(r.entry)}>
                 {renderChangeRow(r.entry)}
-              </div>
+              </Fragment>
             ))}
         </div>
       )}
@@ -332,9 +324,9 @@ export function BriefZoneLayout({
             zones.changeRows
               .filter((r) => r.collapsed)
               .map((r) => (
-                <div key={`${r.entry.kind}-${r.entry.name}`}>
+                <Fragment key={rowIdentity(r.entry)}>
                   {renderChangeRow(r.entry)}
-                </div>
+                </Fragment>
               ))}
         </div>
       )}

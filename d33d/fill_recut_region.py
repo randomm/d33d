@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import Any, TypedDict
 
 from fastapi.responses import JSONResponse
 
@@ -59,8 +59,29 @@ FILL_RECUT_NO_NORMAL_REPLY = (
 NORMAL_LENGTH_TOLERANCE = 0.01
 
 #: The pre-route's "handled the turn" decision shape (see
-#: :func:`fill_recut_region_edit`).
-FillResult = dict[str, Any]
+#: :func:`fill_recut_region_edit`). The closed key set:
+#
+#: * ``kind`` — always the literal ``"answer"`` (the caller registers
+#:   ``answer`` as the reply frame's kind);
+#: * ``answer`` — the reply sentence, ``None`` when the acceptance runs
+#:   the design loop (no plain reply); always ``None`` for
+#:   ``run_loop=True`` outcomes, always a string otherwise;
+#: * ``run_loop`` — ``True`` when the caller runs the design loop with
+#:   the ``instruction`` field (only the ``accept`` outcome);
+#: * ``outcome`` — the discriminator ``"accept" | "decline" | "fresh_offer"
+#:   | "no_normal"`` (the caller's dispatch key);
+#: * ``instruction`` — REQUIRED when ``run_loop`` is True (the fill-and-recut
+#:   instruction the caller prefixes to the request text), otherwise ABSENT;
+#: * ``accepted_offer`` — the pending offer the caller clears once the event
+#:   source is registered (restored on a setup failure), present ONLY on the
+#:   ``accept`` outcome.
+class FillResult(TypedDict, total=False):
+    kind: str
+    answer: str | None
+    run_loop: bool
+    outcome: str
+    instruction: str
+    accepted_offer: dict[str, Any]
 
 
 def fill_recut_region_edit(
@@ -303,7 +324,10 @@ def _handle_acceptance(
     flag is released (the source was not registered, so the stream's
     ``finally`` never runs) and the exception is logged + re-raised.
     """
-    accepted_offer = fill_result.pop("accepted_offer", None)
+    # Pop BEFORE the type narrows: `fill_result` is a TypedDict, but the
+    # caller may pass the raw dict (tests, JSON-persisted offers), so the
+    # pop runs on a `dict` view to avoid the TypedDict key-narrowing error.
+    accepted_offer = dict(fill_result).pop("accepted_offer", None)
     instruction = fill_result["instruction"]
     request_text = f"{instruction} {loop_kwargs['request_text']}"
     loop_kwargs = dict(loop_kwargs, user_message=request_text, request_text=request_text)

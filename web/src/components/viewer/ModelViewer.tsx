@@ -419,10 +419,14 @@ export function resolvePointPick(
   // The mm hit point: the scene is built at a 1:1 mm scale, so the
   // raycaster's `point` is already in millimetres (world space).
   const p = hit.point;
-  const hitPointMm: MmPoint | null =
-    p && Number.isFinite(p.x) && Number.isFinite(p.y) && Number.isFinite(p.z)
-      ? { x: p.x, y: p.y, z: p.z }
-      : null;
+  // ONE shared guard: a non-finite component in EITHER the hit point or
+  // the face normal nulls that field (an infinite component must never
+  // reach the region-edit wire — the server would 422 the hit point or
+  // length-check the normal into a null).
+  const allFinite = (pt: { x: number; y: number; z: number } | null | undefined) =>
+    pt !== null && pt !== undefined &&
+    Number.isFinite(pt.x) && Number.isFinite(pt.y) && Number.isFinite(pt.z);
+  const hitPointMm: MmPoint | null = allFinite(p) ? { x: p.x, y: p.y, z: p.z } : null;
 
   // The world-space unit face normal. `face.normal` is in object/local
   // space; transform it by the hit object's world matrix normal (the mesh
@@ -437,7 +441,7 @@ export function resolvePointPick(
       .clone()
       .transformDirection(hit.object.matrixWorld)
       .normalize();
-    if (Number.isFinite(worldNormal.x) && Number.isFinite(worldNormal.y) && Number.isFinite(worldNormal.z)) {
+    if (allFinite(worldNormal)) {
       const len = Math.hypot(worldNormal.x, worldNormal.y, worldNormal.z);
       // `transformDirection` + `normalize` on a finite non-zero vector
       // yields a unit vector; guard the degenerate zero/NaN case.

@@ -56,6 +56,7 @@ from typing import Any
 
 from d33d import db as db_mod
 from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
+from d33d.fill_recut_region import NORMAL_LENGTH_TOLERANCE as _NORMAL_LENGTH_TOLERANCE
 from d33d.project_git import sanitize_commit_message as _sanitize_commit_message
 
 logger = logging.getLogger(__name__)
@@ -358,12 +359,14 @@ def validate_params(params: dict[str, Any]) -> list[str]:
 
 def _valid_axis(value: Any) -> bool:
     """``True`` iff ``value`` is a 3-element list/tuple of finite numbers
-    (the issue #338 fill-recut offer's ``axis`` — the region-edit pick's
-    face normal). ``bool`` is excluded (a ``bool`` is an ``int``); a wrong
-    length, a non-numeric entry, or a non-finite entry (``NaN``/``inf``)
-    is invalid — such an axis is dropped on read (the offer still
-    returns without it) rather than leaking a malformed axis into the
-    fill-and-recut instruction."""
+    of UNIT length (the issue #338 fill-recut offer's ``axis`` — the
+    region-edit pick's face normal). ``bool`` is excluded (a ``bool`` is
+    an ``int``); a wrong length, a non-numeric entry, a non-finite entry
+    (``NaN``/``inf``), or a vector whose length is outside
+    1±``NORMAL_LENGTH_TOLERANCE`` (the wire's face-normal check, shared
+    constant from ``d33d.fill_recut_region``) is invalid — such an axis
+    is dropped on read (the offer still returns without it) rather than
+    leaking a malformed axis into the fill-and-recut instruction."""
     if not isinstance(value, (list, tuple)) or len(value) != 3:
         return False
     for component in value:
@@ -371,7 +374,8 @@ def _valid_axis(value: Any) -> bool:
             return False
         if not math.isfinite(component):
             return False
-    return True
+    length = math.sqrt(sum(component * component for component in value))
+    return abs(length - 1.0) <= _NORMAL_LENGTH_TOLERANCE
 
 
 # ---------------------------------------------------------------------------

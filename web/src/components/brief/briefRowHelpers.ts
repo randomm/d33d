@@ -85,9 +85,10 @@ export function formatValue(value: number | string | boolean | null): string | n
   return String(value);
 }
 
-/** The primary displayed value for a row: `disagrees` shows the MEASURED
- *  value (that is what will print), everything else shows its own value. */
+/** The row's displayed value — the row's own value for every provenance.
+ *  Kept as a helper because the value cell is the one place where a
+ *  default (`?? 0` / `String()`) would re-introduce issue #91's null→0
+ *  defect: callers must pass the result through `formatValue`. */
 export function primaryValue(entry: DesignStateEntry): number | string | boolean | null {
-  if (entry.provenance === "disagrees") return entry.value;
   return entry.value;
 }

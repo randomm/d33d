@@ -94,7 +94,7 @@ export interface VersionTimelineEntry {
    *  `null` for a design-loop version (a null is a design-loop origin,
    *  never a fabricated `"design"`). The SPA uses this to render the
    *  "v1 — Imported {filename}" label (issue #338, decision 8). */
-  source_kind: string | null;
+  source_kind: "import" | null;
 }
 
 /**

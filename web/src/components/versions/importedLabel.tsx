@@ -21,7 +21,7 @@ export function importedVersionLabel(
 ): React.JSX.Element {
   const isImport = version.source_kind === "import";
   const filename = isImport ? (part?.filename ?? null) : null;
-  if (filename !== null && filename !== undefined && filename !== "") {
+  if (filename) {
     return (
       <span data-testid="version-imported-label">
         {copy.history.importedLabelPrefix}

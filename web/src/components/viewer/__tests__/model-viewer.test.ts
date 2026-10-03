@@ -952,4 +952,35 @@ describe('resolvePointPick', () => {
     expect(result.hitPointMm).toBeNull();
     expect(result.faceNormal).toBeNull();
   });
+
+  it('a non-finite hit point component yields null hitPointMm (issue #338 fix round)', () => {
+    // An infinite hit point must never reach the region-edit wire — the
+    // server would 422 the hit point. The guard is one shared check:
+    // a non-finite component in hitPointMm OR faceNormal nulls that field.
+    const raycaster = makeFakeRaycaster([makeHit({ point: { x: Infinity, y: 0, z: 0 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.hit).toBe(true);
+    expect(result.hitPointMm).toBeNull();
+  });
+
+  it('a non-finite face normal component yields null faceNormal (issue #338 fix round)', () => {
+    // A degenerate (infinite) face normal must never reach the wire — the
+    // server's length check would fail. The guard nulls the normal.
+    const raycaster = makeFakeRaycaster([makeHit({ faceNormal: { x: Infinity, y: 0, z: 0 } })]);
+    const camera = {} as unknown as import('three').Camera;
+    const result = resolvePointPick(
+      { x: 100, y: 100 }, 200, 200,
+      camera,
+      raycaster as unknown as import('three').Raycaster,
+      {} as unknown as import('three').Object3D,
+    );
+    expect(result.hit).toBe(true);
+    expect(result.faceNormal).toBeNull();
+  });
 });
