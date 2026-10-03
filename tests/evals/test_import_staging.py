@@ -192,10 +192,11 @@ def test_non_stl_fixture_yields_failure_outcome_other_cases_run(tmp_path: Path):
 def test_stage_fixture_unresolvable_path_yields_error_outcome(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failure in the success-path ``resolve()`` (an OSError from
-    ``Path.resolve``) is that case's staging failure — ``_stage_fixture``
-    returns a clean ``(None, error)`` pair, never an exception, never an
-    aborted run."""
+    """A failure in ``Path.resolve`` (an OSError from the filesystem) is
+    that case's staging failure — the helper's own
+    ``except (ValueError, OSError)`` branch fires and ``_stage_fixture``
+    returns the genuine violation as ``(None, error)``, never an
+    exception, never an aborted run."""
     run = _load_run_module()
 
     cases_dir = _write_cases(
@@ -214,27 +215,18 @@ def test_stage_fixture_unresolvable_path_yields_error_outcome(
     )
     case = load_golden_set(cases_dir, REPO_ROOT)["unresolvable-import"]
 
-    import d33d.evals.fixtures as fixtures_mod
+    _real_resolve = Path.resolve
 
-    # Let the string-level containment checks pass cleanly, then drive
-    # the OSError branch of _stage_fixture's own ``resolve()``.
-    # On macOS, non-strict ``Path.resolve()`` does not raise for
-    # ENAMETOOLONG or missing files (it catches OSError internally and
-    # returns the path as-is), so we monkeypatch the ``resolve`` method
-    # to simulate the OSError that would occur on a platform where
-    # the OS returns ENAMETOOLONG or a similar error.
-    monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: (None, None))
-    monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: (None, None))
+    def _resolve_proxy(self, *args, **kwargs):
+        if "part.stl" in str(self):
+            raise OSError("ENAMETOOLONG: path component too long")
+        return _real_resolve(self, *args, **kwargs)
 
-    def _raise_oserror(self, *args, **kwargs):
-        raise OSError("ENAMETOOLONG: path component too long")
-
-    monkeypatch.setattr(Path, "resolve", _raise_oserror)
-    case.part.fixture = "evals/cases/fixtures/part.stl"
+    monkeypatch.setattr(Path, "resolve", _resolve_proxy)
     part_path, error = run._stage_fixture(REPO_ROOT, case)
     assert part_path is None
     assert error is not None
-    assert "cannot resolve fixture" in error
+    assert "cannot resolve part fixture" in error
 
 
 def test_missing_fixture_yields_failure_outcome(tmp_path: Path):
