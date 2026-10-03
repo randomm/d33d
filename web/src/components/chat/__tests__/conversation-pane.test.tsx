@@ -54,6 +54,7 @@ function makeVersion(overrides: Partial<VersionTimelineEntry> = {}): VersionTime
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: null,
+    source_kind: null,
     ...overrides,
   };
 }

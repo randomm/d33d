@@ -1072,6 +1072,9 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     assert "That hole came with your file" in msg, msg
     assert "Ø38 mm" in msg, msg
     assert "fill it, then cut a Ø38 mm one on the same axis" in msg, msg
+    # The done frame carries the offer flag (the SPA renders the
+    # [Yes, do that] / [Leave it] buttons from it — fresh offer only).
+    assert done[0].get("fill_recut_offer") is True, done
     # The offer was recorded server-side with the kind discriminator.
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
@@ -1079,6 +1082,44 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
+
+
+def test_fill_recut_decline_done_frame_has_no_offer_flag(app_with_projects):
+    """PR #339 fix round (real bug, chat route): a CLEAN DECLINE of the
+    pending fill-recut offer ("Leave it" → FRILL_DECLINE_REPLY) must NOT
+    re-emit the ``fill_recut_offer`` flag on the done frame — the SPA
+    renders the [Yes, do that] / [Leave it] buttons from that field, so
+    a re-emitted flag re-offers an offer that was just declined. (The
+    same bug was already fixed on the region-edit seam in b0edf88; the
+    chat route's ``post_chat`` registered ``fill_recut_offer=True`` for
+    EVERY handled ``fill_recut_turn`` result, including the decline.)
+    The companion fresh-trigger test pins the True case."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Decline No Flag"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "Leave it"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The quiet decline acknowledgement is the reply…
+    assert "Understood" in done[0].get("message", ""), done
+    # …and the offer flag is ABSENT (the buttons must not re-render for
+    # an offer that no longer exists).
+    assert not done[0].get("fill_recut_offer"), done
+    # The offer was cleared.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
 
 
 def test_fill_recut_trigger_own_param_noun_not_triggered(app_with_projects):
@@ -1302,6 +1343,97 @@ def test_fill_recut_no_clears_offer(app_with_projects):
     assert svc.get_pending_offer(pid) is None
 
 
+def test_fill_recut_turn_failure_releases_inflight_flag(app_with_projects, monkeypatch):
+    """Fix-round MEDIUM: the fill-recut pre-route runs AFTER the in-flight
+    claim but BEFORE an event source is registered. When
+    ``fill_recut.fill_recut_turn`` raises, the flag must be released (the
+    stream's ``finally`` never runs) — a leaked flag would 409 every
+    follow-up chat for the project. The test forces the pre-route to
+    raise (monkeypatch), asserts the flag is released, and asserts a
+    follow-up chat is NOT 409-blocked."""
+    import d33d.fill_recut as _fr
+
+    def _boom_turn(*args, **kwargs):
+        raise RuntimeError("forced fill-recut pre-route failure (test)")
+
+    monkeypatch.setattr(_fr, "fill_recut_turn", _boom_turn)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Pre-route Boom"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # First turn: the fill-recut pre-route is forced to raise.
+        # The ASGI transport re-raises server exceptions to the client
+        # (no 500 wrapping), so the RuntimeError propagates to here.
+        try:
+            await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+            )
+            status = 202  # unreachable if the pre-route raised
+        except RuntimeError:
+            status = 500
+        # The flag must NOT be held after the pre-route failure.
+        inflight = app_with_projects.state.design_loop_inflight
+        held = pid in inflight
+        # The follow-up chat must NOT 409 — the flag must be released.
+        # The monkeypatch is still in place, so the follow-up will also
+        # raise (the pre-route re-fires) — but NOT with a 409.
+        try:
+            r3 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+            )
+            followup = r3.status_code
+        except RuntimeError:
+            followup = 500  # the forced-raise, NOT a 409
+        return status, pid, held, followup
+
+    status, _pid, held, followup = _run_async(app_with_projects, _call)
+    # The first request errored (the pre-route exception propagated).
+    assert status != 202, status
+    # The in-flight flag was NOT held after the pre-route failure.
+    assert not held, "inflight flag leaked after fill-recut pre-route failure"
+    # The follow-up chat was NOT 409-blocked (the flag was released).
+    assert followup != 409, f"follow-up chat was 409-blocked: {followup}"
+
+
+def test_stored_axis_outside_unit_tolerance_dropped(app_with_projects):
+    """Fix-round MEDIUM: a stored fill-recut offer whose axis is outside
+    the unit-length range (1±NORMAL_LENGTH_TOLERANCE) reads back WITHOUT
+    an axis. A 1e6-unit axis is clearly not a face normal — the wire
+    validator and the reader must agree on rejecting it."""
+    import json as _json
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Huge Axis"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET pending_offer = ? WHERE id = ?",
+            (
+                _json.dumps(
+                    {
+                        "kind": "fill_recut",
+                        "noun": "hole",
+                        "size": 38.0,
+                        "axis": [1e6, 0.0, 0.0],
+                    }
+                ),
+                pid,
+            ),
+        )
+        conn.commit()
+        svc = _svc(app_with_projects)
+        offer = svc.get_pending_offer(pid)
+        return pid, offer
+
+    _pid, offer = _run_async(app_with_projects, _call)
+    assert offer is not None, "the offer must still be returned"
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert "axis" not in offer, f"axis outside unit tolerance leaked: {offer}"
+
+
 def test_fill_recut_move_triggers_move_template(app_with_projects):
     """'move the hole left' triggers the move template (the point-at-the-
     spot copy), not the resize template."""
@@ -1510,6 +1642,31 @@ def test_fill_recut_trigger_partial_number_not_parsed() -> None:
     assert t is None, t
 
 
+def test_fill_recut_trigger_over_long_instruction_returns_none() -> None:
+    """PR #339 fix round (item 4): an instruction over
+    ``TRIGGER_MAX_INSTRUCTION_CHARS`` (500) returns ``None`` BEFORE any
+    regex runs — a 10 KB unpunctuated blob containing the trigger
+    phrasing bails out in O(1) instead of spinning the unbounded
+    ``[^.!?]`` spans."""
+    import time
+
+    long_msg = "a" * (10 * 1024 - 17) + " make the hole 38 mm"
+    assert len(long_msg) > 10 * 1024
+    t0 = time.monotonic()
+    t = fill_recut.fill_recut_trigger(long_msg)
+    elapsed = time.monotonic() - t0
+    assert t is None, t
+    assert elapsed < 1.0, f"trigger took {elapsed:.3f}s on a 10 KB input"
+    # The bound itself: at the limit the phrasing still triggers, one
+    # char over it does not (the bound is a hard cap, not a suggestion).
+    at_bound = "a" * (500 - len(" make the hole 38 mm")) + " make the hole 38 mm"
+    assert len(at_bound) <= 500
+    assert fill_recut.fill_recut_trigger(at_bound) is not None
+    over_bound = at_bound + "a"
+    assert len(over_bound) > 500
+    assert fill_recut.fill_recut_trigger(over_bound) is None
+
+
 def test_fill_recut_move_with_distance_keeps_number() -> None:
     """A move carrying a distance + direction keeps the user's number and
     direction (the pre-fix move template dropped the distance —
@@ -1574,6 +1731,59 @@ def test_fill_and_recut_instruction_zero_size_no_clause() -> None:
     assert " at 38 mm" in instr_ok, instr_ok
 
 
+def test_fill_and_recut_instruction_invalid_axis_no_clause() -> None:
+    """Issue #338 final fix round: the instruction builder validates the
+    axis with the SAME ``valid_axis`` the reader uses, so a non-finite
+    (``nan``) or non-unit (``1e6``) axis — a malformed offer dict read
+    straight from storage — yields NO axis clause rather than leaking a
+    bad vector into the instruction. A valid unit axis keeps the clause."""
+    import math
+
+    nan_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [math.nan, 0.0, 0.0]}
+    nan_instr = fill_recut.fill_and_recut_instruction(nan_offer)
+    assert "axis " not in nan_instr, nan_instr
+
+    nonunit_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [1e6, 0.0, 0.0]}
+    nonunit_instr = fill_recut.fill_and_recut_instruction(nonunit_offer)
+    assert "axis " not in nonunit_instr, nonunit_instr
+
+    unit_offer = {"kind": "fill_recut", "noun": "hole", "size": 38.0, "axis": [0.0, 0.0, 1.0]}
+    unit_instr = fill_recut.fill_and_recut_instruction(unit_offer)
+    assert " (axis 0, 0, 1)" in unit_instr, unit_instr
+
+
+def test_register_event_source_warns_on_overwrite(caplog) -> None:
+    """Issue #338 final fix round: ``register_event_source`` pops any
+    previously-registered source and LOGS A WARNING when one existed (a
+    stale, still-live source about to be dropped); a first registration
+    is silent. The single release point is still the SSE endpoint's
+    ``finally`` — this only surfaces the overlap."""
+    import types
+
+    from d33d.chat_frames import register_event_source
+
+    state = types.SimpleNamespace(event_sources={})
+    app = types.SimpleNamespace(state=state)
+    caplog.clear()
+
+    # First registration: no previous source, silent.
+    register_event_source(app, 1, "source-a")
+    assert list(caplog.messages) == [], caplog.messages
+
+    # Second registration: a previous source exists → warning.
+    register_event_source(app, 1, "source-b")
+    assert any(
+        "dropping" in m or "previous event" in m for m in caplog.messages
+    ), caplog.messages
+    # The new source is the one now registered.
+    assert state.event_sources[1] == "source-b"
+
+    # A different project id (no prior source) stays silent.
+    caplog.clear()
+    register_event_source(app, 2, "source-c")
+    assert list(caplog.messages) == [], caplog.messages
+
+
 # ---------------------------------------------------------------------------
 # copy.ts two-way parity pins (parse copy.ts, as the existing part-upload
 # detail pins do — the overstated tripwire claim in the old
@@ -1596,6 +1806,16 @@ def test_unsettled_part_reply_equals_copy_ts() -> None:
     m = re.search(r'partUnitsUnsettled =\s*"([^"]+)"', _copy_ts_text())
     assert m is not None, "copy.ts must define partUnitsUnsettled"
     assert fill_recut.UNSETTLED_PART_REPLY == m.group(1)
+
+
+def test_unsettled_part_reply_in_fill_recut_all() -> None:
+    """Item 4 (MEDIUM): ``UNSETTLED_PART_REPLY`` is in ``fill_recut.__all__``
+    (``d33d.projects`` references it by name — a missing ``__all__`` entry
+    would break ``from d33d.fill_recut import *`` consumers)."""
+    assert "UNSETTLED_PART_REPLY" in fill_recut.__all__, (
+        "UNSETTLED_PART_REPLY missing from fill_recut.__all__"
+    )
+    assert hasattr(fill_recut, "UNSETTLED_PART_REPLY")
 
 
 def test_fill_recut_decline_reply_equals_copy_ts() -> None:
@@ -1673,3 +1893,384 @@ def test_design_contract_pins_fill_recut_deck_key() -> None:
     ).read_text("utf-8")
     assert "fillRecut" in src
     assert "partUnitsUnsettled" in src
+
+
+def _copy_ts_no_normal_value() -> str:
+    """Extract the copy.ts ``fillRecut.noNormal`` string literal (the
+    #338 parity pin reads it from the source — the web strings live in
+    TypeScript, the Python test reads the literal; the literal is
+    double-quoted, so a raw single-quoted substring read between the
+    quotes is exact — the line is a plain string, no escapes)."""
+    import re
+    from pathlib import Path
+
+    copy_src = (
+        Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r'noNormal:\s*\n\s*"([^"]*)"', copy_src)
+    assert m is not None, "copy.ts fillRecut.noNormal literal not found"
+    return m.group(1)
+
+
+def test_design_contract_pins_fill_recut_no_normal_reply():
+    """The backend's FILL_RECUT_NO_NORMAL_REPLY is BYTE-IDENTICAL to the
+    copy.ts noNormal sentence (issue #338, decision 6 parity pin —
+    full-string equality: a drift in EITHER copy silently breaks the
+    SPA/backend copy agreement, so the two-way pin is exact)."""
+    from d33d.fill_recut_region import FILL_RECUT_NO_NORMAL_REPLY
+
+    no_normal = _copy_ts_no_normal_value()
+    assert no_normal == FILL_RECUT_NO_NORMAL_REPLY, (
+        f"copy.ts noNormal:\n  {no_normal!r}\n"
+        f"FILL_RECUT_NO_NORMAL_REPLY:\n  {FILL_RECUT_NO_NORMAL_REPLY!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Issue #338 — chat vs region-edit pre-route PARITY:
+# projects.post_chat and app.create_region_edit must handle the four
+# fill-recut outcomes identically (fresh offer / clean decline /
+# acceptance / setup failure on acceptance) — one test per outcome, both
+# routes driven in it, reusing this file's fixtures (app_with_projects,
+# _set_part_columns, _run_async, _svc) and the region-edit body shape from
+# tests/test_app.py (minimal valid 1x1 PNG + required wire fields).
+# ---------------------------------------------------------------------------
+
+#: A minimal valid 1x1 PNG, base64 (the same test PNG
+#: ``tests/test_app.py``'s ``_region_edit_body`` uses).
+_PARITY_TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _parity_region_edit_body(instruction: str, face_normal: tuple[float, float, float] | None = None) -> dict[str, Any]:
+    """A minimal valid region-edit wire body (the same shape
+    ``tests/test_app.py``'s ``_region_edit_body`` posts — the parity test
+    sends the face normal so the region route stores an axis, matching the
+    chat route's offer shape for the fresh-trigger case)."""
+    body: dict[str, Any] = {
+        "module_ids": [],
+        "view_id": "front",
+        "marked_png_base64": _PARITY_TINY_PNG_BASE64,
+        "point": {"x": 300.0, "y": 200.0},
+        "instruction": instruction,
+    }
+    if face_normal is not None:
+        body["face_normal"] = list(face_normal)
+    return body
+
+
+def _parity_run_loop(app, pid: int) -> list[tuple[str, Any]]:
+    """Drive a registered event source to its terminal frame, returning
+    the collected frames (a small local copy of this file's
+    ``_drive_event_source`` pattern — the parity tests below compare the
+    two routes' frames directly). Drives up to 2 frames (the ``progress``
+    + ``done`` pair) so a source that emits both is fully consumed."""
+
+    async def _run() -> list[tuple[str, Any]]:
+        source = app.state.event_sources.get(pid)
+        frames: list[tuple[str, Any]] = []
+        if source is None:
+            return frames
+        for _ in range(2):  # progress + done
+            try:
+                event, data = await source.__anext__()
+            except StopAsyncIteration:
+                break
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    return _run()
+
+
+def _parity_offer(app, pid: int) -> dict[str, Any] | None:
+    """Read the project's pending offer, tolerating a closed DB handle
+    (reconnect via :func:`_svc`'s pattern) — the parity tests read the
+    offer after ``_run_async`` teardown closed the app's connection."""
+    svc = _svc(app)
+    return svc.get_pending_offer(pid)
+
+
+def test_fill_recut_parity_fresh_offer_no_loop(app_with_projects, monkeypatch):
+    """A fresh trigger stores the SAME offer on BOTH routes and runs NO
+    loop: ``post_chat`` and the region-edit route agree on the stored
+    offer, the boundary-sentence answer frame, and zero loop calls."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        conn = app_with_projects.state.conn
+
+        def _read_pending(pid: int) -> dict[str, Any] | None:
+            """Read the project's raw pending-offer JSON (pre-normalization
+            — the region route stores an extra ``axis`` the #250 reader
+            does not surface, so the raw row is the parity comparison
+            point)."""
+            row = conn.raw.execute(
+                "SELECT pending_offer FROM projects WHERE id = ?", (pid,)
+            ).fetchone()
+            raw = row["pending_offer"]
+            if not raw:
+                return None
+            import json as _json_mod
+
+            return _json_mod.loads(raw)
+
+        # Chat route.
+        r2 = await client.post("/api/projects", json={"name": "Parity Chat"})
+        chat_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        await client.post(
+            f"/api/projects/{chat_pid}/chat",
+            json={"message": "make the big hole 38 mm"},
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        _release_inflight(app_with_projects, chat_pid)
+        # Region-edit route (the SAME instruction).
+        r3 = await client.post("/api/projects", json={"name": "Parity Region"})
+        region_pid = r3.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        r5 = await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body(
+                "make the big hole 38 mm",
+                face_normal=(0.0, 1.0, 0.0),
+            ),
+        )
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        chat_offer_raw = _read_pending(chat_pid)
+        region_offer_raw = _read_pending(region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames, r5.status_code, chat_offer_raw, region_offer_raw
+
+    _chat_pid, _region_pid, chat_frames, region_frames, region_status, chat_offer, region_offer = _run_async(
+        app_with_projects, _call
+    )
+    assert region_status == 202, region_status
+    # The loop ran NEITHER route.
+    assert not calls, f"the design loop was called: {calls}"
+    # The SAME offer was stored server-side on both routes (compared on
+    # the raw stored row — the region route's extra ``axis`` is offer
+    # state the #250 reader does not surface, but both stores carry the
+    # same discriminator / noun / size, and the region route adds the
+    # axis the pick's normal carried).
+    assert chat_offer is not None and region_offer is not None
+    for key in ("kind", "noun", "size"):
+        assert chat_offer[key] == region_offer[key] == {"kind": "fill_recut", "noun": "hole", "size": 38.0}[key], (chat_offer, region_offer)
+    # The SAME boundary-sentence answer frame on both routes.
+    chat_done = [d for e, d in chat_frames if e == "done"]
+    region_done = [d for e, d in region_frames if e == "done"]
+    assert chat_done and region_done
+    assert chat_done[0].get("kind") == "answer"
+    assert region_done[0].get("kind") == "answer"
+    assert chat_done[0]["message"] == region_done[0]["message"]
+    assert "Ø38 mm" in chat_done[0]["message"]
+
+
+def test_fill_recut_parity_clean_decline_clears_offer(app_with_projects, monkeypatch):
+    """A clean decline on a LIVE offer clears the offer on BOTH routes,
+    replies with the SAME quiet acknowledgement, and runs NO loop on
+    either."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        # Chat route: seed the LIVE offer, decline.
+        r = await client.post("/api/projects", json={"name": "Parity No Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{chat_pid}/chat", json={"message": "no"}
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        # Region-edit route: seed the SAME LIVE offer, decline.
+        r2 = await client.post("/api/projects", json={"name": "Parity No Region"})
+        region_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body("no"),
+        )
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames
+
+    chat_pid, region_pid, chat_frames, region_frames = _run_async(
+        app_with_projects, _call
+    )
+    # Neither route ran the loop.
+    assert not calls, f"the design loop was called: {calls}"
+    # Both offers were cleared.
+    assert _parity_offer(app_with_projects, chat_pid) is None
+    assert _parity_offer(app_with_projects, region_pid) is None
+    # The SAME quiet acknowledgement on both routes.
+    chat_done = [d for e, d in chat_frames if e == "done"]
+    region_done = [d for e, d in region_frames if e == "done"]
+    assert chat_done and region_done
+    assert chat_done[0].get("kind") == "answer"
+    assert region_done[0].get("kind") == "answer"
+    assert chat_done[0]["message"] == region_done[0]["message"]
+    assert "Understood" in chat_done[0]["message"]
+
+
+def test_fill_recut_parity_acceptance_runs_loop(app_with_projects, monkeypatch):
+    """An acceptance on a LIVE offer runs the loop on BOTH routes with
+    the SAME fill-and-recut instruction in the request text, and clears
+    the offer on both."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        # Chat route: seed the LIVE offer, accept.
+        r = await client.post("/api/projects", json={"name": "Parity Yes Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{chat_pid}/chat", json={"message": "yes"}
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        # Region-edit route: seed the SAME LIVE offer, accept.
+        r2 = await client.post("/api/projects", json={"name": "Parity Yes Region"})
+        region_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r4 = await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body("yes"),
+        )
+        status4 = r4.status_code
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames, status4
+
+    chat_pid, region_pid, _chat_frames, _region_frames, status4 = _run_async(
+        app_with_projects, _call
+    )
+    assert status4 == 202, status4
+    # The loop ran EXACTLY twice (one per route — both routes' acceptance
+    # calls go through ``d33d.design_loop_events.run_design_loop_with_events``,
+    # the spy's target). The fill-and-recut instruction is in both
+    # request texts (the SAME instruction — the offer's noun/size are
+    # server-side state, never re-parsed).
+    assert len(calls) == 2, f"expected 2 loop calls, got {len(calls)}"
+    for c in calls:
+        assert "Fill-and-recut:" in c["request_text"], c["request_text"]
+        assert "hole" in c["request_text"]
+        assert "38" in c["request_text"]
+    # Both offers were cleared (consumed).
+    assert _parity_offer(app_with_projects, chat_pid) is None
+    assert _parity_offer(app_with_projects, region_pid) is None
+
+
+def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monkeypatch):
+    """A setup failure on acceptance restores the offer on BOTH routes
+    (the #332 "lost yes" contract), releases the in-flight flag, and
+    surfaces the error — the two routes never diverge on the offer's
+    survival."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    def _boom_loop(*args, **kwargs):
+        raise RuntimeError("forced loop setup failure (test)")
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        results: dict[str, Any] = {}
+        # Chat route: seed the LIVE offer, accept — setup must fail.
+        r = await client.post("/api/projects", json={"name": "Parity Boom Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        try:
+            r2 = await client.post(
+                f"/api/projects/{chat_pid}/chat", json={"message": "yes"}
+            )
+            results["chat_status"] = r2.status_code
+        except RuntimeError:
+            results["chat_status"] = 500  # the ASGI transport re-raised
+        # Region-edit route: seed the SAME LIVE offer, accept — same failure.
+        r3 = await client.post("/api/projects", json={"name": "Parity Boom Region"})
+        region_pid = r3.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        try:
+            r4 = await client.post(
+                f"/api/projects/{region_pid}/region-edits",
+                json=_parity_region_edit_body("yes"),
+            )
+            results["region_status"] = r4.status_code
+        except RuntimeError:
+            results["region_status"] = 500
+        results["chat_pid"] = chat_pid
+        results["region_pid"] = region_pid
+        return results
+
+    results = _run_async(app_with_projects, _call)
+    # Both requests errored (the setup exception propagated — no 202).
+    assert results["chat_status"] != 202, results
+    assert results["region_status"] != 202, results
+    # Neither project is 409-blocked — the in-flight flag was released.
+    inflight = app_with_projects.state.design_loop_inflight
+    assert results["chat_pid"] not in inflight
+    assert results["region_pid"] not in inflight
+    # The SAME accepted offer was RESTORED on both routes (the acceptance
+    # survives the failed setup — never lost). Compare the reader's
+    # normalized fields (the restore carries the full accepted-offer dict;
+    # ``get_pending_offer`` surfaces ``kind``/``noun``/``size``).
+    chat_offer = _parity_offer(app_with_projects, results["chat_pid"])
+    region_offer = _parity_offer(app_with_projects, results["region_pid"])
+    assert chat_offer is not None, "the accepted fill_recut offer was lost (chat)"
+    assert region_offer is not None, "the accepted fill_recut offer was lost (region)"
+    assert chat_offer == region_offer == {
+        "kind": "fill_recut",
+        "noun": "hole",
+        "size": 38.0,
+    }

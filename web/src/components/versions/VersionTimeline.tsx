@@ -12,7 +12,8 @@
  * output — the same invariant the backend asserts).
  */
 
-import type { VersionTimelineEntry } from "../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
+import { importedVersionLabel } from "./importedLabel";
 
 interface VersionTimelineProps {
   versions: VersionTimelineEntry[];
@@ -24,6 +25,11 @@ interface VersionTimelineProps {
   onPin?: (versionId: number, pinned: boolean) => void;
   /** Called with the version id (compare-select). */
   onCompareSelect?: (versionId: number) => void;
+  /** The project's imported part (design-state envelope's `part`). When
+   *  present, the v1 entry whose `source_kind` is `import` renders
+   *  "v1 — Imported {filename}" (issue #338, decision 8). `null`/absent
+   *  leaves every entry on its existing `name`. */
+  part?: PartReportInfo | null;
 }
 
 // The "No versions yet" empty-state branch that lived here is gone (issue #117,
@@ -37,6 +43,7 @@ export function VersionTimeline({
   onRestore,
   onPin,
   onCompareSelect,
+  part,
 }: VersionTimelineProps) {
   return (
     <section className="version-timeline" data-testid="version-timeline" aria-label="Version timeline">
@@ -61,7 +68,7 @@ export function VersionTimeline({
               )}
               <div className="timeline-main">
                 <span className="timeline-name" data-testid={`timeline-name-${v.id}`}>
-                  {v.name}
+                  {importedVersionLabel(v, part)}
                 </span>
                 {v.diff_count > 0 && (
                   <span className="timeline-diff-badge" data-testid={`timeline-diff-${v.id}`}>

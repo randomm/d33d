@@ -159,6 +159,22 @@ export const brief = {
    *  agreeing param rows are hidden behind it. Singular-aware. */
   moreParameters: (count: number): string =>
     `${count} more parameter${count === 1 ? "" : "s"}`,
+
+  /** The zone header for "The part you brought" (issue #338, operator
+   *  decision 1). Rendered only when the design-state `part` block is
+   *  present. */
+  partBroughtHeader: "The part you brought",
+  /** The zone header for "Your changes" (issue #338, operator decision 1).
+   *  Rendered only when the zone has at least one row. */
+  yourChangesHeader: "Your changes",
+  /** The note under the W/D/H rows of "The part you brought" (issue #338,
+   *  operator decision 1). {units} is the settled unit (mm / cm / inch).
+   *  Rendered only for a settled part. */
+  partBroughtNote: (units: string): string =>
+    `Measured, in ${units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
+  /** The W/D/H value cell when the part's units are unsettled (issue #338).
+   *  Never a number, never 0. */
+  waitingOnUnits: "waiting on units",
 } as const;
 
 export const passCard = {
@@ -415,6 +431,10 @@ export const region = {
   missedGeometry: "Click on the model to point at a part.",
   notLoaded: "Model not loaded yet — click again once it appears.",
   pending: "A point is selected. Finish in the bar on the model, or press Esc.",
+  /** The chip shown when the pick landed on an imported part (issue #338):
+   *  the point is on the part the user brought, not on a generated module.
+   *  The mm hit point that follows is in the mono face. */
+  onImportedPart: "on the part you brought",
 } as const;
 
 export const history = {
@@ -450,6 +470,10 @@ export const history = {
   /** The pinned variants' mark: which one was kept, dimmed — the version's
    *  own message is the why (no separate pin_reason field exists). */
   pinnedMark: (version: string): string => `${version} · pinned`,
+  /** The prefix of the imported-part version label (issue #338,
+   *  decision 8): "v1 — Imported {filename}" — the version slot +
+   *  dash + the word, before the mono filename span. */
+  importedLabelPrefix: "v1 — Imported ",
   /** The riser graph's legend entries. The graph itself is the version graph
    *  the timeline returns: parent edges (the main line) and restored_from
    *  edges (rise-backs). */
@@ -690,6 +714,10 @@ export const shell = {
   send: "Send",
   export: "Export 3MF",
   exportVersion: (version: string): string => `Export ${version}`,
+  /** The static lead-in for the export note (issue #338). The component
+   *  appends the filename in its own mono `<span>` (never interpolated into
+   *  a sentence string) so a hostile filename stays inert text. */
+  exportContainsGeometryPrefix: "Contains geometry from ",
   /** Only rendered once validation has actually passed. Never a default. */
   validated: (checks: number): string =>
     `Watertight · in millimetres · ${checks} checks passed`,
@@ -795,6 +823,23 @@ export const fillRecut = {
   /** The quiet decline acknowledgement (a clean "no" on the pending
    *  fill-recut offer). */
   declined: "Understood — leaving the part as it is.",
+
+  /** The no-normal degradation reply (issue #338, decision 6): a region
+   *  edit that triggers the boundary WITHOUT a face normal gets NO
+   *  axis-dependent offer — the reply says the feature came with the
+   *  file, then this sentence. No offer is stored, no buttons, no loop.
+   *  The backend's FRILL_NO_NORMAL_REPLY carries the same sentence
+   *  (the parity pin in tests/test_projects.py). */
+  noNormal:
+    "That feature came with your file, so I can't resize it directly — the file has no parameters for me to change. I can't tell that feature's axis from where you pointed — pin a flat face on it and I'll offer to fill it and recut it on the same axis.",
+
+  /** The fill-and-recut offer's acceptance button (issue #338, decision
+   *  7): sends the acceptance through the existing chat offer path, which
+   *  runs the loop. */
+  offerYes: "Yes, do that",
+  /** The fill-and-recut offer's decline button (issue #338, decision 7):
+   *  clears the pending offer, no loop. */
+  offerNo: "Leave it",
 } as const;
 
 /**

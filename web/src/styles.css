@@ -790,4 +790,49 @@ button.chat-send-btn:disabled {
   color: var(--color-blocked);
 }
 
+/* The export note (issue #338): "contains geometry from {filename}" under
+   the button, shown only when the project has a part. The filename renders
+   in the mono face — numbers and filenames in mono, prose in the UI face. */
+.export-3mf-note {
+  margin-top: var(--space-2);
+  font-size: var(--font-size-xs);
+  color: var(--color-muted);
+}
+.export-3mf-note .mono-face {
+  font-family: var(--font-mono);
+}
 
+
+
+/* Fill-and-recut offer buttons (issue #338, decision 7): [Yes, do that] /
+   [Leave it] on the boundary-sentence answer. Colours come from the
+   --color-* tokens — the primary (Yes) uses the same live accent the
+   send button does, the secondary (Leave it) a recessed inset with the
+   hairline border — so they match the other primary/secondary buttons
+   (no inline colours, and never the marker). The pending-driven
+   opacity/cursor stay inline in the component. */
+.fill-recut-offer-btn {
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  font-family: var(--font-ui);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+.fill-recut-offer-btn--yes {
+  margin: 8px 8px 0 0;
+  background-color: var(--color-live);
+  color: var(--color-canvas);
+}
+.fill-recut-offer-btn--yes:hover:not(:disabled) {
+  background-color: var(--color-muted);
+}
+.fill-recut-offer-btn--no {
+  margin: 8px 0 0 0;
+  background-color: var(--color-recess);
+  border-color: var(--color-hairline);
+  color: var(--color-fg);
+}
+.fill-recut-offer-btn--no:hover:not(:disabled) {
+  background-color: var(--color-panel);
+}

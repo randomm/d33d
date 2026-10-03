@@ -472,6 +472,21 @@ def create_versions_router() -> APIRouter:
         # never a fabricated empty object; the SPA uses the absence to
         # decide whether to render the import screens).
         part = part_public(project_row) if project_row.get("part_filename") else None
+        if part is not None:
+            # The part block's ``bbox_mm`` (issue #338): [w, d, h] in mm,
+            # derived from the SETTLED unit — or ``None`` while the unit
+            # is unsettled (a file-unit bbox is not a meaningful mm
+            # measurement until the unit is settled; the Brief then shows
+            # "waiting on units", never a confident number). The helper
+            # reads the v1 row (the import's own measurement — its
+            # persisted bbox is the file bbox × scale, written by the
+            # import / settle — the LATEST version's bbox is the previous
+            # candidate's own extents once a v2+ exists and would be the
+            # wrong number) with the same finite/positive guards as
+            # ``part_envelope_with_bbox``.
+            from d33d.part_http import part_bbox_mm
+
+            part["bbox_mm"] = part_bbox_mm(project_row, svc.conn)
         # history_missing (issue #316): the repo directory is absent → the
         # saved design history is gone. Same predicate as
         # storage.repo_present (via the shared repo_present helper) —

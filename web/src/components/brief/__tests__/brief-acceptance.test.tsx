@@ -12,7 +12,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { Brief } from "../Brief";
 import copy from "../../../copy";
-import type { DesignStateEntry } from "../../../lib/api";
+import type { DesignStateEntry, PartReportInfo } from "../../../lib/api";
 
 const stated = (name: string, value: number): DesignStateEntry => ({
   name,
@@ -95,6 +95,25 @@ const axisStated = (axis: "W" | "D" | "H", value: number): DesignStateEntry => (
 });
 
 const baseProps = { isChip: false, inset: 24, conversationCollapsed: false } as const;
+
+/** A settled imported part (issue #338): the two-zone Brief reads W/D/H
+ *  from `bbox_mm` (settled-unit mm) and shows the part-zone note. */
+const settledPart = (): PartReportInfo => ({
+  filename: "motor-mount.stl",
+  format: "stl",
+  unit: "mm",
+  unit_status: "settled",
+  bbox_mm: [60, 45, 80],
+  scale: 1,
+  report: {
+    triangles: 12,
+    bodies: 1,
+    watertight: true,
+    gaps_closed: 0,
+    bbox_file_units: [60, 45, 80],
+  },
+  options: null,
+});
 
 describe("Brief — provenance states", () => {
   it("an unknown parameter renders the not-established control and NO number", () => {
@@ -691,5 +710,80 @@ describe("Brief — live pin collapses to chip", () => {
     );
     expect(screen.getByTestId("brief-panel").getAttribute("data-mode")).toBe("chip");
     expect(screen.getByTestId("brief-chip-resolved").textContent).toContain("60.0");
+  });
+});
+
+describe("Brief — two-zone split (issue #338)", () => {
+  // The zone SPLIT logic is pinned in brief-zones.test.tsx (the module
+  // itself). These cases pin the two-zone shape at the ACCEPTANCE surface
+  // the issue names: the part's W/D/H rows (measured provenance, mono)
+  // survive the MAX_LIST_ROWS collapse, and no-part projects render exactly
+  // as today.
+
+  it("a project with an imported part shows 'The part you brought' W/D/H in mono, measured provenance", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34), stated("wall_gap", 8)]}
+        part={settledPart()}
+      />,
+    );
+    // The part-zone header renders.
+    expect(screen.getByTestId("brief-zone-part-header").textContent).toBe(
+      "The part you brought",
+    );
+    // The W/D/H part rows render in measured provenance (the hollow ring).
+    for (const axis of ["W", "D", "H"] as const) {
+      const row = screen.getByTestId(`brief-part-row-${axis}`);
+      expect(row.getAttribute("data-provenance")).toBe("measured");
+    }
+    // The values come from part.bbox_mm, in mm and mono.
+    expect(
+      screen.getByTestId("brief-part-row-W").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("60.0\u202Fmm");
+    expect(
+      screen.getByTestId("brief-part-row-D").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("45.0\u202Fmm");
+    expect(
+      screen.getByTestId("brief-part-row-H").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("80.0\u202Fmm");
+  });
+
+  it("the part's W/D/H rows survive the MAX_LIST_ROWS collapse (never folded)", () => {
+    // 8 change rows (> 7 → the changes zone folds) + a settled part. The
+    // part rows must ALWAYS be visible; only the changes zone folds.
+    const entries: DesignStateEntry[] = Array.from(
+      { length: 8 },
+      (_, i) => stated(`p${i}`, 10 + i),
+    );
+    render(<Brief {...baseProps} entries={entries} part={settledPart()} />);
+    // All three part rows remain visible.
+    expect(screen.getByTestId("brief-part-row-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-part-row-D")).toBeTruthy();
+    expect(screen.getByTestId("brief-part-row-H")).toBeTruthy();
+    // The changes zone folds behind its count disclosure.
+    expect(screen.getByTestId("brief-groups-count").textContent).toBe(
+      copy.brief.moreParameters(8),
+    );
+    // The first change row is hidden (folded) — the part rows were not.
+    expect(screen.queryByTestId("brief-row-p0")).toBeNull();
+  });
+
+  it("no-part projects render exactly as today: a single list, no zone headers", () => {
+    // A W/D/H axis row on a no-part project is part of the SINGLE list — it
+    // is NOT a separate part zone, and no zone header renders.
+    render(
+      <Brief
+        {...baseProps}
+        entries={[axisStated("W", 60), axisStated("D", 45), stated("rod_bore", 34)]}
+        part={null}
+      />,
+    );
+    expect(screen.queryByTestId("brief-zone-part-header")).toBeNull();
+    expect(screen.queryByTestId("brief-zone-changes-header")).toBeNull();
+    // The rows render in the single list.
+    expect(screen.getByTestId("brief-row-axis-W")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-axis-D")).toBeTruthy();
+    expect(screen.getByTestId("brief-row-rod_bore")).toBeTruthy();
   });
 });

@@ -327,16 +327,38 @@ export interface ScreenPoint {
   y: number;
 }
 
+/** A point in the scene's model space — millimetres (the viewer builds
+ *  the scene at a 1:1 mm scale, so the raycaster's hit point is already
+ *  in mm). */
+export interface MmPoint {
+  x: number;
+  y: number;
+  z: number;
+}
+
 /** Result of resolving a single click against the loaded model meshes.
  *  `hit` is true only when the ray landed on geometry; `module` is the
  *  named module under the click when one resolves (a bonus — its absence
- *  never disables selection, e.g. a streamed unnamed STL). */
+ *  never disables selection, e.g. a streamed unnamed STL).
+ *
+ *  `hitPointMm` and `faceNormal` are the millimetre-space grounding the
+ *  region-edit wire carries (issue #338): the mm hit point and the
+ *  world-space unit face normal under the click. Both are `null` when the
+ *  pick does not land on a face with a usable normal — an edge-only hit or
+ *  a degenerate (zero / non-finite) normal. A normal is NEVER fabricated:
+ *  a missing or degenerate normal is reported as `null`, never a guessed
+ *  axis. */
 export interface PointPickResult {
   /** Whether the click landed on any loaded geometry. */
   hit: boolean;
   /** The named module identifier under the click, or null when the
    *  nearest hit is unnamed (streamed STL) or nothing was hit. */
   module: string | null;
+  /** The millimetre-space hit point, or null when nothing was hit. */
+  hitPointMm: MmPoint | null;
+  /** The world-space unit face normal under the click, or null for an
+   *  edge-only hit or a degenerate normal (never fabricated). */
+  faceNormal: MmPoint | null;
 }
 
 /**
@@ -358,6 +380,14 @@ export interface PointPickResult {
  *      named-module GLB path), else null. Resolution is via `object.name`
  *      only — never per-face/per-vertex colour (the server-side
  *      OpenSCAD colour-ID pass is dead per spec).
+ *   5. `hitPointMm` is the nearest hit's `point` — the scene is built at
+ *      a 1:1 mm scale, so the raycaster's hit point is already in mm.
+ *   6. `faceNormal` is the nearest hit's `face.normal` converted to
+ *      world space (the mesh may be rotated, e.g. the Z-up → Y-up turn).
+ *      A `null` face (an edge-only hit) or a degenerate normal (zero /
+ *      non-finite / non-unit) yields `null` — a normal is NEVER
+ *      fabricated; a missing normal is reported as `null`, never a
+ *      guessed axis.
  *
  * To let the user "hide the front module and re-select" (the spec's
  * documented remedy for occlusion, since server-side disocclusion is a
@@ -379,12 +409,49 @@ export function resolvePointPick(
   raycaster.setFromCamera(new THREE.Vector2(ndcX, ndcY), camera);
 
   const hits = raycaster.intersectObjects([sceneRoot], true);
-  if (hits.length === 0) return { hit: false, module: null };
+  if (hits.length === 0) return { hit: false, module: null, hitPointMm: null, faceNormal: null };
 
   // Nearest-first is three.js's contract for intersectObjects — only the
   // first (nearest) hit is "visible" at this pixel.
-  const name = hits[0].object.name;
-  return { hit: true, module: name || null };
+  const hit = hits[0];
+  const name = hit.object.name;
+
+  // The mm hit point: the scene is built at a 1:1 mm scale, so the
+  // raycaster's `point` is already in millimetres (world space).
+  const p = hit.point;
+  // ONE shared guard: a non-finite component in EITHER the hit point or
+  // the face normal nulls that field (an infinite component must never
+  // reach the region-edit wire — the server would 422 the hit point or
+  // length-check the normal into a null).
+  const allFinite = (pt: { x: number; y: number; z: number } | null | undefined) =>
+    pt !== null && pt !== undefined &&
+    Number.isFinite(pt.x) && Number.isFinite(pt.y) && Number.isFinite(pt.z);
+  const hitPointMm: MmPoint | null = allFinite(p) ? { x: p.x, y: p.y, z: p.z } : null;
+
+  // The world-space unit face normal. `face.normal` is in object/local
+  // space; transform it by the hit object's world matrix normal (the mesh
+  // is rotated Z-up → Y-up, so a local normal is not a world normal).
+  // A `null` face is an edge-only hit → no normal. A degenerate normal
+  // (zero / non-finite / not unit within tolerance) is never fabricated —
+  // it is reported as null, not a guessed axis.
+  let faceNormal: MmPoint | null = null;
+  const localNormal = hit.face ? hit.face.normal : null;
+  if (localNormal) {
+    const worldNormal = localNormal
+      .clone()
+      .transformDirection(hit.object.matrixWorld)
+      .normalize();
+    if (allFinite(worldNormal)) {
+      const len = Math.hypot(worldNormal.x, worldNormal.y, worldNormal.z);
+      // `transformDirection` + `normalize` on a finite non-zero vector
+      // yields a unit vector; guard the degenerate zero/NaN case.
+      if (len > 0) {
+        faceNormal = { x: worldNormal.x, y: worldNormal.y, z: worldNormal.z };
+      }
+    }
+  }
+
+  return { hit: true, module: name || null, hitPointMm, faceNormal };
 }
 
 // ---------------------------------------------------------------------------

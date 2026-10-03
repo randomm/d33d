@@ -16,9 +16,40 @@ them from here).
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-__all__ = ["answered_frames", "model_unconfigured_frames"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "answered_frames",
+    "model_unconfigured_frames",
+    "register_event_source",
+]
+
+
+def register_event_source(app: Any, project_id: int, source: Any) -> None:
+    """Register ``source`` as the project's SSE event source, logging a
+    warning (issue #338) when a STALE source is already registered.
+
+    The design loop, the answer path, and the region-edit pre-route all
+    install a source via ``app.state.event_sources[project_id] = ...``.
+    An unconditional overwrite silently drops a previous, still-live
+    source (e.g. a loop that never drained before a fresh accept). The
+    helper centralises that write so the dropped-source case is at least
+    LOGGED (the operator decision — the single release point is still the
+    SSE endpoint's ``finally``; this only surfaces the overlap).
+    """
+    event_sources = app.state.event_sources
+    previous = event_sources.pop(project_id, None)
+    if previous is not None:
+        logger.warning(
+            "register_event_source for project %s: a previous event "
+            "source was already registered — dropping it in favour of the "
+            "new source (the prior stream may have been left undrained)",
+            project_id,
+        )
+    event_sources[project_id] = source
 
 
 async def model_unconfigured_frames(env_var: str | None = None):
@@ -48,6 +79,7 @@ async def answered_frames(
     project_id: int | None = None,
     app: Any = None,
     confirm_ack: dict[str, str] | None = None,
+    fill_recut_offer: bool = False,
 ):
     """The answer-path SSE stream (issue #249): ONE terminal ``done``
     frame whose ``message`` is the answer text and which carries the
@@ -61,6 +93,13 @@ async def answered_frames(
     sentence). The question-answer path passes ``None`` (no ``confirm_*``
     keys, byte-identical).
 
+    ``fill_recut_offer`` (issue #338, decision 7): when True, the done
+    frame carries the additive ``fill_recut_offer`` field — the SPA's
+    ``App.tsx`` renders the boundary sentence with the [Yes, do that] /
+    [Leave it] buttons (the offer is stored server-side as the pending
+    offer; the buttons send the acceptance/decline through the existing
+    chat offer path). Default False (byte-identical for non-offer frames).
+
     No token frames, no version-created progress frame: the answer text
     is delivered exclusively in the done frame's ``message`` (the
     operator's decision — token frames feed the model-source view, and
@@ -71,6 +110,8 @@ async def answered_frames(
         done_data["confirm_ack"] = True
         done_data["confirm_ack_label"] = confirm_ack["label"]
         done_data["confirm_ack_value"] = confirm_ack["value"]
+    if fill_recut_offer:
+        done_data["fill_recut_offer"] = True
     yield ("done", done_data)
     # The in-flight flag is released by the STREAM's ``finally``
     # (``d33d.streaming._stream_events`` — the single release point for

@@ -98,6 +98,54 @@ describe("Export3MF", () => {
     expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
+  it("issue #338: a project with a part shows the export note under the button, filename in mono", () => {
+    const client = makeClient();
+    const settled: PartReportInfo = {
+      filename: "bracket.stl",
+      format: "stl",
+      unit: "mm",
+      unit_status: "settled",
+      scale: 1,
+      report: null,
+      options: null,
+    };
+    render(<Export3MF projectId={7} versionId={3} part={settled} client={client} />);
+    const note = screen.getByTestId("export-3mf-note");
+    expect(note.textContent).toContain(
+      `Contains geometry from ${"bracket.stl"}`,
+    );
+    // The filename renders in the mono face — inert text, its own span.
+    const filenameEl = screen.getByTestId("export-3mf-note-filename");
+    expect(filenameEl.textContent).toBe("bracket.stl");
+    expect(filenameEl.classList).toContain("mono-face");
+    // The note sits under the button, inside the export surface.
+    expect(note.closest(".export-3mf")).toBeTruthy();
+  });
+
+  it("issue #338: no part (undefined) shows no export note", () => {
+    const client = makeClient();
+    render(<Export3MF projectId={7} versionId={3} client={client} />);
+    expect(screen.queryByTestId("export-3mf-note")).toBeNull();
+  });
+
+  it("issue #338: a hostile filename renders inert as text in the export note (never interpreted)", () => {
+    const client = makeClient();
+    const hostile: PartReportInfo = {
+      filename: "../../;rm -rf $HOME `id` <img src=x onerror=alert(1)>",
+      format: "stl",
+      unit: "mm",
+      unit_status: "settled",
+      scale: 1,
+      report: null,
+      options: null,
+    };
+    render(<Export3MF projectId={7} versionId={3} part={hostile} client={client} />);
+    const note = screen.getByTestId("export-3mf-note");
+    // The raw filename is inert text — no new element was created from it.
+    expect(note.textContent).toContain(hostile.filename);
+    expect(note.querySelector("script")).toBeNull();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

@@ -71,6 +71,47 @@ describe("RegionEditBar", () => {
     expect(screen.getByTestId("region-edit-pose-hint")).toBeTruthy();
   });
 
+  it("shows the 'on the part you brought' chip and the mm hit point in mono for an imported-geometry pick (issue #338)", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection({
+          moduleIds: [],
+          onImportedPart: true,
+          hitPointMm: { x: 12.0, y: 0.0, z: 20.0 },
+        })}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    const chip = screen.getByTestId("region-edit-imported-chip");
+    expect(chip).toHaveTextContent(copy.region.onImportedPart);
+    // The hit point renders in the mono face, formatted "x 12.0 · y 0.0 · z 20.0 mm".
+    const hit = screen.getByTestId("region-edit-hitpoint");
+    expect(hit).toHaveTextContent("x 12.0 · y 0.0 · z 20.0 mm");
+  });
+
+  it("shows no imported chip or hit point for a non-imported pick (issue #338)", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection({ moduleIds: ["wing_left"] })}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.queryByTestId("region-edit-imported-chip")).toBeNull();
+    expect(screen.queryByTestId("region-edit-hitpoint")).toBeNull();
+  });
+
   it("shows the cleared hint while the pin is cleared", () => {
     render(
       <RegionEditBar
@@ -266,5 +307,48 @@ describe("RegionEditBar", () => {
     );
     const bar = screen.getByTestId("region-edit-bar");
     expect(bar.style.opacity).toBe("0.5");
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Issue #338 (decision 3) — the "on the part you brought" chip + hit point
+// ---------------------------------------------------------------------------
+
+describe("RegionEditBar — imported-geometry chip + hit point (issue #338)", () => {
+  it("shows the 'on the part you brought' chip for imported-geometry picks", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection({
+          onImportedPart: true,
+          hitPointMm: { x: 12.0, y: 0.0, z: 20.0 },
+        })}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    const chip = screen.getByTestId("region-edit-imported-chip");
+    expect(chip.textContent).toBe("on the part you brought");
+  });
+
+  it("does NOT show the imported chip for a module pick (non-imported geometry)", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection({ onImportedPart: false })}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.queryByTestId("region-edit-imported-chip")).toBeNull();
   });
 });

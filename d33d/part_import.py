@@ -95,7 +95,7 @@ from d33d.part_units import (
     settle_scale,
     settle_unit_choices,
 )
-from d33d.versions import ImportCommitFailed
+from d33d.versions import SOURCE_KIND_IMPORT, ImportCommitFailed
 
 logger = logging.getLogger(__name__)
 
@@ -293,7 +293,7 @@ def create_part_router() -> APIRouter:
                 params={},
                 message=f"part import: {filename or 'part'}",
                 bbox=(tuple(mm_bbox) if mm_bbox is not None else None),
-                source_kind="import",
+                source_kind=SOURCE_KIND_IMPORT,
                 mesh_bytes=content,
                 stored_name=stored_name,
                 repo_dir=repo_path,

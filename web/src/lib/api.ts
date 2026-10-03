@@ -90,6 +90,11 @@ export interface VersionTimelineEntry {
    *  server-side state, so the filmstrip mark survives a page reload.
    *  `null` when the version was never exported. */
   exported_at: string | null;
+  /** The version's origin (issue #325): `"import"` for a part-import v1,
+   *  `null` for a design-loop version (a null is a design-loop origin,
+   *  never a fabricated `"design"`). The SPA uses this to render the
+   *  "v1 — Imported {filename}" label (issue #338, decision 8). */
+  source_kind: "import" | null;
 }
 
 /**
@@ -203,6 +208,10 @@ export interface PartReportInfo {
   unit: string | null;
   unit_status: "assumed" | "settled" | "unsettled";
   scale: number | null;
+  /** Issue #338, operator decision 2: the part's settled-unit mm extents
+   *  [w, d, h]. `null` while the part's units are unsettled (the Brief's
+   *  W/D/H rows show "waiting on units" in that case, never a number). */
+  bbox_mm?: number[] | null;
   report: {
     triangles: number;
     bodies: number;
@@ -485,6 +494,14 @@ export interface RegionEditRequest {
   point: RegionEditPoint;
   /** The user's free-text edit instruction for the selected region. */
   instruction: string;
+  /** The pick's mm hit point [x, y, z] (issue #338) — sent for picks on
+   *  imported geometry so the design loop's grounding text names the exact
+   *  millimetre location. Optional; all values must be finite. */
+  hit_point_mm?: [number, number, number];
+  /** The world-space unit face normal [nx, ny, nz] (issue #338) — the
+   *  axis the fill-and-recut offer uses. Optional; must be unit length
+   *  within 1±0.01. */
+  face_normal?: [number, number, number];
 }
 
 /**
