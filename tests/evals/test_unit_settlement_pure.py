@@ -20,8 +20,8 @@ from __future__ import annotations
 
 import pytest
 
-from d33d.part_units import classify_stl_units, mm_factor_for_unit
 from d33d.part_mesh import PartUploadError
+from d33d.part_units import classify_stl_units, mm_factor_for_unit
 
 # Known extents of the git-tracked fixtures (verified via trimesh):
 # tests/fixtures/stl/box_20mm.stl → (20, 20, 20); holey.stl → (20, 20, 20);

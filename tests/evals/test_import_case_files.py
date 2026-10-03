@@ -19,8 +19,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
-
 from d33d.evals.case_schema import GATE_NAMES, load_golden_set, verify_seed
 from d33d.evals.harness import run_case_gates
 
@@ -186,7 +184,6 @@ def test_run_all_stages_fixture_as_part_path(tmp_path: Path) -> None:
     )
     assert report  # the report JSON is non-empty
 
-    by_scad = {c["scad"] for c in calls}
     staged = [c for c in calls if "part_path" in c]
     unstaged = [c for c in calls if "part_path" not in c]
     assert len(staged) == 1 and len(unstaged) == 1

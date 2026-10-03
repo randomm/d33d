@@ -23,9 +23,9 @@ from pathlib import Path
 import trimesh
 
 from d33d.fill_recut import (
+    FEATURE_NOUNS,
     FRILL_HOLE_DIAMETER_REPLY,
     FRILL_NO_DIMENSION_REPLY,
-    FEATURE_NOUNS,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,

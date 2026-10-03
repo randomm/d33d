@@ -80,7 +80,7 @@ from typing import Any
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase, PartRef
+from d33d.evals.case_schema import GoldenCase
 from d33d.evals.gates import GateResult
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
 from d33d.evals.region_gate import run_region_gate
