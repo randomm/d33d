@@ -1,0 +1,27 @@
+{
+  "case_id": "import-split-for-bed",
+  "kind": "imported_part",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/import_edit_v1.md",
+    "sha256": "760a8aa33b1d27924ca07cf8f656e21dca7ea26f1c004433f6c29f48374d2560"
+  },
+  "request": "Split the imported part for the bed: cut it in two at mid-height along Z, keeping both halves in place.",
+  "expected_dims": {
+    "x": 20,
+    "y": 20,
+    "z": 20
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ],
+  "part": {
+    "fixture": "evals/cases/fixtures/part.stl",
+    "scale": 1.0
+  }
+}

@@ -53,22 +53,23 @@ def test_seed_mix_is_exactly_pinned() -> None:
     cases = _load()
     from d33d.evals.case_schema import seed_mix_actual
 
-    # SEED_MIX is the full 20-case on-disk composition (the baseline is
-    # the 6th primitive, not a 21st case)
+    # SEED_MIX is the full on-disk composition (the baseline is
+    # the 6th primitive, not an extra case)
     mix = seed_mix_actual(cases)
     for kind, expected in SEED_MIX.items():
         assert mix.get(kind, 0) == expected, (
             f"kind {kind!r}: expected {expected}, got {mix.get(kind, 0)}"
         )
-    # the mix must sum to exactly 20 — "floor 20" is then testable
+    # the mix must sum to the pinned total (23: the 20-case seed plus the
+    # 3 imported-part cases of issue #340) — "floor 20" is then testable
     mix_total = sum(mix[k] for k in SEED_MIX)
-    assert mix_total == sum(SEED_MIX.values()) == 20
-    assert len(cases) == mix_total == 20
+    assert mix_total == sum(SEED_MIX.values()) == 23
+    assert len(cases) == mix_total == 23
 
 
 def test_verify_seed_reports_no_violations() -> None:
     cases = _load()
-    violations = verify_seed(cases)
+    violations = verify_seed(cases, REPO_ROOT)
     assert violations == [], f"seed violations: {violations}"
 
 
@@ -336,8 +337,8 @@ def test_prompt_file_hash_matches_case_pin() -> None:
         assert actual == c.prompt.sha256, f"{cid}: pin drift"
 
 
-def test_seed_mix_constant_sums_to_20() -> None:
-    assert sum(SEED_MIX.values()) == 20
+def test_seed_mix_constant_sums_to_23() -> None:
+    assert sum(SEED_MIX.values()) == 23
 
 
 def test_gates_constant_is_the_seven_in_order() -> None:

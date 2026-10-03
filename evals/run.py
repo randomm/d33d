@@ -194,12 +194,30 @@ async def _run_all(
     outcomes = []
     for case_id in sorted(cases):
         case = cases[case_id]
+        # Mesh staging (issue #340): an imported-part case carries an
+        # optional ``part`` field; the fixture is staged into the render
+        # volume as part.stl so the candidate's import("part.stl")
+        # resolves. The repo root is the containment boundary.
+        part_path = None
+        part_repo_dir = None
+        if case.part is not None:
+            part_repo_dir = repo_root
+            fixture = repo_root / case.part.fixture
+            if fixture.suffix.lower() != ".stl":
+                raise ValueError(
+                    f"case {case_id}: part fixture {fixture.name!r} must be an "
+                    "STL file (the worker seeds part.stl); 3MF staging is "
+                    "out of scope for the eval harness"
+                )
+            part_path = fixture
         outcome = await run_case(
             case=case,
             repo_root=repo_root,
             model_id=model_id,
             request_factory=request_factory,
             render_fn=render_fn,
+            part_path=part_path,
+            part_repo_dir=part_repo_dir,
         )
         outcomes.append(outcome)
 

@@ -80,7 +80,7 @@ from typing import Any
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase
+from d33d.evals.case_schema import GoldenCase, PartRef
 from d33d.evals.gates import GateResult
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
 from d33d.evals.region_gate import run_region_gate
@@ -100,6 +100,10 @@ RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 #: ``stderr``, ``stl``). The caller injects the real Docker worker
 #: (``d33d.render_worker.render_for_design_loop``) for live runs and a
 #: stub for hermetic tests. The harness never shells into Docker itself.
+#: The optional ``part_path`` / ``repo_dir`` kwargs stage an imported
+#: part fixture (issue #340); render stubs that don't take them are
+#: still valid (the harness only forwards them when a case carries a
+#: ``part``).
 RenderFn = Callable[[str], Any]
 
 
@@ -398,6 +402,7 @@ def run_case_gates(
     stl_path: str | None,
     pre_mesh: Any = None,
     load_fn: Callable[[str], Any] | None = None,
+    scad_source: str = "",
 ) -> dict[str, GateResult]:
     """Run the case's declared gates in the pinned 1->7 order.
 
@@ -426,6 +431,27 @@ def run_case_gates(
     gates["compile"] = g1
     if g1.status == "fail":
         return gates
+
+    # The import guard (issue #340): for an imported-part case, the
+    # candidate must import the seeded part at the settled scale and
+    # never resize it. The violation is recorded as a gate failure BEFORE
+    # the remaining gates run (the detail carries the offending text).
+    if case.kind == "imported_part" and case.part is not None:
+        from d33d.import_guard import import_guard_violation
+
+        violation = import_guard_violation(scad_source, part_scale=case.part.scale)
+        if violation is not None:
+            reason, detail = violation
+            gates["import_guard"] = GateResult(
+                gate="import_guard",
+                status="fail",
+                failure_class="artifact_error",
+                detail=f"{reason}: {detail}",
+            )
+            return gates
+        gates["import_guard"] = GateResult(
+            gate="import_guard", status="pass", failure_class=None, detail=""
+        )
 
     if "stl_export" in case.gate_expectations:
         g2 = _gates.gate2_stl_export(stl_path)
@@ -526,6 +552,8 @@ async def run_case(
     render_fn: RenderFn,
     judge_fn: Callable[..., Awaitable[JudgeVerdict]] | None = None,
     pre_mesh: Any = None,
+    part_path: Path | None = None,
+    part_repo_dir: Path | None = None,
 ) -> CaseOutcome:
     """Run one golden-set case end to end (design call -> render -> gates -> judge).
 
@@ -569,7 +597,13 @@ async def run_case(
         )
 
     # 2. The real render of the model's output (injected seam).
-    render_result = render_fn(scad_source)
+    # An imported-part case stages its fixture as part.stl so the
+    # candidate's import("part.stl") resolves (issue #340); the other
+    # cases render exactly as before (no part, byte-identical argv).
+    if part_path is not None:
+        render_result = render_fn(scad_source, part_path=part_path, repo_dir=part_repo_dir)
+    else:
+        render_result = render_fn(scad_source)
     stl_path = getattr(render_result, "stl", None)
     mesh = _load_mesh(stl_path)
 
@@ -581,6 +615,7 @@ async def run_case(
         mesh=mesh,
         stl_path=stl_path,
         pre_mesh=pre_mesh,
+        scad_source=scad_source,
     )
 
     failed = [g for g in gate_map.values() if g.status == "fail"]
