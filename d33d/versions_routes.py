@@ -729,11 +729,9 @@ def create_versions_router() -> APIRouter:
             # finalize creates no version row, but the user's stated axes
             # must survive into the next successful version's gate input.
             try:
-                import json as _json312
-
                 app.state.conn.raw.execute(
                     "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
-                    (_json312.dumps(per_axis_stated) if per_axis_stated else None, project_id),
+                    (json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
                 )
                 app.state.conn.commit()
             except Exception:

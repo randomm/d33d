@@ -17,6 +17,7 @@ or the model-unconfigured path) — the caller returns the body verbatim.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -213,10 +214,9 @@ async def run_design_loop(
     # failed turn creates no version row, but the user's stated axes
     # must survive into the next successful version's gate input.
     try:
-        _json = __import__("json")
         app.state.conn.raw.execute(
             "UPDATE projects SET carried_stated_dims = ? WHERE id = ?",
-            (_json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
+            (json.dumps(per_axis_stated) if per_axis_stated else None, project_id),
         )
         app.state.conn.commit()
     except Exception:  # the write must never fail the 202

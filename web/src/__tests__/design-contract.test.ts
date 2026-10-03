@@ -2315,7 +2315,7 @@ describe("design contract — issue #338 new copy", () => {
   });
 
   it("pins the export note copy (decision 9)", () => {
-    expect(copy.shell.exportContainsGeometryPrefix).toBe("Contains geometry from ");
+    expect(copy.shell.exportContainsGeometryPrefix).toBe("contains geometry from ");
   });
 
   it("pins the imported history label prefix (decision 8)", () => {

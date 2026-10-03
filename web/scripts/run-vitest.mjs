@@ -65,11 +65,16 @@ function groupProbeESRCH(pgid) {
  * fallback: `process.kill(-pgid, 0)` can EPERM when the group leader is
  * gone but members are mid-reap; asking `ps` for membership is reliable
  * because every process of a dying group is inspectable (or already gone).
- * Returns null when `ps` is unavailable (the caller must not assume).
+ * `timeout: 1000` bounds the probe: a wedged `ps` throws into the same
+ * catch, so the function still returns null — the "ps unavailable" branch
+ * of confirmGroupGone (the kill-confirm.mjs fallback contract is
+ * unchanged). Exported (with an injectable exec) for the unit test that
+ * covers the timeout path with an injected failing `ps` — no real `ps`
+ * process is spawned.
  */
-function psGroupEmpty(pgid) {
+export function psGroupEmpty(pgid, { exec = execFileSync } = {}) {
   try {
-    const out = execFileSync("ps", ["-axo", "pgid="], { encoding: "utf8" });
+    const out = exec("ps", ["-axo", "pgid="], { encoding: "utf8", timeout: 1000 });
     const seen = new Set(
       out
         .split("\n")
@@ -89,11 +94,12 @@ const waitBuf = new Int32Array(new SharedArrayBuffer(4));
 // The wrapper's single kill path: kill the child pid, then `-pid`, via the
 // pure `killChildAndGroup`. Never throws — the escalation, the signal
 // handler and the exit handler all rely on the second kill always running.
-// (ESRCH is silent by construction; a non-ESRCH errno on a dying group is
-// already reflected in the confirmation log below, so no separate line.)
+// ESRCH is silent by construction; every other errno is written to stderr
+// via `log` so a failed kill (EPERM mid-reap, a vanished group, anything
+// else) is visible to the operator instead of swallowed.
 const KILL_DEPS = {
   kill: (target, signal) => process.kill(target, signal),
-  log: () => {},
+  log: (line) => console.error(line),
 };
 
 /**
@@ -101,10 +107,11 @@ const KILL_DEPS = {
  * actually gone before the wrapper exits. The decision logic is the pure
  * `killGroupGone` in ./kill-confirm.mjs (SIGTERM to child + group, then
  * confirm with an EPERM → `ps` fallback); the bindings below are the
- * real-process ones. If the group is unprobeable (EPERM and no `ps`) past
- * the grace, `confirmGroupGone` logs and returns false — the wrapper then
- * exits with the child's code and the parent watchdog remains the
- * backstop. The confirmation never throws.
+ * real-process ones. The "child group <pid>" prefix makes the stderr lines
+ * unambiguous about which kill path emitted them. If the group is
+ * unprobeable (EPERM and no `ps`) past the grace, `confirmGroupGone` logs
+ * and returns false — the wrapper then exits with the child's code and the
+ * parent watchdog remains the backstop. The confirmation never throws.
  */
 function killGroupAndConfirm(pid) {
   killGroupGone(
@@ -114,7 +121,7 @@ function killGroupAndConfirm(pid) {
       ps: () => psGroupEmpty(pid),
       now: Date.now,
       sleep: (ms) => Atomics.wait(waitBuf, 0, 0, ms),
-      log: (line) => console.error(`d33d: child group ${pid} unprobeable — ${line}`),
+      log: (line) => console.error(`d33d: child group ${pid} — ${line}`),
     },
     pid,
     { graceMs: 2000, tickMs: 50 },

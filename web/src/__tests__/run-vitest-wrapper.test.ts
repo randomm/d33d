@@ -568,6 +568,81 @@ test("watchdog: checkParent kills the group on ESRCH (injected probe)", async ()
   expect(signals).toEqual(["SIGKILL"]);
 }, 5000);
 
+test("psGroupEmpty: a ps timeout (simulated via an injected failing exec) returns null — the \"ps unavailable\" branch of confirmGroupGone", async () => {
+  // Issue #341: `execFileSync("ps", ...)` gains `timeout: 1000` in
+  // run-vitest.mjs; a timeout throws into the existing bare catch, so
+  // psGroupEmpty returns null — the "ps unavailable" branch of
+  // confirmGroupGone in kill-confirm.mjs (the fallback contract is
+  // unchanged).
+  //
+  // The wrapper module is imported with D33D_TEST_MODE=1 + a D33D_TEST_COMMAND
+  // override (the same fixture mechanism the wrapper's own spawn tests use),
+  // so the module's top-level `resolveCommand` never touches the real vitest
+  // bin; the top-level `spawn` succeeds, the fixture exits instantly, and
+  // the wrapper's child-exit handler (killGroup → ESRCH-silent, probe →
+  // ESRCH, `process.exit(0)`) runs in the import's own context — never the
+  // outer suite. No real `ps` process and no real vitest suite are spawned;
+  // the injected `exec` throws an execFileSync-shaped ETIMEDOUT error,
+  // exactly what a wedged `ps` produces after the 1000 ms budget.
+  // Capture so the try/finally below can restore process.env: leaking these
+  // into the shared process env would reach the later REAL test, which
+  // spawns the wrapper with {...process.env} and requires both vars unset.
+  const prevMode = process.env.D33D_TEST_MODE;
+  const prevCmd = process.env.D33D_TEST_COMMAND;
+  try {
+    process.env.D33D_TEST_MODE = "1";
+    process.env.D33D_TEST_COMMAND = `${process.execPath} -e 1`;
+    const mod = (await import("../../scripts/run-vitest.mjs")) as unknown as {
+      psGroupEmpty: (pgid: number, opts?: { exec?: (cmd: string, args: string[], o: { encoding: string; timeout?: number }) => string }) => boolean | null;
+    };
+    const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+    const psGroupEmpty = mod.psGroupEmpty;
+
+    // 1. The timeout path: the injected exec throws the way execFileSync does
+    //    when `timeout` elapses — an ETIMEDOUT error — and psGroupEmpty
+    //    swallows it and returns null.
+    const etim = Object.assign(new Error("Command failed (timed out)"), { code: "ETIMEDOUT" });
+    const seen: unknown[] = [];
+    const timedOut = psGroupEmpty(99, {
+      exec: (_cmd: string, _args: string[], opts: { encoding: string; timeout?: number }) => {
+        seen.push(opts.timeout);
+        throw etim;
+      },
+    });
+    expect(timedOut).toBeNull(); // "ps unavailable" — not true/false
+    // The wrapper passes the timeout option through to the probe.
+    expect(seen).toEqual([1000]);
+
+    // 2. The ps-unavailable branch of confirmGroupGone: ps() === null means
+    //    "not confirmed" — it logs the backstop line and never throws. This
+    //    is the production wiring: killGroupGone's deps.ps is
+    //    `() => psGroupEmpty(pid)`, so a ps timeout lands here.
+    const logs: string[] = [];
+    let nowMs = 0;
+    const outcome = confirmGroupGone(
+      {
+        probe: () => false,
+        ps: () => psGroupEmpty(99, { exec: () => { throw etim; } }),
+        now: () => nowMs,
+        sleep: (ms: number) => {
+          nowMs += ms;
+        },
+        log: (line: string) => logs.push(line),
+      },
+      { graceMs: 2000, tickMs: 50 },
+    );
+    expect(outcome).toBe(false);
+    expect(logs.length).toBe(1);
+    expect(logs[0]).toContain("ps unavailable");
+    expect(logs[0]).toContain("backstop");
+  } finally {
+    if (prevMode === undefined) delete process.env.D33D_TEST_MODE;
+    else process.env.D33D_TEST_MODE = prevMode;
+    if (prevCmd === undefined) delete process.env.D33D_TEST_COMMAND;
+    else process.env.D33D_TEST_COMMAND = prevCmd;
+  }
+}, 5000);
+
 test("watchdog: parseWrapperPid warns on a bad pid and disables the watchdog", async () => {
   const { parseWrapperPid } = await loadWatchdog();
   const valid = parseWrapperPid("12345", () => {

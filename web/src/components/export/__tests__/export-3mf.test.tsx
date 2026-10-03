@@ -112,7 +112,7 @@ describe("Export3MF", () => {
     render(<Export3MF projectId={7} versionId={3} part={settled} client={client} />);
     const note = screen.getByTestId("export-3mf-note");
     expect(note.textContent).toContain(
-      `Contains geometry from ${"bracket.stl"}`,
+      `contains geometry from ${"bracket.stl"}`,
     );
     // The filename renders in the mono face — inert text, its own span.
     const filenameEl = screen.getByTestId("export-3mf-note-filename");

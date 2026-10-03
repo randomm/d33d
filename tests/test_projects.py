@@ -1086,7 +1086,7 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
 
 def test_fill_recut_decline_done_frame_has_no_offer_flag(app_with_projects):
     """PR #339 fix round (real bug, chat route): a CLEAN DECLINE of the
-    pending fill-recut offer ("Leave it" → FRILL_DECLINE_REPLY) must NOT
+    pending fill-recut offer ("Leave it" → FILL_RECUT_DECLINE_REPLY) must NOT
     re-emit the ``fill_recut_offer`` flag on the done frame — the SPA
     renders the [Yes, do that] / [Leave it] buttons from that field, so
     a re-emitted flag re-offers an offer that was just declined. (The
@@ -1819,13 +1819,13 @@ def test_unsettled_part_reply_in_fill_recut_all() -> None:
 
 
 def test_fill_recut_decline_reply_equals_copy_ts() -> None:
-    """``FRILL_DECLINE_REPLY`` equals ``copy.ts``'s ``fillRecut.declined``
+    """``FILL_RECUT_DECLINE_REPLY`` equals ``copy.ts``'s ``fillRecut.declined``
     exactly."""
     import re
 
     m = re.search(r'declined:\s*"([^"]+)"', _copy_ts_text())
     assert m is not None, "copy.ts must define fillRecut.declined"
-    assert fill_recut.FRILL_DECLINE_REPLY == m.group(1)
+    assert fill_recut.FILL_RECUT_DECLINE_REPLY == m.group(1)
 
 
 def test_fill_recut_templates_match_copy_ts_fill_recut() -> None:
