@@ -29,22 +29,34 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from d33d.evals.case_schema import GATE_NAMES, KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
 
-#: The gate labels, in the pinned 1->7 order (the report's per-case row
-#: carries at most these keys).
-GATE_ORDER: tuple[str, ...] = (
-    "compile",
-    "stl_export",
-    "watertight_winding",
-    "bbox_dims",
-    "volume_faces",
-    "slice_dry_run",
-    "region_containment",
-)
+if TYPE_CHECKING:
+    from d33d.evals.case_schema import CaseKind
+
+
+def case_gate_order(case_kind: CaseKind) -> tuple[str, ...]:
+    """The ordered gate labels for a case's report row (issue #340).
+
+    The kind's pre-check gate (``import_guard`` for ``imported_part``
+    cases — see ``d33d.evals.case_schema.KIND_PRECHECK_GATES``) is
+    listed FIRST in the row for reading convenience only; kinds
+    without a pre-check get the base order unchanged. The base order is
+    :data:`d33d.evals.case_schema.GATE_NAMES` (the 1->7 gates — the
+    single source of the declare-able taxonomy; the kind's pre-check is
+    prepended when present, so the kind's full order is longer than the
+    base). In execution the order is compile first, then
+    ``import_guard``, then the remaining declared gates — the row's
+    listing order does NOT mirror execution order. The report's
+    per-case row carries at most these keys (absent gates were not
+    reached — a short-circuit).
+    """
+    pre = KIND_PRECHECK_GATES.get(case_kind)
+    return (pre, *GATE_NAMES) if pre is not None else GATE_NAMES
 
 
 @dataclass(frozen=True)
@@ -179,6 +191,17 @@ class RunReport:
         return json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=False, indent=2)
 
 
+def _ordered_gate_names(outcome: CaseOutcome) -> tuple[str, ...]:
+    """The outcome's gate names re-ordered in the kind's gate order (a
+    pure projection — the outcome is untouched) so the report row reads
+    in the order the gate phase ran."""
+    ordered = case_gate_order(outcome.kind)
+    present = dict(outcome.gates)
+    ordered_names = tuple(name for name in ordered if name in present)
+    extras = tuple(name for name in present if name not in ordered)  # unexpected, last
+    return ordered_names + extras
+
+
 def build_report(
     outcomes: list[CaseOutcome],
     *,
@@ -194,14 +217,30 @@ def build_report(
     ``unclassified_syntax_error`` in the design-loop vocabulary) so the
     report reads in the taxonomy the design loop already uses.
 
+    Each row's ``gates`` mapping is ordered by :func:`case_gate_order`
+    (the kind's pre-check gate — ``import_guard`` for ``imported_part``
+    — listed first for reading convenience, then the base 1->7 order).
+    This listing order does NOT mirror execution order: in execution
+    compile runs first, then ``import_guard``, then the remaining
+    declared gates.
+
     ``ts`` defaults to the current UTC time (deterministic in tests via
     the argument).
+
+    The aggregation is pure: each outcome is read, never mutated — the
+    per-row gate reordering (:func:`_ordered_gate_names`) projects the
+    names locally; the outcome's ``gates`` dict is left untouched.
     """
     rows: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
     passed = 0
     for outcome in outcomes:
-        rows[outcome.case_id] = outcome.to_dict()
+        ordered = _ordered_gate_names(outcome)
+        row = outcome.to_dict(include_gates=False)
+        row["gates"] = {
+            name: outcome.gates[name].to_dict() for name in ordered
+        }
+        rows[outcome.case_id] = row
         if outcome.ok:
             passed += 1
             continue

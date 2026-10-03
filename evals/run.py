@@ -62,13 +62,16 @@ from typing import Any
 
 import httpx
 
-from d33d.evals.case_schema import load_golden_set
+from d33d.evals.case_schema import GoldenCase, load_golden_set
+from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.harness import (
+    CaseOutcome,
     RenderFn,
     RequestFactory,
     load_promptfoo_config,
     run_case,
 )
+from d33d.evals.part_ref import part_of
 from d33d.evals.report import build_report
 
 # Make the repo root importable (the script lives at ``evals/``).
@@ -170,6 +173,53 @@ def _resolve_model(catalogue_path: Path, role: str = "design") -> tuple[str, str
     return res.entry.model, res.provider.base
 
 
+def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str | None]:
+    """Resolve and containment-check a part fixture (issue #340).
+
+    Returns ``(part_path, error)`` — exactly one of the two is
+    ``None``. The fixture must be an ``.stl`` file whose resolved path
+    stays under the repo root's ``evals/cases/fixtures/`` directory
+    (checked with ``resolve()`` + ``is_relative_to`` so a ``../``
+    traversal, an absolute path, or a symlink escape is rejected).
+    A staging problem is a per-case failure, never an abort of the
+    run — the error string is the caller's failure outcome detail.
+    """
+    if case.part is None:
+        return None, None
+    part = part_of(case)
+    try:
+        violation = check_fixture_containment(repo_root, str(part.fixture))
+    except (OSError, ValueError) as e:
+        return None, f"case {case.case_id}: {e}"
+    if violation is not None:
+        return None, f"case {case.case_id}: {violation}"
+    try:
+        resolved = (repo_root / part.fixture).resolve()
+        if not resolved.is_file():
+            return (
+                None,
+                f"case {case.case_id}: part fixture {part.fixture!r} is missing on disk",
+            )
+    except (OSError, ValueError) as e:
+        return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}: {e}"
+    return resolved, None
+
+
+def _staging_outcome(case: GoldenCase, error: str) -> CaseOutcome:
+    """A staging problem as the case's failure outcome (issue #340):
+    the same shape :func:`run_case` returns on a gate failure, so the
+    report and the other cases are unaffected."""
+    return CaseOutcome(
+        case_id=case.case_id,
+        kind=case.kind,
+        prompt_version=case.prompt.prompt_version,
+        prompt_sha256=case.prompt.sha256,
+        request=case.request,
+        failure_class="artifact_error",
+        detail=f"fixture staging: {error}",
+    )
+
+
 async def _run_all(
     *,
     repo_root: Path,
@@ -188,18 +238,35 @@ async def _run_all(
     output, then the judge. The report is
     ``d33d.evals.report.build_report`` over the per-case outcomes (the
     "best-candidate + reason" shape the design loop uses).
+
+    A part-fixture staging problem (issue #340) — a non-.stl fixture,
+    a missing fixture, or a fixture that escapes
+    ``evals/cases/fixtures/`` — is a per-case failure outcome, never
+    an abort of the run: the other cases still run and the report is
+    still written.
     """
     cases = load_golden_set(cases_dir, repo_root)
 
     outcomes = []
     for case_id in sorted(cases):
         case = cases[case_id]
+        # Mesh staging (issue #340): an imported-part case carries an
+        # optional ``part`` field; the fixture is staged into the render
+        # volume as part.stl so the candidate's import("part.stl")
+        # resolves. A staging problem is that case's failure, not a
+        # run abort (per-case containment).
+        part_path, staging_error = _stage_fixture(repo_root, case)
+        if staging_error is not None:
+            outcomes.append(_staging_outcome(case, staging_error))
+            continue
         outcome = await run_case(
             case=case,
             repo_root=repo_root,
             model_id=model_id,
             request_factory=request_factory,
             render_fn=render_fn,
+            part_path=part_path,
+            part_repo_dir=repo_root if part_path is not None else None,
         )
         outcomes.append(outcome)
 
@@ -327,9 +394,24 @@ def main(argv: list[str] | None = None) -> int:
         # on a reference fixture. The worker's temp/persist dirs live
         # under $HOME (Docker on macOS cannot see /tmp — a /tmp render
         # dir causes a silent multi-minute hang).
+        #
+        # ``render_for_design_loop`` requires its ``defines`` argument
+        # positionally and has no default, so it does not satisfy the
+        # ``RenderFn`` protocol directly — wrap it (the ``defines`` map
+        # is always empty here; the golden set has no per-case defines).
         from d33d.render_worker import render_for_design_loop
 
-        render_fn: RenderFn = render_for_design_loop
+        def _render(
+            scad_source: str,
+            *,
+            part_path: Path | None = None,
+            repo_dir: Path | None = None,
+        ) -> Any:
+            return render_for_design_loop(
+                scad_source, {}, part_path=part_path, repo_dir=repo_dir
+            )
+
+        render_fn: RenderFn = _render
 
         report_json = asyncio.run(
             _run_all(

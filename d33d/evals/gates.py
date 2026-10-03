@@ -140,8 +140,8 @@ GATE_3 = "watertight"
 GATE_4 = "bbox"
 GATE_5 = "volume"
 
-#: All five gate names in order.
-GATE_NAMES: tuple[str, ...] = (GATE_1, GATE_2, GATE_3, GATE_4, GATE_5)
+#: The 5 gate names this module implements (gates 1–5), in order.
+IMPLEMENTED_GATE_NAMES: tuple[str, ...] = (GATE_1, GATE_2, GATE_3, GATE_4, GATE_5)
 
 #: Per-gate taggability: which superset classes each gate can tag.
 #:
@@ -175,6 +175,8 @@ GATE_TAGGABLE_CLASSES: dict[str, frozenset[EvalFailureClass]] = {
     GATE_3: _POST_COMPILE_TAGGABLE,
     GATE_4: GATE_4_TAGGABLE,
     GATE_5: _POST_COMPILE_TAGGABLE,
+    # Pre-check gate, enforced at construction in guard_gate.py.
+    "import_guard": frozenset({"artifact_error"}),
 }
 
 

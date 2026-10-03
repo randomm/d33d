@@ -5,9 +5,10 @@ case. This module is the single source of truth for:
 
 * the **case schema** (:class:`GoldenCase`) — the fields every case file
   must carry so the harness can score it unattended,
-* the **seed mix** — the 20-case composition the ticket pins (5
-  primitives / 5 red-marked region edits / 3 boolean-topology / 3 photo
-  recreations / 3 adversarial), plus the Qwen smoke baseline,
+* the **seed mix** — the 23-case on-disk composition (the 20-case seed:
+  6 primitives including the Qwen smoke baseline / 5 red-marked region
+  edits / 3 boolean-topology / 3 photo recreations / 3 adversarial, plus
+  the 3 imported-part cases from issue #340),
 * **prompt hash-pinning** — every case references its prompt file by
   SHA-256 of the file content, so a prompt edit without a re-pin fails
   the suite and a regression reads as "prompt v7 fails case 12 which
@@ -15,21 +16,15 @@ case. This module is the single source of truth for:
 
 Case-file fields, and where each comes from:
 
-The seed mix, and the resolution of the ticket's table:
-
-The ticket's seed-mix table (5 primitives / 4 region edits / 3 boolean /
-3 photo / 3 adversarial) sums to 18, not the stated floor of 20 — an
-internal inconsistency. The resolution, documented here so the count is
-auditable: the on-disk set is exactly **20 cases**, composed as 6
-primitives (the 5 ticket primitives + the Qwen smoke baseline, a
-photo-plus-views → OpenSCAD primitive recreation that is the first case
-to write and is marked ``is_baseline`` — a reference, not a gate), 5
-red-marked region edits (one extra over the ticket's 4 so the total
-reaches 20), 3 boolean-topology, 3 photo recreations, 3 adversarial —
-6 + 5 + 3 + 3 + 3 = 20. Every case's ``kind`` matches the table's kinds;
-the baseline is additionally flagged ``is_baseline`` so the report shows
-it as the reference. :data:`SEED_MIX` is this full on-disk composition,
-so ``sum(SEED_MIX.values()) == 20`` is directly testable.
+The on-disk set is the 23-case composition :data:`SEED_MIX` pins: 6
+primitives (5 seed primitives + the Qwen smoke baseline, marked
+``is_baseline`` — a reference, not a gate), 5 red-marked region edits,
+3 boolean-topology, 3 photo recreations, 3 adversarial (6 + 5 + 3 + 3 +
+3 = 20-case seed), plus the 3 imported-part cases issue #340 added
+(6 + 5 + 3 + 3 + 3 + 3 = 23). Every case's ``kind`` matches the
+composition; the baseline is additionally flagged ``is_baseline`` so the
+report shows it as the reference. :data:`SEED_MIX` is this full on-disk
+composition, so ``sum(SEED_MIX.values()) == 23`` is directly testable.
 
 * ``case_id`` / ``kind`` — stable identity across prompt versions and the
   seed-mix classifier.
@@ -79,12 +74,14 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-#: The seven deterministic gates, in the fixed ticket order. Gates 1–7
-#: run before any judge; the judge is stage 8 (the last stage, not a
-#: gate) and is out of scope for the golden-set schema — it is a
-#: holdout-only concern of the harness.
+from d33d.evals.fixtures import check_fixture_containment
+from d33d.evals.part_ref import PartRef, part_of
+
+#: The 7 declare-able gate taxonomy, in the fixed ticket order (gates
+#: 1–7 run before any judge; the judge is stage 8 and out of scope for
+#: the golden-set schema — a holdout-only concern of the harness).
 GATE_NAMES: tuple[str, ...] = (
     "compile",
     "stl_export",
@@ -94,6 +91,31 @@ GATE_NAMES: tuple[str, ...] = (
     "slice_dry_run",
     "region_containment",
 )
+
+#: The closed set of golden-set case kinds (issue #340: named alias).
+CaseKind = Literal[
+    "primitive",
+    "red_region_edit",
+    "boolean_topology",
+    "photo_recreation",
+    "adversarial",
+    "imported_part",
+]
+
+#: Pre-check gates, keyed by the case kind that triggers them (issue
+#: #340): ``import_guard`` runs inside the gate phase of every
+#: ``imported_part`` case (the candidate must import the seeded part at
+#: the settled scale and never resize it) BEFORE the declared
+#: ``gate_expectations`` run, but it is NOT declared in
+#: ``gate_expectations`` — it is implied by the kind.
+#:
+#: Reporting order: the pre-check gate is listed FIRST in the report row
+#: for reading convenience only — in execution, compile runs first, then
+#: the pre-check gate, then the remaining declared gates; the row order
+#: does not mirror execution order.
+#: Ordering lives in :func:`d33d.evals.report.case_gate_order`; this
+#: constant only maps kind → pre-check gate name.
+KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
 
 #: Gate 6/7 N/A markers: a gate reports N/A (neither pass nor hard fail)
 #: when its delegate is absent — gate 6 when no headless slicer is
@@ -105,22 +127,19 @@ GATE_NA_MARKERS: dict[str, str] = {
     "region_containment": "N/A, containment convention not available",
 }
 
-#: The seed mix the ticket pins. A valid seed must have exactly this
-#: count per kind — the total is then exactly 20 (the floor, testable).
-#: The full on-disk composition of the 20-case seed, per kind.
-#:
-#: The ticket's table (5/4/3/3/3 = 18) sums short of the stated floor
-#: of 20; the resolution (see module docstring) is that the Qwen smoke
-#: baseline is the 6th primitive and one extra red-region edit is added,
-#: giving 6 + 5 + 3 + 3 + 3 = 20. The baseline is the ``is_baseline``
-#: case within the primitive count. Sum is exactly 20, so "floor 20"
-#: is directly testable.
+#: The on-disk golden-set composition, per kind: the 20-case seed (6
+#: primitives — 5 seed primitives plus the ``is_baseline`` Qwen smoke
+#: baseline within that count — / 5 red-region edits / 3 boolean /
+#: 3 photo / 3 adversarial) plus the 3 imported-part cases from issue
+#: #340. A valid set must have exactly this count per kind, so it sums
+#: to exactly 23 (testable via ``verify_seed``).
 SEED_MIX: dict[str, int] = {
     "primitive": 6,
     "red_region_edit": 5,
     "boolean_topology": 3,
     "photo_recreation": 3,
     "adversarial": 3,
+    "imported_part": 3,
 }
 
 #: Case kinds that carry no expected geometry (they refuse or apply a
@@ -203,13 +222,7 @@ class GoldenCase(BaseModel):
     """One golden-set case (one JSON file under ``evals/cases/``)."""
 
     case_id: str = Field(min_length=1, pattern=r"^[a-z0-9][a-z0-9-]*$")
-    kind: Literal[
-        "primitive",
-        "red_region_edit",
-        "boolean_topology",
-        "photo_recreation",
-        "adversarial",
-    ]
+    kind: CaseKind
     prompt: PromptPin
     request: str = Field(min_length=1)
 
@@ -225,6 +238,7 @@ class GoldenCase(BaseModel):
 
     red_region_edit: RedRegionEdit | None = None
     adversarial: AdversarialSpec | None = None
+    part: PartRef | None = None
 
     @field_validator("gate_expectations")
     @classmethod
@@ -284,6 +298,25 @@ class GoldenCase(BaseModel):
         if kind == "adversarial" and v is None:
             raise ValueError("kind=adversarial requires the adversarial spec")
         return v
+
+    @field_validator("part")
+    @classmethod
+    def _part_only_for_imported_kind(
+        cls, v: PartRef | None, info
+    ) -> PartRef | None:
+        kind = info.data.get("kind")
+        if v is not None and kind != "imported_part":
+            raise ValueError("part field only valid for kind=imported_part")
+        return v
+
+    @model_validator(mode="after")
+    def _part_required_for_imported_kind(self) -> GoldenCase:
+        """An ``imported_part`` case REQUIRES its part ref (the import
+        guard is schema-guaranteed to have ``case.part``), and no other
+        kind may carry one."""
+        if self.kind == "imported_part" and self.part is None:
+            raise ValueError("kind=imported_part requires a part ref")
+        return self
 
 
 def prompt_file_hash(repo_root: Path, prompt_path: str) -> str:
@@ -348,9 +381,8 @@ def load_golden_set(cases_dir: Path, repo_root: Path | None = None) -> dict[str,
 def seed_mix_actual(cases: dict[str, GoldenCase]) -> dict[str, int]:
     """Count all cases per kind (baseline included).
 
-    The baseline is the 6th primitive — part of the 20-case on-disk
-    composition, not an extra 21st case. So the mix is counted over the
-    full set.
+    The baseline is the 6th primitive — part of the on-disk composition,
+    not an extra case. So the mix is counted over the full set.
     """
     mix: dict[str, int] = {k: 0 for k in SEED_MIX}
     for c in cases.values():
@@ -358,19 +390,22 @@ def seed_mix_actual(cases: dict[str, GoldenCase]) -> dict[str, int]:
     return mix
 
 
-def verify_seed(cases: dict[str, GoldenCase]) -> list[str]:
+def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> list[str]:
     """Check the seed against :data:`SEED_MIX`; return a list of violations.
 
-    Empty list means the seed is valid: the on-disk total is at least 20,
+    Empty list means the seed is valid: the on-disk total is exactly 23 (the
+    20-case seed plus the 3 imported-part cases of issue #340),
     exactly the pinned count per kind, every red-region edit has a
     baseline + selection polygons (gate 7 denominator), every adversarial
-    case scores against an outcome class, and the Qwen smoke baseline
+    case scores against an outcome class, every imported-part case pins a
+    part fixture that exists on disk, and the Qwen smoke baseline
     exists and is marked as baseline. An empty list is what the test
     asserts.
 
-    The baseline (``is_baseline``) is the 21st case (the 6th primitive —
-    see :data:`BASELINE_IS_PRIMITIVE`). The per-kind mix is therefore
-    computed over the non-baseline cases, so it sums to exactly 20.
+    The baseline (``is_baseline``) is the 6th primitive within the
+    20-case seed — part of the set, not a 21st case. The per-kind mix is
+    therefore counted over the full set, and ``SEED_MIX`` sums to 23
+    (the 20-case seed plus the 3 imported-part cases of issue #340).
     """
     violations: list[str] = []
 
@@ -386,6 +421,22 @@ def verify_seed(cases: dict[str, GoldenCase]) -> list[str]:
         actual = mix.get(kind, 0)
         if actual != expected:
             violations.append(f"kind {kind!r}: expected {expected} cases, got {actual}")
+
+    for cid, c in cases.items():
+        if c.kind == "imported_part":
+            # The part ref is schema-guaranteed (GoldenCase requires it
+            # for this kind) — only the on-disk checks can still fail.
+            if repo_root is None:
+                violations.append(f"{cid}: cannot verify fixture without repo_root")
+                continue
+            part = part_of(c)
+            containment = check_fixture_containment(repo_root, str(part.fixture))
+            if containment is not None:
+                violations.append(f"{cid}: {containment}")
+                continue
+            fixture = repo_root / Path(part.fixture)
+            if not fixture.is_file():
+                violations.append(f"{cid}: part fixture {part.fixture!r} missing on disk")
 
     for cid, c in cases.items():
         if c.kind == "red_region_edit":

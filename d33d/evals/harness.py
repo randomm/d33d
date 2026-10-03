@@ -72,17 +72,20 @@ nor a hard fail.
 from __future__ import annotations
 
 import base64
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase
-from d33d.evals.gates import GateResult
+from d33d.evals.case_schema import CaseKind, GoldenCase
+from d33d.evals.gates import EvalFailureClass, GateResult
+from d33d.evals.guard_gate import import_guard_result
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
+from d33d.evals.part_ref import part_of
 from d33d.evals.region_gate import run_region_gate
 from d33d.evals.slice_gate import run_slice_gate
 
@@ -95,17 +98,68 @@ DEFAULT_CONFIG_PATH = Path("evals") / "promptfoo.config.yaml"
 #: ``Authorization`` header) — never in a message or a report.
 RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 
-#: The render seam (issue #108): one OpenSCAD source string in, one
-#: ``RenderResult``-shaped render-worker result out (``error_class``,
-#: ``stderr``, ``stl``). The caller injects the real Docker worker
-#: (``d33d.render_worker.render_for_design_loop``) for live runs and a
-#: stub for hermetic tests. The harness never shells into Docker itself.
-RenderFn = Callable[[str], Any]
+class RenderFn(Protocol):
+    """The render seam (issue #108): one OpenSCAD source string in, one
+    ``RenderResult``-shaped render-worker result out (``error_class``,
+    ``stderr``, ``stl``). The caller injects the render function used for
+    live runs and a stub for hermetic tests. The harness never shells into
+    Docker itself.
+
+    ``evals/run.py`` wraps ``d33d.render_worker.render_for_design_loop``
+    with an explicit wrapper that fills the worker's required
+    ``defines`` argument with an empty map (the worker's ``defines``
+    has no default, so the raw worker does not satisfy this protocol on
+    its own): ``def _render(scad_source, *, part_path=None,
+    repo_dir=None)`` calling the worker with ``defines={}``.
+
+    Contract (issue #340): render functions used with ``imported_part``
+    cases MUST accept the ``part_path`` / ``repo_dir`` kwargs — the
+    harness passes them as keyword arguments whenever a case carries a
+    ``part`` (the fixture staged into the render volume as part.stl
+    so the candidate's ``import("part.stl")`` resolves). Part-less
+    cases call ``render_fn(scad_source)`` with no kwargs, but a render
+    function shared across a mixed run must therefore accept both
+    (e.g. ``def render_fn(scad_source, *, part_path=None, repo_dir=None)``);
+    a stub that takes only ``scad_source`` will ``TypeError`` the first
+    time it is handed an imported-part case.
+    """
+
+    def __call__(
+        self,
+        scad_source: str,
+        *,
+        part_path: Path | None = None,
+        repo_dir: Path | None = None,
+    ) -> Any: ...
+
+
+def _render_fn_accepts_part_kwargs(render_fn: Any) -> bool:
+    """True when ``render_fn`` can take the ``part_path`` / ``repo_dir``
+    kwargs: both are named parameters, or the signature has ``**kwargs``.
+
+    Checked BEFORE the call (instead of catching the call's TypeError)
+    so a genuine TypeError raised inside a correctly signed render_fn
+    propagates. A signature that cannot be inspected (some builtins)
+    counts as NOT accepting the kwargs — the case then gets the clear
+    "render_fn does not accept part_path/repo_dir" artifact_error
+    outcome instead of a raw TypeError.
+    """
+    try:
+        sig = inspect.signature(render_fn)
+    except (ValueError, TypeError):
+        # A signature that cannot be inspected (some builtins): the call
+        # would raise TypeError and be mislabelled, so the case gets the
+        # clear "does not accept part_path/repo_dir" outcome instead.
+        return False
+    params = sig.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "part_path" in params and "repo_dir" in params
 
 
 @dataclass(frozen=True)
 class CaseOutcome:
-    """The harness's per-case result — one row of the run report.
+    """The harness's per-case result — one row of the run report (see :attr:`ok` for the verdict rule).
 
     ``gates`` maps the gate labels to :class:`GateResult` (absent gates
     were not reached — a short-circuit). ``scad_source`` is the design
@@ -117,14 +171,14 @@ class CaseOutcome:
     """
 
     case_id: str
-    kind: str
+    kind: CaseKind
     prompt_version: str
     prompt_sha256: str
     request: str
     scad_source: str = ""
     gates: dict[str, GateResult] = field(default_factory=dict)
     judge: JudgeVerdict | None = None
-    failure_class: str | None = None
+    failure_class: EvalFailureClass | None = None
     detail: str = ""
 
     @property
@@ -134,29 +188,53 @@ class CaseOutcome:
 
     @property
     def ok(self) -> bool:
-        """The case's overall verdict: gates ok AND (when the judge ran)
-        the judge passed."""
+        """The case's overall verdict: no recorded failure, gates ok, AND
+        (when the judge ran) the judge passed.
+
+        A case that never reached the gate phase (a staging problem in
+        ``evals/run.py`` — an escape/non-.stl/missing fixture, issue
+        #340 — or a design-call failure) carries a ``failure_class``
+        and no gates; that is a failure, not a pass — ``failure_class``
+        is the outcome's authoritative failure record, so it fails the
+        case even when no gate row was recorded.
+        """
+        if self.failure_class is not None:
+            return False
         if not self.gates_ok:
             return False
         if self.judge is None:
             return True
         return self.judge.passed
 
-    def to_dict(self) -> dict[str, Any]:
-        """JSON-serialisable row for the run report."""
-        return {
+    def to_dict(self, *, include_gates: bool = True) -> dict[str, Any]:
+        """JSON-serialisable row for the run report.
+
+        The ``gates`` mapping (when included) preserves the phase order
+        of ``self.gates``; the report aggregator re-orders each row via
+        :func:`d33d.evals.report.case_gate_order` (the kind's pre-check
+        gate first — ``import_guard`` for ``imported_part`` — then the
+        base 1->7 order) when it builds the row.
+
+        ``include_gates=False`` serializes the outcome's scalar fields
+        only, so a caller can supply the ``gates`` mapping itself (the
+        report builds the row exactly once — see
+        :func:`d33d.evals.report.build_report`).
+        """
+        row = {
             "case_id": self.case_id,
             "kind": self.kind,
             "prompt_version": self.prompt_version,
             "prompt_sha256": self.prompt_sha256,
             "request": self.request,
             "scad_source": self.scad_source,
-            "gates": {name: g.to_dict() for name, g in self.gates.items()},
             "judge": self.judge.to_dict() if self.judge is not None else None,
             "failure_class": self.failure_class,
             "detail": self.detail,
             "ok": self.ok,
         }
+        if include_gates:
+            row["gates"] = {name: g.to_dict() for name, g in self.gates.items()}
+        return row
 
 
 # ---------------------------------------------------------------------------
@@ -398,6 +476,7 @@ def run_case_gates(
     stl_path: str | None,
     pre_mesh: Any = None,
     load_fn: Callable[[str], Any] | None = None,
+    scad_source: str = "",
 ) -> dict[str, GateResult]:
     """Run the case's declared gates in the pinned 1->7 order.
 
@@ -426,6 +505,29 @@ def run_case_gates(
     gates["compile"] = g1
     if g1.status == "fail":
         return gates
+
+    # The import guard (issue #340): for an imported-part case, the
+    # candidate must import the seeded part at the settled scale and
+    # never resize it. The violation is recorded as a gate failure BEFORE
+    # the remaining gates run (the detail carries the offending text).
+    if case.kind == "imported_part":
+        # ``case.part`` is guaranteed by the GoldenCase schema
+        # (imported_part REQUIRES a part ref); ``part_of`` enforces
+        # the invariant with a typed error if it is ever absent.
+        from d33d.import_guard import import_guard_violation
+
+        part = part_of(case)
+        violation = import_guard_violation(scad_source, part_scale=part.scale)
+        if violation is not None:
+            reason, detail = violation
+            guard = import_guard_result(
+                reason, f"{detail} (fixture {part.fixture!r}, settled scale {part.scale:g})"
+            )
+            gates["import_guard"] = guard
+            return gates
+        gates["import_guard"] = GateResult(
+            gate="import_guard", status="pass", failure_class=None, detail=""
+        )
 
     if "stl_export" in case.gate_expectations:
         g2 = _gates.gate2_stl_export(stl_path)
@@ -526,6 +628,8 @@ async def run_case(
     render_fn: RenderFn,
     judge_fn: Callable[..., Awaitable[JudgeVerdict]] | None = None,
     pre_mesh: Any = None,
+    part_path: Path | None = None,
+    part_repo_dir: Path | None = None,
 ) -> CaseOutcome:
     """Run one golden-set case end to end (design call -> render -> gates -> judge).
 
@@ -569,7 +673,28 @@ async def run_case(
         )
 
     # 2. The real render of the model's output (injected seam).
-    render_result = render_fn(scad_source)
+    # An imported-part case stages its fixture as part.stl so the
+    # candidate's import("part.stl") resolves (issue #340); the other
+    # cases render exactly as before (no part, byte-identical argv).
+    # The kwargs are passed ONLY when part_path is not None (the
+    # RenderFn contract: imported-part-capable fns accept both).
+    if part_path is not None and not _render_fn_accepts_part_kwargs(render_fn):
+        # A legacy render_fn that accepts only ``scad_source`` cannot stage
+        # the part — that case fails, the run continues (the kwargs contract
+        # is documented on the RenderFn Protocol). Checked via the signature
+        # BEFORE the call, so a genuine TypeError raised inside a correctly
+        # signed render_fn propagates instead of being mislabelled here.
+        return CaseOutcome(
+            **base,
+            failure_class="artifact_error",
+            detail="render_fn does not accept part_path/repo_dir",
+        )
+    if part_path is not None:
+        render_result = render_fn(
+            scad_source, part_path=part_path, repo_dir=part_repo_dir
+        )
+    else:
+        render_result = render_fn(scad_source)
     stl_path = getattr(render_result, "stl", None)
     mesh = _load_mesh(stl_path)
 
@@ -581,6 +706,7 @@ async def run_case(
         mesh=mesh,
         stl_path=stl_path,
         pre_mesh=pre_mesh,
+        scad_source=scad_source,
     )
 
     failed = [g for g in gate_map.values() if g.status == "fail"]
@@ -609,7 +735,7 @@ async def run_case(
         )
     )
 
-    failure_class: str | None = None
+    failure_class: EvalFailureClass | None = None
     if not verdict.passed and verdict.failure_class is not None:
         if verdict.failure_class in _gates.EVAL_FAILURE_CLASSES:
             failure_class = verdict.failure_class  # type: ignore[assignment]

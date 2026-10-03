@@ -173,7 +173,7 @@ def test_gate4_tags_geometrically_wrong():
 def test_no_gate_tags_outcome_classes():
     """``graceful_refusal`` / ``clearance_applied`` are adversarial
     verdicts, not gate failures — no gate of 1–5 can tag them."""
-    for gate in eg.GATE_NAMES:
+    for gate in eg.IMPLEMENTED_GATE_NAMES:
         taggable = eg.GATE_TAGGABLE_CLASSES[gate]
         assert OUTCOMES.isdisjoint(taggable)
 
@@ -196,7 +196,7 @@ def test_assert_taggable_rejects_geometrically_wrong_at_gate1():
 
 
 def test_assert_taggable_rejects_outcome_classes_at_any_gate():
-    for gate in eg.GATE_NAMES:
+    for gate in eg.IMPLEMENTED_GATE_NAMES:
         for oc in OUTCOMES:
             with pytest.raises(ValueError, match="not taggable at gate"):
                 eg.assert_taggable(gate, oc)
@@ -208,11 +208,11 @@ def test_assert_taggable_rejects_unknown_gate():
 
 
 def test_gate_names_are_the_five_in_order():
-    assert eg.GATE_NAMES == ("compile", "stl_export", "watertight", "bbox", "volume")
+    assert eg.IMPLEMENTED_GATE_NAMES == ("compile", "stl_export", "watertight", "bbox", "volume")
 
 
 def test_every_gate_name_has_a_taggable_entry():
-    for gate in eg.GATE_NAMES:
+    for gate in eg.IMPLEMENTED_GATE_NAMES:
         assert gate in eg.GATE_TAGGABLE_CLASSES
         assert len(eg.GATE_TAGGABLE_CLASSES[gate]) > 0
 
