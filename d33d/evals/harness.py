@@ -82,7 +82,8 @@ import yaml
 
 from d33d.evals import gates as _gates
 from d33d.evals.case_schema import GoldenCase
-from d33d.evals.gates import EvalFailureClass, GateResult, import_guard_result
+from d33d.evals.gates import EvalFailureClass, GateResult
+from d33d.evals.guard_gate import import_guard_result
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
 from d33d.evals.part_ref import part_of
 from d33d.evals.region_gate import run_region_gate

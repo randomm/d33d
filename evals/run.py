@@ -191,7 +191,7 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
     try:
-        resolved = Path(str(repo_root / str(part.fixture))).resolve()
+        resolved = (repo_root / part.fixture).resolve()
     except (OSError, ValueError) as e:
         return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}: {e}"
     return resolved, None

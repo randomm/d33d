@@ -140,9 +140,7 @@ GATE_3 = "watertight"
 GATE_4 = "bbox"
 GATE_5 = "volume"
 
-#: All five gate names in order — the five gates THIS module implements
-#: (distinct from ``d33d.evals.case_schema.GATE_NAMES``, the 7-name
-#: declare-able taxonomy the case schema pins).
+#: All five gate names in order.
 GATE_NAMES: tuple[str, ...] = (GATE_1, GATE_2, GATE_3, GATE_4, GATE_5)
 
 #: Per-gate taggability: which superset classes each gate can tag.
@@ -177,10 +175,6 @@ GATE_TAGGABLE_CLASSES: dict[str, frozenset[EvalFailureClass]] = {
     GATE_3: _POST_COMPILE_TAGGABLE,
     GATE_4: GATE_4_TAGGABLE,
     GATE_5: _POST_COMPILE_TAGGABLE,
-    # The imported-part pre-check gate (issue #340, run in
-    # ``d33d.evals.harness.run_case_gates``): it only ever fails on a
-    # good render (the candidate violates the import contract), so its
-    # only taggable class is ``artifact_error`` — the class it emits.
     "import_guard": frozenset({"artifact_error"}),
 }
 
@@ -291,30 +285,6 @@ def gate1_compiles(
         status="fail",
         failure_class=classified.failure_class,
         detail=classified.evidence,
-    )
-
-
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Imported-part pre-check gate (issue #340)
-# ---------------------------------------------------------------------------
-
-
-def import_guard_result(reason: str, detail: str) -> GateResult:
-    """The ``import_guard`` gate's failure row (issue #340).
-
-    The guard's violation (the candidate failed to import the seeded
-    part at the settled scale, or resized it) is an artifact-quality
-    defect on a successfully-rendered candidate — always tagged
-    ``artifact_error``, checked through the same :func:`assert_taggable`
-    invariant as every other gate in this module.
-    """
-    assert_taggable("import_guard", "artifact_error")
-    return GateResult(
-        gate="import_guard",
-        status="fail",
-        failure_class="artifact_error",
-        detail=f"{reason}: {detail}",
     )
 
 

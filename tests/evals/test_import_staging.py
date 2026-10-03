@@ -216,23 +216,21 @@ def test_stage_fixture_unresolvable_path_yields_error_outcome(
 
     import d33d.evals.fixtures as fixtures_mod
 
-    # Let the string-level containment checks pass cleanly (the real
-    # helper would be the next to call resolve), then drive the
-    # OSError branch of _stage_fixture's own resolve: patch only
-    # ``run.Path`` (the name ``_stage_fixture`` resolves the fixture
-    # through), leaving the global ``Path.resolve`` intact.
+    # Let the string-level containment checks pass cleanly, then drive
+    # the OSError branch of _stage_fixture's own ``resolve()``.
+    # On macOS, non-strict ``Path.resolve()`` does not raise for
+    # ENAMETOOLONG or missing files (it catches OSError internally and
+    # returns the path as-is), so we monkeypatch the ``resolve`` method
+    # to simulate the OSError that would occur on a platform where
+    # the OS returns ENAMETOOLONG or a similar error.
     monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: None)
-    # run.py imports check_fixture_containment by name — patch both
-    # references.
     monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: None)
 
-    def boom(self):  # type: ignore[no-untyped-def]
-        raise OSError("boom: resolve failed")
+    def _raise_oserror(self, *args, **kwargs):
+        raise OSError("ENAMETOOLONG: path component too long")
 
-    class _UnresolvablePath(Path):
-        resolve = boom
-
-    monkeypatch.setattr(run, "Path", _UnresolvablePath)
+    monkeypatch.setattr(Path, "resolve", _raise_oserror)
+    case.part.fixture = "evals/cases/fixtures/part.stl"
     part_path, error = run._stage_fixture(REPO_ROOT, case)
     assert part_path is None
     assert error is not None

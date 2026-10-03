@@ -89,7 +89,7 @@ def test_import_guard_failure_class_is_taggable() -> None:
     assert "artifact_error" in GATE_TAGGABLE_CLASSES["import_guard"]
     # The guard's failure row itself is built through assert_taggable
     # (import_guard_result); a non-taggable class would raise.
-    from d33d.evals.gates import import_guard_result
+    from d33d.evals.guard_gate import import_guard_result
 
     result = import_guard_result("no_import", "the candidate does not import")
     assert result.status == "fail"
