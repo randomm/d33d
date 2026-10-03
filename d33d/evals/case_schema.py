@@ -71,13 +71,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from d33d.evals.fixtures import check_fixture_containment
+from d33d.evals.part_ref import PartRef, part_of  # re-exported (issue #340)
 
 #: The seven deterministic gates, in the fixed ticket order. Gates 1–7
 #: run before any judge; the judge is stage 8 (the last stage, not a
@@ -148,43 +148,6 @@ PRINT_TOLERANCE_MM = 1.0
 #: views → OpenSCAD, scored on compile, watertightness, parameter
 #: fidelity (gate 4 bbox) and slice success. Marked baseline, not gate.
 QWEN_SMOKE_CASE_ID = "qwen-smoke-baseline"
-
-
-class PartRef(BaseModel):
-    """The imported-part mesh a case renders against (issue #340).
-
-    ``fixture`` is a path under ``evals/cases/fixtures/`` (relative to the
-    repo root); ``scale`` is the settled file→mm factor the import guard
-    accepts for this case (1.0 for an mm part — the guard compares
-    numerically within ``SCALE_FACTOR_TOL``, never by string).
-    """
-
-    fixture: str = Field(min_length=1)
-    # ``gt=0`` alone also rejects NaN (NaN < 0 is False) — the finite
-    # check below stays for inf, and as the one place the message says
-    # so explicitly.
-    scale: float = Field(gt=0)
-
-    @field_validator("scale")
-    @classmethod
-    def _scale_must_be_finite(cls, v: float) -> float:
-        if not math.isfinite(v):
-            raise ValueError("scale must be a finite positive number")
-        return v
-
-
-def part_of(case: GoldenCase) -> PartRef:
-    """The part ref of an ``imported_part`` case.
-
-    Returns ``case.part``, or raises :class:`ValueError` when it is
-    ``None`` — unreachable for a schema-validated ``imported_part``
-    case (the model validator requires the ref), but a typed error
-    instead of an ``AttributeError`` on ``None`` if that invariant is
-    ever broken by a caller constructing cases out-of-band.
-    """
-    if case.part is None:
-        raise ValueError(f"case {case.case_id!r} has no part ref")
-    return case.part
 
 
 class DimsMm(BaseModel):
