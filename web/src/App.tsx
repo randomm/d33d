@@ -966,7 +966,19 @@ export default function App({ client }: AppProps) {
             }
           : {}),
       };
-      setMessages((prev) => [...prev, userMsg]);
+      // Issue #338 (decision 7): answering the fill-and-recut offer (either
+      // branch) — or any new send, which supersedes a pending offer (the
+      // offer is one-shot) — clears `fillRecutOffer.pending` in the SAME
+      // update as the append, so the offer's buttons disable the instant
+      // the answer lands.
+      setMessages((prev) => [
+        ...prev.map((m) =>
+          m.fillRecutOffer && m.fillRecutOffer.pending
+            ? { ...m, fillRecutOffer: { pending: false } }
+            : m,
+        ),
+        userMsg,
+      ]);
 
       // Start the design-loop timer (issue #82): the elapsed-seconds counter
       // starts when the request is sent. The 1s interval runs while
@@ -1221,9 +1233,19 @@ export default function App({ client }: AppProps) {
               }
             },
             onDone: (data) => {
+              // Issue #338 (decision 7): the placeholder's in-place update
+              // below is also where any OTHER message's pending fill-and-
+              // recut offer gets superseded (a newer assistant turn means
+              // the one-shot offer is over) — so the map no longer early-
+              // returns, it clears pending offers on the non-placeholder
+              // messages and applies the placeholder's update as before.
               setMessages((prev) =>
                 prev.map((m) => {
-                  if (m.id !== assistantId) return m;
+                  if (m.id !== assistantId) {
+                    return m.fillRecutOffer && m.fillRecutOffer.pending
+                      ? { ...m, fillRecutOffer: { pending: false } }
+                      : m;
+                  }
                   // A real done message means the design was produced and
                   // validated — the pass card's summary line is the
                   // passCard copy string, NOT the wire message forwarded
@@ -1297,10 +1319,10 @@ export default function App({ client }: AppProps) {
                 }),
               );
               // Issue #250: the done frame's additive `confirm_offer` field
-              // (the server validated it — at most one param per turn, never
-              // re-offering a confirmed or user-changed value) carries the
-              // offer sentence as its own message AFTER the pass card: a
-              // plain assistant turn, never inside the PassCard, never a
+              // (the server validated it — at most one param per offer turn,
+              // never re-offering a confirmed or user-changed value) carries
+              // the offer sentence as its own message AFTER the pass card:
+              // a plain assistant turn, never inside the PassCard, never a
               // form. The pass card's turn itself (the assistant message
               // above) already rendered the pass summary; the offer is a
               // distinct plain message that follows it in the transcript.
@@ -1312,7 +1334,9 @@ export default function App({ client }: AppProps) {
               // face), so one ack done frame renders exactly ONE ack message
               // with message order and ids stable. The offer branch below is
               // byte-identical: the pass card's turn plus one appended offer
-              // message.
+              // message. The done frame's placeholder map (above) also
+              // supersedes any earlier pending fill-and-recut offer — the
+              // offer is one-shot.
               const confirmSentence =
                 typeof data.confirm_sentence === "string" ? data.confirm_sentence : "";
               if (data.confirm_offer !== undefined && confirmSentence.length > 0) {
