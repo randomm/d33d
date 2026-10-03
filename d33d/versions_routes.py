@@ -477,35 +477,16 @@ def create_versions_router() -> APIRouter:
             # derived from the SETTLED unit — or ``None`` while the unit
             # is unsettled (a file-unit bbox is not a meaningful mm
             # measurement until the unit is settled; the Brief then shows
-            # "waiting on units", never a confident number). The v1 row is
-            # the import's own measurement (its persisted bbox is the
-            # file bbox × scale, written by the import / settle) — the
-            # LATEST version's bbox is the previous candidate's own
-            # extents once a v2+ exists and would be the wrong number.
-            from d33d.part_http import _v1_for_part
+            # "waiting on units", never a confident number). The helper
+            # reads the v1 row (the import's own measurement — its
+            # persisted bbox is the file bbox × scale, written by the
+            # import / settle — the LATEST version's bbox is the previous
+            # candidate's own extents once a v2+ exists and would be the
+            # wrong number) with the same finite/positive guards as
+            # ``part_envelope_with_bbox``.
+            from d33d.part_http import part_bbox_mm
 
-            v1 = _v1_for_part(svc.conn, project_id)
-            raw_bbox = v1.get("bbox") if v1 else None
-            if isinstance(raw_bbox, str):
-                try:
-                    raw_bbox = json.loads(raw_bbox)
-                except ValueError:
-                    raw_bbox = None
-            axes = (
-                [raw_bbox.get(a) for a in ("x", "y", "z")]
-                if isinstance(raw_bbox, dict)
-                else []
-            )
-            part["bbox_mm"] = (
-                [float(v) for v in axes]
-                if project_row.get("part_unit_status") == "settled"
-                and len(axes) == 3
-                and all(
-                    isinstance(v, (int, float)) and not isinstance(v, bool)
-                    for v in axes
-                )
-                else None
-            )
+            part["bbox_mm"] = part_bbox_mm(project_row, svc.conn)
         # history_missing (issue #316): the repo directory is absent → the
         # saved design history is gone. Same predicate as
         # storage.repo_present (via the shared repo_present helper) —

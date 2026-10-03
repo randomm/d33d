@@ -2349,3 +2349,82 @@ def test_part_envelope_with_bbox_v1_no_bbox_degrades(tmp_path: Path):
     env = part_envelope_with_bbox(row, conn)
     assert env is not None
     assert env["bbox_mm"] is None, env
+
+
+# ---------------------------------------------------------------------------
+# part_bbox_mm: the design-state part block's single public bbox helper
+# (issue #338, decision 2 — [w, d, h] mm, null while unsettled)
+# ---------------------------------------------------------------------------
+
+
+def _conn_with_part_bbox(
+    tmp_path: Path,
+    *,
+    bbox: dict | None,
+    unit_status: str,
+) -> Any:
+    """An in-memory connection with one project (part columns set to
+    ``unit_status``) and a v1 version row carrying ``bbox`` (JSON)."""
+    import json as _json
+
+    import d33d.db as db_mod
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.Connection(":memory:")
+    _migrate(conn)
+    pid = conn.create_project(name="p", git_repo_path=str(tmp_path / "repo"))
+    bbox_json = _json.dumps(bbox) if bbox is not None else None
+    conn.execute(
+        "INSERT INTO versions (project_id, name, params, bbox) VALUES (?, ?, ?, ?)",
+        (pid, "v1", "{}", bbox_json),
+    )
+    conn.execute(
+        "UPDATE projects SET part_filename=?, part_format=?, part_unit_status=?, "
+        "part_scale=? WHERE id=?",
+        ("part.stl", "stl", unit_status, 1.0, pid),
+    )
+    conn.commit()
+    return conn, pid
+
+
+def test_part_bbox_mm_settled_returns_wdh_list(tmp_path: Path):
+    """A SETTLED part with a positive v1 bbox → the [w, d, h] mm list."""
+    from d33d.part_http import part_bbox_mm
+
+    conn, pid = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 20.0, "y": 10.0, "z": 5.0}, unit_status="settled"
+    )
+    row = conn.get_project(pid)
+    assert part_bbox_mm(row, conn) == [20.0, 10.0, 5.0]
+
+
+def test_part_bbox_mm_zero_or_negative_axis_is_null(tmp_path: Path):
+    """A zero or negative axis (same guards as
+    ``part_envelope_with_bbox``: finite and > 0) degrades to ``None`` —
+    never a confident number."""
+    from d33d.part_http import part_bbox_mm
+
+    conn, pid = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 0.0, "y": 10.0, "z": 5.0}, unit_status="settled"
+    )
+    row = conn.get_project(pid)
+    assert part_bbox_mm(row, conn) is None
+
+    conn2, pid2 = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 20.0, "y": -1.0, "z": 5.0}, unit_status="settled"
+    )
+    row2 = conn2.get_project(pid2)
+    assert part_bbox_mm(row2, conn2) is None
+
+
+def test_part_bbox_mm_unsettled_is_null(tmp_path: Path):
+    """An UNSETTLED part → ``None`` (a file-unit bbox is not a meaningful
+    mm measurement until the unit is settled — decision 2: "null while
+    unsettled"), even when the v1 row carries a bbox."""
+    from d33d.part_http import part_bbox_mm
+
+    conn, pid = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 600.0, "y": 400.0, "z": 200.0}, unit_status="unsettled"
+    )
+    row = conn.get_project(pid)
+    assert part_bbox_mm(row, conn) is None
