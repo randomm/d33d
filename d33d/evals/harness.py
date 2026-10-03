@@ -103,12 +103,12 @@ class RenderFn(Protocol):
     live runs and a stub for hermetic tests. The harness never shells into
     Docker itself.
 
-    The harness's ``render_fn`` is a caller-supplied wrapper, NOT
-    ``d33d.render_worker.render_for_design_loop`` itself: ``evals/run.py``
-    binds the worker into a wrapper whose signature matches this protocol
-    (``scad_source`` plus the ``part_path`` / ``repo_dir`` kwargs, with
-    the worker's own arguments supplied by the wrapper) before handing it
-    to the harness.
+    ``evals/run.py`` passes
+    ``d33d.render_worker.render_for_design_loop`` directly — the harness's
+    ``render_fn`` is not a caller-supplied wrapper. It satisfies this
+    protocol structurally: besides ``scad_source`` it already accepts
+    ``part_path`` / ``repo_dir`` and its remaining parameters (``defines``,
+    ``renders_dir``, etc.) all have defaults.
 
     Contract (issue #340): render functions used with ``imported_part``
     cases MUST accept the ``part_path`` / ``repo_dir`` kwargs — the
