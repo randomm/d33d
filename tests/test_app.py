@@ -1564,6 +1564,242 @@ def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):
 
 
 # ---------------------------------------------------------------------------
+# Issue #338 fix round — fill-recut axis / except-order / unit-gate
+# ---------------------------------------------------------------------------
+
+
+def test_chat_accept_carrys_axis_into_instruction(app_with_projects, monkeypatch):
+    """Item 1 (MEDIUM): a fill-recut offer seeded through the REGION-EDIT
+    route (with a ``face_normal``) carries the pick's axis; accepting it
+    through the CHAT route ("Yes, do that") must build the loop
+    instruction WITH the "on the same axis" clause. Regression: the
+    chat route reads the offer via ``get_pending_offer``, which dropped
+    the axis, so the accepted instruction lost the clause."""
+    import d33d.chat_loop as _cl
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(_cl, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Axis Chat"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # Seed the offer through the REGION-EDIT route with a face normal
+        # (the pick's normal is stored as the offer's axis).
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[12.0, 0.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        assert r2.status_code == 202, r2.text
+        svc = _svc(app_with_projects)
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None, "offer not recorded by the region route"
+        assert offer.get("axis") == [0.0, 1.0, 0.0], offer
+        # The boundary-trigger path left the in-flight flag held (the loop
+        # stub is lazy and never starts, so the stream's finally never runs)
+        # — release it so the CHAT acceptance is not 409-blocked.
+        inflight = app_with_projects.state.design_loop_inflight
+        if inflight is not None:
+            inflight.discard(pid)
+        # Accept through the CHAT route (decision 7: Yes goes via chat).
+        r3 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "Yes, do that"}
+        )
+        assert r3.status_code == 202, r3.text
+        # Drain the event source — the stub _fake_loop is a lazy async
+        # generator; calls.append fires when the generator starts.
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        return pid
+
+    _pid = _run_async(app_with_projects, _call)
+    assert calls, "the design loop was not called on chat acceptance"
+    rt = calls[0].get("request_text", "")
+    assert "Fill-and-recut:" in rt, rt
+    assert "hole" in rt, rt
+    # The accepted instruction carries the axis clause (the face normal).
+    assert "axis 0, 1, 0" in rt, rt
+
+
+def test_chat_accept_corrupt_axis_dropped_no_crash(app_with_projects, monkeypatch):
+    """Item 1 (MEDIUM, security): a stored fill-recut offer whose axis is
+    CORRUPT (non-finite component) reads back WITHOUT an axis and the
+    offer still returns — the accepted instruction is built without the
+    axis clause (no crash, no malformed axis leaked)."""
+    import json as _json
+
+    import d33d.chat_loop as _cl
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(_cl, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Corrupt Axis"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        conn = app_with_projects.state.conn
+        # Store a fill-recut offer with a NON-FINITE axis (NaN is valid
+        # JSON; the reader must reject it).
+        conn.raw.execute(
+            "UPDATE projects SET pending_offer = ? WHERE id = ?",
+            (
+                _json.dumps(
+                    {
+                        "kind": "fill_recut",
+                        "noun": "hole",
+                        "size": 38.0,
+                        "axis": [float("nan"), 0.0, 0.0],
+                    }
+                ),
+                pid,
+            ),
+        )
+        conn.commit()
+        # Read back: the offer returns (noun/size) but WITHOUT the axis.
+        svc = _svc(app_with_projects)
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None, "the offer must still be returned"
+        assert offer["kind"] == "fill_recut", offer
+        assert offer["noun"] == "hole", offer
+        assert offer["size"] == 38.0, offer
+        assert "axis" not in offer, f"corrupt axis leaked: {offer}"
+        # Accept via chat: builds an instruction with no axis clause.
+        r3 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "Yes, do that"}
+        )
+        assert r3.status_code == 202, r3.text
+        source = app_with_projects.state.event_sources.get(pid)
+        if source is not None:
+            async for _event, _data in source:
+                if _event in ("done", "error"):
+                    break
+        return pid
+
+    _pid = _run_async(app_with_projects, _call)
+    assert calls, "the design loop was not called on chat acceptance"
+    rt = calls[0].get("request_text", "")
+    assert "Fill-and-recut:" in rt, rt
+    assert "(axis" not in rt, f"corrupt axis leaked into the instruction: {rt}"
+
+
+def test_region_accept_restore_failure_releases_flag_and_propagates(
+    app_with_projects, monkeypatch
+):
+    """Item 2 (MEDIUM): on the region-edit accept path, if the offer
+    RESTORE itself raises during a design-loop setup failure, the
+    in-flight flag is STILL released (it is discarded FIRST) and the
+    ORIGINAL loop-setup exception propagates (the restore failure is
+    logged, not the one that surfaces)."""
+    import d33d.design_loop_events as dle_mod
+    from d33d.versions import VersionService as _VersionService
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("forced loop setup failure")
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom)
+
+    calls: list[int] = []
+
+    def _flaky_set_pending_offer(self, pid, offer):
+        calls.append(pid)
+        raise RuntimeError("forced: restore (set_pending_offer) failed")
+
+    monkeypatch.setattr(_VersionService, "set_pending_offer", _flaky_set_pending_offer)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Restore Fail"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        app_with_projects.state.conn.raw.execute(
+            "UPDATE projects SET pending_offer = ? WHERE id = ?",
+            ('{"kind": "fill_recut", "noun": "hole", "size": 38.0}', pid),
+        )
+        app_with_projects.state.conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        # The ORIGINAL loop-setup exception (RuntimeError) surfaces — the
+        # restore failure is NOT the one that propagates. With no handler
+        # converting RuntimeError to a 500 response, the ASGI transport
+        # surfaces the original exception here.
+        inflight = app_with_projects.state.design_loop_inflight
+        assert pid not in inflight, "flag leaked (restore failure masked the release)"
+        return r2.status_code
+
+    try:
+        _run_async(app_with_projects, _call)
+        raised = None
+    except RuntimeError as exc:
+        raised = str(exc)
+    assert raised is not None, "the original setup exception did not propagate"
+    assert "forced loop setup failure" in raised, (
+        f"expected the ORIGINAL loop-setup error, got: {raised}"
+    )
+    # The restore was ATTEMPTED exactly once (the flaky setter fired).
+    assert len(calls) == 1, f"expected exactly one restore attempt, got {len(calls)}"
+
+
+def test_region_edit_no_part_preroute_returns_none(app_with_projects, monkeypatch):
+    """Item 3 (MEDIUM): the unit-status gate lives in ONE place —
+    ``fill_recut_region_edit``. ``region_edit_preroute`` no longer
+    re-checks it: a project WITHOUT an imported part makes the decision
+    return ``None`` (the gate), so ``region_edit_preroute`` returns
+    ``None`` (fall through to the design loop)."""
+    import d33d.fill_recut_region as fr_mod
+
+    async def _fake_loop(app, pid, **kwargs):
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    seen: dict[str, Any] = {}
+
+    def _spied(app, project_id, instruction, face_normal=None, row=None, part=None):
+        seen["part"] = part
+
+    monkeypatch.setattr(fr_mod, "fill_recut_region_edit", _spied)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "No Part Gate"})
+        pid = r.json()["id"]
+        return pid
+
+    _pid = _run_async(app_with_projects, _call)
+    # Call the pre-route directly with part=None (no part) → None.
+    result = fr_mod.region_edit_preroute(
+        app_with_projects, _pid, None, None, "make it bigger", None, _fake_loop, {}
+    )
+    assert result is None, "preroute must return None (fall through) when no part"
+    assert "part" in seen, "the decision was not reached for the no-part project"
+    assert seen["part"] is None
+
+
+# ---------------------------------------------------------------------------
 # main.py entrypoint (import sanity, no bind)
 # ---------------------------------------------------------------------------
 

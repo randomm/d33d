@@ -1598,6 +1598,16 @@ def test_unsettled_part_reply_equals_copy_ts() -> None:
     assert fill_recut.UNSETTLED_PART_REPLY == m.group(1)
 
 
+def test_unsettled_part_reply_in_fill_recut_all() -> None:
+    """Item 4 (MEDIUM): ``UNSETTLED_PART_REPLY`` is in ``fill_recut.__all__``
+    (``d33d.projects`` references it by name — a missing ``__all__`` entry
+    would break ``from d33d.fill_recut import *`` consumers)."""
+    assert "UNSETTLED_PART_REPLY" in fill_recut.__all__, (
+        "UNSETTLED_PART_REPLY missing from fill_recut.__all__"
+    )
+    assert hasattr(fill_recut, "UNSETTLED_PART_REPLY")
+
+
 def test_fill_recut_decline_reply_equals_copy_ts() -> None:
     """``FRILL_DECLINE_REPLY`` equals ``copy.ts``'s ``fillRecut.declined``
     exactly."""
