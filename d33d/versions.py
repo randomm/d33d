@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -353,6 +354,24 @@ def _valid_param_value(value: Any) -> bool:
 def validate_params(params: dict[str, Any]) -> list[str]:
     """Keys (sorted) whose values are not scalars — empty means valid."""
     return sorted(k for k, v in params.items() if not _valid_param_value(v))
+
+
+def _valid_axis(value: Any) -> bool:
+    """``True`` iff ``value`` is a 3-element list/tuple of finite numbers
+    (the issue #338 fill-recut offer's ``axis`` — the region-edit pick's
+    face normal). ``bool`` is excluded (a ``bool`` is an ``int``); a wrong
+    length, a non-numeric entry, or a non-finite entry (``NaN``/``inf``)
+    is invalid — such an axis is dropped on read (the offer still
+    returns without it) rather than leaking a malformed axis into the
+    fill-and-recut instruction."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    for component in value:
+        if not isinstance(component, (int, float)) or isinstance(component, bool):
+            return False
+        if not math.isfinite(component):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1086,12 +1105,18 @@ class VersionService:
         # The issue #332 fill-and-recut variant (the ``kind`` discriminator
         # keeps the #250 param-offer readers from reading a fill-recut row
         # as a param offer — a fill-recut doc has no ``param``): validated
-        # to ``{"kind": "fill_recut", "noun": str, "size": float | None}``.
+        # to ``{"kind": "fill_recut", "noun": str, "size": float | None,
+        # "axis": [x, y, z]}``. The optional ``axis`` (the region-edit
+        # pick's face normal, operator decision 5) is surfaced ONLY when it
+        # is a 3-list of finite numbers — an invalid axis (wrong length,
+        # non-numeric, or non-finite) is dropped and the offer is still
+        # returned without it, so a corrupt axis degrades to the axis-free
+        # #332 behaviour instead of leaking into the instruction.
         if doc.get("kind") == "fill_recut":
             noun = doc.get("noun")
             if isinstance(noun, str) and noun:
                 size = doc.get("size")
-                return {
+                offer: dict[str, Any] = {
                     "kind": "fill_recut",
                     "noun": noun,
                     "size": (
@@ -1102,6 +1127,10 @@ class VersionService:
                         else None
                     ),
                 }
+                axis = doc.get("axis")
+                if _valid_axis(axis):
+                    offer["axis"] = [float(v) for v in axis]
+                return offer
         return None
 
     def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None:
