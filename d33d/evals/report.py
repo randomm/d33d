@@ -44,14 +44,16 @@ def case_gate_order(case_kind: CaseKind) -> tuple[str, ...]:
 
     The kind's pre-check gate (``import_guard`` for ``imported_part``
     cases — see ``d33d.evals.case_schema.KIND_PRECHECK_GATES``) is
-    ordered FIRST, before the base 1->7 gates it precedes in the gate
-    phase; kinds without a pre-check get the base order unchanged. The
-    base order is :data:`d33d.evals.case_schema.GATE_NAMES` (the 1->7
-    gates — the single source of the declare-able taxonomy; the kind's
-    pre-check is prepended when present, so the kind's full order is
-    longer than the base). The
-    report's per-case row carries at most these keys (absent gates
-    were not reached — a short-circuit).
+    listed FIRST in the row for reading convenience only; kinds
+    without a pre-check get the base order unchanged. The base order is
+    :data:`d33d.evals.case_schema.GATE_NAMES` (the 1->7 gates — the
+    single source of the declare-able taxonomy; the kind's pre-check is
+    prepended when present, so the kind's full order is longer than the
+    base). In execution the order is compile first, then
+    ``import_guard``, then the remaining declared gates — the row's
+    listing order does NOT mirror execution order. The report's
+    per-case row carries at most these keys (absent gates were not
+    reached — a short-circuit).
     """
     pre = KIND_PRECHECK_GATES.get(case_kind)
     return (pre, *GATE_NAMES) if pre is not None else GATE_NAMES
@@ -216,9 +218,11 @@ def build_report(
     report reads in the taxonomy the design loop already uses.
 
     Each row's ``gates`` mapping is ordered by :func:`case_gate_order`
-    (the kind's pre-check gate first — ``import_guard`` for
-    ``imported_part`` — then the base 1->7 order), so the row reads in
-    the order the gate phase ran.
+    (the kind's pre-check gate — ``import_guard`` for ``imported_part``
+    — listed first for reading convenience, then the base 1->7 order).
+    This listing order does NOT mirror execution order: in execution
+    compile runs first, then ``import_guard``, then the remaining
+    declared gates.
 
     ``ts`` defaults to the current UTC time (deterministic in tests via
     the argument).

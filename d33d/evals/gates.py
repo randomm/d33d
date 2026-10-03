@@ -175,6 +175,7 @@ GATE_TAGGABLE_CLASSES: dict[str, frozenset[EvalFailureClass]] = {
     GATE_3: _POST_COMPILE_TAGGABLE,
     GATE_4: GATE_4_TAGGABLE,
     GATE_5: _POST_COMPILE_TAGGABLE,
+    # Pre-check gate, enforced at construction in guard_gate.py.
     "import_guard": frozenset({"artifact_error"}),
 }
 

@@ -109,9 +109,12 @@ CaseKind = Literal[
 #: ``gate_expectations`` run, but it is NOT declared in
 #: ``gate_expectations`` — it is implied by the kind.
 #:
-#: Ordering lives in :func:`d33d.evals.report.case_gate_order` (the report
-#: orders a kind's pre-check gate first); this constant only maps kind →
-#: pre-check gate name.
+#: Reporting order: the pre-check gate is listed FIRST in the report row
+#: for reading convenience only — in execution, compile runs first, then
+#: the pre-check gate, then the remaining declared gates; the row order
+#: does not mirror execution order.
+#: Ordering lives in :func:`d33d.evals.report.case_gate_order`; this
+#: constant only maps kind → pre-check gate name.
 KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
 
 #: Gate 6/7 N/A markers: a gate reports N/A (neither pass nor hard fail)
