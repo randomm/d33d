@@ -550,61 +550,32 @@ test("killChildAndGroup: one kill path — a failing first kill never skips the 
   expect(otherLogs[1]).toContain("EACCES (simulated)");
 });
 
-test("watchdog: checkParent kills the group on ESRCH (injected probe)", async () => {
-  const { checkParent } = await loadWatchdog();
-  const signals: string[] = [];
-  const killed = checkParent(
-    () => {
-      throw Object.assign(new Error("gone"), { code: "ESRCH" });
-    },
-    42,
-    (s) => signals.push(s),
-  );
-  expect(killed).toBe("dead");
-  expect(signals).toEqual(["SIGKILL"]);
-
-  const alive = checkParent(() => {}, 42, (s) => signals.push(s));
-  expect(alive).toBe("alive");
-  expect(signals).toEqual(["SIGKILL"]);
-}, 5000);
-
 test("psGroupEmpty: a ps timeout (simulated via an injected failing exec) returns null — the \"ps unavailable\" branch of confirmGroupGone", async () => {
-  // Issue #341: `execFileSync("ps", ...)` gains `timeout: 1000` in
-  // run-vitest.mjs; a timeout throws into the existing bare catch, so
-  // psGroupEmpty returns null — the "ps unavailable" branch of
-  // confirmGroupGone in kill-confirm.mjs (the fallback contract is
-  // unchanged).
+  // Issue #341: `psGroupEmpty`'s `execFileSync("ps", ...)` carries
+  // `timeout: 1000`; a timeout throws into the existing bare catch, so the
+  // function returns null — the "ps unavailable" branch of confirmGroupGone
+  // in kill-confirm.mjs (the fallback contract is unchanged).
   //
-  // Importing the wrapper module is side-effect-free: its process effects
-  // (the spawn, the signal/exit handlers) are guarded behind an entry-point
-  // check and run only when the wrapper is executed, so this import yields
-  // the pure exports (psGroupEmpty, the kill bindings) in this worker's own
-  // process without spawning anything and without registering a handler that
-  // could call process.exit in the test runner. (Same invariant the
-  // "spawn the wrapper as a child" fixture tests rely on — here the import
-  // path is exercised directly.)
-  // `run-vitest.d.mts` is the typed contract for this import (the module is
-  // a plain .mjs with no source file to import).
-  // The injected `exec` throws an execFileSync-shaped ETIMEDOUT error,
-  // exactly what a wedged `ps` produces after the 1000 ms budget.
-  const mod = await import("../../scripts/run-vitest.mjs");
-  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
-  const psGroupEmpty = mod.psGroupEmpty;
+  // `psGroupEmpty` lives in kill-confirm.mjs (the pure module) precisely so
+  // this test can import it without importing run-vitest.mjs — the wrapper
+  // is the process (its top-level `spawn` would run in this worker, the
+  // #336 orphaning hazard).
+  const { psGroupEmpty, confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
 
   // 1. The timeout path: the injected exec throws the way execFileSync does
   //    when `timeout` elapses — an ETIMEDOUT error — and psGroupEmpty
-  //    swallows it and returns null.
+  //    swallows it and returns null ("ps unavailable").
   const etim = Object.assign(new Error("Command failed (timed out)"), { code: "ETIMEDOUT" });
-  const seen: unknown[] = [];
+  const seen: Array<{ encoding: string; timeout?: number } | undefined> = [];
   const timedOut = psGroupEmpty(99, {
     exec: (_cmd: string, _args: string[], opts: { encoding: string; timeout?: number }) => {
-      seen.push(opts.timeout);
+      seen.push(opts);
       throw etim;
     },
   });
   expect(timedOut).toBeNull(); // "ps unavailable" — not true/false
   // The wrapper passes the timeout option through to the probe.
-  expect(seen).toEqual([1000]);
+  expect(seen).toEqual([{ encoding: "utf8", timeout: 1000 }]);
 
   // 2. The ps-unavailable branch of confirmGroupGone: ps() === null means
   //    "not confirmed" — it logs the backstop line and never throws. This
@@ -628,6 +599,24 @@ test("psGroupEmpty: a ps timeout (simulated via an injected failing exec) return
   expect(logs.length).toBe(1);
   expect(logs[0]).toContain("ps unavailable");
   expect(logs[0]).toContain("backstop");
+}, 5000);
+
+test("watchdog: checkParent kills the group on ESRCH (injected probe)", async () => {
+  const { checkParent } = await loadWatchdog();
+  const signals: string[] = [];
+  const killed = checkParent(
+    () => {
+      throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    },
+    42,
+    (s) => signals.push(s),
+  );
+  expect(killed).toBe("dead");
+  expect(signals).toEqual(["SIGKILL"]);
+
+  const alive = checkParent(() => {}, 42, (s) => signals.push(s));
+  expect(alive).toBe("alive");
+  expect(signals).toEqual(["SIGKILL"]);
 }, 5000);
 
 test("watchdog: parseWrapperPid warns on a bad pid and disables the watchdog", async () => {
