@@ -138,13 +138,17 @@ def _render_fn_accepts_part_kwargs(render_fn: Any) -> bool:
     Checked BEFORE the call (instead of catching the call's TypeError)
     so a genuine TypeError raised inside a correctly signed render_fn
     propagates. A signature that cannot be inspected (some builtins)
-    is treated as accepting the kwargs — the call then fails loudly
-    rather than being silently mislabelled.
+    counts as NOT accepting the kwargs — the case then gets the clear
+    "render_fn does not accept part_path/repo_dir" artifact_error
+    outcome instead of a raw TypeError.
     """
     try:
         sig = inspect.signature(render_fn)
     except (ValueError, TypeError):
-        return True
+        # A signature that cannot be inspected (some builtins): the call
+        # would raise TypeError and be mislabelled, so the case gets the
+        # clear "does not accept part_path/repo_dir" outcome instead.
+        return False
     params = sig.parameters
     if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         return True

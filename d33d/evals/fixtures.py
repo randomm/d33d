@@ -17,11 +17,12 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
 
     The fixture must be a relative ``.stl`` path whose resolved location
     stays under the repo root's ``evals/cases/fixtures/`` directory.
-    Symlinks: an in-tree symlink (target inside ``evals/cases/fixtures/``)
-    passes here, because ``resolve()`` follows it and the resolved target
-    is still contained; a symlink whose target escapes that directory is
-    rejected by the same ``resolve()`` + ``is_relative_to`` check (the
-    ``../`` traversal and absolute-path rejections work the same way).
+    Symlinks are rejected outright (``is_symlink()`` on the path as
+    given, before ``resolve()`` follows them): a symlink — in-tree or
+    escaping — never passes, so this check stands on its own without
+    relying on target containment. The ``../`` traversal and
+    absolute-path rejections work the same way (via ``resolve()`` +
+    ``is_relative_to``).
     The render worker's ``validate_part_path`` is the authoritative
     containment check at render time — this helper only guards the eval
     harness's staging and seed verification.
@@ -42,6 +43,8 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
             "part.stl); 3MF staging is out of scope for the eval harness"
         )
     root = repo_root.resolve()
+    if (root / fixture).is_symlink():
+        return f"part fixture {fixture!r} is a symlink; symlinks are rejected outright"
     fixtures_dir = (root / "evals" / "cases" / "fixtures").resolve()
     try:
         resolved = (root / fixture).resolve()

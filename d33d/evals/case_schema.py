@@ -160,6 +160,9 @@ class PartRef(BaseModel):
     """
 
     fixture: str = Field(min_length=1)
+    # ``gt=0`` alone also rejects NaN (NaN < 0 is False) — the finite
+    # check below stays for inf, and as the one place the message says
+    # so explicitly.
     scale: float = Field(gt=0)
 
     @field_validator("scale")

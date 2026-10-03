@@ -29,27 +29,17 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from d33d.evals.case_schema import KIND_PRECHECK_GATES
+from d33d.evals.case_schema import GATE_NAMES, KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
 
-if TYPE_CHECKING:
-    from d33d.evals.gates import GateResult
-
 #: The base gate labels, in the pinned 1->7 order — the gates a case
-#: may DECLARE in ``gate_expectations`` (see
-#: ``d33d.evals.case_schema.GATE_NAMES``).
-BASE_GATE_ORDER: tuple[str, ...] = (
-    "compile",
-    "stl_export",
-    "watertight_winding",
-    "bbox_dims",
-    "volume_faces",
-    "slice_dry_run",
-    "region_containment",
-)
+#: may DECLARE in ``gate_expectations``. Derived from
+#: :data:`d33d.evals.case_schema.GATE_NAMES` so the schema's gate list
+#: is the single owner of the taxonomy and its order.
+BASE_GATE_ORDER: tuple[str, ...] = GATE_NAMES
 
 
 def case_gate_order(case_kind: str) -> tuple[str, ...]:
@@ -201,20 +191,15 @@ class RunReport:
         return json.dumps(self.to_dict(), sort_keys=True, ensure_ascii=False, indent=2)
 
 
-def _order_gate_row(outcome: CaseOutcome) -> None:
-    """Re-order an outcome's ``gates`` mapping in the kind's gate order
-    (in place; ``CaseOutcome`` is frozen but its ``gates`` dict is not)
-    so :meth:`CaseOutcome.to_dict` emits the row in the order the gate
-    phase ran."""
+def _ordered_gate_names(outcome: CaseOutcome) -> tuple[str, ...]:
+    """The outcome's gate names re-ordered in the kind's gate order (a
+    pure projection — the outcome is untouched) so the report row reads
+    in the order the gate phase ran."""
     ordered = case_gate_order(outcome.kind)
-    by_name = dict(outcome.gates)
-    ordered_gates: dict[str, GateResult] = {}
-    for name in ordered:
-        if name in by_name:
-            ordered_gates[name] = by_name.pop(name)
-    ordered_gates.update(by_name)  # any unexpected gate, last
-    outcome.gates.clear()
-    outcome.gates.update(ordered_gates)
+    present = dict(outcome.gates)
+    ordered_names = tuple(name for name in ordered if name in present)
+    extras = tuple(name for name in present if name not in ordered)  # unexpected, last
+    return ordered_names + extras
 
 
 def build_report(
@@ -240,15 +225,19 @@ def build_report(
     ``ts`` defaults to the current UTC time (deterministic in tests via
     the argument).
 
-    Side effect: each outcome's ``gates`` dict is reordered in place to
-    the kind's gate order before the row is serialised (:func:`_order_gate_row`).
+    The aggregation is pure: each outcome is read, never mutated — the
+    per-row gate reordering (:func:`_ordered_gate_names`) projects the
+    names locally; the outcome's ``gates`` dict is left untouched.
     """
     rows: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}
     passed = 0
     for outcome in outcomes:
-        _order_gate_row(outcome)
-        rows[outcome.case_id] = outcome.to_dict()
+        row = outcome.to_dict()
+        row["gates"] = {
+            name: outcome.gates[name].to_dict() for name in _ordered_gate_names(outcome)
+        }
+        rows[outcome.case_id] = row
         if outcome.ok:
             passed += 1
             continue

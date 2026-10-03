@@ -191,7 +191,11 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     violation = check_fixture_containment(repo_root, part.fixture)
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
-    return (repo_root / part.fixture).resolve(), None
+    try:
+        resolved = (repo_root / part.fixture).resolve()
+    except (OSError, ValueError) as e:
+        return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}: {e}"
+    return resolved, None
 
 
 def _staging_outcome(case: GoldenCase, error: str) -> CaseOutcome:

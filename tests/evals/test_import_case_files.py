@@ -32,7 +32,8 @@ from d33d.evals.case_schema import (
     part_of,
     verify_seed,
 )
-from d33d.evals.harness import run_case_gates
+from d33d.evals.gates import GateResult
+from d33d.evals.harness import CaseOutcome, run_case_gates
 from tests.evals._casefile_helpers import write_cases as _write_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -122,6 +123,16 @@ def test_import_guard_is_in_the_gate_registry() -> None:
     for cid, case in cases.items():
         for gate in case.gate_expectations:
             assert gate in known, f"{cid}: unknown gate {gate!r}"
+
+
+def test_base_gate_order_derived_from_schema_gate_names() -> None:
+    """``BASE_GATE_ORDER`` (report) and ``GATE_NAMES`` (schema) are the
+    same gates in the same order — the schema is the single owner of the
+    taxonomy."""
+    from d33d.evals.report import BASE_GATE_ORDER
+
+    assert BASE_GATE_ORDER == GATE_NAMES
+    assert list(BASE_GATE_ORDER) == list(GATE_NAMES)
 
 
 def test_fixture_exists_under_1mb_and_parses_watertight() -> None:
@@ -460,6 +471,50 @@ def test_non_stl_fixture_yields_failure_outcome_other_cases_run(tmp_path: Path):
     assert report_doc["summary"]["passed"] == 1
 
 
+def test_stage_fixture_unresolvable_path_yields_error_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failure in the success-path ``resolve()`` (an OSError from
+    ``Path.resolve``) is that case's staging failure — ``_stage_fixture``
+    returns a clean ``(None, error)`` pair, never an exception, never an
+    aborted run."""
+    run = _load_run_module()
+
+    cases_dir = _write_cases(
+        tmp_path,
+        [
+            {
+                "case_id": "unresolvable-import",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {
+                    "fixture": "evals/cases/fixtures/part.stl",
+                    "scale": 1.0,
+                },
+            },
+        ],
+    )
+    case = load_golden_set(cases_dir, REPO_ROOT)["unresolvable-import"]
+
+    def boom(self):  # type: ignore[no-untyped-def]
+        raise OSError("boom: resolve failed")
+
+    import d33d.evals.fixtures as fixtures_mod
+
+    # Pass the string-level containment checks cleanly (the real helper
+    # would be the next to call resolve), then blow up only the
+    # SUCCESS-path resolve in _stage_fixture itself.
+    monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: None)
+    # run.py imports check_fixture_containment by name — patch both
+    # references.
+    monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: None)
+    monkeypatch.setattr(Path, "resolve", boom)
+    part_path, error = run._stage_fixture(REPO_ROOT, case)
+    assert part_path is None
+    assert error is not None
+    assert "cannot resolve fixture" in error
+
+
 def test_missing_fixture_yields_failure_outcome(tmp_path: Path):
     import json as _json
 
@@ -488,6 +543,26 @@ def test_missing_fixture_yields_failure_outcome(tmp_path: Path):
     assert bad["failure_class"] == "artifact_error"
     assert "missing on disk" in bad["detail"]
     assert cases["normal-box"]["ok"] is True
+
+
+def test_check_fixture_containment_rejects_symlink_outright(tmp_path: Path):
+    """A symlinked fixture is rejected outright (before ``resolve()``
+    follows it) — even when the target stays inside
+    ``evals/cases/fixtures/``."""
+    from d33d.evals.fixtures import check_fixture_containment
+
+    fixtures_dir = tmp_path / "evals" / "cases" / "fixtures"
+    fixtures_dir.mkdir(parents=True)
+    target = fixtures_dir / "real.stl"
+    target.write_bytes(b"stl")
+    link = fixtures_dir / "linked.stl"
+    link.symlink_to(target)
+
+    violation = check_fixture_containment(tmp_path, "evals/cases/fixtures/linked.stl")
+    assert violation is not None
+    assert "symlink" in violation
+    # a regular file in the same directory still passes
+    assert check_fixture_containment(tmp_path, "evals/cases/fixtures/real.stl") is None
 
 
 def test_gate_phase_skips_guard_for_non_import_kind() -> None:
@@ -654,6 +729,38 @@ def test_render_fn_legacy_stub_typeerror_is_contained(tmp_path: Path) -> None:
     assert report_doc["summary"]["passed"] == 1
 
 
+def test_render_fn_uninspectable_counts_as_not_accepting_kwargs() -> None:
+    """A render_fn whose signature cannot be inspected (a builtin like
+    ``iter``) is counted as NOT accepting ``part_path``/``repo_dir`` —
+    the probe returns ``False``, so the imported-part case gets the
+    clear artifact_error outcome ("render_fn does not accept
+    part_path/repo_dir") instead of a raw TypeError.
+
+    The probe is a pure function of the signature (checked BEFORE the
+    call), so this tests it directly without needing a full run."""
+    from d33d.evals.harness import _render_fn_accepts_part_kwargs
+
+    # ``iter`` is a builtin that ``inspect.signature`` cannot inspect —
+    # the probe must treat it as NOT accepting the kwargs.
+    assert _render_fn_accepts_part_kwargs(iter) is False
+
+    # ``range`` is a builtin type that ``inspect.signature`` cannot
+    # inspect either.
+    assert _render_fn_accepts_part_kwargs(range) is False
+
+    # A correctly signed render_fn passes the probe (regression guard).
+    def ok_fn(scad_source, *, part_path=None, repo_dir=None):
+        return None
+
+    assert _render_fn_accepts_part_kwargs(ok_fn) is True
+
+    # A **kwargs render_fn passes the probe (regression guard).
+    def kw_fn(scad_source, **kwargs):
+        return None
+
+    assert _render_fn_accepts_part_kwargs(kw_fn) is True
+
+
 def test_render_fn_correct_signature_typeerror_propagates() -> None:
     """A correctly signed render_fn whose BODY raises TypeError propagates
     the TypeError — it is not swallowed and mislabelled as "render_fn does
@@ -740,6 +847,40 @@ def test_part_ref_scale_rejects_non_finite() -> None:
         PartRef(fixture="evals/cases/fixtures/part.stl", scale=float("nan"))
     # a normal positive scale still validates
     assert PartRef(fixture="evals/cases/fixtures/part.stl", scale=1.0).scale == 1.0
+
+
+def test_build_report_is_pure_over_outcome_gates() -> None:
+    """``build_report`` reorders the report ROW, never the outcome: the
+    keys of ``outcome.gates`` are unchanged after the aggregation."""
+    from d33d.evals.report import build_report
+
+    case = _load()[IMPORT_CASE_IDS[0]]
+    outcome = CaseOutcome(
+        case_id=case.case_id,
+        kind=case.kind,
+        prompt_version=case.prompt.prompt_version,
+        prompt_sha256=case.prompt.sha256,
+        request=case.request,
+        # compile ordered BEFORE import_guard here (the gate phase
+        # records the pre-check first) — the row must be reordered, the
+        # outcome must not be.
+        gates={
+            "compile": GateResult(gate="compile", status="pass"),
+            "import_guard": GateResult(gate="import_guard", status="fail"),
+        },
+        failure_class="artifact_error",
+        detail="import_guard: no_import",
+    )
+    before = list(outcome.gates)
+    assert before == ["compile", "import_guard"]
+
+    report = build_report([outcome], ts="2026-01-01T00:00:00+00:00")
+
+    assert list(outcome.gates) == before  # pure: the outcome is untouched
+    assert list(report.outcomes[outcome.case_id]["gates"]) == [
+        "import_guard",
+        "compile",
+    ]
 
 
 def test_run_py_render_wrapper_satisfies_render_fn_contract(
