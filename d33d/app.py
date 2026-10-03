@@ -583,11 +583,11 @@ class RegionEditRequest(BaseModel):
             return None
         length = math.sqrt(sum(x * x for x in v))
         if not math.isclose(
-            length, 1.0, abs_tol=fill_recut_region_mod.NORMAL_LENGTH_TOLERANCE
+            length, 1.0, abs_tol=versions_mod.NORMAL_LENGTH_TOLERANCE
         ):
             raise ValueError(
                 "face_normal length must be within "
-                f"1±{fill_recut_region_mod.NORMAL_LENGTH_TOLERANCE} (got {length:g})"
+                f"1±{versions_mod.NORMAL_LENGTH_TOLERANCE} (got {length:g})"
             )
         return v
 

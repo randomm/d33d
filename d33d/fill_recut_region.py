@@ -36,6 +36,7 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
+from d33d.versions import NORMAL_LENGTH_TOLERANCE
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +52,6 @@ FILL_RECUT_NO_NORMAL_REPLY = (
     "feature's axis from where you pointed — pin a flat face on it and "
     "I'll offer to fill it and recut it on the same axis."
 )
-
-#: The region-edit wire's face-normal length tolerance (issue #338's
-#: operator decision 4): the SPA sends a unit world-space normal; a
-#: length within 1±this tolerance is accepted, outside it is a 422
-#: (a normal that is not unit is a client defect the loop cannot use).
-NORMAL_LENGTH_TOLERANCE = 0.01
 
 #: The pre-route's "handled the turn" decision shape (see
 #: :func:`fill_recut_region_edit`). The closed key set:

@@ -56,7 +56,6 @@ from typing import Any
 
 from d33d import db as db_mod
 from d33d.design_loop import BBOX_TOLERANCE_MIN_MM, BBOX_TOLERANCE_REL
-from d33d.fill_recut_region import NORMAL_LENGTH_TOLERANCE as _NORMAL_LENGTH_TOLERANCE
 from d33d.project_git import sanitize_commit_message as _sanitize_commit_message
 
 logger = logging.getLogger(__name__)
@@ -64,6 +63,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+#: The region-edit wire's face-normal length tolerance (issue #338 operator decision 4).
+NORMAL_LENGTH_TOLERANCE = 0.01
 
 #: Max display name length (auto-names are derived to this).
 NAME_MAX_LEN = 40
@@ -375,7 +377,7 @@ def _valid_axis(value: Any) -> bool:
         if not math.isfinite(component):
             return False
     length = math.sqrt(sum(component * component for component in value))
-    return abs(length - 1.0) <= _NORMAL_LENGTH_TOLERANCE
+    return abs(length - 1.0) <= NORMAL_LENGTH_TOLERANCE
 
 
 # ---------------------------------------------------------------------------
