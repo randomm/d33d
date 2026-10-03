@@ -193,6 +193,8 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
         return None, f"case {case.case_id}: {e}"
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
+    if resolved is None:  # cannot happen for a clean containment result; guard for monkeypatched helpers
+        return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}"
     try:
         if not resolved.is_file():
             return (
