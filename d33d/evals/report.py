@@ -29,11 +29,14 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from d33d.evals.case_schema import KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
+
+if TYPE_CHECKING:
+    from d33d.evals.gates import GateResult
 
 #: The base gate labels, in the pinned 1->7 order — the gates a case
 #: may DECLARE in ``gate_expectations`` (see
@@ -205,7 +208,7 @@ def _order_gate_row(outcome: CaseOutcome) -> None:
     phase ran."""
     ordered = case_gate_order(outcome.kind)
     by_name = dict(outcome.gates)
-    ordered_gates: dict = {}
+    ordered_gates: dict[str, GateResult] = {}
     for name in ordered:
         if name in by_name:
             ordered_gates[name] = by_name.pop(name)

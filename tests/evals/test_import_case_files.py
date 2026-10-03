@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -30,6 +29,7 @@ from d33d.evals.case_schema import (
     verify_seed,
 )
 from d33d.evals.harness import run_case_gates
+from tests.evals._casefile_helpers import write_cases as _write_cases
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_DIR = REPO_ROOT / "evals" / "cases"
@@ -300,33 +300,6 @@ def test_check_fixture_containment_rejects_empty_path(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # (b2) per-case containment: staging problems fail the case, never the run
 # ---------------------------------------------------------------------------
-
-
-def _write_cases(tmp_path: Path, cases: list[dict]) -> Path:
-    """Write case files (with a real, pinned prompt file) into a temp dir."""
-    import hashlib
-
-    prompts_dir = tmp_path / "prompts"
-    prompts_dir.mkdir(exist_ok=True)
-    prompt = prompts_dir / "p.md"
-    prompt.write_text("# prompt v1", encoding="utf-8")
-    pin = hashlib.sha256(prompt.read_bytes()).hexdigest()
-    cases_dir = tmp_path / "cases"
-    cases_dir.mkdir(exist_ok=True)
-    for c in cases:
-        doc = {
-            "prompt": {
-                "prompt_version": "v1",
-                "path": str(prompt),
-                "sha256": pin,
-            },
-            "gate_expectations": ["compile"],
-        }
-        doc.update(c)
-        (cases_dir / f"{c['case_id']}.json").write_text(
-            json.dumps(doc), encoding="utf-8"
-        )
-    return cases_dir
 
 
 def _llm_factory():
@@ -692,3 +665,17 @@ def test_verify_seed_flags_absolute_fixture(tmp_path: Path) -> None:
     cases[IMPORT_CASE_IDS[0]].part.fixture = str(FIXTURE)
     violations = verify_seed(cases, REPO_ROOT)
     assert any("not a relative path" in v for v in violations)
+
+
+def test_verify_seed_without_repo_root_reports_cannot_verify() -> None:
+    """With ``repo_root=None`` the containment check cannot resolve the
+    fixture path: the violation is "cannot verify fixture without
+    repo_root" (a None repo_root is not dereferenced) and the run of
+    the other checks still completes without crashing."""
+    cases = _load()
+    violations = verify_seed(cases)
+    for cid in IMPORT_CASE_IDS:
+        assert any(
+            v.startswith(f"{cid}: cannot verify fixture without repo_root")
+            for v in violations
+        ), f"{cid}: missing the no-repo_root violation in {violations}"

@@ -76,6 +76,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from d33d.evals.fixtures import check_fixture_containment
+
 #: The seven deterministic gates, in the fixed ticket order. Gates 1–7
 #: run before any judge; the judge is stage 8 (the last stage, not a
 #: gate) and is out of scope for the golden-set schema — it is a
@@ -348,43 +350,6 @@ def check_prompt_pin(repo_root: Path, pin: PromptPin) -> str:
     return actual
 
 
-def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
-    """Containment-check a part fixture path (issue #340 shared helper).
-
-    The fixture must be a relative ``.stl`` path whose resolved location
-    stays under the repo root's ``evals/cases/fixtures/`` directory
-    (checked with ``resolve()`` + ``is_relative_to`` so a ``../``
-    traversal, an absolute path, or a symlink escape is rejected).
-    Shared by ``evals/run.py``'s staging path and :func:`verify_seed` —
-    one containment rule, one implementation.
-
-    Returns ``None`` when the fixture is contained, or the violation
-    message otherwise.
-    """
-    if not fixture.strip():
-        return "part fixture path is empty"
-    if Path(fixture).is_absolute():
-        return f"part fixture {fixture!r} is not a relative path under the repo root"
-    if Path(fixture).suffix.lower() != ".stl":
-        return (
-            f"part fixture {fixture!r} must be an STL file (the worker seeds "
-            "part.stl); 3MF staging is out of scope for the eval harness"
-        )
-    root = repo_root.resolve()
-    fixtures_dir = (root / "evals" / "cases" / "fixtures").resolve()
-    try:
-        resolved = (root / fixture).resolve()
-        contained = resolved.is_relative_to(fixtures_dir)
-    except (ValueError, OSError) as e:
-        return f"cannot resolve part fixture {fixture!r} for containment check: {e}"
-    if not contained:
-        return (
-            f"part fixture {fixture!r} escapes {fixtures_dir} (the fixture "
-            "must live under evals/cases/fixtures/)"
-        )
-    return None
-
-
 def load_case_file(path: Path) -> GoldenCase:
     """Parse and validate one case file (JSON → :class:`GoldenCase`)."""
     data = json.loads(path.read_text())
@@ -434,9 +399,10 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
     exists and is marked as baseline. An empty list is what the test
     asserts.
 
-    The baseline (``is_baseline``) is the 21st case (the 6th primitive —
-    see :data:`BASELINE_IS_PRIMITIVE`). The per-kind mix is therefore
-    computed over the non-baseline cases, so it sums to exactly 20.
+    The baseline (``is_baseline``) is the 6th primitive within the
+    20-case seed — part of the set, not a 21st case. The per-kind mix is
+    therefore counted over the full set, and ``SEED_MIX`` sums to 23
+    (the 20-case seed plus the 3 imported-part cases of issue #340).
     """
     violations: list[str] = []
 
@@ -458,14 +424,17 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
             if c.part is None:
                 violations.append(f"{cid}: imported_part case missing its part ref")
             else:
+                if repo_root is None:
+                    violations.append(
+                        f"{cid}: cannot verify fixture without repo_root"
+                    )
+                    continue
                 containment = check_fixture_containment(repo_root, c.part.fixture)
                 if containment is not None:
                     violations.append(f"{cid}: {containment}")
                     continue
-                fixture = (
-                    (repo_root / c.part.fixture) if repo_root is not None else None
-                )
-                if fixture is None or not fixture.is_file():
+                fixture = repo_root / c.part.fixture
+                if not fixture.is_file():
                     violations.append(
                         f"{cid}: part fixture {c.part.fixture!r} missing on disk"
                     )

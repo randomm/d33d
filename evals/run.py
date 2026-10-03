@@ -62,11 +62,8 @@ from typing import Any
 
 import httpx
 
-from d33d.evals.case_schema import (
-    GoldenCase,
-    check_fixture_containment,
-    load_golden_set,
-)
+from d33d.evals.case_schema import GoldenCase, load_golden_set
+from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.harness import (
     CaseOutcome,
     RenderFn,
