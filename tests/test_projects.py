@@ -1818,7 +1818,7 @@ def test_fill_recut_parity_fresh_offer_no_loop(app_with_projects, monkeypatch):
         region_offer_raw = _read_pending(region_pid)
         return chat_pid, region_pid, chat_frames, region_frames, r5.status_code, chat_offer_raw, region_offer_raw
 
-    chat_pid, region_pid, chat_frames, region_frames, region_status, chat_offer, region_offer = _run_async(
+    _chat_pid, _region_pid, chat_frames, region_frames, region_status, chat_offer, region_offer = _run_async(
         app_with_projects, _call
     )
     assert region_status == 202, region_status
@@ -1949,7 +1949,7 @@ def test_fill_recut_parity_acceptance_runs_loop(app_with_projects, monkeypatch):
         region_frames = await _parity_run_loop(app_with_projects, region_pid)
         return chat_pid, region_pid, chat_frames, region_frames, status4
 
-    chat_pid, region_pid, chat_frames, region_frames, status4 = _run_async(
+    chat_pid, region_pid, _chat_frames, _region_frames, status4 = _run_async(
         app_with_projects, _call
     )
     assert status4 == 202, status4
