@@ -20,6 +20,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from d33d.evals.case_schema import (
     GATE_NAMES,
     KIND_PRECHECK_GATES,
@@ -632,6 +634,33 @@ def test_render_fn_legacy_stub_typeerror_is_contained(tmp_path: Path) -> None:
     # the other case still ran and still passes
     assert cases["normal-box"]["ok"] is True
     assert report_doc["summary"]["passed"] == 1
+
+
+def test_render_fn_correct_signature_typeerror_propagates() -> None:
+    """A correctly signed render_fn whose BODY raises TypeError propagates
+    the TypeError — it is not swallowed and mislabelled as "render_fn does
+    not accept part_path/repo_dir" (mutation check: restoring the old
+    ``except TypeError`` around the call makes this fail with the
+    mislabelled artifact_error outcome instead)."""
+    from d33d.evals.harness import run_case
+
+    def broken_render_fn(scad_source, *, part_path=None, repo_dir=None):
+        raise TypeError("boom")
+
+    case = _load()["import-drill-hole"]
+    with pytest.raises(TypeError, match="boom"):
+        asyncio.run(
+            run_case(
+                case=case,
+                repo_root=REPO_ROOT,
+                model_id="m",
+                request_factory=_async_factory("cube([1, 1, 1]);"),
+                render_fn=broken_render_fn,
+                part_path=FIXTURE,
+                part_repo_dir=REPO_ROOT,
+                judge_fn=_passing_judge,
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

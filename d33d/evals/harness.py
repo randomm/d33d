@@ -72,6 +72,7 @@ nor a hard fail.
 from __future__ import annotations
 
 import base64
+import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -121,6 +122,26 @@ class RenderFn(Protocol):
         part_path: Path | None = None,
         repo_dir: Path | None = None,
     ) -> Any: ...
+
+
+def _render_fn_accepts_part_kwargs(render_fn: Any) -> bool:
+    """True when ``render_fn`` can take the ``part_path`` / ``repo_dir``
+    kwargs: both are named parameters, or the signature has ``**kwargs``.
+
+    Checked BEFORE the call (instead of catching the call's TypeError)
+    so a genuine TypeError raised inside a correctly signed render_fn
+    propagates. A signature that cannot be inspected (some builtins)
+    is treated as accepting the kwargs — the call then fails loudly
+    rather than being silently mislabelled.
+    """
+    try:
+        sig = inspect.signature(render_fn)
+    except (ValueError, TypeError):
+        return True
+    params = sig.parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "part_path" in params and "repo_dir" in params
 
 
 @dataclass(frozen=True)
@@ -635,20 +656,21 @@ async def run_case(
     # cases render exactly as before (no part, byte-identical argv).
     # The kwargs are passed ONLY when part_path is not None (the
     # RenderFn contract: imported-part-capable fns accept both).
+    if part_path is not None and not _render_fn_accepts_part_kwargs(render_fn):
+        # A legacy render_fn that accepts only ``scad_source`` cannot stage
+        # the part — that case fails, the run continues (the kwargs contract
+        # is documented on the RenderFn Protocol). Checked via the signature
+        # BEFORE the call, so a genuine TypeError raised inside a correctly
+        # signed render_fn propagates instead of being mislabelled here.
+        return CaseOutcome(
+            **base,
+            failure_class="artifact_error",
+            detail="render_fn does not accept part_path/repo_dir",
+        )
     if part_path is not None:
-        try:
-            render_result = render_fn(
-                scad_source, part_path=part_path, repo_dir=part_repo_dir
-            )
-        except TypeError as e:
-            # A legacy render_fn that accepts only ``scad_source`` cannot
-            # stage the part — that case fails, the run continues (the
-            # kwargs contract is documented on the RenderFn Protocol).
-            return CaseOutcome(
-                **base,
-                failure_class="artifact_error",
-                detail=f"render_fn does not accept part_path/repo_dir: {e}",
-            )
+        render_result = render_fn(
+            scad_source, part_path=part_path, repo_dir=part_repo_dir
+        )
     else:
         render_result = render_fn(scad_source)
     stl_path = getattr(render_result, "stl", None)
