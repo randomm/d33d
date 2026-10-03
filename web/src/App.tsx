@@ -77,7 +77,7 @@ import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
-import { usePartUpload } from "./components/upload/usePartUpload";
+import { usePartUpload } from "./components/upload/PartUpload";
 import { usePartStl } from "./hooks/usePartStl";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
@@ -144,6 +144,14 @@ interface PendingRegionSelection {
   viewId: RegionEditViewId;
   moduleIds: string[];
   point: { x: number; y: number };
+  /** The pick's mm hit point (issue #338) — sent to the region-edit wire
+   *  when the pick landed on imported geometry. */
+  hitPointMm?: { x: number; y: number; z: number } | null;
+  /** The world-space unit face normal (issue #338) — sent to the wire as
+   *  the fill-and-recut offer's axis. */
+  faceNormal?: { x: number; y: number; z: number } | null;
+  /** The pick landed on an imported part (issue #338). */
+  onImportedPart?: boolean;
 }
 
 interface AppProps {
@@ -283,6 +291,14 @@ export default function App({ client }: AppProps) {
   // envelope; the settle response body is never authoritative (D8's
   // refetch-then-render contract). Null until the design-state resolves.
   const [designStatePart, setDesignStatePart] = useState<PartReportInfo | null>(null);
+  // Mirrors `designStatePart` in a ref so the stable-deps `handlePointPick`
+  // callback can read the latest part without re-binding (issue #338: the
+  // pick handler needs to know whether the pick landed on an imported part
+  // to decide whether to carry the mm hit point + face normal to the wire).
+  const designStatePartRef = useRef<PartReportInfo | null>(null);
+  useEffect(() => {
+    designStatePartRef.current = designStatePart;
+  }, [designStatePart]);
   // Issue #316: the design-state envelope's `history_missing` flag (true
   // when the project's repo directory is absent — the same predicate as
   // `storage.repo_present`). `true` alone (a failed project-GET storage
@@ -726,12 +742,20 @@ export default function App({ client }: AppProps) {
         // instruction. The pending selection is attached to whichever chat
         // message the user sends next (see handleSendMessage), or via the
         // bar's own Apply/Enter path.
+        // Issue #338: for picks on imported geometry, carry the mm hit point
+        // and world-space face normal so the region-edit wire sends them
+        // (the design-loop grounding text names the exact location; the
+        // face normal rides as the fill-and-recut offer's axis).
+        const onImportedPart = designStatePartRef.current !== null;
         pendingSelectionGenerationRef.current += 1;
         setPendingSelection({
           thumbnail: `data:image/png;base64,${markedPngBase64}`,
           viewId: "front",
           moduleIds,
           point: event.point,
+          hitPointMm: pick.hitPointMm,
+          faceNormal: pick.faceNormal,
+          onImportedPart,
         });
       } catch (e) {
         const detail = e instanceof Error ? e.message : "unknown error";
@@ -942,7 +966,19 @@ export default function App({ client }: AppProps) {
             }
           : {}),
       };
-      setMessages((prev) => [...prev, userMsg]);
+      // Issue #338 (decision 7): answering the fill-and-recut offer (either
+      // branch) — or any new send, which supersedes a pending offer (the
+      // offer is one-shot) — clears `fillRecutOffer.pending` in the SAME
+      // update as the append, so the offer's buttons disable the instant
+      // the answer lands.
+      setMessages((prev) => [
+        ...prev.map((m) =>
+          m.fillRecutOffer && m.fillRecutOffer.pending
+            ? { ...m, fillRecutOffer: { pending: false } }
+            : m,
+        ),
+        userMsg,
+      ]);
 
       // Start the design-loop timer (issue #82): the elapsed-seconds counter
       // starts when the request is sent. The 1s interval runs while
@@ -970,6 +1006,33 @@ export default function App({ client }: AppProps) {
             marked_png_base64: stripDataUrlPrefix(selectionToAttach.thumbnail),
             point: selectionToAttach.point,
             instruction: trimmed,
+            // Issue #338: for picks on imported geometry, carry the mm hit
+            // point and the world-space face normal (the design-loop
+            // grounding text + the fill-and-recut offer's axis). Omitted
+            // when the pick did not land on a usable face (normal null) or
+            // no mm point was resolved.
+            ...(selectionToAttach.onImportedPart
+              ? {
+                  ...(selectionToAttach.hitPointMm
+                    ? {
+                        hit_point_mm: [
+                          selectionToAttach.hitPointMm.x,
+                          selectionToAttach.hitPointMm.y,
+                          selectionToAttach.hitPointMm.z,
+                        ] as [number, number, number],
+                      }
+                    : {}),
+                  ...(selectionToAttach.faceNormal
+                    ? {
+                        face_normal: [
+                          selectionToAttach.faceNormal.x,
+                          selectionToAttach.faceNormal.y,
+                          selectionToAttach.faceNormal.z,
+                        ] as [number, number, number],
+                      }
+                    : {}),
+                }
+              : {}),
           })
           .then(() => {
             // 202 Accepted means the request was validated and the design
@@ -1170,9 +1233,19 @@ export default function App({ client }: AppProps) {
               }
             },
             onDone: (data) => {
+              // Issue #338 (decision 7): the placeholder's in-place update
+              // below is also where any OTHER message's pending fill-and-
+              // recut offer gets superseded (a newer assistant turn means
+              // the one-shot offer is over) — so the map no longer early-
+              // returns, it clears pending offers on the non-placeholder
+              // messages and applies the placeholder's update as before.
               setMessages((prev) =>
                 prev.map((m) => {
-                  if (m.id !== assistantId) return m;
+                  if (m.id !== assistantId) {
+                    return m.fillRecutOffer && m.fillRecutOffer.pending
+                      ? { ...m, fillRecutOffer: { pending: false } }
+                      : m;
+                  }
                   // A real done message means the design was produced and
                   // validated — the pass card's summary line is the
                   // passCard copy string, NOT the wire message forwarded
@@ -1224,6 +1297,13 @@ export default function App({ client }: AppProps) {
                       : "";
                   const isAck =
                     data.confirm_ack !== undefined && ackLabel.length > 0;
+                  // Issue #338 (decision 7): the fill-and-recut offer's done
+                  // frame carries the additive `fill_recut_offer` field — the
+                  // placeholder renders the boundary sentence with the
+                  // [Yes, do that] / [Leave it] buttons (the offer is stored
+                  // server-side as the pending offer; the buttons send the
+                  // acceptance/decline through the existing chat offer path).
+                  const isFillRecutOffer = data.fill_recut_offer === true;
                   return {
                     ...m,
                     streaming: false,
@@ -1232,14 +1312,17 @@ export default function App({ client }: AppProps) {
                       : isReal && m.content === ""
                         ? { content: isAnswer ? msg : copy.passCard.summary }
                         : {}),
+                    ...(isFillRecutOffer
+                      ? { fillRecutOffer: { pending: true } }
+                      : {}),
                   };
                 }),
               );
               // Issue #250: the done frame's additive `confirm_offer` field
-              // (the server validated it — at most one param per turn, never
-              // re-offering a confirmed or user-changed value) carries the
-              // offer sentence as its own message AFTER the pass card: a
-              // plain assistant turn, never inside the PassCard, never a
+              // (the server validated it — at most one param per offer turn,
+              // never re-offering a confirmed or user-changed value) carries
+              // the offer sentence as its own message AFTER the pass card:
+              // a plain assistant turn, never inside the PassCard, never a
               // form. The pass card's turn itself (the assistant message
               // above) already rendered the pass summary; the offer is a
               // distinct plain message that follows it in the transcript.
@@ -1251,7 +1334,9 @@ export default function App({ client }: AppProps) {
               // face), so one ack done frame renders exactly ONE ack message
               // with message order and ids stable. The offer branch below is
               // byte-identical: the pass card's turn plus one appended offer
-              // message.
+              // message. The done frame's placeholder map (above) also
+              // supersedes any earlier pending fill-and-recut offer — the
+              // offer is one-shot.
               const confirmSentence =
                 typeof data.confirm_sentence === "string" ? data.confirm_sentence : "";
               if (data.confirm_offer !== undefined && confirmSentence.length > 0) {
@@ -1768,6 +1853,7 @@ export default function App({ client }: AppProps) {
           inset={OVERLAY_INSET_PX}
           conversationCollapsed={conversationCollapsed}
           entries={designState}
+          part={designStatePart}
           refreshFailed={designStateStale}
           historyMissing={designStateHistoryMissing}
           storage={projectStorage}
@@ -1798,6 +1884,7 @@ export default function App({ client }: AppProps) {
           onCompareSelect={handleCompareSelect}
           onOpenSheet={(id) => setSheetOpenFor(id)}
           sheetOpenFor={sheetOpenFor}
+          part={designStatePart}
         />
       )}
 
@@ -1837,6 +1924,7 @@ export default function App({ client }: AppProps) {
           onPin={handleVersionPin}
           onCompareSelect={handleCompareSelect}
           onClose={() => setSheetOpenFor(null)}
+          part={designStatePart}
         />
       )}
 

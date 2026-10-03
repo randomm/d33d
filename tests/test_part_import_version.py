@@ -509,6 +509,73 @@ def test_v1_source_kind_is_import(app_with_projects):
     assert v1["source_kind"] == "import"
 
 
+def test_version_public_exposes_source_kind_and_import_filename(app_with_projects):
+    """version_public exposes ``source_kind`` plus the import filename on
+    the version wire (issue #338): the SPA renders "v1 — Imported
+    {filename}" from ``source_kind == "import"`` + the design-state part
+    filename, and distinguishes it from the existing ``name`` field.
+    """
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "SK pub"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        conn = app_with_projects.state.conn
+        v1 = _read_v1(conn, pid)
+        # The public wire: list_versions (the GET the SPA reads).
+        ls_r = await client.get(f"/api/projects/{pid}/versions")
+        # The design-state part block (the filename the label renders).
+        ds_r = await client.get(f"/api/projects/{pid}/design-state")
+        return upload_r, v1, ls_r, ds_r
+
+    upload_r, v1, ls_r, ds_r = _run_async(app_with_projects, _call)
+    assert upload_r.status_code == 201, upload_r.text
+    assert v1 is not None
+    assert v1["source_kind"] == "import"
+    assert ls_r.status_code == 200, ls_r.text
+    body = ls_r.json()
+    # The wire body is either a list or an envelope holding the list.
+    versions = body if isinstance(body, list) else body.get("versions", body.get("items", []))
+    assert len(versions) == 1
+    pub = versions[0]
+    # source_kind rides the public wire (the SPA's label discriminator).
+    assert pub["source_kind"] == "import"
+    # The existing ``name`` field ("Imported box.stl") is the v1 display
+    # name, distinct from the source_kind discriminator.
+    assert pub["name"] == "Imported box.stl"
+    assert pub["name"] != pub["source_kind"]
+    # The design-state part block carries the filename the label renders.
+    assert ds_r.status_code == 200, ds_r.text
+    part = ds_r.json()["part"]
+    assert part is not None
+    assert part["filename"] == "box.stl"
+
+
+def test_version_public_source_kind_null_for_design_loop(app_with_projects):
+    """A design-loop version (no import) → ``source_kind`` is ``null``
+    on the public wire, never a fabricated value — the SPA's import
+    label never fires for a plain design version."""
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "SK loop"})
+        pid = r.json()["id"]
+        v_r = await client.post(
+            f"/api/projects/{pid}/versions", json={"params": {"W": 20.0}}
+        )
+        ls_r = await client.get(f"/api/projects/{pid}/versions")
+        return v_r, ls_r
+
+    v_r, ls_r = _run_async(app_with_projects, _call)
+    assert v_r.status_code == 201, v_r.text
+    assert ls_r.status_code == 200, ls_r.text
+    body = ls_r.json()
+    versions = body if isinstance(body, list) else body.get("versions", body.get("items", []))
+    assert len(versions) == 1
+    pub = versions[0]
+    assert pub["source_kind"] is None
+
+
 # ---------------------------------------------------------------------------
 # Scale on the project row (per operator decision)
 # ---------------------------------------------------------------------------

@@ -333,3 +333,110 @@ describe("ChatPanel", () => {
     });
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Issue #338 (decision 7) — the fill-and-recut offer buttons
+// ---------------------------------------------------------------------------
+
+describe("ChatPanel — fill-and-recut offer buttons (issue #338)", () => {
+  it("renders the boundary sentence + [Yes, do that] / [Leave it] buttons for a fill-recut offer", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file, so I can't resize it directly.",
+        fillRecutOffer: { pending: true },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    const offer = screen.getByTestId("fill-recut-offer-msg");
+    expect(offer.textContent).toContain("That hole came with your file");
+    const yes = screen.getByTestId("fill-recut-offer-yes");
+    const no = screen.getByTestId("fill-recut-offer-no");
+    expect(yes.textContent).toBe("Yes, do that");
+    expect(no.textContent).toBe("Leave it");
+    expect(yes).not.toBeDisabled();
+    expect(no).not.toBeDisabled();
+  });
+
+  it("styles the offer buttons through the styles.css token classes (no inline colours)", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file.",
+        fillRecutOffer: { pending: true },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    const yes = screen.getByTestId("fill-recut-offer-yes");
+    const no = screen.getByTestId("fill-recut-offer-no");
+    expect(yes.className).toContain("fill-recut-offer-btn");
+    expect(yes.className).toContain("fill-recut-offer-btn--yes");
+    expect(no.className).toContain("fill-recut-offer-btn");
+    expect(no.className).toContain("fill-recut-offer-btn--no");
+    // The button colours live in styles.css (--color-* tokens), not inline.
+    expect(yes.getAttribute("style")).not.toContain("background");
+    expect(no.getAttribute("style")).not.toContain("background");
+  });
+
+  it("Yes sends acceptance through the existing chat offer path", () => {
+    const onSend = vi.fn();
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file.",
+        fillRecutOffer: { pending: true },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={onSend} />);
+    fireEvent.click(screen.getByTestId("fill-recut-offer-yes"));
+    expect(onSend).toHaveBeenCalledWith("Yes, do that");
+  });
+
+  it("Leave it sends the decline (clears the pending offer, no loop)", () => {
+    const onSend = vi.fn();
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file.",
+        fillRecutOffer: { pending: true },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={onSend} />);
+    fireEvent.click(screen.getByTestId("fill-recut-offer-no"));
+    expect(onSend).toHaveBeenCalledWith("Leave it");
+  });
+
+  it("both buttons disable when the offer is no longer pending", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file.",
+        fillRecutOffer: { pending: false },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    const yes = screen.getByTestId("fill-recut-offer-yes");
+    const no = screen.getByTestId("fill-recut-offer-no");
+    expect(yes).toBeDisabled();
+    expect(no).toBeDisabled();
+  });
+
+  it("does not render offer buttons for a plain message (no fillRecutOffer)", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That's a good point.",
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    expect(screen.queryByTestId("fill-recut-offer-msg")).toBeNull();
+    expect(screen.queryByTestId("fill-recut-offer-yes")).toBeNull();
+  });
+});

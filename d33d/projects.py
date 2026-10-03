@@ -402,36 +402,61 @@ def create_projects_router() -> APIRouter:
         # the answer-frame plumbing (register the done frame, return the
         # 202 body) and the accepted-offer instruction (appended to the
         # request text further down).
-        from d33d.part_http import part_public
+        # The fill-recut pre-route runs after the in-flight claim but BEFORE
+        # an event source is registered — the same contract as the #250
+        # guard below: ANY failure here releases the flag (the stream's
+        # ``finally`` never runs) and re-raises.
+        try:
+            from d33d.part_http import part_public
 
-        _part = part_public(row) if row.get("part_filename") else None
-        _fill_recut_instruction: str | None = None
-        if _part is not None and _part.get("unit_status") not in ("assumed", "settled"):
-            logger.warning(
-                "chat for project %s: the part's units are unsettled — "
-                "replying with the settle-first notice, no design run",
-                project_id,
-            )
-            app.state.event_sources[project_id] = _answered_frames(
-                fill_recut.UNSETTLED_PART_REPLY
-            )
-            return {"status": "accepted"}
-        _fill_recut = fill_recut.fill_recut_turn(app, project_id, body.message)
-        if _fill_recut is not None:
-            if _fill_recut.get("run_loop"):
-                _fill_recut_instruction = _fill_recut["instruction"]
-                logger.info(
-                    "chat for project %s: fill-and-recut offer accepted — "
-                    "running the design loop with the fill-and-recut "
-                    "instruction (len(message)=%d)",
+            _part = part_public(row) if row.get("part_filename") else None
+            _fill_recut_instruction: str | None = None
+            if _part is not None and _part.get("unit_status") not in (
+                "assumed",
+                "settled",
+            ):
+                logger.warning(
+                    "chat for project %s: the part's units are unsettled — "
+                    "replying with the settle-first notice, no design run",
                     project_id,
-                    len(body.message),
                 )
-            else:
                 app.state.event_sources[project_id] = _answered_frames(
-                    _fill_recut["answer"]
+                    fill_recut.UNSETTLED_PART_REPLY
                 )
                 return {"status": "accepted"}
+            _fill_recut = fill_recut.fill_recut_turn(app, project_id, body.message)
+            if _fill_recut is not None:
+                if _fill_recut.get("run_loop"):
+                    _fill_recut_instruction = _fill_recut["instruction"]
+                    logger.info(
+                        "chat for project %s: fill-and-recut offer accepted — "
+                        "running the design loop with the fill-and-recut "
+                        "instruction (len(message)=%d)",
+                        project_id,
+                        len(body.message),
+                    )
+                else:
+                    # The ``fill_recut_offer`` flag (the SPA's [Yes, do
+                    # that] / [Leave it] buttons) surfaces ONLY for the
+                    # FRESH-OFFER outcome — the SAME ``outcome``
+                    # discriminator the region-edit seam dispatches on
+                    # (b0edf88's region-edit fix): a clean decline (a
+                    # re-emitted FILL_RECUT_DECLINE_REPLY) must NOT re-render
+                    # the buttons for an offer that no longer exists.
+                    app.state.event_sources[project_id] = _answered_frames(
+                        _fill_recut["answer"],
+                        fill_recut_offer=_fill_recut.get("outcome")
+                        == "fresh_offer",
+                    )
+                    return {"status": "accepted"}
+        except Exception:
+            inflight.discard(project_id)
+            logger.exception(
+                "chat for project %s: the fill-recut pre-route failed — "
+                "the in-flight flag is released",
+                project_id,
+            )
+            raise
 
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
@@ -451,6 +476,11 @@ def create_projects_router() -> APIRouter:
             offer_route = await _confirm_offer_route(app, project_id, body.message)
         except Exception:
             inflight.discard(project_id)
+            logger.exception(
+                "chat for project %s: the offer-acceptance pre-route failed "
+                "— the in-flight flag is released",
+                project_id,
+            )
             raise
         if offer_route is not None:
             # The event source is registered — the flag stays set
@@ -508,13 +538,31 @@ def create_projects_router() -> APIRouter:
             )
         except Exception:
             # The design-loop setup raised BEFORE an event source was
-            # registered (the flag is already released by the setup path):
-            # restore the accepted fill-recut offer so the user's "yes" is
-            # never lost to a setup failure (issue #332 fix round).
+            # registered — the in-flight flag is released FIRST (the
+            # stream's ``finally`` never runs, so the flag must be
+            # released here; the setup path never releases it), then the
+            # accepted fill-recut
+            # offer is restored inside its OWN try/except so a restore
+            # failure never masks the original setup exception (the
+            # ``fill_recut_region._handle_acceptance`` pattern).
+            inflight.discard(project_id)
             if _fill_recut is not None and _fill_recut.get("run_loop"):
-                app.state.versions.set_pending_offer(
-                    project_id, _fill_recut.get("accepted_offer")
-                )
+                try:
+                    app.state.versions.set_pending_offer(
+                        project_id, _fill_recut.get("accepted_offer")
+                    )
+                except Exception:
+                    logger.exception(
+                        "chat for project %s: restoring the accepted "
+                        "fill-recut offer after a design-loop setup "
+                        "failure failed — the acceptance may be lost",
+                        project_id,
+                    )
+            logger.exception(
+                "chat for project %s: design-loop setup failed — the "
+                "in-flight flag is released",
+                project_id,
+            )
             raise
 
     return router

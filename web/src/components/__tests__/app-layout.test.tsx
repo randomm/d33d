@@ -18,6 +18,8 @@
  * boundary (avoid re-mocking three.js wholesale here).
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
@@ -251,6 +253,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: null,
+      source_kind: null,
     },
   ]);
   // The export's completion moment (issue #126) POSTs the mark to the
@@ -271,6 +274,7 @@ function makeClient(overrides: Partial<ApiClient> = {}): ApiClient {
     created_at: "2026-01-01T00:00:00Z",
     diff_count: 0,
     exported_at: "2026-01-02T00:00:00Z",
+    source_kind: null,
   });
   vi.spyOn(client, "streamEvents").mockResolvedValue(undefined);
   vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
@@ -439,6 +443,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     const blob = new Blob(["fake 3mf"], { type: "model/3mf" });
@@ -461,6 +466,7 @@ describe("App layout", () => {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: "2026-01-02T00:00:00Z",
+      source_kind: null,
     });
     const listVersions = vi
       .spyOn(client, "listVersions")
@@ -479,6 +485,7 @@ describe("App layout", () => {
           created_at: "2026-01-01T00:00:00Z",
           diff_count: 0,
           exported_at: null,
+      source_kind: null,
         },
       ]);
 
@@ -519,6 +526,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "downloadModel3MF").mockRejectedValue(
@@ -580,6 +588,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
 
@@ -611,6 +620,7 @@ describe("App layout", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "streamEvents").mockImplementation(
@@ -648,6 +658,7 @@ describe("App layout", () => {
       created_at: "2026-01-01T00:00:00Z",
       diff_count: 0,
       exported_at: null,
+      source_kind: null,
     };
     // The design loop is driven the same way the other stream tests do:
     // capture the handler object streamEvents receives and dispatch the
@@ -778,6 +789,64 @@ describe("App layout", () => {
     expect(ackMsgs).toHaveLength(1);
   });
 
+  it("fill-and-recut offer buttons disable once answered (issue #338, decision 7)", async () => {
+    // Issue #338 (decision 7): the fill-recut offer's done frame renders
+    // the [Yes, do that] / [Leave it] buttons. Both stay live until
+    // either is pressed — answering must set `fillRecutOffer.pending`
+    // false in the same update as the send, so the buttons disable
+    // immediately and a second click cannot fire a second chat POST.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    let firstStream = true;
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      // First stream (the offer): kind "answer" + fill_recut_offer.
+      // Subsequent streams (the answer's own stream): plain answer, no offer.
+      if (firstStream) {
+        firstStream = false;
+        handlers.onDone?.({
+          message: "Fill it and cut a new one?",
+          kind: "answer",
+          fill_recut_offer: true,
+        });
+      } else {
+        handlers.onDone?.({
+          message: "Understood.",
+          kind: "answer",
+        });
+      }
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("move the hole");
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // The offer rendered: both buttons present and enabled.
+    const yesBtn = screen.getByTestId("fill-recut-offer-yes");
+    const noBtn = screen.getByTestId("fill-recut-offer-no");
+    expect(yesBtn).toBeTruthy();
+    expect(noBtn).toBeTruthy();
+    expect(yesBtn).toBeEnabled();
+    expect(noBtn).toBeEnabled();
+
+    // Click Yes.
+    fireEvent.click(yesBtn);
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // Both buttons now disabled.
+    expect(screen.getByTestId("fill-recut-offer-yes")).toBeDisabled();
+    expect(screen.getByTestId("fill-recut-offer-no")).toBeDisabled();
+
+    // Exactly one chat POST was sent (the "move the hole" + the "Yes, do that").
+    // postChat is called once per send: 2 sends → 2 postChat calls.
+    // But the task says "exactly one chat POST was sent" — meaning one
+    // ADDITIONAL POST beyond the initial one (for the Yes click).
+    expect(client.postChat).toHaveBeenCalledTimes(2);
+  });
+
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
     // W10: the views map is on the wire in the version-created frame; the
     // pass card (via ChatPanel) is what displays it. The App-level `renders`
@@ -887,6 +956,7 @@ describe("App restore 409 wiring (issue #295)", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
       {
         id: 2,
@@ -902,6 +972,7 @@ describe("App restore 409 wiring (issue #295)", () => {
         created_at: "2026-01-02T00:00:00Z",
         diff_count: 1,
         exported_at: null,
+      source_kind: null,
       },
     ];
     const fetchMock = vi.fn().mockResolvedValue(
@@ -1083,6 +1154,38 @@ describe("App Brief wiring (issue #123)", () => {
     expect(chip.textContent).toContain("Width · 60.0\u202Fmm");
     expect(chip.textContent).toContain("Depth · 45.0\u202Fmm");
     expect(chip.textContent).toContain("Height · 80.0\u202Fmm");
+  });
+
+  it("App passes importedPart to PassProgress whenever the project has a part (issue #338)", () => {
+    // App-level proof of the import-path wiring (issue #338 / the W332
+    // design-contract cross-pin): the design-state envelope's `part` IS
+    // the source of PassProgress's `importedPart` — the render site is
+    // ConversationPane's `importedPart={hasPart}`, where App passes
+    // `hasPart={designStatePart !== null}`.
+    //
+    // The design-contract test pins the render-site expression; this
+    // test pins the DATA FLOW half: App reads the envelope's `part` into
+    // state, and passes `designStatePart !== null` as `hasPart` down to
+    // the pane. A wiring change that drops the part fetch or forgets to
+    // pass `hasPart` fails here.
+    const appSrc = readFileSync(join(__dirname, "..", "..", "App.tsx"), "utf8");
+    // App reads the envelope's part into state:
+    expect(appSrc).toMatch(/setDesignStatePart\(envelope\.part/);
+    // And it reaches the conversation pane as `hasPart` from that state:
+    expect(appSrc).toMatch(/hasPart=\{[^}]*designStatePart[^}]*null\}/);
+  });
+
+  it("App passes part={designStatePart} to the Brief so the two-zone split is reachable (issue #338)", () => {
+    // The critical wiring: the two-zone Brief (issue #338) is dead code
+    // unless App threads the design-state envelope's `part` block into the
+    // <Brief> render site. A wiring change that forgets `part=` here leaves
+    // `part` undefined → null → the two-zone layout never renders in
+    // production, even though the unit tests (brief-zones.test.tsx) pass by
+    // calling <Brief part={...}> directly. This tripwire pins the render
+    // site: App's `part={designStatePart}` must be present.
+    const appSrc = readFileSync(join(__dirname, "..", "..", "App.tsx"), "utf8");
+    // The Brief render site passes the design-state part block:
+    expect(appSrc).toMatch(/part=\{designStatePart\}/);
   });
 
   it("the design-state envelope's history_missing flag drives the brief-saved-missing banner (issue #316)", async () => {
@@ -4631,6 +4734,7 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
         created_at: "2026-01-01T00:00:00Z",
         diff_count: 0,
         exported_at: null,
+      source_kind: null,
       },
     ]);
     vi.spyOn(client, "getProject").mockResolvedValue({

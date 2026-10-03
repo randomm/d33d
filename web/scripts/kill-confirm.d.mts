@@ -28,6 +28,24 @@ export declare function killGroupGone(
 ): boolean;
 
 /**
+ * Probe whether `ps` reports no process whose pgid is `pgid` (the EPERM
+ * fallback probe of the run-vitest wrapper). Returns null when `ps` is
+ * unavailable (including a ps timeout — `timeout: 1000` throws into the
+ * bare catch). The `exec` option is injectable for the unit test of the
+ * timeout path (no real `ps` process is spawned).
+ */
+export declare function psGroupEmpty(
+  pgid: number,
+  deps?: {
+    exec?: (
+      cmd: string,
+      args: string[],
+      o: { encoding: string; timeout?: number },
+    ) => string;
+  },
+): boolean | null;
+
+/**
  * Confirm the child group is gone before the wrapper exits.
  *
  * Pure: all I/O is injected. Returns true when the group was confirmed

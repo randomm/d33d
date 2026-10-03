@@ -160,6 +160,32 @@ def part_envelope_with_bbox(
     return env
 
 
+def part_bbox_mm(
+    row: dict[str, Any] | None, conn: db_mod.Connection | None
+) -> list[float] | None:
+    """The project's imported part's measured mm bbox as ``[w, d, h]``
+    (issue #338, decision 2) — the design-state part block's ``bbox_mm``.
+
+    Reuses :func:`part_envelope_with_bbox`'s v1-read/decode and its guards
+    (the v1 row is the import's own measurement, read through
+    :func:`_v1_for_part`; its raw sqlite JSON string is decoded; every axis
+    must be a finite positive number — a zero, negative, missing, or
+    non-numeric axis degrades to ``None``). ``None`` while the part is
+    unsettled (a file-unit bbox is not a meaningful mm measurement until
+    the unit is settled — the Brief shows "waiting on units", never a
+    confident number), and ``None`` when the project has no part.
+    """
+    if row is None or conn is None or not row.get("part_filename"):
+        return None
+    if row.get("part_unit_status") != "settled":
+        return None
+    env = part_envelope_with_bbox(row, conn)
+    if env is None or env["bbox_mm"] is None:
+        return None
+    w, d, h = env["bbox_mm"]
+    return [float(w), float(d), float(h)]
+
+
 def part_public(row: dict[str, Any]) -> dict[str, Any] | None:
     """The project row's part facts as a public object (``None`` when the
     project has no part — the NULL columns decode to ``None``, never a
@@ -342,6 +368,7 @@ __all__ = [
     "_is_positive_number",
     "_parse_multipart",
     "_v1_for_part",
+    "part_bbox_mm",
     "part_envelope",
     "part_envelope_with_bbox",
     "part_public",

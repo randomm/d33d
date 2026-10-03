@@ -24,6 +24,49 @@
 //   group is gone via `confirmGroupGone`, and reports the confirmation
 //   outcome. The wrapper binds the real probes (`process.kill(-pgid, 0)`,
 //   `ps`) here.
+//
+// - `psGroupEmpty` is the real `ps` probe itself, kept here (not in the
+//   wrapper) so the ps-timeout path is unit-testable WITHOUT importing
+//   `run-vitest.mjs` (whose top-level `spawn` is the #336 orphaning hazard —
+//   the wrapper is the process, and importing it inside a vitest worker
+//   would spawn there). Its `exec` dependency is injectable for that test.
+
+import { execFileSync } from "node:child_process";
+
+/**
+ * True if `ps` reports no process whose pgid is `pgid`. This is the EPERM
+ * fallback probe: `process.kill(-pgid, 0)` can EPERM when the group leader
+ * is gone but members are mid-reap; asking `ps` for membership is reliable
+ * because every process of a dying group is inspectable (or already gone).
+ * Returns null when `ps` is unavailable (the caller must not assume).
+ *
+ * `timeout: 1000` bounds the probe: a wedged `ps` throws into the same
+ * catch, so the function still returns null — the "ps unavailable" branch
+ * of `confirmGroupGone` (the fallback contract is unchanged). `exec` is
+ * injectable so the timeout path can be tested with an injected failing
+ * `ps` — no real `ps` process is spawned.
+ *
+ * @param {number} pgid - the group pid to probe.
+ * @param {object} [deps]
+ * @param {(cmd: string, args: string[], o: { encoding: string; timeout?: number }) => string} [deps.exec] -
+ *   the exec binding (the wrapper binds it to `execFileSync`).
+ * @returns {boolean | null} true if `ps` lists no member of `pgid`, false
+ *   if it does, null if `ps` was unavailable (including a ps timeout).
+ */
+export function psGroupEmpty(pgid, { exec = execFileSync } = {}) {
+  try {
+    const out = exec("ps", ["-axo", "pgid="], { encoding: "utf8", timeout: 1000 });
+    const seen = new Set(
+      out
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean),
+    );
+    return !seen.has(String(pgid));
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Kill the child pid, then its process group (`-pid`), with one signal.

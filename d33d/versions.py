@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -62,6 +63,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+#: The region-edit wire's face-normal length tolerance (issue #338 operator decision 4).
+NORMAL_LENGTH_TOLERANCE = 0.01
+
+#: The version row's origin discriminator for a part-import v1
+#: (``versions.source_kind``; ``None`` for a design-loop version). Owned
+#: here so ``part_import`` and this module never drift on the literal.
+SOURCE_KIND_IMPORT = "import"
 
 #: Max display name length (auto-names are derived to this).
 NAME_MAX_LEN = 40
@@ -353,6 +362,29 @@ def _valid_param_value(value: Any) -> bool:
 def validate_params(params: dict[str, Any]) -> list[str]:
     """Keys (sorted) whose values are not scalars — empty means valid."""
     return sorted(k for k, v in params.items() if not _valid_param_value(v))
+
+
+def valid_axis(value: Any) -> bool:
+    """``True`` iff ``value`` is a 3-element list/tuple of finite numbers
+    of UNIT length (the issue #338 fill-recut offer's ``axis`` — the
+    region-edit pick's face normal). ``bool`` is excluded (a ``bool`` is
+    an ``int``); a wrong length, a non-numeric entry, a non-finite entry
+    (``NaN``/``inf``), or a vector whose length is outside
+    1±``NORMAL_LENGTH_TOLERANCE`` (the wire's face-normal check, shared
+    constant owned by this module — ``d33d.versions``) is invalid — such
+    an axis is dropped on read (the offer still returns without it) rather
+    than leaking a malformed axis into the fill-and-recut instruction.
+    This module is the owner of the axis validation; the fill-and-recut
+    instruction builder reuses it so the two sites never diverge."""
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        return False
+    for component in value:
+        if not isinstance(component, (int, float)) or isinstance(component, bool):
+            return False
+        if not math.isfinite(component):
+            return False
+    length = math.sqrt(sum(component * component for component in value))
+    return abs(length - 1.0) <= NORMAL_LENGTH_TOLERANCE
 
 
 # ---------------------------------------------------------------------------
@@ -1057,8 +1089,12 @@ class VersionService:
         """The project's outstanding offer (``{"version_id": int,
         "param": str}`` for the #250 param offer, or the issue #332
         fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
-        "size": float | None}`` — the ``kind`` discriminator is ADDITIVE:
-        a param-shaped row has no ``kind``), or ``None`` (no pending offer
+        "size": float | None, "axis": [x, y, z]}`` — the ``kind``
+        discriminator is ADDITIVE: a param-shaped row has no ``kind``) —
+        where the fill-recut row's ``axis`` is OPTIONAL (the region-edit
+        pick's face normal, operator decision 5) and is surfaced only when
+        it is a 3-list of finite numbers (an invalid axis is dropped; the
+        offer is still returned without it), or ``None`` (no pending offer
         — NULL or malformed row degrades to no offer, never a raise)."""
         row = self.conn.raw.execute(
             "SELECT pending_offer FROM projects WHERE id = ?", (project_id,)
@@ -1086,12 +1122,18 @@ class VersionService:
         # The issue #332 fill-and-recut variant (the ``kind`` discriminator
         # keeps the #250 param-offer readers from reading a fill-recut row
         # as a param offer — a fill-recut doc has no ``param``): validated
-        # to ``{"kind": "fill_recut", "noun": str, "size": float | None}``.
+        # to ``{"kind": "fill_recut", "noun": str, "size": float | None,
+        # "axis": [x, y, z]}``. The optional ``axis`` (the region-edit
+        # pick's face normal, operator decision 5) is surfaced ONLY when it
+        # is a 3-list of finite numbers — an invalid axis (wrong length,
+        # non-numeric, or non-finite) is dropped and the offer is still
+        # returned without it, so a corrupt axis degrades to the axis-free
+        # #332 behaviour instead of leaking into the instruction.
         if doc.get("kind") == "fill_recut":
             noun = doc.get("noun")
             if isinstance(noun, str) and noun:
                 size = doc.get("size")
-                return {
+                offer: dict[str, Any] = {
                     "kind": "fill_recut",
                     "noun": noun,
                     "size": (
@@ -1102,6 +1144,10 @@ class VersionService:
                         else None
                     ),
                 }
+                axis = doc.get("axis")
+                if valid_axis(axis):
+                    offer["axis"] = [float(v) for v in axis]
+                return offer
         return None
 
     def set_pending_offer(self, project_id: int, offer: dict[str, Any] | None) -> None:
@@ -1111,8 +1157,10 @@ class VersionService:
         offer — the caller validates the param is a real assumed param of
         that version, ``d33d.confirm_offer``) or the issue #332
         fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
-        "size": float | None}``; the writer stores the JSON as-is
-        (``None`` → NULL, the cleared state).
+        "size": float | None, "axis": [x, y, z]}`` (the ``axis`` is
+        OPTIONAL — the region-edit pick's face normal, operator decision
+        5); the writer stores the JSON as-is (``None`` → NULL, the cleared
+        state).
 
         Shape guard (input validation at the boundary): a non-``None``
         offer must be EITHER a param-shaped row (an ``int`` ``version_id``
@@ -1538,6 +1586,14 @@ class VersionService:
             # when it has never been exported (pre-change rows read back
             # as NULL; never a fabricated timestamp).
             "exported_at": version["exported_at"],
+            # The version's origin (issue #325; issue #338 public pin):
+            # ``"import"`` for a part-import v1, ``None`` for a design-
+            # loop version. A NULL is a design-loop origin, never a
+            # fabricated ``"design"`` — the SPA uses it to pick the
+            # "v1 — Imported {filename}" history label (falling back to
+            # ``name`` when the design-state part filename is
+            # unavailable).
+            "source_kind": version.get("source_kind"),
         }
 
 
@@ -1735,6 +1791,7 @@ def migrate(conn: db_mod.Connection) -> None:
 __all__ = [
     "MAIN_MARKER_PREFIX",
     "NAME_MAX_LEN",
+    "SOURCE_KIND_IMPORT",
     "ImportCommitFailed",
     "ParamValue",
     "VersionConflictError",
@@ -1748,5 +1805,6 @@ __all__ = [
     "param_diff_name",
     "resolve_version_name",
     "sanitize_dimension_phrase",
+    "valid_axis",
     "validate_params",
 ]

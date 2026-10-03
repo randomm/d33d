@@ -84,8 +84,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from d33d import db, slicer
+from d33d import fill_recut_region as fill_recut_region_mod
 from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
+from d33d.chat_frames import register_event_source
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
     Catalogue,
@@ -545,6 +547,53 @@ class RegionEditRequest(BaseModel):
     marked_png_base64: str = Field(min_length=1)
     point: PointLocation
     instruction: str = Field(min_length=1)
+    # The pick's mm hit point and world-space unit face normal (issue
+    # #338, operator decision 4): BOTH optional — the SPA sends them
+    # for picks on imported geometry; a design without an imported part
+    # never does. All values must be finite (NaN/±inf are rejected —
+    # the same wire-format discipline as ``PointLocation``), and the
+    # normal's length must be within 1±``NORMAL_LENGTH_TOLERANCE``
+    # (a non-unit normal is a client defect the loop cannot use — 422,
+    # never a silent normalisation the client would misread as an
+    # accepted pick).
+    hit_point_mm: list[float] | None = None
+    face_normal: list[float] | None = None
+
+    @field_validator("hit_point_mm", "face_normal")
+    @classmethod
+    def _vectors_must_be_finite_unit(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return None
+        if len(v) != 3:
+            raise ValueError("hit_point_mm / face_normal must be [x, y, z]")
+        if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v):
+            raise ValueError("vector components must be finite numbers")
+        if any(abs(x) > 1e6 for x in v):
+            # The shared ±1e6 bound is INTENTIONAL on hit_point_mm and
+            # face_normal alike (one wire-format check for both fields)
+            # and can never trigger for a unit normal — its length check
+            # runs separately and 422s any non-unit input first; a
+            # |component| > 1e6 on hit_point_mm is a 1000+ km coordinate,
+            # a client defect, not a pick, so it 422s like the other
+            # wire-format defects instead of entering the loop's grounding
+            # text.
+            raise ValueError("vector components must be within ±1e6 mm")
+        return [float(x) for x in v]
+
+    @field_validator("face_normal")
+    @classmethod
+    def _face_normal_must_be_unit(cls, v: list[float] | None) -> list[float] | None:
+        if v is None:
+            return None
+        length = math.sqrt(sum(x * x for x in v))
+        if not math.isclose(
+            length, 1.0, abs_tol=versions_mod.NORMAL_LENGTH_TOLERANCE
+        ):
+            raise ValueError(
+                "face_normal length must be within "
+                f"1±{versions_mod.NORMAL_LENGTH_TOLERANCE} (got {length:g})"
+            )
+        return v
 
     @field_validator("view_id")
     @classmethod
@@ -1215,6 +1264,22 @@ def create_app(
                 status_code=409, detail="a design loop is already in flight"
             )
 
+        # Issue #338 (operator decision 5) — the fill-and-recut pre-route
+        # for the region-edit seam (the SAME trigger the chat route uses,
+        # ``fill_recut_region.fill_recut_region_edit``): for a project with an
+        # imported part whose units are assumed or settled, the trigger
+        # runs BEFORE any loop. On a fresh trigger the offer is stored
+        # (no loop, no version) and the boundary sentence is the answer;
+        # a clean acceptance of a LIVE offer runs the loop with the
+        # fill-and-recut instruction; a clean decline clears the offer
+        # and replies quietly. ``fill_result is None`` (no part, or no
+        # trigger) falls through to the design loop exactly as today.
+        # The in-flight flag is claimed NOW (the chat route's contract:
+        # claim before the pre-route; every no-source exit below releases
+        # it; the loop path keeps it — streaming.py's ``finally`` is the
+        # release point, exactly as today).
+        inflight.add(project_id)
+
         # Capture photo + stated_dims SYNCHRONOUSLY before the 202
         # response — the loop runs in the background and the DB may be
         # closed by the time it starts (same contract as post_chat).
@@ -1226,14 +1291,14 @@ def create_app(
             else EMPTY_PHOTO_DATA_URI
         )
         # Stated dims: a region edit carries NO dimension statement, so
-        # the gate ABSTAINS (``None``). Pre-#247 the route passed a zero
-        # triple; #247 replaced it with the abstaining ``None`` (the gate
-        # enforces only the axes the current run's input confirmed, and a
-        # region edit confirms nothing — no persisted fallback, issue
-        # #247's operator decision). The gate measures rather than
-        # fabricates, and an unmeasurable gate must not hard-fail every
-        # candidate.
+        # the gate ABSTAINS (``None``) — computed before the pre-route
+        # (the pre-route's acceptance path runs the same loop kwargs).
         stated_dims: tuple[float, float, float] | None = None
+
+        from d33d.dimension_protocol import (
+            carried_stated_set,
+            effective_stated_dims,
+        )
 
         # The carried per-axis set (issue #261): the SAME merge helper
         # the chat and finalize routes use, computed with NO cues — the
@@ -1242,19 +1307,21 @@ def create_app(
         # persists it instead of today's NULL. The gate input stays
         # ``None`` regardless — the merge output here feeds persistence
         # only, never the gate.
-        from d33d.dimension_protocol import (
-            carried_stated_set,
-            effective_stated_dims,
-        )
-
         carried_axes = effective_stated_dims(
             carried_stated_set(app.state.conn, app.state.versions, project_id)
         )
 
-        # The composed request text: the instruction prefixed with the view
-        # id, and with the resolved module_ids only when the pick resolved
-        # named modules (a streamed unnamed STL sends an empty list — the
-        # marked point alone is the grounding). The failures.jsonl hook
+        # The composed request text (the grounding the design loop
+        # receives — also the pre-route's trigger input basis below):
+        # the instruction prefixed with the view id, and with the
+        # resolved module_ids only when the pick resolved named modules
+        # (a streamed unnamed STL sends an empty list — the marked point
+        # alone is the grounding), followed by the pick's mm hit point
+        # and world-space unit face normal when the SPA sent them
+        # (issue #338, operator decision 4 — added to the grounding
+        # text the design loop receives for this region edit; a project
+        # without an imported part never gets them, so such projects see
+        # the pre-#338 text byte-identically). The failures.jsonl hook
         # records this; the version message is its 200-char prefix.
         if body.module_ids:
             request_text = (
@@ -1266,26 +1333,89 @@ def create_app(
                 f"Region edit at the marked point (view: {body.view_id}): "
                 f"{body.instruction}"
             )
+        if body.hit_point_mm is not None:
+            request_text += (
+                f" Pick hit point in mm: {body.hit_point_mm[0]:g}, "
+                f"{body.hit_point_mm[1]:g}, {body.hit_point_mm[2]:g}"
+            )
+        if body.face_normal is not None:
+            request_text += (
+                f" Picked face normal (unit, world space): "
+                f"{body.face_normal[0]:g}, {body.face_normal[1]:g}, "
+                f"{body.face_normal[2]:g}"
+            )
 
         from d33d.design_loop_events import run_design_loop_with_events
+        from d33d.part_http import part_public
 
-        events = run_design_loop_with_events(
+        # The pre-route's ``start_loop`` seam: the SAME adapter the
+        # fall-through below calls — the pre-route's accept path needs
+        # the loop as a callable so it can restore the accepted offer
+        # on a setup failure without the loop's kwargs being plumbed
+        # into the decision module (the module-level import at the top
+        # of the route keeps this patchable at the module seam, the
+        # way the monkeypatch-based tests do it).
+        _start_loop = run_design_loop_with_events
+
+        _part = part_public(row) if row.get("part_filename") else None
+
+        loop_kwargs = {
+            "user_message": request_text,
+            "stated_dims": stated_dims,
+            "chat_history": (),
+            "photo": photo,
+            "request_text": request_text,
+            "stated_axes": carried_axes,
+        }
+
+        # Issue #338 (operator decision 5) — the fill-and-recut
+        # pre-route for the region-edit seam (the SAME trigger the chat
+        # route uses). The WHOLE outcome lifecycle — the accept / decline
+        # / fresh-trigger / no-normal dispatch, the event-source
+        # registration, the offer's restore-on-setup-failure, and the
+        # in-flight flag's pre-registration release — lives in
+        # ``fill_recut_region.region_edit_preroute`` (the flag was
+        # claimed above, the chat route's contract; after registration
+        # the stream's ``finally`` is the single release point, exactly
+        # as today). ``None`` (no part, or no trigger) falls through to
+        # the design loop exactly as today.
+        pre_routed = fill_recut_region_mod.region_edit_preroute(
             app,
             project_id,
-            user_message=request_text,
-            stated_dims=stated_dims,
-            chat_history=(),
-            photo=photo,
-            request_text=request_text,
-            stated_axes=carried_axes,
+            row=row,
+            part=_part,
+            instruction=body.instruction,
+            face_normal=tuple(body.face_normal) if body.face_normal else None,
+            start_loop=_start_loop,  # patchable at the module seam
+            loop_kwargs=loop_kwargs,
+            inflight=inflight,
         )
-        # Register the event source SYNCHRONOUSLY before the 202 response
-        # (else the client's GET /api/stream/{id} sees no active source).
-        # The SSE endpoint is the sole driver of the generator; the
-        # in-flight flag (set here, cleared in the SSE endpoint's finally)
-        # prevents a second concurrent drive.
-        app.state.event_sources[project_id] = events
-        inflight.add(project_id)
+        if pre_routed is not None:
+            return pre_routed
+
+        try:
+            # The SAME ``_start_loop`` seam the pre-route received (the
+            # monkeypatchable module-level import): the fall-through runs
+            # through it too, so a test that patches
+            # ``d33d.design_loop_events.run_design_loop_with_events`` (the
+            # symbol this ``_start_loop`` was captured from) patches BOTH
+            # call sites, not just the pre-route's accept path.
+            events = _start_loop(app, project_id, **loop_kwargs)
+            # Register the event source SYNCHRONOUSLY before the 202
+            # response (else the client's GET /api/stream/{id} sees no
+            # active source). The SSE endpoint is the sole driver of the
+            # generator; the in-flight flag was claimed at the top of the
+            # route (before the pre-route — the chat route's contract), so
+            # there is no re-add here.
+            register_event_source(app, project_id, events)
+        except Exception:
+            inflight.discard(project_id)
+            logger.exception(
+                "region-edit for project %s: design-loop setup failed — "
+                "the in-flight flag is released",
+                project_id,
+            )
+            raise
 
         return JSONResponse(
             status_code=202,

@@ -23,8 +23,9 @@
  * in the four visible slots has no DOM target here — the strip does not grow.
  */
 
-import type { VersionTimelineEntry } from "../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
 import copy from "../../copy";
+import { importedVersionLabel } from "./importedLabel";
 
 interface FilmstripProps {
   /** The version timeline entries (oldest first). */
@@ -46,6 +47,11 @@ interface FilmstripProps {
   onOpenSheet: (versionId: number) => void;
   /** True while the sheet is open (the open slot's mark is active). */
   sheetOpenFor: number | null;
+  /** The project's imported part (design-state envelope's `part`). When
+   *  present, the v1 slot whose `source_kind` is `import` renders
+   *  "v1 — Imported {filename}" (issue #338, decision 8). `null`/absent
+   *  (no part) leaves every slot on its existing `name`. */
+  part?: PartReportInfo | null;
 }
 
 const SLOTS = 4;
@@ -108,6 +114,7 @@ export function Filmstrip({
   onCompareSelect,
   onOpenSheet,
   sheetOpenFor,
+  part,
 }: FilmstripProps) {
   // ABSENT, NOT EMPTY: no versions and no in-flight pass → nothing at all.
   if (versions.length === 0 && !passInFlight) {
@@ -213,7 +220,7 @@ export function Filmstrip({
                   data-testid={`filmstrip-name-${v.id}`}
                   title={v.name}
                 >
-                  {v.name}
+                  {importedVersionLabel(v, part)}
                 </span>
                 <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
                   {` · v${v.id}`}
