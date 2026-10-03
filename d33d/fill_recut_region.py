@@ -128,7 +128,7 @@ def fill_recut_region_edit(
     versions = app.state.versions
     pending = versions.get_pending_offer(project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
-        return _handle_live_offer(versions, project_id, instruction)
+        return _handle_live_offer(versions, project_id, instruction, pending)
 
     trigger = fill_recut_trigger(instruction)
     if trigger is None or trigger["noun"] in own_feature_names(
@@ -142,14 +142,15 @@ def _handle_live_offer(
     versions: Any,
     project_id: int,
     instruction: str,
+    pending: dict[str, Any],
 ) -> FillResult | None:
     """A LIVE fill-recut offer (``kind: "fill_recut"``): a clean
     acceptance runs the loop with the fill-and-recut instruction; a
     clean decline clears the offer and replies quietly; anything else
     supersedes the offer (cleared) and falls through to the fresh
     trigger evaluation (this function returns ``None`` so the caller
-    runs it)."""
-    pending = versions.get_pending_offer(project_id)
+    runs it). The ``pending`` offer is passed in (the caller already
+    fetched it) so the reader is not called a second time."""
     if is_clean_yes(instruction):
         return {
             "kind": "answer",
@@ -224,10 +225,11 @@ def region_edit_preroute(
     contract: claim before the pre-route). This function covers every
     outcome the route used to inline:
 
-    * the unit-status gate — a project without an imported part whose
-      units are assumed/settled skips the pre-route (returns ``None``;
-      the route proceeds to the design loop with the same
-      ``loop_kwargs``);
+    * the unit-status gate lives in :func:`fill_recut_region_edit`
+      (the single decision point) — a project without an imported part
+      whose units are assumed/settled makes the decision return ``None``
+      (no part, or the gate fails) and this function falls through to the
+      design loop via that ``None``;
     * :func:`fill_recut_region_edit`'s decision — on ANY pre-route
       exception the flag (claimed by the caller) is released,
       ``logger.exception`` logs it, and the exception re-raises (the
@@ -246,9 +248,6 @@ def region_edit_preroute(
     point (as before); this function only releases on the pre-route's
     own no-source failure exits.
     """
-    if part is None or part.get("unit_status") not in ("assumed", "settled"):
-        return None
-
     inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
     if inflight is None:
         inflight = set()
@@ -307,13 +306,27 @@ def _handle_acceptance(
     try:
         events = start_loop(app, project_id, **loop_kwargs)
     except Exception:
-        if accepted_offer is not None:
-            app.state.versions.set_pending_offer(project_id, accepted_offer)
+        # Discard in-flight FIRST (the event source was NOT registered,
+        # so the stream's ``finally`` never runs — the flag must be
+        # released here, not after the restore).
         inflight.discard(project_id)
+        # Then restore the offer inside its OWN try/except: a restore
+        # failure must not mask the ORIGINAL setup exception — it is
+        # logged and swallowed, and the original re-raises below.
+        if accepted_offer is not None:
+            try:
+                app.state.versions.set_pending_offer(project_id, accepted_offer)
+            except Exception:
+                logger.exception(
+                    "region-edit for project %s: restoring the accepted "
+                    "fill-recut offer after a design-loop setup failure "
+                    "failed — the acceptance may be lost",
+                    project_id,
+                )
         logger.exception(
             "region-edit for project %s: design-loop setup failed after a "
-            "fill-recut offer acceptance — the offer is restored and the "
-            "in-flight flag released",
+            "fill-recut offer acceptance — the in-flight flag is released "
+            "and the offer restored",
             project_id,
         )
         raise
