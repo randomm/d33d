@@ -78,16 +78,15 @@ def test_import_cases_pin_prompt_with_the_settled_scale() -> None:
 def test_import_guard_is_in_the_gate_registry() -> None:
     """import_guard is the imported_part kind's pre-check gate and the
     report's gate order carries it, ordered first (issue #340)."""
-    from d33d.evals.report import BASE_GATE_ORDER, case_gate_order
+    from d33d.evals.report import case_gate_order
 
     assert KIND_PRECHECK_GATES == {"imported_part": "import_guard"}
     assert "import_guard" not in GATE_NAMES  # implied, not declared
-    assert "import_guard" not in BASE_GATE_ORDER
     order = case_gate_order("imported_part")
     assert order[0] == "import_guard"  # ordered first
-    assert order[1:] == BASE_GATE_ORDER
+    assert order[1:] == GATE_NAMES
     # a kind without a pre-check keeps the base order unchanged
-    assert case_gate_order("primitive") == BASE_GATE_ORDER
+    assert case_gate_order("primitive") == GATE_NAMES
     # and every declared gate is one the registry knows (base + pre-checks)
     known = set(GATE_NAMES) | set(KIND_PRECHECK_GATES.values())
     cases = _load()
@@ -96,14 +95,21 @@ def test_import_guard_is_in_the_gate_registry() -> None:
             assert gate in known, f"{cid}: unknown gate {gate!r}"
 
 
-def test_base_gate_order_derived_from_schema_gate_names() -> None:
-    """``BASE_GATE_ORDER`` (report) and ``GATE_NAMES`` (schema) are the
-    same gates in the same order — the schema is the single owner of the
-    taxonomy."""
-    from d33d.evals.report import BASE_GATE_ORDER
+def test_case_gate_order_uses_the_schema_gate_names() -> None:
+    """The report's base gate order is the schema's ``GATE_NAMES``
+    itself — one source of the declare-able taxonomy (the report no
+    longer keeps its own ``BASE_GATE_ORDER`` alias)."""
+    from d33d.evals.report import case_gate_order
 
-    assert BASE_GATE_ORDER == GATE_NAMES
-    assert list(BASE_GATE_ORDER) == list(GATE_NAMES)
+    for kind in (
+        "primitive",
+        "red_region_edit",
+        "boolean_topology",
+        "photo_recreation",
+        "adversarial",
+    ):
+        assert case_gate_order(kind) == GATE_NAMES
+    assert case_gate_order("imported_part") == ("import_guard", *GATE_NAMES)
 
 
 def test_fixture_exists_under_1mb_and_parses_watertight() -> None:
@@ -156,7 +162,8 @@ def test_primitive_case_must_not_carry_part() -> None:
     """A non-``imported_part`` case carrying a part ref is a schema error."""
     from pydantic import ValidationError
 
-    from d33d.evals.case_schema import GoldenCase, PartRef, PromptPin
+    from d33d.evals.case_schema import GoldenCase, PromptPin
+    from d33d.evals.part_ref import PartRef
 
     with pytest.raises(ValidationError):
         GoldenCase(

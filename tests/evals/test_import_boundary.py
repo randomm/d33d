@@ -18,10 +18,6 @@ No model, no Docker, no network — this is part of the
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import trimesh
-
 from d33d.fill_recut import (
     FEATURE_NOUNS,
     FRILL_HOLE_DIAMETER_REPLY,
@@ -31,26 +27,7 @@ from d33d.fill_recut import (
     fill_recut_trigger,
     own_feature_names,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-
-#: The fixture the boundary route runs on: the holey plate (a 20 mm box
-#: with a through hole) — small enough that a "38 mm" recut is a genuine
-#: fill-and-recut (the new hole is larger than the plate face).
-PART_FIXTURE = REPO_ROOT / "evals" / "cases" / "fixtures" / "part.stl"
-
-
-def _holey_fixture() -> Path:
-    """The git-tracked import fixture the eval cases reference."""
-    assert PART_FIXTURE.is_file(), (
-        f"holey fixture missing: {PART_FIXTURE} does not exist"
-    )
-    return PART_FIXTURE
-
-
-def _fixture_extents() -> tuple[float, float, float]:
-    mesh = trimesh.load(_holey_fixture())
-    return tuple(float(e) for e in mesh.extents)
+from tests.evals._casefile_helpers import FIXTURE, fixture_extents
 
 
 def test_holey_fixture_is_a_20mm_box_with_a_hole() -> None:
@@ -58,7 +35,7 @@ def test_holey_fixture_is_a_20mm_box_with_a_hole() -> None:
     box whose through hole is smaller than 38 mm, so 'make the big hole
     38 mm' is a genuine fill-and-recut (recut larger than the plate
     face), not a resize the mesh could absorb."""
-    extents = _fixture_extents()
+    extents = fixture_extents(FIXTURE)
     assert extents == (20.0, 20.0, 20.0)
     assert max(extents) < 38.0, (
         f"fixture largest side {max(extents)} mm >= 38 mm — the "
@@ -68,7 +45,10 @@ def test_holey_fixture_is_a_20mm_box_with_a_hole() -> None:
     # The fixture is a holey plate, not a solid box: its volume is
     # strictly less than the 8000 mm³ that the same 20 mm box would
     # have if it were solid.
-    mesh = trimesh.load(_holey_fixture(), process=False)
+    assert FIXTURE.is_file(), f"holey fixture missing: {FIXTURE} does not exist"
+    import trimesh
+
+    mesh = trimesh.load(str(FIXTURE), process=False)
     mesh.merge_vertices()
     assert mesh.volume < 8000.0, (
         f"fixture volume {mesh.volume:.1f} mm³ >= 8000 — the fixture "

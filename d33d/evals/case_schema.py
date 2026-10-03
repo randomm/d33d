@@ -77,12 +77,14 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from d33d.evals.fixtures import check_fixture_containment
-from d33d.evals.part_ref import PartRef, part_of  # re-exported (issue #340)
+from d33d.evals.part_ref import PartRef, part_of
 
 #: The seven deterministic gates, in the fixed ticket order. Gates 1–7
 #: run before any judge; the judge is stage 8 (the last stage, not a
 #: gate) and is out of scope for the golden-set schema — it is a
 #: holdout-only concern of the harness.
+# Distinct from ``d33d.evals.gates.GATE_NAMES`` (the 5 gates gates.py
+#: itself implements) — this 7-name list is the declare-able taxonomy.
 GATE_NAMES: tuple[str, ...] = (
     "compile",
     "stl_export",
@@ -424,11 +426,11 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
                 violations.append(f"{cid}: cannot verify fixture without repo_root")
                 continue
             part = part_of(c)
-            containment = check_fixture_containment(repo_root, part.fixture)
+            containment = check_fixture_containment(repo_root, str(part.fixture))
             if containment is not None:
                 violations.append(f"{cid}: {containment}")
                 continue
-            fixture = repo_root / part.fixture
+            fixture = repo_root / Path(part.fixture)
             if not fixture.is_file():
                 violations.append(f"{cid}: part fixture {part.fixture!r} missing on disk")
 

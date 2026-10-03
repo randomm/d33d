@@ -35,12 +35,6 @@ from d33d.evals.case_schema import GATE_NAMES, KIND_PRECHECK_GATES
 from d33d.evals.gates import map_to_design_classes
 from d33d.evals.harness import CaseOutcome
 
-#: The base gate labels, in the pinned 1->7 order — the gates a case
-#: may DECLARE in ``gate_expectations``. Derived from
-#: :data:`d33d.evals.case_schema.GATE_NAMES` so the schema's gate list
-#: is the single owner of the taxonomy and its order.
-BASE_GATE_ORDER: tuple[str, ...] = GATE_NAMES
-
 
 def case_gate_order(case_kind: str) -> tuple[str, ...]:
     """The ordered gate labels for a case's report row (issue #340).
@@ -49,14 +43,15 @@ def case_gate_order(case_kind: str) -> tuple[str, ...]:
     cases — see ``d33d.evals.case_schema.KIND_PRECHECK_GATES``) is
     ordered FIRST, before the base 1->7 gates it precedes in the gate
     phase; kinds without a pre-check get the base order unchanged. The
-    base order is :data:`BASE_GATE_ORDER` (the 1->7 gates; the kind's
+    base order is :data:`d33d.evals.case_schema.GATE_NAMES` (the 1->7
+    gates — the single source of the declare-able taxonomy; the kind's
     pre-check is prepended when present, so the kind's full order is
     longer than the base). The
     report's per-case row carries at most these keys (absent gates
     were not reached — a short-circuit).
     """
     pre = KIND_PRECHECK_GATES.get(case_kind)
-    return (pre, *BASE_GATE_ORDER) if pre is not None else BASE_GATE_ORDER
+    return (pre, *GATE_NAMES) if pre is not None else GATE_NAMES
 
 
 @dataclass(frozen=True)

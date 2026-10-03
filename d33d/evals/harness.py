@@ -81,9 +81,10 @@ from typing import Any, Protocol
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase, part_of
-from d33d.evals.gates import EvalFailureClass, GateResult
+from d33d.evals.case_schema import GoldenCase
+from d33d.evals.gates import EvalFailureClass, GateResult, import_guard_result
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
+from d33d.evals.part_ref import part_of
 from d33d.evals.region_gate import run_region_gate
 from d33d.evals.slice_gate import run_slice_gate
 
@@ -517,15 +518,10 @@ def run_case_gates(
         violation = import_guard_violation(scad_source, part_scale=part.scale)
         if violation is not None:
             reason, detail = violation
-            gates["import_guard"] = GateResult(
-                gate="import_guard",
-                status="fail",
-                failure_class="artifact_error",
-                detail=(
-                    f"{reason}: {detail} (fixture {part.fixture!r}, "
-                    f"settled scale {part.scale:g})"
-                ),
+            guard = import_guard_result(
+                reason, f"{detail} (fixture {part.fixture!r}, settled scale {part.scale:g})"
             )
+            gates["import_guard"] = guard
             return gates
         gates["import_guard"] = GateResult(
             gate="import_guard", status="pass", failure_class=None, detail=""

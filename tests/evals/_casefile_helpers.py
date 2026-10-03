@@ -24,6 +24,16 @@ IMPORT_CASE_IDS = (
 )
 
 
+def fixture_extents(fixture: Path) -> tuple[float, float, float]:
+    """The fixture mesh's extents in mm (shared by the import-boundary
+    and case-file tests — one loader, no per-module copy)."""
+    import trimesh
+
+    assert fixture.is_file(), f"fixture missing: {fixture} does not exist"
+    mesh = trimesh.load(str(fixture))
+    return tuple(float(e) for e in mesh.extents)
+
+
 def _load() -> dict:
     from d33d.evals.case_schema import load_golden_set
 

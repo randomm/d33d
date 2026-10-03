@@ -62,7 +62,7 @@ from typing import Any
 
 import httpx
 
-from d33d.evals.case_schema import GoldenCase, load_golden_set, part_of
+from d33d.evals.case_schema import GoldenCase, load_golden_set
 from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.harness import (
     CaseOutcome,
@@ -71,6 +71,7 @@ from d33d.evals.harness import (
     load_promptfoo_config,
     run_case,
 )
+from d33d.evals.part_ref import part_of
 from d33d.evals.report import build_report
 
 # Make the repo root importable (the script lives at ``evals/``).
@@ -186,11 +187,11 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     if case.part is None:
         return None, None
     part = part_of(case)
-    violation = check_fixture_containment(repo_root, part.fixture)
+    violation = check_fixture_containment(repo_root, str(part.fixture))
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
     try:
-        resolved = (repo_root / part.fixture).resolve()
+        resolved = Path(str(repo_root / str(part.fixture))).resolve()
     except (OSError, ValueError) as e:
         return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}: {e}"
     return resolved, None

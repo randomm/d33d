@@ -12,11 +12,11 @@ import pytest
 
 from d33d.evals.case_schema import (
     GoldenCase,
-    PartRef,
     PromptPin,
     load_golden_set,
     verify_seed,
 )
+from d33d.evals.part_ref import PartRef
 from tests.evals._casefile_helpers import (
     FIXTURE,
     IMPORT_CASE_IDS,
@@ -214,19 +214,25 @@ def test_stage_fixture_unresolvable_path_yields_error_outcome(
     )
     case = load_golden_set(cases_dir, REPO_ROOT)["unresolvable-import"]
 
-    def boom(self):  # type: ignore[no-untyped-def]
-        raise OSError("boom: resolve failed")
-
     import d33d.evals.fixtures as fixtures_mod
 
-    # Pass the string-level containment checks cleanly (the real helper
-    # would be the next to call resolve), then blow up only the
-    # SUCCESS-path resolve in _stage_fixture itself.
+    # Let the string-level containment checks pass cleanly (the real
+    # helper would be the next to call resolve), then drive the
+    # OSError branch of _stage_fixture's own resolve: patch only
+    # ``run.Path`` (the name ``_stage_fixture`` resolves the fixture
+    # through), leaving the global ``Path.resolve`` intact.
     monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: None)
     # run.py imports check_fixture_containment by name — patch both
     # references.
     monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: None)
-    monkeypatch.setattr(Path, "resolve", boom)
+
+    def boom(self):  # type: ignore[no-untyped-def]
+        raise OSError("boom: resolve failed")
+
+    class _UnresolvablePath(Path):
+        resolve = boom
+
+    monkeypatch.setattr(run, "Path", _UnresolvablePath)
     part_path, error = run._stage_fixture(REPO_ROOT, case)
     assert part_path is None
     assert error is not None
@@ -312,7 +318,8 @@ def test_part_of_returns_part_ref_for_imported_case() -> None:
     raises ``ValueError`` (not ``AttributeError``) when the ref is absent
     (the schema makes this unreachable, but the accessor must stay
     honest)."""
-    from d33d.evals.case_schema import part_of
+    from d33d.evals.case_schema import load_golden_set
+    from d33d.evals.part_ref import part_of
 
     cases = load_golden_set(REPO_ROOT / "evals" / "cases", REPO_ROOT)
     case = cases[IMPORT_CASE_IDS[0]]

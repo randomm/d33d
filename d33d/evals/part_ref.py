@@ -4,8 +4,10 @@ The ``imported_part`` cases pin the mesh fixture they render against.
 This module owns :class:`PartRef` (the fixture path + settled scale)
 and :func:`part_of` (the typed accessor on a case). It lives in its
 own file so the imported-part schema pieces stay separate from the
-case schema (which re-exports both so every existing import site
-keeps working).
+case schema (which imports :class:`PartRef` at module level only
+because :class:`~d33d.evals.case_schema.GoldenCase` needs it — no
+circular import, since this module imports ``case_schema`` under
+``TYPE_CHECKING``).
 """
 
 from __future__ import annotations

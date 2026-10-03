@@ -79,6 +79,29 @@ def test_gate_phase_flags_resize() -> None:
     assert "resized_part" in gates["import_guard"].detail
 
 
+def test_import_guard_failure_class_is_taggable() -> None:
+    """The guard's failure class (``artifact_error``) is in
+    ``GATE_TAGGABLE_CLASSES["import_guard"]`` — the guard's GateResult
+    goes through the same :func:`assert_taggable` check as every other
+    gate (the tagging invariant has no gap for the pre-check gate)."""
+    from d33d.evals.gates import GATE_TAGGABLE_CLASSES, assert_taggable
+
+    assert "artifact_error" in GATE_TAGGABLE_CLASSES["import_guard"]
+    # The guard's failure row itself is built through assert_taggable
+    # (import_guard_result); a non-taggable class would raise.
+    from d33d.evals.gates import import_guard_result
+
+    result = import_guard_result("no_import", "the candidate does not import")
+    assert result.status == "fail"
+    assert result.failure_class == "artifact_error"
+    # And the table entry is exactly the class the guard emits — no
+    # wider, no narrower.
+    assert GATE_TAGGABLE_CLASSES["import_guard"] == frozenset({"artifact_error"})
+    # A class the guard cannot emit is rejected by the same invariant.
+    with pytest.raises(ValueError, match="not taggable"):
+        assert_taggable("import_guard", "geometrically_wrong")
+
+
 def test_gate_phase_passes_compliant_candidate() -> None:
     case = _case_with_part()
     gates = run_case_gates(
