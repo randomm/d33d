@@ -360,6 +360,27 @@ describe("ChatPanel — fill-and-recut offer buttons (issue #338)", () => {
     expect(no).not.toBeDisabled();
   });
 
+  it("styles the offer buttons through the styles.css token classes (no inline colours)", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "m1",
+        role: "assistant",
+        content: "That hole came with your file.",
+        fillRecutOffer: { pending: true },
+      },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    const yes = screen.getByTestId("fill-recut-offer-yes");
+    const no = screen.getByTestId("fill-recut-offer-no");
+    expect(yes.className).toContain("fill-recut-offer-btn");
+    expect(yes.className).toContain("fill-recut-offer-btn--yes");
+    expect(no.className).toContain("fill-recut-offer-btn");
+    expect(no.className).toContain("fill-recut-offer-btn--no");
+    // The button colours live in styles.css (--color-* tokens), not inline.
+    expect(yes.getAttribute("style")).not.toContain("background");
+    expect(no.getAttribute("style")).not.toContain("background");
+  });
+
   it("Yes sends acceptance through the existing chat offer path", () => {
     const onSend = vi.fn();
     const messages: ChatMessage[] = [

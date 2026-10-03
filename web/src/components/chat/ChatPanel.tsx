@@ -211,15 +211,10 @@ export function ChatPanel({
                     <button
                       type="button"
                       data-testid="fill-recut-offer-yes"
+                      className="fill-recut-offer-btn fill-recut-offer-btn--yes"
                       disabled={!msg.fillRecutOffer.pending}
                       onClick={() => onSend(copy.fillRecut.offerYes)}
                       style={{
-                        margin: "8px 8px 0 0",
-                        padding: "4px 12px",
-                        border: "none",
-                        borderRadius: 4,
-                        backgroundColor: "#0969da",
-                        color: "#ffffff",
                         cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
                         opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
                       }}
@@ -229,14 +224,10 @@ export function ChatPanel({
                     <button
                       type="button"
                       data-testid="fill-recut-offer-no"
+                      className="fill-recut-offer-btn fill-recut-offer-btn--no"
                       disabled={!msg.fillRecutOffer.pending}
                       onClick={() => onSend(copy.fillRecut.offerNo)}
                       style={{
-                        padding: "4px 12px",
-                        border: "none",
-                        borderRadius: 4,
-                        backgroundColor: "rgba(255, 255, 255, 0.2)",
-                        color: "#ffffff",
                         cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
                         opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
                       }}
