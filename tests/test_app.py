@@ -1401,6 +1401,12 @@ def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatc
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "No Part"})
         pid = r.json()["id"]
+        # A region-edit WITHOUT a part still falls through the pre-route
+        # (``None`` → the route's own ``_start_loop`` seam) — a fall
+        # through the UNPATCHED real ``run_design_loop_with_events`` would
+        # hang this test (a no-LLM-configured project loops until
+        # exhaustion), so the assertion below (the patched seam was the
+        # one that ran) is what makes this a real, non-hanging check.
         r2 = await client.post(
             f"/api/projects/{pid}/region-edits",
             json=_region_edit_body(instruction="make it bigger"),
@@ -1416,7 +1422,8 @@ def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatc
 
     _pid, status, _frames = _run_async(app_with_projects, _call)
     assert status == 202, status
-    # The loop WAS called (fallthrough)
+    # The loop WAS called via the patched seam (fallthrough — the
+    # unpatched real loop would have hung this test).
     assert loop_calls, "the design loop was not called"
     rt = loop_calls[0].get("request_text", "")
     assert "make it bigger" in rt, rt

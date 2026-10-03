@@ -53,29 +53,56 @@ FILL_RECUT_NO_NORMAL_REPLY = (
 )
 
 #: The pre-route's "handled the turn" decision shape (see
-#: :func:`fill_recut_region_edit`). The closed key set:
+#: :func:`fill_recut_region_edit`). A discriminated union of the four
+#: per-outcome shapes, keyed on ``outcome`` — each member is an honest
+#: ``total=True`` TypedDict (every key of that outcome present, no
+#: ``total=False`` holes the reader has to narrow around):
 #
-#: * ``kind`` — always the literal ``"answer"`` (the caller registers
-#:   ``answer`` as the reply frame's kind);
-#: * ``answer`` — the reply sentence, ``None`` when the acceptance runs
-#:   the design loop (no plain reply); always ``None`` for
-#:   ``run_loop=True`` outcomes, always a string otherwise;
-#: * ``run_loop`` — ``True`` when the caller runs the design loop with
-#:   the ``instruction`` field (only the ``accept`` outcome);
-#: * ``outcome`` — the discriminator ``"accept" | "decline" | "fresh_offer"
-#:   | "no_normal"`` (the caller's dispatch key);
-#: * ``instruction`` — REQUIRED when ``run_loop`` is True (the fill-and-recut
-#:   instruction the caller prefixes to the request text), otherwise ABSENT;
-#: * ``accepted_offer`` — the pending offer the caller clears once the event
-#:   source is registered (restored on a setup failure), present ONLY on the
-#:   ``accept`` outcome.
-class FillResult(TypedDict, total=False):
+#: * ``accept`` — the clean-acceptance-of-a-LIVE-offer path: the reply is
+#:   ``None`` (no plain reply), ``run_loop`` is ``True``, and
+#:   ``instruction`` + ``accepted_offer`` are REQUIRED (the fill-and-recut
+#:   instruction the caller prefixes to the request text; the pending offer
+#:   the caller clears once the event source is registered, restored on a
+#:   setup failure);
+#: * ``decline`` / ``fresh_offer`` / ``no_normal`` — ONE ``answer`` frame
+#:   each (``run_loop`` is ``False``); ``fresh_offer`` is the ONLY outcome
+#:   whose done frame carries the ``fill_recut_offer`` flag (the SPA's
+#:   [Yes, do that] / [Leave it] buttons) — a decline / no-normal reply must
+#:   not re-render the buttons for an offer that does not (or no longer)
+#:   exists.
+class _FillAccept(TypedDict):
     kind: Literal["answer"]
-    answer: str | None
+    answer: None
     run_loop: bool
-    outcome: Literal["accept", "decline", "fresh_offer", "no_normal"]
+    outcome: Literal["accept"]
     instruction: str
     accepted_offer: dict[str, Any]
+
+
+class _FillDecline(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["decline"]
+
+
+class _FillFreshOffer(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["fresh_offer"]
+
+
+class _FillNoNormal(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["no_normal"]
+
+
+#: The decision union: an ``accept`` member, or any of the three
+#: answer-frame members (the caller dispatches on ``outcome``).
+FillResult = _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal
 
 
 def fill_recut_region_edit(
@@ -320,10 +347,17 @@ def _handle_acceptance(
     flag is released (the source was not registered, so the stream's
     ``finally`` never runs) and the exception is logged + re-raised.
     """
-    # Pop BEFORE the type narrows: `fill_result` is a TypedDict, but the
-    # caller may pass the raw dict (tests, JSON-persisted offers), so the
-    # pop runs on a `dict` view to avoid the TypedDict key-narrowing error.
-    accepted_offer = dict(fill_result).pop("accepted_offer", None)
+    # The outcome discriminator is the honest narrowing key: this path is
+    # only reachable with ``outcome == "accept"`` (the caller dispatches on
+    # it), which — under the discriminated-union type — makes
+    # ``instruction`` and ``accepted_offer`` required members, no
+    # dict-view dance and no cast needed.
+    if fill_result["outcome"] != "accept":
+        raise ValueError(
+            f"region-edit acceptance path reached with outcome "
+            f"{fill_result['outcome']!r}, not 'accept'"
+        )
+    accepted_offer = fill_result["accepted_offer"]
     instruction = fill_result["instruction"]
     request_text = f"{instruction} {loop_kwargs['request_text']}"
     loop_kwargs = dict(loop_kwargs, user_message=request_text, request_text=request_text)
@@ -337,16 +371,15 @@ def _handle_acceptance(
         # Then restore the offer inside its OWN try/except: a restore
         # failure must not mask the ORIGINAL setup exception — it is
         # logged and swallowed, and the original re-raises below.
-        if accepted_offer is not None:
-            try:
-                app.state.versions.set_pending_offer(project_id, accepted_offer)
-            except Exception:
-                logger.exception(
-                    "region-edit for project %s: restoring the accepted "
-                    "fill-recut offer after a design-loop setup failure "
-                    "failed — the acceptance may be lost",
-                    project_id,
-                )
+        try:
+            app.state.versions.set_pending_offer(project_id, accepted_offer)
+        except Exception:
+            logger.exception(
+                "region-edit for project %s: restoring the accepted "
+                "fill-recut offer after a design-loop setup failure "
+                "failed — the acceptance may be lost",
+                project_id,
+            )
         logger.exception(
             "region-edit for project %s: design-loop setup failed after a "
             "fill-recut offer acceptance — the in-flight flag is released "
@@ -355,19 +388,18 @@ def _handle_acceptance(
         )
         raise
     register_event_source(app, project_id, events)
-    if accepted_offer is not None:
-        # Best-effort: the source is registered, so the stream owns the
-        # in-flight flag from here — a clear failure is logged and
-        # swallowed, never re-raised (the loop already runs).
-        try:
-            app.state.versions.set_pending_offer(project_id, None)
-        except Exception:
-            logger.exception(
-                "region-edit for project %s: clearing the accepted "
-                "fill-recut offer after registration failed — the loop "
-                "runs with the offer still pending",
-                project_id,
-            )
+    # Best-effort: the source is registered, so the stream owns the
+    # in-flight flag from here — a clear failure is logged and swallowed,
+    # never re-raised (the loop already runs).
+    try:
+        app.state.versions.set_pending_offer(project_id, None)
+    except Exception:
+        logger.exception(
+            "region-edit for project %s: clearing the accepted "
+            "fill-recut offer after registration failed — the loop "
+            "runs with the offer still pending",
+            project_id,
+        )
     # No inflight.discard here — the event source is registered, so the
     # stream's finally is the single release point.
     return JSONResponse(

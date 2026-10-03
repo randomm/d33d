@@ -436,8 +436,17 @@ def create_projects_router() -> APIRouter:
                         len(body.message),
                     )
                 else:
+                    # The ``fill_recut_offer`` flag (the SPA's [Yes, do
+                    # that] / [Leave it] buttons) surfaces ONLY for the
+                    # FRESH-OFFER outcome — the SAME ``outcome``
+                    # discriminator the region-edit seam dispatches on
+                    # (b0edf88's region-edit fix): a clean decline (a
+                    # re-emitted FRILL_DECLINE_REPLY) must NOT re-render
+                    # the buttons for an offer that no longer exists.
                     app.state.event_sources[project_id] = _answered_frames(
-                        _fill_recut["answer"], fill_recut_offer=True
+                        _fill_recut["answer"],
+                        fill_recut_offer=_fill_recut.get("outcome")
+                        == "fresh_offer",
                     )
                     return {"status": "accepted"}
         except Exception:

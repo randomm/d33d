@@ -1072,6 +1072,9 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     assert "That hole came with your file" in msg, msg
     assert "Ø38 mm" in msg, msg
     assert "fill it, then cut a Ø38 mm one on the same axis" in msg, msg
+    # The done frame carries the offer flag (the SPA renders the
+    # [Yes, do that] / [Leave it] buttons from it — fresh offer only).
+    assert done[0].get("fill_recut_offer") is True, done
     # The offer was recorded server-side with the kind discriminator.
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
@@ -1079,6 +1082,44 @@ def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
+
+
+def test_fill_recut_decline_done_frame_has_no_offer_flag(app_with_projects):
+    """PR #339 fix round (real bug, chat route): a CLEAN DECLINE of the
+    pending fill-recut offer ("Leave it" → FRILL_DECLINE_REPLY) must NOT
+    re-emit the ``fill_recut_offer`` flag on the done frame — the SPA
+    renders the [Yes, do that] / [Leave it] buttons from that field, so
+    a re-emitted flag re-offers an offer that was just declined. (The
+    same bug was already fixed on the region-edit seam in b0edf88; the
+    chat route's ``post_chat`` registered ``fill_recut_offer=True`` for
+    EVERY handled ``fill_recut_turn`` result, including the decline.)
+    The companion fresh-trigger test pins the True case."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Decline No Flag"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "Leave it"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The quiet decline acknowledgement is the reply…
+    assert "Understood" in done[0].get("message", ""), done
+    # …and the offer flag is ABSENT (the buttons must not re-render for
+    # an offer that no longer exists).
+    assert not done[0].get("fill_recut_offer"), done
+    # The offer was cleared.
+    svc = _svc(app_with_projects)
+    assert svc.get_pending_offer(pid) is None
 
 
 def test_fill_recut_trigger_own_param_noun_not_triggered(app_with_projects):
@@ -1599,6 +1640,31 @@ def test_fill_recut_trigger_partial_number_not_parsed() -> None:
     did not state)."""
     t = fill_recut.fill_recut_trigger("make the hole 38.")
     assert t is None, t
+
+
+def test_fill_recut_trigger_over_long_instruction_returns_none() -> None:
+    """PR #339 fix round (item 4): an instruction over
+    ``TRIGGER_MAX_INSTRUCTION_CHARS`` (500) returns ``None`` BEFORE any
+    regex runs — a 10 KB unpunctuated blob containing the trigger
+    phrasing bails out in O(1) instead of spinning the unbounded
+    ``[^.!?]`` spans."""
+    import time
+
+    long_msg = "a" * (10 * 1024 - 17) + " make the hole 38 mm"
+    assert len(long_msg) > 10 * 1024
+    t0 = time.monotonic()
+    t = fill_recut.fill_recut_trigger(long_msg)
+    elapsed = time.monotonic() - t0
+    assert t is None, t
+    assert elapsed < 1.0, f"trigger took {elapsed:.3f}s on a 10 KB input"
+    # The bound itself: at the limit the phrasing still triggers, one
+    # char over it does not (the bound is a hard cap, not a suggestion).
+    at_bound = "a" * (500 - len(" make the hole 38 mm")) + " make the hole 38 mm"
+    assert len(at_bound) <= 500
+    assert fill_recut.fill_recut_trigger(at_bound) is not None
+    over_bound = at_bound + "a"
+    assert len(over_bound) > 500
+    assert fill_recut.fill_recut_trigger(over_bound) is None
 
 
 def test_fill_recut_move_with_distance_keeps_number() -> None:

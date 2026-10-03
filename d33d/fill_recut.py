@@ -82,6 +82,12 @@ FRILL_NO_DIMENSION_REPLY = (
 #: The quiet decline acknowledgement (a clean "no" on the pending offer).
 FRILL_DECLINE_REPLY = "Understood — leaving the part as it is."
 
+#: The input bound for :func:`fill_recut_trigger`: an instruction longer
+#: than this many characters is NOT a resize/move request — it bails out
+#: before the regexes run (a multi-KB unpunctuated blob would otherwise
+#: spin the unbounded ``[^.!?]`` spans for no gain).
+TRIGGER_MAX_INSTRUCTION_CHARS = 500
+
 #: The closed feature-noun set a resize/move request can target (issue
 #: #332's operator decision (b)+(c)): an imported feature is phrased from
 #: the USER'S WORDS, and only these nouns are recognised feature names on
@@ -224,7 +230,14 @@ def fill_recut_trigger(message: str) -> dict[str, Any] | None:
     does not match a param name/label of the CURRENT version (a feature
     the user added is not the imported mesh) — are caller-side checks
     that need the project row / the latest version's params, which this
-    pure helper does not take."""
+    pure helper does not take.
+
+    An instruction longer than :data:`TRIGGER_MAX_INSTRUCTION_CHARS`
+    returns ``None`` before ANY regex runs (the input bound: a multi-KB
+    unpunctuated blob is never a resize/move request, and the unbounded
+    ``[^.!?]`` spans must not spin on it)."""
+    if len(message) > TRIGGER_MAX_INSTRUCTION_CHARS:
+        return None
     if _ADD_VERB_RE.search(message):
         return None
     m = _FRILL_RESIZE_RE.search(message)
@@ -376,12 +389,21 @@ def fill_recut_turn(
     AFTER the missing-source check and BEFORE the #250 offer / question
     pre-routes (the unsettled-part guard runs first, upstream).
 
-    Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool}``
-    when the turn is handled here (the caller registers the sentence as a
-    ``kind: "answer"`` done frame — and, when ``run_loop`` is True, runs
-    the design loop with the ``instruction`` field appended to the
-    request text), else ``None`` (the caller falls through to the
-    existing routes exactly as today).
+    Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
+    "outcome": "fresh_offer" | "decline" | "accept"}`` when the turn is
+    handled here (the caller registers the sentence as a ``kind:
+    "answer"`` done frame — and, when ``run_loop`` is True, runs the
+    design loop with the ``instruction`` field appended to the request
+    text), else ``None`` (the caller falls through to the existing routes
+    exactly as today).
+
+    The ``outcome`` discriminator is the SAME contract the region-edit
+    seam's :func:`d33d.fill_recut_region.fill_recut_region_edit` returns:
+    the caller keys OFF ``outcome``, never off the reply string — in
+    particular, the done frame's ``fill_recut_offer`` flag (the SPA's
+    [Yes, do that] / [Leave it] buttons) is set ONLY for the
+    ``fresh_offer`` outcome: a clean ``decline`` re-emitting it would
+    re-render the buttons for an offer that no longer exists.
 
     The handled cases:
 
@@ -422,12 +444,18 @@ def fill_recut_turn(
                 "kind": "answer",
                 "answer": None,
                 "run_loop": True,
+                "outcome": "accept",
                 "instruction": fill_and_recut_instruction(pending),
                 "accepted_offer": pending,
             }
         if is_clean_no(message):
             versions.set_pending_offer(project_id, None)
-            return {"kind": "answer", "answer": FRILL_DECLINE_REPLY, "run_loop": False}
+            return {
+                "kind": "answer",
+                "answer": FRILL_DECLINE_REPLY,
+                "run_loop": False,
+                "outcome": "decline",
+            }
         # A new message supersedes the pending offer: clear it and
         # re-evaluate THIS message as a fresh turn (it may itself be a
         # fresh trigger).
@@ -454,7 +482,12 @@ def fill_recut_turn(
                     move_distance_mm=trigger.get("move_distance"),
                     move_direction=trigger.get("direction"),
                 )
-                return {"kind": "answer", "answer": sentence, "run_loop": False}
+                return {
+                    "kind": "answer",
+                    "answer": sentence,
+                    "run_loop": False,
+                    "outcome": "fresh_offer",
+                }
     return None
 
 
@@ -466,6 +499,7 @@ __all__ = [
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
     "fill_and_recut_instruction",

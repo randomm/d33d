@@ -569,11 +569,14 @@ class RegionEditRequest(BaseModel):
         if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v):
             raise ValueError("vector components must be finite numbers")
         if any(abs(x) > 1e6 for x in v):
-            # The hit-point bound: a |component| > 1e6 mm is a 1000+ km
-            # coordinate — a client defect, not a pick, so it 422s like
-            # the other wire-format defects instead of entering the loop's
-            # grounding text (face_normal is unaffected: a unit normal's
-            # components never exceed this).
+            # The shared ±1e6 bound is INTENTIONAL on hit_point_mm and
+            # face_normal alike (one wire-format check for both fields)
+            # and can never trigger for a unit normal — its length check
+            # runs separately and 422s any non-unit input first; a
+            # |component| > 1e6 on hit_point_mm is a 1000+ km coordinate,
+            # a client defect, not a pick, so it 422s like the other
+            # wire-format defects instead of entering the loop's grounding
+            # text.
             raise ValueError("vector components must be within ±1e6 mm")
         return [float(x) for x in v]
 
@@ -1391,7 +1394,13 @@ def create_app(
             return pre_routed
 
         try:
-            events = run_design_loop_with_events(app, project_id, **loop_kwargs)
+            # The SAME ``_start_loop`` seam the pre-route received (the
+            # monkeypatchable module-level import): the fall-through runs
+            # through it too, so a test that patches
+            # ``d33d.design_loop_events.run_design_loop_with_events`` (the
+            # symbol this ``_start_loop`` was captured from) patches BOTH
+            # call sites, not just the pre-route's accept path.
+            events = _start_loop(app, project_id, **loop_kwargs)
             # Register the event source SYNCHRONOUSLY before the 202
             # response (else the client's GET /api/stream/{id} sees no
             # active source). The SSE endpoint is the sole driver of the
