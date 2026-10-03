@@ -575,72 +575,59 @@ test("psGroupEmpty: a ps timeout (simulated via an injected failing exec) return
   // confirmGroupGone in kill-confirm.mjs (the fallback contract is
   // unchanged).
   //
-  // The wrapper module is imported with D33D_TEST_MODE=1 + a D33D_TEST_COMMAND
-  // override (the same fixture mechanism the wrapper's own spawn tests use),
-  // so the module's top-level `resolveCommand` never touches the real vitest
-  // bin; the top-level `spawn` succeeds, the fixture exits instantly, and
-  // the wrapper's child-exit handler (killGroup → ESRCH-silent, probe →
-  // ESRCH, `process.exit(0)`) runs in the import's own context — never the
-  // outer suite. No real `ps` process and no real vitest suite are spawned;
-  // the injected `exec` throws an execFileSync-shaped ETIMEDOUT error,
+  // Importing the wrapper module is side-effect-free: its process effects
+  // (the spawn, the signal/exit handlers) are guarded behind an entry-point
+  // check and run only when the wrapper is executed, so this import yields
+  // the pure exports (psGroupEmpty, the kill bindings) in this worker's own
+  // process without spawning anything and without registering a handler that
+  // could call process.exit in the test runner. (Same invariant the
+  // "spawn the wrapper as a child" fixture tests rely on — here the import
+  // path is exercised directly.)
+  // `run-vitest.d.mts` is the typed contract for this import (the module is
+  // a plain .mjs with no source file to import).
+  // The injected `exec` throws an execFileSync-shaped ETIMEDOUT error,
   // exactly what a wedged `ps` produces after the 1000 ms budget.
-  // Capture so the try/finally below can restore process.env: leaking these
-  // into the shared process env would reach the later REAL test, which
-  // spawns the wrapper with {...process.env} and requires both vars unset.
-  const prevMode = process.env.D33D_TEST_MODE;
-  const prevCmd = process.env.D33D_TEST_COMMAND;
-  try {
-    process.env.D33D_TEST_MODE = "1";
-    process.env.D33D_TEST_COMMAND = `${process.execPath} -e 1`;
-    const mod = (await import("../../scripts/run-vitest.mjs")) as unknown as {
-      psGroupEmpty: (pgid: number, opts?: { exec?: (cmd: string, args: string[], o: { encoding: string; timeout?: number }) => string }) => boolean | null;
-    };
-    const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
-    const psGroupEmpty = mod.psGroupEmpty;
+  const mod = await import("../../scripts/run-vitest.mjs");
+  const { confirmGroupGone } = await import("../../scripts/kill-confirm.mjs");
+  const psGroupEmpty = mod.psGroupEmpty;
 
-    // 1. The timeout path: the injected exec throws the way execFileSync does
-    //    when `timeout` elapses — an ETIMEDOUT error — and psGroupEmpty
-    //    swallows it and returns null.
-    const etim = Object.assign(new Error("Command failed (timed out)"), { code: "ETIMEDOUT" });
-    const seen: unknown[] = [];
-    const timedOut = psGroupEmpty(99, {
-      exec: (_cmd: string, _args: string[], opts: { encoding: string; timeout?: number }) => {
-        seen.push(opts.timeout);
-        throw etim;
-      },
-    });
-    expect(timedOut).toBeNull(); // "ps unavailable" — not true/false
-    // The wrapper passes the timeout option through to the probe.
-    expect(seen).toEqual([1000]);
+  // 1. The timeout path: the injected exec throws the way execFileSync does
+  //    when `timeout` elapses — an ETIMEDOUT error — and psGroupEmpty
+  //    swallows it and returns null.
+  const etim = Object.assign(new Error("Command failed (timed out)"), { code: "ETIMEDOUT" });
+  const seen: unknown[] = [];
+  const timedOut = psGroupEmpty(99, {
+    exec: (_cmd: string, _args: string[], opts: { encoding: string; timeout?: number }) => {
+      seen.push(opts.timeout);
+      throw etim;
+    },
+  });
+  expect(timedOut).toBeNull(); // "ps unavailable" — not true/false
+  // The wrapper passes the timeout option through to the probe.
+  expect(seen).toEqual([1000]);
 
-    // 2. The ps-unavailable branch of confirmGroupGone: ps() === null means
-    //    "not confirmed" — it logs the backstop line and never throws. This
-    //    is the production wiring: killGroupGone's deps.ps is
-    //    `() => psGroupEmpty(pid)`, so a ps timeout lands here.
-    const logs: string[] = [];
-    let nowMs = 0;
-    const outcome = confirmGroupGone(
-      {
-        probe: () => false,
-        ps: () => psGroupEmpty(99, { exec: () => { throw etim; } }),
-        now: () => nowMs,
-        sleep: (ms: number) => {
-          nowMs += ms;
-        },
-        log: (line: string) => logs.push(line),
+  // 2. The ps-unavailable branch of confirmGroupGone: ps() === null means
+  //    "not confirmed" — it logs the backstop line and never throws. This
+  //    is the production wiring: killGroupGone's deps.ps is
+  //    `() => psGroupEmpty(pid)`, so a ps timeout lands here.
+  const logs: string[] = [];
+  let nowMs = 0;
+  const outcome = confirmGroupGone(
+    {
+      probe: () => false,
+      ps: () => psGroupEmpty(99, { exec: () => { throw etim; } }),
+      now: () => nowMs,
+      sleep: (ms: number) => {
+        nowMs += ms;
       },
-      { graceMs: 2000, tickMs: 50 },
-    );
-    expect(outcome).toBe(false);
-    expect(logs.length).toBe(1);
-    expect(logs[0]).toContain("ps unavailable");
-    expect(logs[0]).toContain("backstop");
-  } finally {
-    if (prevMode === undefined) delete process.env.D33D_TEST_MODE;
-    else process.env.D33D_TEST_MODE = prevMode;
-    if (prevCmd === undefined) delete process.env.D33D_TEST_COMMAND;
-    else process.env.D33D_TEST_COMMAND = prevCmd;
-  }
+      log: (line: string) => logs.push(line),
+    },
+    { graceMs: 2000, tickMs: 50 },
+  );
+  expect(outcome).toBe(false);
+  expect(logs.length).toBe(1);
+  expect(logs[0]).toContain("ps unavailable");
+  expect(logs[0]).toContain("backstop");
 }, 5000);
 
 test("watchdog: parseWrapperPid warns on a bad pid and disables the watchdog", async () => {
