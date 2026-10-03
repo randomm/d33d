@@ -38,6 +38,28 @@ def _project_entry_names() -> set[str]:
 
 
 @pytest.fixture(autouse=True)
+def _preimport_part_mesh():
+    """Warm up the heavy mesh stack before every test's measurement window.
+
+    ``d33d.part_mesh`` imports numpy and trimesh at module top (heavy
+    native-extension loads — numpy's BLAS, trimesh's shapely/CGAL deps).
+    If the *first* trimesh import in the process landed inside a
+    worker thread during a test (e.g. the upload route's
+    ``asyncio.to_thread(parse_and_repair)``), the multi-second import
+    cost would be misread by that test's timing/order probe as the
+    event loop being blocked — the exact Linux-CI failure of
+    ``test_parse_and_repair_runs_off_event_loop`` after the eval
+    staging tests ran earlier in the same session (issue #344).
+
+    Importing the module here (main thread; cached in ``sys.modules``
+    afterwards, so the import cost is paid once per process) removes
+    that variable from every test.
+    """
+    import d33d.part_mesh  # noqa: F401  (side-effect: numpy/trimesh import)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_data_dir(tmp_path, monkeypatch):
     """Point ``D33D_DATA_DIR`` at a per-test tmp dir and clear ``db.APP_DATA_DIR``.
 

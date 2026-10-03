@@ -76,7 +76,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.part_ref import PartRef, part_of
 
 #: The 7 declare-able gate taxonomy, in the fixed ticket order (gates
@@ -109,12 +108,9 @@ CaseKind = Literal[
 #: ``gate_expectations`` run, but it is NOT declared in
 #: ``gate_expectations`` — it is implied by the kind.
 #:
-#: Reporting order: the pre-check gate is listed FIRST in the report row
-#: for reading convenience only — in execution, compile runs first, then
-#: the pre-check gate, then the remaining declared gates; the row order
-#: does not mirror execution order.
-#: Ordering lives in :func:`d33d.evals.report.case_gate_order`; this
-#: constant only maps kind → pre-check gate name.
+#: Ordering lives in :func:`d33d.evals.report.case_gate_order` (the report
+#: orders a kind's pre-check gate first); this constant only maps kind →
+#: pre-check gate name.
 KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
 
 #: Gate 6/7 N/A markers: a gate reports N/A (neither pass nor hard fail)
@@ -299,21 +295,13 @@ class GoldenCase(BaseModel):
             raise ValueError("kind=adversarial requires the adversarial spec")
         return v
 
-    @field_validator("part")
-    @classmethod
-    def _part_only_for_imported_kind(
-        cls, v: PartRef | None, info
-    ) -> PartRef | None:
-        kind = info.data.get("kind")
-        if v is not None and kind != "imported_part":
-            raise ValueError("part field only valid for kind=imported_part")
-        return v
-
     @model_validator(mode="after")
-    def _part_required_for_imported_kind(self) -> GoldenCase:
+    def _part_matches_imported_kind(self) -> GoldenCase:
         """An ``imported_part`` case REQUIRES its part ref (the import
         guard is schema-guaranteed to have ``case.part``), and no other
         kind may carry one."""
+        if self.part is not None and self.kind != "imported_part":
+            raise ValueError("part field only valid for kind=imported_part")
         if self.kind == "imported_part" and self.part is None:
             raise ValueError("kind=imported_part requires a part ref")
         return self
@@ -391,6 +379,7 @@ def seed_mix_actual(cases: dict[str, GoldenCase]) -> dict[str, int]:
 
 
 def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> list[str]:
+    from d33d.evals.fixtures import check_fixture_containment
     """Check the seed against :data:`SEED_MIX`; return a list of violations.
 
     Empty list means the seed is valid: the on-disk total is exactly 23 (the
@@ -430,12 +419,11 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
                 violations.append(f"{cid}: cannot verify fixture without repo_root")
                 continue
             part = part_of(c)
-            containment = check_fixture_containment(repo_root, str(part.fixture))
+            resolved, containment = check_fixture_containment(repo_root, str(part.fixture))
             if containment is not None:
                 violations.append(f"{cid}: {containment}")
                 continue
-            fixture = repo_root / Path(part.fixture)
-            if not fixture.is_file():
+            if resolved is None or not resolved.is_file():
                 violations.append(f"{cid}: part fixture {part.fixture!r} missing on disk")
 
     for cid, c in cases.items():
