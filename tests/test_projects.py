@@ -1689,3 +1689,353 @@ def test_design_contract_pins_fill_recut_no_normal_reply():
     # The copy.ts noNormal string must contain the same sentence.
     assert "I can't tell that feature's axis" in copy_src
     assert "I can't tell that feature's axis" in FILL_RECUT_NO_NORMAL_REPLY
+
+
+# ---------------------------------------------------------------------------
+# Issue #338 — chat vs region-edit pre-route PARITY:
+# projects.post_chat and app.create_region_edit must handle the four
+# fill-recut outcomes identically (fresh offer / clean decline /
+# acceptance / setup failure on acceptance) — one test per outcome, both
+# routes driven in it, reusing this file's fixtures (app_with_projects,
+# _set_part_columns, _run_async, _svc) and the region-edit body shape from
+# tests/test_app.py (minimal valid 1x1 PNG + required wire fields).
+# ---------------------------------------------------------------------------
+
+#: A minimal valid 1x1 PNG, base64 (the same test PNG
+#: ``tests/test_app.py``'s ``_region_edit_body`` uses).
+_PARITY_TINY_PNG_BASE64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+
+
+def _parity_region_edit_body(instruction: str, face_normal: tuple[float, float, float] | None = None) -> dict[str, Any]:
+    """A minimal valid region-edit wire body (the same shape
+    ``tests/test_app.py``'s ``_region_edit_body`` posts — the parity test
+    sends the face normal so the region route stores an axis, matching the
+    chat route's offer shape for the fresh-trigger case)."""
+    body: dict[str, Any] = {
+        "module_ids": [],
+        "view_id": "front",
+        "marked_png_base64": _PARITY_TINY_PNG_BASE64,
+        "point": {"x": 300.0, "y": 200.0},
+        "instruction": instruction,
+    }
+    if face_normal is not None:
+        body["face_normal"] = list(face_normal)
+    return body
+
+
+def _parity_run_loop(app, pid: int) -> list[tuple[str, Any]]:
+    """Drive a registered event source to its terminal frame, returning
+    the collected frames (a small local copy of this file's
+    ``_drive_event_source`` pattern — the parity tests below compare the
+    two routes' frames directly). Drives up to 2 frames (the ``progress``
+    + ``done`` pair) so a source that emits both is fully consumed."""
+
+    async def _run() -> list[tuple[str, Any]]:
+        source = app.state.event_sources.get(pid)
+        frames: list[tuple[str, Any]] = []
+        if source is None:
+            return frames
+        for _ in range(2):  # progress + done
+            try:
+                event, data = await source.__anext__()
+            except StopAsyncIteration:
+                break
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    return _run()
+
+
+def _parity_offer(app, pid: int) -> dict[str, Any] | None:
+    """Read the project's pending offer, tolerating a closed DB handle
+    (reconnect via :func:`_svc`'s pattern) — the parity tests read the
+    offer after ``_run_async`` teardown closed the app's connection."""
+    svc = _svc(app)
+    return svc.get_pending_offer(pid)
+
+
+def test_fill_recut_parity_fresh_offer_no_loop(app_with_projects, monkeypatch):
+    """A fresh trigger stores the SAME offer on BOTH routes and runs NO
+    loop: ``post_chat`` and the region-edit route agree on the stored
+    offer, the boundary-sentence answer frame, and zero loop calls."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        conn = app_with_projects.state.conn
+
+        def _read_pending(pid: int) -> dict[str, Any] | None:
+            """Read the project's raw pending-offer JSON (pre-normalization
+            — the region route stores an extra ``axis`` the #250 reader
+            does not surface, so the raw row is the parity comparison
+            point)."""
+            row = conn.raw.execute(
+                "SELECT pending_offer FROM projects WHERE id = ?", (pid,)
+            ).fetchone()
+            raw = row["pending_offer"]
+            if not raw:
+                return None
+            import json as _json_mod
+
+            return _json_mod.loads(raw)
+
+        # Chat route.
+        r2 = await client.post("/api/projects", json={"name": "Parity Chat"})
+        chat_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        await client.post(
+            f"/api/projects/{chat_pid}/chat",
+            json={"message": "make the big hole 38 mm"},
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        _release_inflight(app_with_projects, chat_pid)
+        # Region-edit route (the SAME instruction).
+        r3 = await client.post("/api/projects", json={"name": "Parity Region"})
+        region_pid = r3.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        r5 = await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body(
+                "make the big hole 38 mm",
+                face_normal=(0.0, 1.0, 0.0),
+            ),
+        )
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        chat_offer_raw = _read_pending(chat_pid)
+        region_offer_raw = _read_pending(region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames, r5.status_code, chat_offer_raw, region_offer_raw
+
+    chat_pid, region_pid, chat_frames, region_frames, region_status, chat_offer, region_offer = _run_async(
+        app_with_projects, _call
+    )
+    assert region_status == 202, region_status
+    # The loop ran NEITHER route.
+    assert not calls, f"the design loop was called: {calls}"
+    # The SAME offer was stored server-side on both routes (compared on
+    # the raw stored row — the region route's extra ``axis`` is offer
+    # state the #250 reader does not surface, but both stores carry the
+    # same discriminator / noun / size, and the region route adds the
+    # axis the pick's normal carried).
+    assert chat_offer is not None and region_offer is not None
+    for key in ("kind", "noun", "size"):
+        assert chat_offer[key] == region_offer[key] == {"kind": "fill_recut", "noun": "hole", "size": 38.0}[key], (chat_offer, region_offer)
+    # The SAME boundary-sentence answer frame on both routes.
+    chat_done = [d for e, d in chat_frames if e == "done"]
+    region_done = [d for e, d in region_frames if e == "done"]
+    assert chat_done and region_done
+    assert chat_done[0].get("kind") == "answer"
+    assert region_done[0].get("kind") == "answer"
+    assert chat_done[0]["message"] == region_done[0]["message"]
+    assert "Ø38 mm" in chat_done[0]["message"]
+
+
+def test_fill_recut_parity_clean_decline_clears_offer(app_with_projects, monkeypatch):
+    """A clean decline on a LIVE offer clears the offer on BOTH routes,
+    replies with the SAME quiet acknowledgement, and runs NO loop on
+    either."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        # Chat route: seed the LIVE offer, decline.
+        r = await client.post("/api/projects", json={"name": "Parity No Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{chat_pid}/chat", json={"message": "no"}
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        # Region-edit route: seed the SAME LIVE offer, decline.
+        r2 = await client.post("/api/projects", json={"name": "Parity No Region"})
+        region_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body("no"),
+        )
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames
+
+    chat_pid, region_pid, chat_frames, region_frames = _run_async(
+        app_with_projects, _call
+    )
+    # Neither route ran the loop.
+    assert not calls, f"the design loop was called: {calls}"
+    # Both offers were cleared.
+    assert _parity_offer(app_with_projects, chat_pid) is None
+    assert _parity_offer(app_with_projects, region_pid) is None
+    # The SAME quiet acknowledgement on both routes.
+    chat_done = [d for e, d in chat_frames if e == "done"]
+    region_done = [d for e, d in region_frames if e == "done"]
+    assert chat_done and region_done
+    assert chat_done[0].get("kind") == "answer"
+    assert region_done[0].get("kind") == "answer"
+    assert chat_done[0]["message"] == region_done[0]["message"]
+    assert "Understood" in chat_done[0]["message"]
+
+
+def test_fill_recut_parity_acceptance_runs_loop(app_with_projects, monkeypatch):
+    """An acceptance on a LIVE offer runs the loop on BOTH routes with
+    the SAME fill-and-recut instruction in the request text, and clears
+    the offer on both."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        # Chat route: seed the LIVE offer, accept.
+        r = await client.post("/api/projects", json={"name": "Parity Yes Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        await client.post(
+            f"/api/projects/{chat_pid}/chat", json={"message": "yes"}
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        # Region-edit route: seed the SAME LIVE offer, accept.
+        r2 = await client.post("/api/projects", json={"name": "Parity Yes Region"})
+        region_pid = r2.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r4 = await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body("yes"),
+        )
+        status4 = r4.status_code
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames, status4
+
+    chat_pid, region_pid, chat_frames, region_frames, status4 = _run_async(
+        app_with_projects, _call
+    )
+    assert status4 == 202, status4
+    # The loop ran EXACTLY twice (one per route — both routes' acceptance
+    # calls go through ``d33d.design_loop_events.run_design_loop_with_events``,
+    # the spy's target). The fill-and-recut instruction is in both
+    # request texts (the SAME instruction — the offer's noun/size are
+    # server-side state, never re-parsed).
+    assert len(calls) == 2, f"expected 2 loop calls, got {len(calls)}"
+    for c in calls:
+        assert "Fill-and-recut:" in c["request_text"], c["request_text"]
+        assert "hole" in c["request_text"]
+        assert "38" in c["request_text"]
+    # Both offers were cleared (consumed).
+    assert _parity_offer(app_with_projects, chat_pid) is None
+    assert _parity_offer(app_with_projects, region_pid) is None
+
+
+def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monkeypatch):
+    """A setup failure on acceptance restores the offer on BOTH routes
+    (the #332 "lost yes" contract), releases the in-flight flag, and
+    surfaces the error — the two routes never diverge on the offer's
+    survival."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    def _boom_loop(*args, **kwargs):
+        raise RuntimeError("forced loop setup failure (test)")
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        results: dict[str, Any] = {}
+        # Chat route: seed the LIVE offer, accept — setup must fail.
+        r = await client.post("/api/projects", json={"name": "Parity Boom Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(app_with_projects, chat_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            chat_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        try:
+            r2 = await client.post(
+                f"/api/projects/{chat_pid}/chat", json={"message": "yes"}
+            )
+            results["chat_status"] = r2.status_code
+        except RuntimeError:
+            results["chat_status"] = 500  # the ASGI transport re-raised
+        # Region-edit route: seed the SAME LIVE offer, accept — same failure.
+        r3 = await client.post("/api/projects", json={"name": "Parity Boom Region"})
+        region_pid = r3.json()["id"]
+        _set_part_columns(app_with_projects, region_pid, unit_status="settled")
+        app_with_projects.state.versions.set_pending_offer(
+            region_pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        try:
+            r4 = await client.post(
+                f"/api/projects/{region_pid}/region-edits",
+                json=_parity_region_edit_body("yes"),
+            )
+            results["region_status"] = r4.status_code
+        except RuntimeError:
+            results["region_status"] = 500
+        results["chat_pid"] = chat_pid
+        results["region_pid"] = region_pid
+        return results
+
+    results = _run_async(app_with_projects, _call)
+    # Both requests errored (the setup exception propagated — no 202).
+    assert results["chat_status"] != 202, results
+    assert results["region_status"] != 202, results
+    # Neither project is 409-blocked — the in-flight flag was released.
+    inflight = app_with_projects.state.design_loop_inflight
+    assert results["chat_pid"] not in inflight
+    assert results["region_pid"] not in inflight
+    # The SAME accepted offer was RESTORED on both routes (the acceptance
+    # survives the failed setup — never lost). Compare the reader's
+    # normalized fields (the restore carries the full accepted-offer dict;
+    # ``get_pending_offer`` surfaces ``kind``/``noun``/``size``).
+    chat_offer = _parity_offer(app_with_projects, results["chat_pid"])
+    region_offer = _parity_offer(app_with_projects, results["region_pid"])
+    assert chat_offer is not None, "the accepted fill_recut offer was lost (chat)"
+    assert region_offer is not None, "the accepted fill_recut offer was lost (region)"
+    assert chat_offer == region_offer == {
+        "kind": "fill_recut",
+        "noun": "hole",
+        "size": 38.0,
+    }
