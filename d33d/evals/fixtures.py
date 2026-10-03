@@ -16,9 +16,15 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
     """Containment-check a part fixture path (issue #340 shared helper).
 
     The fixture must be a relative ``.stl`` path whose resolved location
-    stays under the repo root's ``evals/cases/fixtures/`` directory
-    (checked with ``resolve()`` + ``is_relative_to`` so a ``../``
-    traversal, an absolute path, or a symlink escape is rejected).
+    stays under the repo root's ``evals/cases/fixtures/`` directory.
+    Symlinks: an in-tree symlink (target inside ``evals/cases/fixtures/``)
+    passes here, because ``resolve()`` follows it and the resolved target
+    is still contained; a symlink whose target escapes that directory is
+    rejected by the same ``resolve()`` + ``is_relative_to`` check (the
+    ``../`` traversal and absolute-path rejections work the same way).
+    The render worker's ``validate_part_path`` is the authoritative
+    containment check at render time — this helper only guards the eval
+    harness's staging and seed verification.
     Shared by ``evals/run.py``'s staging path and
     :func:`d33d.evals.case_schema.verify_seed` — one containment rule,
     one implementation.

@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Literal
 
@@ -160,6 +161,27 @@ class PartRef(BaseModel):
 
     fixture: str = Field(min_length=1)
     scale: float = Field(gt=0)
+
+    @field_validator("scale")
+    @classmethod
+    def _scale_must_be_finite(cls, v: float) -> float:
+        if not math.isfinite(v):
+            raise ValueError("scale must be a finite positive number")
+        return v
+
+
+def part_of(case: GoldenCase) -> PartRef:
+    """The part ref of an ``imported_part`` case.
+
+    Returns ``case.part``, or raises :class:`ValueError` when it is
+    ``None`` — unreachable for a schema-validated ``imported_part``
+    case (the model validator requires the ref), but a typed error
+    instead of an ``AttributeError`` on ``None`` if that invariant is
+    ever broken by a caller constructing cases out-of-band.
+    """
+    if case.part is None:
+        raise ValueError(f"case {case.case_id!r} has no part ref")
+    return case.part
 
 
 class DimsMm(BaseModel):
@@ -435,13 +457,14 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
             if repo_root is None:
                 violations.append(f"{cid}: cannot verify fixture without repo_root")
                 continue
-            containment = check_fixture_containment(repo_root, c.part.fixture)
+            part = part_of(c)
+            containment = check_fixture_containment(repo_root, part.fixture)
             if containment is not None:
                 violations.append(f"{cid}: {containment}")
                 continue
-            fixture = repo_root / c.part.fixture
+            fixture = repo_root / part.fixture
             if not fixture.is_file():
-                violations.append(f"{cid}: part fixture {c.part.fixture!r} missing on disk")
+                violations.append(f"{cid}: part fixture {part.fixture!r} missing on disk")
 
     for cid, c in cases.items():
         if c.kind == "red_region_edit":

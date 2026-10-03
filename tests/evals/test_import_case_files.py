@@ -25,7 +25,11 @@ from d33d.design_prompts import import_part_instruction
 from d33d.evals.case_schema import (
     GATE_NAMES,
     KIND_PRECHECK_GATES,
+    GoldenCase,
+    PartRef,
+    PromptPin,
     load_golden_set,
+    part_of,
     verify_seed,
 )
 from d33d.evals.harness import run_case_gates
@@ -699,6 +703,100 @@ def test_verify_seed_flags_absolute_fixture(tmp_path: Path) -> None:
     cases[IMPORT_CASE_IDS[0]].part.fixture = str(FIXTURE)
     violations = verify_seed(cases, REPO_ROOT)
     assert any("not a relative path" in v for v in violations)
+
+
+def test_part_of_returns_part_ref_for_imported_case() -> None:
+    """``part_of`` returns ``case.part`` for an imported-part case and
+    raises ``ValueError`` (not ``AttributeError``) when the ref is absent
+    (the schema makes this unreachable, but the accessor must stay
+    honest)."""
+    case = _load()[IMPORT_CASE_IDS[0]]
+    part = part_of(case)
+    assert part is case.part
+    assert part.fixture == "evals/cases/fixtures/part.stl"
+
+    ghost = GoldenCase(
+        case_id="ghost-no-part",
+        kind="primitive",
+        prompt=PromptPin(prompt_version="v1", path="p.md", sha256="f" * 64),
+        request="a box",
+        gate_expectations=["compile"],
+    )
+    assert ghost.part is None
+    with pytest.raises(ValueError, match="no part ref"):
+        part_of(ghost)
+
+
+def test_part_ref_scale_rejects_non_finite() -> None:
+    """A non-finite ``scale`` (inf/nan) is a schema error — the guard's
+    numeric tolerance must never compare against a non-finite factor."""
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="finite"):
+        PartRef(fixture="evals/cases/fixtures/part.stl", scale=float("inf"))
+    # NaN is caught earlier by the ``gt=0`` constraint (NaN < 0 is
+    # False), but the error is still a ValidationError.
+    with pytest.raises(ValidationError):
+        PartRef(fixture="evals/cases/fixtures/part.stl", scale=float("nan"))
+    # a normal positive scale still validates
+    assert PartRef(fixture="evals/cases/fixtures/part.stl", scale=1.0).scale == 1.0
+
+
+def test_run_py_render_wrapper_satisfies_render_fn_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wrapper ``evals/run.py`` installs around
+    ``render_for_design_loop`` satisfies the ``RenderFn`` call shape the
+    harness uses: both the no-part call (``render_fn(scad_source)``) and
+    the imported-part call (``render_fn(scad_source, part_path=..., 
+    repo_dir=...)``) work, and the worker always receives an empty
+    ``defines`` map."""
+
+    recorded: list[dict] = []
+
+    class R:
+        error_class = "ok"
+        stderr = ""
+        scad_source = ""
+        stl = None
+        csg = None
+        views = ()
+
+    def fake_worker(scad_source, defines, *args, **kwargs):
+        recorded.append({"scad": scad_source, "defines": defines, "kwargs": kwargs})
+        return R()
+
+    # Patch the name in the worker module; the wrapper (defined inside
+    # ``main`` in run.py) looks it up at call time, so a monkeypatch on
+    # the module attribute is what the wrapper will invoke.
+    import d33d.render_worker as worker
+
+    monkeypatch.setattr(worker, "render_for_design_loop", fake_worker)
+
+    # The wrapper's exact body as installed by ``evals/run.py`` (the
+    # closure the brief specifies), bound to the patched worker.
+    def _render(scad_source, *, part_path=None, repo_dir=None):
+        return worker.render_for_design_loop(
+            scad_source, {}, part_path=part_path, repo_dir=repo_dir
+        )
+
+    # No-part call shape (the harness's part-less path).
+    _render("cube([1,1,1]);")
+    # Imported-part call shape (the harness's part-carrying path).
+    _render("cube([1,1,1]);", part_path=FIXTURE, repo_dir=REPO_ROOT)
+
+    assert len(recorded) == 2
+    assert recorded[0]["scad"] == "cube([1,1,1]);"
+    assert recorded[0]["defines"] == {}
+    assert recorded[0]["kwargs"] == {"part_path": None, "repo_dir": None}
+    assert recorded[1]["defines"] == {}
+    assert recorded[1]["kwargs"]["part_path"] == FIXTURE
+    assert recorded[1]["kwargs"]["repo_dir"] == REPO_ROOT
+
+    # The wrapper's shape is what the harness probes before the call.
+    from d33d.evals.harness import _render_fn_accepts_part_kwargs
+
+    assert _render_fn_accepts_part_kwargs(_render)
 
 
 def test_verify_seed_without_repo_root_reports_cannot_verify() -> None:

@@ -103,12 +103,12 @@ class RenderFn(Protocol):
     live runs and a stub for hermetic tests. The harness never shells into
     Docker itself.
 
-    ``evals/run.py`` passes
-    ``d33d.render_worker.render_for_design_loop`` directly — the harness's
-    ``render_fn`` is not a caller-supplied wrapper. It satisfies this
-    protocol structurally: besides ``scad_source`` it already accepts
-    ``part_path`` / ``repo_dir`` and its remaining parameters (``defines``,
-    ``renders_dir``, etc.) all have defaults.
+    ``evals/run.py`` wraps ``d33d.render_worker.render_for_design_loop``
+    with an explicit wrapper that fills the worker's required
+    ``defines`` argument with an empty map (the worker's ``defines``
+    has no default, so the raw worker does not satisfy this protocol on
+    its own): ``def _render(scad_source, *, part_path=None,
+    repo_dir=None)`` calling the worker with ``defines={}``.
 
     Contract (issue #340): render functions used with ``imported_part``
     cases MUST accept the ``part_path`` / ``repo_dir`` kwargs — the
@@ -162,6 +162,12 @@ class CaseOutcome:
     (structural enforcement of gates-before-judge). ``failure_class`` is
     the closed-enum class the case failed with (``None`` when the case
     passed).
+
+    Note (issue #340): a case that never reached the gate phase (a
+    staging problem or a design-call failure) carries ``failure_class``
+    with no gates — issue #340 made ``ok`` treat that as a failure, so
+    ``failure_class`` set with an empty ``gates`` map is no longer
+    ``ok=True``.
     """
 
     case_id: str
@@ -499,10 +505,13 @@ def run_case_gates(
     # the remaining gates run (the detail carries the offending text).
     if case.kind == "imported_part":
         # ``case.part`` is guaranteed by the GoldenCase schema
-        # (imported_part REQUIRES a part ref).
+        # (imported_part REQUIRES a part ref); ``part_of`` enforces
+        # the invariant with a typed error if it is ever absent.
+        from d33d.evals.case_schema import part_of
         from d33d.import_guard import import_guard_violation
 
-        violation = import_guard_violation(scad_source, part_scale=case.part.scale)
+        part = part_of(case)
+        violation = import_guard_violation(scad_source, part_scale=part.scale)
         if violation is not None:
             reason, detail = violation
             gates["import_guard"] = GateResult(
@@ -510,8 +519,8 @@ def run_case_gates(
                 status="fail",
                 failure_class="artifact_error",
                 detail=(
-                    f"{reason}: {detail} (fixture {case.part.fixture!r}, "
-                    f"settled scale {case.part.scale:g})"
+                    f"{reason}: {detail} (fixture {part.fixture!r}, "
+                    f"settled scale {part.scale:g})"
                 ),
             )
             return gates

@@ -185,10 +185,13 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     """
     if case.part is None:
         return None, None
-    violation = check_fixture_containment(repo_root, case.part.fixture)
+    from d33d.evals.case_schema import part_of
+
+    part = part_of(case)
+    violation = check_fixture_containment(repo_root, part.fixture)
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
-    return (repo_root / case.part.fixture).resolve(), None
+    return (repo_root / part.fixture).resolve(), None
 
 
 def _staging_outcome(case: GoldenCase, error: str) -> CaseOutcome:
@@ -249,8 +252,8 @@ async def _run_all(
             outcomes.append(
                 _staging_outcome(
                     case,
-                    f"case {case.case_id}: part fixture {case.part.fixture!r} "
-                    "is missing on disk",
+                    f"case {case.case_id}: part fixture "
+                    f"{case.part.fixture!r} is missing on disk",
                 )
             )
             continue
@@ -389,9 +392,19 @@ def main(argv: list[str] | None = None) -> int:
         # on a reference fixture. The worker's temp/persist dirs live
         # under $HOME (Docker on macOS cannot see /tmp — a /tmp render
         # dir causes a silent multi-minute hang).
+        #
+        # ``render_for_design_loop`` requires its ``defines`` argument
+        # positionally and has no default, so it does not satisfy the
+        # ``RenderFn`` protocol directly — wrap it (the ``defines`` map
+        # is always empty here; the golden set has no per-case defines).
         from d33d.render_worker import render_for_design_loop
 
-        render_fn: RenderFn = render_for_design_loop
+        def _render(scad_source, *, part_path=None, repo_dir=None):
+            return render_for_design_loop(
+                scad_source, {}, part_path=part_path, repo_dir=repo_dir
+            )
+
+        render_fn: RenderFn = _render
 
         report_json = asyncio.run(
             _run_all(
