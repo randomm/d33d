@@ -15,6 +15,7 @@ Verifies — without calling a model, Docker, or the network:
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 from pathlib import Path
@@ -77,16 +78,16 @@ def test_imported_part_cases_parse_and_pin_fixture() -> None:
 def test_import_guard_is_in_the_gate_registry() -> None:
     """import_guard is the imported_part kind's pre-check gate and the
     report's gate order carries it, ordered first (issue #340)."""
-    from d33d.evals.report import GATE_ORDER, case_gate_order
+    from d33d.evals.report import BASE_GATE_ORDER, case_gate_order
 
     assert KIND_PRECHECK_GATES == {"imported_part": "import_guard"}
     assert "import_guard" not in GATE_NAMES  # implied, not declared
-    assert "import_guard" not in GATE_ORDER
+    assert "import_guard" not in BASE_GATE_ORDER
     order = case_gate_order("imported_part")
     assert order[0] == "import_guard"  # ordered first
-    assert order[1:] == GATE_ORDER
+    assert order[1:] == BASE_GATE_ORDER
     # a kind without a pre-check keeps the base order unchanged
-    assert case_gate_order("primitive") == GATE_ORDER
+    assert case_gate_order("primitive") == BASE_GATE_ORDER
     # and every declared gate is one the registry knows (base + pre-checks)
     known = set(GATE_NAMES) | set(KIND_PRECHECK_GATES.values())
     cases = _load()
@@ -495,3 +496,163 @@ def test_gate_phase_short_circuits_after_guard_failure() -> None:
         scad_source='scale(2) import("part.stl");',
     )
     assert list(gates) == ["compile", "import_guard"]
+
+
+# ---------------------------------------------------------------------------
+# (c2) full gate_expectations of a real import case through run_case and
+# build_report (issue #340 fix round)
+# ---------------------------------------------------------------------------
+
+
+def _async_factory(content: str):
+    async def factory(request):
+        class R:
+            def json(self):
+                return {"choices": [{"message": {"content": content}}]}
+
+        return R()
+
+    return factory
+
+
+def _ok_render_fn():
+    def render_fn(scad_source, *, part_path=None, repo_dir=None):
+        return _RenderResult()
+
+    return render_fn
+
+
+def test_run_case_full_gate_expectations_guard_short_circuits() -> None:
+    """An imported_part case with the FULL gate_expectations of a real
+    import case (loaded from the git-tracked case files, not a trimmed
+    copy) driven through ``run_case`` with a guard-violating candidate:
+    the gates short-circuit at compile + import_guard, the case fails
+    with ``artifact_error``, and the remaining declared gates never run.
+    Mutation check: removing the import-guard call from
+    ``run_case_gates`` makes this fail (the row then carries a passing
+    compile row with no import_guard)."""
+    from d33d.evals.harness import run_case
+
+    case = _load()["import-drill-hole"]
+    assert "stl_export" in case.gate_expectations  # the FULL set, not trimmed
+
+    outcome = asyncio.run(
+        run_case(
+            case=case,
+            repo_root=REPO_ROOT,
+            model_id="m",
+            request_factory=_async_factory('scale(2) import("part.stl");'),
+            render_fn=_ok_render_fn(),
+            part_path=FIXTURE,
+            part_repo_dir=REPO_ROOT,
+            judge_fn=_passing_judge,
+        )
+    )
+    assert list(outcome.gates) == ["compile", "import_guard"]
+    assert outcome.gates["compile"].status == "pass"
+    assert outcome.gates["import_guard"].status == "fail"
+    assert outcome.ok is False
+    assert outcome.failure_class == "artifact_error"
+    assert outcome.judge is None  # the gate failure short-circuited it
+
+
+def test_build_report_orders_import_guard_first_and_counts_failed() -> None:
+    """``build_report`` over the guard-failing outcome above: the report
+    row orders ``import_guard`` first and counts the case as failed."""
+    from d33d.evals.harness import run_case
+    from d33d.evals.report import build_report
+
+    case = _load()["import-drill-hole"]
+    outcome = asyncio.run(
+        run_case(
+            case=case,
+            repo_root=REPO_ROOT,
+            model_id="m",
+            request_factory=_async_factory('scale(2) import("part.stl");'),
+            render_fn=_ok_render_fn(),
+            part_path=FIXTURE,
+            part_repo_dir=REPO_ROOT,
+            judge_fn=_passing_judge,
+        )
+    )
+    report = build_report([outcome], ts="2026-01-01T00:00:00+00:00")
+    row = report.outcomes[outcome.case_id]
+    # The row's gate mapping is reordered in place to the kind's gate
+    # order: the pre-check import_guard first, then the base 1->7 (the
+    # short-circuit left compile after it in the outcome's own dict).
+    assert list(row["gates"]) == ["import_guard", "compile"]
+    assert row["ok"] is False
+    assert report.passed == 0
+    assert report.failed == 1
+    assert report.total == 1
+
+
+async def _passing_judge(ji) -> object:
+    from d33d.evals.judge import JudgeVerdict
+
+    return JudgeVerdict(passed=True, reason="stub")
+
+
+def test_render_fn_legacy_stub_typeerror_is_contained(tmp_path: Path) -> None:
+    """A legacy one-argument render_fn handed an imported-part case is
+    contained: the case fails with ``artifact_error`` (the detail names
+    the kwargs), the run does not crash, and the other cases are
+    unaffected (per-case containment)."""
+    import json as _json
+
+    def legacy_render_fn(scad_source):
+        return _RenderResult()
+
+    report = _run(
+        tmp_path,
+        [
+            {
+                "case_id": "legacy-import",
+                "kind": "imported_part",
+                "request": "drill a hole",
+                "part": {
+                    "fixture": "evals/cases/fixtures/part.stl",
+                    "scale": 1.0,
+                },
+            },
+            {
+                "case_id": "normal-box",
+                "kind": "primitive",
+                "request": "a box",
+            },
+        ],
+        render_fn=legacy_render_fn,
+    )
+    report_doc = _json.loads(report)
+    cases = report_doc["cases"]
+    bad = cases["legacy-import"]
+    assert bad["ok"] is False
+    assert bad["failure_class"] == "artifact_error"
+    assert "render_fn does not accept part_path/repo_dir" in bad["detail"]
+    # the other case still ran and still passes
+    assert cases["normal-box"]["ok"] is True
+    assert report_doc["summary"]["passed"] == 1
+
+
+# ---------------------------------------------------------------------------
+# (b3) verify_seed containment via the shared helper (issue #340 fix round)
+# ---------------------------------------------------------------------------
+
+
+def test_verify_seed_flags_escaping_fixture() -> None:
+    """A fixture that escapes ``evals/cases/fixtures/`` (``../``
+    traversal) is a seed violation, reported via the shared containment
+    helper — not just a missing file."""
+    cases = _load()
+    cases[IMPORT_CASE_IDS[0]].part.fixture = "evals/cases/fixtures/../part.stl"
+    violations = verify_seed(cases, REPO_ROOT)
+    assert any("escapes" in v for v in violations)
+
+
+def test_verify_seed_flags_absolute_fixture(tmp_path: Path) -> None:
+    """An absolute fixture path is a seed violation (the fixture must be a
+    relative path under the repo root)."""
+    cases = _load()
+    cases[IMPORT_CASE_IDS[0]].part.fixture = str(FIXTURE)
+    violations = verify_seed(cases, REPO_ROOT)
+    assert any("not a relative path" in v for v in violations)

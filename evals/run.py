@@ -62,7 +62,11 @@ from typing import Any
 
 import httpx
 
-from d33d.evals.case_schema import GoldenCase, load_golden_set
+from d33d.evals.case_schema import (
+    GoldenCase,
+    check_fixture_containment,
+    load_golden_set,
+)
 from d33d.evals.harness import (
     CaseOutcome,
     RenderFn,
@@ -184,30 +188,10 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     """
     if case.part is None:
         return None, None
-    fixture = repo_root / case.part.fixture
-    if fixture.suffix.lower() != ".stl":
-        return None, (
-            f"case {case.case_id}: part fixture {case.part.fixture!r} must be an "
-            "STL file (the worker seeds part.stl); 3MF staging is "
-            "out of scope for the eval harness"
-        )
-    root = repo_root.resolve()
-    fixtures_dir = (root / "evals" / "cases" / "fixtures").resolve()
-    resolved = fixture.resolve()
-    try:
-        contained = resolved.is_relative_to(fixtures_dir)
-    except (ValueError, OSError) as e:
-        return None, (
-            f"case {case.case_id}: cannot resolve part fixture "
-            f"{case.part.fixture!r} for containment check: {e}"
-        )
-    if not contained:
-        return None, (
-            f"case {case.case_id}: part fixture {case.part.fixture!r} escapes "
-            f"{fixtures_dir} (the fixture must live under "
-            "evals/cases/fixtures/)"
-        )
-    return resolved, None
+    violation = check_fixture_containment(repo_root, case.part.fixture)
+    if violation is not None:
+        return None, f"case {case.case_id}: {violation}"
+    return (repo_root / case.part.fixture).resolve(), None
 
 
 def _staging_outcome(case: GoldenCase, error: str) -> CaseOutcome:

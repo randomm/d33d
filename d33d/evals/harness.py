@@ -118,8 +118,8 @@ class RenderFn(Protocol):
         self,
         scad_source: str,
         *,
-        part_path: Path | None = ...,
-        repo_dir: Path | None = ...,
+        part_path: Path | None = None,
+        repo_dir: Path | None = None,
     ) -> Any: ...
 
 
@@ -636,7 +636,19 @@ async def run_case(
     # The kwargs are passed ONLY when part_path is not None (the
     # RenderFn contract: imported-part-capable fns accept both).
     if part_path is not None:
-        render_result = render_fn(scad_source, part_path=part_path, repo_dir=part_repo_dir)
+        try:
+            render_result = render_fn(
+                scad_source, part_path=part_path, repo_dir=part_repo_dir
+            )
+        except TypeError as e:
+            # A legacy render_fn that accepts only ``scad_source`` cannot
+            # stage the part — that case fails, the run continues (the
+            # kwargs contract is documented on the RenderFn Protocol).
+            return CaseOutcome(
+                **base,
+                failure_class="artifact_error",
+                detail=f"render_fn does not accept part_path/repo_dir: {e}",
+            )
     else:
         render_result = render_fn(scad_source)
     stl_path = getattr(render_result, "stl", None)

@@ -38,7 +38,7 @@ from d33d.evals.harness import CaseOutcome
 #: The base gate labels, in the pinned 1->7 order — the gates a case
 #: may DECLARE in ``gate_expectations`` (see
 #: ``d33d.evals.case_schema.GATE_NAMES``).
-GATE_ORDER: tuple[str, ...] = (
+BASE_GATE_ORDER: tuple[str, ...] = (
     "compile",
     "stl_export",
     "watertight_winding",
@@ -56,11 +56,14 @@ def case_gate_order(case_kind: str) -> tuple[str, ...]:
     cases — see ``d33d.evals.case_schema.KIND_PRECHECK_GATES``) is
     ordered FIRST, before the base 1->7 gates it precedes in the gate
     phase; kinds without a pre-check get the base order unchanged. The
+    base order is :data:`BASE_GATE_ORDER` (the 1->7 gates; the kind's
+    pre-check is prepended when present, so the kind's full order is
+    longer than the base). The
     report's per-case row carries at most these keys (absent gates
     were not reached — a short-circuit).
     """
     pre = KIND_PRECHECK_GATES.get(case_kind)
-    return (pre, *GATE_ORDER) if pre is not None else GATE_ORDER
+    return (pre, *BASE_GATE_ORDER) if pre is not None else BASE_GATE_ORDER
 
 
 @dataclass(frozen=True)
@@ -233,6 +236,9 @@ def build_report(
 
     ``ts`` defaults to the current UTC time (deterministic in tests via
     the argument).
+
+    Side effect: each outcome's ``gates`` dict is reordered in place to
+    the kind's gate order before the row is serialised (:func:`_order_gate_row`).
     """
     rows: dict[str, dict[str, Any]] = {}
     counts: dict[str, int] = {}

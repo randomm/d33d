@@ -25,8 +25,9 @@ auditable: the on-disk set is composed as 6 primitives (the 5 ticket
 primitives + the Qwen smoke baseline, a photo-plus-views → OpenSCAD
 primitive recreation that is the first case to write and is marked
 ``is_baseline`` — a reference, not a gate), 5 red-marked region edits
-(one extra over the ticket's 4 so the total reaches 20), 3
-topology, 3 photo recreations, 3 adversarial, 3 imported parts
+(one extra over the ticket's 4, so the 20-case seed holds), 3
+topology, 3 photo recreations, 3 adversarial (6 + 5 + 3 + 3 + 3 = 20),
+plus the 3 imported parts that issue #340 brings the total to 23
 (6 + 5 + 3 + 3 + 3 + 3 = 23). Every case's ``kind`` matches the table's
 kinds; the baseline is additionally flagged ``is_baseline`` so the report
 shows it as the reference. :data:`SEED_MIX` is this full on-disk
@@ -102,7 +103,7 @@ GATE_NAMES: tuple[str, ...] = (
 #: the settled scale and never resize it) BEFORE the declared
 #: ``gate_expectations`` run, but it is NOT declared in
 #: ``gate_expectations`` — it is implied by the kind. The report orders
-#: it first (the ``GATE_ORDER`` in ``d33d.evals.report`` prepends the
+#: it first (the ``BASE_GATE_ORDER`` in ``d33d.evals.report`` prepends the
 #: kind's pre-check gate when present).
 KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
 
@@ -123,8 +124,9 @@ GATE_NA_MARKERS: dict[str, str] = {
 #: The ticket's table (5/4/3/3/3 = 18) sums short of the stated floor
 #: of 20; the resolution (see module docstring) is that the Qwen smoke
 #: baseline is the 6th primitive and one extra red-region edit is added,
-#: giving 6 + 5 + 3 + 3 + 3 = 20, plus the 3 imported-part cases of
-#: issue #340 = 23. The baseline is the ``is_baseline``
+#: so the 20-case seed holds (6 + 5 + 3 + 3 + 3 = 20); the 3
+#: imported-part cases of issue #340 then bring the total to 23.
+#: The baseline is the ``is_baseline``
 #: case within the primitive count. Sum is exactly 23, so "floor 20"
 #: is directly testable.
 SEED_MIX: dict[str, int] = {
@@ -357,6 +359,41 @@ def check_prompt_pin(repo_root: Path, pin: PromptPin) -> str:
     return actual
 
 
+def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
+    """Containment-check a part fixture path (issue #340 shared helper).
+
+    The fixture must be a relative ``.stl`` path whose resolved location
+    stays under the repo root's ``evals/cases/fixtures/`` directory
+    (checked with ``resolve()`` + ``is_relative_to`` so a ``../``
+    traversal, an absolute path, or a symlink escape is rejected).
+    Shared by ``evals/run.py``'s staging path and :func:`verify_seed` —
+    one containment rule, one implementation.
+
+    Returns ``None`` when the fixture is contained, or the violation
+    message otherwise.
+    """
+    if Path(fixture).is_absolute():
+        return f"part fixture {fixture!r} is not a relative path under the repo root"
+    if Path(fixture).suffix.lower() != ".stl":
+        return (
+            f"part fixture {fixture!r} must be an STL file (the worker seeds "
+            "part.stl); 3MF staging is out of scope for the eval harness"
+        )
+    root = repo_root.resolve()
+    fixtures_dir = (root / "evals" / "cases" / "fixtures").resolve()
+    try:
+        resolved = (root / fixture).resolve()
+        contained = resolved.is_relative_to(fixtures_dir)
+    except (ValueError, OSError) as e:
+        return f"cannot resolve part fixture {fixture!r} for containment check: {e}"
+    if not contained:
+        return (
+            f"part fixture {fixture!r} escapes {fixtures_dir} (the fixture "
+            "must live under evals/cases/fixtures/)"
+        )
+    return None
+
+
 def load_case_file(path: Path) -> GoldenCase:
     """Parse and validate one case file (JSON → :class:`GoldenCase`)."""
     data = json.loads(path.read_text())
@@ -430,6 +467,10 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
             if c.part is None:
                 violations.append(f"{cid}: imported_part case missing its part ref")
             else:
+                containment = check_fixture_containment(repo_root, c.part.fixture)
+                if containment is not None:
+                    violations.append(f"{cid}: {containment}")
+                    continue
                 fixture = (
                     (repo_root / c.part.fixture) if repo_root is not None else None
                 )
