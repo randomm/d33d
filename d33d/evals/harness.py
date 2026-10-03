@@ -99,9 +99,16 @@ RequestFactory = Callable[[dict[str, Any]], Awaitable[Any]]
 class RenderFn(Protocol):
     """The render seam (issue #108): one OpenSCAD source string in, one
     ``RenderResult``-shaped render-worker result out (``error_class``,
-    ``stderr``, ``stl``). The caller injects the real Docker worker
-    (``d33d.render_worker.render_for_design_loop``) for live runs and a
-    stub for hermetic tests. The harness never shells into Docker itself.
+    ``stderr``, ``stl``). The caller injects the render function used for
+    live runs and a stub for hermetic tests. The harness never shells into
+    Docker itself.
+
+    The harness's ``render_fn`` is a caller-supplied wrapper, NOT
+    ``d33d.render_worker.render_for_design_loop`` itself: ``evals/run.py``
+    binds the worker into a wrapper whose signature matches this protocol
+    (``scad_source`` plus the ``part_path`` / ``repo_dir`` kwargs, with
+    the worker's own arguments supplied by the wrapper) before handing it
+    to the harness.
 
     Contract (issue #340): render functions used with ``imported_part``
     cases MUST accept the ``part_path`` / ``repo_dir`` kwargs — the
@@ -490,7 +497,9 @@ def run_case_gates(
     # candidate must import the seeded part at the settled scale and
     # never resize it. The violation is recorded as a gate failure BEFORE
     # the remaining gates run (the detail carries the offending text).
-    if case.kind == "imported_part" and case.part is not None:
+    if case.kind == "imported_part":
+        # ``case.part`` is guaranteed by the GoldenCase schema
+        # (imported_part REQUIRES a part ref).
         from d33d.import_guard import import_guard_violation
 
         violation = import_guard_violation(scad_source, part_scale=case.part.scale)
@@ -500,7 +509,10 @@ def run_case_gates(
                 gate="import_guard",
                 status="fail",
                 failure_class="artifact_error",
-                detail=f"{reason}: {detail}",
+                detail=(
+                    f"{reason}: {detail} (fixture {case.part.fixture!r}, "
+                    f"settled scale {case.part.scale:g})"
+                ),
             )
             return gates
         gates["import_guard"] = GateResult(

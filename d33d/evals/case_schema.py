@@ -74,7 +74,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from d33d.evals.fixtures import check_fixture_containment
 
@@ -316,6 +316,15 @@ class GoldenCase(BaseModel):
             raise ValueError("part field only valid for kind=imported_part")
         return v
 
+    @model_validator(mode="after")
+    def _part_required_for_imported_kind(self) -> GoldenCase:
+        """An ``imported_part`` case REQUIRES its part ref (the import
+        guard is schema-guaranteed to have ``case.part``), and no other
+        kind may carry one."""
+        if self.kind == "imported_part" and self.part is None:
+            raise ValueError("kind=imported_part requires a part ref")
+        return self
+
 
 def prompt_file_hash(repo_root: Path, prompt_path: str) -> str:
     """SHA-256 (hex) of a prompt file's content.
@@ -421,23 +430,18 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
 
     for cid, c in cases.items():
         if c.kind == "imported_part":
-            if c.part is None:
-                violations.append(f"{cid}: imported_part case missing its part ref")
-            else:
-                if repo_root is None:
-                    violations.append(
-                        f"{cid}: cannot verify fixture without repo_root"
-                    )
-                    continue
-                containment = check_fixture_containment(repo_root, c.part.fixture)
-                if containment is not None:
-                    violations.append(f"{cid}: {containment}")
-                    continue
-                fixture = repo_root / c.part.fixture
-                if not fixture.is_file():
-                    violations.append(
-                        f"{cid}: part fixture {c.part.fixture!r} missing on disk"
-                    )
+            # The part ref is schema-guaranteed (GoldenCase requires it
+            # for this kind) — only the on-disk checks can still fail.
+            if repo_root is None:
+                violations.append(f"{cid}: cannot verify fixture without repo_root")
+                continue
+            containment = check_fixture_containment(repo_root, c.part.fixture)
+            if containment is not None:
+                violations.append(f"{cid}: {containment}")
+                continue
+            fixture = repo_root / c.part.fixture
+            if not fixture.is_file():
+                violations.append(f"{cid}: part fixture {c.part.fixture!r} missing on disk")
 
     for cid, c in cases.items():
         if c.kind == "red_region_edit":

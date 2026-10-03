@@ -147,6 +147,44 @@ def test_verify_seed_flags_missing_fixture() -> None:
     assert any("missing.stl" in v for v in violations)
 
 
+def test_imported_part_case_requires_part() -> None:
+    """An ``imported_part`` case without a part ref is a schema error —
+    the import guard must never silently skip because of a missing ref."""
+    from pydantic import ValidationError
+
+    from d33d.evals.case_schema import GoldenCase, PromptPin
+
+    with pytest.raises(ValidationError):
+        GoldenCase(
+            case_id="import-no-part",
+            kind="imported_part",
+            prompt=PromptPin(
+                prompt_version="v1", path="p.md", sha256="f" * 64
+            ),
+            request="drill a hole",
+            gate_expectations=["compile"],
+        )
+
+
+def test_primitive_case_must_not_carry_part() -> None:
+    """A non-``imported_part`` case carrying a part ref is a schema error."""
+    from pydantic import ValidationError
+
+    from d33d.evals.case_schema import GoldenCase, PartRef, PromptPin
+
+    with pytest.raises(ValidationError):
+        GoldenCase(
+            case_id="primitive-with-part",
+            kind="primitive",
+            prompt=PromptPin(
+                prompt_version="v1", path="p.md", sha256="f" * 64
+            ),
+            request="a box",
+            gate_expectations=["compile"],
+            part=PartRef(fixture="evals/cases/fixtures/part.stl", scale=1.0),
+        )
+
+
 # ---------------------------------------------------------------------------
 # (b) run.py mesh-staging: the fixture goes to the render seam as part_path
 # ---------------------------------------------------------------------------
@@ -166,8 +204,6 @@ def test_run_all_stages_fixture_as_part_path(tmp_path: Path) -> None:
     """run.py hands the case's fixture to the render seam as part_path +
     repo_dir for a part-carrying case, and renders without a part for a
     part-less case."""
-    import asyncio
-
     run = _load_run_module()
 
     cases_dir = _write_cases(
@@ -286,7 +322,7 @@ def test_gate_phase_passes_compliant_candidate() -> None:
 
 
 # ---------------------------------------------------------------------------
-# (b2) per-case containment: staging problems fail the case, never the run
+# (b2a) empty fixture path
 # ---------------------------------------------------------------------------
 
 
@@ -328,8 +364,6 @@ def _llm_factory():
 
 
 def _run(tmp_path: Path, cases: list[dict], render_fn=None):
-    import asyncio
-
     run = _load_run_module()
     if render_fn is None:
 
