@@ -1428,7 +1428,7 @@ def test_region_edit_fill_recut_preroute_failure_releases_flag(
     from starlette.exceptions import HTTPException
 
     import d33d.design_loop_events as dle_mod
-    import d33d.fill_recut as fr_mod
+    import d33d.fill_recut_region as fr_mod
 
     def _boom(*args, **kwargs):
         # Raised only on the FIRST call (the pre-route); the follow-up

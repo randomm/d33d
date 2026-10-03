@@ -85,6 +85,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from d33d import db, slicer
 from d33d import fill_recut as fill_recut_mod
+from d33d import fill_recut_region as fill_recut_region_mod
 from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
 from d33d.chat_frames import answered_frames
@@ -576,10 +577,12 @@ class RegionEditRequest(BaseModel):
         if v is None:
             return None
         length = math.sqrt(sum(x * x for x in v))
-        if not math.isclose(length, 1.0, abs_tol=fill_recut_mod.NORMAL_LENGTH_TOLERANCE):
+        if not math.isclose(
+            length, 1.0, abs_tol=fill_recut_region_mod.NORMAL_LENGTH_TOLERANCE
+        ):
             raise ValueError(
                 "face_normal length must be within "
-                f"1±{fill_recut_mod.NORMAL_LENGTH_TOLERANCE} (got {length:g})"
+                f"1±{fill_recut_region_mod.NORMAL_LENGTH_TOLERANCE} (got {length:g})"
             )
         return v
 
@@ -1254,7 +1257,7 @@ def create_app(
 
         # Issue #338 (operator decision 5) — the fill-and-recut pre-route
         # for the region-edit seam (the SAME trigger the chat route uses,
-        # ``fill_recut.fill_recut_region_edit``): for a project with an
+        # ``fill_recut_region.fill_recut_region_edit``): for a project with an
         # imported part whose units are assumed or settled, the trigger
         # runs BEFORE any loop. On a fresh trigger the offer is stored
         # (no loop, no version) and the boundary sentence is the answer;
@@ -1343,7 +1346,7 @@ def create_app(
             and _part.get("unit_status") in ("assumed", "settled")
         ):
             try:
-                fill_result = fill_recut_mod.fill_recut_region_edit(
+                fill_result = fill_recut_region_mod.fill_recut_region_edit(
                     app,
                     project_id,
                     body.instruction,
