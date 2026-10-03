@@ -62,7 +62,7 @@ from typing import Any
 
 import httpx
 
-from d33d.evals.case_schema import GoldenCase, load_golden_set
+from d33d.evals.case_schema import GoldenCase, load_golden_set, part_of
 from d33d.evals.fixtures import check_fixture_containment
 from d33d.evals.harness import (
     CaseOutcome,
@@ -185,8 +185,6 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
     """
     if case.part is None:
         return None, None
-    from d33d.evals.case_schema import part_of
-
     part = part_of(case)
     violation = check_fixture_containment(repo_root, part.fixture)
     if violation is not None:
@@ -257,7 +255,7 @@ async def _run_all(
                 _staging_outcome(
                     case,
                     f"case {case.case_id}: part fixture "
-                    f"{case.part.fixture!r} is missing on disk",
+                    f"{part_of(case).fixture!r} is missing on disk",
                 )
             )
             continue
@@ -403,7 +401,12 @@ def main(argv: list[str] | None = None) -> int:
         # is always empty here; the golden set has no per-case defines).
         from d33d.render_worker import render_for_design_loop
 
-        def _render(scad_source, *, part_path=None, repo_dir=None):
+        def _render(
+            scad_source: str,
+            *,
+            part_path: Path | None = None,
+            repo_dir: Path | None = None,
+        ) -> Any:
             return render_for_design_loop(
                 scad_source, {}, part_path=part_path, repo_dir=repo_dir
             )

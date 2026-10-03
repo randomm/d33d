@@ -81,8 +81,8 @@ from typing import Any, Protocol
 import yaml
 
 from d33d.evals import gates as _gates
-from d33d.evals.case_schema import GoldenCase
-from d33d.evals.gates import GateResult
+from d33d.evals.case_schema import GoldenCase, part_of
+from d33d.evals.gates import EvalFailureClass, GateResult
 from d33d.evals.judge import JudgeInput, JudgeVerdict, judge_render
 from d33d.evals.region_gate import run_region_gate
 from d33d.evals.slice_gate import run_slice_gate
@@ -182,7 +182,7 @@ class CaseOutcome:
     scad_source: str = ""
     gates: dict[str, GateResult] = field(default_factory=dict)
     judge: JudgeVerdict | None = None
-    failure_class: str | None = None
+    failure_class: EvalFailureClass | None = None
     detail: str = ""
 
     @property
@@ -511,7 +511,6 @@ def run_case_gates(
         # ``case.part`` is guaranteed by the GoldenCase schema
         # (imported_part REQUIRES a part ref); ``part_of`` enforces
         # the invariant with a typed error if it is ever absent.
-        from d33d.evals.case_schema import part_of
         from d33d.import_guard import import_guard_violation
 
         part = part_of(case)
@@ -738,7 +737,7 @@ async def run_case(
         )
     )
 
-    failure_class: str | None = None
+    failure_class: EvalFailureClass | None = None
     if not verdict.passed and verdict.failure_class is not None:
         if verdict.failure_class in _gates.EVAL_FAILURE_CLASSES:
             failure_class = verdict.failure_class  # type: ignore[assignment]

@@ -348,6 +348,15 @@ def test_check_fixture_containment_rejects_empty_path(tmp_path: Path) -> None:
     assert check_fixture_containment(tmp_path, "   ") == "part fixture path is empty"
 
 
+def test_check_fixture_containment_rejects_control_chars(tmp_path: Path) -> None:
+    from d33d.evals.case_schema import check_fixture_containment
+
+    assert (
+        check_fixture_containment(tmp_path, "a\u0000b.stl")
+        == "part fixture path contains control characters"
+    )
+
+
 # ---------------------------------------------------------------------------
 # (b2) per-case containment: staging problems fail the case, never the run
 # ---------------------------------------------------------------------------

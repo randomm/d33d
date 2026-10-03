@@ -35,6 +35,8 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
     """
     if not fixture.strip():
         return "part fixture path is empty"
+    if not fixture.isprintable():
+        return "part fixture path contains control characters"
     if Path(fixture).is_absolute():
         return f"part fixture {fixture!r} is not a relative path under the repo root"
     if Path(fixture).suffix.lower() != ".stl":

@@ -11,8 +11,13 @@ keeps working).
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
+
+if TYPE_CHECKING:
+    from d33d.evals.case_schema import GoldenCase
+
 
 class PartRef(BaseModel):
     """The imported-part mesh a case renders against (issue #340).
