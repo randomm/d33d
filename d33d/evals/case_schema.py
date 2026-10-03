@@ -5,10 +5,10 @@ case. This module is the single source of truth for:
 
 * the **case schema** (:class:`GoldenCase`) — the fields every case file
   must carry so the harness can score it unattended,
-* the **seed mix** — the 23-case composition the ticket pins (5
-  primitives / 5 red-marked region edits / 3 boolean-topology / 3 photo
-  recreations / 3 adversarial / 3 imported parts), plus the Qwen smoke
-  baseline,
+* the **seed mix** — the 23-case on-disk composition (the 20-case seed:
+  6 primitives including the Qwen smoke baseline / 5 red-marked region
+  edits / 3 boolean-topology / 3 photo recreations / 3 adversarial, plus
+  the 3 imported-part cases from issue #340),
 * **prompt hash-pinning** — every case references its prompt file by
   SHA-256 of the file content, so a prompt edit without a re-pin fails
   the suite and a regression reads as "prompt v7 fails case 12 which
@@ -16,21 +16,14 @@ case. This module is the single source of truth for:
 
 Case-file fields, and where each comes from:
 
-The seed mix, and the resolution of the ticket's table:
-
-The ticket's seed-mix table (5 primitives / 4 region edits / 3 boolean /
-3 photo / 3 adversarial) sums to 18, not the stated floor of 20 — an
-internal inconsistency. The resolution, documented here so the count is
-auditable: the on-disk set is composed as 6 primitives (the 5 ticket
-primitives + the Qwen smoke baseline, a photo-plus-views → OpenSCAD
-primitive recreation that is the first case to write and is marked
-``is_baseline`` — a reference, not a gate), 5 red-marked region edits
-(one extra over the ticket's 4, so the 20-case seed holds), 3
-topology, 3 photo recreations, 3 adversarial (6 + 5 + 3 + 3 + 3 = 20),
-plus the 3 imported parts that issue #340 brings the total to 23
-(6 + 5 + 3 + 3 + 3 + 3 = 23). Every case's ``kind`` matches the table's
-kinds; the baseline is additionally flagged ``is_baseline`` so the report
-shows it as the reference. :data:`SEED_MIX` is this full on-disk
+The on-disk set is the 23-case composition :data:`SEED_MIX` pins: 6
+primitives (5 seed primitives + the Qwen smoke baseline, marked
+``is_baseline`` — a reference, not a gate), 5 red-marked region edits,
+3 boolean-topology, 3 photo recreations, 3 adversarial (6 + 5 + 3 + 3 +
+3 = 20-case seed), plus the 3 imported-part cases issue #340 added
+(6 + 5 + 3 + 3 + 3 + 3 = 23). Every case's ``kind`` matches the
+composition; the baseline is additionally flagged ``is_baseline`` so the
+report shows it as the reference. :data:`SEED_MIX` is this full on-disk
 composition, so ``sum(SEED_MIX.values()) == 23`` is directly testable.
 
 * ``case_id`` / ``kind`` — stable identity across prompt versions and the
@@ -102,9 +95,11 @@ GATE_NAMES: tuple[str, ...] = (
 #: ``imported_part`` case (the candidate must import the seeded part at
 #: the settled scale and never resize it) BEFORE the declared
 #: ``gate_expectations`` run, but it is NOT declared in
-#: ``gate_expectations`` — it is implied by the kind. The report orders
-#: it first (the ``BASE_GATE_ORDER`` in ``d33d.evals.report`` prepends the
-#: kind's pre-check gate when present).
+#: ``gate_expectations`` — it is implied by the kind.
+#:
+#: Ordering lives in :func:`d33d.evals.report.case_gate_order` (the report
+#: orders a kind's pre-check gate first); this constant only maps kind →
+#: pre-check gate name.
 KIND_PRECHECK_GATES: dict[str, str] = {"imported_part": "import_guard"}
 
 #: Gate 6/7 N/A markers: a gate reports N/A (neither pass nor hard fail)
@@ -117,18 +112,12 @@ GATE_NA_MARKERS: dict[str, str] = {
     "region_containment": "N/A, containment convention not available",
 }
 
-#: The seed mix the ticket pins. A valid seed must have exactly this
-#: count per kind — the total is then exactly 23 (the floor is 20,
-#: testable). The full on-disk composition of the 23-case seed, per kind.
-#:
-#: The ticket's table (5/4/3/3/3 = 18) sums short of the stated floor
-#: of 20; the resolution (see module docstring) is that the Qwen smoke
-#: baseline is the 6th primitive and one extra red-region edit is added,
-#: so the 20-case seed holds (6 + 5 + 3 + 3 + 3 = 20); the 3
-#: imported-part cases of issue #340 then bring the total to 23.
-#: The baseline is the ``is_baseline``
-#: case within the primitive count. Sum is exactly 23, so "floor 20"
-#: is directly testable.
+#: The on-disk golden-set composition, per kind: the 20-case seed (6
+#: primitives — 5 seed primitives plus the ``is_baseline`` Qwen smoke
+#: baseline within that count — / 5 red-region edits / 3 boolean /
+#: 3 photo / 3 adversarial) plus the 3 imported-part cases from issue
+#: #340. A valid set must have exactly this count per kind, so it sums
+#: to exactly 23 (testable via ``verify_seed``).
 SEED_MIX: dict[str, int] = {
     "primitive": 6,
     "red_region_edit": 5,
@@ -372,6 +361,8 @@ def check_fixture_containment(repo_root: Path, fixture: str) -> str | None:
     Returns ``None`` when the fixture is contained, or the violation
     message otherwise.
     """
+    if not fixture.strip():
+        return "part fixture path is empty"
     if Path(fixture).is_absolute():
         return f"part fixture {fixture!r} is not a relative path under the repo root"
     if Path(fixture).suffix.lower() != ".stl":

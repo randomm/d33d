@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from d33d.design_prompts import import_part_instruction
 from d33d.evals.case_schema import (
     GATE_NAMES,
     KIND_PRECHECK_GATES,
@@ -75,6 +76,27 @@ def test_imported_part_cases_parse_and_pin_fixture() -> None:
         for gate in case.gate_expectations:
             assert gate in GATE_NAMES
             assert gate != precheck, f"{cid}: {gate!r} is a kind pre-check gate"
+
+
+def test_import_cases_pin_prompt_with_the_settled_scale() -> None:
+    """For EVERY imported_part case, the pinned prompt file must contain
+    ``import_part_instruction(case.part.scale)`` verbatim — the prompt
+    file's import paragraph IS that output, and the import guard accepts
+    exactly that settled scale. A future case with a non-1.0 scale whose
+    prompt was not re-rendered fails fast at CI time instead of silently
+    fighting the import guard."""
+    cases = _load()
+    for cid, case in cases.items():
+        if case.kind != "imported_part":
+            continue
+        assert case.part is not None
+        prompt_text = (REPO_ROOT / case.prompt.path).read_text(encoding="utf-8")
+        expected = import_part_instruction(case.part.scale)
+        assert expected in prompt_text, (
+            f"{cid}: prompt {case.prompt.path!r} does not carry "
+            f"import_part_instruction({case.part.scale}) verbatim — re-render "
+            "the prompt for the case's settled scale (and re-pin)"
+        )
 
 
 def test_import_guard_is_in_the_gate_registry() -> None:
@@ -148,48 +170,21 @@ def test_run_all_stages_fixture_as_part_path(tmp_path: Path) -> None:
 
     run = _load_run_module()
 
-    cases_dir = tmp_path / "cases"
-    cases_dir.mkdir()
-    # one imported_part case + one prompt pin it can carry
-    prompts_dir = tmp_path / "prompts"
-    prompts_dir.mkdir()
-    prompt = prompts_dir / "p.md"
-    prompt.write_text("# prompt v1", encoding="utf-8")
-    import hashlib
-
-    pin = hashlib.sha256(prompt.read_bytes()).hexdigest()
-    (cases_dir / "import-drill-hole.json").write_text(
-        json.dumps(
+    cases_dir = _write_cases(
+        tmp_path,
+        [
             {
                 "case_id": "import-drill-hole",
                 "kind": "imported_part",
-                "prompt": {
-                    "prompt_version": "v1",
-                    "path": str(prompt),
-                    "sha256": pin,
-                },
                 "request": "drill a hole",
-                "gate_expectations": ["compile"],
                 "part": {"fixture": "evals/cases/fixtures/part.stl", "scale": 1.0},
-            }
-        ),
-        encoding="utf-8",
-    )
-    (cases_dir / "primitive-box-20mm.json").write_text(
-        json.dumps(
+            },
             {
                 "case_id": "primitive-box-20mm",
                 "kind": "primitive",
-                "prompt": {
-                    "prompt_version": "v1",
-                    "path": str(prompt),
-                    "sha256": pin,
-                },
                 "request": "a box",
-                "gate_expectations": ["compile"],
-            }
-        ),
-        encoding="utf-8",
+            },
+        ],
     )
 
     calls: list[dict] = []
@@ -288,6 +283,18 @@ def test_gate_phase_passes_compliant_candidate() -> None:
         scad_source='scale(1) import("part.stl");\ndifference() { scale(1) import("part.stl"); cylinder(h=40, d=12); }',
     )
     assert gates["import_guard"].status == "pass"
+
+
+# ---------------------------------------------------------------------------
+# (b2) per-case containment: staging problems fail the case, never the run
+# ---------------------------------------------------------------------------
+
+
+def test_check_fixture_containment_rejects_empty_path(tmp_path: Path) -> None:
+    from d33d.evals.case_schema import check_fixture_containment
+
+    assert check_fixture_containment(tmp_path, "") == "part fixture path is empty"
+    assert check_fixture_containment(tmp_path, "   ") == "part fixture path is empty"
 
 
 # ---------------------------------------------------------------------------
@@ -506,6 +513,12 @@ def test_gate_phase_short_circuits_after_guard_failure() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _passing_judge(ji) -> object:
+    from d33d.evals.judge import JudgeVerdict
+
+    return JudgeVerdict(passed=True, reason="stub")
+
+
 def _async_factory(content: str):
     async def factory(request):
         class R:
@@ -587,12 +600,6 @@ def test_build_report_orders_import_guard_first_and_counts_failed() -> None:
     assert report.passed == 0
     assert report.failed == 1
     assert report.total == 1
-
-
-async def _passing_judge(ji) -> object:
-    from d33d.evals.judge import JudgeVerdict
-
-    return JudgeVerdict(passed=True, reason="stub")
 
 
 def test_render_fn_legacy_stub_typeerror_is_contained(tmp_path: Path) -> None:
