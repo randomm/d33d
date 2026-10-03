@@ -95,18 +95,18 @@ def test_run_all_stages_fixture_as_part_path(tmp_path: Path) -> None:
 
 
 def test_check_fixture_containment_rejects_empty_path(tmp_path: Path) -> None:
-    from d33d.evals.case_schema import check_fixture_containment
+    from d33d.evals.fixtures import check_fixture_containment
 
-    assert check_fixture_containment(tmp_path, "") == "part fixture path is empty"
-    assert check_fixture_containment(tmp_path, "   ") == "part fixture path is empty"
+    assert check_fixture_containment(tmp_path, "") == (None, "part fixture path is empty")
+    assert check_fixture_containment(tmp_path, "   ") == (None, "part fixture path is empty")
 
 
 def test_check_fixture_containment_rejects_control_chars(tmp_path: Path) -> None:
-    from d33d.evals.case_schema import check_fixture_containment
+    from d33d.evals.fixtures import check_fixture_containment
 
     assert (
         check_fixture_containment(tmp_path, "a\u0000b.stl")
-        == "part fixture path contains control characters"
+        == (None, "part fixture path contains control characters")
     )
 
 
@@ -223,8 +223,8 @@ def test_stage_fixture_unresolvable_path_yields_error_outcome(
     # returns the path as-is), so we monkeypatch the ``resolve`` method
     # to simulate the OSError that would occur on a platform where
     # the OS returns ENAMETOOLONG or a similar error.
-    monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: None)
-    monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: None)
+    monkeypatch.setattr(fixtures_mod, "check_fixture_containment", lambda r, f: (None, None))
+    monkeypatch.setattr(run, "check_fixture_containment", lambda r, f: (None, None))
 
     def _raise_oserror(self, *args, **kwargs):
         raise OSError("ENAMETOOLONG: path component too long")
@@ -324,11 +324,15 @@ def test_check_fixture_containment_rejects_symlink_outright(tmp_path: Path):
     link = fixtures_dir / "linked.stl"
     link.symlink_to(target)
 
-    violation = check_fixture_containment(tmp_path, "evals/cases/fixtures/linked.stl")
+    resolved, violation = check_fixture_containment(tmp_path, "evals/cases/fixtures/linked.stl")
+    assert resolved is None
     assert violation is not None
     assert "symlink" in violation
     # a regular file in the same directory still passes
-    assert check_fixture_containment(tmp_path, "evals/cases/fixtures/real.stl") is None
+    resolved, violation = check_fixture_containment(
+        tmp_path, "evals/cases/fixtures/real.stl"
+    )
+    assert violation is None and resolved is not None
 
 
 # ---------------------------------------------------------------------------
