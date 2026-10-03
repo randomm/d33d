@@ -308,7 +308,11 @@ export function BriefZoneLayout({
         <div className="brief-rows" data-testid="brief-rows">
           {zones.changeRows
             .filter((r) => !r.collapsed)
-            .map((r) => renderChangeRow(r.entry))}
+            .map((r) => (
+              <div key={`${r.entry.kind}-${r.entry.name}`}>
+                {renderChangeRow(r.entry)}
+              </div>
+            ))}
         </div>
       )}
       {zones.changesCount !== null && (
@@ -327,7 +331,11 @@ export function BriefZoneLayout({
           {groupsOpen &&
             zones.changeRows
               .filter((r) => r.collapsed)
-              .map((r) => renderChangeRow(r.entry))}
+              .map((r) => (
+                <div key={`${r.entry.kind}-${r.entry.name}`}>
+                  {renderChangeRow(r.entry)}
+                </div>
+              ))}
         </div>
       )}
     </>

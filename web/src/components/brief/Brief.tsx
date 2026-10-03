@@ -51,10 +51,6 @@ import { splitBriefZones, BriefZoneLayout } from "./BriefZones";
 import { BriefRow, BriefRowList } from "./BriefRow";
 import { formatValue, primaryValue, rowLabel } from "./briefRowHelpers";
 
-/** Above this many rows the resolved list collapses to one honest count
- *  (the "not a list that grows" rule — design answer 1). */
-const MAX_LIST_ROWS = 7;
-
 interface BriefProps {
   /** True when the window is below the chip threshold — the Brief
    *  renders compact, not as a full panel (the rule itself is owned by
@@ -160,23 +156,6 @@ export function Brief({
   const savedDesignMissing =
     historyMissing === true || storage?.repo_present === false;
   const photoMissing = storage?.photo_present === false;
-
-  // Grouping counts only COLLAPSIBLE rows — settled, agreeing param rows
-  // (stated / measured / assumed, `kind: "param"`, never disagrees). Axis
-  // rows, any disagrees row, and unknown rows always render as rows above
-  // the folded group (issue #274). The pending-offer param rule is not
-  // implemented: the design-state payload carries no pending-offer param
-  // field (DesignStateEntry has no such key and no pendingOffer prop is
-  // threaded in), so the rule is skipped per the ticket.
-  const collapsible = resolved.filter(
-    (e) =>
-      e.kind === "param" &&
-      e.provenance !== "disagrees" &&
-      (e.provenance === "stated" ||
-        e.provenance === "measured" ||
-        e.provenance === "assumed"),
-  );
-  const showGroups = !chip && collapsible.length > MAX_LIST_ROWS;
 
   // Issue #338: the two-zone split. When `part` is present the resolved
   // list splits into "The part you brought" (W/D/H from part.bbox_mm, never
@@ -327,84 +306,20 @@ export function Brief({
             </div>
           )}
 
-          {zones.hasPart ? (
-            // Issue #338, operator decision 1: two zones — the presentation
-            // lives in BriefZones.tsx (the split AND the layout) so Brief.tsx
-            // does not grow. "The part you brought" (W/D/H, NEVER folded)
-            // first; "Your changes" folds behind its own MAX_LIST_ROWS count.
-            <BriefZoneLayout
+          {/* Issue #338, operator decision 1: two zones when `part` is
+            present — the presentation lives in BriefZones.tsx (the split
+            AND the layout) so Brief.tsx does not grow. "The part you
+            brought" (W/D/H, NEVER folded) first; "Your changes" folds
+            behind its own MAX_LIST_ROWS count. No part — single list,
+            the pre-#338 shape; splitBriefZones folds the collapsible
+            rows behind ONE honest count above MAX_LIST_ROWS (issue
+            #274) via the same layout. */}
+          <BriefZoneLayout
               zones={zones}
               groupsOpen={groupsOpen}
               onToggleGroups={() => setGroupsOpen((open) => !open)}
               renderChangeRow={renderRow}
             />
-          ) : showGroups ? (
-            // No part — single list, the pre-#338 shape. Above MAX_LIST_ROWS
-            // the collapsible rows fold behind ONE honest count (issue #274).
-            <>
-              <div className="brief-rows" data-testid="brief-rows">
-                <BriefRowList
-                  entries={resolved.filter((e) => !collapsible.includes(e))}
-                  expanded={expanded}
-                  onToggleExpanded={(identity) => setExpanded(expanded === identity ? null : identity)}
-                  inFlight={inFlight}
-                  reMeasuring={reMeasuring}
-                  highlightModuleId={highlightModuleId}
-                  onAsk={onAsk}
-                  onChange={onChange}
-                  onShowOnModel={onShowOnModel}
-                />
-              </div>
-              <div className="brief-groups" data-testid="brief-groups">
-                <button
-                  type="button"
-                  className="brief-groups-count"
-                  data-testid="brief-groups-count"
-                  aria-expanded={groupsOpen}
-                  aria-label={copy.brief.moreParameters(collapsible.length)}
-                  onClick={() => setGroupsOpen((open) => !open)}
-                  style={{
-                    border: "1px solid var(--color-hairline)",
-                    borderRadius: 6,
-                    background: "transparent",
-                    color: "var(--color-fg-2)",
-                    fontSize: 13,
-                    cursor: "pointer",
-                    padding: "2px 8px",
-                  }}
-                >
-                  {copy.brief.moreParameters(collapsible.length)}
-                </button>
-                {groupsOpen && (
-                  <BriefRowList
-                    entries={collapsible}
-                    expanded={expanded}
-                    onToggleExpanded={(identity) => setExpanded(expanded === identity ? null : identity)}
-                    inFlight={inFlight}
-                    reMeasuring={reMeasuring}
-                    highlightModuleId={highlightModuleId}
-                    onAsk={onAsk}
-                    onChange={onChange}
-                    onShowOnModel={onShowOnModel}
-                  />
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="brief-rows" data-testid="brief-rows">
-              <BriefRowList
-                entries={resolved}
-                expanded={expanded}
-                onToggleExpanded={(identity) => setExpanded(expanded === identity ? null : identity)}
-                inFlight={inFlight}
-                reMeasuring={reMeasuring}
-                highlightModuleId={highlightModuleId}
-                onAsk={onAsk}
-                onChange={onChange}
-                onShowOnModel={onShowOnModel}
-              />
-            </div>
-          )}
         </div>
       )}
 
