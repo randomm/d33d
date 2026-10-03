@@ -1342,12 +1342,22 @@ def create_app(
             _part is not None
             and _part.get("unit_status") in ("assumed", "settled")
         ):
-            fill_result = fill_recut_mod.fill_recut_region_edit(
-                app,
-                project_id,
-                body.instruction,
-                face_normal=tuple(body.face_normal) if body.face_normal else None,
-            )
+            try:
+                fill_result = fill_recut_mod.fill_recut_region_edit(
+                    app,
+                    project_id,
+                    body.instruction,
+                    face_normal=tuple(body.face_normal)
+                    if body.face_normal
+                    else None,
+                )
+            except Exception:
+                # Pre-route failure: release the in-flight flag (claimed
+                # above) and re-raise — the same contract as the chat
+                # route's pre-route failure path. Without this guard an
+                # exception here would leave the project 409-blocked.
+                inflight.discard(project_id)
+                raise
         if fill_result is not None:
             # A fresh boundary trigger (no live offer to accept/decline)
             # surfaces the offer — the SPA renders the boundary sentence
@@ -1363,7 +1373,11 @@ def create_app(
                 # contract below); the offer is cleared once the loop
                 # is running and restored on a setup failure (the #332
                 # "lost yes" pattern — the acceptance is never lost to
-                # a failed setup).
+                # a failed setup). The in-flight flag is NOT released
+                # here: when the event source is registered the stream's
+                # ``finally`` is the single release point (see
+                # ``d33d.chat_frames.answered_frames``); on setup failure
+                # the offer is restored and the flag is released below.
                 _accepted = fill_result.pop("accepted_offer", None)
                 request_text = f"{fill_result['instruction']} {request_text}"
                 try:
@@ -1387,19 +1401,22 @@ def create_app(
                 app.state.event_sources[project_id] = events
                 if _accepted is not None:
                     app.state.versions.set_pending_offer(project_id, None)
+                # No inflight.discard here — the stream's finally is the
+                # single release point (the event source is registered).
                 return JSONResponse(
                     status_code=202,
                     content={"project_id": project_id, "status": "accepted"},
                 )
             # Boundary trigger / no-normal degradation / clean decline:
-            # ONE answer frame, NO loop, NO version — the flag is
-            # released here (the no-run reply contract: nothing keeps it
-            # after this point).
+            # ONE answer frame, NO loop, NO version. The event source
+            # (an ``answered_frames`` generator) is registered above;
+            # the stream's ``finally`` releases the in-flight flag when
+            # the generator is exhausted — the single release point
+            # (issue #338 fix round: no explicit discard here).
             app.state.event_sources[project_id] = answered_frames(
                 fill_result["answer"],
                 fill_recut_offer=_is_fresh_trigger,
             )
-            inflight.discard(project_id)
             return JSONResponse(
                 status_code=202,
                 content={"project_id": project_id, "status": "accepted"},

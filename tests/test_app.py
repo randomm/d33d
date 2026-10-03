@@ -1397,6 +1397,164 @@ def test_region_edit_no_part_fallthrough_runs_loop(app_with_projects, monkeypatc
     assert "make it bigger" in rt, rt
 
 
+async def _drive_sse(client: AsyncClient, app: Any, pid: int) -> list[tuple[str, dict]]:
+    """Drain ``GET /api/stream/{pid}`` (the real SSE route) to a terminal
+    frame and return the parsed ``(event, data)`` frames. Driving the
+    route — not the raw event source — runs ``d33d.streaming._stream_events``,
+    whose ``finally`` is the in-flight flag's single release point."""
+    resp = await client.get(f"/api/stream/{pid}")
+    assert resp.status_code == 200, resp.text
+    frames: list[tuple[str, dict]] = []
+    event = None
+    for line in resp.text.splitlines():
+        if line.startswith("event: "):
+            event = line[len("event: ") :].strip()
+        elif line.startswith("data: ") and event is not None:
+            import json as _json
+
+            frames.append((event, _json.loads(line[len("data: ") :].strip())))
+            if event in ("done", "error"):
+                break
+    return frames
+
+
+def test_region_edit_fill_recut_preroute_failure_releases_flag(
+    app_with_projects, monkeypatch
+):
+    """If ``fill_recut_region_edit`` raises on the region-edit route's
+    pre-route, the in-flight flag (claimed before the pre-route) is
+    released and re-raised — the project is not 409-blocked: a follow-up
+    region-edit (or chat) proceeds without a 409."""
+    from starlette.exceptions import HTTPException
+
+    import d33d.design_loop_events as dle_mod
+    import d33d.fill_recut as fr_mod
+
+    def _boom(*args, **kwargs):
+        # Raised only on the FIRST call (the pre-route); the follow-up
+        # region-edit returns None (fall through to the normal loop path).
+        raise HTTPException(status_code=500, detail="forced (test)")
+
+    def _flaky(*args, **kwargs):
+        boom_counter[0] += 1
+        if boom_counter[0] == 1:
+            _boom()
+
+    boom_counter = [0]
+    monkeypatch.setattr(fr_mod, "fill_recut_region_edit", _flaky)
+
+    def _fake_loop(app, pid, **kwargs):
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Boom"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # The pre-route raises — the flag must be released on the re-raise.
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make the big hole 38 mm"),
+        )
+        assert r2.status_code == 500, r2.text
+        inflight = app_with_projects.state.design_loop_inflight
+        assert pid not in inflight, "inflight flag leaked after pre-route failure"
+        # A follow-up region-edit is NOT 409-blocked (the stub loop runs).
+        r3 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="make the big hole 38 mm"),
+        )
+        assert r3.status_code == 202, r3.text
+        return True
+
+    _run_async(app_with_projects, _call)
+
+
+def test_region_edit_answer_path_released_by_stream(app_with_projects, monkeypatch):
+    """Single release point (item 2): the region-edit ANSWER path
+    (boundary trigger — no loop) releases the in-flight flag via the
+    STREAM (``d33d.streaming._stream_events``'s ``finally``), not an
+    explicit discard: drain ``GET /api/stream/{pid}`` (the real SSE
+    route), then assert the flag is cleared."""
+    import d33d.design_loop_events as dle_mod
+
+    def _fake_loop(app, pid, **kwargs):
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Answer Path"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the big hole 38 mm",
+                hit_point_mm=[12.0, 0.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        assert r2.status_code == 202, r2.text
+        inflight = app_with_projects.state.design_loop_inflight
+        # The flag is HELD while the stream is un-drained (the stream's
+        # finally is the release point — not the route).
+        assert pid in inflight, "flag released before the stream drained"
+        frames = await _drive_sse(client, app_with_projects, pid)
+        assert pid not in inflight, "flag not released by the stream drain"
+        # The boundary sentence is the answer frame.
+        done = [d for e, d in frames if e == "done"]
+        assert done and done[0].get("kind") == "answer", frames
+        assert "That hole came with your file" in done[0]["message"], done
+        return True
+
+    _run_async(app_with_projects, _call)
+
+
+def test_region_edit_loop_setup_failure_releases_flag_and_restores_offer(
+    app_with_projects, monkeypatch
+):
+    """Item 2 companion: on the region-edit accept path, a design-loop
+    SETUP failure restores the offer AND releases the in-flight flag
+    (the event source is not registered, so the stream's finally never
+    runs — the route's own discard is the release point here)."""
+    from starlette.exceptions import HTTPException
+
+    import d33d.design_loop_events as dle_mod
+
+    def _boom(*args, **kwargs):
+        # Re-raised as a 500 through the route (the test app has no
+        # handler that would convert a bare RuntimeError to a response).
+        raise HTTPException(status_code=500, detail="forced (test)")
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Lost Yes"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        svc = app_with_projects.state.versions
+        svc.set_pending_offer(
+            pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0}
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(instruction="yes"),
+        )
+        assert r2.status_code == 500, r2.text
+        inflight = app_with_projects.state.design_loop_inflight
+        assert pid not in inflight, "flag leaked after loop setup failure"
+        offer = svc.get_pending_offer(pid)
+        assert offer is not None, "the accepted offer was lost to a setup failure"
+        assert offer["kind"] == "fill_recut", offer
+        return r2.status_code
+
+    _run_async(app_with_projects, _call)
+
+
 def test_create_app_does_not_require_catalogue_file_to_exist(app, app_paths):
     """The app starts with an empty in-memory catalogue — no
     ``models.yaml`` required on disk until the first ``PUT``. (The
