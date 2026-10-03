@@ -38,21 +38,14 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 #: with a through hole) — small enough that a "38 mm" recut is a genuine
 #: fill-and-recut (the new hole is larger than the plate face).
 PART_FIXTURE = REPO_ROOT / "evals" / "cases" / "fixtures" / "part.stl"
-FALLBACK_PART_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "stl" / "holey.stl"
 
 
 def _holey_fixture() -> Path:
-    """The git-tracked import fixture the eval cases reference, with a
-    fallback to the original tests/ fixture (the workstream that stages
-    evals/cases/fixtures/part.stl is in flight in parallel — the boundary
-    route does not depend on which one is on disk)."""
-    if PART_FIXTURE.is_file():
-        return PART_FIXTURE
-    assert FALLBACK_PART_FIXTURE.is_file(), (
-        f"holey fixture missing: neither {PART_FIXTURE} nor "
-        f"{FALLBACK_PART_FIXTURE} exists"
+    """The git-tracked import fixture the eval cases reference."""
+    assert PART_FIXTURE.is_file(), (
+        f"holey fixture missing: {PART_FIXTURE} does not exist"
     )
-    return FALLBACK_PART_FIXTURE
+    return PART_FIXTURE
 
 
 def _fixture_extents() -> tuple[float, float, float]:
@@ -71,6 +64,16 @@ def test_holey_fixture_is_a_20mm_box_with_a_hole() -> None:
         f"fixture largest side {max(extents)} mm >= 38 mm — the "
         "'make the big hole 38 mm' scenario no longer holds a "
         "fill-and-recut over this mesh; re-derive the fixture"
+    )
+    # The fixture is a holey plate, not a solid box: its volume is
+    # strictly less than the 8000 mm³ that the same 20 mm box would
+    # have if it were solid.
+    mesh = trimesh.load(_holey_fixture(), process=False)
+    mesh.merge_vertices()
+    assert mesh.volume < 8000.0, (
+        f"fixture volume {mesh.volume:.1f} mm³ >= 8000 — the fixture "
+        "is a solid box, not a holey plate; the 'big hole' scenario "
+        "is vacuous"
     )
 
 

@@ -72,6 +72,7 @@ def test_fixture_exists_under_1mb_and_parses_watertight() -> None:
     mesh = trimesh.load(str(FIXTURE), process=False)
     mesh.merge_vertices()
     assert mesh.is_watertight, "part.stl is not watertight"
+    assert mesh.is_winding_consistent, "part.stl is not winding-consistent"
     assert len(mesh.faces) > 0
 
 
