@@ -140,7 +140,7 @@ GATE_3 = "watertight"
 GATE_4 = "bbox"
 GATE_5 = "volume"
 
-#: All five gate names in order.
+#: All five gate names in order — the five gates THIS module implements, distinct from ``d33d.evals.case_schema.GATE_NAMES`` (the 7-name declare-able taxonomy the case schema pins).
 GATE_NAMES: tuple[str, ...] = (GATE_1, GATE_2, GATE_3, GATE_4, GATE_5)
 
 #: Per-gate taggability: which superset classes each gate can tag.
