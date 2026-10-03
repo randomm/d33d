@@ -206,12 +206,21 @@ class CaseOutcome:
             return True
         return self.judge.passed
 
-    def to_row(self) -> dict[str, Any]:
-        """The outcome's scalar fields only (no ``gates``), so a caller
-        can supply the ``gates`` mapping itself (the report builds the
-        row exactly once — see :func:`d33d.evals.report.build_report`).
+    def to_dict(self, *, include_gates: bool = True) -> dict[str, Any]:
+        """JSON-serialisable row for the run report.
+
+        The ``gates`` mapping (when included) preserves the phase order
+        of ``self.gates``; the report aggregator re-orders each row via
+        :func:`d33d.evals.report.case_gate_order` (the kind's pre-check
+        gate first — ``import_guard`` for ``imported_part`` — then the
+        base 1->7 order) when it builds the row.
+
+        ``include_gates=False`` serializes the outcome's scalar fields
+        only, so a caller can supply the ``gates`` mapping itself (the
+        report builds the row exactly once — see
+        :func:`d33d.evals.report.build_report`).
         """
-        return {
+        row = {
             "case_id": self.case_id,
             "kind": self.kind,
             "prompt_version": self.prompt_version,
@@ -223,17 +232,8 @@ class CaseOutcome:
             "detail": self.detail,
             "ok": self.ok,
         }
-
-    def to_dict(self) -> dict[str, Any]:
-        """JSON-serialisable row for the run report, always including
-        the ``gates`` mapping in the phase order of ``self.gates``; the
-        report aggregator re-orders each row via
-        :func:`d33d.evals.report.case_gate_order` (the kind's pre-check
-        gate first — ``import_guard`` for ``imported_part`` — then the
-        base 1->7 order) when it builds the row.
-        """
-        row = self.to_row()
-        row["gates"] = {name: g.to_dict() for name, g in self.gates.items()}
+        if include_gates:
+            row["gates"] = {name: g.to_dict() for name, g in self.gates.items()}
         return row
 
 

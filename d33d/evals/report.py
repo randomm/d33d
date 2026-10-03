@@ -232,7 +232,7 @@ def build_report(
     passed = 0
     for outcome in outcomes:
         ordered = _ordered_gate_names(outcome)
-        row = outcome.to_row()
+        row = outcome.to_dict(include_gates=False)
         row["gates"] = {
             name: outcome.gates[name].to_dict() for name in ordered
         }

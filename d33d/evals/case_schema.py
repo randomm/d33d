@@ -296,13 +296,21 @@ class GoldenCase(BaseModel):
             raise ValueError("kind=adversarial requires the adversarial spec")
         return v
 
+    @field_validator("part")
+    @classmethod
+    def _part_only_for_imported_kind(
+        cls, v: PartRef | None, info
+    ) -> PartRef | None:
+        kind = info.data.get("kind")
+        if v is not None and kind != "imported_part":
+            raise ValueError("part field only valid for kind=imported_part")
+        return v
+
     @model_validator(mode="after")
-    def _part_matches_imported_kind(self) -> GoldenCase:
+    def _part_required_for_imported_kind(self) -> GoldenCase:
         """An ``imported_part`` case REQUIRES its part ref (the import
         guard is schema-guaranteed to have ``case.part``), and no other
         kind may carry one."""
-        if self.part is not None and self.kind != "imported_part":
-            raise ValueError("part field only valid for kind=imported_part")
         if self.kind == "imported_part" and self.part is None:
             raise ValueError("kind=imported_part requires a part ref")
         return self
@@ -419,11 +427,12 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
                 violations.append(f"{cid}: cannot verify fixture without repo_root")
                 continue
             part = part_of(c)
-            resolved, containment = check_fixture_containment(repo_root, str(part.fixture))
+            containment = check_fixture_containment(repo_root, str(part.fixture))
             if containment is not None:
                 violations.append(f"{cid}: {containment}")
                 continue
-            if resolved is None or not resolved.is_file():
+            fixture = repo_root / Path(part.fixture)
+            if not fixture.is_file():
                 violations.append(f"{cid}: part fixture {part.fixture!r} missing on disk")
 
     for cid, c in cases.items():

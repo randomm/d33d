@@ -188,14 +188,13 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
         return None, None
     part = part_of(case)
     try:
-        resolved, violation = check_fixture_containment(repo_root, str(part.fixture))
+        violation = check_fixture_containment(repo_root, str(part.fixture))
     except (OSError, ValueError) as e:
         return None, f"case {case.case_id}: {e}"
     if violation is not None:
         return None, f"case {case.case_id}: {violation}"
-    if resolved is None:  # cannot happen for a clean containment result; guard for monkeypatched helpers
-        return None, f"case {case.case_id}: cannot resolve fixture {part.fixture!r}"
     try:
+        resolved = (repo_root / part.fixture).resolve()
         if not resolved.is_file():
             return (
                 None,
@@ -209,10 +208,7 @@ def _stage_fixture(repo_root: Path, case: GoldenCase) -> tuple[Path | None, str 
 def _staging_outcome(case: GoldenCase, error: str) -> CaseOutcome:
     """A staging problem as the case's failure outcome (issue #340):
     the same shape :func:`run_case` returns on a gate failure, so the
-    report and the other cases are unaffected.
-
-    ``scad_source`` is empty because staging failed before any render happened.
-    """
+    report and the other cases are unaffected."""
     return CaseOutcome(
         case_id=case.case_id,
         kind=case.kind,
