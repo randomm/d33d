@@ -460,6 +460,7 @@ __all__ = [
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "UNSETTLED_PART_REPLY",
     "boundary_sentence",
     "fill_and_recut_instruction",
     "fill_recut_trigger",
