@@ -89,7 +89,8 @@ def fill_recut_region_edit(
     (a route that would have 404'd never calls this).
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop":
-    bool, ...}`` when the pre-route handles the turn (the caller
+    bool, "outcome": "accept" | "decline" | "fresh_offer" | "no_normal",
+    ...}`` when the pre-route handles the turn (the caller
     registers the event source and, when ``run_loop`` is true, runs the
     design loop with the ``instruction`` field prefixed to the request
     text), else ``None`` (the caller proceeds to the design loop
@@ -156,6 +157,7 @@ def _handle_live_offer(
             "kind": "answer",
             "answer": None,
             "run_loop": True,
+            "outcome": "accept",
             "instruction": fill_and_recut_instruction(pending),
             "accepted_offer": pending,
         }
@@ -165,6 +167,7 @@ def _handle_live_offer(
             "kind": "answer",
             "answer": FRILL_DECLINE_REPLY,
             "run_loop": False,
+            "outcome": "decline",
         }
     versions.set_pending_offer(project_id, None)
     return None
@@ -187,6 +190,7 @@ def _handle_fresh_trigger(
             "kind": "answer",
             "answer": FILL_RECUT_NO_NORMAL_REPLY,
             "run_loop": False,
+            "outcome": "no_normal",
         }
     axis = tuple(float(v) for v in face_normal)
     versions.set_pending_offer(
@@ -205,7 +209,7 @@ def _handle_fresh_trigger(
         move_distance_mm=trigger.get("move_distance"),
         move_direction=trigger.get("direction"),
     )
-    return {"kind": "answer", "answer": sentence, "run_loop": False}
+    return {"kind": "answer", "answer": sentence, "run_loop": False, "outcome": "fresh_offer"}
 
 
 def region_edit_preroute(
@@ -352,12 +356,15 @@ def _handle_answer(
     stream's ``finally`` releases the in-flight flag when the generator
     is exhausted — the single release point (no explicit discard here).
 
-    A fresh boundary trigger surfaces the offer — the SPA renders the
-    boundary sentence with the [Yes, do that] / [Leave it] buttons
-    (issue #338, decision 7); the decline / no-normal replies are plain
-    (no buttons).
+    Only a FRESH boundary trigger (``outcome == "fresh_offer"``) surfaces
+    the offer — the SPA renders the boundary sentence with the [Yes, do
+    that] / [Leave it] buttons (issue #338, decision 7); the decline /
+    no-normal replies are plain (no buttons). The outcome discriminator
+    is the decision functions' own field — never a string comparison of
+    the reply (the no-normal reply is not the decline reply, and it must
+    not render offer buttons for an offer that was never stored).
     """
-    is_fresh_trigger = fill_result["answer"] != FRILL_DECLINE_REPLY
+    is_fresh_trigger = fill_result.get("outcome") == "fresh_offer"
     app.state.event_sources[project_id] = answered_frames(
         fill_result["answer"],
         fill_recut_offer=is_fresh_trigger,

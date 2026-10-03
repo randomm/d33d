@@ -1685,20 +1685,35 @@ def test_design_contract_pins_fill_recut_deck_key() -> None:
     assert "partUnitsUnsettled" in src
 
 
-def test_design_contract_pins_fill_recut_no_normal_reply():
-    """The backend's FILL_RECUT_NO_NORMAL_REPLY matches the copy.ts
-    noNormal sentence (issue #338, decision 6 parity pin)."""
+def _copy_ts_no_normal_value() -> str:
+    """Extract the copy.ts ``fillRecut.noNormal`` string literal (the
+    #338 parity pin reads it from the source — the web strings live in
+    TypeScript, the Python test reads the literal; the literal is
+    double-quoted, so a raw single-quoted substring read between the
+    quotes is exact — the line is a plain string, no escapes)."""
+    import re
     from pathlib import Path
 
+    copy_src = (
+        Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r'noNormal:\s*\n\s*"([^"]*)"', copy_src)
+    assert m is not None, "copy.ts fillRecut.noNormal literal not found"
+    return m.group(1)
+
+
+def test_design_contract_pins_fill_recut_no_normal_reply():
+    """The backend's FILL_RECUT_NO_NORMAL_REPLY is BYTE-IDENTICAL to the
+    copy.ts noNormal sentence (issue #338, decision 6 parity pin —
+    full-string equality: a drift in EITHER copy silently breaks the
+    SPA/backend copy agreement, so the two-way pin is exact)."""
     from d33d.fill_recut_region import FILL_RECUT_NO_NORMAL_REPLY
 
-    copy_src = (
-        Path(__file__).parent.parent
-        / "web" / "src" / "copy.ts"
-    ).read_text("utf-8")
-    # The copy.ts noNormal string must contain the same sentence.
-    assert "I can't tell that feature's axis" in copy_src
-    assert "I can't tell that feature's axis" in FILL_RECUT_NO_NORMAL_REPLY
+    no_normal = _copy_ts_no_normal_value()
+    assert no_normal == FILL_RECUT_NO_NORMAL_REPLY, (
+        f"copy.ts noNormal:\n  {no_normal!r}\n"
+        f"FILL_RECUT_NO_NORMAL_REPLY:\n  {FILL_RECUT_NO_NORMAL_REPLY!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

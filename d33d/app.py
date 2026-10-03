@@ -567,6 +567,13 @@ class RegionEditRequest(BaseModel):
             raise ValueError("hit_point_mm / face_normal must be [x, y, z]")
         if not all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in v):
             raise ValueError("vector components must be finite numbers")
+        if any(abs(x) > 1e6 for x in v):
+            # The hit-point bound: a |component| > 1e6 mm is a 1000+ km
+            # coordinate — a client defect, not a pick, so it 422s like
+            # the other wire-format defects instead of entering the loop's
+            # grounding text (face_normal is unaffected: a unit normal's
+            # components never exceed this).
+            raise ValueError("vector components must be within ±1e6 mm")
         return [float(x) for x in v]
 
     @field_validator("face_normal")
@@ -1337,23 +1344,16 @@ def create_app(
         from d33d.design_loop_events import run_design_loop_with_events
         from d33d.part_http import part_public
 
-        _part = part_public(row) if row.get("part_filename") else None
+        # The pre-route's ``start_loop`` seam: the SAME adapter the
+        # fall-through below calls — the pre-route's accept path needs
+        # the loop as a callable so it can restore the accepted offer
+        # on a setup failure without the loop's kwargs being plumbed
+        # into the decision module (the module-level import at the top
+        # of the route keeps this patchable at the module seam, the
+        # way the monkeypatch-based tests do it).
+        _start_loop = run_design_loop_with_events
 
-        def _start_loop(
-            loop_app: Any,
-            loop_project_id: int,
-            **kwargs: Any,
-        ) -> Any:
-            """The design loop, wrapped for the pre-route's acceptance
-            path (the same call the fall-through below makes — the
-            pre-route's module needs the loop as a callable so it can
-            restore the accepted offer on a setup failure without the
-            loop's kwargs being plumbed into it)."""
-            return run_design_loop_with_events(
-                loop_app,
-                loop_project_id,
-                **kwargs,
-            )
+        _part = part_public(row) if row.get("part_filename") else None
 
         loop_kwargs = {
             "user_message": request_text,
@@ -1382,7 +1382,7 @@ def create_app(
             _part,
             body.instruction,
             tuple(body.face_normal) if body.face_normal else None,
-            _start_loop,
+            _start_loop,  # the loop adapter (patchable at the module seam)
             loop_kwargs,
         )
         if pre_routed is not None:
@@ -1394,10 +1394,10 @@ def create_app(
         # Register the event source SYNCHRONOUSLY before the 202 response
         # (else the client's GET /api/stream/{id} sees no active source).
         # The SSE endpoint is the sole driver of the generator; the
-        # in-flight flag (set here, cleared in the SSE endpoint's finally)
-        # prevents a second concurrent drive.
+        # in-flight flag was claimed at the top of the route (before the
+        # pre-route — the chat route's contract), so there is no re-add
+        # here; the SSE endpoint's ``finally`` is the single release point.
         app.state.event_sources[project_id] = events
-        inflight.add(project_id)
 
         return JSONResponse(
             status_code=202,

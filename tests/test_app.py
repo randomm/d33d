@@ -1125,6 +1125,22 @@ def test_region_edit_rejects_non_finite_hit_point(app):
     assert r.status_code == 422, r.text
 
 
+def test_region_edit_rejects_out_of_bound_hit_point(app):
+    """A ``hit_point_mm`` component with |value| > 1e6 is rejected (422)
+    — a 1000+ km coordinate is a client defect, not a pick."""
+
+    async def _call(client):
+        project_id = await _create_project(client)
+        body = _region_edit_body(hit_point_mm=[1e7, 0.0, 0.0])
+        return await client.post(
+            f"/api/projects/{project_id}/region-edits",
+            json=body,
+        )
+
+    r = _run_async(app, _call)
+    assert r.status_code == 422, r.text
+
+
 def test_region_edit_face_normal_within_tolerance_accepted(app):
     """A ``face_normal`` with length within 1±0.01 is accepted (202)."""
 
@@ -1202,6 +1218,9 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     msg = done[0]["message"]
     assert "That hole came with your file" in msg, msg
     assert "Ø38 mm" in msg, msg
+    # The done frame surfaces the fresh offer (the SPA renders the
+    # [Yes, do that] / [Leave it] buttons from this field).
+    assert done[0].get("fill_recut_offer") is True, done
     # The offer was recorded server-side
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
@@ -1258,7 +1277,11 @@ def test_region_edit_fill_recut_no_normal_degradation(app_with_projects, monkeyp
     msg = done[0]["message"]
     assert "came with your file" in msg, msg
     assert "I can't tell that feature's axis from where you pointed" in msg, msg
-    # NO offer stored
+    # NO offer stored — and the done frame must NOT carry the offer
+    # discriminator either (the SPA would render [Yes, do that] /
+    # [Leave it] for an offer that was never stored — the string
+    # comparison the discriminator replaced did exactly that).
+    assert "fill_recut_offer" not in done[0], done
     svc = _svc(app_with_projects)
     offer = svc.get_pending_offer(pid)
     assert offer is None, f"offer should not be stored, got: {offer}"
@@ -1355,6 +1378,8 @@ def test_region_edit_fill_recut_decline_clears_offer(app_with_projects, monkeypa
     assert done, f"no done frame: {frames}"
     assert done[0].get("kind") == "answer", done
     assert "leaving the part as it is" in done[0]["message"], done
+    # The decline reply is plain — no offer buttons.
+    assert "fill_recut_offer" not in done[0], done
     # The offer was cleared
     svc = _svc(app_with_projects)
     assert svc.get_pending_offer(pid) is None, "offer not cleared"

@@ -1076,8 +1076,12 @@ class VersionService:
         """The project's outstanding offer (``{"version_id": int,
         "param": str}`` for the #250 param offer, or the issue #332
         fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
-        "size": float | None}`` — the ``kind`` discriminator is ADDITIVE:
-        a param-shaped row has no ``kind``), or ``None`` (no pending offer
+        "size": float | None, "axis": [x, y, z]}`` — the ``kind``
+        discriminator is ADDITIVE: a param-shaped row has no ``kind``) —
+        where the fill-recut row's ``axis`` is OPTIONAL (the region-edit
+        pick's face normal, operator decision 5) and is surfaced only when
+        it is a 3-list of finite numbers (an invalid axis is dropped; the
+        offer is still returned without it), or ``None`` (no pending offer
         — NULL or malformed row degrades to no offer, never a raise)."""
         row = self.conn.raw.execute(
             "SELECT pending_offer FROM projects WHERE id = ?", (project_id,)
@@ -1140,8 +1144,10 @@ class VersionService:
         offer — the caller validates the param is a real assumed param of
         that version, ``d33d.confirm_offer``) or the issue #332
         fill-and-recut variant ``{"kind": "fill_recut", "noun": str,
-        "size": float | None}``; the writer stores the JSON as-is
-        (``None`` → NULL, the cleared state).
+        "size": float | None, "axis": [x, y, z]}`` (the ``axis`` is
+        OPTIONAL — the region-edit pick's face normal, operator decision
+        5); the writer stores the JSON as-is (``None`` → NULL, the cleared
+        state).
 
         Shape guard (input validation at the boundary): a non-``None``
         offer must be EITHER a param-shaped row (an ``int`` ``version_id``
