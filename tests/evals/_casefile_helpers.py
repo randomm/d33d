@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -45,7 +46,20 @@ def _load_run_module():
         "evals_run", REPO_ROOT / "evals" / "run.py"
     )
     mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+    # ``evals/run.py`` inserts the repo root into ``sys.path`` at import
+    # time (so the standalone CLI can ``import d33d``).  Under pytest the
+    # repo root is already on the path, so the insert is a no-op in the
+    # common case — but a stray ``sys.path`` mutation that survives into
+    # later tests can change module resolution and (on some runners)
+    # leave the default ``ThreadPoolExecutor`` in a state where the
+    # product's off-the-loop ``to_thread`` timing test sees a blocked
+    # worker.  Snapshot and restore ``sys.path`` so the mutation is
+    # contained to this module's import.
+    saved_path = list(sys.path)
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.path[:] = saved_path
     return mod
 
 
