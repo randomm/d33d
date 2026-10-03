@@ -2,21 +2,31 @@
 operator decisions 5–6).
 
 ``d33d.app``'s ``POST /api/projects/{id}/region-edits`` calls
-:func:`fill_recut_region_edit` BEFORE the loop when the project has an
+:func:`region_edit_preroute` BEFORE the loop when the project has an
 imported part whose units are assumed or settled — the SAME trigger the
 chat route uses (``fill_recut.fill_recut_trigger``), evaluated with the
-SAME caller-side rules.
+SAME caller-side rules. The function owns the whole pre-route outcome
+lifecycle — the accept / decline / fresh-trigger / no-normal dispatch,
+the event-source registration, the offer's restore-on-setup-failure,
+and the in-flight flag's pre-registration release (the single release
+point after registration is ``d33d.streaming``'s ``finally``) — so the
+route body stays a few lines.
 
-The module hosts the region-edit-only pieces of the fill-recut
-pre-route — the region seam entry point, the no-normal degradation
-copy, and the face-normal length tolerance the wire validator reads.
-Everything shared with the chat route stays in :mod:`d33d.fill_recut`.
+The module also hosts the pre-route DECISION
+(:func:`fill_recut_region_edit`), the no-normal degradation copy, and
+the face-normal length tolerance the wire validator reads. Everything
+shared with the chat route stays in :mod:`d33d.fill_recut`.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
 from typing import Any
 
+from fastapi.responses import JSONResponse
+
+from d33d.chat_frames import answered_frames
 from d33d.fill_recut import (
     FRILL_DECLINE_REPLY,
     boundary_sentence,
@@ -26,6 +36,8 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Issue #338 (operator decision 6) — the region-edit no-normal
 #: degradation copy (issue #332's axis-dependent offer is impossible
@@ -46,37 +58,49 @@ FILL_RECUT_NO_NORMAL_REPLY = (
 #: (a normal that is not unit is a client defect the loop cannot use).
 NORMAL_LENGTH_TOLERANCE = 0.01
 
+#: The pre-route's "handled the turn" decision shape (see
+#: :func:`fill_recut_region_edit`).
+FillResult = dict[str, Any]
+
 
 def fill_recut_region_edit(
     app: Any,
     project_id: int,
     instruction: str,
     face_normal: tuple[float, float, float] | None = None,
-) -> dict[str, Any] | None:
-    """The fill-and-recut pre-route for the REGION-EDIT seam (issue
-    #338's operator decisions 5–6).
+    row: dict[str, Any] | None = None,
+    part: dict[str, Any] | None = None,
+) -> FillResult | None:
+    """The fill-and-recut pre-route DECISION for the REGION-EDIT seam
+    (issue #338's operator decisions 5–6).
 
-    ``d33d.app``'s ``POST /api/projects/{id}/region-edits`` calls this
-    BEFORE the loop when the project has an imported part whose units
-    are assumed or settled — the SAME trigger the chat route uses
+    The route (via :func:`region_edit_preroute`) calls this BEFORE the
+    loop when the project has an imported part whose units are assumed
+    or settled — the SAME trigger the chat route uses
     (``fill_recut_trigger`` over the instruction text), evaluated with
     the SAME caller-side rules: the part exists and is assumed/settled
     (a) and the noun is not a token of the design's own current params
     or labels (d).
 
+    ``row`` / ``part`` are the route's ALREADY-FETCHED project row and
+    ``part_public`` dict — passed in (the route fetched them for the
+    404 and the unit-status decision) instead of re-fetched via
+    ``get_project``; when ``row`` is ``None`` a defensive fetch runs
+    (a route that would have 404'd never calls this).
+
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop":
     bool, ...}`` when the pre-route handles the turn (the caller
-    registers ``answer`` as a ``kind: "answer"`` done frame and, when
-    ``run_loop`` is true, runs the design loop with the ``instruction``
-    field appended to the request text), else ``None`` (the caller
-    proceeds to the design loop exactly as today).
+    registers the event source and, when ``run_loop`` is true, runs the
+    design loop with the ``instruction`` field prefixed to the request
+    text), else ``None`` (the caller proceeds to the design loop
+    exactly as today).
 
     The handled cases mirror the chat route's:
 
     * a LIVE fill-recut offer (``kind: "fill_recut"``): a clean
-      acceptance clears the offer (the caller's job — it clears once
-      the event source is registered, like the chat route) and runs
-      the loop with the explicit fill-and-recut instruction; a clean
+      acceptance returns the explicit fill-and-recut instruction with
+      ``run_loop: True`` and the offer the caller clears once the event
+      source is registered (restored on a setup failure); a clean
       decline clears the offer and replies quietly; anything else
       supersedes the offer (cleared) and re-evaluates the instruction
       as a fresh trigger;
@@ -90,74 +114,250 @@ def fill_recut_region_edit(
       (the #338 operator decision 6 copy) and NO offer is stored, NO
       loop runs (operator decision 6: no offer, no buttons, no loop).
     """
-    from d33d.part_http import part_public
-
-    row = app.state.conn.get_project(project_id)
     if row is None:
-        return None
-    part = part_public(row) if row.get("part_filename") else None
+        row = app.state.conn.get_project(project_id)
+        if row is None:
+            return None
+    if part is None:
+        from d33d.part_http import part_public
+
+        part = part_public(row) if row.get("part_filename") else None
     if part is None or part.get("unit_status") not in ("assumed", "settled"):
         return None
 
     versions = app.state.versions
     pending = versions.get_pending_offer(project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
-        if is_clean_yes(instruction):
-            return {
-                "kind": "answer",
-                "answer": None,
-                "run_loop": True,
-                "instruction": fill_and_recut_instruction(pending),
-                "accepted_offer": pending,
-            }
-        if is_clean_no(instruction):
-            versions.set_pending_offer(project_id, None)
-            return {
-                "kind": "answer",
-                "answer": FRILL_DECLINE_REPLY,
-                "run_loop": False,
-            }
-        versions.set_pending_offer(project_id, None)
-        pending = None
+        return _handle_live_offer(versions, project_id, instruction)
 
-    if pending is None:
-        trigger = fill_recut_trigger(instruction)
-        if trigger is not None:
-            own = own_feature_names(versions.latest_version(project_id))
-            if trigger["noun"] not in own:
-                axis = (
-                    (float(v) for v in face_normal)
-                    if face_normal is not None
-                    else None
-                )
-                if axis is None:
-                    return {
-                        "kind": "answer",
-                        "answer": FILL_RECUT_NO_NORMAL_REPLY,
-                        "run_loop": False,
-                    }
-                versions.set_pending_offer(
-                    project_id,
-                    {
-                        "kind": "fill_recut",
-                        "noun": trigger["noun"],
-                        "size": trigger["size"],
-                        "axis": list(axis),
-                    },
-                )
-                sentence = boundary_sentence(
-                    trigger["noun"],
-                    trigger["size"],
-                    move=trigger["move"],
-                    move_distance_mm=trigger.get("move_distance"),
-                    move_direction=trigger.get("direction"),
-                )
-                return {"kind": "answer", "answer": sentence, "run_loop": False}
+    trigger = fill_recut_trigger(instruction)
+    if trigger is None or trigger["noun"] in own_feature_names(
+        versions.latest_version(project_id)
+    ):
+        return None
+    return _handle_fresh_trigger(versions, project_id, trigger, face_normal)
+
+
+def _handle_live_offer(
+    versions: Any,
+    project_id: int,
+    instruction: str,
+) -> FillResult | None:
+    """A LIVE fill-recut offer (``kind: "fill_recut"``): a clean
+    acceptance runs the loop with the fill-and-recut instruction; a
+    clean decline clears the offer and replies quietly; anything else
+    supersedes the offer (cleared) and falls through to the fresh
+    trigger evaluation (this function returns ``None`` so the caller
+    runs it)."""
+    pending = versions.get_pending_offer(project_id)
+    if is_clean_yes(instruction):
+        return {
+            "kind": "answer",
+            "answer": None,
+            "run_loop": True,
+            "instruction": fill_and_recut_instruction(pending),
+            "accepted_offer": pending,
+        }
+    if is_clean_no(instruction):
+        versions.set_pending_offer(project_id, None)
+        return {
+            "kind": "answer",
+            "answer": FRILL_DECLINE_REPLY,
+            "run_loop": False,
+        }
+    versions.set_pending_offer(project_id, None)
     return None
+
+
+def _handle_fresh_trigger(
+    versions: Any,
+    project_id: int,
+    trigger: dict[str, Any],
+    face_normal: tuple[float, float, float] | None,
+) -> FillResult:
+    """A fresh fill-and-recut trigger: with a face normal the boundary
+    sentence is the answer and the offer is recorded server-side (the
+    offer carries the pick's normal as its ``axis`` — operator decision
+    5); without one the axis-dependent offer is impossible — the
+    no-normal degradation copy (operator decision 6), no offer, no
+    loop."""
+    if face_normal is None:
+        return {
+            "kind": "answer",
+            "answer": FILL_RECUT_NO_NORMAL_REPLY,
+            "run_loop": False,
+        }
+    axis = tuple(float(v) for v in face_normal)
+    versions.set_pending_offer(
+        project_id,
+        {
+            "kind": "fill_recut",
+            "noun": trigger["noun"],
+            "size": trigger["size"],
+            "axis": list(axis),
+        },
+    )
+    sentence = boundary_sentence(
+        trigger["noun"],
+        trigger["size"],
+        move=trigger["move"],
+        move_distance_mm=trigger.get("move_distance"),
+        move_direction=trigger.get("direction"),
+    )
+    return {"kind": "answer", "answer": sentence, "run_loop": False}
+
+
+def region_edit_preroute(
+    app: Any,
+    project_id: int,
+    row: dict[str, Any] | None,
+    part: dict[str, Any] | None,
+    instruction: str,
+    face_normal: tuple[float, float, float] | None,
+    start_loop: Callable[..., Any],
+    loop_kwargs: dict[str, Any],
+) -> JSONResponse | None:
+    """The region-edit route's fill-and-recut pre-route, end to end
+    (issue #338, operator decision 5).
+
+    The route has ALREADY claimed the in-flight flag (the chat route's
+    contract: claim before the pre-route). This function covers every
+    outcome the route used to inline:
+
+    * the unit-status gate — a project without an imported part whose
+      units are assumed/settled skips the pre-route (returns ``None``;
+      the route proceeds to the design loop with the same
+      ``loop_kwargs``);
+    * :func:`fill_recut_region_edit`'s decision — on ANY pre-route
+      exception the flag (claimed by the caller) is released,
+      ``logger.exception`` logs it, and the exception re-raises (the
+      project is never left 409-blocked);
+    * the accept path (:func:`_handle_acceptance`) — the loop runs
+      with the fill-and-recut instruction; the offer is cleared once
+      the event source is registered and RESTORED on a setup failure
+      (the #332 "lost yes" pattern), with the flag released and the
+      exception logged + re-raised;
+    * the decline / fresh-trigger / no-normal path
+      (:func:`_handle_answer`) — ONE ``answered_frames`` source, no
+      loop, no version.
+
+    After an event source is registered the stream's
+    ``d33d.streaming`` ``finally`` is the single in-flight release
+    point (as before); this function only releases on the pre-route's
+    own no-source failure exits.
+    """
+    if part is None or part.get("unit_status") not in ("assumed", "settled"):
+        return None
+
+    inflight: set[int] = getattr(app.state, "design_loop_inflight", None)
+    if inflight is None:
+        inflight = set()
+        app.state.design_loop_inflight = inflight
+    try:
+        fill_result = fill_recut_region_edit(
+            app,
+            project_id,
+            instruction,
+            face_normal=face_normal,
+            row=row,
+            part=part,
+        )
+    except Exception:
+        # Pre-route failure: the event source is NOT registered, so the
+        # stream's finally never runs — release the flag (claimed by the
+        # caller) and re-raise; without this guard the project would be
+        # 409-blocked.
+        inflight.discard(project_id)
+        logger.exception(
+            "region-edit for project %s: fill-and-recut pre-route failed — "
+            "the in-flight flag is released",
+            project_id,
+        )
+        raise
+    if fill_result is None:
+        return None
+    if fill_result.get("run_loop"):
+        return _handle_acceptance(
+            app, project_id, fill_result, loop_kwargs, start_loop, inflight
+        )
+    return _handle_answer(app, project_id, fill_result)
+
+
+def _handle_acceptance(
+    app: Any,
+    project_id: int,
+    fill_result: FillResult,
+    loop_kwargs: dict[str, Any],
+    start_loop: Callable[..., Any],
+    inflight: set[int],
+) -> JSONResponse:
+    """The clean-acceptance-of-a-LIVE-offer path (the #332 "lost yes"
+    pattern): the loop runs with the fill-and-recut instruction
+    prefixed to the request text; the event source is registered
+    synchronously before the 202; the offer is cleared once the source
+    is registered and RESTORED on a setup failure — the acceptance is
+    never lost to a failed setup. On a setup failure the in-flight
+    flag is released (the source was not registered, so the stream's
+    ``finally`` never runs) and the exception is logged + re-raised.
+    """
+    accepted_offer = fill_result.pop("accepted_offer", None)
+    instruction = fill_result["instruction"]
+    request_text = f"{instruction} {loop_kwargs['request_text']}"
+    loop_kwargs = dict(loop_kwargs, user_message=request_text, request_text=request_text)
+    try:
+        events = start_loop(app, project_id, **loop_kwargs)
+    except Exception:
+        if accepted_offer is not None:
+            app.state.versions.set_pending_offer(project_id, accepted_offer)
+        inflight.discard(project_id)
+        logger.exception(
+            "region-edit for project %s: design-loop setup failed after a "
+            "fill-recut offer acceptance — the offer is restored and the "
+            "in-flight flag released",
+            project_id,
+        )
+        raise
+    app.state.event_sources[project_id] = events
+    if accepted_offer is not None:
+        app.state.versions.set_pending_offer(project_id, None)
+    # No inflight.discard here — the event source is registered, so the
+    # stream's finally is the single release point.
+    return JSONResponse(
+        status_code=202,
+        content={"project_id": project_id, "status": "accepted"},
+    )
+
+
+def _handle_answer(
+    app: Any,
+    project_id: int,
+    fill_result: FillResult,
+) -> JSONResponse:
+    """The boundary-trigger / no-normal-degradation / clean-decline
+    path: ONE answer frame, NO loop, NO version. The event source (an
+    ``answered_frames`` generator) is registered synchronously; the
+    stream's ``finally`` releases the in-flight flag when the generator
+    is exhausted — the single release point (no explicit discard here).
+
+    A fresh boundary trigger surfaces the offer — the SPA renders the
+    boundary sentence with the [Yes, do that] / [Leave it] buttons
+    (issue #338, decision 7); the decline / no-normal replies are plain
+    (no buttons).
+    """
+    is_fresh_trigger = fill_result["answer"] != FRILL_DECLINE_REPLY
+    app.state.event_sources[project_id] = answered_frames(
+        fill_result["answer"],
+        fill_recut_offer=is_fresh_trigger,
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"project_id": project_id, "status": "accepted"},
+    )
 
 
 __all__ = [
     "FILL_RECUT_NO_NORMAL_REPLY",
     "NORMAL_LENGTH_TOLERANCE",
     "fill_recut_region_edit",
+    "region_edit_preroute",
 ]

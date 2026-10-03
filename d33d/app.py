@@ -84,11 +84,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 
 from d33d import db, slicer
-from d33d import fill_recut as fill_recut_mod
 from d33d import fill_recut_region as fill_recut_region_mod
 from d33d import print_validation as _print_validation
 from d33d import versions as versions_mod
-from d33d.chat_frames import answered_frames
 from d33d.config import ModelCatalogueLoader, hot_reload
 from d33d.config.catalogue import (
     Catalogue,
@@ -1337,105 +1335,62 @@ def create_app(
             )
 
         from d33d.design_loop_events import run_design_loop_with_events
-        from d33d.part_http import part_public as _part_public
+        from d33d.part_http import part_public
 
-        _part = _part_public(row) if row.get("part_filename") else None
-        fill_result = None
-        if (
-            _part is not None
-            and _part.get("unit_status") in ("assumed", "settled")
-        ):
-            try:
-                fill_result = fill_recut_region_mod.fill_recut_region_edit(
-                    app,
-                    project_id,
-                    body.instruction,
-                    face_normal=tuple(body.face_normal)
-                    if body.face_normal
-                    else None,
-                )
-            except Exception:
-                # Pre-route failure: release the in-flight flag (claimed
-                # above) and re-raise — the same contract as the chat
-                # route's pre-route failure path. Without this guard an
-                # exception here would leave the project 409-blocked.
-                inflight.discard(project_id)
-                raise
-        if fill_result is not None:
-            # A fresh boundary trigger (no live offer to accept/decline)
-            # surfaces the offer — the SPA renders the boundary sentence
-            # with the [Yes, do that] / [Leave it] buttons (issue #338,
-            # decision 7). The decline reply is plain (no buttons).
-            _is_fresh_trigger = fill_result["answer"] != fill_recut_mod.FRILL_DECLINE_REPLY
-            if fill_result.get("run_loop"):
-                # A clean acceptance of a LIVE fill-recut offer: the
-                # loop runs with the fill-and-recut instruction (the
-                # #332 pattern — the offer's noun/size/axis are
-                # server-side state, never re-parsed from the client).
-                # The event source is registered before the 202 (the
-                # contract below); the offer is cleared once the loop
-                # is running and restored on a setup failure (the #332
-                # "lost yes" pattern — the acceptance is never lost to
-                # a failed setup). The in-flight flag is NOT released
-                # here: when the event source is registered the stream's
-                # ``finally`` is the single release point (see
-                # ``d33d.chat_frames.answered_frames``); on setup failure
-                # the offer is restored and the flag is released below.
-                _accepted = fill_result.pop("accepted_offer", None)
-                request_text = f"{fill_result['instruction']} {request_text}"
-                try:
-                    events = run_design_loop_with_events(
-                        app,
-                        project_id,
-                        user_message=request_text,
-                        stated_dims=stated_dims,
-                        chat_history=(),
-                        photo=photo,
-                        request_text=request_text,
-                        stated_axes=carried_axes,
-                    )
-                except Exception:
-                    if _accepted is not None:
-                        app.state.versions.set_pending_offer(
-                            project_id, _accepted
-                        )
-                    inflight.discard(project_id)
-                    raise
-                app.state.event_sources[project_id] = events
-                if _accepted is not None:
-                    app.state.versions.set_pending_offer(project_id, None)
-                # No inflight.discard here — the stream's finally is the
-                # single release point (the event source is registered).
-                return JSONResponse(
-                    status_code=202,
-                    content={"project_id": project_id, "status": "accepted"},
-                )
-            # Boundary trigger / no-normal degradation / clean decline:
-            # ONE answer frame, NO loop, NO version. The event source
-            # (an ``answered_frames`` generator) is registered above;
-            # the stream's ``finally`` releases the in-flight flag when
-            # the generator is exhausted — the single release point
-            # (issue #338 fix round: no explicit discard here).
-            app.state.event_sources[project_id] = answered_frames(
-                fill_result["answer"],
-                fill_recut_offer=_is_fresh_trigger,
+        _part = part_public(row) if row.get("part_filename") else None
+
+        def _start_loop(
+            loop_app: Any,
+            loop_project_id: int,
+            **kwargs: Any,
+        ) -> Any:
+            """The design loop, wrapped for the pre-route's acceptance
+            path (the same call the fall-through below makes — the
+            pre-route's module needs the loop as a callable so it can
+            restore the accepted offer on a setup failure without the
+            loop's kwargs being plumbed into it)."""
+            return run_design_loop_with_events(
+                loop_app,
+                loop_project_id,
+                **kwargs,
             )
-            return JSONResponse(
-                status_code=202,
-                content={"project_id": project_id, "status": "accepted"},
-            )
-        # The fill-recut pre-route falls through (no part, or no
-        # trigger): the design loop runs exactly as today.
-        events = run_design_loop_with_events(
+
+        loop_kwargs = {
+            "user_message": request_text,
+            "stated_dims": stated_dims,
+            "chat_history": (),
+            "photo": photo,
+            "request_text": request_text,
+            "stated_axes": carried_axes,
+        }
+
+        # Issue #338 (operator decision 5) — the fill-and-recut
+        # pre-route for the region-edit seam (the SAME trigger the chat
+        # route uses). The WHOLE outcome lifecycle — the accept / decline
+        # / fresh-trigger / no-normal dispatch, the event-source
+        # registration, the offer's restore-on-setup-failure, and the
+        # in-flight flag's pre-registration release — lives in
+        # ``fill_recut_region.region_edit_preroute`` (the flag was
+        # claimed above, the chat route's contract; after registration
+        # the stream's ``finally`` is the single release point, exactly
+        # as today). ``None`` (no part, or no trigger) falls through to
+        # the design loop exactly as today.
+        pre_routed = fill_recut_region_mod.region_edit_preroute(
             app,
             project_id,
-            user_message=request_text,
-            stated_dims=stated_dims,
-            chat_history=(),
-            photo=photo,
-            request_text=request_text,
-            stated_axes=carried_axes,
+            row,
+            _part,
+            body.instruction,
+            tuple(body.face_normal) if body.face_normal else None,
+            _start_loop,
+            loop_kwargs,
         )
+        if pre_routed is not None:
+            return pre_routed
+
+        # The fill-recut pre-route falls through (no part, or no
+        # trigger): the design loop runs exactly as today.
+        events = run_design_loop_with_events(app, project_id, **loop_kwargs)
         # Register the event source SYNCHRONOUSLY before the 202 response
         # (else the client's GET /api/stream/{id} sees no active source).
         # The SSE endpoint is the sole driver of the generator; the
