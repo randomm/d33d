@@ -812,12 +812,15 @@ def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     either, so the guard is defensive); the best candidate carries no
     ``BboxInfo`` (the pre-flight placeholder); or the compared extents
     are non-positive (a zero is the encoded absence, issue #91 — it is
-    never emitted as a measured number). The axis keys are always
+    never emitted as a measured number).
+
+    Import projects (issue #332): the confirmed set is empty there (no
+    user-stated axes), so the guard above omits the field — the gate
+    abstained and cannot fail, and the SPA renders the generic card
+    (rule 2b) rather than the size card. The axis keys are always
     ``W``/``D``/``H`` regardless of which axes were confirmed: the made
     value is a measurement of the render, not an echo of the ask, so an
-    import project (empty confirmed set — the gate target there is the
-    part's own bbox) still emits the measured axes, and the SPA renders
-    made-only rows for axes with no asked value.
+    axis with no asked value still renders its made number.
     """
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
