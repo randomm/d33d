@@ -2427,8 +2427,8 @@ def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
     the design proceeds photo-less with the EMPTY data URI (unchanged
     behaviour), BUT the stream carries ONE plain copy.ts notice before
     the done frame, and the design-loop adapter logs a WARNING that
-    names the project id and NO file path (no PII — the path is never in
-    the log line)."""
+    names the project id AND the photo FILE NAME (basename only — the
+    full path is never in the log line; issue #356)."""
     import logging as _logging
 
     from d33d.design_frames import PHOTO_MISSING_NOTICE
@@ -2472,11 +2472,11 @@ def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
                 frames.append((_event, _data))
                 if _event in ("done", "error"):
                     break
-            return frames, [r.getMessage() for r in records]
+            return frames, records, pid
         finally:
             logger.removeHandler(handler)
 
-    frames, log_messages = run_async(app_with_versions, _call)
+    frames, log_records, pid = run_async(app_with_versions, _call)
     # The design proceeded photo-less (unchanged behaviour — the URI is
     # still the EMPTY constant, never None, never a dead path).
     assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
@@ -2494,13 +2494,22 @@ def test_chat_lost_photo_notice_and_warning(app_with_versions, tmp_path):
     assert notice_data["message"] == PHOTO_MISSING_NOTICE
     # Exactly ONE notice frame.
     assert sum(1 for ev, _d in frames if ev == "notice") == 1
-    # The WARNING fired and named the project id — with NO file path
-    # (no PII: the operator decision is project id only).
-    warnings = [m for m in log_messages if "photo" in m and "missing" in m]
-    assert warnings, "no WARNING logged for a lost photo"
-    for m in warnings:
-        assert str(tmp_path) not in m, f"the WARNING carries a file path: {m!r}"
-        assert "photo.png" not in m, f"the WARNING carries the filename: {m!r}"
+    # Issue #356 — the WARNING: exactly ONE record, level WARNING, on the
+    # ``d33d.design_loop_events`` logger, naming the project id AND the
+    # photo FILE NAME (basename only) — never the full path, never the
+    # bytes.
+    warnings = [r for r in log_records if r.levelno == _logging.WARNING]
+    assert len(warnings) == 1, (
+        f"exactly one WARNING expected, got {len(warnings)}: "
+        f"{[r.getMessage() for r in log_records]}"
+    )
+    rec = warnings[0]
+    assert rec.name == "d33d.design_loop_events", rec.name
+    m = rec.getMessage()
+    assert "photo" in m and "missing" in m, m
+    assert f"project {pid}" in m, m
+    assert "photo.png" in m, f"the WARNING must name the photo file name: {m!r}"
+    assert str(tmp_path) not in m, f"the WARNING carries the full path: {m!r}"
 
 
 def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp_path):
@@ -2510,7 +2519,8 @@ def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp
     exactly :data:`EMPTY_PHOTO_DATA_URI` (the MIME flip from a stored
     ``.jpg`` to ``data:image/png`` is expected and pinned), the stream
     carries ONE ``PHOTO_MISSING_NOTICE`` notice frame before the terminal
-    frame, and the WARNING names the project id only (no file path).
+    frame, and the WARNING names the project id AND the photo FILE NAME
+    (basename only — never the full path; issue #356).
     A photo-LESS project (NULL path) must NOT get a notice — pinned by
     ``test_chat_missing_photo_falls_back_to_empty_constant``.
     """
@@ -2557,11 +2567,11 @@ def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp
                 frames.append((_event, _data))
                 if _event in ("done", "error"):
                     break
-            return frames, [r.getMessage() for r in records]
+            return frames, records, pid
         finally:
             logger.removeHandler(handler)
 
-    frames, log_messages = run_async(app_with_versions, _call)
+    frames, log_records, pid = run_async(app_with_versions, _call)
     # The design proceeded with the EMPTY constant, never the bad bytes.
     assert captured.get("photo") == EMPTY_PHOTO_DATA_URI
     # ONE copy.ts notice frame, BEFORE the terminal frame.
@@ -2576,12 +2586,22 @@ def test_chat_undecodable_stored_photo_notice_and_warning(app_with_versions, tmp
     assert notice_idx < terminal_idx, "the notice must precede the terminal frame"
     assert frames[notice_idx][1]["message"] == PHOTO_MISSING_NOTICE
     assert sum(1 for ev, _d in frames if ev == "notice") == 1
-    # The WARNING fired, project id only (no file path).
-    warnings = [m for m in log_messages if "photo" in m and "missing" in m]
-    assert warnings, "no WARNING logged for an undecodable stored photo"
-    for m in warnings:
-        assert str(tmp_path) not in m, f"the WARNING carries a file path: {m!r}"
-        assert "photo.jpg" not in m, f"the WARNING carries the filename: {m!r}"
+    # Issue #356 — the WARNING: exactly ONE record, level WARNING, on the
+    # ``d33d.design_loop_events`` logger, naming the project id AND the
+    # photo FILE NAME (``photo.jpg``) — never the full path, never the
+    # bytes.
+    warnings = [r for r in log_records if r.levelno == _logging.WARNING]
+    assert len(warnings) == 1, (
+        f"exactly one WARNING expected, got {len(warnings)}: "
+        f"{[r.getMessage() for r in log_records]}"
+    )
+    rec = warnings[0]
+    assert rec.name == "d33d.design_loop_events", rec.name
+    m = rec.getMessage()
+    assert "photo" in m and "missing" in m, m
+    assert f"project {pid}" in m, m
+    assert "photo.jpg" in m, f"the WARNING must name the photo file name: {m!r}"
+    assert str(tmp_path) not in m, f"the WARNING carries the full path: {m!r}"
 
 
 def test_chat_missing_design_source_reply_no_run(app_with_versions):
@@ -5319,14 +5339,19 @@ def _bad_idat_crc_png_bytes() -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_finalize_embeds_empty_photo_for_undecodable_stored_photo(app_with_versions):
+def test_finalize_embeds_empty_photo_for_undecodable_stored_photo(
+    app_with_versions, caplog
+):
     """Issue #299: finalize on a project whose stored photo is present but
     undecodable must hand the design loop exactly
     :data:`EMPTY_PHOTO_DATA_URI` — never the raw path, never the
     undecodable bytes base64-encoded — and still succeed (201, no
-    400/500). The stored-photo twin of the chat path's #295 gate (the
-    notice + id-only WARNING live in the chat adapter; on finalize the
-    gate is the constant itself)."""
+    400/500). The stored-photo twin of the chat path's #295 gate: on
+    finalize (no stream/notice channel) the gate is the constant itself,
+    and the operator-visible signal is the WARNING (issue #356 —
+    project id + photo FILE NAME, never the full path or bytes)."""
+    import logging as _logging
+
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -5346,24 +5371,56 @@ def test_finalize_embeds_empty_photo_for_undecodable_stored_photo(app_with_versi
             pid, source_photo_path=str(bad_photo)
         )
         app_with_versions.state.run_design_loop = _loop
-        return await client.post(
-            f"/api/projects/{pid}/finalize",
-            json={"request": "make a bracket"},
+        return (
+            await client.post(
+                f"/api/projects/{pid}/finalize",
+                json={"request": "make a bracket"},
+            ),
+            bad_photo,
         )
 
-    r = run_async(app_with_versions, _call)
+    caplog.set_level(_logging.INFO)
+    r, bad_photo = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     assert "photo" in captured, "finalize seam did not supply a photo kwarg"
     assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
     # The raw path must not leak into the loop either way.
     assert not str(captured["photo"]).endswith("fake-png")
+    # Issue #356 — the finalize seam's WARNING: exactly ONE record, level
+    # WARNING, on the ``d33d.versions_routes`` logger, naming the project
+    # id and the photo FILE NAME — never the full path, never the bytes.
+    # (The lifespan's model pre-flight logs an unrelated WARNING on
+    # ``d33d.app`` when no model is configured — filtered out here.)
+    warnings = [
+        r
+        for r in caplog.get_records("call")
+        if r.levelno == _logging.WARNING
+        and r.name == "d33d.versions_routes"
+        and "photo" in r.getMessage()
+    ]
+    assert len(warnings) == 1, (
+        f"exactly one finalize-photo WARNING expected, got {len(warnings)}: "
+        f"{[r.getMessage() for r in caplog.get_records('call')] }"
+    )
+    rec = warnings[0]
+    m = rec.getMessage()
+    assert "missing" in m, m
+    assert str(bad_photo.parent) not in m, (
+        f"the WARNING carries the full path: {m!r}"
+    )
+    assert "fake-png" in m, f"the WARNING must name the photo file name: {m!r}"
 
 
-def test_finalize_embeds_empty_photo_for_missing_stored_photo(app_with_versions):
+def test_finalize_embeds_empty_photo_for_missing_stored_photo(
+    app_with_versions, caplog
+):
     """Issue #299: the finalize photo gate covers ALL FOUR photo states —
     a stored photo whose file is gone out-of-band (path set, file deleted)
     also degrades to :data:`EMPTY_PHOTO_DATA_URI`, identical to the chat
-    path's photo-LOST handling."""
+    path's photo-LOST handling; the operator-visible signal is the
+    WARNING (issue #356 — project id + photo FILE NAME)."""
+    import logging as _logging
+
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -5380,17 +5437,42 @@ def test_finalize_embeds_empty_photo_for_missing_stored_photo(app_with_versions)
             pid, source_photo_path=str(gone)
         )
         app_with_versions.state.run_design_loop = _loop
-        return await client.post(
-            f"/api/projects/{pid}/finalize",
-            json={"request": "make a bracket"},
+        return (
+            await client.post(
+                f"/api/projects/{pid}/finalize",
+                json={"request": "make a bracket"},
+            ),
+            gone,
         )
 
-    r = run_async(app_with_versions, _call)
+    caplog.set_level(_logging.INFO)
+    r, gone = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+    # Issue #356 — exactly ONE stored-photo WARNING on finalize (the
+    # lifespan's model pre-flight logs an unrelated WARNING on
+    # ``d33d.app`` when no model is configured — filtered out here).
+    warnings = [
+        r
+        for r in caplog.get_records("call")
+        if r.levelno == _logging.WARNING
+        and r.name == "d33d.versions_routes"
+        and "photo" in r.getMessage()
+    ]
+    assert len(warnings) == 1, (
+        f"exactly one finalize-photo WARNING expected, got {len(warnings)}: "
+        f"{[r.getMessage() for r in caplog.get_records('call')] }"
+    )
+    m = warnings[0].getMessage()
+    assert "gone.png" in m, m
+    assert str(gone.parent) not in m, (
+        f"the WARNING carries the full path: {m!r}"
+    )
 
 
-def test_finalize_body_photo_valid_data_uri_is_embedded(app_with_versions):
+def test_finalize_body_photo_valid_data_uri_is_embedded(
+    app_with_versions, caplog
+):
     """Issue #299: ``body.photo`` is accepted ONLY when it is a
     ``data:image/png`` / ``data:image/jpeg`` URI whose DECODED BYTES pass
     the shared upload gate (``validate_photo_bytes``) — the dispatch's
@@ -5399,8 +5481,11 @@ def test_finalize_body_photo_valid_data_uri_is_embedded(app_with_versions):
     supplies one) — the SPA's ``FinalizeInput`` never carries this field
     today, so the gate exists purely so a raw client value can neither
     SSRF the model host (no URL forwarding) nor 400 the LLM (no
-    undecodable bytes)."""
+    undecodable bytes). A body photo that PASSES the gate never fires the
+    stored-photo WARNING (issue #356 — the WARNING is the stored-fallback
+    signal only)."""
     import base64 as _b64
+    import logging as _logging
 
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
@@ -5429,6 +5514,7 @@ def test_finalize_body_photo_valid_data_uri_is_embedded(app_with_versions):
             json={"request": "make a bracket", "photo": body_uri},
         )
 
+    caplog.set_level(_logging.INFO)
     r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     expected = "data:image/png;base64," + _b64.b64encode(
@@ -5436,16 +5522,28 @@ def test_finalize_body_photo_valid_data_uri_is_embedded(app_with_versions):
     ).decode("ascii")
     assert captured["photo"] == expected, captured.get("photo")
     assert captured["photo"] != EMPTY_PHOTO_DATA_URI
+    # Issue #356 — a passing body photo is a usable photo: NO stored-photo
+    # WARNING (the body branch never reaches the fallback's guard).
+    assert not [
+        r
+        for r in caplog.get_records("call")
+        if r.levelno == _logging.WARNING and "photo" in r.getMessage()
+    ], "a valid body photo must not fire the stored-photo WARNING"
 
 
-def test_finalize_body_photo_http_url_is_ignored(app_with_versions):
+def test_finalize_body_photo_http_url_is_ignored(app_with_versions, caplog):
     """Issue #299, attack #1: a client-supplied ``http(s)://`` photo URL is
     IGNORED — never forwarded to the LLM server (the model host fetching
     an operator-controllable URL is an SSRF the dispatch's minimal rule
     closes) and never checked against the decodability gate (an
     undecodable remote image would 400 finalize again). The stored-photo
     gate takes over: with no stored photo the design loop receives
-    :data:`EMPTY_PHOTO_DATA_URI`."""
+    :data:`EMPTY_PHOTO_DATA_URI` — and, being a photo-LESS project, NO
+    stored-photo WARNING fires (issue #356: the WARNING names a photo that
+    IS set in the row; a NULL path is the photo-LESS state, never
+    warned)."""
+    import logging as _logging
+
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -5463,18 +5561,32 @@ def test_finalize_body_photo_http_url_is_ignored(app_with_versions):
             json={"request": "make a bracket", "photo": "http://evil.example/photo.png"},
         )
 
+    caplog.set_level(_logging.INFO)
     r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
     assert "http://" not in str(captured["photo"])
+    # Issue #356 — photo-LESS (NULL path): the fallback degrades to the
+    # constant but the WARNING must NOT fire (photo_lost is False).
+    assert not [
+        r
+        for r in caplog.get_records("call")
+        if r.levelno == _logging.WARNING and "photo" in r.getMessage()
+    ], "a photo-LESS project must not fire the stored-photo WARNING"
 
 
-def test_finalize_body_photo_undecodable_data_uri_is_ignored(app_with_versions):
+def test_finalize_body_photo_undecodable_data_uri_is_ignored(
+    app_with_versions, caplog
+):
     """Issue #299, attack #1: a ``data:image/png`` URI whose DECODED BYTES
     fail the shared gate (``validate_photo_bytes``) is IGNORED, not
     embedded — the decodability gate applies to client-supplied photos
     exactly as it does to the stored-photo fallback (an undecodable
-    embed would 400 every design pass)."""
+    embed would 400 every design pass). Being a photo-LESS project, the
+    fallback's empty constant fires and the WARNING does NOT (issue
+    #356 — a NULL path is photo-LESS, never warned)."""
+    import logging as _logging
+
     from d33d.design_loop_events import EMPTY_PHOTO_DATA_URI
 
     captured: dict = {}
@@ -5492,9 +5604,17 @@ def test_finalize_body_photo_undecodable_data_uri_is_ignored(app_with_versions):
             json={"request": "make a bracket", "photo": "data:image/png;base64,AAAA"},
         )
 
+    caplog.set_level(_logging.INFO)
     r = run_async(app_with_versions, _call)
     assert r.status_code == 201, r.text
     assert captured["photo"] == EMPTY_PHOTO_DATA_URI, captured.get("photo")
+    # Issue #356 — photo-LESS: no WARNING (same contract as the HTTP-URL
+    # case — the ignored body drops straight into the fallback).
+    assert not [
+        r
+        for r in caplog.get_records("call")
+        if r.levelno == _logging.WARNING and "photo" in r.getMessage()
+    ], "a photo-LESS project must not fire the stored-photo WARNING"
 
 
 def test_storage_signal_and_embed_gate_can_disagree_on_corrupt_crc(
@@ -6126,6 +6246,43 @@ def test_question_path_deterministic_answer_unaffected_by_model_unconfigured(
     # No NEW version created (count unchanged — the design loop never
     # runs; the one version is the one the test created).
     assert len(timeline) == 1
+
+
+def test_design_loop_events_logger_emits_warning_after_create_app(
+    app_with_versions, caplog
+):
+    """Issue #356 — the WARNING-visibility guard: after ``create_app``
+    (no logging config in the app or in ``d33d.main``'s ``basicConfig``
+    during tests — the production ``main()`` installs it) the
+    ``d33d.design_loop_events`` logger must NOT be disabled and its
+    effective level must be ≤ WARNING, so a ``logger.warning`` record
+    actually reaches the root handlers. A future regression that adds a
+    ``logger.setLevel(ERROR)`` / ``logging.disable`` in the app or main
+    would silence the operator's only signal for a corrupt photo and
+    fail here.
+
+    The second half is the caplog half of the contract: a real
+    ``logger.warning`` call from that logger is captured end-to-end
+    (record level WARNING, name ``d33d.design_loop_events``) — caplog
+    hooks the root handlers, so a silenced logger would surface as an
+    empty capture."""
+    import logging as _logging
+
+    logger = _logging.getLogger("d33d.design_loop_events")
+    # Not silenced by any configuration.
+    assert not logger.disabled, "the design_loop_events logger is disabled"
+    effective = logger.getEffectiveLevel()
+    assert effective <= _logging.WARNING, (
+        f"the design_loop_events logger's effective level is {effective} — "
+        f"WARNING records would not surface in the live server log"
+    )
+    # caplog end-to-end: a real WARNING record is captured at the root.
+    logger.warning("issue #356 capture probe")
+    captured = caplog.get_records("call")
+    recs = [r for r in captured if r.name == "d33d.design_loop_events"]
+    assert recs, "the WARNING record did not reach the root handlers"
+    assert recs[-1].levelno == _logging.WARNING
+    assert recs[-1].getMessage() == "issue #356 capture probe"
 
 
 def test_startup_lifespan_logs_exactly_one_warning_naming_var(

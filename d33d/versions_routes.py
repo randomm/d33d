@@ -988,6 +988,26 @@ def _finalize_loop_kwargs(
     else:
         stored_photo = photo_data_uri(row.get("source_photo_path"))
         photo = stored_photo or EMPTY_PHOTO_DATA_URI
+        # Issue #356 — the finalize seam's lost/undecodable stored-photo
+        # WARNING: finalize is a plain 201 JSON response with no stream /
+        # notice channel, so this WARNING is the only operator-visible
+        # signal that the design proceeded photo-less. Fires ONLY on the
+        # stored-photo fallback (a ``body.photo`` override that passed the
+        # decode gate is a usable photo by construction — never warn). The
+        # message names the project id and the photo FILE NAME (basename
+        # only — never the full path, never the image bytes), mirroring
+        # the chat path's WARNING in ``d33d.design_loop_events``.
+        if photo is EMPTY_PHOTO_DATA_URI:
+            from d33d.design_loop_events import photo_lost
+
+            if photo_lost(row):
+                logger.warning(
+                    "finalize for project %s: the stored reference photo "
+                    "%s is missing on disk or undecodable — the design "
+                    "proceeds photo-less",
+                    project_id,
+                    Path(row.get("source_photo_path")).name,
+                )
     latest = app.state.versions.latest_version(project_id)
     # The gate's target (ticket #91; issue #247's per-axis decision): the
     # CURRENT run's per-axis confirmed set — the body's explicit

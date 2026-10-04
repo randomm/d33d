@@ -279,7 +279,8 @@ def photo_lost(row: dict[str, Any]) -> bool:
     proceeds identically to today — no notice, no WARNING); path set +
     file present AND decodable → ``False``; path set + file missing or
     undecodable → ``True`` (the stream carries the copy.ts notice and the
-    WARNING fires — project id only, never a file path).
+    WARNING fires — project id + the photo's FILE NAME; never a full
+    path, never the bytes).
     """
     photo_path = row.get("source_photo_path")
     if not photo_path:
@@ -1714,7 +1715,8 @@ async def run_design_loop_with_events(
     # project), the terminal stream carries ONE plain copy.ts notice
     # BEFORE the done/error frame. The design proceeds photo-less with
     # the EMPTY_PHOTO_DATA_URI constant, unchanged behaviour — only the
-    # notice and the WARNING (project id only, no file path) are new.
+    # notice and the WARNING (project id + photo FILE NAME — never the
+    # full path, never the bytes; issue #356) are new.
     # The notice is deferred until just before the terminal frame on
     # every exit path (pass, exhausted, exception, deadline): the run's
     # own frames (progress, version-created, tokens) always land first,
@@ -1722,11 +1724,16 @@ async def run_design_loop_with_events(
     # frame always carries the notice's last word right before it.
     _photo_notice: str | None = None
     if row is not None and photo_lost(row):
+        # Issue #356 — the WARNING names the project id AND the photo
+        # FILE NAME (the path's basename — never the full path, never
+        # the bytes): the operator matching the live log can now spot
+        # the undecodable file by name.
         logger.warning(
-            "design loop for project %s: the stored reference photo is "
-            "missing on disk — the design proceeds photo-less; the "
-            "stream carries the copy.ts notice",
+            "design loop for project %s: the stored reference photo %s "
+            "is missing on disk or undecodable — the design proceeds "
+            "photo-less; the stream carries the copy.ts notice",
             project_id,
+            Path(row.get("source_photo_path")).name,
         )
         from d33d.design_frames import PHOTO_MISSING_NOTICE
 
