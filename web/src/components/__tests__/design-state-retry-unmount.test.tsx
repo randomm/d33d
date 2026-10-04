@@ -40,7 +40,10 @@ vi.mock("../../components/viewer/ModelViewer", async () => {
   const actual = await vi.importActual<typeof import("../../components/viewer/ModelViewer")>(
     "../../components/viewer/ModelViewer",
   );
-  const MockModelViewer = (props: { data: ArrayBuffer | null }) => {
+  const MockModelViewer = (props: {
+    data: ArrayBuffer | null;
+    onReady?: (handle: unknown) => void;
+  }) => {
     useEffect(() => {
       props.onReady?.({
         scene: {} as never,
@@ -63,7 +66,7 @@ describe("design-state refetch retry timer (issue #354)", () => {
   let client: ApiClient;
 
   beforeEach(() => {
-    client = new ApiClient("http://test");
+    client = new ApiClient();
   });
 
   afterEach(() => {
