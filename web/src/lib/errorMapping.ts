@@ -115,11 +115,14 @@ export interface DisplayError {
   envVar?: string;
   /** The renderer image pre-flight detail (issue #346, `renderer_image_stale`
    *  frame's `renderer_detail` field, omit-not-null): the verified real
-   *  reason plus the exact rebuild command. The mapping folds it into the
-   *  disclosure (`detail`) so "What the checker actually said" shows why
-   *  (image missing, or label X vs expected Y) and how to fix it (the
-   *  rebuild command), rendered in the mono face by the failure turn.
-   *  Absent → the plain reason string, as before. */
+   *  reason plus the exact rebuild command, carried STRUCTURED on the
+   *  mapped error so the failure turn renders the reason line and the
+   *  mono rebuild command from the structure itself (never re-parsing
+   *  the disclosure string). `detail` stays the plain reason string for
+   *  the generic disclosure — the structured fields do not fold into
+   *  it. Absent (the frame did not carry a well-formed `renderer_detail`)
+   *  → the turn renders the headline and the plain disclosure, nothing
+   *  more. */
   rendererDetail?: {
     /** "image_missing" (the image is not in the daemon) or
      *  "label_mismatch" (the image's build-hash label differs). */
@@ -184,17 +187,7 @@ function parseRendererDetail(raw: unknown): DisplayError["rendererDetail"] | und
   return out;
 }
 
-/** Render the renderer image fault's disclosure text (issue #346): the
- *  real reason first (image missing, or the label mismatch naming both
- *  values), then the exact rebuild command. The failure turn renders the
- *  whole string in the mono face. */
-function formatRendererDetail(detail: NonNullable<DisplayError["rendererDetail"]>): string {
-  const line =
-    detail.reason === "image_missing"
-      ? copy.failure.rendererImageMissing
-      : copy.failure.rendererImageLabelMismatch(detail.actual ?? "(unlabeled)", detail.expected ?? "(unknown)");
-  return `${line}\n${detail.rebuild_command}`;
-}
+
 
 export function parseEnvelopeGateDetail(
   detail: string,
@@ -315,9 +308,6 @@ export function displayDesignLoopError(
     // REAL reason (image missing, or the label mismatch) and the exact
     // rebuild command, in the mono face — never the generic reason code
     // alone.
-    if (reason === "renderer_image_stale" && rendererDetail !== undefined) {
-      detail = formatRendererDetail(rendererDetail);
-    }
     if (reason === "axis_params_mismatch" && Array.isArray(data.mismatches)) {
       const parsed = (data.mismatches as unknown[]).flatMap((m) => {
         if (
@@ -377,6 +367,7 @@ export function displayDesignLoopError(
       ...(envelope !== undefined ? { envelope } : {}),
       ...(mismatches !== undefined ? { mismatches } : {}),
       ...(envVar !== undefined ? { envVar } : {}),
+      ...(rendererDetail !== undefined ? { rendererDetail } : {}),
     };
   }
   return {

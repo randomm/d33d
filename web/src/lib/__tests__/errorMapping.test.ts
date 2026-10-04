@@ -149,14 +149,16 @@ describe("errorMapping", () => {
     expect(display.retryable).toBe(true);
   });
 
-  it("the renderer_image_stale frame maps to the rebuild sentence and is NOT retryable (issue #346)", () => {
+  it("the renderer_image_stale frame carries the STRUCTURED rendererDetail and is NOT retryable (issue #346)", () => {
     // The terminal frame carries `reason: "renderer_image_stale"` plus an
     // `renderer_detail` field (omit-not-null: the verified reason — image
     // missing or label mismatch — and the exact rebuild command). The
     // headline is the reason-keyed `copy.failure.reasons` entry; the
-    // disclosure carries the real reason plus the rebuild command. The
-    // reason is terminal — no retry button, because retrying changes
-    // nothing until the operator rebuilds the image.
+    // structured `rendererDetail` is copied onto the mapped error (the
+    // failure turn renders the reason line + the mono rebuild command
+    // from it). `detail` stays the plain reason string for the generic
+    // disclosure. The reason is terminal — no retry button, because
+    // retrying changes nothing until the operator rebuilds the image.
     const detail = {
       reason: "image_missing" as const,
       rebuild_command: "docker build -t d33d/render-worker:local .",
@@ -170,39 +172,44 @@ describe("errorMapping", () => {
     expect(display.message).toBe("The renderer needs rebuilding.");
     expect(display.retryable).toBe(false);
     expect(display.reason).toBe("renderer_image_stale");
-    // The disclosure shows the real reason and the rebuild command.
-    expect(display.detail).toContain("image missing");
-    expect(display.detail).toContain("docker build -t d33d/render-worker:local .");
-    // The label_mismatch variant names both values.
+    // The structured detail rides on the mapped error (the turn renders
+    // the reason line + the mono rebuild command from this field).
+    expect(display.rendererDetail).toEqual(detail);
+    // `detail` stays the plain reason string — the generic disclosure.
+    expect(display.detail).toBe("renderer_image_stale");
+    // The label_mismatch variant carries both values structurally.
+    const mismatchInput = {
+      reason: "label_mismatch" as const,
+      expected: "abc123",
+      actual: "def456",
+      rebuild_command: "docker build -t d33d/render-worker:local .",
+    };
     const mismatch = displayDesignLoopError({
       message: "Design loop exhausted: renderer_image_stale",
       reason: "renderer_image_stale",
-      renderer_detail: {
-        reason: "label_mismatch" as const,
-        expected: "abc123",
-        actual: "def456",
-        rebuild_command: "docker build -t d33d/render-worker:local .",
-      },
+      renderer_detail: mismatchInput,
     });
-    expect(mismatch.detail).toContain("label mismatch");
-    expect(mismatch.detail).toContain("def456");
-    expect(mismatch.detail).toContain("abc123");
+    expect(mismatch.rendererDetail).toEqual(mismatchInput);
+    expect(mismatch.detail).toBe("renderer_image_stale");
     expect(mismatch.retryable).toBe(false);
 
-    // A malformed renderer_detail falls back to the plain reason string —
-    // a half-established detail is never rendered.
+    // A malformed renderer_detail is DROPPED — the plain reason string
+    // disclosure stands, and no half-established detail is carried.
     const malformed = displayDesignLoopError({
       message: "Design loop exhausted: renderer_image_stale",
       reason: "renderer_image_stale",
       renderer_detail: "not an object",
     });
+    expect(malformed.rendererDetail).toBeUndefined();
     expect(malformed.detail).toBe("renderer_image_stale");
 
-    // No renderer_detail at all → the plain reason string, as before.
+    // No renderer_detail at all → no structured field, plain reason
+    // disclosure, as before.
     const headless = displayDesignLoopError({
       message: "Design loop exhausted: renderer_image_stale",
       reason: "renderer_image_stale",
     });
+    expect(headless.rendererDetail).toBeUndefined();
     expect(headless.detail).toBe("renderer_image_stale");
   });
 

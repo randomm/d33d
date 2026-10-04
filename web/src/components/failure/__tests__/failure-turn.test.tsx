@@ -291,9 +291,13 @@ describe("FailureTurn", () => {
       "image missing: the render-worker image is not in the Docker daemon";
     const error: DisplayError = {
       message: copy.failure.reasons.renderer_image_stale,
-      detail: `${reasonLine}\n${rebuild}`,
+      detail: "renderer_image_stale",
       retryable: false,
       reason: "renderer_image_stale",
+      rendererDetail: {
+        reason: "image_missing",
+        rebuild_command: rebuild,
+      },
     };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
     // The headline is the deck's reason sentence — the honest copy.
@@ -332,9 +336,15 @@ describe("FailureTurn", () => {
       "label mismatch: image label def456 does not match expected abc123";
     const error: DisplayError = {
       message: copy.failure.reasons.renderer_image_stale,
-      detail: `${reasonLine}\n${rebuild}`,
+      detail: "renderer_image_stale",
       retryable: false,
       reason: "renderer_image_stale",
+      rendererDetail: {
+        reason: "label_mismatch",
+        expected: "abc123",
+        actual: "def456",
+        rebuild_command: rebuild,
+      },
     };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
     expect(
@@ -372,6 +382,35 @@ describe("FailureTurn", () => {
     expect(container.querySelector("[data-testid='failure-turn-raw-rebuild']")).toBeNull();
     // Still no retry — the reason alone is terminal.
     expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+  });
+
+  it("a renderer_image_stale failure with a malformed-ish structured detail renders only what is established (issue #346)", () => {
+    // The mapping validates `renderer_detail` (malformed objects are
+    // dropped before they reach the turn), so the turn can only ever see
+    // a well-formed structured field — but a label_mismatch with an
+    // ABSENT actual/expected still reaches it: the fault line falls back
+    // to the honest "(unlabeled)" / "(unknown)" placeholders, the command
+    // renders in mono, and no fabricated value is shown.
+    const rebuild = "docker build -t d33d/render-worker:local .";
+    const error: DisplayError = {
+      message: copy.failure.reasons.renderer_image_stale,
+      detail: "renderer_image_stale",
+      retryable: false,
+      reason: "renderer_image_stale",
+      rendererDetail: {
+        reason: "label_mismatch",
+        rebuild_command: rebuild,
+      },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.getByTestId("failure-turn-renderer-fault").textContent).toBe(
+      copy.failure.rendererImageLabelMismatch(undefined, undefined),
+    );
+    expect(screen.getByTestId("failure-turn-renderer-fault").textContent).toContain("(unlabeled)");
+    expect(screen.getByTestId("failure-turn-renderer-fault").textContent).toContain("(unknown)");
+    const rebuildEl = screen.getByTestId("failure-turn-rebuild-command");
+    expect(rebuildEl.tagName).toBe("CODE");
+    expect(rebuildEl.textContent).toBe(rebuild);
   });
 
   it("a non-envelope failure offers the generic retry action", () => {

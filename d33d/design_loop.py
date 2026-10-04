@@ -1591,13 +1591,21 @@ async def run_design_loop_async(
     else:
         try:
             image_detail = image_check()
-        except OSError:
+        except OSError as exc:
             # A docker-query failure from the image probe (daemon down,
             # inspect timeout, binary vanished — issue #346 operator
             # decision 1) is NOT a verified image fault: fall back to the
             # RETRYABLE ``renderer_unavailable`` path, never the terminal
-            # ``renderer_image_stale`` (a transient daemon outage must not
-            # become a "rebuild the image" notice).
+            # ``renderer_image_stale``
+            # (a transient daemon outage must not become a "rebuild the
+            # image" notice). Logged at DEBUG so the degradation is
+            # observable without spamming a per-run WARN-level line.
+            logger.debug(
+                "render-worker image pre-flight could not query docker (%s) — "
+                "degrading this run to renderer_unavailable (retryable), "
+                "never renderer_image_stale",
+                exc,
+            )
             return DesignResult(
                 status="exhausted",
                 best=IterationRecord(
@@ -1987,10 +1995,16 @@ def _render_worker_image_detail(
     except FileNotFoundError as exc:
         logger.warning("render-worker image pre-flight skipped: %s", exc)
         return None
-    except OSError:
+    except OSError as exc:
         # A docker-query failure is "cannot query docker" — NOT staleness.
         # The caller's daemon check (or its absence) degrades this run to
         # renderer_unavailable (retryable), never the terminal rebuild fault.
+        logger.debug(
+            "render-worker image pre-flight could not query docker (%s) — "
+            "returning None (no verified fault); the caller degrades to "
+            "renderer_unavailable, never renderer_image_stale",
+            exc,
+        )
         return None
     except RuntimeError as exc:
         detail: dict[str, str] = {

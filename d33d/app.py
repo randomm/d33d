@@ -334,6 +334,15 @@ def _default_catalogue_path(data_dir: Path) -> Path:
     return data_dir / "models.yaml"
 
 
+#: The wall-clock bound on the startup render-worker image probe (issue
+#: 346): the probe (``docker image inspect`` over the daemon) runs off the
+#: event loop, and a hung daemon must never stall startup — a probe past
+#: this bound is treated like an ``OSError`` (cannot query docker).
+#: Module-level so tests can patch it down without waiting for a real
+#: timeout.
+_IMAGE_CHECK_TIMEOUT_SECONDS = 20.0
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Wire the shared DB + credential store on app startup.
@@ -407,10 +416,52 @@ async def _lifespan(app: FastAPI):
     # report as retryable renderer_unavailable) logs nothing. Never crashes
     # startup. The seam is injectable (``create_app(image_check=...)``)
     # so the fast suite runs it without real Docker.
+    #
+    # The probe (``docker image inspect`` over the daemon) blocks: run it
+    # off the event loop with a wall-clock bound so a hung daemon can never
+    # stall startup (every other lifespan step, and the first request,
+    # would otherwise wait for it). A probe past the bound is treated like
+    # an ``OSError`` (cannot query docker): one timeout WARNING, never the
+    # stale-image warning (the fault is not established), and startup
+    # completes regardless.
     _image_check = state.image_check
     from d33d import design_loop as _dl_mod
 
-    _image_detail = _image_check() if _image_check is not None else _dl_mod._render_worker_image_detail()
+    def _startup_image_probe() -> dict[str, str] | None:
+        if _image_check is None:
+            return _dl_mod._render_worker_image_detail(
+                image=_dl_mod.RENDER_WORKER_IMAGE,
+                rebuild_command=_dl_mod.canonical_build_command(),
+            )
+        return _image_check()
+
+    try:
+        _image_detail = await asyncio.wait_for(
+            asyncio.to_thread(_startup_image_probe),
+            timeout=_IMAGE_CHECK_TIMEOUT_SECONDS,
+        )
+    except (OSError, TimeoutError) as _image_exc:
+        # A docker-query failure (OSError — daemon down, binary missing,
+        # inspect timeout) or a probe past the wall-clock bound (TimeoutError)
+        # means the fault CANNOT be established: log one WARNING naming the
+        # failure mode, emit no stale-image warning, and continue — the
+        # design loop's own pre-flight reports the same condition per-run
+        # as the retryable renderer_unavailable.
+        if isinstance(_image_exc, TimeoutError):
+            logger.warning(
+                "renderer image pre-flight timed out after 20 s (cannot "
+                "query docker) — no image fault established; the design "
+                "loop will report 'renderer_unavailable' per run until the "
+                "daemon responds"
+            )
+        else:
+            logger.warning(
+                "renderer image pre-flight could not query docker (%s) — no "
+                "image fault established; the design loop will report "
+                "'renderer_unavailable' per run until the daemon responds",
+                _image_exc,
+            )
+        _image_detail = None
     if _image_detail:
         logger.warning(
             "renderer image pre-flight: %s — the design loop will report "

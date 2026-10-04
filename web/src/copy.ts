@@ -358,7 +358,7 @@ export const failure = {
    *  renders separately in `<code>`; this is the reason line only. */
   rendererImageMissing:
     "image missing: the render-worker image is not in the Docker daemon",
-  rendererImageLabelMismatch: (actual: string, expected: string): string =>
+  rendererImageLabelMismatch: (actual: string | undefined, expected: string | undefined): string =>
     `label mismatch: image label ${actual ?? "(unlabeled)"} does not match expected ${expected ?? "(unknown)"}`,
   /** The label prefix for the rebuild command in the collapsed disclosure
    *  (issue #346). */

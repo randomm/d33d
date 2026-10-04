@@ -459,9 +459,11 @@ describe("App layout", () => {
     const fault = screen.getByTestId("failure-turn-renderer-fault");
     expect(fault.textContent).toContain("image missing");
     expect(fault.textContent).not.toContain(rebuild);
-    expect(
-      screen.getByTestId("failure-turn-raw-code").textContent,
-    ).toContain(`${fault.textContent}\n${rebuild}`);
+    // The disclosure is the plain reason string; the rebuild command
+    // renders in its own labeled mono line below it.
+    expect(screen.getByTestId("failure-turn-raw-code").textContent).toBe(
+      "renderer_image_stale",
+    );
     // The rebuild command renders verbatim in the mono face.
     const rebuildEl = screen.getByTestId("failure-turn-rebuild-command");
     expect(rebuildEl.tagName).toBe("CODE");

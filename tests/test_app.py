@@ -790,6 +790,58 @@ def test_startup_image_healthy_logs_no_renderer_image_warning(
     )
 
 
+def test_startup_image_probe_past_wall_clock_bound_logs_timeout_warning_and_completes(
+    app_paths, tmp_path, env_key, monkeypatch, caplog
+):
+    """Issue #346: the startup image probe runs OFF the event loop with a
+    wall-clock bound (``asyncio.wait_for(asyncio.to_thread(...), 20)``).
+    A probe past the bound (a hung docker daemon) is treated like an
+    ``OSError``: ONE WARNING saying the image check timed out, NO
+    stale-image warning (the fault is not established), and startup still
+    completes. The bound is patched down to 0.05 s so the test stays
+    fast; the seam is injected, so no real Docker runs."""
+    import d33d.app as app_mod
+
+    app_mod._IMAGE_CHECK_TIMEOUT_SECONDS = 0.05
+
+    def _slow_probe() -> dict[str, str] | None:
+        import time
+
+        time.sleep(0.3)
+        return {
+            "reason": "image_missing",
+            "expected": "abc123",
+            "rebuild_command": "docker build -t d33d/render-worker:local .",
+        }
+
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
+        image_check=_slow_probe,
+    )
+
+    async def _call(client):
+        return None
+
+    with caplog.at_level("WARNING"):
+        _run_async(app, _call)  # must return — startup completes
+
+    startup_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "renderer image pre-flight" in r.getMessage()
+    ]
+    assert len(startup_warnings) == 1, "exactly one startup WARNING"
+    msg = startup_warnings[0].getMessage()
+    assert "timed out" in msg, f"the timeout WARNING names the timeout: {msg}"
+    # The stale-image warning (the fault naming + rebuild command) must
+    # NOT be emitted — the fault was not established.
+    assert "rebuild" not in msg, f"no stale-image warning: {msg}"
+    assert "image_missing" not in msg and "missing from" not in msg
+
+
 def test_create_app_registers_streaming_router(app):
     """Regression: ``create_app()`` alone must make ``GET /api/stream/{id}``
     reachable — a real SSE response (``text/event-stream``), not 404."""

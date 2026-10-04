@@ -14,6 +14,7 @@ keeps ``./scripts/test`` green on a fresh checkout without Docker.
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -93,10 +94,12 @@ def _isolate_data_dir(tmp_path, monkeypatch):
 # function (imported BEFORE the conftest stub is installed — the test
 # module's top-level import captures the real name) or to a custom
 # callable. The conftest stub (below) reads this on every call.
-_render_preflight_overrides: dict = {"image_detail": None}
+_render_preflight_overrides: dict[str, Callable[..., dict[str, str] | None] | None] = {
+    "image_detail": None
+}
 
 
-def image_detail_override(func):
+def image_detail_override(func: Callable[..., dict[str, str] | None] | None) -> None:
     """Set the conftest ``_render_worker_image_detail`` stub to *func*.
 
     Call this at the TOP of a test that deliberately exercises the real
