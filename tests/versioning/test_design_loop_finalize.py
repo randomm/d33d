@@ -6238,10 +6238,9 @@ def test_startup_lifespan_without_docker_no_image_logs_no_image_warning(
     def _no_docker(*a, **kw):
         raise FileNotFoundError("docker not found")
 
-    # Both the design-loop docker-info probe and the image inspect probe
-    # shell out via ``subprocess.run`` — kill every docker query in this
-    # process to simulate a runner without Docker.
-    monkeypatch.setattr(dl.subprocess, "run", _no_docker)
+    # The image inspect probe (``d33d.render_worker._verify_render_worker_
+    # image``) shells out via ``subprocess.run`` — kill it to simulate a
+    # runner without Docker.
     monkeypatch.setattr(rw.subprocess, "run", _no_docker)
     dl.reset_renderer_preflight_cache()
     try:

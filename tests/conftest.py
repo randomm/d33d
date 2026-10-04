@@ -139,12 +139,13 @@ def _hermetic_render_preflight(request, monkeypatch):
     the module defaults) or via :func:`image_detail_override` (which
     re-points the conftest stub to the real probe or a custom callable).
 
-    Gated on the ``slow`` marker: ``tests/slow`` (``pytestmark =
-    pytest.mark.slow``) exercises the REAL Docker render path and must see
-    the real probes; it is excluded from CI's fast gate (``-m "not slow
+    Gated on the ``slow`` and ``live`` markers: ``tests/slow``
+    (``pytestmark = pytest.mark.slow``) and ``tests/live_e2e`` (``pytestmark
+    = pytest.mark.live``) exercise the REAL Docker render path and must see
+    the real probes; both are excluded from CI's fast gate (``-m "not slow
     and not live"``).
     """
-    if "slow" in request.keywords:
+    if "slow" in request.keywords or "live" in request.keywords:
         yield
         return
     import d33d.design_loop as _dl
