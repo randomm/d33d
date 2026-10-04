@@ -761,15 +761,7 @@ def build_registry_glb(
                 continue
             geometries[site.registry_name] = mesh
         finally:
-            # The isolated-render container is started without ``--rm``
-            # (``build_docker_argv``), so the per-site ``finally`` must
-            # remove it on EVERY path — success and every early-``continue``
-            # failure branch alike — mirroring the ``_remove_named_volume``
-            # call it already runs. Without this the exited ``render-*``
-            # container accumulates alongside the registry volumes (issue
-            # #354: slow-test container leak). Removal is the same bounded,
-            # best-effort ``_cleanup_container`` the populate/harvest
-            # helpers use, so it never masks the call-site's own result.
+            # render-{run_id} has no --rm: remove it on every path (issue #354)
             _cleanup_container(f"render-{run_id}")
             _remove_named_volume(volume)
 

@@ -90,8 +90,9 @@ banned:
 
 - ❌ No NEW suppressions — `tests/fast/test_suppression_ratchet.py` (CI,
   fast suite) fails if the count of suppressed lines across `d33d/`,
-  `tests/` and `web/src/` rises above the recorded baseline (currently
-  52).
+  `tests/` and `web/src/` rises above the recorded baseline
+  (`BASELINE` in `tests/fast/test_suppression_ratchet.py`); lower it
+  when you remove one.
 - ✅ Existing suppressions are removed opportunistically; when one is
   removed, lower the baseline in the ratchet test so the guard ratchets
   down and never up.
