@@ -82,6 +82,19 @@ FRILL_NO_DIMENSION_REPLY = (
 #: The quiet decline acknowledgement (a clean "no" on the pending offer).
 FILL_RECUT_DECLINE_REPLY = "Understood — leaving the part as it is."
 
+#: Issue #351 (operator decision 2) — the honest no-hole reply: a
+#: hole/bore/counterbore resize request on a part the import measured to
+#: carry ZERO holes (``part_report.hole_count == 0``, the stored fact
+#: computed once at import — the pre-route reads the stored fact, never
+#: re-parses the mesh). The offer is NOT made for a feature the part does
+#: not have, and the reply says so plainly (a verbatim copy of the
+#: copy.ts sentence — the parity test in ``tests/test_projects.py`` pins
+#: the two-way agreement against ``web/src/copy.ts``). The loop must not
+#: run — this is an answer, not a change request.
+FILL_RECUT_NO_HOLE_REPLY = (
+    "I don't see a hole on the part you brought — want me to drill one?"
+)
+
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
 #: before the regexes run (a multi-KB unpunctuated blob would otherwise
@@ -381,6 +394,51 @@ def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     )
 
 
+def part_has_hole_evidence(part: dict[str, Any] | None) -> bool | None:
+    """Issue #351 (operator decisions 1–4) — the stored hole evidence for
+    a part: the ``hole_count`` key of the part's stored import report
+    (``part_report``), read through the ``part_public`` dict's ``report``
+    field.
+
+    The gate the caller applies: a fresh fill-and-recut trigger on a
+    hole-family noun (hole/bore/counterbore) is offered ONLY when this
+    returns ``True`` (the import measured at least one hole). ``0`` →
+    ``False`` (the honest no-hole reply, no offer). ``None`` (no report
+    — legacy row or a part imported before the key existed — or an
+    unparseable/corrupt report that ``part_public`` already reduced to
+    ``None``; the stored fact was never re-parsed here) → ``None``
+    (UNKNOWN — keep today's behaviour: the offer fires, as it does today
+    for every part row without a report).
+
+    A negative count is a corrupt value and degrades to ``None`` (unknown)
+    — never ``False`` (a false honest-no-hole reply on a possibly-holey
+    part is a lie; a false OFFER on a known-holey part is today's
+    behaviour, which the gate preserves for unknowns). The trigger itself
+    stays purely lexical; this is the separate caller-side evidence check
+    that consumes the stored fact (the trigger is never passed mesh
+    state). The hole-count computation itself lives at import
+    (``d33d.part_mesh``, task-a) — this reader does no mesh work.
+    """
+    report = (part or {}).get("report")
+    if not isinstance(report, dict):
+        return None
+    count = report.get("hole_count")
+    if count is None:
+        return None
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    if count < 0:
+        return None
+    return count > 0
+
+
+#: The hole-family feature nouns the #351 evidence gate applies to
+#: (operator decision 4: the gate is hole/bore/counterbore only — the
+#: mesh signal can only speak about holes, and other nouns keep current
+#: behaviour regardless of the stored fact).
+HOLE_NOUNS = frozenset({"hole", "holes", "bore", "counterbore"})
+
+
 def fill_recut_turn(
     app: Any, project_id: int, message: str
 ) -> dict[str, Any] | None:
@@ -467,6 +525,23 @@ def fill_recut_turn(
         if trigger is not None:
             own = own_feature_names(versions.latest_version(project_id))
             if trigger["noun"] not in own:
+                # Issue #351 (operator decisions 1–4): a hole-family noun
+                # is offered ONLY when the import stored hole evidence —
+                # ``hole_count == 0`` is a plain honest no-hole reply (no
+                # offer, no loop, no flag); ``None`` (unknown — no report,
+                # legacy row, corrupt blob) keeps today's behaviour (the
+                # offer fires). Other nouns keep current behaviour (the
+                # mesh signal can only speak about holes).
+                if (
+                    trigger["noun"] in HOLE_NOUNS
+                    and part_has_hole_evidence(part) is False
+                ):
+                    return {
+                        "kind": "answer",
+                        "answer": FILL_RECUT_NO_HOLE_REPLY,
+                        "run_loop": False,
+                        "outcome": "no_feature",
+                    }
                 versions.set_pending_offer(
                     project_id,
                     {
@@ -494,11 +569,13 @@ def fill_recut_turn(
 __all__ = [
     "FEATURE_NOUNS",
     "FILL_RECUT_DECLINE_REPLY",
+    "FILL_RECUT_NO_HOLE_REPLY",
     "FRILL_HOLE_DIAMETER_REPLY",
     "FRILL_MOVE_DISTANCE_REPLY",
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "HOLE_NOUNS",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
@@ -508,4 +585,5 @@ __all__ = [
     "is_clean_no",
     "is_clean_yes",
     "own_feature_names",
+    "part_has_hole_evidence",
 ]

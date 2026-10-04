@@ -204,9 +204,24 @@ def part_public(row: dict[str, Any]) -> dict[str, Any] | None:
         "unit": row.get("part_unit"),
         "unit_status": row.get("part_unit_status"),
         "scale": row.get("part_scale"),
-        "report": json.loads(report) if report else None,
-        "options": json.loads(options) if options is not None else None,
+        "report": _loads_or_none(report),
+        "options": _loads_or_none(options),
     }
+
+
+def _loads_or_none(blob: str | None) -> Any | None:
+    """Decode a stored JSON column, degrading a CORRUPT (unparseable) blob
+    to ``None`` instead of raising (issue #351): a corrupt ``part_report``
+    is no evidence either way — every reader (the fill-and-recut hole
+    gate included) must degrade to the unknown behaviour, never a 500.
+    Valid JSON (including ``null``) decodes normally; ``None``/empty
+    stays ``None``."""
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except (ValueError, TypeError):
+        return None
 
 
 def resolve_part_paths(

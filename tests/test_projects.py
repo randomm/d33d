@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import shutil as _shutil
 import subprocess
 from pathlib import Path
@@ -1006,15 +1007,30 @@ _SETTLED_PART_PARAMS = {
 }
 
 
-def _set_part_columns(app: Any, pid: int, *, unit_status: str, scale: float = 1.0):
+def _set_part_columns(
+    app: Any,
+    pid: int,
+    *,
+    unit_status: str,
+    scale: float = 1.0,
+    hole_count: int | None = None,
+):
     """Set the project's part columns (a part the user brought, units
     ``unit_status``) directly on the DB — the same UPDATE the #325
-    settle path runs, minus the settle call itself."""
+    settle path runs, minus the settle call itself.
+
+    ``hole_count`` (issue #351): when given, also writes the ``part_report``
+    JSON with ``{"hole_count": hole_count}`` — the stored import-time hole
+    fact the fill-and-recut gate reads (the #351 new tests set it
+    explicitly; default ``None`` leaves the report NULL, i.e. the
+    legacy-row unknown case, which keeps the offer)."""
     conn = app.state.conn
+    report = json.dumps({"hole_count": hole_count}) if hole_count is not None else None
     conn.raw.execute(
         "UPDATE projects SET part_filename='part.stl', part_format='stl', "
-        "part_unit='mm', part_unit_status=?, part_scale=? WHERE id=?",
-        (unit_status, scale, pid),
+        "part_unit='mm', part_unit_status=?, part_scale=?, part_report=? "
+        "WHERE id=?",
+        (unit_status, scale, report, pid),
     )
     conn.commit()
 
@@ -1045,6 +1061,80 @@ def _insert_version_direct(app: Any, pid: int, params: dict, param_meta: dict | 
         (pid, "v1", json.dumps(params), meta_json),
     )
     conn.commit()
+
+
+def test_fill_recut_trigger_no_hole_report_no_offer(app_with_projects):
+    """Issue #351 — the stored import-time hole fact gates the offer:
+    a settled part whose ``part_report`` carries an explicit
+    ``hole_count: 0`` (a plain box, no hole) + "make the hole 10 mm"
+    → NO fill-recut offer is stored, the done frame is the honest
+    no-feature reply (NOT the boundary sentence), NO ``fill_recut_offer``
+    flag on the done frame, and NO design loop (``run_loop`` is False —
+    the loop is not wired on the test app, so a fresh_offer would leave
+    the offer stored, which the assertion below forbids). The holey
+    twin of the same request (``hole_count: 1``) still gets the offer,
+    and a legacy NULL report keeps the offer (unknown → today's
+    behaviour, operator decision 2)."""
+
+    async def _call(client):
+        # No-hole part (hole_count explicitly 0 — the plain-box case).
+        r = await client.post("/api/projects", json={"name": "Plain Box"})
+        pid = r.json()["id"]
+        _set_part_columns(
+            app_with_projects, pid, unit_status="settled", hole_count=0
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 10 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        # Holey part (hole_count 1) with the SAME request — the offer
+        # fires exactly as today (the gate passes).
+        r3 = await client.post("/api/projects", json={"name": "Holey Part"})
+        holey_pid = r3.json()["id"]
+        _set_part_columns(
+            app_with_projects, holey_pid, unit_status="settled", hole_count=1
+        )
+        r4 = await client.post(
+            f"/api/projects/{holey_pid}/chat",
+            json={"message": "make the hole 10 mm"},
+        )
+        holey_frames = await _drive_event_source(app_with_projects, client, holey_pid)
+        return (
+            r2.status_code,
+            pid,
+            frames,
+            r4.status_code,
+            holey_pid,
+            holey_frames,
+        )
+
+    status, pid, frames, holey_status, holey_pid, holey_frames = _run_async(
+        app_with_projects, _call
+    )
+    assert status == 202, status
+    assert holey_status == 202, holey_status
+    svc = _svc(app_with_projects)
+    # The no-hole part: the honest reply, NO offer stored, NO flag.
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "I don't see a hole on the part you brought" in msg, msg
+    assert "That hole came with your file" not in msg, msg
+    assert not done[0].get("fill_recut_offer"), done
+    assert svc.get_pending_offer(pid) is None
+    # The holey twin: the boundary offer exactly as today — stored,
+    # flagged, boundary sentence with Ø10 mm.
+    holey_done = [d for e, d in holey_frames if e == "done"]
+    assert holey_done, f"no done frame: {holey_frames}"
+    assert "That hole came with your file" in holey_done[0]["message"], holey_done
+    assert "Ø10 mm" in holey_done[0]["message"], holey_done
+    assert holey_done[0].get("fill_recut_offer") is True, holey_done
+    offer = svc.get_pending_offer(holey_pid)
+    assert offer is not None
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 10.0, offer
 
 
 def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
@@ -1828,6 +1918,127 @@ def test_fill_recut_decline_reply_equals_copy_ts() -> None:
     assert fill_recut.FILL_RECUT_DECLINE_REPLY == m.group(1)
 
 
+def test_fill_recut_no_hole_reply_equals_copy_ts() -> None:
+    """Issue #351 — ``FILL_RECUT_NO_HOLE_REPLY`` equals ``copy.ts``'s
+    ``fillRecut.noHole`` exactly (the same two-way pin as the decline
+    reply — a drift in either copy breaks the SPA/backend agreement).
+    copy.ts is task-c's file; this pin is task-b's backend constant.
+    Skipped while task-c's ``noHole`` entry is not yet merged (the
+    parallel-workstream split: this workstream owns the backend side).
+    """
+    import re
+
+    m = re.search(r'noHole:\s*"([^"]+)"', _copy_ts_text())
+    if m is None:
+        pytest.skip("copy.ts fillRecut.noHole not yet defined (task-c)")
+    assert fill_recut.FILL_RECUT_NO_HOLE_REPLY == m.group(1)
+
+
+def test_fill_recut_no_hole_reply_in_fill_recut_all() -> None:
+    """Issue #351 — ``FILL_RECUT_NO_HOLE_REPLY`` and the helper are
+    exported (``d33d.projects`` / ``d33d.fill_recut_region`` reference
+    them by name)."""
+    assert "FILL_RECUT_NO_HOLE_REPLY" in fill_recut.__all__
+    assert "part_has_hole_evidence" in fill_recut.__all__
+    assert "HOLE_NOUNS" in fill_recut.__all__
+
+
+def test_part_has_hole_evidence_reads_stored_fact_only() -> None:
+    """Issue #351 — the evidence reader is a pure reader of the STORED
+    ``part_report.hole_count`` fact (no mesh work, no LLM, no
+    re-parse): ``hole_count: 1`` → True (the offer is allowed);
+    ``hole_count: 0`` → False (the honest no-hole reply); ``None``
+    (no report / legacy row), missing key, and corrupt values (bool,
+    string, negative, float) → None (unknown — keep the offer). A
+    non-dict ``part`` (no part at all) is None."""
+    from d33d.fill_recut import part_has_hole_evidence
+
+    assert part_has_hole_evidence({"report": {"hole_count": 1}}) is True
+    assert part_has_hole_evidence({"report": {"hole_count": 2}}) is True
+    assert part_has_hole_evidence({"report": {"hole_count": 0}}) is False
+    # Unknown → None (the offer keeps firing, today's behaviour):
+    assert part_has_hole_evidence(None) is None
+    assert part_has_hole_evidence({"report": None}) is None
+    assert part_has_hole_evidence({"report": {}}) is None
+    assert part_has_hole_evidence({"report": {"watertight": True}}) is None
+    # Corrupt / unexpected values degrade to unknown, never False:
+    assert part_has_hole_evidence({"report": {"hole_count": True}}) is None
+    assert part_has_hole_evidence({"report": {"hole_count": "1"}}) is None
+    assert part_has_hole_evidence({"report": {"hole_count": 1.0}}) is None
+    assert part_has_hole_evidence({"report": {"hole_count": -1}}) is None
+
+
+def test_part_public_corrupt_report_degrades_to_no_report():
+    """Issue #351 — a CORRUPT ``part_report`` blob (unparseable JSON)
+    must degrade to ``report: None`` (UNKNOWN), never a raised 500:
+    the hole-family gate reads the stored fact, and an unreadable blob
+    is no evidence either way — the offer keeps firing, as today.
+    ``part_public`` is the single reader of the column on the chat
+    route (``post_chat`` line 461), so degrading the reader degrades
+    every route identically. (The reader-side degradation lives in
+    ``d33d.part_http._loads_or_none`` — issue #351; a corrupt report
+    is no evidence either way and must never 500.)"""
+    import d33d.part_http as part_http_mod
+
+    row = {
+        "id": 1,
+        "part_filename": "part.stl",
+        "part_format": "stl",
+        "part_unit": "mm",
+        "part_unit_status": "settled",
+        "part_scale": 1.0,
+        "part_report": '{"hole_count": ',
+        "part_options": None,
+    }
+    part = part_http_mod.part_public(row)
+    assert part is not None
+    assert part["report"] is None, part
+    from d33d.fill_recut import part_has_hole_evidence
+
+    assert part_has_hole_evidence(part) is None
+
+
+def test_fill_recut_trigger_corrupt_report_degrades_to_offer(app_with_projects):
+    """Issue #351 — a CORRUPT ``part_report`` blob (unparseable JSON) on
+    a LIVE chat turn degrades the stored fact to UNKNOWN (``part_public``
+    reduces it to ``report: None``), so the hole-family offer fires
+    exactly as today — never the honest no-hole reply, never a 500.
+    The trigger never re-parses the mesh: the stored fact is the sole
+    input, and an unreadable blob is no evidence either way."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Corrupt Report"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled")
+        # Overwrite with a corrupt JSON blob (the degradation case) — on
+        # the LIVE connection (the lifespan's, not the closed one).
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_report=? WHERE id=?",
+            ('{"hole_count": ', pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 10 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # Unknown fact (report degraded to None) → today's behaviour: the
+    # boundary sentence, the flag, and the stored offer — NOT the
+    # honest no-hole reply.
+    assert "That hole came with your file" in done[0]["message"], done
+    assert "I don't see a hole on the part you brought" not in done[0]["message"], done
+    assert done[0].get("fill_recut_offer") is True, done
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None and offer["kind"] == "fill_recut", offer
+
+
 def test_fill_recut_templates_match_copy_ts_fill_recut() -> None:
     """Every fill-recut boundary template, rendered with fixed sample
     values, equals ``copy.ts``'s ``fillRecut`` deck function with the
@@ -1989,6 +2200,78 @@ def _parity_offer(app, pid: int) -> dict[str, Any] | None:
     offer after ``_run_async`` teardown closed the app's connection."""
     svc = _svc(app)
     return svc.get_pending_offer(pid)
+
+
+def test_fill_recut_parity_no_feature_reply_no_loop(app_with_projects, monkeypatch):
+    """Issue #351 — route parity for the honest no-feature reply: a hole
+    request on a part with ``hole_count: 0`` gets the SAME honest reply
+    on BOTH routes (``post_chat`` and the region-edit route), NO offer
+    stored on either, NO ``fill_recut_offer`` flag, and NO loop call on
+    either (the same four-outcome parity contract the other #338
+    parity tests pin, now covering the no-feature outcome)."""
+    import d33d.chat_loop as chat_loop_mod
+    import d33d.design_loop_events as dle_mod
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+    monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
+    app_with_projects.state.answer_question = None
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Parity No Hole Chat"})
+        chat_pid = r.json()["id"]
+        _set_part_columns(
+            app_with_projects, chat_pid, unit_status="settled", hole_count=0
+        )
+        await client.post(
+            f"/api/projects/{chat_pid}/chat",
+            json={"message": "make the hole 10 mm"},
+        )
+        chat_frames = await _parity_run_loop(app_with_projects, chat_pid)
+        _release_inflight(app_with_projects, chat_pid)
+        r3 = await client.post("/api/projects", json={"name": "Parity No Hole Region"})
+        region_pid = r3.json()["id"]
+        _set_part_columns(
+            app_with_projects, region_pid, unit_status="settled", hole_count=0
+        )
+        r5 = await client.post(
+            f"/api/projects/{region_pid}/region-edits",
+            json=_parity_region_edit_body(
+                "make the hole 10 mm",
+                face_normal=(0.0, 1.0, 0.0),
+            ),
+        )
+        region_frames = await _parity_run_loop(app_with_projects, region_pid)
+        return chat_pid, region_pid, chat_frames, region_frames, r5.status_code
+
+    chat_pid, region_pid, chat_frames, region_frames, region_status = _run_async(
+        app_with_projects, _call
+    )
+    assert region_status == 202, region_status
+    # Neither route ran the loop.
+    assert not calls, f"the design loop was called: {calls}"
+    # Neither route stored an offer.
+    assert _parity_offer(app_with_projects, chat_pid) is None
+    assert _parity_offer(app_with_projects, region_pid) is None
+    # The SAME honest no-feature reply on both routes, and NO offer flag
+    # (the SPA must not render [Yes, do that] / [Leave it] for an offer
+    # that was never stored).
+    chat_done = [d for e, d in chat_frames if e == "done"]
+    region_done = [d for e, d in region_frames if e == "done"]
+    assert chat_done and region_done
+    assert chat_done[0].get("kind") == "answer"
+    assert region_done[0].get("kind") == "answer"
+    assert chat_done[0]["message"] == region_done[0]["message"]
+    assert "I don't see a hole on the part you brought" in chat_done[0]["message"]
+    assert "That hole came with your file" not in chat_done[0]["message"]
+    assert not chat_done[0].get("fill_recut_offer"), chat_done
+    assert not region_done[0].get("fill_recut_offer"), region_done
 
 
 def test_fill_recut_parity_fresh_offer_no_loop(app_with_projects, monkeypatch):

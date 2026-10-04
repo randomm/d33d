@@ -1180,14 +1180,28 @@ def _svc(app: Any) -> Any:
         return fresh_svc
 
 
-def _set_part_columns(app: Any, pid: int, *, unit_status: str) -> None:
+def _set_part_columns(
+    app: Any,
+    pid: int,
+    *,
+    unit_status: str,
+    hole_count: int | None = None,
+) -> None:
     """Set the project's part columns directly on the DB (the same UPDATE
-    the #325 settle path runs, minus the settle call)."""
+    the #325 settle path runs, minus the settle call). ``hole_count``
+    (issue #351): when given, also writes the ``part_report`` JSON with
+    ``{"hole_count": hole_count}`` — the stored import-time hole fact
+    the fill-and-recut gate reads; default ``None`` leaves the report
+    NULL (the legacy-row unknown case, which keeps the offer)."""
+    import json as _json
+
     conn = app.state.conn
+    report = _json.dumps({"hole_count": hole_count}) if hole_count is not None else None
     conn.raw.execute(
         "UPDATE projects SET part_filename='part.stl', part_format='stl', "
-        "part_unit='mm', part_unit_status=?, part_scale=1.0 WHERE id=?",
-        (unit_status, pid),
+        "part_unit='mm', part_unit_status=?, part_scale=1.0, part_report=? "
+        "WHERE id=?",
+        (unit_status, report, pid),
     )
     conn.commit()
 
@@ -1400,6 +1414,65 @@ def test_region_edit_fill_recut_trigger_no_loop(app_with_projects, monkeypatch):
     assert offer["kind"] == "fill_recut", offer
     assert offer["noun"] == "hole", offer
     assert offer["size"] == 38.0, offer
+
+
+def test_region_edit_fill_recut_no_hole_no_offer(app_with_projects, monkeypatch):
+    """Issue #351 — the region-edit seam reads the SAME stored hole fact
+    as the chat route (operator decision 3): a part with
+    ``hole_count: 0`` + a region edit "make the hole 10 mm" (with a face
+    normal — the pick IS on the surface) gets the honest no-hole reply,
+    NO offer stored, NO ``fill_recut_offer`` flag, and NO loop. The pick
+    can land on a plain face too — the stored import-time fact is the
+    deterministic signal, never local geometry at the hit point."""
+    import d33d.design_loop_events as dle_mod
+    loop_calls: list[dict[str, Any]] = []
+
+    async def _fake_loop(app, pid, **kwargs):
+        loop_calls.append(kwargs)
+        yield ("progress", {"step": "design-loop-start"})
+        yield ("done", {"message": "ok", "kind": "loop_done"})
+
+    monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Plain Box Region"})
+        pid = r.json()["id"]
+        _set_part_columns(
+            app_with_projects, pid, unit_status="settled", hole_count=0
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_region_edit_body(
+                instruction="make the hole 10 mm",
+                hit_point_mm=[12.0, 0.0, 20.0],
+                face_normal=[0.0, 1.0, 0.0],
+            ),
+        )
+        source = app_with_projects.state.event_sources.get(pid)
+        frames = []
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        return pid, r2.status_code, frames
+
+    pid, status, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    # The loop was NOT called.
+    assert not loop_calls, f"the design loop was called: {loop_calls}"
+    # The honest no-feature reply — NOT the boundary sentence.
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "I don't see a hole on the part you brought" in msg, msg
+    assert "That hole came with your file" not in msg, msg
+    # NO offer stored — and NO offer flag on the done frame.
+    assert "fill_recut_offer" not in done[0], done
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is None, f"offer should not be stored, got: {offer}"
 
 
 def test_region_edit_fill_recut_no_normal_degradation(app_with_projects, monkeypatch):

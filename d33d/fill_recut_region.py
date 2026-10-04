@@ -29,20 +29,16 @@ from fastapi.responses import JSONResponse
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
-    FRILL_NO_HOLE_REPLY,
+    FILL_RECUT_NO_HOLE_REPLY,
+    HOLE_NOUNS,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
     is_clean_no,
     is_clean_yes,
     own_feature_names,
+    part_has_hole_evidence,
 )
-
-#: The feature nouns the region-edit hole gate applies to (issue #351,
-#: operator decision 4): only these trigger the stored ``hole_count``
-#: check — other nouns (slot, boss, tab, …) keep their current
-#: behaviour.
-_HOLE_NOUNS = frozenset({"hole", "holes", "bore", "counterbore"})
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +103,20 @@ class _FillNoNormal(TypedDict):
     outcome: Literal["no_normal"]
 
 
-#: The decision union: an ``accept`` member, or any of the three
-#: answer-frame members (the caller dispatches on ``outcome``).
-FillResult = _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal
+class _FillNoFeature(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["no_feature"]
+
+
+#: The decision union: an ``accept`` member, or any of the four
+#: answer-frame members (the caller dispatches on ``outcome``; only
+#: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
+#: no-normal / no-feature replies are plain answers, never an offer).
+FillResult = (
+    _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal | _FillNoFeature
+)
 
 
 def fill_recut_region_edit(
@@ -185,7 +192,26 @@ def fill_recut_region_edit(
         versions.latest_version(project_id)
     ):
         return None
-    return _handle_fresh_trigger(versions, project_id, trigger, face_normal, part)
+    # Issue #351 (operator decision 3): the region-edit path reads the
+    # SAME stored ``hole_count`` fact the chat route gates on — NO local
+    # mesh geometry at the hit point (the pick can land on a plain face
+    # too, and the stored import-time fact is the deterministic signal).
+    # A hole-family noun with an explicit zero count gets the honest
+    # no-hole reply (no offer, no loop — before the face-normal branch,
+    # because the pick's normal is not evidence the hole exists); an
+    # unknown count keeps today's behaviour (the fresh-offer / no-normal
+    # dispatch, unchanged).
+    if (
+        trigger["noun"] in HOLE_NOUNS
+        and part_has_hole_evidence(part) is False
+    ):
+        return {
+            "kind": "answer",
+            "answer": FILL_RECUT_NO_HOLE_REPLY,
+            "run_loop": False,
+            "outcome": "no_feature",
+        }
+    return _handle_fresh_trigger(versions, project_id, trigger, face_normal)
 
 
 def _handle_live_offer(
@@ -231,21 +257,13 @@ def _handle_fresh_trigger(
     project_id: int,
     trigger: dict[str, Any],
     face_normal: tuple[float, float, float] | None,
-    part: dict[str, Any] | None = None,
 ) -> FillResult:
     """A fresh fill-and-recut trigger: with a face normal the boundary
     sentence is the answer and the offer is recorded server-side (the
     offer carries the pick's normal as its ``axis`` — operator decision
     5); without one the axis-dependent offer is impossible — the
     no-normal degradation copy (operator decision 6), no offer, no
-    loop.
-
-    Issue #351: for hole/bore/counterbore nouns on a part whose stored
-    ``part_report.hole_count`` is explicitly zero, the offer is NOT
-    stored and the honest no-hole reply is returned instead (no loop,
-    no buttons). A missing or null ``hole_count`` (legacy row) keeps
-    today's behaviour: the offer fires.
-    """
+    loop."""
     if face_normal is None:
         return {
             "kind": "answer",
@@ -253,17 +271,6 @@ def _handle_fresh_trigger(
             "run_loop": False,
             "outcome": "no_normal",
         }
-    # Issue #351 (operator decision 4): the hole gate applies only to
-    # hole/bore/counterbore nouns and reads the stored hole_count.
-    if trigger["noun"] in _HOLE_NOUNS:
-        hole_count = _stored_hole_count(part)
-        if hole_count == 0:
-            return {
-                "kind": "answer",
-                "answer": FRILL_NO_HOLE_REPLY.format(noun=trigger["noun"]),
-                "run_loop": False,
-                "outcome": "no_normal",
-            }
     axis = tuple(float(v) for v in face_normal)
     versions.set_pending_offer(
         project_id,
@@ -282,25 +289,6 @@ def _handle_fresh_trigger(
         move_direction=trigger.get("direction"),
     )
     return {"kind": "answer", "answer": sentence, "run_loop": False, "outcome": "fresh_offer"}
-
-
-def _stored_hole_count(part: dict[str, Any] | None) -> int | None:
-    """Read the stored ``hole_count`` from the part's report.
-
-    Returns the integer value when explicitly present and an int, or
-    ``None`` when the report is missing, the key is absent, or the
-    value is not an int (all treated as "unknown" — operator decision
-    2: unknown → keep today's behaviour, the offer fires).
-    """
-    if part is None:
-        return None
-    report = part.get("report")
-    if not isinstance(report, dict):
-        return None
-    value = report.get("hole_count")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return value
-    return None
 
 
 def region_edit_preroute(
