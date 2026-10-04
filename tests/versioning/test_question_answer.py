@@ -53,6 +53,8 @@ from d33d.question_answer import (
     DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
     NOT_ESTABLISHED,
+    NO_OFFER_AFFIRMATION_REPLY,
+    NO_VERSION_QUESTION_REPLY,
     UNANSWERABLE_MISSING_TEMPLATE,
     build_answer_prompt,
     deterministic_axis_answer,
@@ -577,13 +579,36 @@ class TestRouteChatMessage:
         result = run_async_safe(route_chat_message("What is the material?", latest, edge))
         assert result == {"kind": ANSWER_DONE_KIND, "answer": "It is 12 mm tall."}
 
-    def test_no_versions_returns_none(self) -> None:
-        # No version → the deterministic stage does not run (the existing
-        # early exit runs first). A non-axis question is used to make it
-        # clear the test is about the no-version path, not the
-        # deterministic stage.
-        result = run_async_safe(route_chat_message("What is the material?", None))
-        assert result is None
+    def test_no_versions_question_returns_nothing_built_reply(self) -> None:
+        # issue #349: a QUESTION with no version gets the deterministic
+        # "nothing built" reply (kind "answer"), never the design loop.
+        # Zero LLM calls (the guard runs before any stage-2 call).
+        for msg in ("How deep is it?", "How tall is it?", "What is the material?"):
+            edge_called = [False]
+
+            async def _edge(question: str, entries: list) -> str:
+                edge_called[0] = True
+                return "{}"
+
+            result = run_async_safe(route_chat_message(msg, None, _edge))
+            assert result == {
+                "kind": ANSWER_DONE_KIND,
+                "answer": NO_VERSION_QUESTION_REPLY,
+            }, msg
+            assert not edge_called[0], (
+                f"the answer edge must NOT be called for a no-version question: {msg}"
+            )
+
+    def test_no_versions_change_request_still_routes_to_loop(self) -> None:
+        # issue #349: a CHANGE REQUEST (not a question) with no version
+        # still routes to the design loop — the guard is question-shaped
+        # only. "make it taller" fails is_candidate_question (imperative
+        # cue) → None → the loop.
+        for msg in ("make it taller", "Make a 30 mm plate", "add a rib"):
+            result = run_async_safe(route_chat_message(msg, None))
+            assert result is None, (
+                f"a change request with no version must still route to the loop: {msg}"
+            )
 
     def test_non_question_returns_none(self) -> None:
         latest = _latest({"H": 12.0})
@@ -2562,9 +2587,11 @@ def test_screw_question_answer_citing_25_still_guard_failure(
     assert data["message"] == COULD_NOT_ANSWER
 
 
-def test_no_versions_goes_to_loop(app_with_versions) -> None:
-    """A fresh project (no versions) receiving a question →
-    stage 1 is skipped (no design state) → design loop, unchanged."""
+def test_no_versions_question_replies_nothing_built_no_loop(app_with_versions) -> None:
+    """issue #349: a fresh project (no versions) receiving a question →
+    the no-version guard fires → ONE done frame with kind "answer" and
+    the "nothing built" reply; the design loop is NOT called; NO version
+    is created (0 stays 0); NO version-created frame; NO LLM call."""
 
     loop_called = False
 
@@ -2588,14 +2615,68 @@ def test_no_versions_goes_to_loop(app_with_versions) -> None:
             app_with_versions,
             client,
             pid,
-            {"message": "What is the material?", "chat_history": []},
+            {"message": "How deep is it?", "chat_history": []},
             answer_reply='{"answerable": true, "answer": "It is 12 mm tall."}',
         )
-        return r, frames
+        version_count = len(
+            app_with_versions.state.versions.list_versions(pid)
+        )
+        return r, frames, loop_called, version_count
 
-    r, _frames = run_async(app_with_versions, _call)
+    r, frames, was_loop_called, version_count = run_async(app_with_versions, _call)
     assert r.status_code == 202, r.text
-    assert loop_called, "the design loop was NOT called for a fresh project"
+    assert not was_loop_called, (
+        "the design loop must NOT be called for a no-version question"
+    )
+    assert version_count == 0, (
+        f"no version may be created for a no-version question (got {version_count})"
+    )
+    # Exactly ONE frame: the terminal done frame with kind "answer".
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == ANSWER_DONE_KIND
+    assert data["message"] == NO_VERSION_QUESTION_REPLY
+    # No version-created frame (the single done frame IS the only frame).
+    assert not any(e == "progress" for e, _ in frames)
+
+
+def test_no_versions_change_request_still_starts_loop(app_with_versions) -> None:
+    """issue #349: a change request on a fresh project (no versions) still
+    starts the design loop exactly as today — the first design request on
+    an empty project creates a version."""
+
+    loop_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": "Make a 30 mm plate", "chat_history": []},
+            answer_reply='{"answerable": true, "answer": "It is 12 mm tall."}',
+        )
+        return r, loop_called
+
+    r, was_loop_called = run_async(app_with_versions, _call)
+    assert r.status_code == 202, r.text
+    assert was_loop_called, (
+        "a change request on an empty project must still start the design loop"
+    )
 
 
 def test_llm_call_timeout_constant_equals_design_loop_default() -> None:
@@ -3193,12 +3274,28 @@ class TestStage2OutcomeWarningLogs:
     def test_stage1_short_circuit_emits_no_warning(self, caplog) -> None:
         # The stage-1 short-circuits (no versions / not a candidate /
         # no answer edge) stay at INFO: zero WARNING records.
-        # Uses a non-axis question so the #263 deterministic stage does
-        # not intercept it (an axis question with no version would be
-        # "not established" via the deterministic stage, not a stage-1
-        # short-circuit).
+        # issue #349: a no-version QUESTION now gets the deterministic
+        # "nothing built" reply (INFO, no WARNING) — use a no-version
+        # CHANGE REQUEST ("make it taller") to test the no-version
+        # → None short-circuit, and the two other cases as before.
         with caplog.at_level(logging.INFO, "d33d.question_answer"):
-            assert asyncio.run(route_chat_message("What is the material?", None)) is None
+            # No-version question: deterministic reply (not None anymore).
+            result = asyncio.run(
+                route_chat_message("What is the material?", None)
+            )
+            assert result == {
+                "kind": ANSWER_DONE_KIND,
+                "answer": NO_VERSION_QUESTION_REPLY,
+            }
+            # No-version change request: still None (the guard is
+            # question-shaped only).
+            assert (
+                asyncio.run(
+                    route_chat_message("make it taller", None)
+                )
+                is None
+            )
+            # With a version, not a candidate:
             assert (
                 asyncio.run(
                     route_chat_message(
@@ -3207,6 +3304,7 @@ class TestStage2OutcomeWarningLogs:
                 )
                 is None
             )
+            # With a version, no answer edge:
             assert (
                 asyncio.run(
                     route_chat_message(
@@ -3497,14 +3595,28 @@ class TestCopyDeckParity:
         # deck reformatting and can pick up the wrong string). Both
         # directions are pinned: a backend rewrite or a deck rewrite breaks
         # the check.
-        for backend_string in (COULD_NOT_ANSWER, NOT_ESTABLISHED):
+        for backend_string in (
+            COULD_NOT_ANSWER,
+            NOT_ESTABLISHED,
+            NO_VERSION_QUESTION_REPLY,
+            NO_OFFER_AFFIRMATION_REPLY,
+        ):
             assert f'"{backend_string}"' in copy_ts, (
                 f"backend string {backend_string!r} not found in copy.ts "
                 f"(the copy.ts deck must carry it verbatim)"
             )
-        # The two strings are distinct (a failure and an unanswerable
-        # question are different honest statements).
-        assert COULD_NOT_ANSWER != NOT_ESTABLISHED
+        # The four strings are distinct (a failure, an unanswerable
+        # question, a no-version question, and a bare yes with no offer
+        # are different honest statements).
+        all_strings = (
+            COULD_NOT_ANSWER,
+            NOT_ESTABLISHED,
+            NO_VERSION_QUESTION_REPLY,
+            NO_OFFER_AFFIRMATION_REPLY,
+        )
+        assert len(set(all_strings)) == 4, (
+            "the four no-run reply strings must all be distinct"
+        )
 
     def test_unanswerable_missing_template_renders_acceptance_text(self) -> None:
         # issue #278: the parameterised template renders the exact

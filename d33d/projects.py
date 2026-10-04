@@ -34,6 +34,8 @@ from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
+from d33d.dimension_protocol import _is_clean_affirmation
+from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 from d33d.photo_upload import photo_upload_route
 from d33d.project_git import (
     init_git_repo,
@@ -124,6 +126,26 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
+
+
+def _is_bare_affirmation_no_offer(message: str) -> bool:
+    """True iff ``message`` is a CLEAN AFFIRMATION (the issue #249
+    heuristic — ``_is_clean_affirmation`` — "yes" yes; "yes but make it
+    2 mm" no) and the caller has already established that NO offer is
+    live (the #250 offer pre-route returned None AND the fill-recut
+    pre-route returned None — both ran BEFORE this check in
+    ``post_chat``, so a live offer of either kind is handled there and
+    never reaches this guard).
+
+    The predicate itself is the EXISTING clean-affirmation heuristic,
+    unchanged (operator decision 1, issue #349) — the SAME predicate
+    ``is_pending_offer_acceptance`` uses. The "no offer" condition is
+    the caller's: by the time this runs, ``_confirm_offer_route`` has
+    already returned ``None`` (no live #250 offer, a lapsed/stale offer,
+    or a non-affirmation) and ``fill_recut.fill_recut_turn`` has already
+    returned ``None`` (no live fill-recut offer for this message).
+    """
+    return _is_clean_affirmation(message)
 
 
 async def _confirm_offer_route(app: Any, project_id: int, message: str):
@@ -458,6 +480,7 @@ def create_projects_router() -> APIRouter:
             )
             raise
 
+
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
         # (the previous turn's design pass offered to confirm param P on
@@ -518,6 +541,36 @@ def create_projects_router() -> APIRouter:
                     # #265).
                     "value": mm_value_str(ack_entry),
                 },
+            )
+            return {"status": "accepted"}
+
+        # Issue #349 — the no-offer bare-affirmation guard (AFTER the
+        # #250 offer pre-route returned None, BEFORE the design loop):
+        # a CLEAN AFFIRMATION (the same ``_is_clean_affirmation``
+        # predicate the offer pre-route uses — operator decision 1,
+        # unchanged) when NO offer is live — neither a #250 param offer
+        # (``offer_route is None`` above: no pending offer, a
+        # lapsed/stale offer, a moved value, or a non-affirmation) nor
+        # a fill-recut offer (``_fill_recut is None`` above —
+        # ``fill_recut_turn`` fires on every turn with a live
+        # fill-recut offer, so its None is the "no live fill-recut
+        # offer" signal) — gets the deterministic no-run reply, never
+        # the design loop. A hedge ("yes but make it 2 mm") is not a
+        # clean affirmation and flows to the loop as today; a real
+        # change request is not clean either. The event source follows
+        # the same contract as every other no-run reply: 202, ONE done
+        # frame (``kind: "answer"``), no design run, no version, flag
+        # released by the stream drain.
+        if _is_bare_affirmation_no_offer(body.message):
+            logger.info(
+                "chat for project %s: bare affirmation with no live "
+                "offer — replying with the no-offer notice, no design "
+                "run (len(message)=%d)",
+                project_id,
+                len(body.message),
+            )
+            app.state.event_sources[project_id] = _answered_frames(
+                NO_OFFER_AFFIRMATION_REPLY
             )
             return {"status": "accepted"}
 

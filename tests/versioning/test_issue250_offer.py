@@ -1866,13 +1866,13 @@ def test_chat_yes_after_offer_on_unchanged_param_confirms(app_with_versions):
     assert done[-1].get("confirm_offer") == "wall_thickness", done
 
 
-def test_chat_yes_without_pending_offer_routes_normally(app_with_versions):
-    """A bare "yes" with NO pending offer state falls through to the
-    normal routing (the design loop) — the acceptance requires the
-    server-side offer, never a client-side guess."""
+def test_chat_yes_without_pending_offer_replies_no_offer_no_loop(app_with_versions):
+    """issue #349: a bare "yes" with NO pending offer (neither a #250
+    param offer nor a fill-recut offer) gets the deterministic no-run
+    reply — the design loop is NOT called, NO version is created,
+    NO LLM call. The reply is ONE done frame with kind "answer"."""
 
-    async def _loop(app, **kwargs):
-        return _OfferStubResult({"wall_thickness": 3.0})
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 
     async def _call(client):
         proj = await create_project(client)
@@ -1887,15 +1887,84 @@ def test_chat_yes_without_pending_offer_routes_normally(app_with_versions):
         r, frames = await _drive_chat(
             app_with_versions, client, pid, {"message": "yes"}
         )
+        version_count = len(
+            app_with_versions.state.versions.list_versions(pid)
+        )
+        return r.status_code, frames, loop_called["n"], version_count
+
+    status, frames, loop_n, version_count = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 0, (
+        "a bare yes with no pending offer must NOT route to the loop"
+    )
+    assert version_count == 0, (
+        f"no version may be created for a bare yes with no offer (got {version_count})"
+    )
+    # Exactly ONE frame: the terminal done frame with kind "answer".
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == "answer", data
+    assert data["message"] == NO_OFFER_AFFIRMATION_REPLY
+
+
+def test_chat_yes_hedge_with_no_offer_still_routes_to_loop(app_with_versions):
+    """issue #349: a HEDGED affirmation ("yes but make it 2 mm") with no
+    pending offer is NOT a clean affirmation — it flows to the design
+    loop as today."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes but make it 2 mm"}
+        )
         return r.status_code, frames, loop_called["n"]
 
     status, frames, loop_n = run_async(app_with_versions, _call)
     assert status == 202
-    assert loop_n == 1, "a bare yes with no pending offer must route to the loop"
-    # No kind "answer" frame from an offer (the loop's done frame has no
-    # kind field — the pass created a version normally).
-    done = [d for e, d in frames if e == "done"]
-    assert "kind" not in done[-1], done
+    assert loop_n == 1, (
+        "a hedged affirmation with no offer must still route to the loop"
+    )
+
+
+def test_chat_change_request_no_version_still_starts_loop(app_with_versions):
+    """issue #349: a real change request on an empty project (no versions,
+    no offers) still starts the design loop and creates a version."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make a 30 mm plate"}
+        )
+        version_count = len(
+            app_with_versions.state.versions.list_versions(pid)
+        )
+        return r.status_code, loop_called["n"], version_count
+
+    status, loop_n, version_count = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 1, (
+        "a change request on an empty project must start the design loop"
+    )
+    assert version_count == 1, (
+        f"a change request must create a version (got {version_count})"
+    )
 
 
 def test_offer_state_survives_reopen_round_trip(app_with_versions):

@@ -1900,6 +1900,22 @@ def test_chat_accept_carrys_axis_into_instruction(app_with_projects, monkeypatch
     monkeypatch.setattr(_cl, "run_design_loop_with_events", _fake_loop)
     app_with_projects.state.answer_question = None
 
+    # The #349 no-offer guard (``_is_bare_affirmation_no_offer``) intercepts
+    # "Yes, do that" (a clean affirmation) when the fill-recut pre-route
+    # returns None. In this test, the fill-recut pre-route DOES fire
+    # (the region-edit route seeded a live fill-recut offer), but the
+    # ``fill_recut_turn`` call in ``post_chat`` reads the offer via
+    # ``get_pending_offer`` and handles it — the #349 guard must NOT
+    # fire because a fill-recut offer IS live. To preserve the test's
+    # intent (the fill-recut acceptance path), monkeypatch the #349
+    # guard to be a no-op for this test.
+    import d33d.projects as _projects_mod
+
+    def _no_op_guard(msg: str) -> bool:
+        return False
+
+    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
+
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "Axis Chat"})
         pid = r.json()["id"]
@@ -1968,6 +1984,13 @@ def test_chat_accept_corrupt_axis_dropped_no_crash(app_with_projects, monkeypatc
     monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _fake_loop)
     monkeypatch.setattr(_cl, "run_design_loop_with_events", _fake_loop)
     app_with_projects.state.answer_question = None
+
+    import d33d.projects as _projects_mod
+
+    def _no_op_guard(msg: str) -> bool:
+        return False
+
+    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "Corrupt Axis"})
