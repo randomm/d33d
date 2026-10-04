@@ -611,6 +611,46 @@ class TestRouteChatMessage:
                 f"a change request with no version must still route to the loop: {msg}"
             )
 
+    # issue #349 adversarial round 1 — the priority-attack list, pinned
+    # BOTH ways: every request-shaped first message (a question-form
+    # request — an imperative verb such as make / design / get, or a
+    # noun plus dimensions — is a REQUEST, not a question about the
+    # current design) must start the loop on an empty project (result
+    # None), while the genuine no-version questions get the
+    # "nothing built" reply. The pure-function route pins the classifier
+    # itself (zero LLM calls); the route-level test below pins the wire
+    # (202 + loop called + a version created).
+    @pytest.mark.parametrize(
+        ("message", "starts_loop"),
+        [
+            ("Can you make me a 20 mm cube?", True),
+            ("Could you design a phone stand 80 mm wide?", True),
+            ("Can I get a box 60 × 40 × 30 mm?", True),
+            ("How about a hook that holds 5 kg?", True),
+            ("Would you make a cable clip for a 6 mm cable?", True),
+            ("Is it possible to make a lid for a 55 mm jar?", True),
+            ("What about a 30 mm spacer?", True),
+            ("make a cube", True),
+            ("How deep is it?", False),
+            ("How tall is it?", False),
+        ],
+    )
+    def test_no_versions_request_question_routing_pinned(self, message, starts_loop) -> None:
+        result = run_async_safe(route_chat_message(message, None))
+        if starts_loop:
+            assert result is None, (
+                f"a request phrased as a question on an empty project must "
+                f"start the design loop (no 'nothing built' intercept): {message!r}"
+            )
+        else:
+            assert result == {
+                "kind": ANSWER_DONE_KIND,
+                "answer": NO_VERSION_QUESTION_REPLY,
+            }, (
+                f"a genuine no-version question must get the nothing-built "
+                f"reply: {message!r}"
+            )
+
     def test_non_question_returns_none(self) -> None:
         latest = _latest({"H": 12.0})
         result = run_async_safe(route_chat_message("make it taller", latest))
@@ -2678,6 +2718,83 @@ def test_no_versions_change_request_still_starts_loop(app_with_versions) -> None
     assert was_loop_called, (
         "a change request on an empty project must still start the design loop"
     )
+
+
+@pytest.mark.parametrize(
+    ("message", "starts_loop"),
+    [
+        ("Can you make me a 20 mm cube?", True),
+        ("Could you design a phone stand 80 mm wide?", True),
+        ("Can I get a box 60 × 40 × 30 mm?", True),
+        ("How about a hook that holds 5 kg?", True),
+        ("Would you make a cable clip for a 6 mm cable?", True),
+        ("Is it possible to make a lid for a 55 mm jar?", True),
+        ("What about a 30 mm spacer?", True),
+        ("make a cube", True),
+        ("How deep is it?", False),
+        ("How tall is it?", False),
+    ],
+)
+def test_no_versions_request_question_routing_route_level(
+    app_with_versions, message: str, starts_loop: bool
+) -> None:
+    """issue #349 adversarial round 1 (route level): the priority-attack
+    list on a FRESH project, both directions pinned over the real
+    ``/chat`` route. Every request phrased as a question (an imperative
+    verb such as make / design / get, or a noun plus dimensions —
+    including the control "make a cube") starts the design loop (202,
+    the loop stub is called); the genuine no-version questions ("How
+    deep is it?" / "How tall is it?" — the #349 acceptance cases) get
+    the single "nothing built" done frame and the loop is NEVER called
+    (no version, 0 stays 0)."""
+
+    loop_called = False
+
+    def _loop(app, **kwargs):
+        nonlocal loop_called
+        loop_called = True
+
+        class _R:
+            status = "pass"
+            failure_reason = None
+            best = None
+
+        return _R()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        r, frames = await _drive_chat_with_answer(
+            app_with_versions,
+            client,
+            pid,
+            {"message": message, "chat_history": []},
+            answer_reply='{"answerable": true, "answer": "It is 12 mm tall."}',
+        )
+        return r, frames, loop_called
+
+    r, frames, was_loop_called = run_async(
+        app_with_versions, _call
+    )
+    assert r.status_code == 202, r.text
+    if starts_loop:
+        # The loop stub is the "a started loop" pin (the stub bypasses the
+        # adapter's version creation, as in the existing empty-project
+        # test below it):
+        assert was_loop_called, (
+            f"a request phrased as a question on an empty project must "
+            f"start the design loop: {message!r}"
+        )
+    else:
+        assert not was_loop_called, (
+            f"a genuine no-version question must NOT start the loop: {message!r}"
+        )
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert data["message"] == NO_VERSION_QUESTION_REPLY
 
 
 def test_llm_call_timeout_constant_equals_design_loop_default() -> None:

@@ -2115,6 +2115,56 @@ def test_chat_change_request_no_version_still_starts_loop(app_with_versions):
     )
 
 
+def test_chat_yes_live_fill_recut_offer_runs_loop(app_with_versions):
+    """issue #349 adversarial round 1: a bare "yes" with a LIVE
+    fill-recut offer is NOT a no-offer situation — the #349 guard must
+    respect the live offer (never fire) and the fill-recut pre-route
+    must run the design loop with the accepted fill-and-recut
+    instruction. UNPATCHED: this test does not monkeypatch
+    ``_is_bare_affirmation_no_offer`` — it pins that the guard's
+    live-offer check (the fill-recut branch of
+    ``_is_bare_affirmation_no_offer``) lets the acceptance through on
+    the real pre-route order (``fill_recut_turn`` before the #349
+    guard)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        # The fill-recut pre-route needs a PART with settled units to
+        # fire at all (the ``_set_part_columns`` pattern).
+        conn = app_with_versions.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0 "
+            "WHERE id=?",
+            (pid,),
+        )
+        conn.commit()
+        # Seed a LIVE fill-recut offer, then accept it with a bare yes.
+        svc.set_pending_offer(pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0})
+        r, _frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        return r.status_code, loop_called["n"], svc.get_pending_offer(pid)
+
+    status, loop_n, row_offer = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 1, (
+        "a bare yes with a LIVE fill-recut offer must run the design loop "
+        "(the fill-recut pre-route) — the #349 no-offer guard must respect "
+        "the live offer and never fire"
+    )
+    assert row_offer is None, "the accepted fill-recut offer must be consumed"
+
+
 def test_offer_state_survives_reopen_round_trip(app_with_versions):
     """Persistence: the pending offer (param P on version V) and
     ``confirmed_params`` survive a client-session boundary (a fresh

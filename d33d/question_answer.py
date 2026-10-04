@@ -362,6 +362,64 @@ _MULTIWORD_IMPERATIVE_RE = re.compile(
 )
 
 
+#: The design/request cues the no-version guard excludes from the
+#: "nothing built" reply (issue #349, adversarial review round 1): the
+#: STAGE-1 imperative scan alone misses request-questions whose verb is
+#: not in the change-cue set — "Could you design a phone stand 80 mm
+#: wide?" (design), "Can I get a box 60 × 40 × 30 mm?" (get), "How
+#: about a hook that holds 5 kg?" (hold), "What about a 30 mm spacer?"
+#: (noun + dimensions, no verb at all). Such a message is a request, not
+#: a question about the current design — it MUST start the loop (the
+#: ticket's dispatch rule: an imperative verb such as make, design,
+#: create, build, print, get, add; or a noun plus dimensions). The
+#: predicate is the EXISTING stage-1 cue scan (the imperative union plus
+#: the multi-word imperative forms — never widened, it has version-exists
+#: callers through :func:`is_candidate_question`) OR one of these
+#: request verbs. It is used ONLY in the no-version branch — a message
+#: with a live version routes exactly as today.
+_REQUEST_CUE_WORDS: frozenset[str] = frozenset(
+    ["design", "create", "build", "print", "get", "hold", "holds"]
+)
+_REQUEST_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_REQUEST_CUE_WORDS)) + r")\b",
+    re.IGNORECASE,
+)
+#: A "what about …?" / "how about …?" proposal — the noun-plus-dimensions
+#: request shape with no verb at all ("What about a 30 mm spacer?").
+#: Such a message proposes a design rather than asking about the current
+#: one, so the no-version guard must let it start the loop.
+_REQUEST_WHAT_ABOUT_RE = re.compile(
+    r"\b(?:what|how)\s+about\b", re.IGNORECASE
+)
+
+
+def carries_request_cue(message: str) -> bool:
+    """True iff the message carries a design/request cue: any stage-1
+    imperative cue (the :data:`_ALL_IMPERATIVE_WORDS` union scan, which
+    already includes "make"/"set"/"add"/…), any multi-word imperative
+    form ("can you make", …), one of :data:`_REQUEST_CUE_WORDS` ("design",
+    "create", "build", "print", "get", "hold"/"holds" — the request verbs
+    the stage-1 scan lacks, issue #349), or a "what about" / "how about"
+    proposal form. Used ONLY by the no-version guard: a message with any
+    such cue that the no-version branch would otherwise answer "nothing
+    built yet" is a request in question form, and it starts the design
+    loop instead. The comparison-form carve-out deliberately does NOT
+    apply here — a design never exists at this point, so a "taller than"
+    form is not a comparison and still routes to the loop (the stage-1
+    carve-out's purpose — keeping genuine comparisons answerable — is
+    moot)."""
+    m = message.strip()
+    if not m:
+        return False
+    if _IMPERATIVE_RE.search(m) is not None:
+        return True
+    if _MULTIWORD_IMPERATIVE_RE.search(m) is not None:
+        return True
+    if _REQUEST_WHAT_ABOUT_RE.search(m) is not None:
+        return True
+    return _REQUEST_CUE_RE.search(m) is not None
+
+
 def is_interrogative(message: str) -> bool:
     """True iff the message is interrogative in FORM: it ends with ``?``
     or opens with an interrogative word (what/how/which/is/are/does/do/
@@ -1631,7 +1689,14 @@ async def route_chat_message(
         # imperative cue or no interrogative form) still starts the
         # loop exactly as today, including the first design request on
         # an empty project.
-        if is_candidate_question(message):
+        # A question-shaped message carrying a request cue ("Could you
+        # design …?" / "Can I get a box …?" / "What about a 30 mm
+        # spacer?" — a noun + dimensions, no change verb) is a request
+        # in question form, not a question about the current design:
+        # it starts the loop exactly like any other first design request
+        # (issue #349 — the no-version reply is reserved for genuine
+        # questions about something that does not yet exist).
+        if is_candidate_question(message) and not carries_request_cue(message):
             logger.info(
                 "question-answer: no versions yet — replying with the "
                 "nothing-built notice (len(message)=%d)",

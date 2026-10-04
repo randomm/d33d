@@ -128,13 +128,23 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _is_bare_affirmation_no_offer(app: Any, project_id: int, message: str) -> bool:
+def _is_bare_affirmation_no_offer(
+    app: Any,
+    project_id: int,
+    message: str,
+    latest: dict[str, Any] | None = None,
+) -> bool:
     """True iff ``message`` is a CLEAN AFFIRMATION (the issue #249
     heuristic — ``_is_clean_affirmation`` — "yes" yes; "yes but make it
     2 mm" no) and NO live offer is pending (the guard checks
     ``versions.get_pending_offer`` itself — issue #349: the guard is
     self-sufficient, the caller no longer has to establish the no-offer
-    state upstream).
+    state upstream). ``latest`` is the caller's existing
+    ``latest_version`` read, passed to keep this guard's state reads at
+    exactly one (``get_pending_offer``); the caller's ``latest`` already
+    reflects this turn — the offer pre-route ran before it and neither
+    the fill-recut path nor the offer pre-route creates versions, so it
+    is the correct "is this #250 offer live" check.
 
     The predicate itself is the EXISTING clean-affirmation heuristic,
     unchanged (operator decision 1, issue #349) — the SAME predicate
@@ -152,8 +162,8 @@ def _is_bare_affirmation_no_offer(app: Any, project_id: int, message: str) -> bo
     """
     offer = app.state.versions.get_pending_offer(project_id)
     if offer is not None and offer.get("kind") != "fill_recut":
-        # The #250 param shape: live only while its version is latest.
-        latest = app.state.versions.latest_version(project_id)
+        # The #250 param shape: live only while its version is latest
+        # (the caller's read — this guard performs no second read).
         if latest is not None and latest.get("id") == offer.get("version_id"):
             return False
     elif offer is not None:
@@ -574,7 +584,14 @@ def create_projects_router() -> APIRouter:
         # the same contract as every other no-run reply: 202, ONE done
         # frame (``kind: "answer"``), no design run, no version, flag
         # released by the stream drain.
-        if _is_bare_affirmation_no_offer(app, project_id, body.message):
+        # The caller's ``latest_version`` read, passed so the guard
+        # performs exactly ONE state read (``get_pending_offer``) — a
+        # stale #250 offer (a newer version superseded it) must be
+        # treated as "no live offer", which is the same
+        # ``version_id != latest`` check the offer pre-route applies.
+        if _is_bare_affirmation_no_offer(
+            app, project_id, body.message, app.state.versions.latest_version(project_id)
+        ):
             logger.info(
                 "chat for project %s: bare affirmation with no live "
                 "offer — replying with the no-offer notice, no design "
