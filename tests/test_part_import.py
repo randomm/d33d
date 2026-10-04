@@ -633,12 +633,12 @@ def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     def _boom(mesh):
         raise RuntimeError("genus computation failed")
 
-    original = part_mesh_mod._watertight_genus
-    part_mesh_mod._watertight_genus = _boom
+    original = part_mesh_mod.watertight_genus
+    part_mesh_mod.watertight_genus = _boom
     try:
         r = _run_async(app_with_projects, _call)
     finally:
-        part_mesh_mod._watertight_genus = original
+        part_mesh_mod.watertight_genus = original
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
     # Fallback: gaps_before (4 boundary loops) alone, never None/crash.

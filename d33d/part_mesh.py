@@ -29,6 +29,8 @@ from typing import Any
 import numpy as np
 import trimesh
 
+from d33d.part_holes import watertight_genus
+
 #: The named face cap for an import (a distinct constant from
 #: ``print_validation.MAX_FACES`` — that bound belongs to the render
 #: pipeline's gate 5 and must not be conflated with the import's parse-cost
@@ -168,26 +170,6 @@ def _boundary_loops(mesh: trimesh.Trimesh) -> int:
                 if y not in seen:
                     stack.append(y)
     return n
-
-
-def _watertight_genus(mesh: trimesh.Trimesh) -> int:
-    """Total genus across the watertight connected bodies of ``mesh``.
-
-    Genus is the closed-body hole count: for a closed orientable body,
-    ``genus = (2 - euler_number) / 2`` (sphere 0, ring 1, torus-with-2 2).
-    Summed over every watertight component (``split(only_watertight=False)``
-    so a gapped remainder still contributes its closed bodies, not the whole
-    mesh as one). Cheap — an euler_number is a vertex/edge/face count, no
-    geometry passes — but the caller wraps it in a guard (any exception
-    falls back to the boundary-loop count alone, never a crash).
-    """
-    genus = 0
-    for body in mesh.split(only_watertight=False):
-        if body.is_watertight:
-            body.merge_vertices()
-            g = (2 - int(body.euler_number)) // 2
-            genus += max(0, g)
-    return genus
 
 
 def _total_faces(loaded: Any) -> int:
@@ -357,7 +339,8 @@ def parse_and_repair(
       (``pymeshfix``) CLOSES those loops before the stored mesh exists, so
       a post-repair count would read 0 for a holey part (the loops are the
       signal, not a bug to fix).
-    - ``genus`` — the total closed-body genus (``_watertight_genus``) of
+    - ``genus`` — the total closed-body genus (``watertight_genus``, from
+      ``d33d.part_holes``) of
       the PRE-REPAIR merged mesh, one per closed through-hole. A
       CAD-exported part with a real drilled through-bore is WATERTIGHT:
       0 boundary loops but genus 1. Gaps alone would count it 0 and the
@@ -448,9 +431,9 @@ def parse_and_repair(
     # call (and not from the repaired mesh — see docstring) so the repair
     # chain itself stays exactly as it is on main, single MeshFix call.
     try:
-        holes = gaps_before + _watertight_genus(merged)
+        holes = gaps_before + watertight_genus(merged)
     # A genus measurement failure must not 422 the import — the count
-    # degrades to the boundary-loop signal alone. ``_watertight_genus`` is a
+    # degrades to the boundary-loop signal alone. ``watertight_genus`` is a
     # topology read (``split`` / vertex-merge / euler_number); the failure
     # modes are numeric/topology errors on a malformed mesh (the guard's
     # job is to degrade the count, not to 422 the import over it).

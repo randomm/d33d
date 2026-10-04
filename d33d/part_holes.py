@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import trimesh
+
 #: Issue #351 (operator decision 2) — the honest no-hole reply: a
 #: hole/bore/counterbore resize request on a part the import measured to
 #: carry ZERO holes (``part_report.hole_count == 0``, the stored fact
@@ -74,8 +76,29 @@ def part_has_hole_evidence(part: dict[str, Any] | None) -> bool | None:
 HOLE_NOUNS = frozenset({"hole", "holes", "bore", "counterbore"})
 
 
+def watertight_genus(mesh: trimesh.Trimesh) -> int:
+    """Total genus across the watertight connected bodies of ``mesh``.
+
+    Genus is the closed-body hole count: for a closed orientable body,
+    ``genus = (2 - euler_number) / 2`` (sphere 0, ring 1, torus-with-2 2).
+    Summed over every watertight component (``split(only_watertight=False)``
+    so a gapped remainder still contributes its closed bodies, not the whole
+    mesh as one). Cheap — an euler_number is a vertex/edge/face count, no
+    geometry passes — but the caller wraps it in a guard (any exception
+    falls back to the boundary-loop count alone, never a crash).
+    """
+    genus = 0
+    for body in mesh.split(only_watertight=False):
+        if body.is_watertight:
+            body.merge_vertices()
+            g = (2 - int(body.euler_number)) // 2
+            genus += max(0, g)
+    return genus
+
+
 __all__ = [
     "FILL_RECUT_NO_HOLE_REPLY",
     "HOLE_NOUNS",
     "part_has_hole_evidence",
+    "watertight_genus",
 ]
