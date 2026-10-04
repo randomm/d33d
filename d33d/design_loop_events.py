@@ -40,7 +40,13 @@ from typing import Any
 
 from PIL import Image
 
-from d33d.design_loop import MODEL_UNCONFIGURED, RENDERER_IMAGE_STALE, BboxInfo
+from d33d.design_loop import (
+    MODEL_UNCONFIGURED,
+    RENDERER_IMAGE_STALE,
+    BboxInfo,
+    _bbox_target,
+    gate_comparison_extents,
+)
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -753,6 +759,27 @@ def _axis_mismatches(result: Any) -> list[dict[str, Any]] | None:
     return out or None
 
 
+def _positive_axis_map(gate_axes: Any) -> dict[str, float] | None:
+    """Normalise the gate's confirmed per-axis set to ``{str(axis): float}``
+    (positive, finite, bool-excluded), or ``None`` when it is not a
+    non-empty dict of usable entries — the shared coercion both
+    ``_carried_axes`` and ``_measured_axes`` apply (identical rule, one
+    definition)."""
+    if not isinstance(gate_axes, dict) or not gate_axes:
+        return None
+    out: dict[str, float] = {}
+    for axis, value in gate_axes.items():
+        if isinstance(value, bool):  # bool is a subclass of int — exclude
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            out[str(axis)] = f
+    return out or None
+
+
 def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     """The axes the bbox gate ENFORCED on this turn (the caller's
     per-axis set, ``{"H": 12.0, ...}`` — the carried-plus-cued effective
@@ -770,19 +797,86 @@ def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
         return None
-    if not isinstance(gate_axes, dict) or not gate_axes:
+    return _positive_axis_map(gate_axes)
+
+
+def _measured_axes(
+    result: Any,
+    gate_axes: Any,
+    part_bbox_mm: tuple[float, float, float] | None = None,
+) -> dict[str, float] | None:
+    """The extents the bbox gate ACTUALLY compared on this turn (issue
+    #367: the terminal error frame's ``measured_axes`` — the made values
+    the SPA renders beside the user's asked values in the size-mismatch
+    card), or ``None`` when the field is omitted (omit-not-null, the
+    frame policy).
+
+    Mirrors the gate's OWN selection: the gate compares against
+    ``_bbox_target`` — the user's confirmed triple, which for an import
+    project (issue #332) switches to the part's own extent
+    (``part_bbox_mm``) only when the candidate's bbox matches the part
+    within tolerance — and in that case the gate PASSES, so this field
+    never runs. This field routes the resolved target THROUGH
+    ``d33d.design_loop.gate_comparison_extents`` — the single selection
+    definition the gate itself calls — so the gate and this frame can
+    never disagree: a FULL positive (W, D, H) target with a component
+    breakdown → the BEST-MATCHING component's extents (issue #100);
+    a PARTIAL target (or no breakdown) → the whole-mesh extents.
+
+    Omitted (``None``) when: the failing gate is not the bbox gate; the
+    best candidate carries no ``BboxInfo`` (the pre-flight placeholder);
+    or the gate compared nothing (no axis confirmed — the gate abstained,
+    so it cannot fail here either) or the compared extents are
+    non-positive (a zero is the encoded absence, issue #91 — it is never
+    emitted as a measured number).
+
+    Import projects (issue #332), exactly:
+
+    - PURE import (empty stated set): ``_bbox_target`` keeps the zero
+      stated triple — a failing candidate's bbox has DIVERGED beyond
+      tolerance from the part, so the part-extent fallback never applies.
+      No axis is confirmed → the gate abstains → this field is OMITTED
+      (the SPA renders the generic card); ``carried_axes`` is empty too.
+    - MIXED import (the user stated SOME axes): the partial confirmed
+      triple makes ``gate_comparison_extents`` compare the WHOLE-MESH
+      extents, and this field carries that made (W, D, H) — with
+      ``carried_axes`` holding only the user's ask.
+    """
+    reason = getattr(result, "failure_reason", None)
+    if reason != "bbox_out_of_tolerance":
         return None
-    out: dict[str, float] = {}
-    for axis, value in gate_axes.items():
-        if isinstance(value, bool):  # bool is a subclass of int — exclude
-            continue
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            continue
-        if f > 0:
-            out[str(axis)] = f
-    return out or None
+    best = getattr(result, "best", None)
+    if best is None:
+        return None
+    bbox = getattr(best, "bbox", None)
+    if not isinstance(bbox, BboxInfo):
+        return None
+    # Normalise the user-confirmed set to a zero-filled (W, D, H) triple —
+    # the gate's own input shape (``_bbox_within_tolerance``'s contract).
+    # ``_bbox_target`` (the single shared definition) resolves the
+    # import-project target; the field carries the extents the gate
+    # actually compared, never the user's (empty) ask.
+    confirmed = _positive_axis_map(gate_axes)
+    triple = (
+        (
+            (confirmed.get("W", 0.0), confirmed.get("D", 0.0), confirmed.get("H", 0.0))
+            if confirmed is not None
+            else (0.0, 0.0, 0.0)
+        ),
+    )[0]
+    target = _bbox_target(triple, bbox, part_bbox_mm)
+    # The gate's own selection, verbatim: route the resolved target
+    # through :func:`gate_comparison_extents` — the same call the gate
+    # makes (``_bbox_within_tolerance``), the single definition of the
+    # component vs whole-mesh decision (issue #367 lens review).
+    extents = gate_comparison_extents(bbox, target)
+    if extents is None:
+        # No axis confirmed (the gate abstained — it cannot fail here
+        # either): omit, never emit a vacuous measurement.
+        return None
+    if any(e <= 0 for e in extents):
+        return None
+    return {"W": float(extents[0]), "D": float(extents[1]), "H": float(extents[2])}
 
 
 def _loop_takes_app(run_loop: Any) -> bool:
@@ -1647,6 +1741,7 @@ async def run_design_loop_with_events(
         "photo": photo,
         "chat_history": chat_history,
         "stated_dims": stated_dims,
+        "stated_axes": stated_axes,
         "render_fn": None,  # the production closure supplies render_for_design_loop
         "llm_fn": None,
         "bbox_fn": bbox_from_render,
@@ -2106,6 +2201,19 @@ async def run_design_loop_with_events(
         carried = _carried_axes(result, kwargs.get("stated_axes"))
         if carried is not None:
             error_data["carried_axes"] = carried
+        # The gate's ACTUALLY-COMPARED extents (issue #367): the made
+        # values the SPA renders beside the asked ones in the
+        # size-mismatch card (best-matching component for a full
+        # confirmed triple, whole-mesh extents for a partial set — the
+        # gate's own selection). Omitted for every other reason and
+        # when nothing was measured (omit-not-null).
+        measured = _measured_axes(
+            result,
+            kwargs.get("stated_axes"),
+            kwargs.get("part_bbox_mm"),
+        )
+        if measured is not None:
+            error_data["measured_axes"] = measured
         # The per-param mismatch detail (issue #276): one line per
         # mismatching param (label + both numbers, the server's own
         # gate evidence), so the SPA's failure turn renders the detail

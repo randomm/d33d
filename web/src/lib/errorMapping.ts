@@ -32,6 +32,19 @@
 
 import { copy } from "../copy";
 
+/** The W/D/H axis letter → sentence-case noun ("width", "depth",
+ *  "height") — the single source for the size-mismatch rows (issue
+ *  #367) and the carried-axis sentence. Note this is NOT the backend's
+ *  `AXIS_LABELS` (the x/y/z bed-letter tuple in `d33d/design_loop.py`);
+ *  it is the dimension protocol's own axis vocabulary, sentence-cased
+ *  (the escape-input's capitalised `copy.partReport.axisLabels` is a
+ *  different, display-cased form). */
+export const SIZE_AXIS_WORDS = {
+  W: "width",
+  D: "depth",
+  H: "height",
+} as const;
+
 /** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
  *  the terminal error frame's `reason` field can hold.
@@ -152,6 +165,15 @@ export interface DisplayError {
     /** 0 = X, 1 = Y, 2 = Z (the gate's dimension index). */
     axis: 0 | 1 | 2;
   };
+  /** Part 2b — the ASKED sizes: the frame's `carried_axes` (the axes the
+   *  gate enforced from the user's own statements; empty/absent for import
+   *  projects, where no axis is an ask). Drives the size-mismatch card's
+   *  "asked → made" rows (issue #367). */
+  carriedAxes?: Partial<Record<"W" | "D" | "H", number>>;
+  /** Part 2c — the MADE sizes: the frame's `measured_axes` (the extents the
+   *  bbox gate actually compared, per axis, omit-not-null; issue #367).
+   *  Absent → the size card renders only the carried/asked rows. */
+  measuredAxes?: Partial<Record<"W" | "D" | "H", number>>;
 }
 
 /** Parse the gate-7 envelope failure string produced by
@@ -235,12 +257,20 @@ export function parseEnvelopeGateDetail(
  * enforced set is non-empty gets the carried-axis sentence (the held
  * value, formatted by `mm`, in the message) instead of the generic
  * "came out a different size" — the gate holds the user's earlier
- * number, and the copy says which one and how to override it. */
+ * number, and the copy says which one and how to override it.
+ *
+ * The structured per-axis data is threaded onto the mapped error for
+ * the size-mismatch card (issue #367): `carried_axes` (the ASKED values)
+ * and `measured_axes` (the MADE values — the extents the gate actually
+ * compared) are validated (axis-letter → positive finite number) and
+ * copied through unchanged in shape; malformed shapes are dropped
+ * (absent), never rendered half-established. */
 export function displayDesignLoopError(
   data: {
     message?: string;
     reason?: unknown;
     carried_axes?: unknown;
+    measured_axes?: unknown;
     mismatches?: unknown;
     /** The model pre-flight frame's `env_var` field (issue #303): the
      *  missing variable's name, or `null` when the model did not resolve.
@@ -279,20 +309,31 @@ export function displayDesignLoopError(
     // forward merge). A bbox failure with at least one enforced axis says
     // which value was held, in the axis's own words — the value is the
     // user's own number, safe to render; `mm` decides the formatting.
-    if (reason === "bbox_out_of_tolerance" && typeof data.carried_axes === "object" && data.carried_axes !== null) {
-      const carried = data.carried_axes as Record<string, unknown>;
-      const axes: Array<[string, number]> = [
-        ["W", carried.W],
-        ["D", carried.D],
-        ["H", carried.H],
-      ]
-        .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
-        .sort((a, b) => b[1] - a[1]);
-      if (axes.length > 0) {
-        const axisLabels: Record<string, string> = { W: "width", D: "depth", H: "height" };
-        const label = axes.map(([a]) => axisLabels[a]).join(" and ");
+    let carriedAxes: DisplayError["carriedAxes"];
+    if (reason === "bbox_out_of_tolerance") {
+      const parsedCarried = parsePositiveAxes(data.carried_axes);
+      if (parsedCarried !== undefined) {
+        carriedAxes = parsedCarried;
+        const axes: Array<[string, number]> = [
+          ["W", parsedCarried.W],
+          ["D", parsedCarried.D],
+          ["H", parsedCarried.H],
+        ]
+          .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
+          .sort((a, b) => b[1] - a[1]);
+        const label = axes
+          .map(([a]) => SIZE_AXIS_WORDS[a as keyof typeof SIZE_AXIS_WORDS])
+          .join(" and ");
         message = copy.failure.bboxCarried(label, axes[0][1]);
       }
+    }
+    // The measured-axis data (issue #367): the frame's `measured_axes`
+    // carries the extents the bbox gate actually compared (the MADE side
+    // of the size card's "asked → made" rows). Validated the same way —
+    // a malformed shape is dropped, never rendered half-established.
+    let measuredAxes: DisplayError["measuredAxes"];
+    if (reason === "bbox_out_of_tolerance") {
+      measuredAxes = parsePositiveAxes(data.measured_axes);
     }
     // The axis_params_mismatch detail (issue #276): the per-param numbers
     // arrive STRUCTURED as `mismatches` (one entry per mismatching param —
@@ -367,6 +408,8 @@ export function displayDesignLoopError(
       reason,
       ...(envelope !== undefined ? { envelope } : {}),
       ...(mismatches !== undefined ? { mismatches } : {}),
+      ...(carriedAxes !== undefined ? { carriedAxes } : {}),
+      ...(measuredAxes !== undefined ? { measuredAxes } : {}),
       ...(envVar !== undefined ? { envVar } : {}),
       ...(rendererDetail !== undefined ? { rendererDetail } : {}),
     };
@@ -376,4 +419,25 @@ export function displayDesignLoopError(
     detail: rawMessage,
     retryable: true,
   };
+}
+
+/** Validate the frame's `carried_axes` / `measured_axes` field (issue
+ *  #367, omit-not-null): a well-formed object (axis-letter W/D/H →
+ *  positive finite number) is returned with only the well-formed entries;
+ *  anything else (absent, non-object, no usable entries) is `undefined` —
+ *  a number that is not established is not rendered. */
+function parsePositiveAxes(
+  raw: unknown,
+): DisplayError["carriedAxes"] | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const entry = raw as Record<string, unknown>;
+  const out: DisplayError["carriedAxes"] = {};
+  for (const axis of ["W", "D", "H"] as const) {
+    const v = entry[axis];
+    if (typeof v === "number" && Number.isFinite(v) && v > 0) {
+      out[axis] = v;
+    }
+  }
+  if (out.W === undefined && out.D === undefined && out.H === undefined) return undefined;
+  return out;
 }

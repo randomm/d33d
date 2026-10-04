@@ -43,6 +43,57 @@ def test_seam_d_schema_passes_for_recorded_fixture():
     assert validate_frames_stream(frames)
 
 
+def test_seam_d_schema_fails_on_null_measured_axes():
+    """Omit-not-null: an error frame with ``measured_axes=None`` fails —
+    the adapter's contract is to OMIT the field, never emit a null."""
+    with pytest.raises(SeamError) as exc:
+        validate_frame(
+            (
+                "error",
+                {
+                    "message": "Design loop exhausted: bbox_out_of_tolerance",
+                    "reason": "bbox_out_of_tolerance",
+                    "measured_axes": None,
+                },
+            )
+        )
+    assert "measured_axes" in str(exc.value)
+    assert "null" in str(exc.value)
+
+
+def test_seam_d_schema_fails_on_zero_measured_axes_entry():
+    """A zero extent is the encoded absence (issue #91): it is never
+    emitted as a measured number — a zero entry in ``measured_axes``
+    fails the schema (positive finite numbers only)."""
+    with pytest.raises(SeamError) as exc:
+        validate_frame(
+            (
+                "error",
+                {
+                    "message": "Design loop exhausted: bbox_out_of_tolerance",
+                    "reason": "bbox_out_of_tolerance",
+                    "measured_axes": {"W": 0.0, "D": 45.0, "H": 30.0},
+                },
+            )
+        )
+    assert "measured_axes" in str(exc.value)
+
+
+def test_seam_d_schema_passes_with_measured_axes():
+    """A valid ``measured_axes`` map (axis letter → positive number) on a
+    bbox-gate error frame passes the schema."""
+    validate_frame(
+        (
+            "error",
+            {
+                "message": "Design loop exhausted: bbox_out_of_tolerance",
+                "reason": "bbox_out_of_tolerance",
+                "measured_axes": {"W": 66.0, "D": 45.0, "H": 30.0},
+            },
+        )
+    )
+
+
 def test_seam_d_schema_fails_on_bad_kind():
     """A frame kind outside the closed four-set fails — the schema names
     the offending kind."""

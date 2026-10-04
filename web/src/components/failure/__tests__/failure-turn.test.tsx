@@ -248,10 +248,39 @@ describe("FailureTurn", () => {
     expect((details as HTMLDetailsElement).open).toBe(true);
   });
 
+  it("a bbox_out_of_tolerance frame with no gate7 string and no envelope renders the generic card (issue #367, operator decision 2b)", () => {
+    // The reason-only shape: detail is the plain reason code (no gate7/
+    // envelope string), and the envelope field is absent. Under the new
+    // card-selection rule (isEnvelope = error.envelope !== undefined),
+    // this is NOT the bed card — it's the generic failure card with the
+    // existing reason sentence and no rows (rule 2b).
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    // The headline is the generic reason sentence, not the bed headline.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toBe(
+      copy.failure.reasons.bbox_out_of_tolerance,
+    );
+    // No bed card artifacts: no bars, no size rows, no bed actions.
+    expect(container.querySelector("[data-testid='failure-turn-bars']")).toBeNull();
+    expect(container.querySelector("[data-testid='failure-turn-size-rows']")).toBeNull();
+    expect(screen.queryByTestId("failure-action-split")).toBeNull();
+    expect(screen.queryByTestId("failure-action-scale")).toBeNull();
+    expect(screen.queryByTestId("failure-action-bigger")).toBeNull();
+    // The generic retry action is offered (retryable).
+    expect(screen.getByTestId("failure-action-retry")).toBeTruthy();
+  });
+
   it("the envelope actions prefill the composer (part 3)", () => {
     const error: DisplayError = {
       message: copy.failure.envelope.headline,
-      detail: "bbox_out_of_tolerance",
+      detail: "bbox_out_of_tolerance: gate7/envelope: dimension 0 (380.0mm) exceeds envelope 320.0mm",
       retryable: true,
       reason: "bbox_out_of_tolerance",
       envelope: { measured: 380, limit: 320, axis: 0 },
@@ -507,5 +536,227 @@ describe("FailureTurn", () => {
     expect(first.container.innerHTML).toBe(second.container.innerHTML);
     // And there is no attempt counting anywhere in the rendered turn.
     expect(first.container.textContent).not.toMatch(/2nd|second|again.*twice|twice/i);
+  });
+
+  // ── Issue #367: the size-mismatch card ──────────────────────────────
+
+  it("a stated-size frame (no gate7 string, carried+measured axes) renders the size card with asked → made rows and NO bed artifacts (issue #367)", () => {
+    // The QA 60mm-tray/66mm-made shape: carried_axes {W: 60},
+    // measured_axes {W: 66, D: 42, H: 12}. No gate7/envelope string
+    // in the message — this is the stated-size gate, not the bed gate.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 66, D: 42, H: 12 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    // The headline is the reason sentence, not the bed headline.
+    expect(screen.getByTestId("failure-turn-sentence").textContent).toBe(
+      copy.failure.reasons.bbox_out_of_tolerance,
+    );
+    // The size card rows render: W (asked→made), D (made only), H (made only).
+    const rows = container.querySelectorAll("[data-testid^='failure-turn-size-row-']");
+    expect(rows.length).toBe(3);
+    // W: asked 60 → made 66
+    expect((container.querySelector("[data-testid='failure-turn-size-row-W']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.row("width", 60, 66),
+    );
+    // D: made only (no asked value for D)
+    expect((container.querySelector("[data-testid='failure-turn-size-row-D']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.madeOnly("depth", 42),
+    );
+    // H: made only (no asked value for H)
+    expect((container.querySelector("[data-testid='failure-turn-size-row-H']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.madeOnly("height", 12),
+    );
+    // NO bed card artifacts: no bars, no bed actions.
+    expect(container.querySelector("[data-testid='failure-turn-bars']")).toBeNull();
+    expect(screen.queryByTestId("failure-action-split")).toBeNull();
+    expect(screen.queryByTestId("failure-action-scale")).toBeNull();
+    expect(screen.queryByTestId("failure-action-bigger")).toBeNull();
+  });
+
+  it("a stated-size frame with carried_axes but no measured_axes shows the not-established phrase rows (issue #367)", () => {
+    // The user asked for W=60 but no measurement was made (bbox absent
+    // or pre-flight). The row shows the not-established phrase, never a
+    // number.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    const wRow = container.querySelector("[data-testid='failure-turn-size-row-W']");
+    expect(wRow).not.toBeNull();
+    expect((wRow as HTMLElement).textContent).toBe(
+      copy.failure.envelope.axisNotMeasured("width"),
+    );
+    // No made-only rows for D/H (no data at all).
+    expect(container.querySelector("[data-testid='failure-turn-size-row-D']")).toBeNull();
+    expect(container.querySelector("[data-testid='failure-turn-size-row-H']")).toBeNull();
+  });
+
+  it("a measured_axes-only frame (no carried_axes) renders made-only rows with no asked label (issue #367)", () => {
+    // Defensive coverage for a frame carrying measured_axes WITHOUT
+    // carried_axes. Note: the real backend does NOT emit this exact
+    // shape for import projects — `_measured_axes` omits the field
+    // whenever the confirmed set is empty (issue #332), so import
+    // projects render the generic card. This pins the made-only row
+    // shape any future frame shape could reach.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      measuredAxes: { W: 45, D: 30, H: 15 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    expect((container.querySelector("[data-testid='failure-turn-size-row-W']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.madeOnly("width", 45),
+    );
+    expect((container.querySelector("[data-testid='failure-turn-size-row-D']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.madeOnly("depth", 30),
+    );
+    expect((container.querySelector("[data-testid='failure-turn-size-row-H']") as HTMLElement).textContent).toBe(
+      copy.failure.sizeMismatch.madeOnly("height", 15),
+    );
+  });
+
+  it("the follow-up question renders for the first axis with both asked and made (issue #367, operator decision 3)", () => {
+    // W: asked 60, made 66 — the first axis with both values. The frame's
+    // bbox_out_of_tolerance reason already establishes that some confirmed
+    // axis exceeded the gate tolerance, so the SPA asks which measurement
+    // the stated number refers to.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 66 },
+    };
+    const onAction = vi.fn();
+    render(<FailureTurn error={error} inFlight={false} onAction={onAction} />);
+    const btn = screen.getByTestId("failure-action-which-measurement");
+    expect(btn).toBeTruthy();
+    expect(btn.textContent).toBe(
+      copy.failure.sizeMismatch.whichMeasurement(60, "width"),
+    );
+    // Clicking prefills the composer via onAction.
+    fireEvent.click(btn);
+    expect(onAction).toHaveBeenCalledWith(
+      copy.failure.sizeMismatch.whichMeasurement(60, "width"),
+    );
+    // No bed actions.
+    expect(screen.queryByTestId("failure-action-split")).toBeNull();
+  });
+
+  it("no follow-up when only made is present (no asked value to compare) (issue #367)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      measuredAxes: { W: 66 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+  });
+
+  it("no follow-up when the first with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
+    // OD3: the follow-up fires only for the first W/D/H axis that has BOTH
+    // an asked and a made value AND differs beyond the gate tolerance
+    // max(1%, 0.5 mm). Here W is within tolerance (60 asked / 60.5 made,
+    // diff 0.5 <= max(0.6, 0.5)=0.6) while D diverges (40 asked / 44 made,
+    // diff 4 > max(0.4, 0.5)=0.5). The follow-up must name D, NOT W.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60, D: 40 },
+      measuredAxes: { W: 60.5, D: 44 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    const btn = screen.getByTestId("failure-action-which-measurement");
+    // W (diff 0.5) is within tolerance -> skipped; D (diff 4) is beyond.
+    expect(btn.textContent).toBe(
+      copy.failure.sizeMismatch.whichMeasurement(40, "depth"),
+    );
+  });
+
+  it("no follow-up when every with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
+    // OD3: "if no axis qualifies, no follow-up." W is within tolerance
+    // (diff 0.5 <= max(0.6,0.5)); D has a made value but no asked value, so
+    // it can't qualify. No axis has both values beyond tolerance -> no
+    // follow-up is offered.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 60.5, D: 44 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+  });
+
+  it("the size card uses --color-blocked, not #FF3300 (issue #367)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 66 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    const row = container.querySelector("[data-testid='failure-turn-size-row-W']");
+    expect(row).not.toBeNull();
+    // The row uses the blocked colour (var(--color-blocked) = #D2A63C).
+    // We verify the class is present (the CSS handles the colour).
+    expect((row as HTMLElement).className).toContain("failure-turn-size-row");
+    // #FF3300 must never appear in the size card's DOM.
+    expect(container.innerHTML).not.toContain("#FF3300");
+    expect(container.innerHTML).not.toContain("#ff3300");
+  });
+
+  it("a gate7-string frame still shows the bed card (issue #367 regression guard)", () => {
+    // A genuine envelope-gate failure (a 664 mm model on a 320 mm bed)
+    // carries the gate7/envelope string in the message — displayDesignLoopError
+    // attaches `envelope`, so the bed card renders (not the size card).
+    const error: DisplayError = {
+      message: copy.failure.envelope.headline,
+      detail: "bbox_out_of_tolerance: gate7/envelope: dimension 0 (664.0mm) exceeds envelope 320.0mm",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      envelope: { measured: 664, limit: 320, axis: 0 },
+      carriedAxes: { W: 664 },
+      measuredAxes: { W: 664 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} envelope={ENVELOPE} inFlight={false} onAction={vi.fn()} />,
+    );
+    // Bed card artifacts present.
+    expect(container.querySelector("[data-testid='failure-turn-bars']")).not.toBeNull();
+    expect(screen.getByTestId("failure-action-split")).toBeTruthy();
+    expect(screen.getByTestId("failure-action-scale")).toBeTruthy();
+    expect(screen.getByTestId("failure-action-bigger")).toBeTruthy();
+    // Size card rows absent.
+    expect(container.querySelector("[data-testid='failure-turn-size-rows']")).toBeNull();
   });
 });

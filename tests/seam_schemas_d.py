@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
 from typing import Any
 
 from tests.seam_schemas import SeamError
@@ -207,6 +208,28 @@ def validate_frame(frame: tuple[Any, Any]) -> tuple[str, dict[str, Any]]:
         for axis, value in axes.items():
             if not isinstance(axis, str) or not (isinstance(value, (int, float)) and not isinstance(value, bool)):
                 raise SeamError("D", "error frame 'carried_axes' entry is not axis-letter → number")
+    # The gate's actually-compared extents (issue #367): present only on
+    # a bbox-gate failure (omit-not-null, like ``carried_axes``); a map of
+    # axis letter → POSITIVE finite number (a zero is the encoded absence,
+    # issue #91 — it is never emitted as a measured number).
+    if "measured_axes" in data:
+        if data["measured_axes"] is None:
+            raise SeamError(
+                "D", "error frame 'measured_axes' is null — the omit policy omits it, never emits null"
+            )
+        axes = data["measured_axes"]
+        if not isinstance(axes, dict) or not axes:
+            raise SeamError("D", "error frame 'measured_axes' present but not a non-empty dict")
+        for axis, value in axes.items():
+            if not isinstance(axis, str) or not (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value > 0
+                and math.isfinite(value)
+            ):
+                raise SeamError(
+                    "D", "error frame 'measured_axes' entry is not axis-letter → positive finite number"
+                )
     return frame
 
 

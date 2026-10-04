@@ -458,6 +458,29 @@ export const failure = {
   /** The card points at the canvas so the two halves read as one thing. */
   seeItOnThePlate: "It's on the plate to your left, with the overhang picked out.",
 
+  /** The size-mismatch card (issue #367): rendered when a
+   *  `bbox_out_of_tolerance` frame does NOT carry the gate-7 envelope
+   *  string (the stated-size gate, not the build-plate gate). One mono
+   *  row per axis — "asked → made". The axis word is the noun form
+   *  ("width", "depth", "height"). */
+  sizeMismatch: {
+    /** The per-axis row: asked → made, both mm-formatted. */
+    row: (axisWord: string, askedMm: number, madeMm: number): string =>
+      `${axisWord}: ${mm(askedMm)} → ${mm(madeMm)}`,
+    /** The per-axis row when only the made value is established
+     *  (import projects, or an axis the user never stated). */
+    madeOnly: (axisWord: string, madeMm: number): string =>
+      `${axisWord}: ${mm(madeMm)}`,
+    /** The follow-up question (operator decision 3): at most ONE per
+     *  card, the first axis in W/D/H order that has both an asked and a
+     *  made value (the backend's gate failure already establishes that
+     *  some confirmed axis was beyond tolerance — the SPA does not
+     *  re-derive it). Asks which measurement the stated number refers
+     *  to. */
+    whichMeasurement: (askedMm: number, axisWord: string): string =>
+      `Is ${mm(askedMm)} the ${axisWord} of the part itself, or the overall size including any lip or flange?`,
+  },
+
   /** Part 3 — the retry action for a failure with no dedicated action
    *  set: a concrete, sendable line. */
   retryAction: "Try again",
