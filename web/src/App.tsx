@@ -1105,11 +1105,18 @@ export default function App({ client }: AppProps) {
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
 
-      // Set the in-flight flag (disables the send button) BEFORE the
-      // postChat call — the design loop runs in a background task and the
-      // flag must be set synchronously to prevent a second send from
-      // racing the first.
-      setDesignLoopInFlight(true);
+      // Issue #349: the in-flight indicator is DEFERRED until the first
+      // design-loop progress frame (the `design-loop-start` step) — a
+      // no-loop reply (a no-version question, a bare affirmation with no
+      // pending offer) resolves through a `kind: "answer"` done frame with
+      // no progress frame at all, so the flag stays false for those: no
+      // "Generating design…" stage and no pending filmstrip slot ever
+      // render. The race guard this comment used to justify is preserved:
+      // the stream is opened only inside the postChat `.then`, and
+      // `streamEvents` returns without resolving until the stream drains,
+      // so the `finally` flag release (and the flag set below) happen
+      // after the previous stream has finished — a second send cannot
+      // race the first.
 
       // Collect the last 10 user messages for chat_history (the SPA
       // in-memory state — the transcripts table is NOT populated by this
@@ -1151,6 +1158,15 @@ export default function App({ client }: AppProps) {
               // an identical value is a no-op state update (React bails out),
               // so repeated steps do not reset the elapsed timer or flicker.
               if (typeof step === "string") setDesignLoopStep(step);
+              // Issue #349: the FIRST design-loop progress frame is the
+              // moment the indicator and pending slot may appear — a no-loop
+              // reply (kind "answer") never reaches here, so its indicator
+              // never renders. (A done frame that arrives without any progress
+              // frame — an ack / offer / no-loop answer — clears the flag in
+              // onDone below.)
+              if (step === "design-loop-start" || step === "design-loop-pass") {
+                setDesignLoopInFlight(true);
+              }
               // Issue #118: the per-view frames (render-view-start /
               // render-view-done, each carrying `view` + `iteration`) drive
               // the honest counter. Only those steps reach the reducer
@@ -1239,6 +1255,14 @@ export default function App({ client }: AppProps) {
               // the one-shot offer is over) — so the map no longer early-
               // returns, it clears pending offers on the non-placeholder
               // messages and applies the placeholder's update as before.
+              // Issue #349: a done frame that arrived with NO design-loop
+              // progress frame is a no-loop reply (an ack, an offer, the
+              // no-version / no-offer answers) — release the indicator BEFORE
+              // this frame renders so neither "Generating design…" nor the
+              // pending history slot shows. A real design run always emits
+              // `design-loop-start` first (which set the flag above), so
+              // those clear in the `.finally` below. Idempotent.
+              setDesignLoopInFlight(false);
               setMessages((prev) =>
                 prev.map((m) => {
                   if (m.id !== assistantId) {
