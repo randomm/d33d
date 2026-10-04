@@ -34,17 +34,19 @@ EXCLUDED_SUFFIXES = {".pyc", ".pyo", ".png", ".jpg", ".jpeg", ".gif", ".webp", "
 # one) only trip when they stand alone; the spaced forms are literal
 # substrings.
 SUPPRESSION_RE = re.compile(
-    r"\bnoqa\b|\bts-ignore\b"
+    r"\bnoqa\b|\bts-expect-error\b|\bts-ignore\b"
     r"|type:\s*ignore"
     r"|eslint-disable"
     r"|biome-ignore"
 )
 
-# Measured with the same scan as this test at the pre-#354 baseline commit
-# (worktree state at the issue's baseline): 54 lines across 25 files.
-# Ratchet: lower this as suppressions are removed opportunistically; never
-# raise it without re-measuring and an explicit operator decision.
-BASELINE = 54
+# The consolidated #354 branch measured at the commit that removed the two
+# conftest ``# noqa: F401`` lines (workstream a) and dropped the redundant
+# per-category ratchet of workstream a in favour of this single five-token
+# total: 52 lines across 25 files. Ratchet: lower this as suppressions are
+# removed opportunistically; never raise it without re-measuring and an
+# explicit operator decision.
+BASELINE = 52
 
 SELF = Path(__file__).resolve()
 

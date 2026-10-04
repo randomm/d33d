@@ -85,12 +85,13 @@ All checks must pass locally before push:
 ## Zero technical debt (ratchet)
 
 Suppression markers (`# noqa`, `# type: ignore`, `@ts-ignore`,
-`eslint-disable`, `biome-ignore`) are ratcheted, not banned:
+`@ts-expect-error`, `eslint-disable`, `biome-ignore`) are ratcheted, not
+banned:
 
 - ❌ No NEW suppressions — `tests/fast/test_suppression_ratchet.py` (CI,
   fast suite) fails if the count of suppressed lines across `d33d/`,
   `tests/` and `web/src/` rises above the recorded baseline (currently
-  54).
+  52).
 - ✅ Existing suppressions are removed opportunistically; when one is
   removed, lower the baseline in the ratchet test so the guard ratchets
   down and never up.
