@@ -1796,7 +1796,11 @@ def _build_production_design_loop():
     ``asyncio.run``-nested inside the already-running event loop, which
     ``asyncio.run`` forbids with ``RuntimeError``.
     """
-    from d33d.config.catalogue import CatalogueError, MissingEnvVarError, load_catalogue
+    from d33d.config.catalogue import (
+        CatalogueError,
+        MissingEnvVarError,
+        load_catalogue,
+    )
     from d33d.config.preflight import model_preflight_loaded
     from d33d.config.probes import probe_capabilities
     from d33d.config.resolve import resolve_model
@@ -1808,6 +1812,7 @@ def _build_production_design_loop():
     )
     from d33d.evals.failure_capture import default_run_design_loop_hook
     from d33d.prompt_hash import canonical_hash
+    from d33d.request_logging import make_logged_llm_fn
 
     def _model_unconfigured_result(env_var: str | None) -> DesignResult:
         # The pre-flight's not-ok terminal: an exhausted result carrying
@@ -1936,6 +1941,11 @@ def _build_production_design_loop():
             {"design": factory, "critique": factory},
             {"design": capability, "critique": capability},
         )
+        # request_logs wrapper (issue #355) — see d33d/request_logging.
+        _logged_llm_fn = make_logged_llm_fn(
+            llm_fn, app_state, cat, kwargs.get("project_id")
+        )
+
         # The user's CURRENT request text (issue #97: forwarded verbatim to
         # the loop via the hook — the loop renders it as the first line of
         # the design prompt). The historical ``chat_history`` fallback is
@@ -1963,7 +1973,7 @@ def _build_production_design_loop():
             if kwargs.get("stated_dims") is not None
             else (0.0, 0.0, 0.0),
             render_fn=_render_fn,
-            llm_fn=llm_fn,
+            llm_fn=_logged_llm_fn,
             bbox_fn=bbox_fn,
             request=request,
             image_check=getattr(app_state, "image_check", None),

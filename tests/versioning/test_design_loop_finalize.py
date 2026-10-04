@@ -6434,3 +6434,618 @@ def test_production_closure_unset_env_var_rides_the_result(
         "ride the exhausted result"
     )
     assert llm.calls == 0
+
+
+# ---------------------------------------------------------------------------
+# Issue #355 — the production design closure's request_logs wrapper
+# ---------------------------------------------------------------------------
+
+
+def _write_request_logs_yaml(tmp_path: Path, key_env: str = "SK_355_KEY") -> Path:
+    p = tmp_path / "models355.yaml"
+    p.write_text(
+        "providers:\n"
+        "  p:\n"
+        "    base: http://stub\n"
+        f"    key: ${{{key_env}}}\n"
+        "models:\n"
+        "  - id: dm\n"
+        "    provider: p\n"
+        "    model: stub/design\n"
+        "  - id: cm\n"
+        "    provider: p\n"
+        "    model: stub/critique\n"
+        "roles:\n"
+        "  design: dm\n"
+        "  critique: cm\n"
+        "  classification: dm\n"
+    )
+    return p
+
+
+async def _fake_probe_noop(*a, **kw):
+    return None
+
+
+_KEY_SENTINEL = "SK-355-TEST-KEY"
+
+
+def _stub_production_closure_deps(monkeypatch, app, tmp_path: Path, llm):
+    """Wire the real production closure's stub deps (issue #355 tests).
+
+    The catalogue is a REAL file (pointed at by ``app.state.catalogue_path``
+    — no monkeypatch of ``load_catalogue`` / ``resolve_model``: the real
+    load is exactly the path under test, and the wrapper's own
+    ``resolve_model`` call resolves the per-role models); the probe is a
+    no-op and ``make_llm_fn`` returns the injected ``llm`` stub. The real
+    ``run_design_loop_async`` runs (renderer check stubbed ok, llm and
+    render stubbed by the test), so the wrapper is on the live path.
+    """
+    from d33d import design_loop as _dl_mod
+    from d33d.config import probes as _probes_mod
+
+    monkeypatch.setenv("SK_355_KEY", _KEY_SENTINEL)
+    p = _write_request_logs_yaml(tmp_path)
+    app.state.catalogue_path = p
+    monkeypatch.setattr(_probes_mod, "probe_capabilities", _fake_probe_noop)
+    monkeypatch.setattr(_dl_mod, "make_llm_fn", lambda cat, f, c: llm)
+    monkeypatch.setattr(_dl_mod, "renderer_is_available", lambda: True)
+    monkeypatch.setattr(_dl_mod, "default_image_check", lambda: None)
+    return p
+
+
+# The SCAD tool-calls channel (the T0 protocol): the loop's
+# ``_scad_from_result`` extracts the SCAD verbatim — no content-fence
+# heuristics, no real OpenSCAD compile (the render is stubbed via the
+# test's ``render_fn``).
+_SCAD_TCS = ({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},)
+
+
+def _make_llm(
+    *,
+    prompt_hash: str,
+    usage: dict[str, int] | None = None,
+    status: str = "ok",
+):
+    from d33d.design_llm import LLMResult
+
+    class _LLM:
+        async def __call__(self, role, messages, system):
+            return LLMResult(
+                content="",
+                tool_calls=_SCAD_TCS,
+                prompt_hash=prompt_hash,
+                tier="t0",
+                status=status,
+                request_body={},
+                usage=usage if usage is not None else {},
+            )
+
+    return _LLM()
+
+
+def _ok_render() -> RenderResult:
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=0,
+        error_class="ok",
+        stderr="",
+        stl=None,
+        csg=None,
+        views=("v",) * 6,
+    )
+
+
+def test_design_path_llm_calls_write_one_request_log_row_each(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A production-closure run with N llm_fn invocations writes exactly N
+    rows to request_logs — each with role='design', the result's
+    prompt_hash, status from result.status, the design role's resolved
+    model fields, and the project_id the closure received in kwargs."""
+    from d33d.app import _build_production_design_loop
+    from d33d.design_llm import LLMResult
+
+    class _LLM:
+        n = 0
+
+        async def __call__(self, role, messages, system):
+            # Async stub: the wrapper awaits the callable's result, and
+            # the loop's ``_call`` awaits coroutine results too — so
+            # ``__call__`` is ``async`` and returns the ``LLMResult``.
+            _LLM.n += 1
+            if _LLM.n >= 2:
+                return LLMResult(
+                    content="",
+                    tool_calls=_SCAD_TCS,
+                    prompt_hash="h" * 64,
+                    tier="t0",
+                    status="ok",
+                    request_body={},
+                    usage={"prompt_tokens": 10, "completion_tokens": 5},
+                )
+            # No tool calls — blank SCAD, fail-fast.
+            return LLMResult(
+                content="",
+                tool_calls=(),
+                prompt_hash="x" * 64,
+                tier="t0",
+                status="ok",
+                request_body={},
+                usage={},
+            )
+
+    llm = _LLM()
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    run_async(app_with_versions, _call)
+    n = _LLM.n
+    assert n >= 2, f"expected at least 2 LLM calls, got {n}"
+    from d33d.db import connect as _connect355
+
+    _reader = _connect355(app_with_versions.state.db_path)
+    rows = _reader._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert len(rows) == n, f"expected {n} rows, got {len(rows)}: {rows}"
+    assert rows[0]["prompt_hash"] == "x" * 64
+    assert rows[1]["prompt_hash"] == "h" * 64
+    assert rows[-1]["prompt_hash"] == "h" * 64
+    for row in rows:
+        assert row["model_alias"] == "dm"
+        assert row["model_id"] == "stub/design"
+        assert row["provider"] == "p"
+        assert row["status"] == "ok"
+        assert row["project_id"] == 1
+    assert rows[0]["prompt_tokens"] == 0  # usage absent -> 0
+    assert rows[1]["prompt_tokens"] == 10
+    assert rows[1]["completion_tokens"] == 5
+    assert isinstance(rows[1]["latency_ms"], int)
+
+
+def test_design_path_sender_error_row_and_reraise(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A ``SenderError(status='no_tools_supported')`` from llm_fn writes a
+    row with status='no_tools_supported', prompt_hash='', tokens 0 — then
+    re-raises (the loop's behaviour on the error is unchanged)."""
+    from d33d.app import _build_production_design_loop
+    from d33d.design_llm import SenderError
+
+    class _LLM:
+        async def __call__(self, role, messages, system):
+            raise SenderError("no tool channel", status="no_tools_supported")
+
+    llm = _LLM()
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        try:
+            return await closure(
+                app=app_with_versions,
+                project_id=pid,
+                photo="data:image/png;base64,x",
+                stated_dims=(10.0, 10.0, 10.0),
+                render_fn=lambda scad, defines: _ok_render(),
+                request="make a box",
+            )
+        except SenderError:
+            return "raised"
+
+    outcome = run_async(app_with_versions, _call)
+    assert outcome == "raised"
+    from d33d.db import connect as _connect355
+
+    _reader = _connect355(app_with_versions.state.db_path)
+    rows = _reader._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert len(rows) == 1, f"expected 1 row, got {len(rows)}: {rows}"
+    row = rows[0]
+    assert row["status"] == "no_tools_supported"
+    assert row["prompt_hash"] == ""
+    assert row["prompt_tokens"] == 0
+    assert row["completion_tokens"] == 0
+    assert row["model_alias"] == "dm"
+    assert row["provider"] == "p"
+
+
+def test_design_path_write_uses_new_connection_not_app_state_conn(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """The finalize path (the thread that created ``app.state.conn``) still
+    writes through a NEW short-lived connection — ``app.state.conn`` is
+    never touched (operator decision 3: ALWAYS a short-lived
+    ``db.connect(db_path)`` handle). Proven by closing
+    ``app.state.conn`` before the loop runs: the row is written anyway."""
+    from d33d.app import _build_production_design_loop
+    from d33d.db import connect as _connect355
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+
+    # The app's own handle is seeded (the fresh app has none) and closed —
+    # a writer that touched ``app.state.conn`` would raise
+    # ``sqlite3.ProgrammingError`` (closed handle) and its warning would
+    # swallow the row.
+    _app_conn = _connect355(app_with_versions.state.db_path)
+    _app_conn.close()
+    app_with_versions.state.conn = _app_conn
+
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    run_async(app_with_versions, _call)
+    _reader = _connect355(app_with_versions.state.db_path)
+    rows = _reader._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert len(rows) >= 1, (
+        "row missing — the write must go through a NEW short-lived "
+        f"connection, not the closed app.state.conn: {rows}"
+    )
+    assert rows[0]["prompt_hash"] == "h" * 64
+
+
+def test_design_path_log_write_failure_warns_without_failing_loop(
+    app_with_versions, tmp_path, monkeypatch, caplog
+) -> None:
+    """A failing request_logs write (simulated DB failure) is caught and
+    logged as a warning — the loop's return value is unchanged."""
+    import logging as _logging
+
+    import d33d.db as db_mod
+    from d33d.app import _build_production_design_loop
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+
+    real_connect = db_mod.connect
+
+    def _raising_connect(path):
+        conn = real_connect(path)
+
+        def _raise_log_request(*a, **kw):
+            raise RuntimeError("db failure")
+
+        conn.log_request = _raise_log_request  # type: ignore[assignment]
+        return conn
+
+    monkeypatch.setattr(db_mod, "connect", _raising_connect)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    with caplog.at_level(_logging.WARNING):
+        result = run_async(app_with_versions, _call)
+    # The loop itself is UNCHANGED by the logging failure (the write is
+    # the only thing that failed): it ran normally and returned whatever
+    # the gate decided (pass or exhausted — either way, no crash).
+    assert result.status in ("pass", "exhausted")
+    warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    write_warns = [r for r in warns if "failed to write row" in r.getMessage()]
+    assert write_warns, (
+        f"expected a failed-write request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    # The exception text rides the warning (``exc_info=True`` — the
+    # traceback lands in ``LogRecord.exc_text``, not the message).
+    assert any(
+        r.exc_text and "db failure" in r.exc_text for r in write_warns
+    ), (
+        "expected the write-failure exception text in the warning "
+        "(exc_info=True)"
+    )
+
+
+def test_design_path_row_never_contains_provider_key(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A sentinel provider key in the resolved model's provider appears in
+    NO column of any written request_logs row."""
+    from d33d.app import _build_production_design_loop
+
+    sentinel = _KEY_SENTINEL
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    run_async(app_with_versions, _call)
+    from d33d.db import connect as _connect355
+
+    _reader = _connect355(app_with_versions.state.db_path)
+    rows = _reader._conn.execute(
+        "SELECT * FROM request_logs"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert rows, "expected at least one request_logs row"
+    for row in rows:
+        for value in row.values():
+            assert value is None or sentinel not in str(value), (
+                f"provider key leaked into request_logs row: {row}"
+            )
+
+
+def test_design_path_write_from_non_main_thread_succeeds(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """A row written from a non-main thread succeeds — the wrapper's
+    short-lived-connection write is thread-safe (``app.state.conn``, bound
+    to the main thread, is NOT used for the cross-thread write)."""
+    from d33d.app import _build_production_design_loop
+    from d33d.db import connect as _connect355
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+
+    # File-backed DB (the production shape the wrapper writes through)
+    # + a project row the row's project_id FK needs.
+    _db = _connect355(app_with_versions.state.db_path)
+    _db.create_project(name="cross-thread project")
+    _db._conn.execute("DELETE FROM request_logs")
+    _db._conn.commit()
+
+    def _worker():
+        loop = _build_production_design_loop()
+        return asyncio.run(
+            loop(
+                app=app_with_versions,
+                project_id=1,
+                photo="data:image/png;base64,x",
+                stated_dims=(10.0, 10.0, 10.0),
+                render_fn=lambda scad, defines: _ok_render(),
+                request="make a box",
+            )
+        )
+
+    # Drive the worker directly on a plain thread (no asyncio wrapper —
+    # the worker runs its own event loop via ``asyncio.run``).
+    import threading as _t
+
+    _th = _t.Thread(target=_worker)
+    _th.start()
+    _th.join(timeout=30)
+    assert _th.is_alive() is False, "worker thread timed out"
+    rows = _db._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design'"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert len(rows) >= 1, f"expected at least 1 row, got {len(rows)}: {rows}"
+    for r in rows:
+        assert r["prompt_hash"] == "h" * 64
+        assert r["status"] == "ok"
+        assert r["project_id"] == 1
+
+
+def test_chat_path_rows_carry_the_chat_projects_id(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """The chat seam (``design_loop_events.run_design_loop_with_events``)
+    threads the chat project's id into the loop kwargs — a chat-path row
+    carries the CHAT project's id, not the finalize project's (operator
+    decision 1: rows carry the real project id from the design request)."""
+    from d33d.app import _build_production_design_loop
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    llm = _make_llm(prompt_hash="c" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    app_with_versions.state.run_design_loop = _build_production_design_loop()
+
+    from d33d.db import connect as _connect355
+
+    _db = _connect355(app_with_versions.state.db_path)
+    _db.create_project(name="chat project")
+    _db.create_project(name="finalize project")
+    _db._conn.execute("DELETE FROM request_logs")
+    _db._conn.commit()
+
+    async def _drain(client):
+        frames = []
+        async for frame in run_design_loop_with_events(
+            app_with_versions,
+            1,  # the chat project
+            user_message="make a box",
+            stated_dims=(10.0, 10.0, 10.0),
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make a box",
+        ):
+            frames.append(frame)
+        return frames
+
+    frames = run_async(app_with_versions, _drain)
+    terminal = [f for f in frames if f[0] in ("done", "error")]
+    assert terminal, f"no terminal frame: {frames[:5]}"
+    rows = _db._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert rows, "expected chat-path request_logs rows"
+    for row in rows:
+        assert row["project_id"] == 1, f"row carries wrong project: {row}"
+        assert row["prompt_hash"] == "c" * 64
+
+
+def test_design_path_connect_failure_warns_without_failing_loop(
+    app_with_versions, tmp_path, monkeypatch, caplog
+) -> None:
+    """A ``db.connect`` failure (e.g. an unwritable path raising
+    ``sqlite3.OperationalError``) is caught like the write failures:
+    the loop completes, a warning with ``exc_info`` is logged, and zero
+    rows are written — the connect lives INSIDE the guarded block, so
+    it can never escape into the design loop."""
+    import asyncio
+    import logging as _logging
+
+    import d33d.db as db_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.db import connect as _connect355
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+
+    # Seed the project BEFORE the connect patch goes live (the connect
+    # below is the only thing that will raise in the loop).
+    _db = _connect355(app_with_versions.state.db_path)
+    _db.create_project(name="connect-failure project")
+    pid = _db.get_project(1)["id"]
+
+    # Patch connect to raise.
+    def _raising_connect(path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(db_mod, "connect", _raising_connect)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call():
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    with caplog.at_level(_logging.WARNING):
+        result = asyncio.run(_call())
+    # The connect failure is the ONLY thing that failed: the loop ran
+    # normally to its gate decision (no crash, no fabricated row).
+    assert result.status in ("pass", "exhausted")
+    warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    write_warns = [r for r in warns if "failed to write row" in r.getMessage()]
+    assert write_warns, (
+        f"expected a connect-failure request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    # The exception text rides the warning (``exc_info=True`` — the
+    # traceback lands in ``LogRecord.exc_text``, not the message).
+    assert any(
+        r.exc_text and "unable to open database file" in r.exc_text
+        for r in write_warns
+    ), (
+        "expected the connect-failure exception text in the warning "
+        "(exc_info=True)"
+    )
+    # Zero rows: the connection never existed, so nothing was written.
+    # Read through the handle opened BEFORE the patch went live.
+    rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
+    assert rows == [], f"expected no rows on a connect failure, got {rows}"
+
+
+def test_design_path_role_resolution_failure_warning_carries_exc_info(
+    app_with_versions, tmp_path, monkeypatch, caplog
+) -> None:
+    """A role-resolution failure (the wrapper's ``resolve_model`` raises
+    ``CatalogueError`` — the role is missing from the catalogue's roles
+    map) warns with ``exc_info=True``: the traceback rides the warning,
+    so the misconfiguration is diagnosable from the log alone. Proven
+    via the wrapper's own ``_logged_llm_fn``: the closure's pre-flight
+    short-circuits to ``model_unconfigured`` before any loop call, so
+    the test drives the wrapper directly with a role its catalogue
+    cannot resolve."""
+    import logging as _logging
+
+    from d33d.config.catalogue import load_catalogue
+    from d33d.request_logging import make_logged_llm_fn
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+
+    # Load the catalogue from the real file (the stub closure wrote it via
+    # ``_stub_production_closure_deps``). The unresolvable role is one the
+    # catalogue has no entry for, which makes ``resolve_model`` raise
+    # ``CatalogueError``.
+    cat = load_catalogue(app_with_versions.state.catalogue_path)
+
+    from d33d.db import connect as _connect355
+
+    _db = _connect355(app_with_versions.state.db_path)
+    _db._conn.execute("DELETE FROM request_logs")
+    _db._conn.commit()
+
+    logged = make_logged_llm_fn(llm, app_with_versions, cat, 1)
+
+    async def _call(_client):
+        return await logged("unresolvable_role", [], None)
+
+    with caplog.at_level(_logging.WARNING):
+        result = run_async(app_with_versions, _call)
+    # The llm behaviour is unchanged: the call succeeded and returned
+    # the LLM result — only the row was skipped.
+    assert result.status == "ok"
+    warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    resolve_warns = [r for r in warns if "could not resolve role" in r.getMessage()]
+    assert resolve_warns, (
+        f"expected a role-resolution request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    assert any(r.exc_text and "unknown role" in r.exc_text for r in resolve_warns), (
+        "expected the resolution-failure exception text in the warning "
+        "(exc_info=True)"
+    )
+    rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
+    assert rows == [], f"expected no rows on a resolution failure, got {rows}"
