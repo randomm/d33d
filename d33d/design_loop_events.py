@@ -811,12 +811,12 @@ def _measured_axes(
     card), or ``None`` when the field is omitted (omit-not-null, the
     frame policy).
 
-    Mirrors the gate's OWN selection, including the import-project
-    target (issue #332): the gate compares against ``_bbox_target`` —
-    the user's confirmed triple, EXCEPT for an import project, where the
-    part's own measured extent (``part_bbox_mm``) is the ground truth and
-    confirms all three axes even though the user stated nothing. This
-    field routes that resolved target THROUGH
+    Mirrors the gate's OWN selection: the gate compares against
+    ``_bbox_target`` — the user's confirmed triple, which for an import
+    project (issue #332) switches to the part's own extent
+    (``part_bbox_mm``) only when the candidate's bbox matches the part
+    within tolerance — and in that case the gate PASSES, so this field
+    never runs. This field routes the resolved target THROUGH
     ``d33d.design_loop.gate_comparison_extents`` — the single selection
     definition the gate itself calls — so the gate and this frame can
     never disagree: a FULL positive (W, D, H) target with a component
@@ -830,15 +830,17 @@ def _measured_axes(
     non-positive (a zero is the encoded absence, issue #91 — it is never
     emitted as a measured number).
 
-    Import projects (issue #332): the user-stated set (``gate_axes``) is
-    empty there, so ``_bbox_target`` falls back to the PART's measured
-    extent — all three axes confirmed. The gate therefore MEASURED a real
-    (W, D, H) triple, and this field carries those made extents: the SPA
-    renders made-only rows with no row labelled as the user's ask (the
-    ``carried_axes`` field stays empty — the ask is a different thing from
-    the measurement). The axis keys are always ``W``/``D``/``H``: the made
-    value is a measurement of the render, not an echo of the ask, so an
-    axis with no asked value still renders its made number.
+    Import projects (issue #332), exactly:
+
+    - PURE import (empty stated set): ``_bbox_target`` keeps the zero
+      stated triple — a failing candidate's bbox has DIVERGED beyond
+      tolerance from the part, so the part-extent fallback never applies.
+      No axis is confirmed → the gate abstains → this field is OMITTED
+      (the SPA renders the generic card); ``carried_axes`` is empty too.
+    - MIXED import (the user stated SOME axes): the partial confirmed
+      triple makes ``gate_comparison_extents`` compare the WHOLE-MESH
+      extents, and this field carries that made (W, D, H) — with
+      ``carried_axes`` holding only the user's ask.
     """
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
@@ -851,10 +853,9 @@ def _measured_axes(
         return None
     # Normalise the user-confirmed set to a zero-filled (W, D, H) triple —
     # the gate's own input shape (``_bbox_within_tolerance``'s contract).
-    # For an import project the user stated nothing, but the gate target is
-    # the PART's own extent (``part_bbox_mm``) — ``_bbox_target`` (the
-    # single shared definition) resolves that; the field carries the
-    # extents the gate actually compared, never the user's (empty) ask.
+    # ``_bbox_target`` (the single shared definition) resolves the
+    # import-project target; the field carries the extents the gate
+    # actually compared, never the user's (empty) ask.
     confirmed = _positive_axis_map(gate_axes)
     triple = (
         (
