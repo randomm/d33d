@@ -36,6 +36,12 @@ cube" — are the statement shapes it confirms; a bare single number like
   no persisted fallback, partial → zero-filled triple, none → None
 - region-edit: always None (a region edit carries no dimension
   statement → the gate abstains, as before issue #247)
+- issue #369 route-level: a size change across two turns ("a 40mm wide
+  box, 12mm tall" then "make it 20 mm tall") feeds the loop the UPDATED
+  triple (40.0, 0.0, 20.0) — the newest explicit value per axis wins —
+  and a relative word in a newer turn ("make it taller") leaves its axis
+  ABSENT from the gate triple (the stale carried value never masks the
+  release)
 - consumer: the design-role system prompt (``design_prompt``) renders an
   unconfirmed axis of the zero-filled triple as ``not specified``, never
   "0 mm"
@@ -947,5 +953,173 @@ def test_failed_turn_no_stated_dims_still_abstains(app_with_versions):
         # No stated dims: the gate must be None (abstain), never (0,0,0).
         stated = captured.get("stated_dims")
         assert stated is None, f"gate should abstain (None), got {stated}"
+
+    run_async(app_with_versions, _call)
+
+
+# ---------------------------------------------------------------------------
+# Issue #369: newest-wins size changes across turns — the design loop
+# receives the UPDATED triple, not the stale one, and a relative word
+# releases the axis instead of masking it with the carried value
+# ---------------------------------------------------------------------------
+
+
+class _LoopPassStub:
+    """A capturing stub loop that records the kwargs and reports a PASS
+    (the route only reads ``status`` / ``best`` after the capture; the
+    stub's pass result short-circuits the adapter's version create so no
+    real .scad or render is touched)."""
+
+    def __init__(self) -> None:
+        self.kwargs: dict[str, Any] = {}
+
+    async def __call__(self, **kwargs: Any) -> Any:
+        self.kwargs.update(kwargs)
+        return type(
+            "_PassResult",
+            (),
+            {"status": "pass", "best": None},
+        )()
+
+
+def test_chat_size_change_across_two_turns_feeds_updated_triple(app_with_versions):
+    """NEWEST-WINS (issue #369, route-level): turn 1 "a 40mm wide box,
+    12mm tall" (W=40, H=12 stated), turn 2 "make it 20 mm tall" — the
+    design loop receives the UPDATED gate triple (40.0, 0.0, 20.0): the
+    later explicit H=20 REPLACES the earlier H=12 (newest wins per axis)
+    while W=40 carries through unchanged. Pre-fix the extraction kept
+    the FIRST H (12) it saw, and the gate enforced a stale target the
+    user had just overridden."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+
+        # Turn 1: "a 40mm wide box, 12mm tall" — W=40, H=12.
+        stub1 = _LoopPassStub()
+        app_with_versions.state.run_design_loop = stub1
+        r1 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 40mm wide box, 12mm tall", "chat_history": []},
+        )
+        assert r1.status_code == 202, r1.text
+        source1 = app_with_versions.state.event_sources.get(pid)
+        assert source1 is not None
+        async for _event, _data in source1:
+            if _event in ("done", "error"):
+                break
+        # The flag's normal release point is the SSE endpoint's finally —
+        # driving the generator directly skips it, so clear it manually
+        # (the same escape hatch the #312 two-turn tests use).
+        app_with_versions.state.design_loop_inflight.discard(pid)
+
+        first = stub1.kwargs["stated_dims"]
+        assert first == (40.0, 0.0, 12.0), f"turn 1 triple: {first}"
+
+        # Turn 2: "make it 20 mm tall" — the NEWEST H (20) wins.
+        stub2 = _LoopPassStub()
+        app_with_versions.state.run_design_loop = stub2
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={
+                "message": "make it 20 mm tall",
+                "chat_history": ["a 40mm wide box, 12mm tall"],
+            },
+        )
+        assert r2.status_code == 202, r2.text
+        source2 = app_with_versions.state.event_sources.get(pid)
+        assert source2 is not None
+        async for _event, _data in source2:
+            if _event in ("done", "error"):
+                break
+
+        second = stub2.kwargs["stated_dims"]
+        # W=40 carried, D abstained, H=20 (the update, never the stale 12).
+        assert second == (40.0, 0.0, 20.0), (
+            f"turn 2 triple must be the UPDATED one (40.0, 0.0, 20.0), "
+            f"got {second}"
+        )
+
+    run_async(app_with_versions, _call)
+
+
+def test_chat_relative_release_word_absent_from_gate_triple(app_with_versions):
+    """RELATIVE-RELEASE (issue #369, route-level): turn 1 "a 40mm wide
+    box, 12mm tall", turn 2 "make it taller" — the gate triple is
+    (40.0, 0.0, 0.0): H is ABSENT (the relative word releases it, the
+    gate abstains on H) while W=40 stays enforced. Pre-fix the carried
+    H=12 masked the release (the stale value was re-enforced against the
+    candidate the user just asked to make taller)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+
+        # Turn 1 fails: the loop exhausts, so no version row is created —
+        # the W=40 / H=12 statement survives ONLY as the project-level
+        # carried set (the #312 carry), exactly the shape the release
+        # must act on (the #247 "no version row to fall back to" regime).
+        captured1: dict[str, Any] = {}
+
+        async def _exhausted_loop(**kwargs: Any) -> Any:
+            captured1.update(kwargs)
+            return type(
+                "_ExhaustedStub",
+                (),
+                {"status": "exhausted", "best": None},
+            )()
+
+        app_with_versions.state.run_design_loop = _exhausted_loop
+        r1 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={"message": "a 40mm wide box, 12mm tall", "chat_history": []},
+        )
+        assert r1.status_code == 202, r1.text
+        source1 = app_with_versions.state.event_sources.get(pid)
+        assert source1 is not None
+        async for _event, _data in source1:
+            if _event in ("done", "error"):
+                break
+        app_with_versions.state.design_loop_inflight.discard(pid)
+
+        # No version row was created (the loop exhausted) — the carried
+        # set is the ONLY record of the statement.
+        assert app_with_versions.state.versions.latest_version(pid) is None
+        first = captured1["stated_dims"]
+        assert first == (40.0, 0.0, 12.0), f"turn 1 triple: {first}"
+
+        # Turn 2: "make it taller" — the relative word releases H; the
+        # stale H=12 must not be re-enforced from the carried set.
+        stub2 = _LoopPassStub()
+        app_with_versions.state.run_design_loop = stub2
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat",
+            json={
+                "message": "make it taller",
+                # The SPA's contract: chat_history holds PRIOR turns only —
+                # the turn-1 message already lives in the carried set and
+                # is never re-quoted in history (the #312 test's habit of
+                # echoing the prior turn is a test artifact, not the wire
+                # shape — an echoed turn-1 message would restate the
+                # carried H and the release would have nothing to act on).
+                "chat_history": [],
+            },
+        )
+        assert r2.status_code == 202, r2.text
+        source2 = app_with_versions.state.event_sources.get(pid)
+        assert source2 is not None
+        async for _event, _data in source2:
+            if _event in ("done", "error"):
+                break
+
+        second = stub2.kwargs["stated_dims"]
+        # H must be ABSENT from the gate triple (0.0 = abstain), W=40
+        # still enforced. (The effective per-axis set — ``stated_axes``,
+        # which the adapter persists on the new version row — is
+        # ``{W: 40.0}`` here: the loop kwargs never carry it on the
+        # adapter's seam contract, so the gate triple is the assertion.)
+        assert second == (40.0, 0.0, 0.0), (
+            f"release case: H must be absent from the gate triple, got {second}"
+        )
 
     run_async(app_with_versions, _call)

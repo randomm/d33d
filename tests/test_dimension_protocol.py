@@ -985,6 +985,59 @@ class TestOfferTierSignals:
         assert quoted == set()
 
 
+class TestNewestWinsPerAxis:
+    """Issue #369: per axis, the NEWEST explicit stated value wins; a
+    relative word in a newer message releases that axis."""
+
+    def test_later_value_overrides_earlier(self):
+        """'make it 20 mm tall' after 'a 40mm wide box, 12mm tall' → W40, H20."""
+        axes = stated_axes_from_message(
+            "make it 20 mm tall", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes == {"W": 40.0, "H": 20.0}
+
+    def test_relative_releases_axis(self):
+        """'make it taller' after 'a 40mm wide box, 12mm tall' + 'make it
+        20 mm tall' → W40, H released (H absent)."""
+        axes = stated_axes_from_message(
+            "make it taller",
+            ["a 40mm wide box, 12mm tall", "make it 20 mm tall"],
+        )
+        assert axes == {"W": 40.0}
+        assert "H" not in axes
+
+    def test_relative_releases_w(self):
+        """'make it wider' → W released; H carried from the 20 mm explicit."""
+        axes = stated_axes_from_message(
+            "make it wider",
+            ["a 40mm wide box, 12mm tall", "make it 20 mm tall", "make it taller"],
+        )
+        assert "W" not in axes
+
+    def test_two_explicit_values_newest_wins(self):
+        """Two explicit H values in different messages → the newest wins."""
+        axes = stated_axes_from_message("H: 20", ["H: 12"])
+        assert axes == {"H": 20.0}
+
+    def test_same_message_explicit_beats_relative(self):
+        """'H: 20, make it taller' → H=20 (explicit axis-letter wins over
+        the relative word in the same message)."""
+        axes = stated_axes_from_message(
+            "H: 20, make it taller", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.0
+
+    def test_older_relative_does_not_consume_axis(self):
+        """A relative word in an OLDER message must not 'consume' the axis
+        such that a NEWER explicit value is lost."""
+        axes = stated_axes_from_message(
+            "make it shorter",
+            ["make it taller", "a 40mm wide box, 12mm tall"],
+        )
+        assert "H" not in axes  # released by the newer relative word
+        assert "W" in axes
+
+
 class TestTripleExtraction:
     """W×D×H triple extraction via ``stated_axes_from_message`` / ``stated_dims_from_message``
     (issue #275 task-b). The triple is matched on the raw message by
