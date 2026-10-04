@@ -203,7 +203,7 @@ export const brief = {
    *  without naming an axis or mm the wire has not established.
    *  Rendered only for a settled part whose unit is "custom". */
   partBroughtNoteMeasured:
-    "Measured from your measurement. Its own features are fixed — I can add and cut, not resize.",
+    "Scaled from the measurement you gave. Its own features are fixed — I can add and cut, not resize.",
   /** The W/D/H value cell when the part's units are unsettled (issue #338).
    *  Never a number, never 0. */
   waitingOnUnits: "waiting on units",

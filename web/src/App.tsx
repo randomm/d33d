@@ -1640,8 +1640,9 @@ export default function App({ client }: AppProps) {
   // that ever has a file-unit bbox the numeric gate protects), the card
   // collapses to its compact line. The full report stays reachable from
   // the Brief's "The part you brought" zone (the note + W/D/H rows).
-  // While a settled/assumed part still has no design version, the card
-  // stays full (it carries the unit-change affordance for an assumed part).
+  // A settled part collapses immediately. An assumed or unsettled part
+  // stays full until a design version exists (it carries the unit-change
+  // "Change the units" affordance).
   const importReportCollapsed =
     isScreen2 &&
     designStatePart !== null &&

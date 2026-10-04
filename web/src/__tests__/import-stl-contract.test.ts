@@ -136,7 +136,7 @@ describe("copy.ts Screen 2 strings", () => {
 
   it("brief.partBroughtNoteMeasured is the measurement-escape note (issue #352, #350 follow-up comment)", () => {
     expect(copy.brief.partBroughtNoteMeasured).toBe(
-      "Measured from your measurement. Its own features are fixed — I can add and cut, not resize.",
+      "Scaled from the measurement you gave. Its own features are fixed — I can add and cut, not resize.",
     );
     // It never reads "in custom you confirmed" — the pre-#352
     // contradiction for a part settled via the measurement escape.
