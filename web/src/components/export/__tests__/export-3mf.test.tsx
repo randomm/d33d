@@ -77,7 +77,7 @@ describe("Export3MF", () => {
     expect(screen.getByTestId("export-3mf-button")).toBeDisabled();
   });
 
-  it("issue #334 (D8): an assumed (not settled) part disables export", () => {
+  it("issue #350: an assumed part leaves export ENABLED (assumed = usable; only unsettled 409s)", () => {
     const client = makeClient();
     const assumed: PartReportInfo = {
       filename: "part.stl",
@@ -85,11 +85,12 @@ describe("Export3MF", () => {
       unit: "mm",
       unit_status: "assumed",
       scale: 1,
+      bbox_mm: [20, 20, 20],
       report: null,
       options: null,
     };
     render(<Export3MF projectId={7} versionId={3} part={assumed} client={client} />);
-    expect(screen.getByTestId("export-3mf-button")).toBeDisabled();
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
   it("issue #334 (D8): no part (null) leaves the existing version gating (enabled)", () => {

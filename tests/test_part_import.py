@@ -1043,6 +1043,60 @@ def test_max_part_faces_is_2m():
 # ---------------------------------------------------------------------------
 
 
+def test_loop_runs_for_assumed_part(app_with_projects):
+    """Issue #350 (regression): an assumed-status part runs the design
+    loop on chat — the guard at ``d33d/projects.py`` fires only for
+    ``unsettled`` (``not in ("assumed", "settled")``), so an assumed part
+    must NOT get the ``fill_recut.UNSETTLED_PART_REPLY`` settle-first
+    notice. The message is a non-boundary change request ("make it 10 mm
+    taller" is an add, never a fill-recut boundary), so no fill-recut
+    offer is recorded either — the request falls through to the design
+    loop. The test app has no LLM configured, so the registered source
+    is the terminal ``model_unconfigured`` error frame (the loop's no-op
+    outcome); the guard's reply (a ``kind: "answer"`` done frame reading
+    "Settle the units first") is the discriminator this test pins
+    against."""
+    from d33d.fill_recut import UNSETTLED_PART_REPLY
+
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Loop assumed"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make it 10 mm taller"}
+        )
+        frames = []
+        source = app.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        # Read the pending offer under the LIVE connection (the lifespan
+        # closes it on teardown — a post-teardown read would raise).
+        offer = app.state.versions.get_pending_offer(pid)
+        return r2.status_code, pid, frames, offer
+
+    status, pid, frames, offer = _run_async(app, _call)
+    assert status == 202, status
+    assert offer is None, "10 mm taller is an add, not a boundary"
+    # The source must NOT be the guard's answer frame (a single done frame
+    # whose message is the settle-first notice). Under a no-LLM test app
+    # the loop registers a progress frame + the model_unconfigured
+    # terminal error frame instead — that terminal frame proves the
+    # request fell THROUGH to the design loop (loop-usable).
+    assert frames, f"no frames from the event source: {frames}"
+    assert "done" not in [e for e, _ in frames], (
+        f"a done frame would be a pre-route reply, not the loop: {frames}"
+    )
+    errors = [d for e, d in frames if e == "error"]
+    assert errors, f"no terminal error frame from the loop: {frames}"
+    assert errors[0].get("reason") == "model_unconfigured", errors
+    assert UNSETTLED_PART_REPLY not in str(errors[0].get("message", "")), errors
+
+
 def test_export_assumed_part_is_not_units_unsettled(app_with_projects) -> None:
     """Issue #350: an import project whose part's unit status is
     "assumed" (a plausible STL read as mm — usable, not unsettled) →
@@ -1060,11 +1114,12 @@ def test_export_assumed_part_is_not_units_unsettled(app_with_projects) -> None:
         return await client.get(f"/api/projects/{pid}/model.3mf")
 
     resp = _run_async(app, _call)
-    # The assumed part cleared the units-unsettled gate: the response is
-    # NOT the units_unsettled 409 (the no-versions 404 fires instead, since
-    # no render is seeded — the gate order the spec's test-surface pins).
-    assert resp.status_code != 409 or resp.json().get("error_class") != "units_unsettled", (
-        f"assumed part must not 409 with units_unsettled: {resp.text}"
+    # The assumed part cleared the units-unsettled gate: with no render
+    # seeded, the no-versions gate fires instead — a 404 (the gate order
+    # the spec's test-surface pins: units-unsettled 409 is checked before
+    # the render gates, and it no longer fires for assumed).
+    assert resp.status_code == 404, (
+        f"assumed part must 404 (no-versions), got {resp.status_code}: {resp.text}"
     )
 
 

@@ -39,9 +39,10 @@ interface Export3MFProps {
    *  so the button is disabled until the loop completes. */
   inFlight?: boolean;
   /** Issue #334 (D8): the project's imported part (the design-state
-   *  envelope's `part`). When present and `unit_status !== "settled"` the
-   *  export is disabled (the 3MF cannot be built until the units are
-   *  settled — the backend 409s it with `units_unsettled`). `null`/absent
+   *  envelope's `part`). When present and `unit_status === "unsettled"`
+   *  the export is disabled (the 3MF cannot be built until the units are
+   *  settled — the backend 409s it with `units_unsettled`). An "assumed"
+   *  part is exportable (issue #350 — assumed = usable). `null`/absent
    *  (no part) leaves the existing version-based gating untouched. */
   part?: PartReportInfo | null;
   /** Injectable API client (test seam). Defaults to a same-origin ApiClient. */
@@ -100,12 +101,13 @@ export function Export3MF({
     versionName ?? (versionId !== undefined ? `v${versionId}` : "current"),
   );
 
-  // Issue #334 (D8): an unsettled imported part blocks the export — the
-  // 3MF cannot be built until `unit_status === "settled"` (the backend 409s
-  // it with `units_unsettled`). No part (undefined/null) leaves the existing
-  // version-based gating untouched.
+  // Issue #334 (D8) / issue #350: only an UNSETTLED imported part blocks
+  // the export — the 3MF cannot be built until the units are settled (the
+  // backend 409s it with `units_unsettled`). An "assumed" part is usable:
+  // its mm bbox is established, so the export stays enabled. No part
+  // (undefined/null) leaves the existing version-based gating untouched.
   const partUnsettled =
-    part !== null && part !== undefined && part.unit_status !== "settled";
+    part !== null && part !== undefined && part.unit_status === "unsettled";
 
   const handleExport = async () => {
     setState("downloading");

@@ -1623,10 +1623,13 @@ export default function App({ client }: AppProps) {
   // exists (the design-state envelope's `part`). FirstRun is suppressed
   // while Screen 2 is up (the same centred space; never both).
   const isScreen2 = designStatePart !== null;
-  // The single derivation of "are the part's units settled?" — drives BOTH
-  // the PlateBackdrop suppression and the ImportReport caption so the
+  // The single derivation of "are the part's units unsettled?" — drives
+  // BOTH the PlateBackdrop suppression and the ImportReport caption so the
   // unsettled-caption invariant (plate hidden ⇔ caption shown) can't drift.
-  const partUnsettled = isScreen2 && designStatePart.unit_status !== "settled";
+  // An "assumed" part is USABLE, not unsettled (issue #350): the plate
+  // shows, the caption does not, export is enabled. Only "unsettled"
+  // (an implausible STL) hides the plate and shows the caption.
+  const partUnsettled = isScreen2 && designStatePart.unit_status === "unsettled";
 
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the
