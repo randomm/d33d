@@ -1077,9 +1077,9 @@ def test_loop_runs_for_assumed_part(app_with_projects):
         # Read the pending offer under the LIVE connection (the lifespan
         # closes it on teardown — a post-teardown read would raise).
         offer = app.state.versions.get_pending_offer(pid)
-        return r2.status_code, pid, frames, offer
+        return r2.status_code, frames, offer
 
-    status, pid, frames, offer = _run_async(app, _call)
+    status, frames, offer = _run_async(app, _call)
     assert status == 202, status
     assert offer is None, "10 mm taller is an add, not a boundary"
     # The source must NOT be the guard's answer frame (a single done frame
