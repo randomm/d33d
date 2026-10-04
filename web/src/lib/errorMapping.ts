@@ -191,8 +191,8 @@ function parseRendererDetail(raw: unknown): DisplayError["rendererDetail"] | und
 function formatRendererDetail(detail: NonNullable<DisplayError["rendererDetail"]>): string {
   const line =
     detail.reason === "image_missing"
-      ? "image missing: the render-worker image is not in the Docker daemon"
-      : `label mismatch: image label ${detail.actual ?? "(unlabeled)"} does not match expected ${detail.expected ?? "(unknown)"}`;
+      ? copy.failure.rendererImageMissing
+      : copy.failure.rendererImageLabelMismatch(detail.actual ?? "(unlabeled)", detail.expected ?? "(unknown)");
   return `${line}\n${detail.rebuild_command}`;
 }
 

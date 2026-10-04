@@ -330,7 +330,7 @@ export function FailureTurn({
           <code data-testid="failure-turn-raw-code">{error.detail}</code>
           {rebuildCommand !== null && (
             <code data-testid="failure-turn-raw-rebuild">
-              rebuild: {rebuildCommand}
+              {copy.failure.rebuildLabel}: {rebuildCommand}
             </code>
           )}
         </details>

@@ -314,7 +314,7 @@ describe("FailureTurn", () => {
     // The disclosure carries the rebuild command too (label + command, in
     // the mono face).
     expect(screen.getByTestId("failure-turn-raw-rebuild").textContent).toBe(
-      `rebuild: ${rebuild}`,
+      `${copy.failure.rebuildLabel}: ${rebuild}`,
     );
     // No retry button — the action set is the non-envelope branch, but
     // retryable:false omits it. The actions container is still present

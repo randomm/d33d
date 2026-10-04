@@ -468,7 +468,7 @@ describe("App layout", () => {
     expect(rebuildEl.textContent).toBe(rebuild);
     // The disclosure carries it too.
     expect(screen.getByTestId("failure-turn-raw-rebuild").textContent).toBe(
-      `rebuild: ${rebuild}`,
+      `${copy.failure.rebuildLabel}: ${rebuild}`,
     );
     // No retry button — the fault is terminal until the rebuild.
     expect(screen.queryByTestId("failure-action-retry")).toBeNull();

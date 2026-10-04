@@ -351,6 +351,18 @@ export const failure = {
    *  the alias/role is missing). Distinct from the env-var helper: the fix
    *  is the settings file, not a shell variable. Also a sibling of `reasons`. */
   modelUnresolved: "Check the model settings.",
+  /** The renderer image pre-flight disclosure (issue #346): the fault
+   *  line naming the verified reason (image missing vs label mismatch).
+   *  A sibling of `reasons`, not a reason-code entry: the failure turn
+   *  renders it in the mono face under the headline. The rebuild command
+   *  renders separately in `<code>`; this is the reason line only. */
+  rendererImageMissing:
+    "image missing: the render-worker image is not in the Docker daemon",
+  rendererImageLabelMismatch: (actual: string, expected: string): string =>
+    `label mismatch: image label ${actual ?? "(unlabeled)"} does not match expected ${expected ?? "(unknown)"}`,
+  /** The label prefix for the rebuild command in the collapsed disclosure
+   *  (issue #346). */
+  rebuildLabel: "rebuild",
 
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value,

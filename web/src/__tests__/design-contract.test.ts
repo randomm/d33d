@@ -292,6 +292,15 @@ describe("design contract", () => {
       reason: "renderer_image_stale",
     });
     expect(display.retryable).toBe(false);
+    // The disclosure fault lines and the rebuild label are copy.ts entries
+    // (design-contract: all user-facing strings live in the deck).
+    expect(copy.failure.rendererImageMissing).toContain("image missing");
+    expect(copy.failure.rendererImageMissing).toContain("Docker daemon");
+    const mismatch = copy.failure.rendererImageLabelMismatch("abc123", "def456");
+    expect(mismatch).toContain("label mismatch");
+    expect(mismatch).toContain("abc123");
+    expect(mismatch).toContain("def456");
+    expect(copy.failure.rebuildLabel).toBe("rebuild");
     expect(display.message).toBe(headline);
   });
 
