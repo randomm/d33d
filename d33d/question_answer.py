@@ -218,11 +218,13 @@ NO_OFFER_AFFIRMATION_REPLY = (
 #: file-unit bbox is not an mm measurement until the units are settled,
 #: so the deterministic stage must never emit "It measures 80.0 mm" for
 #: an unsettled part. A single fixed sentence (no per-axis form) for
-#: both the single-axis and the dimension-list questions. The route's
-#: unsettled pre-route (``fill_recut.UNSETTLED_PART_REPLY`` in
-#: ``d33d.projects.post_chat``) already pre-empts EVERY message on an
-#: unsettled part, so this constant is the deterministic stage's own
-#: guard — defence in depth (the operator decision). Verbatim copy of
+#: both the single-axis and the dimension-list questions.
+#: THE DEFINITION: the route's unsettled pre-route (``fill_recut.
+#: UNSETTLED_PART_REPLY`` in ``d33d.projects.post_chat``) already
+#: pre-empts EVERY message on an unsettled part, so this constant is the
+#: deterministic stage's own guard — defence in depth (the operator
+#: decision; the rationale lives ONLY here — ``_deterministic_decision``
+#: and ``route_chat_message`` carry one-line pointers). Verbatim copy of
 #: ``copy.ts deterministicAnswer.sizeUnknownWhileUnsettled`` (pinned by
 #: the design-contract test and the backend parity test — the #260
 #: way).
@@ -1190,18 +1192,16 @@ def _deterministic_decision(
     """
     if latest is None:
         return None
-    # The unsettled-part gate (issue #352, operator decision 1): the part's
-    # units are not settled, so the v1 import's file-unit bbox is NOT an mm
-    # measurement — no numeric size answer may be emitted. The route's
-    # unsettled pre-route already pre-empts every message on an unsettled
-    # part, so this is the stage's own defence-in-depth guard: the
-    # dimension question gets the size-unknown reply (no number, no LLM
-    # call), and any other message falls through exactly as today. "Assumed"
-    # parts are USABLE (issue #350) — their answers may be labelled
-    # assumed there; only "unsettled" triggers this gate.
+    # The unsettled-part gate (issue #352, operator decision 1) —
+    # defence in depth (see :data:`UNSETTLED_SIZE_REPLY`): ANY size
+    # question (dimension list OR single axis) gets the size-unknown
+    # reply; any other message falls through exactly as today.
     if part_unit_status == "unsettled":
         if DETERMINISTIC_DIMENSION_LIST_RE.search(message) is not None:
             return ("list", "unsettled", UNSETTLED_SIZE_REPLY)
+        what = _deterministic_axis(message, latest.get("name"))
+        if what is not None and what != "list":
+            return (what, "unsettled", UNSETTLED_SIZE_REPLY)
         return None
     # Target-number guard (adversarial finding 1): a message carrying a
     # number ("Can it be 15 mm tall?", "Is it 12 mm tall?") is a
@@ -1708,10 +1708,10 @@ async def route_chat_message(
     The ``part_unit_status`` (issue #352, operator decision 1) is the
     project's part ``unit_status`` (``"unsettled"`` / ``"assumed"`` /
     ``"settled"``), ``None`` when the project has no part. When it is
-    ``"unsettled"`` the deterministic axis stage answers a dimension
-    question with the size-unknown reply (never the v1 import's
-    file-unit bbox as mm) and any other message falls through as
-    today; any other value routes exactly as before.
+    ``"unsettled"`` the deterministic axis stage answers ANY size
+    question with the size-unknown reply (see
+    :data:`UNSETTLED_SIZE_REPLY`) and any other message falls through
+    as today; any other value routes exactly as before.
 
     The stage-1 short-circuits log at INFO; every stage-2 outcome logs
     at WARNING and (except the ``request`` outcome) at INFO from

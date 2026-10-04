@@ -122,6 +122,12 @@ export function Filmstrip({
   }
 
   const siblings = siblingCounts(versions);
+  // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
+  // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
+  // for a long timeline.
+  const ordinalById = new Map<number, number>(
+    versions.map((v, i) => [v.id, i + 1]),
+  );
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;
   const latestId = versions.length > 0 ? versions[versions.length - 1].id : null;
@@ -184,7 +190,7 @@ export function Filmstrip({
           // (importedVersionLabel) and renders NO position span: the two
           // numbers ("v1 … · v40") were the same version's ordinal and DB id
           // side by side.
-          const ordinal = versions.findIndex((x) => x.id === v.id) + 1;
+          const ordinal = ordinalById.get(v.id) ?? 0;
           const isImport = v.source_kind === "import";
           return (
             <span

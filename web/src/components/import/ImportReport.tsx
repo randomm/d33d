@@ -25,11 +25,28 @@
  */
 
 import { useState } from "react";
+import type { CSSProperties } from "react";
 import { ApiClient, ApiError, type PartReportInfo } from "../../lib/api";
 import copy, { mm } from "../../copy";
 import { UnitChoice } from "./UnitChoice";
 
 const numberFmt = new Intl.NumberFormat("en-US");
+
+// The card geometry hoisted out of the render (issue #352 tidy): the two
+// shapes the card takes — the centred viewport overlay (full) and the
+// compact top-left line (collapsed). Named consts so the JSX reads the
+// intent, not the geometry.
+const GEOMETRY_COLLAPSED: CSSProperties = {
+  inset: "auto auto auto 0",
+  display: "block",
+  padding: 24,
+};
+const GEOMETRY_FULL: React.CSSProperties = {
+  inset: 0,
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+};
 
 interface ImportReportProps {
   /** The design-state envelope's `part` (the ONLY source of truth). */
@@ -161,18 +178,7 @@ export function ImportReport({
         // centred inset-0 overlay (the model, the plate and the other
         // panels are no longer hidden behind it). The full form keeps
         // the centred overlay while the user settles the units.
-        ...(collapsed
-          ? {
-              inset: "auto auto auto 0",
-              display: "block",
-              padding: 24,
-            }
-          : {
-              inset: 0,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-            }),
+        ...(collapsed ? GEOMETRY_COLLAPSED : GEOMETRY_FULL),
         zIndex: 10,
         pointerEvents: "none",
       }}

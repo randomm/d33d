@@ -193,15 +193,6 @@ export const brief = {
    *  would read "in custom you confirmed" — a unit the user never chose.
    *  This note names the measurement instead. Rendered only for a settled
    *  part whose unit is "custom". */
-  /** The measurement-escape note (issue #352, #350 follow-up comment):
-   *  d33d/part_import.py settle_units settles `part_unit = "custom"`
-   *  after ONE measured axis (the scale was derived, not a unit choice),
-   *  so `partBroughtNote("custom")` would read "in custom you
-   *  confirmed" — a unit the user never chose. The settle's axis is
-   *  stored on the project row but never carried on the design-state
-   *  wire (`part_public`), so the note says the part was measured
-   *  without naming an axis or mm the wire has not established.
-   *  Rendered only for a settled part whose unit is "custom". */
   partBroughtNoteMeasured:
     "Scaled from the measurement you gave. Its own features are fixed — I can add and cut, not resize.",
   /** The W/D/H value cell when the part's units are unsettled (issue #338).
