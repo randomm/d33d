@@ -470,4 +470,79 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
     });
     expect(display.message).toBe(copy.failure.reasons.empty_model);
   });
+
+  it("measured_axes is threaded onto the mapped error for a stated-size frame (issue #367)", () => {
+    // The new terminal frame shape: the stated-size gate (a 60 mm tray made
+    // at 66 mm) emits the ASKED set on carried_axes and the MADE set on
+    // measured_axes — the extents the gate actually compared. The mapping
+    // threads both through, so the size card can render asked → made.
+    const display = displayDesignLoopError(
+      {
+        message: "Design loop exhausted: bbox_out_of_tolerance",
+        reason: "bbox_out_of_tolerance",
+        carried_axes: { W: 60 },
+        measured_axes: { W: 66, D: 40, H: 12 },
+      },
+      limits,
+    );
+    expect(display.carriedAxes).toEqual({ W: 60 });
+    expect(display.measuredAxes).toEqual({ W: 66, D: 40, H: 12 });
+    // The bboxCarried sentence (issue #261) still stands alongside the
+    // structured data — the mapping changed threading, not the message.
+    expect(display.message).toBe(copy.failure.bboxCarried("width", 60));
+    // No gate7 string in the message → the bed card's envelope is still
+    // absent (the size card's discriminator, downstream).
+    expect(display.envelope).toBeUndefined();
+    expect(display.detail).toBe("bbox_out_of_tolerance");
+  });
+
+  it("measured_axes alone threads (import projects: carried_axes empty → made-only rows)", () => {
+    // Import projects carry no carried_axes (no user-stated set), but the
+    // gate still MEASURED the part — measured_axes is emitted and threaded
+    // on its own; the size card shows made-only rows, no asked label.
+    const display = displayDesignLoopError(
+      {
+        message: "Design loop exhausted: bbox_out_of_tolerance",
+        reason: "bbox_out_of_tolerance",
+        measured_axes: { W: 66, D: 40, H: 12 },
+      },
+      limits,
+    );
+    expect(display.carriedAxes).toBeUndefined();
+    expect(display.measuredAxes).toEqual({ W: 66, D: 40, H: 12 });
+    // The headline stays the reason sentence — no carried value to name.
+    expect(display.message).toBe(copy.failure.reasons.bbox_out_of_tolerance);
+  });
+
+  it("measured_axes is ignored for non-bbox reasons and dropped when malformed", () => {
+    const other = displayDesignLoopError({
+      message: "Design loop exhausted: empty_model",
+      reason: "empty_model",
+      measured_axes: { W: 66 },
+    });
+    expect(other.measuredAxes).toBeUndefined();
+
+    // Malformed shapes are dropped (absent), never rendered half-
+    // established: non-objects, empty objects, non-numeric / non-positive
+    // / non-finite values.
+    for (const bad of ["nope", [], null, {}, { W: 0 }, { W: -1 }, { W: NaN }, { W: Infinity }, { W: "66" }, { X: 1 }]) {
+      const display = displayDesignLoopError({
+        message: "Design loop exhausted: bbox_out_of_tolerance",
+        reason: "bbox_out_of_tolerance",
+        measured_axes: bad,
+      });
+      expect(display.measuredAxes, `measured_axes=${JSON.stringify(bad)}`).toBeUndefined();
+    }
+  });
+
+  it("carried_axes is dropped when malformed (never a half-established asked row)", () => {
+    for (const bad of ["nope", [], null, {}, { W: 0 }, { W: -1 }, { W: NaN }]) {
+      const display = displayDesignLoopError({
+        message: "Design loop exhausted: bbox_out_of_tolerance",
+        reason: "bbox_out_of_tolerance",
+        carried_axes: bad,
+      });
+      expect(display.carriedAxes, `carried_axes=${JSON.stringify(bad)}`).toBeUndefined();
+    }
+  });
 });

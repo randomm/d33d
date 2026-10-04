@@ -78,8 +78,27 @@ export function FailureTurn({
   inFlight,
   onAction,
 }: FailureTurnProps) {
-  const isEnvelope = error.reason === "bbox_out_of_tolerance";
-  const envelopeData = isEnvelope && error.envelope !== undefined ? error.envelope : null;
+  // Card selection (issue #367, operator decision 1): the bed card
+  // renders if and only if the envelope gate is established — i.e.
+  // `displayDesignLoopError` attached `envelope` (the gate-7/envelope
+  // string was parsed). Never keyed on the reason alone: a stated-size
+  // gate failure also arrives as `bbox_out_of_tolerance` but carries no
+  // gate-7 string, so `envelope` is absent and the size card renders
+  // instead.
+  const isEnvelope = error.envelope !== undefined;
+  const envelopeData: DisplayError["envelope"] | null =
+    isEnvelope && error.envelope !== undefined ? error.envelope : null;
+
+  // The size-mismatch card (issue #367, operator decision 2): a
+  // `bbox_out_of_tolerance` frame WITHOUT the gate-7 envelope string.
+  // Rule 2(a): carried_axes and/or measured_axes present → size card
+  // with asked → made rows. Rule 2(b): neither present → generic card
+  // (the existing reason sentence, no rows). Never the bed card.
+  const isSizeMismatch =
+    error.reason === "bbox_out_of_tolerance" && !isEnvelope;
+  const hasSizeData =
+    isSizeMismatch &&
+    (error.carriedAxes !== undefined || error.measuredAxes !== undefined);
 
   // The model pre-flight helper (issue #303): the terminal
   // `model_unconfigured` frame's `env_var` field selects the second
@@ -129,6 +148,58 @@ export function FailureTurn({
       : isEnvelope
         ? error.message
         : null;
+
+  // The size-mismatch rows (issue #367): one mono row per axis, asked →
+  // made. The axis union is the W/D/H axes present in either carriedAxes
+  // (asked) or measuredAxes (made). Each row renders:
+  //   asked + made  → "width: 60.0 mm → 66.0 mm"
+  //   made only     → "depth: 42.0 mm"
+  //   asked only    → "height: not measured yet"
+  // The axisWord map mirrors the backend's AXIS_LABELS noun forms.
+  const AX_WORD: Record<string, string> = { W: "width", D: "depth", H: "height" };
+  const sizeRows: Array<{ key: string; text: string }> | null =
+    hasSizeData
+      ? (["W", "D", "H"] as const)
+          .filter((a) => {
+            const c = error.carriedAxes?.[a];
+            const m = error.measuredAxes?.[a];
+            return c !== undefined || m !== undefined;
+          })
+          .map((a) => {
+            const c = error.carriedAxes?.[a];
+            const m = error.measuredAxes?.[a];
+            const word = AX_WORD[a];
+            const text =
+              c !== undefined && m !== undefined
+                ? copy.failure.sizeMismatch.row(word, c, m)
+                : m !== undefined
+                  ? copy.failure.sizeMismatch.madeOnly(word, m)
+                  : copy.failure.sizeMismatch.madeNotEstablished(word);
+            return { key: a, text };
+          })
+      : null;
+
+  // The follow-up question (issue #367, operator decision 3): at most
+  // ONE per card. Uses the first axis in W, D, H order that has BOTH an
+  // asked and a made value, and only if they differ beyond the gate
+  // tolerance (max(1%, 0.5 mm)). If no axis qualifies, no follow-up.
+  const sizeFollowUp: string | null = (() => {
+    if (!hasSizeData) return null;
+    for (const a of ["W", "D", "H"] as const) {
+      const c = error.carriedAxes?.[a];
+      const m = error.measuredAxes?.[a];
+      if (c !== undefined && m !== undefined) {
+        const tol = Math.max(0.01 * c, 0.5);
+        if (Math.abs(m - c) > tol) {
+          return copy.failure.sizeMismatch.whichMeasurement(c, AX_WORD[a]);
+        }
+        // This axis is within tolerance — fall through to the next
+        // axis. But if this was the only axis with both values, no
+        // follow-up (the gate would have passed on it).
+      }
+    }
+    return null;
+  })();
 
   // Part 2 — the per-axis bars. Rendered when the envelope gate measured
   // an axis AND the API envelope is available (both numbers established).
@@ -217,7 +288,9 @@ export function FailureTurn({
       {/* Part 2 — the number that matters, shown. The per-axis bars: track
           is the limit, fill is the part, the failing axis in the blocked
           colour. One component at every severity — an axis without a
-          measurement renders its not-established phrase, never a number. */}
+          measurement renders its not-established phrase, never a number.
+          Rendered ONLY for the envelope gate (bed card); the size-mismatch
+          card (issue #367) has its own rows below. */}
       {rows !== null && (
         <div className="failure-turn-bars" data-testid="failure-turn-bars">
           {rows.map((row) => {
@@ -249,6 +322,20 @@ export function FailureTurn({
             );
           })}
         </div>
+      )}
+
+      {/* Part 2b — the size-mismatch rows (issue #367): one mono row per
+          axis, asked → made. Rendered only when the frame is a stated-size
+          gate failure (bbox_out_of_tolerance, no gate-7 string) AND at
+          least one axis has data (carried or measured). */}
+      {sizeRows !== null && sizeRows.length > 0 && (
+        <ul className="failure-turn-size-rows" data-testid="failure-turn-size-rows">
+          {sizeRows.map((row) => (
+            <li key={row.key} className="failure-turn-size-row" data-testid={`failure-turn-size-row-${row.key}`}>
+              {row.text}
+            </li>
+          ))}
+        </ul>
       )}
 
       {/* Always say what survived — but claim exportability only when
@@ -297,6 +384,21 @@ export function FailureTurn({
               {copy.failure.envelope.actions.biggerPrinter}
             </button>
           </>
+        ) : isSizeMismatch && sizeFollowUp !== null ? (
+          // The size-mismatch card offers ONE follow-up question (issue
+          // #367, operator decision 3): the first axis in W/D/H order
+          // that has both asked and made, differing beyond the gate
+          // tolerance. Clicking prefills the composer via the existing
+          // onAction→onSend path.
+          <button
+            type="button"
+            className="failure-turn-action"
+            data-testid="failure-action-which-measurement"
+            disabled={inFlight}
+            onClick={() => onAction(sizeFollowUp)}
+          >
+            {sizeFollowUp}
+          </button>
         ) : (
           // The retry control is offered only when the failure is
           // retryable: pre-flight configuration failures (issue #303's

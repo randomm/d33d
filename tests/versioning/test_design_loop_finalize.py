@@ -25,6 +25,7 @@ from typing import Any, ClassVar
 import pytest
 
 from d33d.design_loop import BboxInfo, IterationRecord, Score
+from d33d.design_loop_events import run_design_loop_with_events
 from d33d.question_answer import COULD_NOT_ANSWER
 from d33d.render_worker import RenderResult
 from tests.versioning.helpers import (
@@ -4063,6 +4064,131 @@ def test_exhausted_error_frame_carries_structured_reason(app_with_versions):
     # The free-text message is preserved for backward compatibility
     assert "message" in error_frames[0], "free-text 'message' field must be preserved"
     assert "Design loop exhausted" in error_frames[0]["message"]
+
+
+def _measured_axes_frame(app_with_versions, stated_axes, bbox, failure_reason=None):
+    """Drive the adapter DIRECTLY (bypassing the chat route, which
+    computes its own ``stated_axes`` from the message) with a stub loop
+    whose best candidate carries ``bbox`` (a real ``BboxInfo``); return
+    the terminal error frame's data."""
+
+    class _R:
+        pass
+
+    r = _R()
+    r.best = IterationRecord(
+        iteration=0,
+        scad_source="",
+        render=_default_render(),
+        score=Score(bits=(False,) * 5, rank=0, tiebreak=(False,) * 5),
+        params={},
+        bbox=bbox,
+    )
+    r.failure_reason = (
+        failure_reason if failure_reason is not None else "bbox_out_of_tolerance"
+    )
+
+    async def _loop(app=None, **kwargs):
+        return r
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        source = run_design_loop_with_events(
+            app_with_versions,
+            pid,
+            user_message="hi",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="hi",
+            stated_axes=stated_axes,
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    return error_frames[0]
+
+
+def test_exhausted_error_frame_carries_measured_axes_whole_mesh(app_with_versions):
+    """A bbox-gate exhaustion with a PARTIAL confirmed set (only W
+    stated) emits ``measured_axes`` carrying the WHOLE-MESH extents the
+    gate compared (issue #367: the made values beside the asked ones in
+    the SPA's size card) — the full (W, D, H) map, positive numbers."""
+    bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
+    frame = _measured_axes_frame(
+        app_with_versions, {"W": 60.0}, bbox, failure_reason="bbox_out_of_tolerance"
+    )
+    assert frame.get("measured_axes") == {"W": 66.0, "D": 45.0, "H": 30.0}, (
+        f"wrong measured_axes: {frame.get('measured_axes')!r}"
+    )
+
+
+def test_exhausted_error_frame_measured_axes_best_matching_component(app_with_versions):
+    """A bbox-gate exhaustion with a FULL confirmed triple and a
+    multi-component breakdown emits ``measured_axes`` carrying the
+    BEST-MATCHING component's extents (issue #100: the gate compared
+    THAT component, not the whole assembly) — not the whole-mesh
+    x/y/z."""
+    bbox = BboxInfo(
+        x=200.0,
+        y=50.0,
+        z=50.0,
+        volume=0.0,
+        components=(
+            (10.0, 10.0, 10.0, 1000.0, 0.0, 0.0, 0.0),
+            (20.0, 20.0, 20.0, 8000.0, 150.0, 0.0, 0.0),
+        ),
+    )
+    frame = _measured_axes_frame(
+        app_with_versions, {"W": 20.0, "D": 20.0, "H": 20.0}, bbox
+    )
+    assert frame.get("measured_axes") == {"W": 20.0, "D": 20.0, "H": 20.0}, (
+        f"expected the best-matching component's extents, got {frame.get('measured_axes')!r}"
+    )
+
+
+def test_exhausted_error_frame_measured_axes_omitted_for_other_reason(app_with_versions):
+    """``measured_axes`` is a bbox-gate-only field: an exhausted loop whose
+    failure reason is NOT ``bbox_out_of_tolerance`` omits it (omit-not-null,
+    the frame policy) — even though the best candidate carries a bbox."""
+    bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
+    frame = _measured_axes_frame(
+        app_with_versions, {"W": 60.0}, bbox, failure_reason="empty_model"
+    )
+    assert "measured_axes" not in frame, (
+        f"measured_axes must be omitted for non-bbox failures: {frame.get('measured_axes')!r}"
+    )
+
+
+def test_exhausted_error_frame_measured_axes_omitted_without_bbox(app_with_versions):
+    """Omit-not-null: a bbox-gate exhaustion whose best candidate carries
+    NO ``BboxInfo`` (the pre-flight placeholder) omits ``measured_axes``
+    — a missing measurement abstains, it is never emitted as null or a
+    zero triple."""
+    frame = _measured_axes_frame(app_with_versions, {"W": 60.0}, None)
+    assert "measured_axes" not in frame, (
+        f"measured_axes must be omitted when no bbox was measured: {frame.get('measured_axes')!r}"
+    )
+
+
+def test_exhausted_error_frame_measured_axes_omitted_without_stated_axes(app_with_versions):
+    """Omit-not-null: with NO confirmed axis at all (the gate abstained —
+    nothing was compared) ``measured_axes`` is omitted even though the
+    candidate carries a bbox."""
+    bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
+    frame = _measured_axes_frame(app_with_versions, None, bbox)
+    assert "measured_axes" not in frame, (
+        f"measured_axes must be omitted when nothing was confirmed: {frame.get('measured_axes')!r}"
+    )
 
 
 def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_versions):
