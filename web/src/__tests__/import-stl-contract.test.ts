@@ -134,6 +134,23 @@ describe("copy.ts Screen 2 strings", () => {
     expect(copy.brief.partBroughtNoteFromFile).not.toContain("you confirmed");
   });
 
+  it("brief.partBroughtNoteMeasured is the measurement-escape note (issue #352, #350 follow-up comment)", () => {
+    expect(copy.brief.partBroughtNoteMeasured).toBe(
+      "Measured from your measurement. Its own features are fixed — I can add and cut, not resize.",
+    );
+    // It never reads "in custom you confirmed" — the pre-#352
+    // contradiction for a part settled via the measurement escape.
+    expect(copy.brief.partBroughtNoteMeasured).not.toContain("you confirmed");
+    expect(copy.brief.partBroughtNoteMeasured).not.toContain("custom");
+    // Distinct from the user-settled and the 3MF file-own notes.
+    expect(copy.brief.partBroughtNoteMeasured).not.toBe(
+      copy.brief.partBroughtNote("custom"),
+    );
+    expect(copy.brief.partBroughtNoteMeasured).not.toBe(
+      copy.brief.partBroughtNoteFromFile,
+    );
+  });
+
   it("deterministicAnswer.sizeUnknownWhileUnsettled is the size-unknown sentence (issue #352, operator decision 1)", () => {
     // The backend's UNSETTLED_SIZE_REPLY carries the same sentence (the
     // parity pin is in design-contract.test.ts + the backend test).

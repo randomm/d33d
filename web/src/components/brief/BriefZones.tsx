@@ -152,12 +152,22 @@ export function splitBriefZones(
   // HOW the units were settled. The wire discriminator is `part.format ===
   // "3mf"` — a 3MF is always stored settled as mm by the import (the
   // units came from the file, never the user), so it gets the file-own
-  // note; "you confirmed" stays for the user-settled case.
+  // note; "you confirmed" stays for the user-settled case. A unit of
+  // "custom" (issue #350, measurement escape — d33d/part_import.py
+  // settle_units derives the scale from ONE measured axis) was never a
+  // unit the user chose, so `partBroughtNote("custom")` ("in custom you
+  // confirmed") would be a contradiction. The measurement note does not
+  // name the axis: the settle stores it on the project row but the
+  // design-state wire (part_public) never carries it — saying which axis
+  // or what mm it was would be a confident value the wire has not
+  // established, so the note only says it was measured.
   const partNote =
     settled && part.unit
       ? part.format === "3mf"
         ? copy.brief.partBroughtNoteFromFile
-        : copy.brief.partBroughtNote(part.unit)
+        : part.unit === "custom"
+          ? copy.brief.partBroughtNoteMeasured
+          : copy.brief.partBroughtNote(part.unit)
       : assumed
         ? copy.brief.partBroughtNoteAssumed
         : null;

@@ -274,6 +274,32 @@ describe("BriefZones — part present (two zones)", () => {
     );
   });
 
+  it("a measurement-escape part (settled, unit 'custom') gets the measurement note, never 'in custom you confirmed' (issue #352, #350 follow-up)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34)]}
+        part={{ ...settledPart(), unit: "custom", scale: 0.5 }}
+      />,
+    );
+    // The measurement note — the part was measured, not settled in a unit
+    // the user chose.
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      copy.brief.partBroughtNoteMeasured,
+    );
+    // Never "in custom you confirmed" (the pre-#352 contradiction).
+    expect(screen.getByTestId("brief-zone-part-note").textContent).not.toContain(
+      "you confirmed",
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).not.toContain(
+      "in custom",
+    );
+    // The W/D/H values still render from `part.bbox_mm` (the derived mm).
+    expect(
+      screen.getByTestId("brief-part-row-W").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("60.0\u202Fmm");
+  });
+
   it("zero entries and NO part: 'Nothing yet' still renders (the empty state is untouched)", () => {
     render(<Brief {...baseProps} entries={[]} part={null} />);
     expect(screen.getByTestId("brief-empty").textContent).toBe(

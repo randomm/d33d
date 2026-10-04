@@ -42,8 +42,8 @@ from typing import Any, ClassVar
 
 import pytest
 
-from d33d.confirm_offer import mm_formatted
 from d33d import fill_recut
+from d33d.confirm_offer import mm_formatted
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
     COULD_NOT_ANSWER,
