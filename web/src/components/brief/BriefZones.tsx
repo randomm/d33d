@@ -60,9 +60,15 @@ export interface BriefZones {
    *  `hasPart`; the values are in mm (the settled unit) or `null` while
    *  unsettled. */
   partRows: BriefPartRow[];
-  /** The part-zone note — rendered only for a settled part. `null` for an
+  /** The part-zone note — rendered for a settled part (the confirmed note)
+   *  or an assumed part (the assumed note, issue #350). `null` for an
    *  unsettled part (no note). */
   partNote: string | null;
+  /** The provenance of the part's W/D/H rows: `"assumed"` when the part's
+   *  units are assumed (issue #350 — the mm reading is assumed, not
+   *  measured), `"measured"` for a settled part. `null` while unsettled
+   *  (the rows show the waiting control). */
+  partProvenance: "assumed" | "measured" | null;
   /** `true` when the "Your changes" header should render (it has at least
    *  one row). */
   showChangesHeader: boolean;
@@ -115,6 +121,7 @@ export function splitBriefZones(
       hasPart: false,
       partRows: [],
       partNote: null,
+      partProvenance: null,
       showChangesHeader: false,
       changeRows: resolved.map((entry) => ({
         entry,
@@ -140,8 +147,24 @@ export function splitBriefZones(
         : null,
   }));
   const settled = part.unit_status === "settled";
+  const assumed = part.unit_status === "assumed";
+  // Issue #350: an assumed part carries the assumed-provenance note (not
+  // the confirmed one); only an unsettled part has no note at all.
   const partNote =
-    settled && part.unit ? copy.brief.partBroughtNote(part.unit) : null;
+    settled && part.unit
+      ? copy.brief.partBroughtNote(part.unit)
+      : assumed
+        ? copy.brief.partBroughtNoteAssumed
+        : null;
+  // The W/D/H rows' provenance mark: assumed while the units are assumed
+  // (issue #350 — the mm reading is assumed, not measured), measured for a
+  // settled part; no mark while unsettled (the waiting control). The
+  // `bbox !== null` guard covers the contract edge where the server omits
+  // the mm bbox even for an assumed part — then the rows show the waiting
+  // control and the note is suppressed to stay non-contradictory.
+  const bboxUsable = bbox !== null && Array.isArray(bbox) && bbox.length === 3;
+  const partProvenance: BriefZones["partProvenance"] =
+    settled && bboxUsable ? "measured" : assumed && bboxUsable ? "assumed" : null;
 
   // The change rows are every resolved entry that is NOT the part's W/D/H.
   const changeEntries = resolved.filter((e) => !isPartRow(e));
@@ -152,6 +175,7 @@ export function splitBriefZones(
     hasPart: true,
     partRows,
     partNote,
+    partProvenance,
     showChangesHeader: changeEntries.length > 0,
     changeRows: changeEntries.map((entry) => ({
       entry,
@@ -234,12 +258,19 @@ export function BriefZoneLayout({
         key={row.axis}
         className="brief-row"
         data-testid={`brief-part-row-${row.axis}`}
-        data-provenance="measured"
+        data-provenance={zones.partProvenance ?? "measured"}
       >
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
         >
-          <span data-testid="brief-mark" style={{ flex: "0 0 auto", display: "inline-block", ...MARKS.measured }} />
+          <span
+            data-testid="brief-mark"
+            style={{
+              flex: "0 0 auto",
+              display: "inline-block",
+              ...MARKS[zones.partProvenance ?? "measured"],
+            }}
+          />
           <span
             style={{
               flex: "1 1 auto",
@@ -271,6 +302,9 @@ export function BriefZoneLayout({
             {copy.brief.partBroughtHeader}
           </h3>
           {zones.partRows.map((row) => renderPartRow(row))}
+          {/* Issue #350: the note renders for settled parts (confirmed) AND
+              assumed parts (assumed provenance) — only an unsettled part
+              has no note. */}
           {zones.partNote !== null && (
             <p
               className="brief-zone-part-note"
