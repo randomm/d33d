@@ -355,7 +355,8 @@ export const failure = {
   /** One sentence per closed-set reason. errorMapping.ts keeps the mapping; this
    *  holds the words. The map must stay total — every GATE_REASON_BITS value,
    *  every render ErrorClass value, and the loop-level pre-flight reasons
-   *  (`renderer_unavailable`, issue #277; `model_unconfigured`, issue #303)
+   *  (`renderer_unavailable`, issue #277; `model_unconfigured`, issue #303;
+   *  `renderer_image_stale`, issue #346)
    *  have an entry (the `model_unconfigured` entry is the headline; the
    *  sibling helpers `modelUnconfiguredHelper` / `modelUnresolved` render
    *  after it). */
@@ -389,6 +390,13 @@ export const failure = {
       "The render environment failed. That is temporary — try again.",
     renderer_unavailable:
       "The renderer isn't running, so nothing was designed. Start Docker and try again.",
+    /** Loop-level pre-flight (issue #346): the render-worker image is
+     *  missing or its build-hash label no longer matches the tree, so no
+     *  render can run. Terminal — retrying changes nothing until the
+     *  operator rebuilds the image (the "What the checker actually said"
+     *  disclosure carries the real reason and the rebuild command in the
+     *  mono face), which is why the failure turn offers no retry. */
+    renderer_image_stale: "The renderer needs rebuilding.",
     load_error: "The finished model could not be loaded back for checking.",
     watertight:
       "The model has holes in its surface, so a slicer can't tell inside from outside.",
