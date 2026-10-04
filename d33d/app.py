@@ -1812,14 +1812,7 @@ def _build_production_design_loop():
     )
     from d33d.evals.failure_capture import default_run_design_loop_hook
     from d33d.prompt_hash import canonical_hash
-    from d33d.request_logging import log_design_request, make_logged_llm_fn
-
-    def _log_design_request(*a: Any, **kw: Any) -> None:
-        # One ``request_logs`` row for a design-path LLM call (issue
-        # #355) — the writer lives in ``d33d.request_logging`` (short-
-        # lived connection write, per-role ``resolve_model``, warning on
-        # failure); this is the thin call site the wrapper below uses.
-        log_design_request(*a, **kw)
+    from d33d.request_logging import make_logged_llm_fn
 
     def _model_unconfigured_result(env_var: str | None) -> DesignResult:
         # The pre-flight's not-ok terminal: an exhausted result carrying
