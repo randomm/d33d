@@ -1643,9 +1643,8 @@ export default function App({ client }: AppProps) {
   const importReportCollapsed =
     isScreen2 &&
     designStatePart !== null &&
-    (designStatePart.unit_status !== "unsettled" ||
-      (versions.length > 1 &&
-        versions[0]?.source_kind === "import"));
+    (designStatePart.unit_status === "settled" ||
+      (versions.length > 1 && versions[0]?.source_kind === "import"));
 
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the
