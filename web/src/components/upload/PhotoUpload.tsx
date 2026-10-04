@@ -12,7 +12,7 @@
  *   Max: 20 MB
  */
 
-import { shell as shellCopy } from "../../copy";
+import { partUpload, shell as shellCopy } from "../../copy";
 import { useState, type ChangeEvent, type DragEvent } from "react";
 
 const MAX_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
@@ -218,7 +218,7 @@ export function PhotoUpload({
             data-testid="photo-preview"
           />
         ) : (
-          <span>📎 Attach reference photo</span>
+          <span>{partUpload.photoAttachLine}</span>
         )}
       </label>
       {state === "error" && (

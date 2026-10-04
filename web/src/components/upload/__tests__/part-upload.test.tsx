@@ -136,6 +136,14 @@ describe("PartUpload (issue #334, D5)", () => {
     );
   });
 
+  it("the drop-area label carries no 📦 glyph (issue #347, decision 1: text-only)", () => {
+    const client = makeClient();
+    render(<PartUpload projectId={7} client={client} />);
+    const label = screen.getByTestId("part-upload-label");
+    expect(label.textContent).not.toContain("\u{1F4E6}"); // 📦
+    expect(label.textContent).not.toContain("\u{1F4CE}"); // 📎
+  });
+
   it("rejects a non-STL/3MF client-side (the unsupported copy, not a POST)", async () => {
     const client = makeClient();
     const file = makeFile("photo.png");

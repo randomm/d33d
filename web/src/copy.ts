@@ -862,7 +862,11 @@ export const partUnitsUnsettled =
 export const partUpload = {
   /** The chat-pane drop-area label (the part upload surface, distinct from
    *  the first-run drop area's `firstRun.fileDropLine`). */
-  dropLine: "📦 Drop an STL or 3MF here",
+  dropLine: "Drop an STL or 3MF here",
+  /** The reference-photo drop-area label (issue #347, decision 1): the
+   *  clip glyph was removed — text-only, in the deck per the user-string
+   *  contract (it was previously inlined in PhotoUpload.tsx). */
+  photoAttachLine: "Attach reference photo",
   /** The 400 `detail` body: an unsupported content type / extension. */
   unsupported:
     "That file type isn't supported. Upload an STL or 3MF mesh.",

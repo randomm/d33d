@@ -1819,6 +1819,7 @@ export default function App({ client }: AppProps) {
           onBesidePhoto={handleBesidePhoto}
           envelope={envelope}
           hideComposer={isFirstRun}
+          hidden={isFirstRun}
           lastUserMessage={lastUserMessageRef.current}
           versions={versions}
           onCompareSelect={handleCompareSelect}

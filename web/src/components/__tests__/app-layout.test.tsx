@@ -1046,6 +1046,14 @@ describe("App conversation rail (collapse control, issue #191)", () => {
 
   it("renders the collapse control icon-only, with the aria-label as sole accessible name", async () => {
     render(<App client={client} />);
+    // Issue #347: while the first-run card is up the pane is inert +
+    // aria-hidden, so the collapse button is out of the accessibility
+    // tree. Dismiss first run (one send) so the pane is live for the
+    // accessibility assertion below.
+    sendFirstComposerMessage("make a box");
+    await act(async () => {
+      await Promise.resolve();
+    });
     const btn = screen.getByTestId("conversation-collapse-btn");
     // Icon-only: no visible copy string — the defect was the label rendered
     // as BOTH the aria-label and the visible text children.
@@ -4613,6 +4621,42 @@ describe("App first-run screen (issue #128, W14)", () => {
       await Promise.resolve();
     });
     expect(screen.queryByTestId("first-run")).toBeNull();
+  });
+
+  it("hides (never unmounts) the conversation pane while the first-run card is up, and restores it once first run is dismissed (issue #347)", async () => {
+    render(<App client={client} />);
+
+    // First run up: the pane shell stays MOUNTED — FirstRun's photo
+    // button routes to the pane's label[htmlfor="photo-file-input"].click(),
+    // so unmounting would silently break "Add a photo". But it must be
+    // inert: visibility:hidden (nothing shows through the semi-transparent
+    // card — pointer-events:none alone is NOT sufficient per the ticket),
+    // aria-hidden, and the inert attribute (no focus/interaction), while
+    // its z-index 20 stays within the closed set {0,10,20,30}.
+    expect(screen.getByTestId("first-run")).toBeTruthy();
+    const pane = screen.getByTestId("app-left-pane");
+    expect(pane).toBeTruthy();
+    expect(pane.style.visibility).toBe("hidden");
+    expect(pane.getAttribute("aria-hidden")).toBe("true");
+    // The inert attribute (React renders `inert={true}` as an attribute;
+    // jsdom 26 here does not reflect the IDL property, so assert on the
+    // attribute — it is what the browser reads).
+    expect(pane.hasAttribute("inert")).toBe(true);
+    // The label route must survive the hiding — the input is still in
+    // the DOM, reachable by the FirstRun photo button's query.
+    expect(screen.getByTestId("photo-file-input")).toBeTruthy();
+
+    // Once a message has been sent the pane must be RESTORED — visible
+    // again, not inert, the photo surface reachable as normal.
+    sendFirstComposerMessage("make a bracket");
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByTestId("first-run")).toBeNull();
+    const restoredPane = screen.getByTestId("app-left-pane");
+    expect(restoredPane.style.visibility).not.toBe("hidden");
+    expect(restoredPane.hasAttribute("aria-hidden")).toBe(false);
+    expect(restoredPane.hasAttribute("inert")).toBe(false);
   });
 
   it("suppresses the viewer's empty-state while FirstRun is shown, and re-exposes it once FirstRun is dismissed (issue #208)", async () => {

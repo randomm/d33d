@@ -34,7 +34,14 @@ describe("copy.ts Screen 1 strings", () => {
   });
 
   it("partUpload.dropLine is verbatim (the chat-pane drop area's own copy, distinct from firstRun.fileDropLine)", () => {
-    expect(copy.partUpload.dropLine).toBe("📦 Drop an STL or 3MF here");
+    // Issue #347, decision 1: the 📦 glyph is gone — text-only everywhere.
+    expect(copy.partUpload.dropLine).toBe("Drop an STL or 3MF here");
+  });
+
+  it("partUpload.photoAttachLine is the text-only photo label (issue #347, decision 1)", () => {
+    // The 📎 glyph is gone; the string now lives in the deck (it was
+    // inlined in PhotoUpload.tsx, a user-string-contract violation).
+    expect(copy.partUpload.photoAttachLine).toBe("Attach reference photo");
   });
 
   it("partUpload.uploading is verbatim (the in-flight status line)", () => {

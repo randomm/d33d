@@ -28,7 +28,7 @@ import { Filmstrip } from "../versions/Filmstrip";
 import type { Envelope, VersionTimelineEntry } from "../../lib/api";
 import type { ViewProgressState } from "../../lib/viewProgress";
 import type { DisplayError } from "../../lib/errorMapping";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { Z_INDEX } from "../../App";
 import copy from "../../copy";
 
@@ -55,6 +55,15 @@ interface ConversationPaneProps {
   /** Issue #193: the exactly-one-composer invariant — the pane's ChatPanel
    *  hides its composer while FirstRun carries the only one. */
   hideComposer: boolean;
+  /** Issue #347: while the FirstRun card is up, the pane shell is hidden
+   *  in place (visibility:hidden + aria-hidden + inert) — it must NOT be
+   *  unmounted, because App routes FirstRun's photo button to the pane's
+   *  label[htmlfor="photo-file-input"].click(). Hiding (never unmounting)
+   *  stops the z-index-20 pane from intercepting pointer events over the
+   *  z-index-10 card and its empty-state hints showing through it, while
+   *  keeping the label route alive (a hidden element still has layout and
+   *  its label's .click() still opens the picker). */
+  hidden: boolean;
   /** The last user message text (the filmstrip's pending slot). */
   lastUserMessage: string;
   /** The version timeline (the docked filmstrip's data). */
@@ -105,6 +114,7 @@ export function ConversationPane({
   onBesidePhoto,
   envelope,
   hideComposer,
+  hidden,
   lastUserMessage,
   versions,
   onCompareSelect,
@@ -124,61 +134,67 @@ export function ConversationPane({
   partClient,
   hasPart = false,
 }: ConversationPaneProps) {
+  // The pane shell's base style (floating vs docked — issue #194). While
+  // hidden (issue #347, first-run up) the same box gets visibility:hidden
+  // layered on top — the geometry is preserved so the pane's
+  // label[htmlfor="photo-file-input"] route keeps working, but nothing is
+  // visible or hittable.
+  const baseStyle: CSSProperties = docked
+    ? {
+        // Issue #194 docked layout: a full-width bar across the
+        // bottom band. The canvas keeps 100% − 48vh above it, so
+        // the pane (and the failure card inside it) can no longer
+        // overlap the build plate; the filmstrip keeps its
+        // bottom inset inside that band (its own box, unchanged).
+        position: "absolute",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        width: "100%",
+        height: `${CONVERSATION_DOCK_HEIGHT_VH}vh`,
+        zIndex: Z_INDEX.conversation,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        padding: 12,
+        minWidth: 0,
+        overflowY: "auto",
+        boxSizing: "border-box",
+        borderTop: "1px solid var(--color-hairline)",
+        background:
+          "color-mix(in srgb, var(--color-panel) 92%, transparent)",
+      }
+    : {
+        position: "absolute",
+        top: OVERLAY_INSET_PX,
+        left: OVERLAY_INSET_PX,
+        width: collapsed ? 240 : 420,
+        // The pane's bottom stops clear of the filmstrip's box: the
+        // filmstrip sits at the bottom inset with a 96px track, and
+        // the pane must not cover the filmstrip's expand mark — the
+        // history sheet's only entry point (issue #184). The calc
+        // reserves, in order: the top inset (24), the filmstrip's
+        // 96px track, the bottom inset (24), plus a 12px clear gap
+        // above the track and a 12px clear gap below the top inset.
+        // Total 168; at the 640 floor the pane spans 24→496,
+        // leaving 24px above the track's top (520) and the full
+        // filmstrip box (520→616) unobstructed.
+        height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
+        zIndex: Z_INDEX.conversation,
+        display: "flex",
+        flexDirection: "column",
+        gap: 12,
+        minWidth: 0,
+        overflowY: "auto",
+        boxSizing: "border-box",
+      };
   return (
     <div
       className="app-left"
       data-testid="app-left-pane"
-      style={
-        docked
-          ? {
-              // Issue #194 docked layout: a full-width bar across the
-              // bottom band. The canvas keeps 100% − 48vh above it, so
-              // the pane (and the failure card inside it) can no longer
-              // overlap the build plate; the filmstrip keeps its
-              // bottom inset inside that band (its own box, unchanged).
-              position: "absolute",
-              left: 0,
-              right: 0,
-              bottom: 0,
-              width: "100%",
-              height: `${CONVERSATION_DOCK_HEIGHT_VH}vh`,
-              zIndex: Z_INDEX.conversation,
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-              padding: 12,
-              minWidth: 0,
-              overflowY: "auto",
-              boxSizing: "border-box",
-              borderTop: "1px solid var(--color-hairline)",
-              background:
-                "color-mix(in srgb, var(--color-panel) 92%, transparent)",
-            }
-          : {
-              position: "absolute",
-              top: OVERLAY_INSET_PX,
-              left: OVERLAY_INSET_PX,
-              width: collapsed ? 240 : 420,
-              // The pane's bottom stops clear of the filmstrip's box: the
-              // filmstrip sits at the bottom inset with a 96px track, and
-              // the pane must not cover the filmstrip's expand mark — the
-              // history sheet's only entry point (issue #184). The calc
-              // reserves, in order: the top inset (24), the filmstrip's
-              // 96px track, the bottom inset (24), plus a 12px clear gap
-              // above the track and a 12px clear gap below the top inset.
-              // Total 168; at the 640 floor the pane spans 24→496,
-              // leaving 24px above the track's top (520) and the full
-              // filmstrip box (520→616) unobstructed.
-              height: `calc(100% - ${OVERLAY_INSET_PX * 2 + 96 + 12 + 12}px)`, // 168
-              zIndex: Z_INDEX.conversation,
-              display: "flex",
-              flexDirection: "column",
-              gap: 12,
-              minWidth: 0,
-              overflowY: "auto",
-              boxSizing: "border-box",
-            }
-      }
+      aria-hidden={hidden || undefined}
+      inert={hidden}
+      style={hidden ? { ...baseStyle, visibility: "hidden" } : baseStyle}
     >
       {docked && (
         <div
