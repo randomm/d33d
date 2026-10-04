@@ -497,13 +497,15 @@ def gate_comparison_extents(
     Divergence between the two is structurally impossible — both call this.
 
     ``None`` when the gate ABSTAINS entirely (no axis confirmed —
-    ``stated`` holds no positive axis) or when the caller violated its
-    contract with a >3-axis input (the ValueError :func:`_bbox_within_tolerance`
-    raises propagates unchanged). Otherwise: a FULL positive (W, D, H)
+    ``stated`` holds no positive axis). Otherwise: a FULL positive (W, D, H)
     triple with a component breakdown compares the BEST-MATCHING component
     (issue #100); a partial confirmed set (or no breakdown) compares the
     whole-mesh extents — the conservative (fail-safe) direction documented
     on :func:`_bbox_within_tolerance`.
+
+    Raises ``ValueError`` (a contract violation, distinct from the ``None``
+    abstain return above) when ``stated`` carries more than 3 axes — the
+    same ValueError :func:`_bbox_within_tolerance` propagates unchanged.
     """
     stated = tuple(stated) + (0.0,) * (3 - len(stated))
     if not any(t > 0 for t in stated):

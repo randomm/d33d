@@ -45,7 +45,7 @@ from d33d.design_loop import (
     RENDERER_IMAGE_STALE,
     BboxInfo,
     _bbox_target,
-    best_match_component,
+    gate_comparison_extents,
 )
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -815,13 +815,13 @@ def _measured_axes(
     target (issue #332): the gate compares against ``_bbox_target`` —
     the user's confirmed triple, EXCEPT for an import project, where the
     part's own measured extent (``part_bbox_mm``) is the ground truth and
-    confirms all three axes even though the user stated nothing. That
-    target is what this field carries — never a different number than the
-    gate compared:
-      * a FULL positive (W, D, H) confirmed set with a component
-        breakdown → the BEST-MATCHING component's extents (issue #100);
-      * a PARTIAL confirmed set (or no breakdown) → the whole-mesh
-        extents.
+    confirms all three axes even though the user stated nothing. This
+    field routes that resolved target THROUGH
+    ``d33d.design_loop.gate_comparison_extents`` — the single selection
+    definition the gate itself calls — so the gate and this frame can
+    never disagree: a FULL positive (W, D, H) target with a component
+    breakdown → the BEST-MATCHING component's extents (issue #100);
+    a PARTIAL target (or no breakdown) → the whole-mesh extents.
 
     Omitted (``None``) when: the failing gate is not the bbox gate; the
     best candidate carries no ``BboxInfo`` (the pre-flight placeholder);
@@ -864,21 +864,15 @@ def _measured_axes(
         ),
     )[0]
     target = _bbox_target(triple, bbox, part_bbox_mm)
-    if not any(t > 0 for t in target):
+    # The gate's own selection, verbatim: route the resolved target
+    # through :func:`gate_comparison_extents` — the same call the gate
+    # makes (``_bbox_within_tolerance``), the single definition of the
+    # component vs whole-mesh decision (issue #367 lens review).
+    extents = gate_comparison_extents(bbox, target)
+    if extents is None:
         # No axis confirmed (the gate abstained — it cannot fail here
         # either): omit, never emit a vacuous measurement.
         return None
-    full_triple = all(t > 0 for t in target)
-    if full_triple and bbox.components:
-        # Full confirmed triple + breakdown: the gate compared the
-        # best-matching component (issue #100) — carry ITS extents.
-        extents = best_match_component(bbox, target)
-        if extents is None:  # defensive: non-empty breakdown never None
-            extents = (bbox.x, bbox.y, bbox.z)
-    else:
-        # Partial confirmed set (or no breakdown): the gate compared the
-        # whole-mesh extents — carry those.
-        extents = (bbox.x, bbox.y, bbox.z)
     if any(e <= 0 for e in extents):
         return None
     return {"W": float(extents[0]), "D": float(extents[1]), "H": float(extents[2])}

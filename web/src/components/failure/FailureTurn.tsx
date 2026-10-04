@@ -79,6 +79,7 @@ export function FailureTurn({
   onAction,
 }: FailureTurnProps) {
   // Card selection (issue #367): one value names the card.
+  // Producer: the `envelope` discriminator value is parsed in `displayDesignLoopError` from the `gate7/envelope` string d33d/print_validation.py emits via `_GATE7_ENVELOPE_PREFIX` (pinned by the bed-card regression test).
   //   "bed"    — the envelope gate is established, i.e. `displayDesignLoopError`
   //              attached `envelope` (the gate-7 string was parsed). Never
   //              keyed on the reason alone: a stated-size gate failure also

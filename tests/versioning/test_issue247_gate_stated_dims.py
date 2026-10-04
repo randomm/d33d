@@ -277,18 +277,60 @@ def test_measured_axes_frame_field_best_matching_component() -> None:
     }
 
 
-def test_measured_axes_emitted_on_empty_carried_axes_import_project() -> None:
-    """Import projects (issue #332): the gate target is the part's own
-    bbox, not the user's statements, so ``carried_axes`` is empty there —
-    but ``measured_axes`` is a MEASUREMENT, not an ask, and is emitted
-    whenever a bbox was measured, regardless of the confirmed set."""
-    # The helper mirrors the gate: with an empty confirmed set it omits
-    # (the gate abstained — it cannot fail), so the adapter never emits
-    # the field on that path. The field's contract for import projects
-    # is therefore "omitted" (the SPA renders the generic card), NOT
-    # "emitted without an asked value" — pin that here so the helper's
-    # rule is explicit.
+def test_measured_axes_omitted_on_pure_import_project() -> None:
+    """Pure import projects (issue #332): the gate target is the part's
+    own bbox, not the user's statements, so ``carried_axes`` is empty
+    there — and with NO user-confirmed axis the gate abstains, so
+    ``measured_axes`` is omitted too (the SPA renders the generic card),
+    never "emitted without an asked value" — pin that here so the
+    helper's rule is explicit."""
     assert _measured_axes(_bbox_result("bbox_out_of_tolerance", BboxInfo(x=66.0, y=45.0, z=30.0)), {}) is None
+
+
+def test_measured_axes_equals_gate_comparison_extents() -> None:
+    """Single source (issue #367): ``_measured_axes`` routes THROUGH
+    :func:`d33d.design_loop.gate_comparison_extents` — for the same
+    inputs (the ``_bbox_target``-resolved stated triple and the best
+    record's bbox) the frame's values MUST equal the gate's own
+    comparison extents. Matrix: full stated triple with a component
+    breakdown (best-matching component wins), a partial set, and no
+    components (whole-mesh path)."""
+    from d33d.design_loop import gate_comparison_extents
+
+    bbox = BboxInfo(
+        x=200.0,
+        y=50.0,
+        z=50.0,
+        components=(
+            (10.0, 10.0, 10.0, 1000.0, 0.0, 0.0, 0.0),
+            (20.0, 20.0, 20.0, 8000.0, 150.0, 0.0, 0.0),
+        ),
+    )
+    # 1. Full stated triple + non-empty component breakdown → the
+    #    best-matching component's extents, both paths.
+    full = (20.0, 20.0, 20.0)
+    assert gate_comparison_extents(bbox, full) == (20.0, 20.0, 20.0)
+    assert _measured_axes(
+        _bbox_result("bbox_out_of_tolerance", bbox),
+        {"W": 20.0, "D": 20.0, "H": 20.0},
+    ) == {"W": 20.0, "D": 20.0, "H": 20.0}
+    # 2. Partial confirmed set (only W) → whole-mesh extents, both paths.
+    partial = (60.0, 0.0, 0.0)
+    assert gate_comparison_extents(bbox, partial) == (200.0, 50.0, 50.0)
+    assert _measured_axes(
+        _bbox_result("bbox_out_of_tolerance", bbox), {"W": 60.0}
+    ) == {"W": 200.0, "D": 50.0, "H": 50.0}
+    # 3. Full triple but NO components → whole-mesh extents, both paths.
+    no_components = BboxInfo(x=66.0, y=45.0, z=30.0)
+    assert gate_comparison_extents(no_components, (66.0, 45.0, 30.0)) == (
+        66.0,
+        45.0,
+        30.0,
+    )
+    assert _measured_axes(
+        _bbox_result("bbox_out_of_tolerance", no_components),
+        {"W": 66.0, "D": 45.0, "H": 30.0},
+    ) == {"W": 66.0, "D": 45.0, "H": 30.0}
 
 
 def test_chat_cueless_follow_up_carries_forward(app_with_versions):
