@@ -326,6 +326,14 @@ export default function App({ client }: AppProps) {
   // component is gone rejects outside act() and surfaces as an unhandled
   // rejection under vitest teardown).
   const designStateRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Issue #366: the shared seq guard for every setVersions call site. The
+  // same shape as designStateReqRef (monotonic seq + tagged project id) —
+  // an older GET /versions that resolves after a newer one can never
+  // clobber it. Every site that writes `versions` goes through this helper.
+  const versionsReqRef = useRef<{ seq: number; projectId: number | null }>({
+    seq: 0,
+    projectId: null,
+  });
 
   // Issue #354: the single retry-timer scheduling helper. Clears any pending
   // timer, arms a new one, and the callback nulls the ref (identity-checked
@@ -820,24 +828,44 @@ export default function App({ client }: AppProps) {
   // carries view geometry on the frame can do a real swap here.
   const handleBesidePhoto = useCallback(() => {}, []);
 
+  // Issue #366: the single refetch helper shared by every versions call
+  // site (mount-time effect, post-upload, recordExport, the version-created
+  // frame, restoreVersion). It bumps the shared seq, fetches, and applies
+  // only if it is still the latest request for the CURRENT project — an
+  // older in-flight GET /versions that resolves after a newer one is
+  // dropped (mirrors designStateReqRef's isStale, issue #237). The guard
+  // is shared, so the post-upload refetch cannot be clobbered by the
+  // mount-time effect's slower [] response, and no call site bypasses it.
+  const refetchVersions = useCallback(
+    (pid: number, onSettled?: (vs: VersionTimelineEntry[]) => void) => {
+      versionsReqRef.current = { seq: versionsReqRef.current.seq + 1, projectId: pid };
+      const { seq } = versionsReqRef.current;
+      const isStale = () =>
+        versionsReqRef.current.seq !== seq ||
+        versionsReqRef.current.projectId !== pid;
+      apiClient
+        .listVersions(pid)
+        .then((vs) => {
+          if (isStale()) return;
+          setVersions(vs);
+          onSettled?.(vs);
+        })
+        .catch(() => {
+          // A fresh project has an empty timeline — no error to surface
+          // (the timeline component renders its own empty state).
+          if (isStale()) return;
+          setVersions([]);
+          onSettled?.([]);
+        });
+    },
+    [apiClient],
+  );
+
   // Load the version timeline once the project exists (the resume state).
   useEffect(() => {
-    let cancelled = false;
     if (projectId === null) return;
-    apiClient
-      .listVersions(projectId)
-      .then((vs) => {
-        if (!cancelled) setVersions(vs);
-      })
-      .catch(() => {
-        // A fresh project has an empty timeline — no error to surface
-        // (the timeline component renders its own empty state).
-        if (!cancelled) setVersions([]);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [projectId, apiClient]);
+    refetchVersions(projectId);
+  }, [projectId, refetchVersions]);
 
   // The build envelope (issue #128) — fetched once on mount, independent of
   // the project id (it is machine config, not project state). A failure
@@ -867,9 +895,9 @@ export default function App({ client }: AppProps) {
       if (projectId === null) return;
       try {
         await apiClient.restoreVersion(projectId, versionId);
-        // Refresh the timeline (a new forward version was created).
-        const vs = await apiClient.listVersions(projectId);
-        setVersions(vs);
+        // Refresh the timeline (a new forward version was created) through
+        // the shared seq guard (issue #366).
+        refetchVersions(projectId);
       } catch (e) {
         // Issue #295: a 409 whose detail body carries the code
         // `source_missing` (the repo — or the target version's recorded
@@ -898,7 +926,7 @@ export default function App({ client }: AppProps) {
         });
       }
     },
-    [projectId, apiClient],
+    [projectId, apiClient, refetchVersions],
   );
 
   const handleVersionPin = useCallback(
@@ -1250,7 +1278,10 @@ export default function App({ client }: AppProps) {
               // for refetching the timeline — not every progress frame
               // (that would hammer the endpoint).
               if (step === "version-created") {
-                void apiClient.listVersions(effectiveProjectId).then(setVersions);
+                // Issue #366: the timeline refetch goes through the shared
+                // seq guard so an older in-flight GET /versions cannot
+                // clobber the newer list.
+                refetchVersions(effectiveProjectId);
                 // Issue #123: a new version means the design-state block the
                 // Brief renders may have changed — refetch it on the same
                 // single trigger.
@@ -1481,7 +1512,7 @@ export default function App({ client }: AppProps) {
           setViewProgress(INITIAL_VIEW_PROGRESS);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, nextMsgId],
+    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, refetchVersions, nextMsgId],
   );
 
   // The shared project-creation failure path (issue #282): a photo chosen
@@ -1561,8 +1592,8 @@ export default function App({ client }: AppProps) {
         await apiClient.recordExport(projectId, versionId);
         // The mark is now server state — pick it up in the timeline so the
         // filmstrip shows it in THIS session, not only after a reload.
-        const vs = await apiClient.listVersions(projectId);
-        setVersions(vs);
+        // Issue #366: through the shared seq guard.
+        refetchVersions(projectId);
       } catch {
         // The download already happened — the 3MF is in the browser and the
         // completion turn is appended. Only the mark is missing; say so
@@ -1574,7 +1605,7 @@ export default function App({ client }: AppProps) {
         });
       }
     },
-    [projectId, projectName, versions, apiClient, nextMsgId],
+    [projectId, projectName, versions, apiClient, refetchVersions, nextMsgId],
   );
 
   // Elapsed-seconds timer for the design-loop stage indicator (issue
@@ -1618,8 +1649,15 @@ export default function App({ client }: AppProps) {
   const handlePartUploaded = useCallback(
     (projectIdOverride: number) => {
       refetchDesignState(projectIdOverride);
+      // Issue #366: the part upload created v1 server-side but the SPA
+      // never refetched the version list — a mesh that parses slower than
+      // the mount-time fetch left the app in its no-version state (the pane
+      // hidden, Export disabled). Refetch the versions alongside the design
+      // state (added, not replacing it) so the import v1 appears without a
+      // reload regardless of parse duration.
+      refetchVersions(projectIdOverride);
     },
-    [refetchDesignState],
+    [refetchDesignState, refetchVersions],
   );
 
   // The Screen 1 file card's drop / pick handler (issue #334, D5) and the
