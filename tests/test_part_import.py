@@ -589,10 +589,12 @@ def test_hole_count_watertight_ring_counts_through_hole(app_with_projects):
 
 def test_hole_count_two_watertight_rings(app_with_projects):
     """Issue #351: two separate watertight rings (two disconnected bodies,
-    each genus 1) → ``hole_count`` == 2 — genus is summed over bodies.
-    The rings are placed far apart (STL is float32: at a 100 mm gap the
-    float32 vertex rounding merges the two bodies into one, corrupting
-    both the body count and the genus sum)."""
+    each genus 1) → ``hole_count`` == 2 — genus is summed over bodies on
+    the PRE-REPAIR mesh. The rings are placed far apart (STL is float32:
+    at a 100 mm gap the float32 vertex rounding merges the two bodies into
+    one, corrupting both the body count and the genus sum). The 10000 mm
+    separation is what keeps the two bodies distinct through the float32
+    round-trip."""
     import trimesh
 
     ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
