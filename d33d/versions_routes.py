@@ -1101,6 +1101,11 @@ def _finalize_loop_kwargs(
     prompt_version = canonical_hash(role="design", messages=[])
 
     out: dict[str, Any] = {
+        # Issue #355: the production closure's request_logs wrapper reads
+        # the design-path row's ``project_id`` from the loop kwargs —
+        # the finalize seam is the other production caller that carries
+        # it.
+        "project_id": project_id,
         "photo": photo,
         "chat_history": (),
         "stated_dims": stated_dims,

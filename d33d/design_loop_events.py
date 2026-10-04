@@ -1639,6 +1639,10 @@ async def run_design_loop_with_events(
     # worker thread and has no loop to capture from there.
     _loop = asyncio.get_running_loop()
     kwargs: dict[str, Any] = {
+        # Issue #355: the production closure's request_logs wrapper reads
+        # the design-path row's ``project_id`` from the loop kwargs —
+        # the chat seam is the one production caller that carries it.
+        "project_id": project_id,
         "photo": photo,
         "chat_history": chat_history,
         "stated_dims": stated_dims,
