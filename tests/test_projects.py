@@ -1920,18 +1920,22 @@ def test_fill_recut_decline_reply_equals_copy_ts() -> None:
 
 def test_fill_recut_no_hole_reply_equals_copy_ts() -> None:
     """Issue #351 — ``FILL_RECUT_NO_HOLE_REPLY`` equals ``copy.ts``'s
-    ``fillRecut.noHole`` exactly (the same two-way pin as the decline
-    reply — a drift in either copy breaks the SPA/backend agreement).
-    copy.ts is task-c's file; this pin is task-b's backend constant.
-    Skipped while task-c's ``noHole`` entry is not yet merged (the
-    parallel-workstream split: this workstream owns the backend side).
-    """
+    ``fillRecut.noHole`` template with the noun substituted (the same
+    two-way pin as the decline reply — a drift in either copy breaks the
+    SPA/backend agreement).``"""
     import re
 
-    m = re.search(r'noHole:\s*"([^"]+)"', _copy_ts_text())
-    if m is None:
-        pytest.skip("copy.ts fillRecut.noHole not yet defined (task-c)")
-    assert fill_recut.FILL_RECUT_NO_HOLE_REPLY == m.group(1)
+    m = re.search(r'noHole:.*?`([^`]*)`', _copy_ts_text(), re.DOTALL)
+    assert m is not None, "copy.ts must define fillRecut.noHole"
+    ts_template = m.group(1)
+    assert "${noun}" in ts_template, (
+        f"copy.ts noHole must carry the ${{noun}} slot: {ts_template!r}"
+    )
+    ts_rendered = ts_template.replace("${noun}", "hole")
+    assert fill_recut.FILL_RECUT_NO_HOLE_REPLY == ts_rendered, (
+        f"backend: {fill_recut.FILL_RECUT_NO_HOLE_REPLY!r}\n"
+        f"copy.ts (noun='hole'): {ts_rendered!r}"
+    )
 
 
 def test_fill_recut_no_hole_reply_in_fill_recut_all() -> None:
