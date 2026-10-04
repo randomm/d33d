@@ -655,6 +655,23 @@ button.chat-send-btn:disabled {
   color: var(--color-fg-2);
 }
 
+/* The size-mismatch rows (issue #367): one mono row per axis,
+   asked → made. The mismatch state uses --color-blocked; the
+   marker hex never appears. */
+.failure-turn-size-rows {
+  list-style: none;
+  margin: 0 0 var(--space-2);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.failure-turn-size-row {
+  font-family: var(--font-mono);
+  color: var(--color-blocked);
+}
+
 .failure-turn-bars {
   display: flex;
   flex-direction: column;
