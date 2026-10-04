@@ -44,6 +44,7 @@ from d33d.design_loop import (
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
     BboxInfo,
+    _bbox_target,
     best_match_component,
 )
 from d33d.render_worker import VIEWS, RenderResult
@@ -799,62 +800,79 @@ def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     return _positive_axis_map(gate_axes)
 
 
-def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
+def _measured_axes(
+    result: Any,
+    gate_axes: Any,
+    part_bbox_mm: tuple[float, float, float] | None = None,
+) -> dict[str, float] | None:
     """The extents the bbox gate ACTUALLY compared on this turn (issue
     #367: the terminal error frame's ``measured_axes`` — the made values
     the SPA renders beside the user's asked values in the size-mismatch
     card), or ``None`` when the field is omitted (omit-not-null, the
     frame policy).
 
-    Mirrors the gate's own selection (``_bbox_within_tolerance`` in
-    ``d33d.design_loop``): for a FULL positive (W, D, H) confirmed set
-    with a component breakdown the gate compares the BEST-MATCHING
-    component's extents (issue #100), so that component's W/D/H is what
-    the field carries — never the whole-assembly bbox, which would
-    report a different (larger) number than the gate compared. For a
-    PARTIAL confirmed set (or no breakdown) the gate compares the
-    whole-mesh extents, and that is what the field carries.
+    Mirrors the gate's OWN selection, including the import-project
+    target (issue #332): the gate compares against ``_bbox_target`` —
+    the user's confirmed triple, EXCEPT for an import project, where the
+    part's own measured extent (``part_bbox_mm``) is the ground truth and
+    confirms all three axes even though the user stated nothing. That
+    target is what this field carries — never a different number than the
+    gate compared:
+      * a FULL positive (W, D, H) confirmed set with a component
+        breakdown → the BEST-MATCHING component's extents (issue #100);
+      * a PARTIAL confirmed set (or no breakdown) → the whole-mesh
+        extents.
 
-    Omitted (``None``) when: the failing gate is not the bbox gate; no
-    axis was confirmed (the gate abstained entirely — in which case it
-    cannot fail, and the reason can't be ``bbox_out_of_tolerance``
-    either, so the guard is defensive); the best candidate carries no
-    ``BboxInfo`` (the pre-flight placeholder); or the compared extents
-    are non-positive (a zero is the encoded absence, issue #91 — it is
-    never emitted as a measured number).
+    Omitted (``None``) when: the failing gate is not the bbox gate; the
+    best candidate carries no ``BboxInfo`` (the pre-flight placeholder);
+    or the gate compared nothing (no axis confirmed — the gate abstained,
+    so it cannot fail here either) or the compared extents are
+    non-positive (a zero is the encoded absence, issue #91 — it is never
+    emitted as a measured number).
 
-    Import projects (issue #332): the confirmed set is empty there (no
-    user-stated axes), so the guard above omits the field — the gate
-    abstained and cannot fail, and the SPA renders the generic card
-    (rule 2b) rather than the size card. The axis keys are always
-    ``W``/``D``/``H`` regardless of which axes were confirmed: the made
+    Import projects (issue #332): the user-stated set (``gate_axes``) is
+    empty there, so ``_bbox_target`` falls back to the PART's measured
+    extent — all three axes confirmed. The gate therefore MEASURED a real
+    (W, D, H) triple, and this field carries those made extents: the SPA
+    renders made-only rows with no row labelled as the user's ask (the
+    ``carried_axes`` field stays empty — the ask is a different thing from
+    the measurement). The axis keys are always ``W``/``D``/``H``: the made
     value is a measurement of the render, not an echo of the ask, so an
     axis with no asked value still renders its made number.
     """
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
         return None
-    # Normalise the confirmed set to a zero-filled (W, D, H) triple —
-    # the gate's own input shape (``_bbox_within_tolerance``'s contract).
-    confirmed = _positive_axis_map(gate_axes)
-    if confirmed is None:
-        return None
-    triple = (
-        confirmed.get("W", 0.0),
-        confirmed.get("D", 0.0),
-        confirmed.get("H", 0.0),
-    )
     best = getattr(result, "best", None)
     if best is None:
         return None
     bbox = getattr(best, "bbox", None)
     if not isinstance(bbox, BboxInfo):
         return None
-    full_triple = all(t > 0 for t in triple)
+    # Normalise the user-confirmed set to a zero-filled (W, D, H) triple —
+    # the gate's own input shape (``_bbox_within_tolerance``'s contract).
+    # For an import project the user stated nothing, but the gate target is
+    # the PART's own extent (``part_bbox_mm``) — ``_bbox_target`` (the
+    # single shared definition) resolves that; the field carries the
+    # extents the gate actually compared, never the user's (empty) ask.
+    confirmed = _positive_axis_map(gate_axes)
+    triple = (
+        (
+            (confirmed.get("W", 0.0), confirmed.get("D", 0.0), confirmed.get("H", 0.0))
+            if confirmed is not None
+            else (0.0, 0.0, 0.0)
+        ),
+    )[0]
+    target = _bbox_target(triple, bbox, part_bbox_mm)
+    if not any(t > 0 for t in target):
+        # No axis confirmed (the gate abstained — it cannot fail here
+        # either): omit, never emit a vacuous measurement.
+        return None
+    full_triple = all(t > 0 for t in target)
     if full_triple and bbox.components:
         # Full confirmed triple + breakdown: the gate compared the
         # best-matching component (issue #100) — carry ITS extents.
-        extents = best_match_component(bbox, triple)
+        extents = best_match_component(bbox, target)
         if extents is None:  # defensive: non-empty breakdown never None
             extents = (bbox.x, bbox.y, bbox.z)
     else:
@@ -2194,7 +2212,11 @@ async def run_design_loop_with_events(
         # confirmed triple, whole-mesh extents for a partial set — the
         # gate's own selection). Omitted for every other reason and
         # when nothing was measured (omit-not-null).
-        measured = _measured_axes(result, kwargs.get("stated_axes"))
+        measured = _measured_axes(
+            result,
+            kwargs.get("stated_axes"),
+            kwargs.get("part_bbox_mm"),
+        )
         if measured is not None:
             error_data["measured_axes"] = measured
         # The per-param mismatch detail (issue #276): one line per

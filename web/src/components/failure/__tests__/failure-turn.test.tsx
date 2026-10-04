@@ -674,6 +674,45 @@ describe("FailureTurn", () => {
     expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
   });
 
+  it("no follow-up when the first with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
+    // OD3: the follow-up fires only for the first W/D/H axis that has BOTH
+    // an asked and a made value AND differs beyond the gate tolerance
+    // max(1%, 0.5 mm). Here W is within tolerance (60 asked / 60.5 made,
+    // diff 0.5 <= max(0.6, 0.5)=0.6) while D diverges (40 asked / 44 made,
+    // diff 4 > max(0.4, 0.5)=0.5). The follow-up must name D, NOT W.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60, D: 40 },
+      measuredAxes: { W: 60.5, D: 44 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    const btn = screen.getByTestId("failure-action-which-measurement");
+    // W (diff 0.5) is within tolerance -> skipped; D (diff 4) is beyond.
+    expect(btn.textContent).toBe(
+      copy.failure.sizeMismatch.whichMeasurement(40, "depth"),
+    );
+  });
+
+  it("no follow-up when every with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
+    // OD3: "if no axis qualifies, no follow-up." W is within tolerance
+    // (diff 0.5 <= max(0.6,0.5)); D has a made value but no asked value, so
+    // it can't qualify. No axis has both values beyond tolerance -> no
+    // follow-up is offered.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 60.5, D: 44 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+  });
+
   it("the size card uses --color-blocked, not #FF3300 (issue #367)", () => {
     const error: DisplayError = {
       message: copy.failure.reasons.bbox_out_of_tolerance,

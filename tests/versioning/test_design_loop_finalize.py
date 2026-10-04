@@ -4191,6 +4191,50 @@ def test_exhausted_error_frame_measured_axes_omitted_without_stated_axes(app_wit
     )
 
 
+def test_import_project_gate_invariant_measured_axes(app_with_versions):
+    """Import projects (issue #332) — the gate invariant behind the
+    ``measured_axes`` contract.
+
+    A pure import project carries NO user-stated axis (``stated_axes``
+    empty). The gate's target (``_bbox_target``) only switches to the
+    part's own extent when the candidate's bbox is WITHIN tolerance of the
+    part (in which case the gate passes — the mesh measures itself); a
+    candidate that DIVERGES beyond tolerance keeps the empty stated target
+    and the gate abstains (passes). So for a pure import project the bbox
+    gate can NEVER fail, and ``measured_axes`` is omitted (the field
+    exists only on a ``bbox_out_of_tolerance`` frame) — the SPA renders
+    the generic card, never a fabricated "asked" row (the ask is empty;
+    the made value is a measurement, not an ask).
+
+    The one shape that DOES carry ``measured_axes`` with an empty
+    user-stated set is an import project where the user DID state an axis
+    (a mixed project) and the gate failed on it: the field then carries
+    the whole-mesh extents for that axis. This test pins both invariants
+    at the frame level.
+    """
+    # 1) Pure import project, empty stated set, gate reason bbox: nothing
+    #    confirmed by the user and (by the gate invariant) the gate did
+    #    not actually fail — measured_axes is omitted.
+    bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
+    frame = _measured_axes_frame(app_with_versions, None, bbox)
+    assert "measured_axes" not in frame, (
+        f"import project (empty stated set) must omit measured_axes: "
+        f"{frame.get('measured_axes')!r}"
+    )
+    # 2) Mixed import project (user stated W=60, gate failed on it, part
+    #    present): the gate compared the whole-mesh extents for the
+    #    partial confirmed set — measured_axes carries the made (W, D, H),
+    #    and carried_axes carries ONLY the user's ask (W) — no D/H asked
+    #    row is fabricated.
+    frame2 = _measured_axes_frame(app_with_versions, {"W": 60.0}, bbox)
+    assert frame2.get("measured_axes") == {"W": 66.0, "D": 45.0, "H": 30.0}, (
+        f"mixed import project measured_axes wrong: {frame2.get('measured_axes')!r}"
+    )
+    assert frame2.get("carried_axes") == {"W": 60.0}, (
+        f"carried_axes must carry only the user's ask: {frame2.get('carried_axes')!r}"
+    )
+
+
 def test_preflight_failure_frame_carries_renderer_unavailable_reason(app_with_versions):
     """A renderer pre-flight failure (Docker daemon down before the first
     iteration — issue #277) travels the SAME terminal error-frame shape

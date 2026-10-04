@@ -179,21 +179,22 @@ export function FailureTurn({
       : null;
 
   // The follow-up question (issue #367, operator decision 3): at most
-  // ONE per card — the first axis in W, D, H order that has BOTH an
-  // asked and a made value. The frame's `bbox_out_of_tolerance` reason
-  // already establishes that some confirmed axis was beyond the gate
-  // tolerance (that is what failed the gate), so the SPA does not
-  // re-derive the tolerance; an axis that merely fits still gets the
-  // question, which remains a useful clarification.
+  // ONE per card — the FIRST axis in W, D, H order that has BOTH an
+  // asked and a made value, AND only if they differ beyond the gate
+  // tolerance (max(1%, 0.5 mm) — the same gate the failure frame came
+  // from, re-derived here from the two numbers the frame carries; the
+  // backend marks no per-axis tolerance, so the SPA owns this last step).
+  // If no axis qualifies (the first with-both axis is within tolerance —
+  // i.e. only a LATER axis actually diverged, or the frame is malformed),
+  // no follow-up is offered.
   const sizeFollowUp: string | null = (() => {
     for (const a of ["W", "D", "H"] as const) {
       const c = error.carriedAxes?.[a];
       const m = error.measuredAxes?.[a];
-      if (c !== undefined && m !== undefined) {
-        return copy.failure.sizeMismatch.whichMeasurement(
-          c,
-          SIZE_AXIS_WORDS[a],
-        );
+      if (c === undefined || m === undefined) continue;
+      const tolerance = Math.max(0.01 * c, 0.5);
+      if (Math.abs(m - c) > tolerance) {
+        return copy.failure.sizeMismatch.whichMeasurement(c, SIZE_AXIS_WORDS[a]);
       }
     }
     return null;
