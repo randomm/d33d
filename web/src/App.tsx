@@ -366,8 +366,19 @@ export default function App({ client }: AppProps) {
       .catch(() => {
         // First attempt failed: retry exactly once, ~300 ms later.
         if (isStale()) return;
-        designStateRetryTimerRef.current = setTimeout(() => {
-          designStateRetryTimerRef.current = null;
+        // Issue #354 (overlap fix): at most ONE retry timer is ever pending.
+        // A new failed refetch clears any timer the previous failed refetch
+        // armed, so no orphaned timer can survive the unmount cleanup.
+        if (designStateRetryTimerRef.current !== null) {
+          clearTimeout(designStateRetryTimerRef.current);
+        }
+        const retryHandle = setTimeout(() => {
+          // Null the ref only if THIS timer is still the tracked one — an
+          // overlapping retry may have replaced it, and unconditionally
+          // nulling would untrack the newer timer.
+          if (designStateRetryTimerRef.current === retryHandle) {
+            designStateRetryTimerRef.current = null;
+          }
           if (isStale()) return;
           apiClient
             .getDesignState(effectiveProjectId)
@@ -381,6 +392,7 @@ export default function App({ client }: AppProps) {
               }
             });
         }, 300);
+        designStateRetryTimerRef.current = retryHandle;
       });
   }, [projectId, apiClient]);
 
