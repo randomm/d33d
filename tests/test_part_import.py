@@ -829,9 +829,8 @@ def test_single_body_repair_invariance_box_20mm():
     the SAME repaired vertices/faces as a direct one-call ``MeshFix``
     repair of the same pre-repair mesh (the historical path)."""
     import numpy as np
-    import trimesh
-
     import pymeshfix
+    import trimesh
 
     import d33d.part_mesh as part_mesh_mod
 
@@ -907,7 +906,7 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     try:
         # The second body returns an empty mesh → concatenate of [body1,
         # empty] keeps only body 1 → post-repair 1 body < pre-repair 2.
-        mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
         part_mesh_mod._repair_with_pmf = original
     assert report["bodies"] == 1, f"post-repair body count: {report}"
