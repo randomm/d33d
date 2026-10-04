@@ -1599,7 +1599,24 @@ def test_chat_pass_title_present_becomes_version_name(app_with_versions):
     """Issue #245 acceptance: a chat-created version whose best candidate
     carries a ``// title:`` comment is named from that title (trimmed),
     and the raw user message "how tall is it now" is preserved in the
-    message field but NEVER becomes the name."""
+    message field but NEVER becomes the name.
+
+    The message is driven as a FOLLOW-UP turn: a v1 ("First design") is
+    seeded first so the project already has a version — issue #349's
+    no-version guard (a question on a versionless project gets the
+    deterministic "nothing built" reply, never the design loop) would
+    otherwise intercept "how tall is it now" before the design loop, and
+    the naming contract under test is the title-named pass, not the
+    guard. The #263 deterministic axis stage (a question naming one axis
+    answered from the version's state, no LLM call) is neutralised the
+    same way — it too would answer the follow-up and never reach the
+    title-named version this test exists to pin; the loop is the
+    contract under test. The stage-2 edge is stubbed to classify the
+    message as a ``request`` (the documented fall-through to the design
+    loop) because the fixture wires no question model — the real
+    pre-flight would raise ``model_unconfigured`` before the loop ran.
+    """
+    import d33d.question_answer as _qa_mod
     from d33d.design_loop import BboxInfo, run_design_loop_async
 
     scad = "// title: Taller upright\nW = 20;\nH = 30;\ncube([W, W, H]);"
@@ -1622,24 +1639,55 @@ def test_chat_pass_title_present_becomes_version_name(app_with_versions):
         proj = await create_project(client)
         pid = proj["id"]
         app_with_versions.state.run_design_loop = _loop_impl(scad, bbox)
-        await client.post(
-            f"/api/projects/{pid}/chat",
-            json={"message": "how tall is it now", "chat_history": []},
+        # Seed v1 so "how tall is it now" is a follow-up question (the
+        # no-version guard, issue #349, must not intercept it).
+        await app_with_versions.state.versions.create_version(
+            pid,
+            {"W": 20.0, "D": 20.0, "H": 20.0},
+            name="First design",
         )
-        source = app_with_versions.state.event_sources[pid]
-        async for event, data in source:
-            if event in ("done", "error"):
-                break
+        # Neutralise the pre-route's deterministic/stage-2 answer stages
+        # for this turn: "how tall is it now" would otherwise be answered
+        # from the version's state (or fail the unconfigured-model
+        # pre-flight) and never reach the design loop the test drives.
+        # The stubbed edge classifies it as a request — the documented
+        # fall-through to the loop.
+        _orig_decision = _qa_mod._deterministic_decision
+        _qa_mod._deterministic_decision = lambda msg, latest: None
+        _orig_block = _qa_mod.state_block_for_chat
+        _qa_mod.state_block_for_chat = lambda latest: []
+
+        async def _request_edge(question: str, entries: list) -> str:
+            return '{"kind": "request", "answer": ""}'
+
+        _orig_edge = getattr(app_with_versions.state, "answer_question", None)
+        app_with_versions.state.answer_question = _request_edge
+        try:
+            await client.post(
+                f"/api/projects/{pid}/chat",
+                json={"message": "how tall is it now", "chat_history": []},
+            )
+            source = app_with_versions.state.event_sources[pid]
+            async for event, data in source:
+                if event in ("done", "error"):
+                    break
+        finally:
+            _qa_mod._deterministic_decision = _orig_decision
+            _qa_mod.state_block_for_chat = _orig_block
+            if _orig_edge is not None:
+                app_with_versions.state.answer_question = _orig_edge
         timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
         return timeline
 
     timeline = run_async(app_with_versions, _call)
-    assert len(timeline) == 1
+    # Two versions: the seeded v1 plus the chat-created follow-up.
+    assert len(timeline) == 2
+    chat_version = timeline[-1]
     # The name is the model's title (trimmed), never the raw message.
-    assert timeline[0]["name"] == "Taller upright"
-    assert timeline[0]["name"] != "how tall is it now"
+    assert chat_version["name"] == "Taller upright"
+    assert chat_version["name"] != "how tall is it now"
     # The message field keeps the raw user text (provenance).
-    assert timeline[0]["created_by_message"] == "how tall is it now"
+    assert chat_version["created_by_message"] == "how tall is it now"
 
 
 def test_chat_pass_no_title_second_version_param_diff_name(app_with_versions):

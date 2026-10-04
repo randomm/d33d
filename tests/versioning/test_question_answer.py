@@ -52,9 +52,9 @@ from d33d.question_answer import (
     DETERMINISTIC_COMPARISON_SENTENCES,
     DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
-    NOT_ESTABLISHED,
     NO_OFFER_AFFIRMATION_REPLY,
     NO_VERSION_QUESTION_REPLY,
+    NOT_ESTABLISHED,
     UNANSWERABLE_MISSING_TEMPLATE,
     build_answer_prompt,
     deterministic_axis_answer,
@@ -583,13 +583,14 @@ class TestRouteChatMessage:
         # issue #349: a QUESTION with no version gets the deterministic
         # "nothing built" reply (kind "answer"), never the design loop.
         # Zero LLM calls (the guard runs before any stage-2 call).
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "{}"
+
         for msg in ("How deep is it?", "How tall is it?", "What is the material?"):
-            edge_called = [False]
-
-            async def _edge(question: str, entries: list) -> str:
-                edge_called[0] = True
-                return "{}"
-
+            edge_called[0] = False
             result = run_async_safe(route_chat_message(msg, None, _edge))
             assert result == {
                 "kind": ANSWER_DONE_KIND,
@@ -2663,7 +2664,7 @@ def test_no_versions_change_request_still_starts_loop(app_with_versions) -> None
         proj = await create_project(client)
         pid = proj["id"]
         app_with_versions.state.run_design_loop = _loop
-        r, frames = await _drive_chat_with_answer(
+        r, _frames = await _drive_chat_with_answer(
             app_with_versions,
             client,
             pid,

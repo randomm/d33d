@@ -1923,12 +1923,12 @@ def test_chat_yes_hedge_with_no_offer_still_routes_to_loop(app_with_versions):
             return _OfferStubResult({"wall_thickness": 3.0})
 
         app_with_versions.state.run_design_loop = _loop2
-        r, frames = await _drive_chat(
+        r, _frames = await _drive_chat(
             app_with_versions, client, pid, {"message": "yes but make it 2 mm"}
         )
-        return r.status_code, frames, loop_called["n"]
+        return r.status_code, loop_called["n"]
 
-    status, frames, loop_n = run_async(app_with_versions, _call)
+    status, loop_n = run_async(app_with_versions, _call)
     assert status == 202
     assert loop_n == 1, (
         "a hedged affirmation with no offer must still route to the loop"
@@ -2097,7 +2097,7 @@ def test_chat_change_request_no_version_still_starts_loop(app_with_versions):
             return _OfferStubResult({"wall_thickness": 3.0})
 
         app_with_versions.state.run_design_loop = _loop2
-        r, frames = await _drive_chat(
+        r, _frames = await _drive_chat(
             app_with_versions, client, pid, {"message": "make a 30 mm plate"}
         )
         version_count = len(
