@@ -5,13 +5,18 @@
 # (moved) tag ref cannot silently inject unverified code into the image.
 # See docs/bosl2-pinning.md for the pinning policy.
 #
-# Pinned base image: docker.io/openscad/openscad:trixie
+# Pinned base image: docker.io/openscad/openscad@sha256:0af06bc2aa7a45d18b01a23cfb9dae6dddcd9542611e7be50edea6beb3b52fa7
+#   Tag: openscad/openscad:trixie.2026-01-19 (immutable digest pin; the :trixie tag is rolling
+#   and its 2026-09-28 roll to 99250895… broke headless PNG export on this host —
+#   "Can't create OffscreenView: Unable to initialize GLAD" under every Qt platform /
+#   LIBGL_ALWAYS_SOFTWARE / EGL-surfaceless combination tried. STL and CSG still work on
+#   the broken build; PNG export requires the pre-roll 2026.01.19 trixie build.)
 #   Confirmed: Debian GNU/Linux 13 (trixie), OpenSCAD version 2026.01.19
 #   The --camera, --autocenter, --projection, --imgsize, and --colorscheme options
 #   are all present in this build. See the "Empirical CLI verification" section of
 #   docs/bosl2-pinning.md for the verified flag set.
 
-FROM --platform=linux/amd64 docker.io/openscad/openscad:trixie
+FROM --platform=linux/amd64 docker.io/openscad/openscad@sha256:0af06bc2aa7a45d18b01a23cfb9dae6dddcd9542611e7be50edea6beb3b52fa7
 
 # BOSL2_TAG and BOSL2_COMMIT are build-args with NO DEFAULT — a build without either fails loudly.
 # This is a hard requirement of the spec: the image must not silently drift.

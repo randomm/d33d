@@ -102,6 +102,17 @@ def _host_tmp_base() -> Path:
     return path
 
 
+# The render-worker image the ``_render``-based gates target. Defaults to
+# the hash-checked ``d33d/render-worker:local`` (the production image);
+# set ``D33D_RENDER_WORKER_IMAGE`` to another local tag (e.g. the
+# digest-pinned ``d33d/render-worker:pin-test`` from issue #348) when the
+# local image was built on a different (possibly broken) base and the
+# gate must target the pinned build instead.
+RENDER_IMAGE = os.environ.get(
+    "D33D_RENDER_WORKER_IMAGE", rw.RENDER_WORKER_IMAGE
+)
+
+
 def _render(scad_source: str, workdir: Path) -> None:
     """Run one render via the render-worker image and harvest the
     artifacts into ``workdir/out``.
@@ -147,7 +158,7 @@ def _render(scad_source: str, workdir: Path) -> None:
         )
         # Run the render worker.
         argv = rw.build_docker_argv(
-            image=rw.RENDER_WORKER_IMAGE,
+            image=RENDER_IMAGE,
             name=f"render-{volume[-8:]}",
             workdir_volume=volume,
             params=rw.RenderParams(),
@@ -1268,5 +1279,55 @@ def test_render_imports_committed_part(tmp_path: Path) -> None:
         assert abs(extent - 20.0) < 0.5, (
             f"axis {i} extent {extent} mm — expected ≈20 mm (the part's "
             f"size); bounds={bounds}"
+        )
+
+
+# ── Gate 6: 6-view PNG export survives a base-image roll (issue #348) ──────
+
+
+def test_all_six_views_render_real_pngs(tmp_path: Path) -> None:
+    """Render ``cube([30,30,30], center=true);`` end to end and assert,
+    for EACH of the six ``rw.VIEWS``, that the harvested PNG
+
+    - exists,
+    - decodes to 800×800,
+    - contains non-background pixels, and
+    - is at least 2 KB on disk.
+
+    This is the regression guard for the issue #348 failure mode: on
+    2026-09-28 the rolling ``trixie`` tag rolled to an OpenSCAD build
+    whose headless PNG export fails ("Unable to initialize GLAD") while
+    STL/CSG export keeps working — so a render that produces no views
+    (or blank, undersized, or malformed ones) while still exiting 0 is
+    exactly what this gate catches. Skips when Docker is unreachable
+    (slow-layer convention); FAILS when Docker is up but any view is
+    missing, undecodable, blank, or below the 2 KB floor.
+
+    Run against the digest-pinned image (``D33D_RENDER_WORKER_IMAGE=d33d/
+    render-worker:pin-test``) when the local ``:local`` image was built on
+    a post-roll base — the image this test targets comes from
+    ``RENDER_IMAGE`` (see above), so the default (the hash-checked
+    ``:local``) works unchanged once that image is rebuilt from the
+    pinned Dockerfile.
+    """
+    _skip_if_no_docker()
+    scad = "cube([30,30,30], center=true);\n"
+    workdir = tmp_path / "views348"
+    _render(scad, workdir)
+    for view in VIEW_FILES:
+        png = workdir / "out" / view
+        assert png.is_file(), f"{view}: view file missing after render"
+        assert png.stat().st_size >= 2048, (
+            f"{view}: file is only {png.stat().st_size} bytes (< 2 KB) — "
+            f"likely a failed or stub PNG export"
+        )
+        w, h, bpp, out = _decode_png(png)
+        assert (w, h) == (800, 800), (
+            f"{view}: decoded to {w}×{h}, expected 800×800"
+        )
+        bbox, _centroid, _edge_px = _pixel_bbox(w, h, bpp, out)
+        assert all(v >= 0 for v in bbox), (
+            f"{view}: no non-background pixels — the view is blank "
+            f"(headless GL export produced an all-background frame)"
         )
 

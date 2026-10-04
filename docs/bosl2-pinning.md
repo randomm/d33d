@@ -77,9 +77,42 @@ Upgrading the pinned BOSL2 tag is a **breaking change** that requires:
 
 ## Base image pinning
 
-The base image is pinned to `docker.io/openscad/openscad:trixie` — the
-Debian trixie (13) variant. This tag is a rolling ref that updates as new
-OpenSCAD releases are published to the trixie suite.
+The base image is pinned to the immutable digest:
+
+```
+docker.io/openscad/openscad@sha256:0af06bc2aa7a45d18b01a23cfb9dae6dddcd9542611e7be50edea6beb3b52fa7
+```
+
+tagged `trixie.2026-01-19` on Docker Hub (the dated-tag alias for the same
+content-addressable image). This is the OpenSCAD 2026.01.19 Debian trixie
+(13) build, the last trixie release before the 2026-09-28 rolling-tag roll
+that broke headless PNG export on this host (see below).
+
+**Why this digest, not the rolling `trixie` tag:** on 2026-09-28 the
+`openscad/openscad:trixie` tag rolled from the 2026.01.19 build to the
+2026-09-28 build (digest `992508950d86…`). With the 2026-09-28 build, PNG
+export fails headlessly on this host (linux/amd64, arm64 Mac host under
+Docker Desktop / colima) with
+
+```
+Can't create OffscreenView: Unable to initialize GLAD
+```
+
+for every combination of `QT_QPA_PLATFORM` (`offscreen`, `eglfs`, `minimal`),
+`LIBGL_ALWAYS_SOFTWARE=1`, and EGL surfaceless surface tried. STL and CSG
+export still work on the 2026-09-28 build; only PNG export (which requires
+an OpenGL offscreen context) is broken. The last render with real PNGs was
+2026-09-23, which used the 2026-01-19 trixie build — the same build now
+pinned by digest above.
+
+Pinning by digest (not by tag) guarantees that a future Docker Hub re-roll
+or re-tag of `trixie` cannot silently inject a different OpenSCAD build into
+the image; the build always uses the exact same content-addressable blob.
+A future bump of this pin (e.g. to a new OpenSCAD release that fixes
+headless GL on this host class) must be made by updating the digest in
+`Dockerfile` **and** in this section in the same commit, and re-running the
+full 6-view PNG render to confirm the new build produces real PNGs before
+merging.
 
 ### Empirical CLI verification
 
