@@ -321,10 +321,21 @@ def parse_and_repair(
     Returns ``(mesh, report, file_unit)`` where ``mesh`` is the repaired
     mesh in FILE units (the bbox is measured in file units BEFORE any unit
     conversion), ``report`` is the repair report
-    (``{triangles, bodies, watertight, gaps_closed, bbox_file_units}``),
-    and ``file_unit`` is the 3MF's declared unit string read from the
-    ORIGINAL (pre-repair) loaded geometry (``None`` for STL — unitless, or
-    a 3MF with no ``unit`` attribute — the 3MF default is millimeters).
+    (``{triangles, bodies, watertight, gaps_closed, bbox_file_units,
+    hole_count}``), and ``file_unit`` is the 3MF's declared unit string read
+    from the ORIGINAL (pre-repair) loaded geometry (``None`` for STL —
+    unitless, or a 3MF with no ``unit`` attribute — the 3MF default is
+    millimeters).
+
+    ``hole_count`` is the number of through- or blind-holes the imported
+    part actually has, computed ONCE here at import from the PRE-REPAIR
+    merged mesh's boundary loops (``_boundary_loops``) and stored with the
+    part. The pre-repair merged mesh is the right surface: the repair chain
+    (``pymeshfix``) CLOSES those loops before the stored mesh exists, so a
+    post-repair count would read 0 for a holey part (the loops are the
+    signal, not a bug to fix). Each hole opening contributes one boundary
+    loop, so the loop count is the hole count. A plain watertight box has
+    no open loops → ``0``; a holey part has one loop per hole opening.
 
     Raises ``PartUploadError`` (the 422) on any failure: unparseable,
     empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
@@ -424,11 +435,18 @@ def parse_and_repair(
     trimesh.repair.fix_normals(repaired)
     gaps_after = _boundary_loops(repaired)
 
+    # ``hole_count``: the PRE-REPAIR merged mesh's boundary-loop count
+    # (``gaps_before``) — one loop per hole opening. Computed here at import
+    # (off the event loop, inside this ``to_thread`` call) and stored with
+    # the part; the fill-recut gate at chat time only reads this stored
+    # fact, never re-parsing the mesh. See the docstring for why the
+    # pre-repair mesh, not the post-repair one, is the signal.
     report = {
         "triangles": len(repaired.faces),
         "bodies": bodies,
         "watertight": bool(repaired.is_watertight),
         "gaps_closed": max(0, gaps_before - gaps_after),
+        "hole_count": gaps_before,
         "bbox_file_units": file_bbox,
     }
     return repaired, report, file_unit
