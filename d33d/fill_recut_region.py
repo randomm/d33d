@@ -29,14 +29,16 @@ from fastapi.responses import JSONResponse
 from d33d.chat_frames import answered_frames, register_event_source
 from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
-    FILL_RECUT_NO_HOLE_REPLY,
-    HOLE_NOUNS,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
     is_clean_no,
     is_clean_yes,
     own_feature_names,
+)
+from d33d.part_holes import (
+    FILL_RECUT_NO_HOLE_REPLY,
+    HOLE_NOUNS,
     part_has_hole_evidence,
 )
 
