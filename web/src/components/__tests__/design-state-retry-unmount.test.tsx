@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { ApiClient } from "../../lib/api";
 import type { Project } from "../../lib/api";
+import type { ModelViewerHandle } from "../../components/viewer/ModelViewer";
 
 // ModelViewer owns a real three.js WebGLRenderer, which jsdom cannot
 // construct — mock it the same way app-layout.test.tsx does; this test
@@ -40,20 +41,26 @@ vi.mock("../../components/viewer/ModelViewer", async () => {
   const actual = await vi.importActual<typeof import("../../components/viewer/ModelViewer")>(
     "../../components/viewer/ModelViewer",
   );
+  // The handle's three.js fields (THREE.Scene, WebGLRenderer, …) are inert
+  // in this test — App only stores the handle, and poseSignature reads
+  // camera.position. Build it from the real ModelViewerHandle type (no cast
+  // to any) and give the one field App actually reads a real shape.
+  const mockHandle: ModelViewerHandle = {
+    scene: undefined as unknown as ModelViewerHandle["scene"],
+    camera: { position: { x: 0, y: 100, z: 200 } } as unknown as ModelViewerHandle["camera"],
+    renderer: undefined as unknown as ModelViewerHandle["renderer"],
+    controls: { target: { x: 0, y: 0, z: 0 } } as unknown as ModelViewerHandle["controls"],
+    raycaster: undefined as unknown as ModelViewerHandle["raycaster"],
+    modelRoot: null,
+  };
   const MockModelViewer = (props: {
     data: ArrayBuffer | null;
-    onReady?: (handle: unknown) => void;
+    onReady?: (handle: ModelViewerHandle) => void;
   }) => {
+    const { data, onReady } = props;
     useEffect(() => {
-      props.onReady?.({
-        scene: {} as never,
-        camera: { position: { x: 0, y: 100, z: 200 } } as never,
-        renderer: { domElement: document.createElement("canvas") } as never,
-        controls: { target: { x: 0, y: 0, z: 0 } } as never,
-        raycaster: {} as never,
-        modelRoot: null,
-      });
-    }, [props, props.data]);
+      onReady?.(mockHandle);
+    }, [data, onReady]);
     return null;
   };
   return {

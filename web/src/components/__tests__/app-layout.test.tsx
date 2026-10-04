@@ -5084,15 +5084,23 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
           files: [new File([new Uint8Array(4)], "box.stl")],
         },
       });
-      const report = await waitFor(() => {
+      // The report can mount in the SAME commit that the refetched design
+      // state (and thus `data-collapsed`) commits — assert on the attribute
+      // with a re-query inside waitFor so a mount/commit race cannot read
+      // a stale or half-committed element (observed flake: case 2 of 4
+      // read `null` for a collapsed card once in ~3 runs).
+      await waitFor(() => {
         const el = screen.queryByTestId("import-report");
-        if (!el) throw new Error("not mounted yet");
-        return el;
+        expect(el, `report missing in case ${c.unit_status}/${c.versions.length}`).toBeTruthy();
+        expect(el!.getAttribute("data-collapsed"), `case ${c.unit_status}/${c.versions.length}`).toBe(
+          c.collapsed ? "true" : null,
+        );
       });
-      expect(report.getAttribute("data-collapsed"), `case ${c.unit_status}/${c.versions.length}`).toBe(
-        c.collapsed ? "true" : null,
-      );
+      // Full teardown before the next case: drop this case's DOM and the
+      // spies on its (per-case) client so a leftover spy on a torn-down
+      // tree cannot leak into the next iteration's render.
       cleanup();
+      vi.restoreAllMocks();
     }
   });
 

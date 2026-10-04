@@ -40,12 +40,12 @@ SUPPRESSION_RE = re.compile(
     r"|biome-ignore"
 )
 
-# The consolidated #354 branch measured at the commit that removed the two
-# conftest ``# noqa: F401`` lines (workstream a) and dropped the redundant
-# per-category ratchet of workstream a in favour of this single five-token
-# total: 52 lines across 25 files. Ratchet: lower this as suppressions are
-# removed opportunistically; never raise it without re-measuring and an
-# explicit operator decision.
+# The consolidated #354 branch measured at the consolidation commit:
+# 52 suppressed lines across 26 files (all pre-existing on origin/main
+# except the ratchet's own docstring lines, which the counting rule treats
+# as suppressions). Ratchet: lower this as suppressions are removed
+# opportunistically; never raise it without re-measuring and an explicit
+# operator decision.
 BASELINE = 52
 
 SELF = Path(__file__).resolve()
