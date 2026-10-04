@@ -196,6 +196,17 @@ def _render(scad_source: str, workdir: Path) -> None:
         for f in host_out.iterdir():
             shutil.copy2(f, out_dir)
     finally:
+        # The render container is started without ``--rm`` (via
+        # ``build_docker_argv``), so the existing finally that removed only
+        # the volume and host dirs leaked the exited ``render-*`` container
+        # on every path (success, render failure, timeout). Remove it here
+        # too (issue #354: slow-test container leak). Best-effort — a
+        # failed removal must not mask the test's own assertion.
+        subprocess.run(
+            ["docker", "rm", "-f", f"render-{volume[-8:]}"],
+            capture_output=True,
+            check=False,
+        )
         subprocess.run(
             ["docker", "volume", "rm", "-f", volume],
             capture_output=True,

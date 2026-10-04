@@ -538,3 +538,70 @@ def test_harvest_helper_spawn_failure_records_empty_model_and_cleans_up() -> Non
     assert len(get_names) == 2
     assert fake.cleaned(get_names[0])
     assert fake.cleaned(get_names[1])
+
+
+# ---------------------------------------------------------------------------
+# Issue #354 — the isolated-render container (render-{run_id}) is removed in
+# the per-site finally on EVERY path, not just the post-harvest success path.
+# ---------------------------------------------------------------------------
+
+
+def _is_render(argv) -> bool:
+    """True for the per-site openscad render invocation (the container
+    named ``render-{run_id}``), as opposed to the ``registry-put-*`` /
+    ``registry-get-*`` helper containers."""
+    name = _name_of(argv)
+    return name is not None and name.startswith("render-")
+
+
+def test_render_container_removed_on_success_path() -> None:
+    """A SUCCESSFUL isolated render must have its ``render-{run_id}`` container
+    removed in the per-site ``finally`` — the container is started without
+    ``--rm`` (``build_docker_argv``), so before the fix every call-site, even
+    a fully successful one, leaked an exited ``render-*`` container while the
+    ``finally`` only removed the ``registry-*`` volume."""
+    stl_bytes = _box_stl_bytes()
+    fake = _RecordingRun(
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes)
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    assert result.failures == ()
+    render_names = fake.started_names(_is_render)
+    assert len(render_names) == 2  # two call-sites -> two render containers
+    for name in render_names:
+        assert fake.cleaned(name), f"render container {name} was not removed"
+
+
+def test_render_container_removed_on_openscad_timeout_path() -> None:
+    """An isolated render that times out (exit 124 -> ``timeout`` -> early
+    ``continue``) must still have its ``render-{run_id}`` container removed —
+    the early-continue branch is a distinct path from the success path, and
+    the per-site ``finally`` is the only place that covers it."""
+    stl_bytes = _box_stl_bytes()
+
+    def _openscad(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            return _completed(124)  # timeout on the first call-site
+        return _completed(0)
+
+    fake = _RecordingRun(
+        openscad=_openscad,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    with patch("subprocess.run", side_effect=fake):
+        result = build_registry_glb(TWO_MODULE_SCAD)
+
+    # First call-site timed out; the second succeeded.
+    assert len(result.failures) == 1
+    assert result.failures[0].error_class == "timeout"
+    assert result.registry_names == ("cap",)
+    render_names = fake.started_names(_is_render)
+    assert len(render_names) == 2
+    # The TIMED-OUT render container (first) was still removed, not leaked.
+    assert fake.cleaned(render_names[0])
+    assert fake.cleaned(render_names[1])
