@@ -1195,17 +1195,6 @@ def test_fill_recut_yes_runs_loop_with_instruction(
     monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
     app_with_projects.state.answer_question = None
 
-    # The #349 guard intercepts "yes" when the fill-recut pre-route returns
-    # None (the first "make the hole 38 mm" turn stores the offer; the
-    # second "yes" turn's ``fill_recut_turn`` reads it and handles it —
-    # the #349 guard must not fire because a fill-recut offer IS live).
-    import d33d.projects as _projects_mod
-
-    def _no_op_guard(msg: str) -> bool:
-        return False
-
-    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
-
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "Yes Flow"})
         pid = r.json()["id"]
@@ -1267,13 +1256,6 @@ def test_fill_recut_yes_setup_failure_keeps_offer(
 
     monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
     app_with_projects.state.answer_question = None
-
-    import d33d.projects as _projects_mod
-
-    def _no_op_guard(msg: str) -> bool:
-        return False
-
-    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
 
     async def _call(client):
         r = await client.post("/api/projects", json={"name": "Lost Yes"})
@@ -2175,13 +2157,6 @@ def test_fill_recut_parity_acceptance_runs_loop(app_with_projects, monkeypatch):
     monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _fake_loop)
     app_with_projects.state.answer_question = None
 
-    import d33d.projects as _projects_mod
-
-    def _no_op_guard(msg: str) -> bool:
-        return False
-
-    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
-
     async def _call(client):
         # Chat route: seed the LIVE offer, accept.
         r = await client.post("/api/projects", json={"name": "Parity Yes Chat"})
@@ -2242,13 +2217,6 @@ def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monke
     monkeypatch.setattr(dle_mod, "run_design_loop_with_events", _boom_loop)
     monkeypatch.setattr(chat_loop_mod, "run_design_loop_with_events", _boom_loop)
     app_with_projects.state.answer_question = None
-
-    import d33d.projects as _projects_mod
-
-    def _no_op_guard(msg: str) -> bool:
-        return False
-
-    monkeypatch.setattr(_projects_mod, "_is_bare_affirmation_no_offer", _no_op_guard)
 
     async def _call(client):
         results: dict[str, Any] = {}

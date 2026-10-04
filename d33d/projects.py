@@ -35,13 +35,13 @@ from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
 from d33d.dimension_protocol import _is_clean_affirmation
-from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 from d33d.photo_upload import photo_upload_route
 from d33d.project_git import (
     init_git_repo,
     remove_repo,
     repo_present,
 )
+from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 
 logger = logging.getLogger(__name__)
 
@@ -128,23 +128,37 @@ class ChatRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _is_bare_affirmation_no_offer(message: str) -> bool:
+def _is_bare_affirmation_no_offer(app: Any, project_id: int, message: str) -> bool:
     """True iff ``message`` is a CLEAN AFFIRMATION (the issue #249
     heuristic — ``_is_clean_affirmation`` — "yes" yes; "yes but make it
-    2 mm" no) and the caller has already established that NO offer is
-    live (the #250 offer pre-route returned None AND the fill-recut
-    pre-route returned None — both ran BEFORE this check in
-    ``post_chat``, so a live offer of either kind is handled there and
-    never reaches this guard).
+    2 mm" no) and NO live offer is pending (the guard checks
+    ``versions.get_pending_offer`` itself — issue #349: the guard is
+    self-sufficient, the caller no longer has to establish the no-offer
+    state upstream).
 
     The predicate itself is the EXISTING clean-affirmation heuristic,
     unchanged (operator decision 1, issue #349) — the SAME predicate
-    ``is_pending_offer_acceptance`` uses. The "no offer" condition is
-    the caller's: by the time this runs, ``_confirm_offer_route`` has
-    already returned ``None`` (no live #250 offer, a lapsed/stale offer,
-    or a non-affirmation) and ``fill_recut.fill_recut_turn`` has already
-    returned ``None`` (no live fill-recut offer for this message).
+    ``is_pending_offer_acceptance`` uses. The "no live offer" condition
+    is the guard's OWN: a LIVE offer of either shape suppresses the
+    guard (a bare "yes" must never steal an acceptance that the
+    offer pre-routes handle); everything else — no pending offer at
+    all, a fill-recut offer that was already declined/cleared, or a
+    stale #250 param offer whose version is no longer the latest
+    (``is_pending_offer_acceptance`` lapses it, so the offer pre-route
+    already returned None upstream) — lets the guard fire. A fill-recut
+    row, while present, is always live (it is consumed by its own
+    accept/decline path before this guard runs); a #250 row is live
+    ONLY while its ``version_id`` is still the project's latest version.
     """
+    offer = app.state.versions.get_pending_offer(project_id)
+    if offer is not None and offer.get("kind") != "fill_recut":
+        # The #250 param shape: live only while its version is latest.
+        latest = app.state.versions.latest_version(project_id)
+        if latest is not None and latest.get("id") == offer.get("version_id"):
+            return False
+    elif offer is not None:
+        # A live fill-recut offer — handled by the fill-recut pre-route.
+        return False
     return _is_clean_affirmation(message)
 
 
@@ -480,7 +494,6 @@ def create_projects_router() -> APIRouter:
             )
             raise
 
-
         # Issue #250 — the offer-acceptance pre-route (BEFORE the
         # question pre-route): if the project has a LIVE pending offer
         # (the previous turn's design pass offered to confirm param P on
@@ -561,7 +574,7 @@ def create_projects_router() -> APIRouter:
         # the same contract as every other no-run reply: 202, ONE done
         # frame (``kind: "answer"``), no design run, no version, flag
         # released by the stream drain.
-        if _is_bare_affirmation_no_offer(body.message):
+        if _is_bare_affirmation_no_offer(app, project_id, body.message):
             logger.info(
                 "chat for project %s: bare affirmation with no live "
                 "offer — replying with the no-offer notice, no design "
