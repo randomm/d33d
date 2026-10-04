@@ -5207,9 +5207,12 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     });
     // Call 1 (mount): resolves [] LATE (after the newer call).
     // Call 2 (post-upload): resolves [v1] immediately.
-    vi.spyOn(client, "listVersions")
-      .mockReturnValue(oldPromise as unknown as ReturnType<ApiClient["listVersions"]>)
-      .mockResolvedValue([importV1]);
+    const lv = vi.spyOn(client, "listVersions");
+    lv.mockImplementation(() =>
+      lv.mock.calls.length <= 1
+        ? oldPromise
+        : Promise.resolve([importV1]),
+    );
     vi.spyOn(client, "getDesignState").mockResolvedValue({
       entries: [],
       history_missing: false,
@@ -5237,22 +5240,43 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
       expect(screen.getByTestId("chat-input")).toBeTruthy();
     });
 
+    // The newer [v1] list has been applied — record the filmstrip slot count
+    // now, BEFORE the stale response resolves, so "unchanged" has a baseline
+    // to compare against. (VersionTimeline — and its count badge — lives in
+    // the history sheet, which is not open in this scenario; the filmstrip
+    // is the version surface mounted on Screen 2, absent when versions is []
+    // and a pass is not in flight.)
+    const slotCountBefore = screen.getAllByTestId(/^filmstrip-slot-/).length;
+    expect(screen.getByTestId("filmstrip-slot-1")).toBeTruthy();
+
     // NOW resolve the older [] (it was in-flight from the mount-time call).
     // Without the seq guard, this would setVersions([]) and hide the pane.
     act(() => {
       resolveOld([]);
     });
-    // Give the stale response a tick to (try to) apply.
+    // Let the stale response FULLY settle (resolve → microtask .then →
+    // guard check → potential setVersions). A single `await Promise.resolve()`
+    // is NOT enough — the chain of queued microtasks (the resolved promise's
+    // reaction plus the state update flush) does not all drain in one tick,
+    // so the stale .then would never run and the test would pass with the
+    // guard disabled (that is exactly the regression #366's decision 2
+    // requires the test to prove). A real macrotask tick lets the whole
+    // chain complete inside the act scope.
     await act(async () => {
-      await Promise.resolve();
+      await new Promise((r) => setTimeout(r, 0));
     });
 
-    // The newer [v1] list must survive: the chat-input is still visible
-    // and export is still enabled. If the stale [] clobbered it, the pane
-    // would be hidden (isFirstRun = true) and chat-input would not be
-    // reachable.
+    // The newer [v1] list must survive: the pane is still visible (not
+    // inert — if the stale [] clobbered, isFirstRun flips to true and the
+    // pane hides), export is still enabled, and the version count is
+    // unchanged.
     expect(screen.getByTestId("chat-input")).toBeTruthy();
+    // The pane is un-hidden (not inert — a clobbered [] flips isFirstRun to
+    // true, which hides the whole pane with inert).
+    expect(screen.getByTestId("app-left-pane")).not.toHaveAttribute("inert");
     expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+    expect(screen.getAllByTestId(/^filmstrip-slot-/).length).toBe(slotCountBefore);
+    expect(screen.getByTestId("filmstrip-slot-1")).toBeTruthy();
   });
 
   it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {
