@@ -581,7 +581,7 @@ describe("FailureTurn", () => {
     expect(screen.queryByTestId("failure-action-bigger")).toBeNull();
   });
 
-  it("a stated-size frame with carried_axes but no measured_axes shows madeNotEstablished rows (issue #367)", () => {
+  it("a stated-size frame with carried_axes but no measured_axes shows the not-established phrase rows (issue #367)", () => {
     // The user asked for W=60 but no measurement was made (bbox absent
     // or pre-flight). The row shows the not-established phrase, never a
     // number.
@@ -598,7 +598,7 @@ describe("FailureTurn", () => {
     const wRow = container.querySelector("[data-testid='failure-turn-size-row-W']");
     expect(wRow).not.toBeNull();
     expect((wRow as HTMLElement).textContent).toBe(
-      copy.failure.sizeMismatch.madeNotEstablished("width"),
+      copy.failure.envelope.axisNotMeasured("width"),
     );
     // No made-only rows for D/H (no data at all).
     expect(container.querySelector("[data-testid='failure-turn-size-row-D']")).toBeNull();

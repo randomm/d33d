@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import math
 from typing import Any
 
 from tests.seam_schemas import SeamError
@@ -224,7 +225,7 @@ def validate_frame(frame: tuple[Any, Any]) -> tuple[str, dict[str, Any]]:
                 isinstance(value, (int, float))
                 and not isinstance(value, bool)
                 and value > 0
-                and value == value
+                and math.isfinite(value)
             ):
                 raise SeamError(
                     "D", "error frame 'measured_axes' entry is not axis-letter → positive finite number"

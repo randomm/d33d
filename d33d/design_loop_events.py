@@ -44,7 +44,7 @@ from d33d.design_loop import (
     MODEL_UNCONFIGURED,
     RENDERER_IMAGE_STALE,
     BboxInfo,
-    best_match_component,
+    gate_comparison_extents,
 )
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -797,14 +797,13 @@ def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     card), or ``None`` when the field is omitted (omit-not-null, the
     frame policy).
 
-    Mirrors the gate's own selection (``_bbox_within_tolerance`` in
-    ``d33d.design_loop``): for a FULL positive (W, D, H) confirmed set
-    with a component breakdown the gate compares the BEST-MATCHING
-    component's extents (issue #100), so that component's W/D/H is what
-    the field carries — never the whole-assembly bbox, which would
-    report a different (larger) number than the gate compared. For a
-    PARTIAL confirmed set (or no breakdown) the gate compares the
-    whole-mesh extents, and that is what the field carries.
+    The compared extents come from the gate's OWN selection decision —
+    ``gate_comparison_extents`` in ``d33d.design_loop``, the single
+    definition the gate's ``_bbox_within_tolerance`` also calls — so the
+    field can never report a different number than the gate actually
+    compared (full positive (W, D, H) confirmed set with a component
+    breakdown → the best-matching component's extents, issue #100;
+    partial set or no breakdown → the whole-mesh extents).
 
     Omitted (``None``) when: the failing gate is not the bbox gate; no
     axis was confirmed (the gate abstained entirely — in which case it
@@ -813,11 +812,12 @@ def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     ``BboxInfo`` (the pre-flight placeholder); or the compared extents
     are non-positive (a zero is the encoded absence, issue #91 — it is
     never emitted as a measured number). The axis keys are always
-    ``W``/``D``/``H`` regardless of which axes were confirmed: the made
-    value is a measurement of the render, not an echo of the ask, so an
-    import project (empty confirmed set — the gate target there is the
-    part's own bbox) still emits the measured axes, and the SPA renders
-    made-only rows for axes with no asked value.
+    ``W``/``D``/``H`` when the field is emitted: the made value is a
+    measurement of the render, not an echo of the ask. When the field is
+    omitted (including import projects, where the confirmed set is
+    empty) the SPA falls back to its generic card (operator decision
+    2(b)); the made-only row shape is reachable only when the gate
+    measured extents with a non-empty confirmed set.
     """
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
@@ -849,18 +849,14 @@ def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     bbox = getattr(best, "bbox", None)
     if not isinstance(bbox, BboxInfo):
         return None
-    full_triple = all(t > 0 for t in triple)
-    if full_triple and bbox.components:
-        # Full confirmed triple + breakdown: the gate compared the
-        # best-matching component (issue #100) — carry ITS extents.
-        extents = best_match_component(bbox, triple)
-        if extents is None:  # defensive: non-empty breakdown never None
-            extents = (bbox.x, bbox.y, bbox.z)
-    else:
-        # Partial confirmed set (or no breakdown): the gate compared the
-        # whole-mesh extents — carry those.
-        extents = (bbox.x, bbox.y, bbox.z)
-    if any(e <= 0 for e in extents):
+    # The gate's OWN selection decision (issue #367 lens review: the
+    # frame must carry the extents the gate ACTUALLY compared — never a
+    # re-implemented mirror). ``gate_comparison_extents`` is the single
+    # definition ``_bbox_within_tolerance`` also calls, so divergence is
+    # structurally impossible. It cannot raise here: the confirmed set
+    # is non-empty (guard above) and exactly (W, D, H) — never >3 axes.
+    extents = gate_comparison_extents(bbox, triple)
+    if extents is None or any(e <= 0 for e in extents):
         return None
     return {"W": float(extents[0]), "D": float(extents[1]), "H": float(extents[2])}
 

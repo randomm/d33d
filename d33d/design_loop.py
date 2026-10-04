@@ -97,6 +97,7 @@ __all__ = [
     "Score",
     "_axis_param_mismatches",
     "extract_named_params",
+    "gate_comparison_extents",
     "import_part_lines",
     "is_best",
     "make_llm_fn",
@@ -486,6 +487,49 @@ def _bbox_target(
     return stated
 
 
+def gate_comparison_extents(
+    bbox: BboxInfo, stated: tuple[float, ...]
+) -> tuple[float, float, float] | None:
+    """The extents the bbox gate ACTUALLY compares for ``stated`` (issue
+    #367, lens review): the SINGLE definition of the gate's component-
+    selection decision, shared by :func:`_bbox_within_tolerance` and the
+    terminal error frame's ``measured_axes`` (``d33d.design_loop_events``).
+    Divergence between the two is structurally impossible — both call this.
+
+    ``None`` when the gate ABSTAINS entirely (no axis confirmed —
+    ``stated`` holds no positive axis) or when the caller violated its
+    contract with a >3-axis input (the ValueError :func:`_bbox_within_tolerance`
+    raises propagates unchanged). Otherwise: a FULL positive (W, D, H)
+    triple with a component breakdown compares the BEST-MATCHING component
+    (issue #100); a partial confirmed set (or no breakdown) compares the
+    whole-mesh extents — the conservative (fail-safe) direction documented
+    on :func:`_bbox_within_tolerance`.
+    """
+    stated = tuple(stated) + (0.0,) * (3 - len(stated))
+    if not any(t > 0 for t in stated):
+        return None  # the gate abstains (no axis confirmed — issue #247)
+    if len(stated) > 3:
+        # A widened input over the (W, D, H) envelope: caller contract
+        # violation — fail loudly, never silently ignore (issue #247).
+        raise ValueError(
+            f"stated dimensions must be at most 3 axes (W, D, H), got {len(stated)}"
+        )
+    if len(stated) == 3 and all(t > 0 for t in stated):
+        # Full confirmed triple + component breakdown: rank the components
+        # and compare against the best match (issue #100). Without a
+        # breakdown (``best_match_component`` returns ``None``) fall
+        # through to the whole-mesh extents (the legacy path).
+        extents = best_match_component(bbox, stated)
+        if extents is None:
+            extents = (bbox.x, bbox.y, bbox.z)
+    else:
+        # A PARTIAL confirmed set (no well-defined component selection —
+        # documented choice on _bbox_within_tolerance): compare the
+        # confirmed axes against the whole-mesh extents.
+        extents = (bbox.x, bbox.y, bbox.z)
+    return extents
+
+
 def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
     """True iff every rendered axis the user CONFIRMED is within
     max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).
@@ -534,42 +578,17 @@ def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
     test-built ``BboxInfo``s without a breakdown keep the legacy whole-part
     comparison.
     """
-    # Normalize to a 3-tuple with ``0.0`` for any absent axis (per-axis
-    # semantics — issue #247): callers pass the per-axis confirmed set as
-    # either a full 3-tuple (legacy) or a shorter tuple naming only the
-    # CONFIRMED axes in W→x, D→y, H→z order (a partial set — the rest are
-    # unconfirmed). Zero-filling makes the zip below always 3-wide, so
-    # each unconfirmed axis maps to target ``<= 0`` (skipped) and the
-    # branch test below sees the true confirmed shape.
-    stated = tuple(stated) + (0.0,) * (3 - len(stated))
-    if not any(t > 0 for t in stated):
+    # The selection decision (component vs whole-mesh, per-axis
+    # abstention, the >3-axis contract violation) lives in
+    # :func:`gate_comparison_extents` — the single definition shared with
+    # the terminal error frame's ``measured_axes`` (issue #367).
+    extents = gate_comparison_extents(bbox, stated)
+    if extents is None:
         # No axis confirmed: the gate abstains (True) — an unmeasurable
         # gate must not hard-fail every candidate (ticket #91). The
         # abstention is recorded DISTINCTLY by :func:`score`'s
         # ``bbox_abstained`` field, never a vacuous unmarked pass.
         return True
-    if len(stated) > 3:
-        # A widened input over the (W, D, H) envelope: the gate measures
-        # three axes only — longer input is a caller contract violation,
-        # not a fourth measurement target (fail loudly, never silently
-        # ignore). ``_dim_params`` and the loop's normalization never
-        # produce this; it guards the seam.
-        raise ValueError(
-            f"stated dimensions must be at most 3 axes (W, D, H), got {len(stated)}"
-        )
-    if len(stated) == 3 and all(t > 0 for t in stated):
-        # Full confirmed triple + component breakdown: rank the components
-        # and compare against the best match (issue #100). Without a
-        # breakdown (``best_match_component`` returns ``None``) fall
-        # through to the whole-mesh extents (the legacy path).
-        extents = best_match_component(bbox, stated)
-        if extents is None:
-            extents = (bbox.x, bbox.y, bbox.z)
-    else:
-        # A PARTIAL confirmed set (no well-defined component selection —
-        # documented choice above): compare the confirmed axes against the
-        # whole-mesh extents.
-        extents = (bbox.x, bbox.y, bbox.z)
     for extent, target in zip(extents, stated):
         if target <= 0:
             continue  # axis not confirmed: per-axis abstention, skip

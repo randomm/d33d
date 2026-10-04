@@ -4864,8 +4864,46 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     client = makeClient();
   });
 
+  // Issue #366: a full-shape import v1 entry — used by the upload-driven
+  // and race tests to model the version list that appears after a part
+  // upload's 201.
+  const importV1: VersionTimelineEntry = {
+    id: 1,
+    name: "v1",
+    params: {},
+    created_by_message: "",
+    parent: null,
+    restored_from: null,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-01T00:00:00Z",
+    diff_count: 0,
+    exported_at: null,
+    source_kind: "import",
+  };
+
+  /** Issue #366: drive a part upload through the named file input and
+   *  return the resulting listVersions call count. The upload's 201
+   *  triggers handlePartUploaded → refetchDesignState + refetchVersions
+   *  (the post-upload refetch this ticket adds). */
+  async function driveUpload(inputTestId: string): Promise<number> {
+    const input = screen.getByTestId(inputTestId);
+    fireEvent.change(input, {
+      target: { files: [new File([new Uint8Array(4)], "box.stl")] },
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    return vi.mocked(client.listVersions).mock.calls.length;
+  }
+
   it("unsettled: the plate hides, the report mounts, the viewer data comes from part.stl, export is disabled, and the photo button is gone", async () => {
-    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    // Issue #366: the mount-time listVersions resolves [] (no version yet);
+    // the post-upload refetch (triggered by the version-created frame's
+    // listVersions call inside settleModelMount) resolves [v1 import].
+    vi.spyOn(client, "listVersions").mockResolvedValueOnce([]).mockResolvedValue([importV1]);
     vi.spyOn(client, "getDesignState").mockResolvedValue({
       entries: [],
       history_missing: false,
@@ -4949,10 +4987,9 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
   });
 
   it("assumed: the plate shows, the unsettled caption is ABSENT, export is enabled, and part.stl is fetched (issue #350 — assumed = usable)", async () => {
-    // A version exists so the export button's versionId is defined — the
-    // only thing that can disable the button now is the part gate, which
-    // for an assumed part is lifted (issue #350: only "unsettled" blocks).
-    vi.spyOn(client, "listVersions").mockResolvedValue([
+    // Issue #366: the mount-time listVersions resolves [] (no version yet);
+    // the post-upload refetch resolves [v1 import].
+    vi.spyOn(client, "listVersions").mockResolvedValueOnce([]).mockResolvedValue([
       {
         id: 1,
         name: "v1",
@@ -5011,28 +5048,8 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
   });
 
   it("collapse truth table: settled/1 → collapsed; assumed/1, unsettled/1, assumed/2 → full (issue #352 predicate)", async () => {
-    const oneImport = [
-      {
-        id: 1,
-        name: "v1",
-        params: {},
-        created_by_message: "",
-        parent: null,
-        restored_from: null,
-        forked_from: null,
-        pinned: false,
-        archived: false,
-        thumbnail: null,
-        created_at: "2026-01-01T00:00:00Z",
-        diff_count: 0,
-        exported_at: null,
-        source_kind: "import",
-      },
-    ] as VersionTimelineEntry[];
-    const twoImport = [
-      oneImport[0],
-      { ...oneImport[0], id: 2, name: "v2", source_kind: null },
-    ];
+    const oneImport = [importV1];
+    const twoImport = [importV1, { ...importV1, id: 2, name: "v2", source_kind: null }];
     const cases = [
       { unit_status: "settled", versions: oneImport, collapsed: true },
       { unit_status: "assumed", versions: oneImport, collapsed: false },
@@ -5045,7 +5062,10 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     ] as const;
     for (const c of cases) {
       const clientCase = makeClient();
-      vi.spyOn(clientCase, "listVersions").mockResolvedValue(
+      // Issue #366: the mount-time listVersions resolves [] (no version yet);
+      // the post-upload refetch (triggered by the upload's 201 → handlePartUploaded
+      // → refetchVersions) resolves [v1 import].
+      vi.spyOn(clientCase, "listVersions").mockResolvedValueOnce([]).mockResolvedValue(
         [...c.versions],
       );
       vi.spyOn(clientCase, "getDesignState").mockResolvedValue({
@@ -5102,6 +5122,137 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
       cleanup();
       vi.restoreAllMocks();
     }
+  });
+
+  it("upload through the pane's part-file-input: listVersions refetches, chat-input visible, export enabled (issue #366)", async () => {
+    // Issue #366: the mount-time listVersions resolves [] (no version yet);
+    // the post-upload refetch (triggered by the upload's 201 → handlePartUploaded
+    // → refetchVersions) resolves [v1 import].
+    vi.spyOn(client, "listVersions").mockResolvedValueOnce([]).mockResolvedValue([importV1]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "fetchPartStl").mockResolvedValue(partBytes as ArrayBuffer);
+    vi.spyOn(client, "uploadPart").mockResolvedValue({
+      id: 1,
+      version_id: 1,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["uploadPart"]>>);
+
+    render(<App client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Drive the upload through the pane's part-file-input.
+    const callsAfterUpload = await driveUpload("part-file-input");
+
+    // The post-upload refetch fired: listVersions was called at least twice
+    // (the mount-time call + the post-upload refetch).
+    expect(callsAfterUpload).toBeGreaterThanOrEqual(2);
+    // The conversation pane is un-hidden (the chat-input is visible).
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toBeTruthy();
+    });
+    // Export is enabled for an assumed part (the version exists, the part is
+    // assumed — the D8 gate lifts).
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
+  it("upload through the FirstRun file card: listVersions refetches, chat-input visible, export enabled (issue #366)", async () => {
+    // Issue #366: the mount-time listVersions resolves [] (no version yet);
+    // the post-upload refetch (triggered by the upload's 201 → handlePartUploaded
+    // → refetchVersions) resolves [v1 import].
+    vi.spyOn(client, "listVersions").mockResolvedValueOnce([]).mockResolvedValue([importV1]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "fetchPartStl").mockResolvedValue(partBytes as ArrayBuffer);
+    vi.spyOn(client, "uploadPart").mockResolvedValue({
+      id: 1,
+      version_id: 1,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["uploadPart"]>>);
+
+    render(<App client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Drive the upload through the FirstRun file card (the QA repro surface).
+    const callsAfterUpload = await driveUpload("first-run-file-input");
+
+    // The post-upload refetch fired: listVersions was called at least twice.
+    expect(callsAfterUpload).toBeGreaterThanOrEqual(2);
+    // The conversation pane is un-hidden (the chat-input is visible).
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toBeTruthy();
+    });
+    // Export is enabled for an assumed part.
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
+  it("race: the older [] listVersions response resolves AFTER the newer [v1] and must not clobber it (issue #366)", async () => {
+    // Issue #366 race: the mount-time GET /versions (seq 1) returns a
+    // promise that resolves [] AFTER the post-upload GET /versions (seq 2)
+    // resolves [v1]. Without the seq guard, the stale [] would clobber the
+    // newer [v1]. With the guard, the stale [] is dropped.
+    let resolveOld!: (vs: VersionTimelineEntry[]) => void;
+    const oldPromise = new Promise<VersionTimelineEntry[]>((r) => {
+      resolveOld = r;
+    });
+    // Call 1 (mount): resolves [] LATE (after the newer call).
+    // Call 2 (post-upload): resolves [v1] immediately.
+    vi.spyOn(client, "listVersions")
+      .mockReturnValue(oldPromise as unknown as ReturnType<ApiClient["listVersions"]>)
+      .mockResolvedValue([importV1]);
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    vi.spyOn(client, "fetchPartStl").mockResolvedValue(partBytes as ArrayBuffer);
+    vi.spyOn(client, "uploadPart").mockResolvedValue({
+      id: 1,
+      version_id: 1,
+      part: partStub({ unit_status: "assumed" }),
+    } as Awaited<ReturnType<ApiClient["uploadPart"]>>);
+
+    render(<App client={client} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The mount-time listVersions call has fired (its promise is pending).
+    // Drive the upload (the post-upload refetch fires with [v1]).
+    const callsAfterUpload = await driveUpload("part-file-input");
+    expect(callsAfterUpload).toBeGreaterThanOrEqual(2);
+
+    // The newer [v1] has resolved and been applied.
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toBeTruthy();
+    });
+
+    // NOW resolve the older [] (it was in-flight from the mount-time call).
+    // Without the seq guard, this would setVersions([]) and hide the pane.
+    act(() => {
+      resolveOld([]);
+    });
+    // Give the stale response a tick to (try to) apply.
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The newer [v1] list must survive: the chat-input is still visible
+    // and export is still enabled. If the stale [] clobbered it, the pane
+    // would be hidden (isFirstRun = true) and chat-input would not be
+    // reachable.
+    expect(screen.getByTestId("chat-input")).toBeTruthy();
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
   it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {

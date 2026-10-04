@@ -229,7 +229,6 @@ def test_measured_axes_frame_field_bbox_only() -> None:
     when no bbox was measured, and when the compared extents are
     non-positive (omit-not-null)."""
     bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
-    bbox = BboxInfo(x=66.0, y=45.0, z=30.0)
     # Partial confirmed set (only W): the gate compared the whole-mesh
     # extents — the full (W, D, H) map is emitted (the made values are a
     # measurement, not an echo of the ask).
