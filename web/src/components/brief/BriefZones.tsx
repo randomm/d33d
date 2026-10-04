@@ -238,6 +238,9 @@ export function BriefZoneLayout({
   // One W/D/H part row. The value is `null` while the part's units are
   // unsettled — the row shows the "waiting on units" control, never a
   // number.
+  // The W/D/H rows' provenance mark (issue #350): assumed while the part's
+  // units are assumed, measured otherwise — one value for both sites.
+  const provenance = zones.partProvenance ?? "measured";
   const renderPartRow = (row: BriefPartRow) => {
     const valueCell =
       row.value === null ? (
@@ -258,7 +261,7 @@ export function BriefZoneLayout({
         key={row.axis}
         className="brief-row"
         data-testid={`brief-part-row-${row.axis}`}
-        data-provenance={zones.partProvenance ?? "measured"}
+        data-provenance={provenance}
       >
         <div
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}
@@ -268,7 +271,7 @@ export function BriefZoneLayout({
             style={{
               flex: "0 0 auto",
               display: "inline-block",
-              ...MARKS[zones.partProvenance ?? "measured"],
+              ...MARKS[provenance],
             }}
           />
           <span

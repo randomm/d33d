@@ -946,7 +946,7 @@ export const partReport = {
   /** The one-line note shown when the server sent no unit options and the
    *  user opens the choice anyway (issue #350): only the measurement
    *  escape is available — never a bare escape with no explanation. */
-  assumedNoOptionsLine: "There's no unit to pick from here — tell me one real measurement and I'll scale from that.",
+  assumedNoOptionsLine: "There's no unit to pick from here.",
   /** The unit option labels. */
   unitLabels: {
     inch: "Inches",

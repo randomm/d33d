@@ -12,6 +12,15 @@
 import type { PartOption } from "../../lib/api";
 import copy, { mm } from "../../copy";
 
+/** The closed set of units the server offers — a row whose unit is
+ *  outside it is a contract violation the UI must not render. */
+const PART_UNITS: readonly string[] = ["mm", "cm", "inch"];
+
+/** `true` when `u` is one of the closed mm/cm/inch option units. */
+export function isPartUnit(u: unknown): boolean {
+  return typeof u === "string" && PART_UNITS.includes(u);
+}
+
 export interface UnitChoiceProps {
   /** `import-report-assumed` (assumed branch) or `import-report`
    *  (unsettled branch) — prefixes the option/escape/axis/settle testids. */
@@ -54,10 +63,11 @@ export function UnitChoice({
             marginTop: 12,
           }}
         >
-          {options.map((opt) => (
+          {options.filter((opt) => isPartUnit(opt.unit)).map((opt) => (
             <button
               key={opt.unit}
               type="button"
+              /* Deliberately `import-report-option-${opt.unit}`, not prefixed: existing tests depend on this testid. */
               data-testid={`import-report-option-${opt.unit}`}
               onClick={() => onSettleUnit(opt.unit)}
               disabled={busy}

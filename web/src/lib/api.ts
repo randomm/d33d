@@ -194,11 +194,15 @@ export interface DesignStateEntry {
  * drive the Screen 2 UI (settled / assumed / unsettled) and to decide
  * whether to show the unsettled viewport caption and disable export.
  */
+/** The closed set of units the server offers (``settle_unit_choices``).
+ *  Not a bare string — the SPA never renders a unit row outside this set. */
+export type PartUnit = "mm" | "cm" | "inch";
+
 export interface PartOption {
   /** The candidate unit — the server offers only the closed mm/cm/inch
    *  set (``settle_unit_choices``), so the type is the closed union, not a
    *  bare string. */
-  unit: "mm" | "cm" | "inch";
+  unit: PartUnit;
   scale: number;
   extents_mm: number[];
   fits_envelope: boolean;
@@ -208,7 +212,7 @@ export interface PartOption {
 export interface PartReportInfo {
   filename: string;
   format: string;
-  unit: string | null;
+  unit: PartUnit | null;
   unit_status: "assumed" | "settled" | "unsettled";
   scale: number | null;
   /** Issue #338, operator decision 2: the part's settled-unit mm extents
