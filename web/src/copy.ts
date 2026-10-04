@@ -877,6 +877,15 @@ export const fillRecut = {
   noNormal:
     "That feature came with your file, so I can't resize it directly — the file has no parameters for me to change. I can't tell that feature's axis from where you pointed — pin a flat face on it and I'll offer to fill it and recut it on the same axis.",
 
+  /** The no-hole honest reply (issue #351): the user asked to resize a
+   *  hole/bore/counterbore on a part whose stored hole_count is 0.
+   *  No offer is stored, no buttons, no loop. The noun is the user's own
+   *  closed-set feature noun (substituted, never invented). The backend's
+   *  FRILL_NO_HOLE_REPLY carries the same template (the parity pin in
+   *  tests/test_projects.py). */
+  noHole: (noun: string): string =>
+    `I don't see a ${noun} on the part you brought — want me to drill one?`,
+
   /** The fill-and-recut offer's acceptance button (issue #338, decision
    *  7): sends the acceptance through the existing chat offer path, which
    *  runs the loop. */

@@ -914,6 +914,45 @@ describe("App layout", () => {
     expect(client.postChat).toHaveBeenCalledTimes(2);
   });
 
+  it("no-hole honest reply renders without offer buttons (issue #351)", async () => {
+    // Issue #351: when the done frame carries kind "answer" and NO
+    // fill_recut_offer flag (the honest no-hole reply), the SPA must
+    // render the message as a plain assistant turn — NO Yes/Leave-it
+    // buttons, and a follow-up message supersedes nothing.
+    const client = new ApiClient();
+    vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(client, "listVersions").mockResolvedValue([]);
+    vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
+    let firstStream = true;
+    vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
+      if (firstStream) {
+        firstStream = false;
+        handlers.onDone?.({
+          message: copy.fillRecut.noHole("hole"),
+          kind: "answer",
+        });
+      } else {
+        handlers.onDone?.({
+          message: "Understood.",
+          kind: "answer",
+        });
+      }
+    });
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make the hole 10 mm");
+    await act(async () => { await Promise.resolve(); });
+    await act(async () => { await Promise.resolve(); });
+
+    // The honest no-hole reply rendered as a plain message.
+    const noHoleText = copy.fillRecut.noHole("hole");
+    expect(await screen.findByText(noHoleText)).toBeTruthy();
+
+    // NO offer buttons: the done frame carried no fill_recut_offer flag.
+    expect(screen.queryByTestId("fill-recut-offer-yes")).toBeNull();
+    expect(screen.queryByTestId("fill-recut-offer-no")).toBeNull();
+  });
+
   it("mounts the pass card with the views carried on the version-created frame (issue #125)", async () => {
     // W10: the views map is on the wire in the version-created frame; the
     // pass card (via ChatPanel) is what displays it. The App-level `renders`
