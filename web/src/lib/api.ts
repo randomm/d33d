@@ -212,7 +212,9 @@ export interface PartOption {
 export interface PartReportInfo {
   filename: string;
   format: string;
-  unit: PartUnit | null;
+  /** The part's settled unit — "custom" is reachable via the measurement
+   *  branch (d33d/part_import.py `settle_units` settles `part_unit = "custom"`). */
+  unit: PartUnit | "custom" | null;
   unit_status: "assumed" | "settled" | "unsettled";
   scale: number | null;
   /** Issue #338, operator decision 2: the part's settled-unit mm extents
