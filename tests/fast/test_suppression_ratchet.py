@@ -92,3 +92,49 @@ def test_suppression_count_does_not_exceed_baseline() -> None:
         f"(issue #354 ratchet). Offending lines:\n"
         + "\n".join(locations)
     )
+
+
+# ---------------------------------------------------------------------------
+# Unit test: each suppression token is counted exactly once per line.
+# Token strings are built by concatenation so THIS file's lines are not
+# themselves counted by the ratchet (the ratchet scans by regex, not by
+# file identity — though this file excludes itself, the concatenation
+# also protects against a future refactor that removes the SELF exclusion).
+# ---------------------------------------------------------------------------
+
+
+def test_each_suppression_token_counts_exactly_once(tmp_path: Path) -> None:
+    """Each of the six token families must match its synthetic line and
+    produce exactly one suppressed-line count — verifying the regex is
+    neither too loose (double-counting) nor too strict (missing a token
+    variant like ``@``-prefixed forms)."""
+    noqa_tok = "no" + "qa"
+    type_ignore_tok = "type" + ": ignore"
+    ts_ignore_tok = "@" + "ts-" + "ignore"
+    ts_expect_tok = "@" + "ts-" + "expect-" + "error"
+    eslint_tok = "eslint-" + "disable"
+    biome_tok = "biome-" + "ignore"
+
+    lines = [
+        f"x = 1  # {noqa_tok}",
+        f"x = 1  # {type_ignore_tok}",
+        f"// {ts_ignore_tok}",
+        f"// {ts_expect_tok}",
+        f"// {eslint_tok}",
+        f"// {biome_tok}",
+    ]
+    for line in lines:
+        f = tmp_path / "test.py"
+        f.write_text(line + "\n", encoding="utf-8")
+        count = sum(1 for l in f.read_text().splitlines() if SUPPRESSION_RE.search(l))
+        f.unlink()
+        assert count == 1, f"expected 1 match for {line!r}, got {count}"
+
+
+def test_multitoken_line_counts_once(tmp_path: Path) -> None:
+    """A line with TWO tokens (e.g. both noqa and type: ignore) counts as
+    ONE suppressed line — the regex is a per-line ``search``, not a per-
+    token ``findall``."""
+    multi = "x = 1  # no" + "qa  # type" + ": ignore"
+    count = sum(1 for l in [multi] if SUPPRESSION_RE.search(l))
+    assert count == 1, f"multi-token line should count once, got {count}"

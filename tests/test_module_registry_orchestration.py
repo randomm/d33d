@@ -605,3 +605,42 @@ def test_render_container_removed_on_openscad_timeout_path() -> None:
     # The TIMED-OUT render container (first) was still removed, not leaked.
     assert fake.cleaned(render_names[0])
     assert fake.cleaned(render_names[1])
+
+
+def test_render_container_removed_when_run_container_raises_timeout_expired() -> None:
+    """Disputed-finding settlement (issue #354): a ``subprocess.
+    TimeoutExpired`` raised OUT of ``run_container`` (an abnormal path —
+    the real ``run_container`` catches every ``TimeoutExpired`` and returns
+    a 124 sentinel, but a caller must not rely on that to keep the
+    container from leaking) must still have its ``render-{run_id}`` container
+    force-removed by the per-site ``finally`` — the exception propagates to
+    the caller, but the container must not leak on the way out.
+    """
+
+    def _openscad(argv, state):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise subprocess.TimeoutExpired(cmd=argv, timeout=30)
+        return _completed(0)
+
+    stl_bytes = _box_stl_bytes()
+    fake = _RecordingRun(
+        openscad=_openscad,
+        harvest=lambda argv, state: _completed(0, stdout=stl_bytes),
+    )
+
+    def _fake_run_container(argv, timeout_s):
+        return fake(list(argv))
+
+    with (
+        patch("d33d.module_registry.run_container", side_effect=_fake_run_container),
+        patch("subprocess.run", side_effect=fake),
+        pytest.raises(subprocess.TimeoutExpired),
+    ):
+        build_registry_glb(TWO_MODULE_SCAD)
+
+    # The render container for the first call-site was force-removed in the
+    # finally despite the exception propagating — no leak.
+    render_names = fake.started_names(_is_render)
+    assert len(render_names) == 1  # only the first call-site ran a render
+    assert fake.cleaned(render_names[0])

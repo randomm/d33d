@@ -327,6 +327,27 @@ export default function App({ client }: AppProps) {
   // rejection under vitest teardown).
   const designStateRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Issue #354: the single retry-timer scheduling helper. Clears any pending
+  // timer, arms a new one, and the callback nulls the ref (identity-checked
+  // so an overlapping retry's newer timer is never untracked by an older
+  // timer firing) then calls fn.
+  const scheduleDesignStateRetry = useCallback(
+    (fn: () => void) => {
+      if (designStateRetryTimerRef.current !== null) {
+        clearTimeout(designStateRetryTimerRef.current);
+      }
+      const retryHandle = setTimeout(() => {
+        // Identity check: only null if THIS timer is still the tracked one.
+        if (designStateRetryTimerRef.current === retryHandle) {
+          designStateRetryTimerRef.current = null;
+        }
+        fn();
+      }, 300);
+      designStateRetryTimerRef.current = retryHandle;
+    },
+    [],
+  );
+
   const refetchDesignState = useCallback((projectIdOverride?: number) => {
     const effectiveProjectId = projectIdOverride ?? projectId;
     if (effectiveProjectId === null) return;
@@ -366,19 +387,7 @@ export default function App({ client }: AppProps) {
       .catch(() => {
         // First attempt failed: retry exactly once, ~300 ms later.
         if (isStale()) return;
-        // Issue #354 (overlap fix): at most ONE retry timer is ever pending.
-        // A new failed refetch clears any timer the previous failed refetch
-        // armed, so no orphaned timer can survive the unmount cleanup.
-        if (designStateRetryTimerRef.current !== null) {
-          clearTimeout(designStateRetryTimerRef.current);
-        }
-        const retryHandle = setTimeout(() => {
-          // Null the ref only if THIS timer is still the tracked one — an
-          // overlapping retry may have replaced it, and unconditionally
-          // nulling would untrack the newer timer.
-          if (designStateRetryTimerRef.current === retryHandle) {
-            designStateRetryTimerRef.current = null;
-          }
+        scheduleDesignStateRetry(() => {
           if (isStale()) return;
           apiClient
             .getDesignState(effectiveProjectId)
@@ -391,10 +400,9 @@ export default function App({ client }: AppProps) {
                 setDesignStateStale(true);
               }
             });
-        }, 300);
-        designStateRetryTimerRef.current = retryHandle;
+        });
       });
-  }, [projectId, apiClient]);
+  }, [projectId, apiClient, scheduleDesignStateRetry]);
 
   // The mount-time refetch effect: fires when projectId changes (from null
   // to the created project's id). This is the "project change" effect that

@@ -23,6 +23,13 @@
  * Without the fix (the cleanup removed): the retry fires, getDesignState is
  * called a second time, and the post-unmount state update surfaces as an
  * unhandled rejection — the assertion fails.
+ *
+ * NOTE — the first test (single unmount) does not reliably discriminate the
+ * overlap mutation (unconditional null, no pre-clear): the two refetches in
+ * one effect run reject within ~1 ms of each other, so the unmount cleanup
+ * (which cancels the LATEST timer) lands within milliseconds of the older
+ * timer's arm and cancels it by luck. The dedicated overlap test (two sends)
+ * is the one that discriminates.
  */
 
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
@@ -110,12 +117,6 @@ describe("design-state refetch retry timer (issue #354)", () => {
     // (one tracked timer, issue #354 overlap fix).
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(2));
     // 150 ms: both retry timers armed and pending when unmount runs.
-    // NOTE — the mutation check (unconditional null, no pre-clear) is NOT
-    // reliably caught by this test: the two refetches in one effect run
-    // reject within ~1 ms of each other, so the unmount cleanup (which
-    // cancels the LATEST timer) lands within milliseconds of the older
-    // timer's arm and cancels it by luck. The dedicated overlap test below
-    // (two sends) is the one that discriminates.
     await new Promise((r) => setTimeout(r, 150));
 
     // Unmount BEFORE the ~300 ms retry window elapses.
@@ -166,7 +167,7 @@ describe("design-state refetch retry timer (issue #354)", () => {
     // and rejects (refetch #1). The version-created frame from that send
     // fires refetch #2 as well (issue #123) — both inside one effect run,
     // milliseconds apart, so they do NOT discriminate the overlap (see the
-    // NOTE above).
+    // NOTE in the file docstring).
     const firstRunInput = screen.getByTestId("first-run-input");
     fireEvent.change(firstRunInput, { target: { value: "make a box" } });
     fireEvent.click(screen.getByTestId("first-run-start-btn"));

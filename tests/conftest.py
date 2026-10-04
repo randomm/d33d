@@ -13,7 +13,7 @@ keeps ``./scripts/test`` green on a fresh checkout without Docker.
 
 from __future__ import annotations
 
-import importlib as _conftest_importlib
+import importlib
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -24,10 +24,8 @@ import pytest
 # tests/__init__.py (dependency + provenance). If either guard fails it
 # calls sys.exit() with a diagnostic and the pytest session aborts
 # before collecting a single test.
-# Side-effect-only import via ``importlib`` — no module-level binding to
-# flag (ruff F401 only fires on a bare ``import x`` whose name is never
-# referenced; the call below is the guard, and no suppression is needed).
-_conftest_importlib.import_module("tests")  # side-effect: guard checks
+# Side-effect-only import via ``importlib`` — the call below is the guard.
+importlib.import_module("tests")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 root_str = str(_REPO_ROOT)
@@ -61,7 +59,7 @@ def _preimport_part_mesh():
     ``sys.modules`` afterwards) pays the import cost once per process,
     outside any test's measurement window. The ``importlib`` form is a side-effect-only import — no module-level binding to flag.
     """
-    _conftest_importlib.import_module("d33d.part_mesh")
+    importlib.import_module("d33d.part_mesh")
     yield
 
 
