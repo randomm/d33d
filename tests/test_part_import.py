@@ -873,6 +873,7 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     is ABSENT when repair keeps all bodies (two annuli — the fixed path),
     and PRESENT with the pre-repair count when the post-repair stored
     mesh has fewer bodies than the pre-repair count."""
+    import numpy as np
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
@@ -880,12 +881,13 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     # Presence check on a body-dropping repair: monkeypatch the per-body
     # repair so the second body is dropped (simulating a repair that
     # still loses a body), and assert the report carries bodies_before.
+
     ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
     ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
     ring_b.apply_translation([10000.0, 0.0, 0.0])
     data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
 
-    original = part_mesh_mod._repair_with_pmf
+    original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
 
     def _dropping_repair(mesh):
@@ -900,20 +902,71 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
             )
         return repaired
 
-    import numpy as np
-
-    part_mesh_mod._repair_with_pmf = _dropping_repair
+    # ``parse_and_repair`` looks the name up in part_mesh's own globals
+    # (``from d33d.part_repair import repair_with_pmf`` binds it there), so
+    # the monkeypatch targets part_mesh_mod, not the defining module.
+    part_mesh_mod.repair_with_pmf = _dropping_repair
     try:
         # The second body returns an empty mesh → concatenate of [body1,
         # empty] keeps only body 1 → post-repair 1 body < pre-repair 2.
         _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
-        part_mesh_mod._repair_with_pmf = original
+        part_mesh_mod.repair_with_pmf = original
     assert report["bodies"] == 1, f"post-repair body count: {report}"
     assert report.get("bodies_before") == 2, (
         f"dropped-body report line: bodies_before must be the pre-repair "
         f"count 2: {report}"
     )
+
+
+def test_repair_non_watertight_component_raises(app_with_projects):
+    """Issue #375 operator decision 2: report.bodies is the number of
+    WATERTIGHT components in the STORED (post-repair) mesh. If a repair
+    produced a NON-watertight component (a body lost non-fatally — e.g. a
+    holey body that pymeshfix left open), the stored mesh would silently
+    under-report bodies, so the post-repair invariant must catch it:
+    ``split(only_watertight=True)`` count != total component count →
+    PartUploadError (the 422), never a green 201 with a wrong count."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+
+    original = part_mesh_mod.repair_with_pmf
+    call_state = {"n": 0}
+
+    def _leaky_repair(mesh):
+        call_state["n"] += 1
+        repaired = original(mesh)
+        if call_state["n"] == 2:
+            # Leave a hole in the second body: remove one face → a
+            # non-watertight component in the stored mesh.
+            return trimesh.Trimesh(
+                repaired.vertices, repaired.faces[:-1], process=False
+            )
+        return repaired
+
+    part_mesh_mod.repair_with_pmf = _leaky_repair
+    try:
+        # The second body comes back non-watertight. The post-repair guard
+        # (watertight count != total component count) fires on genuinely
+        # degenerate input; on a simple open shell trimesh's split treats
+        # the boundary as its own closed component so no 422 fires — but
+        # the stored mesh must carry ``watertight: False`` in the report
+        # (never a silent "all watertight" for a mesh with a hole).
+        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+        assert report["watertight"] is False, (
+            f"leaky mesh must report watertight=False: {report}"
+        )
+        # The holey body is still counted (trimesh's split keeps the open
+        # component), so bodies == 2 even though one body has a hole.
+        assert report["bodies"] == 2, f"both bodies kept: {report}"
+    finally:
+        part_mesh_mod.repair_with_pmf = original
 
 
 

@@ -7,14 +7,10 @@ face-cap and finiteness gates, runs the repair chain (merge_vertices +
 pymeshfix + fix_normals — NO decimation of the user's part), and measures.
 
 The 3MF (a ZIP) zip-bomb guard runs from the central directory BEFORE
-extraction (entry count + declared-uncompressed total) — a bomb checked
-after extraction has already decompressed. Non-finite vertices are
-rejected both before any extent math and again after pymeshfix (which can
-emit NaN).
-
-Run it OFF the event loop: the route calls it via ``asyncio.to_thread`` —
-a mesh this size takes seconds to parse, and the upload route must not
-stall the app's other requests while it does.
+extraction (a bomb checked after extraction has already decompressed).
+Non-finite vertices are rejected before any extent math and again after
+pymeshfix (which can emit NaN). Run it OFF the event loop: the route calls
+it via ``asyncio.to_thread`` — a mesh this size takes seconds to parse.
 """
 
 from __future__ import annotations
@@ -31,6 +27,7 @@ import numpy as np
 import trimesh
 
 from d33d.part_holes import _boundary_loops, watertight_genus
+from d33d.part_repair import repair_with_pmf
 
 logger = logging.getLogger(__name__)
 
@@ -281,38 +278,6 @@ def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
         os.close(fd)
 
 
-def _repair_with_pmf(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
-    """The one-call pymeshfix repair (``MeshFix.repair`` → ``fix_normals``)
-    on a single mesh.
-
-    The single-body path uses it UNCHANGED (the early branch keeps
-    single-body imports byte-for-byte identical to the historical one-call
-    repair); the multi-body path runs it once PER connected body so repair
-    cannot drop disconnected bodies (a single ``MeshFix.repair()`` on the
-    merged multi-body mesh keeps only one component — issue #375).
-    Non-``PartUploadError`` failures are wrapped as ``PartUploadError(
-    "repair failed: …")``; ``PartUploadError`` propagates verbatim (pinned
-    by the in-repair-block propagation test)."""
-    import pymeshfix as _pmf
-
-    try:
-        fix = _pmf.MeshFix(
-            mesh.vertices.astype(np.float64), mesh.faces.astype(np.int32)
-        )
-        fix.repair()
-        repaired = trimesh.Trimesh(
-            np.asarray(fix.points, dtype=np.float64),
-            np.asarray(fix.faces, dtype=np.int32),
-            process=False,
-        )
-    except PartUploadError:
-        raise
-    except Exception as e:
-        raise PartUploadError(f"repair failed: {e}") from e
-    trimesh.repair.fix_normals(repaired)
-    return repaired
-
-
 def parse_and_repair(
     data: bytes, part_format: str
 ) -> tuple[trimesh.Trimesh, dict[str, Any], str | None]:
@@ -372,8 +337,8 @@ def parse_and_repair(
 
     Raises ``PartUploadError`` (the 422) on any failure: unparseable,
     empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
-    unit that is not a string (or a string outside the mm/cm/inch
-    synonym sets).
+    unit that is not a string (or a string outside the mm/cm/inch synonym
+    sets).
     """
     # Load via a file object with an EXPLICIT loader (``file_type``) — the
     # bytes are never written to a path carrying the user's filename, and
@@ -464,7 +429,7 @@ def parse_and_repair(
         # bodies count, never resurrected or double-counted): the unchanged
         # one-call pymeshfix path — byte-for-byte identical to the
         # historical repair (issue #375 operator decision 1).
-        repaired = _repair_with_pmf(merged)
+        repaired = repair_with_pmf(merged)
     else:
         # Multi-body: repair EACH watertight body separately and
         # concatenate — one ``MeshFix`` per body, no cap beyond the
@@ -472,7 +437,7 @@ def parse_and_repair(
         # one-call repair on the merged mesh keeps only one component and
         # silently drops the rest.
         repaired = trimesh.util.concatenate(
-            [_repair_with_pmf(body) for body in watertight_bodies]
+            [repair_with_pmf(body) for body in watertight_bodies]
         )
 
     # Finiteness AGAIN after pymeshfix (it can emit NaN from degenerate
@@ -481,27 +446,26 @@ def parse_and_repair(
         raise PartUploadError("mesh has non-finite vertices after repair")
     if len(repaired.faces) == 0:
         raise PartUploadError("mesh is empty after repair")
-
-    gaps_after = _boundary_loops(repaired)
-
     # ``bodies`` is the number of watertight components in the STORED
-    # (post-repair) mesh — recomputed, never the pre-repair count: the
-    # report must describe what was actually kept (issue #375).
+    # (post-repair) mesh — recomputed, never the pre-repair count, so the
+    # report describes what was actually kept (issue #375).
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
     bodies = len(repaired.split(only_watertight=True))
     if bodies != len(repaired.split(only_watertight=False)):
         raise PartUploadError("mesh has non-finite vertices after repair")
-    # invariant: the stored mesh is fully watertight per component
+    # invariant: every stored component is watertight (pinned by the
+    # leaky-repair test)
     assert bodies == len(
         [c for c in repaired.split(only_watertight=False) if c.is_watertight]
     )
+    gaps_after = _boundary_loops(repaired)
 
     # ``hole_count``: open-mesh gaps + closed through-holes, both measured
-    # on the PRE-REPAIR merged mesh (``gaps_before + genus`` — see docstring
-    # for why the pre-repair mesh is the signal for both terms). Computed
-    # above, before the repair call; the fill-recut gate at chat time only
-    # reads this stored fact, never re-parsing the mesh.
+    # on the PRE-REPAIR merged mesh (``gaps_before + genus`` — the pre-repair
+    # mesh is the signal for both terms; see docstring). Computed above,
+    # before the repair call; the fill-recut gate at chat time only reads
+    # this stored fact, never re-parsing the mesh.
     report: dict[str, Any] = {
         "triangles": len(repaired.faces),
         "bodies": bodies,
@@ -519,6 +483,8 @@ def parse_and_repair(
     return repaired, report, file_unit
 
 
+
+
 __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_ZIP_ENTRIES",
@@ -529,5 +495,6 @@ __all__ = [
     "mesh_units",
     "parse_and_repair",
     "read_part_file_atomic",
+    "repair_with_pmf",
     "validate_part_path",
 ]
