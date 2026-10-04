@@ -10,6 +10,7 @@ part-columns → public object.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,8 @@ from typing import Any
 from fastapi import Request
 
 from d33d import db as db_mod
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)
@@ -204,9 +207,34 @@ def part_public(row: dict[str, Any]) -> dict[str, Any] | None:
         "unit": row.get("part_unit"),
         "unit_status": row.get("part_unit_status"),
         "scale": row.get("part_scale"),
-        "report": json.loads(report) if report else None,
-        "options": json.loads(options) if options is not None else None,
+        "report": _loads_or_none(report, "part_report"),
+        "options": _loads_or_none(options, "part_options"),
     }
+
+
+def _loads_or_none(blob: str | None, column: str = "part_report") -> Any | None:
+    """Decode a stored JSON column, degrading a CORRUPT (unparseable) blob
+    to ``None`` instead of raising (issue #351): a corrupt ``part_report``
+    is no evidence either way — every reader (the fill-and-recut hole
+    gate included) must degrade to the unknown behaviour, never a 500.
+    Valid JSON (including ``null``) decodes normally; ``None``/empty
+    stays ``None``. ``column`` names the column in the failure log (the
+    blob itself is never logged)."""
+    if not blob:
+        return None
+    try:
+        return json.loads(blob)
+    except (ValueError, TypeError) as e:
+        # The warning names the COLUMN, not the blob — a corrupt blob
+        # degrades to the unknown value (never a 500), and the log is a
+        # line an operator can grep, not a multi-KB dump.
+        logger.warning(
+            "stored JSON column %r failed to decode (value degrades to "
+            "None): %s",
+            column,
+            e,
+        )
+        return None
 
 
 def resolve_part_paths(

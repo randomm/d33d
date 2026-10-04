@@ -75,6 +75,13 @@ def _stl_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _stl_bytes_from_mesh(mesh) -> bytes:
+    """Export a trimesh mesh to STL bytes (in-memory — no file on disk)."""
+    buf = io.BytesIO()
+    mesh.export(buf, file_type="stl")
+    return buf.getvalue()
+
+
 def _make_3mf(unit: str | None = "millimeter") -> bytes:
     import trimesh
 
@@ -461,6 +468,251 @@ def test_repair_report_box_watertight(app_with_projects):
     assert report["watertight"] is True
     assert report["gaps_closed"] == 0
     assert report["bodies"] == 1
+
+
+def test_hole_count_key_present_and_int(app_with_projects):
+    """Issue #351: the repair report carries an integer ``hole_count`` key
+    (the import-time hole signal). The key is ALWAYS present (never
+    ``None`` / missing — the degradation to "unknown" is the READER's job
+    when the stored blob is NULL/legacy, not the import's)."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HoleKey"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert "hole_count" in report, f"report must carry hole_count: {report}"
+    hc = report["hole_count"]
+    assert isinstance(hc, int), f"hole_count must be an int, got {type(hc)}"
+
+
+def test_hole_count_zero_for_plain_box(app_with_projects):
+    """Issue #351: a plain watertight box has NO open boundary loops →
+    ``hole_count == 0``. This is the explicit zero that the fill-recut gate
+    (task-b/c) keys on for the honest no-hole reply."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HoleZero"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["hole_count"] == 0, f"plain box must have hole_count 0: {report}"
+
+
+def test_hole_count_positive_for_holey_fixture(app_with_projects):
+    """Issue #351: holey.stl (a 20 mm plate with holes, 4 boundary loops
+    pre-repair per ``test_repair_report_holey_gaps_closed``) →
+    ``hole_count > 0`` (one loop per hole opening). A positive count is the
+    explicit evidence the fill-recut gate keys on for firing the offer."""
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HolePositive"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["hole_count"] > 0, f"holey part must have hole_count > 0: {report}"
+
+
+def test_hole_count_equals_pre_repair_boundary_loops(app_with_projects):
+    """Issue #351: ``hole_count`` is computed from the PRE-REPAIR merged
+    mesh's boundary loops PLUS the closed-body genus. For holey.stl the
+    pre-repair loop count is 4 (the same value ``gaps_closed`` reports as
+    closed by pymeshfix: a gapped→closed delta of 4) and the repaired
+    watertight mesh is a single genus-0 body, so ``hole_count`` == 4 —
+    NOT the post-repair loop count (which is 0 — pymeshfix closes the
+    loops, so a post-repair-only signal would read 0 for a holey part)."""
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HolePreRepair"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # gaps_closed = pre_repair_loops - post_repair_loops. Post-repair the
+    # mesh is watertight (0 loops), so gaps_closed == pre_repair_loops.
+    # hole_count is defined to equal the pre-repair loop count.
+    assert report["hole_count"] == report["gaps_closed"], (
+        f"hole_count ({report['hole_count']}) must equal the pre-repair "
+        f"boundary-loop count (gaps_closed, {report['gaps_closed']}) for a "
+        f"mesh pymeshfix fully closes"
+    )
+    assert report["hole_count"] == 4, f"holey.stl has 4 pre-repair loops: {report}"
+
+
+def test_hole_count_watertight_ring_counts_through_hole(app_with_projects):
+    """Issue #351: a watertight ring (trimesh annulus exported to STL)
+    has a REAL drilled through-bore: 0 boundary loops but genus 1.
+    ``hole_count`` must count the closed through-hole (``gaps_before +
+    genus``) → >= 1, so the fill-recut gate has evidence for the very
+    part it exists for. The repaired mesh stays watertight."""
+    import trimesh
+
+    ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    data = _stl_bytes_from_mesh(ring)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Ring"})
+        pid = r.json()["id"]
+        files = {"file": ("ring.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["gaps_closed"] == 0
+    assert report["hole_count"] >= 1, (
+        f"watertight ring has a through-hole (genus 1); hole_count must be "
+        f">= 1, got {report}: {report}"
+    )
+    assert isinstance(report["hole_count"], int)
+
+
+def test_hole_count_two_watertight_rings(app_with_projects):
+    """Issue #351: two separate watertight rings (two disconnected bodies,
+    each genus 1) → ``hole_count`` == 2 — genus is summed over bodies on
+    the PRE-REPAIR mesh. The rings are placed far apart (STL is float32:
+    at a 100 mm gap the float32 vertex rounding merges the two bodies into
+    one, corrupting both the body count and the genus sum). The 10000 mm
+    separation is what keeps the two bodies distinct through the float32
+    round-trip."""
+    import trimesh
+
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TwoRings"})
+        pid = r.json()["id"]
+        files = {"file": ("two_rings.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["bodies"] == 2, f"two disconnected rings: {report}"
+    assert report["hole_count"] == 2, f"two rings → genus 2: {report}"
+
+
+def test_bodies_count_split_equivalence_on_fixtures():
+    """Issue #351 perf — the single-split refactor: on the four #351
+    fixtures (box, holey, annulus, two rings), the number of watertight
+    components in ``split(only_watertight=False)`` equals
+    ``len(split(only_watertight=True))``, so the bodies count and the
+    genus can read the SAME split (the refactor's premise — pinned here
+    so the premise is a test, not an assumption)."""
+    import trimesh
+
+    box = trimesh.creation.box(extents=[20, 20, 20])
+    holey = trimesh.load(str(FIXTURES / "holey.stl"))
+    annulus = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    two_rings = trimesh.util.concatenate([ring_a, ring_b])
+
+    for name, mesh in [
+        ("box", box),
+        ("holey", holey),
+        ("annulus", annulus),
+        ("two_rings", two_rings),
+    ]:
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.to_mesh()
+        merged = mesh.copy()
+        merged.merge_vertices()
+        merged.update_faces(merged.nondegenerate_faces())
+        strict = len(merged.split(only_watertight=True))
+        loose = merged.split(only_watertight=False)
+        watertight_count = sum(1 for c in loose if c.is_watertight)
+        assert strict == watertight_count, (
+            f"{name}: split(only_watertight=True) count {strict} != "
+            f"watertight count in split(only_watertight=False) {watertight_count}"
+        )
+
+
+def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
+    """Issue #351: any exception in the genus computation degrades to
+    ``gaps_before`` alone — never a crash, never ``None``. A holey part
+    still gets its boundary-loop count (4), not an error response."""
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "GenusFail"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    def _boom(mesh):
+        raise RuntimeError("genus computation failed")
+
+    original = part_mesh_mod.watertight_genus
+    part_mesh_mod.watertight_genus = _boom
+    try:
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.watertight_genus = original
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # Fallback: gaps_before (4 boundary loops) alone, never None/crash.
+    assert report["hole_count"] == 4, f"genus failure falls back to gaps: {report}"
+
+
+def test_part_upload_error_in_repair_block_propagates_verbatim(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #351 regression: a ``PartUploadError`` raised INSIDE the repair
+    try-block (pymeshfix's repair step) propagates with its ORIGINAL message
+    — the ``except PartUploadError: raise`` passthrough — NOT wrapped as
+    ``PartUploadError("repair failed: …")``. The 422 mapping at the route
+    consumes the type, but the original message is what the logs carry.
+    ``parse_and_repair`` is driven directly (synchronously) with the
+    in-function ``pymeshfix`` import monkeypatched: a valid STL is loaded
+    for real, then ``_pmf.MeshFix.repair`` raises the PartUploadError."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    mesh = trimesh.creation.box(extents=[20, 20, 20])
+    data = _stl_bytes_from_mesh(mesh)
+
+    import pymeshfix  # the real module; the monkeypatch replaces its MeshFix
+
+    class _BoomyFix:
+        def __init__(self, *args, **kwargs):
+            raise part_mesh_mod.PartUploadError("boom in repair")
+
+    monkeypatch.setattr(pymeshfix, "MeshFix", _BoomyFix)
+
+    with pytest.raises(part_mesh_mod.PartUploadError) as excinfo:
+        part_mesh_mod.parse_and_repair(data, "stl")
+    # The ORIGINAL message survives verbatim — no "repair failed: " prefix.
+    assert str(excinfo.value) == "boom in repair"
+    assert "repair failed" not in str(excinfo.value)
 
 
 def test_repair_report_two_body(app_with_projects):
@@ -1689,6 +1941,72 @@ def test_parse_and_repair_runs_off_event_loop(
     # 50 ms after the upload, itself near-instant) could only complete
     # AFTER the upload. Off the loop, the GET completes first.
     assert order == ["fast", "slow"], order
+
+
+def test_hole_count_computation_runs_off_event_loop(
+    app_with_projects, monkeypatch
+) -> None:
+    """Issue #351: the ``hole_count`` computation happens INSIDE
+    ``parse_and_repair`` (it reuses ``_boundary_loops(merged)`` on the
+    pre-repair merged mesh), which the upload route runs via
+    ``asyncio.to_thread``. So the hole-count compute is off the event loop
+    for the same reason the decode is — this test proves the SAME way as
+    ``test_parse_and_repair_runs_off_event_loop``: a slow ``parse_and_repair
+    + hole_count`` stub must not block a concurrent GET (completion-order
+    discriminator, not a wall-clock bound).
+
+    The stub sleeps inside the worker thread (simulating the non-trivial
+    boundary-loop / genus count on a large mesh) and then calls the REAL
+    ``parse_and_repair`` so the response's ``report.hole_count`` is the
+    genuine computed value (the test also asserts it is present and int,
+    pinning that the off-loop path still produces the signal)."""
+    import time as _time
+
+    import d33d.part_import as part_import_mod
+
+    original_parse = part_import_mod.parse_and_repair
+
+    def slow_parse_with_hole_count(content: bytes, part_format: str):
+        _time.sleep(0.3)  # simulate the slow hole-count compute (worker thread)
+        return original_parse(content, part_format)
+
+    monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse_with_hole_count)
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HoleOffLoop"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+
+        order: list[str] = []
+
+        async def _slow_request():
+            resp = await client.post(f"/api/projects/{pid}/part", files=files)
+            order.append("slow")
+            return resp
+
+        async def _fast_request():
+            await asyncio.sleep(0.05)
+            resp = await client.get("/api/projects")
+            order.append("fast")
+            return resp
+
+        upload_r, list_r = await asyncio.gather(_slow_request(), _fast_request())
+        return upload_r, list_r, order
+
+    upload_r, list_r, order = _run_async(app_with_projects, _call)
+    assert upload_r.status_code == 201, upload_r.text
+    assert list_r.status_code == 200
+    # If the hole-count compute ran ON the event loop, the 0.3 s sleep in
+    # the worker stub would block the GET: the GET (dispatched 50 ms after
+    # the upload, itself near-instant) could only complete AFTER the upload.
+    # Off the loop, the GET completes first.
+    assert order == ["fast", "slow"], order
+    # The off-loop path still produces the hole-count signal.
+    report = upload_r.json()["part"]["report"]
+    assert "hole_count" in report, f"hole_count missing from off-loop report: {report}"
+    assert isinstance(report["hole_count"], int)
 
 
 # ---------------------------------------------------------------------------

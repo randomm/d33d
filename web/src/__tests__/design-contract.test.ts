@@ -161,6 +161,7 @@ describe("design contract", () => {
     expect(copy.fillRecut.holeDiameter).toBeDefined();
     expect(copy.fillRecut.nounDimension).toBeDefined();
     expect(copy.fillRecut.noDimension).toBeDefined();
+    expect(copy.fillRecut.noHole).toBeDefined();
     expect(copy.fillRecut.declined).toBeDefined();
     expect(copy.partUnitsUnsettled).toBeDefined();
   });

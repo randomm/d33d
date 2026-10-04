@@ -20,6 +20,7 @@ stall the app's other requests while it does.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 import stat
@@ -28,6 +29,10 @@ from typing import Any
 
 import numpy as np
 import trimesh
+
+from d33d.part_holes import _boundary_loops, watertight_genus
+
+logger = logging.getLogger(__name__)
 
 #: The named face cap for an import (a distinct constant from
 #: ``print_validation.MAX_FACES`` — that bound belongs to the render
@@ -133,41 +138,6 @@ class PartFileTooLargeError(OSError):
     413 mapping, the render worker's staging) can map by TYPE instead of
     string-matching the message. The message is informative but never
     parsed. Carries ``errno = 28`` (EDQUOT)."""
-
-
-def _boundary_loops(mesh: trimesh.Trimesh) -> int:
-    """The number of boundary loops (connected open-edge components) on a
-    mesh — one loop per gap. The repair report's ``gaps_closed`` is the
-    count BEFORE repair minus AFTER (pymeshfix closes them)."""
-    edges, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
-    open_edges = edges[counts == 1]
-    if len(open_edges) == 0:
-        return 0
-    adj: dict[int, set[int]] = {i: set() for i in range(len(open_edges))}
-    pos: dict[tuple[int, int], int] = {}
-    for i, (a, b) in enumerate(open_edges):
-        pos[(int(a), int(b))] = i
-    for i, (a, b) in enumerate(open_edges):
-        j = pos.get((int(b), int(a)))
-        if j is not None:
-            adj[i].add(j)
-            adj[j].add(i)
-    seen: set[int] = set()
-    n = 0
-    for i in range(len(open_edges)):
-        if i in seen:
-            continue
-        n += 1
-        stack = [i]
-        while stack:
-            x = stack.pop()
-            if x in seen:
-                continue
-            seen.add(x)
-            for y in adj[x]:
-                if y not in seen:
-                    stack.append(y)
-    return n
 
 
 def _total_faces(loaded: Any) -> int:
@@ -321,10 +291,36 @@ def parse_and_repair(
     Returns ``(mesh, report, file_unit)`` where ``mesh`` is the repaired
     mesh in FILE units (the bbox is measured in file units BEFORE any unit
     conversion), ``report`` is the repair report
-    (``{triangles, bodies, watertight, gaps_closed, bbox_file_units}``),
-    and ``file_unit`` is the 3MF's declared unit string read from the
-    ORIGINAL (pre-repair) loaded geometry (``None`` for STL — unitless, or
-    a 3MF with no ``unit`` attribute — the 3MF default is millimeters).
+    (``{triangles, bodies, watertight, gaps_closed, bbox_file_units,
+    hole_count}``), and ``file_unit`` is the 3MF's declared unit string read
+    from the ORIGINAL (pre-repair) loaded geometry (``None`` for STL —
+    unitless, or a 3MF with no ``unit`` attribute — the 3MF default is
+    millimeters).
+
+    ``hole_count`` is the number of holes the imported part actually has,
+    computed ONCE here at import and stored with the part, as
+    ``gaps_before + genus``:
+
+    - ``gaps_before`` — the PRE-REPAIR merged mesh's boundary loops
+      (``_boundary_loops``), one per OPEN hole opening. The pre-repair
+      merged mesh is the right surface for these: the repair chain
+      (``pymeshfix``) CLOSES those loops before the stored mesh exists, so
+      a post-repair count would read 0 for a holey part (the loops are the
+      signal, not a bug to fix).
+    - ``genus`` — the total closed-body genus (``watertight_genus``, from
+      ``d33d.part_holes``) of the PRE-REPAIR merged mesh's watertight
+      components (the same one split that counts the bodies — no second
+      split), one per closed through-hole. A
+      CAD-exported part with a real drilled through-bore is WATERTIGHT:
+      0 boundary loops but genus 1. Gaps alone would count it 0 and the
+      fill-recut gate would refuse the very part it exists for, so closed
+      holes are counted too.
+
+    A plain watertight box has neither → ``0``; an open holey part has one
+    boundary loop per opening (and the closed body under each contributes
+    the matching genus); a watertight ring has genus 1 → ``1``. The genus
+    computation is wrapped so any exception falls back to ``gaps_before``
+    alone — the count degrades, never crashes, never ``None``.
 
     Raises ``PartUploadError`` (the 422) on any failure: unparseable,
     empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
@@ -365,11 +361,16 @@ def parse_and_repair(
     if not _is_finite(merged):
         raise PartUploadError("mesh has non-finite vertices")
 
-    # Body count: connected components after merging (the honest count the
-    # report carries — a multi-body import is reported, not dropped).
+    # ONE split serves both the bodies count and the genus: the bodies
+    # are the watertight components (== ``len(split(only_watertight=True))``,
+    # pinned by a fixture test), and the genus reads the SAME subset.
+    # ``merge_vertices`` is kept — the component split needs merged
+    # vertices and the euler count reads the merged topology.
     merged.merge_vertices()
     merged.update_faces(merged.nondegenerate_faces())
-    bodies = len(merged.split(only_watertight=True))
+    components = merged.split(only_watertight=False)
+    watertight_bodies = [c for c in components if c.is_watertight]
+    bodies = len(watertight_bodies)
     if len(merged.faces) == 0:
         raise PartUploadError("mesh is empty after cleanup")
 
@@ -380,11 +381,10 @@ def parse_and_repair(
         raise PartUploadError("mesh has invalid extents")
 
     # The 3MF's declared unit, read from the ORIGINAL (pre-repair)
-    # geometry — pymeshfix does not change units, but reading it from the
-    # original load is the only place the ``unit`` attribute is guaranteed
-    # to be present. Only an ABSENT unit (``None``) means the 3MF default
-    # (millimeters); a non-string unit, or a string outside the closed
-    # mm/cm/inch synonym sets, is a 422 — never a silent mm assumption.
+    # geometry — the only place the ``unit`` attribute is guaranteed
+    # present. Only an ABSENT unit (``None``) means the 3MF default
+    # (millimeters); a non-string unit, or a string outside the mm/cm/inch
+    # synonym sets, is a 422 — never a silent mm assumption.
     file_unit: str | None = None
     if part_format == "3mf":
         file_unit = mesh_units(
@@ -397,6 +397,19 @@ def parse_and_repair(
     # render pipeline decimates for its own gates; the user's part is
     # preserved): merge → pymeshfix.repair → fix_normals.
     gaps_before = _boundary_loops(merged)
+
+    # Genus over the SAME split (measured pre-repair — see docstring); a
+    # failure degrades to the boundary-loop signal alone, never a 422.
+    try:
+        holes = gaps_before + watertight_genus(watertight_bodies)
+    except (ArithmeticError, ValueError, TypeError, RuntimeError):
+        logger.warning(
+            "parse_and_repair: watertight_genus failed on the pre-repair "
+            "merged mesh — falling back to the boundary-loop count alone",
+            exc_info=True,
+        )
+        holes = gaps_before
+
     import pymeshfix as _pmf
 
     try:
@@ -424,11 +437,17 @@ def parse_and_repair(
     trimesh.repair.fix_normals(repaired)
     gaps_after = _boundary_loops(repaired)
 
+    # ``hole_count``: open-mesh gaps + closed through-holes, both measured
+    # on the PRE-REPAIR merged mesh (``gaps_before + genus`` — see docstring
+    # for why the pre-repair mesh is the signal for both terms). Computed
+    # above, before the repair call; the fill-recut gate at chat time only
+    # reads this stored fact, never re-parsing the mesh.
     report = {
         "triangles": len(repaired.faces),
         "bodies": bodies,
         "watertight": bool(repaired.is_watertight),
         "gaps_closed": max(0, gaps_before - gaps_after),
+        "hole_count": int(holes),
         "bbox_file_units": file_bbox,
     }
     return repaired, report, file_unit

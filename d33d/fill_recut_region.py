@@ -36,6 +36,7 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
+from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +101,20 @@ class _FillNoNormal(TypedDict):
     outcome: Literal["no_normal"]
 
 
-#: The decision union: an ``accept`` member, or any of the three
-#: answer-frame members (the caller dispatches on ``outcome``).
-FillResult = _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal
+class _FillNoFeature(TypedDict):
+    kind: Literal["answer"]
+    answer: str
+    run_loop: bool
+    outcome: Literal["no_feature"]
+
+
+#: The decision union: an ``accept`` member, or any of the four
+#: answer-frame members (the caller dispatches on ``outcome``; only
+#: ``fresh_offer`` surfaces the SPA's offer buttons — the decline /
+#: no-normal / no-feature replies are plain answers, never an offer).
+FillResult = (
+    _FillAccept | _FillDecline | _FillFreshOffer | _FillNoNormal | _FillNoFeature
+)
 
 
 def fill_recut_region_edit(
@@ -178,6 +190,25 @@ def fill_recut_region_edit(
         versions.latest_version(project_id)
     ):
         return None
+    # Issue #351 (operator decision 3): the region-edit path reads the
+    # SAME stored ``hole_count`` fact the chat route gates on — NO local
+    # mesh geometry at the hit point (the pick can land on a plain face
+    # too, and the stored import-time fact is the deterministic signal).
+    # A hole-family noun with an explicit zero count gets the honest
+    # no-hole reply (no offer, no loop — before the face-normal branch,
+    # because the pick's normal is not evidence the hole exists); an
+    # unknown count keeps today's behaviour (the fresh-offer / no-normal
+    # dispatch, unchanged).
+    if (
+        trigger["noun"] in HOLE_NOUNS
+        and part_has_hole_evidence(part) is False
+    ):
+        return {
+            "kind": "answer",
+            "answer": no_hole_reply(trigger["noun"]),
+            "run_loop": False,
+            "outcome": "no_feature",
+        }
     return _handle_fresh_trigger(versions, project_id, trigger, face_normal)
 
 

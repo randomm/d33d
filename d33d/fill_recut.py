@@ -6,17 +6,20 @@ closed feature-noun set that is NOT a param name or label of the
 design's own current version — operator decision (b)–(e)), the reply is
 the spec's templated boundary sentence (copy.ts) as a ``kind: "answer"``
 done frame, and a fill-recut offer is recorded server-side (the
-pending-offer field, with the ``kind: "fill_recut"`` discriminator so
-the #250 param-offer route never reads it back as a param offer). A
-clean "yes" on the pending offer runs the design loop with an explicit
-fill-and-recut instruction (the request text carries it); a clean "no"
+pending-offer field, ``kind: "fill_recut"``, which the #250 param-offer
+route never reads back). A clean "yes" on the pending offer runs the
+design loop with an explicit fill-and-recut instruction; a clean "no"
 clears the offer.
 
 The module's ONE entry point is :func:`fill_recut_turn`, which
 ``d33d.projects.post_chat`` calls after the missing-source check (the
-answer-frame plumbing — registering the event source and returning the
-202 body — stays in the router, the ``route_chat_message`` pattern from
-``d33d.question_answer``).
+answer-frame plumbing — event-source registration and the 202 body —
+stays in the router). The #351 hole-evidence half (the stored-fact
+reader, the gated noun set, the no-hole reply) lives in
+:mod:`d33d.part_holes`; this module imports the pieces it calls
+(``HOLE_NOUNS``, ``part_has_hole_evidence``, ``no_hole_reply``) directly
+from there — the region-edit seam and the tests import from
+``d33d.part_holes`` themselves.
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.versions import valid_axis
 
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
@@ -84,8 +88,7 @@ FILL_RECUT_DECLINE_REPLY = "Understood — leaving the part as it is."
 
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
-#: before the regexes run (a multi-KB unpunctuated blob would otherwise
-#: spin the unbounded ``[^.!?]`` spans for no gain).
+#: before the regexes run.
 TRIGGER_MAX_INSTRUCTION_CHARS = 500
 
 #: The closed feature-noun set a resize/move request can target (issue
@@ -160,8 +163,7 @@ _MOVE_DIRECTIONS = frozenset(
 
 def _fmt_size(value: float | None) -> str | None:
     """The user's number, mono-formatted the way the deck renders it
-    (never invented, never truncated — ``38.0`` → ``38``, ``38.5`` →
-    ``38.5``)."""
+    (never invented, never truncated)."""
     if value is None:
         return None
     return f"{value:g}"
@@ -178,19 +180,13 @@ def boundary_sentence(
     decision: a CLOSED set of templates with the user's noun and
     dimension substituted — mono-formatted mm, never invented).
 
-    The five shapes, in the operator decision's order:
-
-    * move with a distance + direction — the fill-then-cut at the
-      user's stated offset (the number and direction are KEPT, never
-      dropped);
-    * move without a distance — the point-at-the-spot ask ("Point at
-      the spot, or tell me where.");
-    * hole/bore with a diameter — the UX spec's sentence VERBATIM
-      ("fill it, then cut a Ø{d} mm one on the same axis");
-    * other noun with a dimension — "fill it, then cut a new {noun} at
-      {dimension} mm in the same place";
-    * no dimension given — the ask ("How big should the {noun} be?").
-    """
+    The five shapes, in the operator decision's order: a move with a
+    distance + direction (the fill-then-cut at the user's stated offset
+    — the number and direction are KEPT); a move without a distance
+    (the point-at-the-spot ask); a hole/bore with a diameter (the UX
+    spec's sentence VERBATIM); another noun with a dimension ("fill it,
+    then cut a new {noun} at {dimension} mm in the same place"); and no
+    dimension given (the ask, "How big should the {noun} be?")."""
     if move:
         if move_distance_mm is not None and move_direction in _MOVE_DIRECTIONS:
             return FRILL_MOVE_DISTANCE_REPLY.format(
@@ -215,27 +211,21 @@ def fill_recut_trigger(message: str) -> dict[str, Any] | None:
     bool, "move_distance": <mm float or None>, "direction": <where-word
     or None>}``.
 
-    Fires only when ALL of the operator decision's (b)–(e) hold:
-
-    * (b) the message asks to resize or move an existing feature
-      ("make the <noun> N mm", "make the <noun> bigger/smaller", "resize
-      the <noun>", "move the <noun> …") — "taller"/"wider the part" is an
-      ADD (no closed-set noun) and never triggers;
-    * (c) the noun is in :data:`FEATURE_NOUNS` (a closed set, defined
-      once — never a free-form noun match);
-    * (e) the message has no add/create verb ("add a 38 mm hole" is an
-      add and goes to the design loop).
-
-    (a) — the project has an assumed/settled part — and (d) — the noun
-    does not match a param name/label of the CURRENT version (a feature
-    the user added is not the imported mesh) — are caller-side checks
-    that need the project row / the latest version's params, which this
+    Fires only when ALL of the operator decision's (b)–(e) hold: (b) the
+    message asks to resize or move an existing feature ("make the <noun>
+    N mm", "make the <noun> bigger/smaller", "resize the <noun>", "move
+    the <noun> …") — "taller"/"wider the part" is an ADD (no closed-set
+    noun) and never triggers; (c) the noun is in :data:`FEATURE_NOUNS`
+    (a closed set, never a free-form noun match); (e) the message has no
+    add/create verb ("add a 38 mm hole" is an add and goes to the design
+    loop). (a) — an assumed/settled part — and (d) — the noun is not a
+    param name/label of the CURRENT version — are caller-side checks this
     pure helper does not take.
 
     An instruction longer than :data:`TRIGGER_MAX_INSTRUCTION_CHARS`
-    returns ``None`` before ANY regex runs (the input bound: a multi-KB
-    unpunctuated blob is never a resize/move request, and the unbounded
-    ``[^.!?]`` spans must not spin on it)."""
+    returns ``None`` before ANY regex runs (a multi-KB unpunctuated blob
+    is never a resize/move request, and the unbounded ``[^.!?]`` spans
+    must not spin on it)."""
     if len(message) > TRIGGER_MAX_INSTRUCTION_CHARS:
         return None
     if _ADD_VERB_RE.search(message):
@@ -280,17 +270,16 @@ def fill_recut_trigger(message: str) -> dict[str, Any] | None:
 
 
 def own_feature_names(latest: dict[str, Any] | None) -> set[str]:
-    """The lower-cased param names, labels, and SINGLE-WORD label tokens of
-    the CURRENT version's own params (issue #332's operator decision (d):
-    a resize of a feature the user added — a param in the design's own
-    SCAD — behaves as today and never triggers the fill-and-recut offer).
+    """The lower-cased param names, labels, and SINGLE-WORD label tokens
+    of the CURRENT version's own params (issue #332's operator decision
+    (d): a resize of a feature the user added — a param in the design's
+    own SCAD — behaves as today and never triggers the fill-and-recut
+    offer).
 
-    Token match on the design's own params: a param named ``hole_diameter``
-    (label "Hole diameter") contributes the token ``hole`` to the set, so
-    "make the hole 38 mm" does NOT trigger when the design's own SCAD
-    already owns a hole param — the user is resizing their own feature, not
-    the imported mesh. ``None`` row → empty set (no design of its own yet
-    — the part's features are the only features)."""
+    Token match: a param named ``hole_diameter`` (label "Hole
+    diameter") contributes the token ``hole``, so "make the hole 38 mm"
+    does NOT trigger when the design's own SCAD already owns a hole
+    param. ``None`` row → empty set (no design of its own yet)."""
     names: set[str] = set()
     if not latest:
         return names
@@ -310,8 +299,7 @@ def is_clean_yes(message: str) -> bool:
     """The fill-and-recut offer's acceptance predicate (issue #332's
     operator decision: "yes" / "Yes, do that" run the loop). A clean
     affirmation via the shared heuristic (``_is_clean_affirmation`` —
-    short, no question mark, no negation, no hedge — "yes but make it 2
-    mm" is NOT an acceptance)."""
+    short, no question mark, no negation, no hedge)."""
     from d33d.dimension_protocol import _is_clean_affirmation
 
     return _is_clean_affirmation(message)
@@ -332,20 +320,17 @@ def is_clean_no(message: str) -> bool:
     ):
         return False
     return bool(
-        re.search(
-            r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low
-        )
+        re.search(r"\b(no|not|nope|nah|wrong|incorrect|never|drop it|forget it)\b", low)
     )
 
 
 def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     """The explicit design-loop instruction an ACCEPTED fill-recut offer
     appends to the request text (the loop's own import-aware prompt
-    already teaches the fill-then-cut move from the settled import — the
-    instruction makes the accepted turn's intent explicit). The noun and
-    the size come from the SERVER-SIDE offer (never parsed from the
-    client's chat); the size is mono-formatted, ``None`` → no size
-    clause."""
+    already teaches the fill-then-cut move — this makes the accepted
+    turn's intent explicit). The noun and size come from the
+    SERVER-SIDE offer (never parsed from the client's chat); the size is
+    mono-formatted, ``None`` → no size clause."""
     from d33d.part_http import PART_FILENAME
 
     noun = str(offer.get("noun") or "feature")
@@ -359,12 +344,11 @@ def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     # axis — the pick's face normal, substituted as unit vector
     # components — names the same axis the offer text promised. A
     # chat-route offer has no axis (``None``): the clause is omitted
-    # and the instruction is byte-identical to pre-#338 (the chat
-    # route's #332 behaviour is unchanged). The axis is validated with
-    # the SAME ``valid_axis`` the reader (``d33d.versions.get_pending_offer``)
-    # uses, so a non-finite or non-unit axis (a corrupt row read straight
-    # from storage) yields NO axis clause rather than leaking a malformed
-    # vector into the instruction.
+    # and the instruction is byte-identical to pre-#338. The axis is
+    # validated with the SAME ``valid_axis`` the reader
+    # (``d33d.versions.get_pending_offer``) uses, so a non-finite or
+    # non-unit axis (a corrupt row read straight from storage) yields
+    # NO axis clause rather than leaking a malformed vector.
     axis = offer.get("axis")
     if valid_axis(axis):
         axis = [float(v) for v in axis]
@@ -390,33 +374,29 @@ def fill_recut_turn(
     pre-routes (the unsettled-part guard runs first, upstream).
 
     Returns ``{"kind": "answer", "answer": <sentence>, "run_loop": bool,
-    "outcome": "fresh_offer" | "decline" | "accept"}`` when the turn is
-    handled here (the caller registers the sentence as a ``kind:
-    "answer"`` done frame — and, when ``run_loop`` is True, runs the
-    design loop with the ``instruction`` field appended to the request
-    text), else ``None`` (the caller falls through to the existing routes
-    exactly as today).
+    "outcome": "fresh_offer" | "decline" | "accept" | "no_feature"}``
+    when the turn is handled here (the caller registers the sentence as
+    a ``kind: "answer"`` done frame — and, when ``run_loop`` is True,
+    runs the design loop with the ``instruction`` field appended to the
+    request text), else ``None`` (fall-through to the existing routes).
 
     The ``outcome`` discriminator is the SAME contract the region-edit
-    seam's :func:`d33d.fill_recut_region.fill_recut_region_edit` returns:
-    the caller keys OFF ``outcome``, never off the reply string — in
-    particular, the done frame's ``fill_recut_offer`` flag (the SPA's
-    [Yes, do that] / [Leave it] buttons) is set ONLY for the
-    ``fresh_offer`` outcome: a clean ``decline`` re-emitting it would
-    re-render the buttons for an offer that no longer exists.
+    seam's :func:`d33d.fill_recut_region.fill_recut_region_edit`
+    returns: the caller keys OFF ``outcome`` — the done frame's
+    ``fill_recut_offer`` flag (the SPA's [Yes, do that] / [Leave it]
+    buttons) is set ONLY for ``fresh_offer``; a clean ``decline``
+    re-emitting it would re-render the buttons for an offer that no
+    longer exists.
 
-    The handled cases:
-
-    * a LIVE fill-recut offer (``kind: "fill_recut"`` pending offer —
-      server-side state, never parsed from the client): a clean "yes"
-      clears the offer and runs the loop with the explicit
-      fill-and-recut instruction; a clean "no" clears the offer and
-      replies quietly; anything else supersedes the offer (cleared) and
-      re-evaluates THIS message as a fresh turn;
-    * a fresh trigger on an assumed/settled part: the boundary sentence
-      as the reply and the offer recorded server-side (``kind:
-      "fill_recut"`` — the #250 param-offer route never reads it back,
-      since the #250 writer is param-shaped only).
+    Handled cases: a LIVE fill-recut offer (``kind: "fill_recut"``
+    pending, server-side state) — a clean "yes" clears the offer and
+    runs the loop with the explicit fill-and-recut instruction; a clean
+    "no" clears it and replies quietly; anything else supersedes the
+    offer and re-evaluates this message as a fresh turn; and a fresh
+    trigger on an assumed/settled part — the boundary sentence plus the
+    offer recorded server-side (``kind: "fill_recut"``), or the honest
+    no-hole reply for a hole-family noun with explicit
+    ``hole_count == 0`` (issue #351).
     """
     from d33d.part_http import part_public
 
@@ -430,15 +410,14 @@ def fill_recut_turn(
     versions = app.state.versions
     pending = versions.get_pending_offer(project_id)
     if pending is not None and pending.get("kind") == "fill_recut":
-        # A LIVE fill-recut offer. "yes" CLEARS the offer (the accepted
-        # acceptance is the loop's — the caller registers the design loop
-        # and clears the offer there once the event source is up; if the
-        # setup fails, the offer is restored so the acceptance is never
-        # lost) and runs the loop with the explicit fill-and-recut
-        # instruction; "no" clears the offer and replies quietly (a done
-        # frame, no design run — nothing can fail after this point, so
-        # the clear is safe here); anything else supersedes the offer
-        # (cleared, re-evaluated below as a fresh turn).
+        # A LIVE fill-recut offer: "yes" clears the offer and runs the
+        # loop with the explicit fill-and-recut instruction (the caller
+        # registers the design loop and clears the offer once the event
+        # source is up, restoring it on a setup failure — the acceptance
+        # is never lost); "no" clears the offer and replies quietly
+        # (nothing can fail after this point, so the clear is safe);
+        # anything else supersedes the offer and re-evaluates this
+        # message as a fresh turn.
         if is_clean_yes(message):
             return {
                 "kind": "answer",
@@ -457,8 +436,7 @@ def fill_recut_turn(
                 "outcome": "decline",
             }
         # A new message supersedes the pending offer: clear it and
-        # re-evaluate THIS message as a fresh turn (it may itself be a
-        # fresh trigger).
+        # re-evaluate as a fresh turn.
         versions.set_pending_offer(project_id, None)
         pending = None
 
@@ -467,6 +445,22 @@ def fill_recut_turn(
         if trigger is not None:
             own = own_feature_names(versions.latest_version(project_id))
             if trigger["noun"] not in own:
+                # Issue #351 (operator decisions 1–4): a hole-family noun
+                # is offered ONLY when the import stored hole evidence —
+                # ``hole_count == 0`` → the honest no-hole reply (no
+                # offer, no loop, no flag); ``None`` (unknown — no
+                # report, legacy row, corrupt blob) keeps today's
+                # behaviour. Other nouns keep current behaviour.
+                if (
+                    trigger["noun"] in HOLE_NOUNS
+                    and part_has_hole_evidence(part) is False
+                ):
+                    return {
+                        "kind": "answer",
+                        "answer": no_hole_reply(trigger["noun"]),
+                        "run_loop": False,
+                        "outcome": "no_feature",
+                    }
                 versions.set_pending_offer(
                     project_id,
                     {
