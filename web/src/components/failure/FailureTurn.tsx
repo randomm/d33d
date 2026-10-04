@@ -21,6 +21,34 @@
 import { copy } from "../../copy";
 import type { DisplayError } from "../../lib/errorMapping";
 
+/** Split the `renderer_image_stale` disclosure (issue #346) into its two
+ *  established lines: the real reason (image missing vs the label
+ *  mismatch) and the exact rebuild command. `error.detail` is the
+ *  disclosure the mapping folds the frame's `renderer_detail` field into
+ *  ("<reason line>\n<rebuild command>"); a detail the mapping did not
+ *  establish (it is the bare reason string, no second line) yields
+ *  `null` for both — the turn then renders the headline alone and the
+ *  collapsed disclosure, never a fabricated command or value. */
+function rendererDisclosure(error: DisplayError): {
+  reasonLine: string | null;
+  rebuildCommand: string | null;
+} {
+  const detail = error.detail;
+  if (error.reason !== "renderer_image_stale" || detail === undefined) {
+    return { reasonLine: null, rebuildCommand: null };
+  }
+  const nl = detail.indexOf("\n");
+  if (nl <= 0 || nl === detail.length - 1) {
+    return { reasonLine: null, rebuildCommand: null };
+  }
+  const reasonLine = detail.slice(0, nl);
+  const rebuildCommand = detail.slice(nl + 1);
+  if (reasonLine === "" || rebuildCommand === "") {
+    return { reasonLine: null, rebuildCommand: null };
+  }
+  return { reasonLine, rebuildCommand };
+}
+
 /** The model pre-flight frame's `env_var` field (issue #303) as carried
  *  on the mapped `DisplayError` (the `envVar` field — the mapping copies
  *  it from the frame). Absent → `null`: the helper is the unresolved
@@ -87,6 +115,19 @@ export function FailureTurn({
         : copy.failure.modelUnresolved
       : null;
 
+  // The renderer image pre-flight (issue #346): the terminal
+  // `renderer_image_stale` frame's `renderer_detail` field is folded by
+  // the mapping into the disclosure (`detail`), which carries the verified
+  // fault (image missing vs the label mismatch) on its first line and the
+  // exact rebuild command on its second. The rebuild command is a
+  // measurement, rendered in the mono face under the headline (like the
+  // `env_var` helper above). Absent (the frame did not carry the
+  // structured detail — the raw detail is the bare reason string) →
+  // nothing extra is rendered; the collapsed disclosure still shows
+  // whatever `detail` carried. No number, no value, no command the SPA
+  // has not established.
+  const { reasonLine: faultLine, rebuildCommand } = rendererDisclosure(error);
+
   // Part 1 — the sentence. For the envelope gate with a measurement, the
   // deck's body names measured and limit together (the headline stays as
   // the lead line).
@@ -144,6 +185,25 @@ export function FailureTurn({
         <p className="failure-turn-body" data-testid="failure-turn-model-helper">
           {modelHelper}
         </p>
+      )}
+
+      {/* Part 1d — the renderer image pre-flight detail (issue #346):
+          the verified fault (image missing / label X vs expected Y) and
+          the exact rebuild command in the mono face. Only when the frame
+          carried the structured `renderer_detail` field — never a
+          fabricated command or value. */}
+      {faultLine !== null && (
+        <p className="failure-turn-body" data-testid="failure-turn-renderer-fault">
+          {faultLine}
+        </p>
+      )}
+      {rebuildCommand !== null && (
+        <code
+          className="failure-turn-body"
+          data-testid="failure-turn-rebuild-command"
+        >
+          {rebuildCommand}
+        </code>
       )}
 
       {/* Part 1b — the per-param mismatch detail (issue #276): one line
@@ -242,9 +302,10 @@ export function FailureTurn({
           </>
         ) : (
           // The retry control is offered only when the failure is
-          // retryable: the `model_unconfigured` pre-flight failure (issue
-          // #303) is a configuration state — retrying just fails again —
-          // so it renders NO retry button (the helper sentence in part 1
+          // retryable: pre-flight configuration failures (issue #303's
+          // `model_unconfigured`, issue #346's `renderer_image_stale`)
+          // are configuration states — retrying just fails again — so
+          // they render NO retry button (the helper sentence in part 1
           // says what to do instead).
           error.retryable ? (
             <button
@@ -267,6 +328,11 @@ export function FailureTurn({
         <details className="failure-turn-raw" data-testid="failure-turn-raw">
           <summary>{copy.failure.rawDisclosure}</summary>
           <code data-testid="failure-turn-raw-code">{error.detail}</code>
+          {rebuildCommand !== null && (
+            <code data-testid="failure-turn-raw-rebuild">
+              rebuild: {rebuildCommand}
+            </code>
+          )}
         </details>
       )}
     </div>
