@@ -86,6 +86,82 @@ def _isolate_data_dir(tmp_path, monkeypatch):
     yield
 
 
+# Mutable override namespace for the hermetic render pre-flight stubs
+# (issue #346). Tests that deliberately exercise the REAL probe (rather
+# than the hermetic "image present, label matches" default) set
+# ``image_detail_override`` to the real ``_render_worker_image_detail``
+# function (imported BEFORE the conftest stub is installed — the test
+# module's top-level import captures the real name) or to a custom
+# callable. The conftest stub (below) reads this on every call.
+_render_preflight_overrides: dict = {"image_detail": None}
+
+
+def image_detail_override(func):
+    """Set the conftest ``_render_worker_image_detail`` stub to *func*.
+
+    Call this at the TOP of a test that deliberately exercises the real
+    probe or a specific image-detail outcome. *func* is called with the
+    same ``*a, **kw`` the conftest stub would receive (the probe's
+    ``image=`` / ``repo_root=`` / ``expected_hash=`` / ``rebuild_command=``
+    kwargs). When *func* is ``None`` (the default) the hermetic stub
+    returns ``None`` (no fault). Tests that need the real probe do::
+
+        from d33d.design_loop import _render_worker_image_detail as _real_probe
+        image_detail_override(_real_probe)   # at the top of the test
+
+    (The import at module top captures the real function BEFORE the
+    conftest stub replaces it.)
+    """
+    _render_preflight_overrides["image_detail"] = func
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_render_preflight(request, monkeypatch):
+    """Stub the two render pre-flight seams so the fast suite is hermetic.
+
+    (Issue #346.) The design loop's pre-flight — ``d33d.design_loop.
+    renderer_is_available`` (the ``docker info`` probe, issue #277) and
+    ``d33d.design_loop._render_worker_image_detail`` (the render-worker
+    image existence / build-hash label probe, issue #346) — shells out to
+    real Docker. On a machine with a correctly labelled
+    ``d33d/render-worker:local`` image the fast suite passes; on CI (no
+    image) the image probe reports ``image_missing`` and every design-loop
+    test with a mocked ``render_fn`` that does not inject the ``image_check
+    `` / ``renderer_check`` seams fails with ``renderer_image_stale``.
+
+    Stubbing BOTH seams at the module level (the same names the loop's
+    default ``None`` path resolves through, and the name ``d33d.app``
+    ``_lifespan`` resolves through) makes the whole fast suite independent
+    of the host's Docker and images: the default path reads
+    "daemon up, image present and label matches" (``None`` — no fault),
+    and tests that deliberately exercise the fault paths override via the
+    loop's ``renderer_check`` / ``image_check`` parameters (they win over
+    the module defaults) or via :func:`image_detail_override` (which
+    re-points the conftest stub to the real probe or a custom callable).
+
+    Gated on the ``slow`` marker: ``tests/slow`` (``pytestmark =
+    pytest.mark.slow``) exercises the REAL Docker render path and must see
+    the real probes; it is excluded from CI's fast gate (``-m "not slow
+    and not live"``).
+    """
+    if "slow" in request.keywords:
+        yield
+        return
+    import d33d.design_loop as _dl
+
+    monkeypatch.setattr(_dl, "renderer_is_available", lambda *a, **kw: True)
+
+    def _image_detail_stub(*a, **kw):
+        override = _render_preflight_overrides.get("image_detail")
+        if override is not None:
+            return override(*a, **kw)
+        return None
+
+    monkeypatch.setattr(_dl, "_render_worker_image_detail", _image_detail_stub)
+    yield
+    _render_preflight_overrides["image_detail"] = None
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _home_d33d_projects_guard():
     """Session guard: tests must not create entries in ``~/.d33d/projects``.

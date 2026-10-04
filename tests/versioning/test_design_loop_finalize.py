@@ -6138,6 +6138,13 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
     import asyncio
 
     app = app_with_versions
+    # Assigned BEFORE the try so the ``finally`` never reads ``p`` before
+    # assignment: if case 1's lifespan enter raises (e.g. an un-stubbed
+    # docker pre-flight on a machine without Docker — issue #346 CI
+    # failure), the ``finally`` would otherwise raise
+    # ``UnboundLocalError: cannot access local variable 'p'`` and mask the
+    # real failure.
+    p = app.state.catalogue_path
 
     try:
         # Case 1: missing models.yaml (the file is absent in the fixture)
@@ -6159,7 +6166,6 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
 
         # Case 2: an unset ${ENV} key → exactly one WARNING that NAMES
         # the variable and never carries the value.
-        p = app.state.catalogue_path
         p.write_text(
             "providers:\n"
             "  p:\n"
@@ -6210,6 +6216,53 @@ def test_startup_lifespan_logs_exactly_one_warning_naming_var(
     finally:
         if p.is_file():
             p.unlink()
+
+
+def test_startup_lifespan_without_docker_no_image_logs_no_image_warning(
+    app_with_versions, monkeypatch, caplog
+):
+    """Issue #346 CI regression: the lifespan's REAL image pre-flight on a
+    machine WITHOUT Docker (no binary, no image — the GitHub runner's
+    state) must not crash startup or log a fabricated fault: the probe
+    degrades to ``None`` ("cannot query docker") so NO image warning is
+    emitted (the design loop later reports retryable
+    ``renderer_unavailable`` — issue #277 semantics — never a terminal
+    rebuild fault)."""
+    import asyncio
+
+    import d33d.design_loop as dl
+    import d33d.render_worker as rw
+
+    app = app_with_versions
+
+    def _no_docker(*a, **kw):
+        raise FileNotFoundError("docker not found")
+
+    # Both the design-loop docker-info probe and the image inspect probe
+    # shell out via ``subprocess.run`` — kill every docker query in this
+    # process to simulate a runner without Docker.
+    monkeypatch.setattr(dl.subprocess, "run", _no_docker)
+    monkeypatch.setattr(rw.subprocess, "run", _no_docker)
+    dl.reset_renderer_preflight_cache()
+    try:
+        async def _enter():
+            async with app.router.lifespan_context(app):
+                pass
+
+        asyncio.run(_enter())
+        image_warnings = [
+            r
+            for r in caplog.get_records("call")
+            if "renderer image pre-flight" in r.getMessage()
+        ]
+        assert image_warnings == [], (
+            "no image fault was established (docker unqueryable) — no "
+            f"rebuild warning may be logged, got: "
+            f"{[r.getMessage() for r in image_warnings]}"
+        )
+    finally:
+        dl.reset_renderer_preflight_cache()
+
 
 # ---------------------------------------------------------------------------
 # Issue #303 — the production design-loop closure's model pre-flight

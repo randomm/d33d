@@ -68,6 +68,12 @@ from d33d.design_loop import (
     scad_looks_valid,
     score,
 )
+
+# Captured at module import time — BEFORE the conftest hermetic stub
+# (issue #346) monkeypatches the module attribute. The probe test below
+# needs the real function to re-point the stub (via
+# ``image_detail_override``).
+from d33d.design_loop import _render_worker_image_detail as _real_image_detail
 from d33d.failure_classes import (
     FAILURE_CLASSES,
     classify_failure,
@@ -2131,6 +2137,14 @@ def test_render_worker_image_detail_maps_probe_outcomes(monkeypatch):
 
     import d33d.render_worker as rw
     from d33d import design_loop
+
+    # Override the conftest hermetic stub (issue #346): this test
+    # deliberately exercises the REAL probe function (the inspect branch
+    # is stubbed via ``rw.subprocess`` below, the rest is production
+    # code).
+    from tests.conftest import image_detail_override
+
+    image_detail_override(_real_image_detail)
 
     probe_labels = {"labels": {rw.BUILD_HASH_LABEL: "abc123"}}
 

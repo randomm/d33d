@@ -27,6 +27,12 @@ import pytest
 
 import d33d.render_worker as rw
 
+# Captured at module import time — BEFORE the conftest hermetic stub
+# (issue #346) monkeypatches the module attribute. The probe tests below
+# need the real function to re-point the stub (via
+# ``image_detail_override``).
+from d33d.design_loop import _render_worker_image_detail as _real_image_detail
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOCS_BUILD_CMD = REPO_ROOT / "docs" / "bosl2-pinning.md"
 
@@ -238,6 +244,13 @@ def test_preflight_probe_reuses_verify_and_canonical_command(
     command (or ``None`` when healthy / docker-query failure), Docker-free.
     """
     import d33d.design_loop as dl
+
+    # Override the conftest hermetic stub (issue #346): this test
+    # deliberately exercises the REAL probe (the inspect branch is stubbed
+    # via ``rw.subprocess`` below, the rest is production code).
+    from tests.conftest import image_detail_override
+
+    image_detail_override(_real_image_detail)
 
     # Image present + label match → healthy (None — no fault, no probe
     # crash, no real Docker).
