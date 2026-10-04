@@ -472,9 +472,11 @@ export const failure = {
     madeOnly: (axisWord: string, madeMm: number): string =>
       `${axisWord}: ${mm(madeMm)}`,
     /** The follow-up question (operator decision 3): at most ONE per
-     *  card, the first axis in W/D/H order that has both asked and made
-     *  and they differ beyond the gate tolerance. Asks which
-     *  measurement the stated number refers to. */
+     *  card, the first axis in W/D/H order that has both an asked and a
+     *  made value (the backend's gate failure already establishes that
+     *  some confirmed axis was beyond tolerance — the SPA does not
+     *  re-derive it). Asks which measurement the stated number refers
+     *  to. */
     whichMeasurement: (askedMm: number, axisWord: string): string =>
       `Is ${mm(askedMm)} the ${axisWord} of the part itself, or the overall size including any lip or flange?`,
   },
