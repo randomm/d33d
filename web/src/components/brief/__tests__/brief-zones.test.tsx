@@ -212,6 +212,103 @@ describe("BriefZones — part present (two zones)", () => {
     expect(screen.queryByTestId("brief-zone-part-note")).toBeNull();
   });
 
+  it("unsettled part with ZERO design-state entries: W/D/H show 'waiting on units', never 'Nothing yet' (issue #352)", () => {
+    render(
+      <Brief {...baseProps} entries={[]} part={unsettledPart()} />,
+    );
+    // The part zone is present (the part block exists).
+    expect(screen.getByTestId("brief-zone-part-header")).toBeTruthy();
+    // Each W/D/H row shows the waiting control, never a number.
+    for (const axis of ["W", "D", "H"] as const) {
+      const row = screen.getByTestId(`brief-part-row-${axis}`);
+      const valueCell = row.querySelector("[data-testid='brief-value']");
+      expect(valueCell?.textContent).toBe(copy.brief.waitingOnUnits);
+      expect(valueCell?.textContent).not.toMatch(/\d/);
+    }
+    // The 'Nothing yet' empty body is suppressed — the part zone IS the
+    // content (the fallthrough the ticket calls out).
+    expect(screen.queryByTestId("brief-empty")).toBeNull();
+    // No 'Your changes' zone: zero change entries → no header, no rows.
+    expect(screen.queryByTestId("brief-zone-changes-header")).toBeNull();
+    expect(screen.queryByTestId("brief-rows")).toBeNull();
+    // The note is NOT shown (unsettled part).
+    expect(screen.queryByTestId("brief-zone-part-note")).toBeNull();
+  });
+
+  it("a 3MF part (settled) renders the file-own note, not 'you confirmed' (issue #352, operator decision 3)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34)]}
+        part={{ ...settledPart(), format: "3mf", filename: "bracket.3mf" }}
+      />,
+    );
+    // The file-own note — the spec's exact sentence.
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      copy.brief.partBroughtNoteFromFile,
+    );
+    // ...and it does not say "you confirmed" (the units came from the
+    // file, not a user choice).
+    expect(screen.getByTestId("brief-zone-part-note").textContent).not.toContain(
+      "you confirmed",
+    );
+    // The W/D/H values still render from `part.bbox_mm`.
+    expect(
+      screen.getByTestId("brief-part-row-W").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("60.0\u202Fmm");
+  });
+
+  it("a user-settled STL part keeps the 'you confirmed' note (issue #352)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34)]}
+        part={settledPart()}
+      />,
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      copy.brief.partBroughtNote("mm"),
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toContain(
+      "you confirmed",
+    );
+  });
+
+  it("a measurement-escape part (settled, unit 'custom') gets the measurement note, never 'in custom you confirmed' (issue #352, #350 follow-up)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34)]}
+        part={{ ...settledPart(), unit: "custom", scale: 0.5 }}
+      />,
+    );
+    // The measurement note — the part was measured, not settled in a unit
+    // the user chose.
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      copy.brief.partBroughtNoteMeasured,
+    );
+    // Never "in custom you confirmed" (the pre-#352 contradiction).
+    expect(screen.getByTestId("brief-zone-part-note").textContent).not.toContain(
+      "you confirmed",
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).not.toContain(
+      "in custom",
+    );
+    // The W/D/H values still render from `part.bbox_mm` (the derived mm).
+    expect(
+      screen.getByTestId("brief-part-row-W").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("60.0\u202Fmm");
+  });
+
+  it("zero entries and NO part: 'Nothing yet' still renders (the empty state is untouched)", () => {
+    render(<Brief {...baseProps} entries={[]} part={null} />);
+    expect(screen.getByTestId("brief-empty").textContent).toBe(
+      copy.brief.emptyBody,
+    );
+    // No part zone at all.
+    expect(screen.queryByTestId("brief-zone-part-header")).toBeNull();
+  });
+
   it("assumed part: W/D/H rows show the mm values (not 'waiting on units') with assumed provenance + the assumed note (issue #350)", () => {
     render(
       <Brief

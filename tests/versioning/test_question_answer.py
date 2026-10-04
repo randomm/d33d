@@ -42,6 +42,7 @@ from typing import Any, ClassVar
 
 import pytest
 
+from d33d import fill_recut
 from d33d.confirm_offer import mm_formatted
 from d33d.question_answer import (
     ANSWER_DONE_KIND,
@@ -56,6 +57,7 @@ from d33d.question_answer import (
     NO_VERSION_QUESTION_REPLY,
     NOT_ESTABLISHED,
     UNANSWERABLE_MISSING_TEMPLATE,
+    UNSETTLED_SIZE_REPLY,
     build_answer_prompt,
     deterministic_axis_answer,
     guard_answer_numbers,
@@ -931,6 +933,19 @@ def _latest263(
     return out
 
 
+def _set_part_columns(app, pid: int, **kwargs) -> None:
+    """Update the project row's part columns directly (the test fixture
+    creates projects with all part columns NULL; this helper simulates
+    the part-import workstream's writes so the unsettled chat route can
+    be exercised without the full import pipeline)."""
+    sets = ", ".join(f"{k} = ?" for k in kwargs)
+    app.state.conn.raw.execute(
+        f"UPDATE projects SET {sets} WHERE id = ?",
+        (*kwargs.values(), pid),
+    )
+    app.state.conn.raw.commit()
+
+
 class TestDeterministicAxisStage:
     """Issue #263: the deterministic axis-size stage — a stage-1 candidate
     that asks for exactly one axis's size (or the full dimension list) is
@@ -1003,6 +1018,127 @@ class TestDeterministicAxisStage:
         latest = _latest263()
         result = deterministic_axis_answer("what's the depth?", latest)
         assert result == "The depth isn't established yet."
+
+    # ------------------------------------------------------------------
+    # Issue #352 (operator decision 1): the unsettled size gate — the
+    # deterministic stage must never emit a numeric size answer while
+    # the part's units are unsettled (defence in depth: the route's
+    # unsettled pre-route already pre-empts, this is the stage's own
+    # guard, unit-tested here).
+    # ------------------------------------------------------------------
+
+    def test_unsettled_dimension_list_question_gets_size_unknown_reply(self) -> None:
+        # The v1 import's file-unit bbox (80.0) is NOT an mm measurement
+        # while the units are unsettled — the dimension-list question gets
+        # the size-unknown reply, never "It measures 80.0 …".
+        latest = _latest263(bbox={"x": 80.0, "y": 80.0, "z": 80.0})
+        result = deterministic_axis_answer(
+            "How big is it?", latest, part_unit_status="unsettled"
+        )
+        assert result == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in (result or "")
+
+    def test_unsettled_single_axis_question_gets_size_unknown_reply(self) -> None:
+        # The OD1 gate is REAL (not dimension-list-only): a single-axis
+        # size question on an unsettled part also gets the size-unknown
+        # reply — the v1 import's file-unit bbox (12.0 here) is NOT an mm
+        # measurement while the units are unsettled, so "It measures …"
+        # must never fire for a single-axis question either.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How tall is it now?", latest, part_unit_status="unsettled"
+        )
+        assert result == UNSETTLED_SIZE_REPLY
+        assert "12.0" not in (result or "")
+
+    def test_unsettled_single_axis_non_part_noun_falls_through(self) -> None:
+        # A single-axis question about a FEATURE ("the post") is not a
+        # part size question: the gate does not take it, it falls through
+        # to stage 2 exactly as today (never a number, never the
+        # size-unknown sentence — the gate answers the PART's envelope
+        # only, like the rest of the deterministic stage).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How tall is the post?", latest, part_unit_status="unsettled"
+        )
+        assert result is None
+
+    def test_unsettled_comparison_gate_suppresses_numeric_answer(
+        self, monkeypatch
+    ) -> None:
+        # Issue #352 (operator decision 1): the COMPARISON stage runs
+        # BEFORE the decision gate and emits the measured value as a
+        # number. On an unsettled part with a file-unit bbox of 80.0,
+        # "is it wider than 50 mm?" must never emit "80.0" — the gate
+        # covers the comparison stage too. The pure public API
+        # (``deterministic_axis_answer``) covers only the decision stage,
+        # so this test drives the REAL ``route_chat_message`` with the
+        # answer edge stubbed (it must never be called) and pins the
+        # comparison-stage gate's output.
+        from d33d.question_answer import route_chat_message
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "It is 80.0 mm wide."
+
+        latest = _latest263(bbox={"x": 80.0, "y": 80.0, "z": 80.0})
+        result = run_async_safe(
+            route_chat_message(
+                "Is it wider than 50 mm?",
+                latest,
+                _edge,
+                part_unit_status="unsettled",
+            )
+        )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        assert result["answer"] == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in result["answer"]
+        assert not edge_called[0], (
+            "the answer edge must NOT be called for the comparison gate"
+        )
+
+    def test_unsettled_comparison_gate_feature_noun_falls_through(self) -> None:
+        # A comparison about a FEATURE ("is the post wider than 50 mm?")
+        # is not a part-size comparison — the gate does not take it; it
+        # falls through exactly as today (no number, no size-unknown
+        # sentence at this pure stage — the comparison stage itself also
+        # falls through on a feature noun, landing on stage 2 at the
+        # route level).
+        latest = _latest263(bbox={"x": 80.0, "y": 80.0, "z": 80.0})
+        result = deterministic_axis_answer(
+            "Is the post wider than 50 mm?", latest, part_unit_status="unsettled"
+        )
+        assert result is None
+
+    def test_settled_part_answers_normally(self) -> None:
+        # The gate is "unsettled"-only: a settled part answers exactly as
+        # before (the v1 import's bbox is an mm measurement once settled).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How tall is it now?", latest, part_unit_status="settled"
+        )
+        assert result == "It measures 12.0\u202fmm tall."
+
+    def test_assumed_part_answers_normally(self) -> None:
+        # "Assumed" parts are usable (issue #350): the gate is
+        # "unsettled"-only, so an assumed part answers from the bbox as
+        # today (the assumed labelling is issue #350's scope).
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How tall is it now?", latest, part_unit_status="assumed"
+        )
+        assert result == "It measures 12.0\u202fmm tall."
+
+    def test_no_part_answers_normally(self) -> None:
+        # No part (the kwarg is None) → the gate never fires.
+        latest = _latest263(bbox={"x": 20.0, "y": 20.0, "z": 12.0})
+        result = deterministic_axis_answer(
+            "How big is it?", latest, part_unit_status=None
+        )
+        assert result == "It measures 20.0\u202fmm × 20.0\u202fmm × 12.0\u202fmm."
 
     def test_dimension_list(self) -> None:
         # "How big is it?" → the full W × D × H list.
@@ -2167,6 +2303,206 @@ class TestDeterministicAxisStageRouteLevel:
         assert "20.0" in data["message"]
         assert "25.0" in data["message"]
         assert "12.0" in data["message"]
+
+    def test_unsettled_part_question_gets_settled_reply_not_size(
+        self, app_with_versions
+    ) -> None:
+        """Issue #352 (operator decision 1): a question on a project whose
+        part's units are unsettled routes to the fill/recut pre-route's
+        settle-first reply (``UNSETTLED_PART_REPLY``) — never the numeric
+        "It measures …" path and never the design loop. The pre-route runs
+        before the question pre-route (which now carries the part status),
+        so the route-level answer is the unsettled reply."""
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            # An unsettled import: part columns set, v1 with the file-unit
+            # bbox (the mm number the naive path would have emitted).
+            _set_part_columns(
+                app_with_versions,
+                pid,
+                part_filename="big-part.stl",
+                part_format="stl",
+                part_unit=None,
+                part_unit_status="unsettled",
+                part_scale=None,
+                part_report=None,
+                part_options=None,
+            )
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"W": 80.0, "D": 80.0, "H": 80.0},
+                bbox=(80.0, 80.0, 80.0),
+            )
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "How tall is it?", "chat_history": []},
+            )
+            return r, frames
+
+        r, frames = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}"
+        event, data = frames[0]
+        assert event == "done"
+        # The reply is the settle-first notice, never a numeric size:
+        # the v1 import's 80.0 file-unit extent is not an mm measurement
+        # until the units are settled.
+        assert data["message"] == fill_recut.UNSETTLED_PART_REPLY
+        assert "80.0" not in data["message"]
+        assert data.get("kind") == ANSWER_DONE_KIND
+
+    def test_unsettled_single_axis_gate_fires_on_live_chat_path(
+        self, app_with_versions, monkeypatch
+    ) -> None:
+        """OD1 (issue #352) through the LIVE chat wiring: drive the real
+        POST /chat route on an unsettled import. The unsettled pre-route
+        (the fill/recut guard that would pre-empt EVERY message) is
+        bypassed by monkeypatching ``fill_recut.part_public`` to None —
+        the design-loop setup seam (``d33d.chat_loop.run_design_loop``)
+        reads the REAL project row and threads ``part_unit_status`` to
+        ``route_chat_message``: a single-axis question gets the
+        size-unknown reply, never the file-unit bbox number, with no LLM
+        call and no version. Dropping the ``part_unit_status`` kwarg in
+        ``d33d/chat_loop.py`` makes this test fail (the stage falls
+        through to stage 2 and emits "It measures 80.0 …")."""
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "It is 80.0 mm tall."
+
+        def _loop(app, **kwargs):
+            raise AssertionError("the design loop must NOT be called on the answer path")
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            # An unsettled import: part columns set, v1 with the file-unit
+            # bbox (the number the naive path would emit as "It measures").
+            _set_part_columns(
+                app_with_versions,
+                pid,
+                part_filename="big-part.stl",
+                part_format="stl",
+                part_unit=None,
+                part_unit_status="unsettled",
+                part_scale=None,
+                part_report=None,
+                part_options=None,
+            )
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"W": 80.0, "D": 80.0, "H": 80.0},
+                bbox=(80.0, 80.0, 80.0),
+            )
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _edge
+            # Bypass the unsettled pre-route: post_chat calls
+            # fill_recut.part_public(row) to decide the guard; the None
+            # makes _part None, so no UNSETTLED_PART_REPLY frame fires
+            # and the message flows into the design-loop setup seam, which
+            # calls route_chat_message with the row's real part status.
+            monkeypatch.setattr("d33d.part_http.part_public", lambda row: None)
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "How tall is it now?", "chat_history": []},
+            )
+            versions = app_with_versions.state.versions.list_versions(pid)
+            return r, frames, len(versions), edge_called[0]
+
+        r, frames, version_count, was_edge_called = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not was_edge_called, "the answer edge must NOT be called for the gate"
+        assert version_count == 1, f"expected 1 version, got {version_count}"
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert data["message"] == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in data["message"]
+
+    def test_unsettled_comparison_gate_fires_on_live_chat_path(
+        self, app_with_versions, monkeypatch
+    ) -> None:
+        """OD1 on the COMPARISON path through the LIVE chat wiring: drive
+        the real POST /chat route on an unsettled import with a
+        DIGIT-bearing question ("Is it wider than 50 mm?") — the message
+        shape the decision gate's digit-abstain would let through to
+        stage 2, and that the comparison stage would otherwise answer
+        with the file-unit bbox. The unsettled pre-route is bypassed
+        (``fill_recut.part_public`` → None, the same seam as the
+        single-axis test); the comparison gate must return the
+        size-unknown reply — never "80.0", with no LLM call and no
+        version. Dropping the ``part_unit_status`` kwarg from
+        ``route_chat_message``'s comparison call makes this fail (the
+        stage emits "Yes — it measures 80.0 mm wide, …")."""
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "It is 80.0 mm wide."
+
+        def _loop(app, **kwargs):
+            raise AssertionError("the design loop must NOT be called on the answer path")
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            _set_part_columns(
+                app_with_versions,
+                pid,
+                part_filename="wide-part.stl",
+                part_format="stl",
+                part_unit=None,
+                part_unit_status="unsettled",
+                part_scale=None,
+                part_report=None,
+                part_options=None,
+            )
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"W": 80.0, "D": 40.0, "H": 30.0},
+                bbox=(80.0, 40.0, 30.0),
+            )
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _edge
+            monkeypatch.setattr("d33d.part_http.part_public", lambda row: None)
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "Is it wider than 50 mm?", "chat_history": []},
+            )
+            versions = app_with_versions.state.versions.list_versions(pid)
+            return r, frames, len(versions), edge_called[0]
+
+        r, frames, version_count, was_edge_called = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not was_edge_called, "the answer edge must NOT be called for the gate"
+        assert version_count == 1, f"expected 1 version, got {version_count}"
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert data["message"] == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in data["message"]
+
+    def test_unsettled_size_reply_matches_copy_deck_constant(self) -> None:
+        """The backend's size-unknown sentence (the deterministic stage's
+        defence-in-depth guard for an unsettled part) is verbatim the
+        copy.ts ``deterministicAnswer.sizeUnknownWhileUnsettled`` deck
+        string — no placeholder, both directions pinned by the literal."""
+        assert UNSETTLED_SIZE_REPLY == (
+            "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real."
+        )
 
 
 # ---------------------------------------------------------------------------

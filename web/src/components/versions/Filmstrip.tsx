@@ -122,6 +122,18 @@ export function Filmstrip({
   }
 
   const siblings = siblingCounts(versions);
+  // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
+  // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
+  // for a long timeline.
+  const ordinalById = new Map<number, number>();
+  versions.forEach((v, i) => {
+    // The first occurrence wins (identical to findIndex): a duplicate id
+    // (DB-unique in practice — auto-increment rows) would otherwise be
+    // overridden by its later slot.
+    if (!ordinalById.has(v.id)) {
+      ordinalById.set(v.id, i + 1);
+    }
+  });
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;
   const latestId = versions.length > 0 ? versions[versions.length - 1].id : null;
@@ -176,6 +188,16 @@ export function Filmstrip({
           const isCurrent = v.id === latestId;
           const fork = siblings.get(v.id);
           const diff = diffFragment(v, versions);
+          // Issue #352 (operator decision 5): the slot's position label is
+          // the user-facing version ORDINAL — the 1-based position in the
+          // timeline list — never the DB row id (which diverges from the
+          // ordinal once branches/restores create non-sequential ids). An
+          // import version carries its own "v1 — Imported {filename}" label
+          // (importedVersionLabel) and renders NO position span: the two
+          // numbers ("v1 … · v40") were the same version's ordinal and DB id
+          // side by side.
+          const ordinal = ordinalById.get(v.id) ?? 0;
+          const isImport = v.source_kind === "import";
           return (
             <span
               key={v.id}
@@ -222,10 +244,12 @@ export function Filmstrip({
                 >
                   {importedVersionLabel(v, part)}
                 </span>
-                <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                  {` · v${v.id}`}
-                  {diff !== null ? ` · ${diff}` : ""}
-                </span>
+                {!isImport && (
+                  <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
+                    {` · v${ordinal}`}
+                    {diff !== null ? ` · ${diff}` : ""}
+                  </span>
+                )}
                 {fork !== undefined && (
                   <span
                     className="filmstrip-fork"

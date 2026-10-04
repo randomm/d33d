@@ -1631,6 +1631,20 @@ export default function App({ client }: AppProps) {
   // (an implausible STL) hides the plate and shows the caption.
   const partUnsettled = isScreen2 && designStatePart.unit_status === "unsettled";
 
+  // Issue #352 (operator decision 2) — the collapse predicate, exactly:
+  //   settled → collapsed immediately;
+  //   assumed or unsettled, only the import version (versions.length === 1) → full
+  //     (the full card carries "Change the units" for assumed parts, added in
+  //     #350, and the settle controls for unsettled ones);
+  //   any unit_status once a design version exists (versions.length > 1,
+  //     versions[0]?.source_kind === "import") → collapsed; the full report
+  //     stays reachable from the Brief's "The part you brought" zone.
+  const importReportCollapsed =
+    isScreen2 &&
+    designStatePart !== null &&
+    (designStatePart.unit_status === "settled" ||
+      (versions.length > 1 && versions[0]?.source_kind === "import"));
+
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the
   // pre-pass empty state, issue #107).
@@ -1781,6 +1795,7 @@ export default function App({ client }: AppProps) {
           client={apiClient}
           onSettled={() => refetchDesignState()}
           showPlate={!partUnsettled}
+          collapsed={importReportCollapsed}
         />
       )}
 
@@ -1870,6 +1885,7 @@ export default function App({ client }: AppProps) {
           onPartUploaded={handlePartUploaded}
           partClient={apiClient}
           hasPart={designStatePart !== null}
+          partUnsettled={partUnsettled}
         />
       )}
 

@@ -94,6 +94,12 @@ interface ChatPanelProps {
   /** The version label the failure turn says survived (the latest
    *  version — the failure was never a version). */
   keptVersion?: string | null;
+  /** Issue #352 (operator decision 4): false when the export button is
+   *  actually disabled (the part's units are unsettled or a design pass
+   *  is in flight) — the failure turn's survived line then omits the
+   *  "still exportable" claim. Absent defaults to true (the pre-#352
+   *  behaviour). */
+  exportable?: boolean;
   /** Issue #193: hide the composer while the first-run screen is up
    *  (the first-run screen carries its own composer, so exactly one
    *  must be visible). Defaults to false for direct-render tests. */
@@ -107,6 +113,7 @@ export function ChatPanel({
   onBesidePhoto,
   envelope,
   keptVersion,
+  exportable,
   hideComposer,
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
@@ -170,6 +177,7 @@ export function ChatPanel({
                   error={msg.failure!}
                   envelope={envelope}
                   keptVersion={keptVersion}
+                  exportable={exportable}
                   inFlight={inFlight === true}
                   onAction={onSend}
                 />

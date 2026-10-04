@@ -384,6 +384,63 @@ describe("Filmstrip — imported version label (issue #338)", () => {
     expect(fallback.textContent).toBe("Imported bracket.stl");
   });
 
+  it("an import slot carries no position span: the 'v1 — Imported' label is the single version number (issue #352, operator decision 5)", () => {
+    // 40 versions; the import is v1 (collapsed into the earlier count), the
+    // 40th version has DB id 40. The pre-#352 shape rendered "v1 — Imported
+    // …" AND " · v40" (the DB id) on the same card when both were visible —
+    // two numbers for one version. Now every visible slot's position span
+    // is the ORDINAL (1-based position in the timeline), and the import
+    // slot renders its label alone (no span) — pinned by the 2-version
+    // case below.
+    const versions = Array.from({ length: 40 }, (_, i) =>
+      entry(i + 1, i === 0 ? { source_kind: "import" as const } : {}),
+    );
+    render(<Filmstrip {...baseProps({ versions })} part={part} />);
+    // The four visible are 37, 38, 39, 40 — ordinals 37..40 (id == ordinal
+    // here; the divergence case is pinned separately). Each slot's span
+    // carries its ordinal.
+    for (const id of [37, 38, 39, 40]) {
+      expect(screen.getByTestId(`filmstrip-pos-${id}`).textContent).toBe(
+        ` · v${id}`,
+      );
+    }
+  });
+
+  it("a 2-version project: the import slot renders the label alone (no ' · v1' span), the second slot renders the ordinal (issue #352)", () => {
+    const versions = [
+      entry(1, { source_kind: "import" as const }),
+      entry(2),
+    ];
+    render(<Filmstrip {...baseProps({ versions })} part={part} />);
+    // The import slot: the 'v1 — Imported' label is the ONLY number.
+    expect(screen.getByTestId("version-imported-label")).toBeTruthy();
+    expect(screen.queryByTestId("filmstrip-pos-1")).toBeNull();
+    // The second slot: the ordinal (2 — 1-based position in the list).
+    expect(screen.getByTestId("filmstrip-pos-2").textContent).toBe(" · v2");
+  });
+
+  it("the position span is the ORDINAL, not the DB id, when ids diverge from position (issue #352)", () => {
+    // A branched lineage: v3 (id 3) was created after v2, and v4's parent
+    // is v1 (a branch off v1) — the ids are still sequential here, but the
+    // ORDINAL is what renders: a project where a restore creates a
+    // non-sequential id would show the position in the list, never the id.
+    // Simulate the divergence directly: the list order IS the ordinal
+    // source, so entry with id 7 in position 4 renders " · v4".
+    const versions = [
+      entry(1),
+      entry(2),
+      entry(3),
+      entry(7),
+    ];
+    render(<Filmstrip {...baseProps({ versions })} />);
+    // The four visible slots are ids 1,2,3,7 — ordinals 1,2,3,4.
+    expect(screen.getByTestId("filmstrip-pos-1").textContent).toBe(" · v1");
+    expect(screen.getByTestId("filmstrip-pos-2").textContent).toBe(" · v2");
+    expect(screen.getByTestId("filmstrip-pos-3").textContent).toBe(" · v3");
+    // id 7 in position 4 → " · v4" (the ordinal), never " · v7" (the id).
+    expect(screen.getByTestId("filmstrip-pos-7").textContent).toBe(" · v4");
+  });
+
   it("renders a hostile filename as inert text (never interpreted)", () => {
     const hostilePart = {
       ...part,

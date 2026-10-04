@@ -53,6 +53,14 @@ interface FailureTurnProps {
    *  in the timeline — the failure was never a version). Absent when no
    *  version exists yet. */
   keptVersion?: string | null;
+  /** True when the export is actually available (issue #352, operator
+   *  decision 4: the part's units are settled AND no design pass is in
+   *  flight — the same 409 gate the export button renders). When false
+   *  the survived line names the survivor but omits the "still
+   *  exportable" claim (the button being disabled is a contradiction
+   *  the copy must not make). Absent defaults to true (the pre-#352
+   *  behaviour). */
+  exportable?: boolean;
   /** The in-flight flag — disables the action buttons while a loop runs. */
   inFlight: boolean;
   /** An action click: the text is sent through the composer (it prefills
@@ -66,6 +74,7 @@ export function FailureTurn({
   error,
   envelope,
   keptVersion,
+  exportable = true,
   inFlight,
   onAction,
 }: FailureTurnProps) {
@@ -242,10 +251,16 @@ export function FailureTurn({
         </div>
       )}
 
-      {/* Always say what survived. */}
+      {/* Always say what survived — but claim exportability only when
+          the export is actually available (issue #352, operator decision
+          4): when the export button is disabled (unsettled units or a
+          pass in flight) the line names the survivor without the
+          export claim. */}
       {keptVersion !== null && keptVersion !== undefined && (
         <p className="failure-turn-survived" data-testid="failure-turn-survived">
-          {copy.failure.survived(keptVersion)}
+          {exportable
+            ? copy.failure.survived(keptVersion)
+            : copy.failure.survivedNoExport(keptVersion)}
         </p>
       )}
 

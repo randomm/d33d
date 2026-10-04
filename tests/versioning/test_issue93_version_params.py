@@ -1653,7 +1653,9 @@ def test_chat_pass_title_present_becomes_version_name(app_with_versions):
         # The stubbed edge classifies it as a request — the documented
         # fall-through to the loop.
         _orig_decision = _qa_mod._deterministic_decision
-        _qa_mod._deterministic_decision = lambda msg, latest: None
+        _qa_mod._deterministic_decision = (
+            lambda msg, latest, part_unit_status=None: None
+        )
         _orig_block = _qa_mod.state_block_for_chat
         _qa_mod.state_block_for_chat = lambda latest: []
 

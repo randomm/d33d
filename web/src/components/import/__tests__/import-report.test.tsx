@@ -194,6 +194,68 @@ describe("ImportReport — the import report (issue #334, D6)", () => {
   });
 });
 
+describe("ImportReport — the collapsed compact form (issue #352, operator decision 2)", () => {
+  const settled: PartReportInfo = {
+    filename: "gear.stl",
+    format: "stl",
+    unit: "mm",
+    unit_status: "settled",
+    scale: 1,
+    report: { triangles: 100, bodies: 1, watertight: true, gaps_closed: 0, bbox_file_units: [50, 30, 20] },
+    options: null,
+  };
+
+  it("a settled part collapses to the compact line: the title stays, the W-D-H / options / metrics drop off the viewport", () => {
+    const client = makeClient();
+    render(<ImportReport part={settled} projectId={7} client={client} onSettled={vi.fn()} showPlate={true} collapsed />);
+    // The card is marked collapsed.
+    const card = screen.getByTestId("import-report");
+    expect(card.getAttribute("data-collapsed")).toBe("true");
+    // The title line stays (the compact form is the "I read …" line).
+    expect(screen.getByTestId("import-report-title").textContent).toBe(
+      copy.partReport.iRead("gear.stl"),
+    );
+    // The compact form no longer covers the viewport: the inset-0 centred
+    // overlay is gone (the model / plate / panels are no longer hidden
+    // behind it).
+    expect(card.style.inset).not.toBe("0px");
+    expect(card.style.position).toBe("absolute");
+    expect(card.style.display).toBe("block");
+    // The W-D-H line is gone from the viewport (the part's facts live in
+    // the Brief's "The part you brought" zone now).
+    expect(screen.queryByTestId("import-report-wdh")).toBeNull();
+    expect(screen.queryByTestId("import-report-metrics")).toBeNull();
+    expect(screen.queryByTestId("import-report-filename")).toBeNull();
+    expect(screen.queryByTestId("import-report-unsettled")).toBeNull();
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
+  });
+
+  it("an unsettled part stays FULL (not collapsed) while it carries the settle controls", () => {
+    const client = makeClient();
+    // The App never passes collapsed=true for an unsettled part (the
+    // collapse gate: settled/assumed OR first design turn); the card
+    // defaults to the full overlay so the unit choice stays in place.
+    render(<ImportReport part={unsettledPart} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
+    const card = screen.getByTestId("import-report");
+    expect(card.getAttribute("data-collapsed")).toBeNull();
+    // The settle controls are present (the card carries the unit choice
+    // the user needs to get out of unsettled state).
+    expect(screen.getByTestId("import-report-unsettled")).toBeTruthy();
+    expect(screen.getByTestId("import-report-option-mm")).toBeTruthy();
+    // The full overlay geometry (inset: 0 — jsdom's inline-style read-back
+    // for a zero inset, so the unit is not asserted).
+    expect(card.style.inset).toBe("0");
+  });
+
+  it("the unsettled part renders its full report while NOT collapsed (the pre-#352 form is unchanged)", () => {
+    const client = makeClient();
+    render(<ImportReport part={unsettledPart} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} collapsed={false} />);
+    expect(screen.getByTestId("import-report-metrics")).toBeTruthy();
+    expect(screen.getByTestId("import-report-unsettled")).toBeTruthy();
+    expect(screen.getByTestId("import-report-unsettled-caption")).toBeTruthy();
+  });
+});
+
 describe("ImportReport — settlement (issue #334, D8)", () => {
   it("picking an option calls setPartUnit with that unit, then refetches (onSettled)", async () => {
     const onSettled = vi.fn();
