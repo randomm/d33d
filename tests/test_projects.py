@@ -1137,6 +1137,48 @@ def test_fill_recut_trigger_no_hole_report_no_offer(app_with_projects):
     assert offer["size"] == 10.0, offer
 
 
+def test_fill_recut_offer_fires_for_annulus_import(app_with_projects):
+    """Issue #351 — route-level: a project whose part_report carries the
+    ``hole_count`` from a real watertight annulus import (a real drilled
+    through-bore: 0 boundary loops but genus 1 → ``hole_count == 1`` —
+    exactly the case the old gaps-only count read as 0 and refused) +
+    "make the hole 10 mm" → the offer FIRES (pending offer stored,
+    boundary sentence with Ø10 mm, ``fill_recut_offer: True`` on the done
+    frame). The count is set via the helper from the annulus's computed
+    import value — the fill-recut gate reads the stored fact, never
+    re-parsing the mesh."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Annulus"})
+        pid = r.json()["id"]
+        # The annulus import's stored hole fact (watertight, genus 1):
+        # 0 open gaps + 1 closed through-hole → 1.
+        _set_part_columns(
+            app_with_projects, pid, unit_status="settled", hole_count=1
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 10 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    assert done[0].get("kind") == "answer", done
+    msg = done[0]["message"]
+    assert "That hole came with your file" in msg, msg
+    assert "Ø10 mm" in msg, msg
+    assert done[0].get("fill_recut_offer") is True, done
+    svc = _svc(app_with_projects)
+    offer = svc.get_pending_offer(pid)
+    assert offer is not None
+    assert offer["kind"] == "fill_recut", offer
+    assert offer["noun"] == "hole", offer
+    assert offer["size"] == 10.0, offer
+
+
 def test_fill_recut_trigger_hole_with_dimension(app_with_projects):
     """(a)–(e) all hold: 'make the big hole 38 mm' on a project with a
     settled part and no version of its own → the boundary sentence

@@ -75,6 +75,13 @@ def _stl_bytes(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _stl_bytes_from_mesh(mesh) -> bytes:
+    """Export a trimesh mesh to STL bytes (in-memory — no file on disk)."""
+    buf = io.BytesIO()
+    mesh.export(buf, file_type="stl")
+    return buf.getvalue()
+
+
 def _make_3mf(unit: str | None = "millimeter") -> bytes:
     import trimesh
 
@@ -523,11 +530,12 @@ def test_hole_count_positive_for_holey_fixture(app_with_projects):
 
 def test_hole_count_equals_pre_repair_boundary_loops(app_with_projects):
     """Issue #351: ``hole_count`` is computed from the PRE-REPAIR merged
-    mesh's boundary loops. For holey.stl the pre-repair loop count is 4
-    (the same value ``gaps_closed`` reports as closed by pymeshfix: a
-    gapped→closed delta of 4). ``hole_count`` must equal that pre-repair
-    count, NOT the post-repair count (which is 0 — pymeshfix closes the
-    loops, so a post-repair signal would read 0 for a holey part)."""
+    mesh's boundary loops PLUS the closed-body genus. For holey.stl the
+    pre-repair loop count is 4 (the same value ``gaps_closed`` reports as
+    closed by pymeshfix: a gapped→closed delta of 4) and the repaired
+    watertight mesh is a single genus-0 body, so ``hole_count`` == 4 —
+    NOT the post-repair loop count (which is 0 — pymeshfix closes the
+    loops, so a post-repair-only signal would read 0 for a holey part)."""
     data = _stl_bytes(FIXTURES / "holey.stl")
 
     async def _call(client):
@@ -548,6 +556,91 @@ def test_hole_count_equals_pre_repair_boundary_loops(app_with_projects):
         f"mesh pymeshfix fully closes"
     )
     assert report["hole_count"] == 4, f"holey.stl has 4 pre-repair loops: {report}"
+
+
+def test_hole_count_watertight_ring_counts_through_hole(app_with_projects):
+    """Issue #351: a watertight ring (trimesh annulus exported to STL)
+    has a REAL drilled through-bore: 0 boundary loops but genus 1.
+    ``hole_count`` must count the closed through-hole (``gaps_before +
+    genus``) → >= 1, so the fill-recut gate has evidence for the very
+    part it exists for. The repaired mesh stays watertight."""
+    import trimesh
+
+    ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    data = _stl_bytes_from_mesh(ring)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Ring"})
+        pid = r.json()["id"]
+        files = {"file": ("ring.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["gaps_closed"] == 0
+    assert report["hole_count"] >= 1, (
+        f"watertight ring has a through-hole (genus 1); hole_count must be "
+        f">= 1, got {report}: {report}"
+    )
+    assert isinstance(report["hole_count"], int)
+
+
+def test_hole_count_two_watertight_rings(app_with_projects):
+    """Issue #351: two separate watertight rings (two disconnected bodies,
+    each genus 1) → ``hole_count`` == 2 — genus is summed over bodies.
+    The rings are placed far apart (STL is float32: at a 100 mm gap the
+    float32 vertex rounding merges the two bodies into one, corrupting
+    both the body count and the genus sum)."""
+    import trimesh
+
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TwoRings"})
+        pid = r.json()["id"]
+        files = {"file": ("two_rings.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["bodies"] == 2, f"two disconnected rings: {report}"
+    assert report["hole_count"] == 2, f"two rings → genus 2: {report}"
+
+
+def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
+    """Issue #351: any exception in the genus computation degrades to
+    ``gaps_before`` alone — never a crash, never ``None``. A holey part
+    still gets its boundary-loop count (4), not an error response."""
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "GenusFail"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    def _boom(mesh):
+        raise RuntimeError("genus computation failed")
+
+    original = part_mesh_mod._watertight_genus
+    part_mesh_mod._watertight_genus = _boom
+    try:
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod._watertight_genus = original
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # Fallback: gaps_before (4 boundary loops) alone, never None/crash.
+    assert report["hole_count"] == 4, f"genus failure falls back to gaps: {report}"
 
 
 def test_repair_report_two_body(app_with_projects):

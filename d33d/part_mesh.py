@@ -170,6 +170,26 @@ def _boundary_loops(mesh: trimesh.Trimesh) -> int:
     return n
 
 
+def _watertight_genus(mesh: trimesh.Trimesh) -> int:
+    """Total genus across the watertight connected bodies of ``mesh``.
+
+    Genus is the closed-body hole count: for a closed orientable body,
+    ``genus = (2 - euler_number) / 2`` (sphere 0, ring 1, torus-with-2 2).
+    Summed over every watertight component (``split(only_watertight=False)``
+    so a gapped remainder still contributes its closed bodies, not the whole
+    mesh as one). Cheap — an euler_number is a vertex/edge/face count, no
+    geometry passes — but the caller wraps it in a guard (any exception
+    falls back to the boundary-loop count alone, never a crash).
+    """
+    genus = 0
+    for body in mesh.split(only_watertight=False):
+        if body.is_watertight:
+            body.merge_vertices()
+            g = (2 - int(body.euler_number)) // 2
+            genus += max(0, g)
+    return genus
+
+
 def _total_faces(loaded: Any) -> int:
     """The total face count across ALL geometries (a Scene's geos, or a
     single Trimesh) — the face cap applies to the total, never just the
@@ -327,15 +347,27 @@ def parse_and_repair(
     unitless, or a 3MF with no ``unit`` attribute — the 3MF default is
     millimeters).
 
-    ``hole_count`` is the number of through- or blind-holes the imported
-    part actually has, computed ONCE here at import from the PRE-REPAIR
-    merged mesh's boundary loops (``_boundary_loops``) and stored with the
-    part. The pre-repair merged mesh is the right surface: the repair chain
-    (``pymeshfix``) CLOSES those loops before the stored mesh exists, so a
-    post-repair count would read 0 for a holey part (the loops are the
-    signal, not a bug to fix). Each hole opening contributes one boundary
-    loop, so the loop count is the hole count. A plain watertight box has
-    no open loops → ``0``; a holey part has one loop per hole opening.
+    ``hole_count`` is the number of holes the imported part actually has,
+    computed ONCE here at import and stored with the part, as
+    ``gaps_before + genus``:
+
+    - ``gaps_before`` — the PRE-REPAIR merged mesh's boundary loops
+      (``_boundary_loops``), one per OPEN hole opening. The pre-repair
+      merged mesh is the right surface for these: the repair chain
+      (``pymeshfix``) CLOSES those loops before the stored mesh exists, so
+      a post-repair count would read 0 for a holey part (the loops are the
+      signal, not a bug to fix).
+    - ``genus`` — the total closed-body genus (``_watertight_genus``) of
+      the REPAIRED mesh, one per closed through-hole. A CAD-exported part
+      with a real drilled through-bore is WATERTIGHT: 0 boundary loops but
+      genus 1. Gaps alone would count it 0 and the fill-recut gate would
+      refuse the very part it exists for, so closed holes are counted too.
+
+    A plain watertight box has neither → ``0``; an open holey part has one
+    boundary loop per opening (and the closed body under each contributes
+    the matching genus); a watertight ring has genus 1 → ``1``. The genus
+    computation is wrapped so any exception falls back to ``gaps_before``
+    alone — the count degrades, never crashes, never ``None``.
 
     Raises ``PartUploadError`` (the 422) on any failure: unparseable,
     empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
@@ -410,16 +442,39 @@ def parse_and_repair(
     gaps_before = _boundary_loops(merged)
     import pymeshfix as _pmf
 
-    try:
+    # Repair PER CONNECTED BODY, not the whole mesh in one MeshFix call:
+    # the pymeshfix C++ repair (pybind11) is known to lose disconnected
+    # components — a multi-body watertight STL (two rings) comes back as a
+    # single body (256 of 512 faces survive) — which would silently drop
+    # bodies from the stored mesh AND undercount the genus (one body's
+    # holes, not all of them). Repairing each body separately preserves
+    # every component; the per-body results concatenate back to the same
+    # mesh a whole-mesh repair would produce for the single-body case.
+    def _pmf_repair_body(body: trimesh.Trimesh) -> trimesh.Trimesh:
         fix = _pmf.MeshFix(
-            merged.vertices.astype(np.float64), merged.faces.astype(np.int32)
+            body.vertices.astype(np.float64), body.faces.astype(np.int32)
         )
         fix.repair()
-        repaired = trimesh.Trimesh(
+        return trimesh.Trimesh(
             np.asarray(fix.points, dtype=np.float64),
             np.asarray(fix.faces, dtype=np.int32),
             process=False,
         )
+
+    try:
+        # ``merged`` was merge_vertices'd above, so ``split`` sees the
+        # true connectivity; a single-body mesh keeps the one-call fast
+        # path, a multi-body mesh is repaired per component.
+        if len(merged.split(only_watertight=False)) <= 1:
+            repaired = _pmf_repair_body(merged)
+        else:
+            repaired_parts = [
+                _pmf_repair_body(b) for b in merged.split(only_watertight=False)
+            ]
+            repaired_parts = [p for p in repaired_parts if len(p.faces) > 0]
+            if not repaired_parts:
+                raise PartUploadError("repair produced an empty mesh")
+            repaired = trimesh.util.concatenate(repaired_parts)
     except PartUploadError:
         raise
     except Exception as e:
@@ -435,18 +490,26 @@ def parse_and_repair(
     trimesh.repair.fix_normals(repaired)
     gaps_after = _boundary_loops(repaired)
 
-    # ``hole_count``: the PRE-REPAIR merged mesh's boundary-loop count
-    # (``gaps_before``) — one loop per hole opening. Computed here at import
-    # (off the event loop, inside this ``to_thread`` call) and stored with
-    # the part; the fill-recut gate at chat time only reads this stored
-    # fact, never re-parsing the mesh. See the docstring for why the
-    # pre-repair mesh, not the post-repair one, is the signal.
+    # ``hole_count``: open-mesh gaps + closed through-holes.
+    # ``gaps_before`` counts the PRE-REPAIR merged mesh's boundary loops
+    # (one per open hole opening — see docstring for why pre-repair); the
+    # genus of the REPAIRED (watertight) mesh counts closed through-holes
+    # a watertight import — e.g. a CAD-exported part with a drilled bore —
+    # would otherwise read as 0. Both computed here at import (off the
+    # event loop, inside this ``to_thread`` call); the fill-recut gate at
+    # chat time only reads this stored fact, never re-parsing the mesh.
+    # The genus half is guarded: any exception degrades the count to
+    # ``gaps_before`` alone — never a crash, never ``None``.
+    try:
+        holes = gaps_before + _watertight_genus(repaired)
+    except Exception:
+        holes = gaps_before
     report = {
         "triangles": len(repaired.faces),
         "bodies": bodies,
         "watertight": bool(repaired.is_watertight),
         "gaps_closed": max(0, gaps_before - gaps_after),
-        "hole_count": gaps_before,
+        "hole_count": int(holes),
         "bbox_file_units": file_bbox,
     }
     return repaired, report, file_unit
