@@ -70,6 +70,7 @@ const IDLE_PROGRESS: ViewProgressState = {
 interface PaneOverrides {
   docked?: boolean;
   collapsed?: boolean;
+  hidden?: boolean;
   projectId?: number | null;
   inFlight?: boolean;
   versions?: VersionTimelineEntry[];
@@ -100,6 +101,7 @@ function renderPane(overrides: PaneOverrides = {}) {
       onBesidePhoto={vi.fn()}
       envelope={null}
       hideComposer={false}
+      hidden={overrides.hidden ?? false}
       lastUserMessage=""
       versions={overrides.versions ?? []}
       onCompareSelect={onCompareSelect}

@@ -1,66 +1,94 @@
 /**
- * E2E: first-run photo hint vs plate caption vertical clearance (issue #214).
+ * E2E: first-run "Add a photo" button vs plate caption clearance (issue #347).
  * MANUAL-ONLY — NOT run by CI. Run with: `cd web && npx playwright test test_plate_caption_clearance.spec.ts`
  *
- * The ticket's acceptance criterion: at each of the enumerated viewports
- * (1024 × 640 — the documented responsive floor, 1280 × 720 — where the
- * 4px overlap was originally measured, 1280 × 900) the photo hint's bottom
- * edge (first-run-photo-hint, last child of the FirstRun card) must sit at
- * least 8px ABOVE the plate caption's top edge (plate-caption, in
- * PlateBackdrop's independently-centred column). Two elements in two
- * separate layout trees, so the 8px clearance must be measured in real
- * geometry — getBoundingClientRect — not a bare "not overlapping" check.
+ * The ticket's acceptance criterion: at each of the four gate viewports
+ * (1024 × 640, 1280 × 800, 1440 × 900, 1920 × 1080 — the two docked and the
+ * two floating conversation-pane layouts, split at
+ * CONVERSATION_DOCK_MAX_HEIGHT_PX = 900, strict less-than) the plate caption
+ * (plate-caption, in PlateBackdrop's independently-centred column, canvas
+ * layer z-index 0) must NOT intersect the first-run photo button
+ * (first-run-photo-btn, in the FirstRun card at z-index 10) AND must clear
+ * it by at least 8px (MIN_CLEARANCE_PX).
  *
- * Setup is a bare page.goto("/"): the SPA auto-creates a fresh project on
- * load (first-run screen present) and the live backend always serves
- * verified:true for GET /api/config/envelope (issue #134), so the plate
- * caption is always the short confirmed form — no envelope-route
- * interception is needed. Before measuring, the spec asserts plate-caption
- * is visible (a distinct precondition failure) so a failed/slow envelope
- * fetch — or a leftover version from a prior run that unmounted
- * first-run — fails as a precondition violation, not a confusing geometry
- * failure.
+ * Why these two elements: the plate backdrop is the only non-card element in
+ * the same centred band. The card's photo button and photo hint are its two
+ * lowest rows, sitting at the bottom of the card's centred column — exactly
+ * where the plate column (plate SVG, caption, note) terminates. The plate
+ * caption is the element in that bottom band (the caption's text is the
+ * plate's dimension string, and the spec's named pair is caption vs button).
+ *
+ * Why "gap or separation" (not a fixed vertical order): the plate column
+ * and the card are two INDEPENDENTLY centred flex columns. Depending on
+ * viewport and card height the caption can sit above the button (caption
+ * bottom + 8px ≤ button top) or the button can sit above the caption (button
+ * bottom + 8px ≤ caption top) — both are clearances. Asserting one fixed
+ * order would false-fail a re-arrangement that still clears. The invariant
+ * the ticket protects is "no intersection AND ≥ 8px between the boxes",
+ * and gap = max(0, captionTop − btnBottom, btnTop − captionBottom) is
+ * exactly that: gap ≥ MIN_CLEARANCE_PX passes iff the boxes are separated
+ * by at least 8px in either order, and intersects (or touch) fail with
+ * gap 0.
+ *
+ * The "both boxes present" precondition (a distinct failure, not a
+ * geometric one): a missing plate-caption means the envelope fetch
+ * failed/timed out; a missing photo button means a leftover version from a
+ * prior run unmounted the first-run card. Both fail LOUDLY here instead of
+ * passing by envelope-size coincidence (a missing box would otherwise make
+ * any "no intersection" reading trivially true).
+ *
+ * Geometry is measured in real getBoundingClientRect (not the rounded
+ * boundingBox()) in a single evaluate() so the measurement is atomic, and
+ * the spec is MANUAL-ONLY under the issue #207 guard in playwright.config
+ * (never runs against the operator's live server without D33D_DATA_DIR).
  */
 
 import { expect, test, type Page } from "@playwright/test";
 
 const VIEWPORTS: ReadonlyArray<{ w: number; h: number }> = [
   { w: 1024, h: 640 },
-  { w: 1280, h: 720 },
-  { w: 1280, h: 900 },
+  { w: 1280, h: 800 },
+  { w: 1440, h: 900 },
+  { w: 1920, h: 1080 },
 ];
 
-/** The required clearance between the photo hint's bottom edge and the
- *  plate caption's top edge (issue #214 acceptance criterion). */
+/** The required clearance between the plate caption's box and the photo
+ *  button's box (issue #347 acceptance criterion). */
 const MIN_CLEARANCE_PX = 8;
 
-/** Read both elements' bounding boxes (real getBoundingClientRect, not
- *  boundingBox() — the latter is already rounded) in a single
- * evaluate() so the measurement is atomic. */
+/** Read both elements' bounding boxes (real getBoundingClientRect) in a
+ *  single evaluate() so the measurement is atomic. */
 async function measureClearance(page: Page): Promise<{
-  hintBottom: number;
+  btnTop: number;
+  btnBottom: number;
   captionTop: number;
+  captionBottom: number;
 }> {
   return page.evaluate(() => {
-    const hint = document.querySelector<HTMLElement>(
-      '[data-testid="first-run-photo-hint"]',
+    const btn = document.querySelector<HTMLElement>(
+      '[data-testid="first-run-photo-btn"]',
     );
     const caption = document.querySelector<HTMLElement>(
       '[data-testid="plate-caption"]',
     );
-    if (!hint || !caption) {
+    if (!btn || !caption) {
       throw new Error(
-        "missing first-run-photo-hint or plate-caption — both must exist before measuring clearance",
+        "missing first-run-photo-btn or plate-caption — both boxes must exist before measuring clearance",
       );
     }
-    const hintRect = hint.getBoundingClientRect();
+    const btnRect = btn.getBoundingClientRect();
     const captionRect = caption.getBoundingClientRect();
-    return { hintBottom: hintRect.bottom, captionTop: captionRect.top };
+    return {
+      btnTop: btnRect.top,
+      btnBottom: btnRect.bottom,
+      captionTop: captionRect.top,
+      captionBottom: captionRect.bottom,
+    };
   });
 }
 
 for (const { w, h } of VIEWPORTS) {
-  test(`first-run photo hint clears the plate caption by ${MIN_CLEARANCE_PX}px at ${w}x${h}`, async ({
+  test(`plate caption clears the photo button by ${MIN_CLEARANCE_PX}px at ${w}x${h}`, async ({
     page,
   }) => {
     test.setTimeout(60_000);
@@ -68,28 +96,44 @@ for (const { w, h } of VIEWPORTS) {
     await page.setViewportSize({ width: w, height: h });
     await page.goto("/");
 
-    // Precondition: the plate caption must be visible. This covers
-    // (a) a failed/slow GET /api/config/envelope (the caption never
-    // mounts) and (b) a leftover version from a prior run that
-    // unmounted the first-run screen — both fail here as a
-    // precondition violation, not as a geometry failure.
+    // Precondition (the "both boxes present" guard): the plate caption must
+    // be visible — it is absent until GET /api/config/envelope resolves —
+    // and the first-run photo button must be present (a leftover version
+    // from a prior run unmounts the first-run card). Either missing fails
+    // LOUDLY here as a precondition violation, not as a passing geometry.
     const caption = page.getByTestId("plate-caption");
     await expect
       .soft(
         caption,
-        `PRECONDITION (issue #214, ${w}x${h}): plate caption must be visible before measuring — a missing caption means the envelope fetch failed, timed out, or a prior run left a version behind that unmounted the first-run screen`,
+        `PRECONDITION (issue #347, ${w}x${h}): plate caption must be visible before measuring — a missing caption means the envelope fetch failed or timed out`,
       )
       .toBeVisible();
 
-    const { hintBottom, captionTop } = await measureClearance(page);
+    const btn = page.getByTestId("first-run-photo-btn");
+    await expect
+      .soft(
+        btn,
+        `PRECONDITION (issue #347, ${w}x${h}): photo button must be present before measuring — a missing button means a leftover version unmounted the first-run card`,
+      )
+      .toBeVisible();
 
-    // The strict acceptance criterion: the photo hint's bottom edge must
-    // be at least MIN_CLEARANCE_PX above the plate caption's top edge.
-    // No tolerance on the margin itself — a 2px slack here would accept
-    // a 6px real clearance.
+    const { btnTop, btnBottom, captionTop, captionBottom } =
+      await measureClearance(page);
+
+    // Gap in either order (see the header for why order-agnostic): the
+    // positive value, if any, of the space between the two boxes.
+    const gap = Math.max(
+      0,
+      captionTop - btnBottom,
+      btnTop - captionBottom,
+    );
+
+    // No intersection AND ≥ MIN_CLEARANCE_PX of separation — measured in
+    // real geometry, no tolerance on the margin itself (a 2px slack here
+    // would accept a 6px real clearance).
     expect(
-      captionTop - hintBottom,
-      `at ${w}x${h} the photo hint (bottom=${hintBottom.toFixed(1)}px) must clear the plate caption (top=${captionTop.toFixed(1)}px) by at least ${MIN_CLEARANCE_PX}px — measured gap is ${(captionTop - hintBottom).toFixed(1)}px`,
+      gap,
+      `at ${w}x${h} the plate caption (top=${captionTop.toFixed(1)}px, bottom=${captionBottom.toFixed(1)}px) must clear the photo button (top=${btnTop.toFixed(1)}px, bottom=${btnBottom.toFixed(1)}px) by at least ${MIN_CLEARANCE_PX}px — measured clearance is ${gap.toFixed(1)}px`,
     ).toBeGreaterThanOrEqual(MIN_CLEARANCE_PX);
   });
 }

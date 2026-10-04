@@ -44,6 +44,8 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { createElement } from "react";
 
 import copy, { mm } from "../copy";
+import { PartUpload } from "../components/upload/PartUpload";
+import { PhotoUpload } from "../components/upload/PhotoUpload";
 import { FAILURE_REASONS, displayDesignLoopError } from "../lib/errorMapping";
 // The backend's mm spelling (issue #265): the SPA has no build step that
 // imports Python, so the pin below compares the backend's emitted wire
@@ -195,6 +197,29 @@ describe("design contract", () => {
     expect(copy.failure.axisMismatchLine("Width", 40, 43.8)).toBe(
       `Width: ${mm(40)} → ${mm(43.8)}`,
     );
+  });
+
+  /* ---------------------------------------- W347 */
+
+  it("no 📦/📎 glyph survives in user-facing copy or the upload pane (issue #347, decision 1)", () => {
+    // Issue #347 operator decision 1: the 📦 (U+1F4E6) and 📎 (U+1F4CE)
+    // hint glyphs are replaced with text-only labels, EVERYWHERE. The
+    // deck is scanned at the source level (a re-added glyph in any string
+    // trips it, not just the two known ones), and the rendered pane is
+    // scanned in jsdom — the pane's own DOM is the surface that showed
+    // through behind the first-run card.
+    const copySource = readFileSync(join(SRC, "copy.ts"), "utf8");
+    expect(copySource).not.toContain("\u{1F4E6}"); // 📦
+    expect(copySource).not.toContain("\u{1F4CE}"); // 📎
+    expect(copy.partUpload.dropLine).not.toContain("\u{1F4E6}");
+    expect(copy.partUpload.photoAttachLine).not.toContain("\u{1F4CE}");
+
+    const part = render(createElement(PartUpload, { projectId: 1 }));
+    expect(part.container.textContent).not.toContain("\u{1F4E6}");
+    expect(part.container.textContent).not.toContain("\u{1F4CE}");
+    const photo = render(createElement(PhotoUpload, { onUploaded: () => {} }));
+    expect(photo.container.textContent).not.toContain("\u{1F4E6}");
+    expect(photo.container.textContent).not.toContain("\u{1F4CE}");
   });
 
   /* ---------------------------------------- W303 */
