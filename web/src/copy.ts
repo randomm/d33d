@@ -943,6 +943,10 @@ export const partReport = {
   /** The one-tap change link (issue #350: it opens the unit choice +
    *  measurement escape — the same surface the unsettled card uses). */
   changeUnits: "Change the units",
+  /** The one-line note shown when the server sent no unit options and the
+   *  user opens the choice anyway (issue #350): only the measurement
+   *  escape is available — never a bare escape with no explanation. */
+  assumedNoOptionsLine: "There's no unit to pick from here — tell me one real measurement and I'll scale from that.",
   /** The unit option labels. */
   unitLabels: {
     inch: "Inches",

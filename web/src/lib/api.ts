@@ -195,7 +195,10 @@ export interface DesignStateEntry {
  * whether to show the unsettled viewport caption and disable export.
  */
 export interface PartOption {
-  unit: string;
+  /** The candidate unit — the server offers only the closed mm/cm/inch
+   *  set (``settle_unit_choices``), so the type is the closed union, not a
+   *  bare string. */
+  unit: "mm" | "cm" | "inch";
   scale: number;
   extents_mm: number[];
   fits_envelope: boolean;

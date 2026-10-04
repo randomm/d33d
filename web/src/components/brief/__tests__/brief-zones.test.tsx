@@ -125,13 +125,11 @@ describe("BriefZones — part present (two zones)", () => {
         part={settledPart()}
       />,
     );
-    // The part-zone header is present.
+    // The part-zone header is present (the literal is pinned in the
+    // design-contract test — assert it here only against copy.ts).
     expect(
       screen.getByTestId("brief-zone-part-header").textContent,
     ).toBe(copy.brief.partBroughtHeader);
-    expect(
-      screen.getByTestId("brief-zone-part-header").textContent,
-    ).toBe("The part you brought");
     // The three W/D/H part rows are present, in measured provenance.
     expect(screen.getByTestId("brief-part-row-W")).toBeTruthy();
     expect(screen.getByTestId("brief-part-row-D")).toBeTruthy();

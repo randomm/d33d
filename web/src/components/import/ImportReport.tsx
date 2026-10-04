@@ -25,10 +25,171 @@
  */
 
 import { useState } from "react";
-import { ApiClient, ApiError, type PartReportInfo } from "../../lib/api";
+import {
+  ApiClient,
+  ApiError,
+  type PartOption,
+  type PartReportInfo,
+} from "../../lib/api";
 import copy, { mm } from "../../copy";
 
 const numberFmt = new Intl.NumberFormat("en-US");
+
+/**
+ * The shared unit choice (issue #350 fix round): the three-unit option list
+ * (when `options` is present) plus the W/D/H measurement escape + settle
+ * button. Rendered from BOTH the assumed branch ("Change the units" opens
+ * it) and the unsettled branch — one component, no duplication. The
+ * `testIdPrefix` distinguishes the two call sites (`import-report-assumed`
+ * / `import-report`), so every data-testid the existing tests read stays
+ * byte-identical.
+ */
+export interface UnitChoiceProps {
+  /** `import-report-assumed` (assumed branch) or `import-report`
+   *  (unsettled branch) — prefixes the option/escape/axis/settle testids. */
+  testIdPrefix: string;
+  /** The unit options (the `import-report-option-{unit}` rows). */
+  options: PartOption[] | null;
+  /** The selected escape axis (shared state — both call sites read/write
+   *  the same value). */
+  escapeAxis: "W" | "D" | "H";
+  onEscapeAxis: (axis: "W" | "D" | "H") => void;
+  /** The escape number field (a string — validated client-side). */
+  escapeMm: string;
+  onEscapeMm: (value: string) => void;
+  /** The settle actions (a unit choice / the escape measurement). */
+  onSettleUnit: (unit: "mm" | "cm" | "inch") => void;
+  onSettleAxis: () => void;
+  busy: boolean;
+}
+
+export function UnitChoice({
+  testIdPrefix,
+  options,
+  escapeAxis,
+  onEscapeAxis,
+  escapeMm,
+  onEscapeMm,
+  onSettleUnit,
+  onSettleAxis,
+  busy,
+}: UnitChoiceProps) {
+  return (
+    <>
+      {options && options.length > 0 && (
+        <div
+          data-testid={`${testIdPrefix}-options`}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+            marginTop: 12,
+          }}
+        >
+          {options.map((opt) => (
+            <button
+              key={opt.unit}
+              type="button"
+              data-testid={`import-report-option-${opt.unit}`}
+              onClick={() => onSettleUnit(opt.unit)}
+              disabled={busy}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "10px 14px",
+                border: "1px solid var(--color-hairline)",
+                borderRadius: "var(--radius-sm)",
+                background: "var(--color-recess)",
+                color: "var(--color-fg)",
+                cursor: busy ? "not-allowed" : "pointer",
+              }}
+            >
+              <span>{copy.partReport.unitLabels[opt.unit] ?? opt.unit}</span>
+              <span style={{ fontFamily: "var(--font-mono)" }}>
+                {opt.extents_mm.map((e) => mm(e)).join(" × ")}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* The escape input: explicit W/D/H segmented choice + number. */}
+      <div
+        data-testid={`${testIdPrefix}-escape`}
+        style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}
+      >
+        <span style={{ fontSize: "var(--font-size-xs)", color: "var(--color-fg-2)" }}>
+          {copy.partReport.escapeLine}
+        </span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div
+            data-testid={`${testIdPrefix}-escape-axis`}
+            style={{ display: "inline-flex", gap: 4 }}
+          >
+            {(["W", "D", "H"] as const).map((axis) => (
+              <button
+                key={axis}
+                type="button"
+                data-testid={`${testIdPrefix}-axis-${axis}`}
+                onClick={() => onEscapeAxis(axis)}
+                style={{
+                  padding: "4px 10px",
+                  border: `1px solid ${
+                    escapeAxis === axis ? "var(--color-live)" : "var(--color-hairline)"
+                  }`,
+                  borderRadius: "var(--radius-sm)",
+                  background: escapeAxis === axis ? "var(--color-live)" : "var(--color-recess)",
+                  color: escapeAxis === axis ? "var(--color-canvas)" : "var(--color-fg)",
+                  cursor: "pointer",
+                }}
+              >
+                {axis}
+              </button>
+            ))}
+          </div>
+          <input
+            type="number"
+            data-testid={`${testIdPrefix}-escape-mm`}
+            min="0"
+            step="any"
+            value={escapeMm}
+            onChange={(e) => onEscapeMm(e.target.value)}
+            placeholder={copy.partReport.escapePlaceholder}
+            aria-label={copy.partReport.axisLabels[escapeAxis]}
+            style={{
+              flex: "1 1 0",
+              minWidth: 0,
+              padding: "8px 12px",
+              fontSize: "var(--font-size-base)",
+              color: "var(--color-fg)",
+              background: "var(--color-recess)",
+              border: "1px solid var(--color-hairline)",
+              borderRadius: "var(--radius-sm)",
+              fontFamily: "var(--font-mono)",
+            }}
+          />
+          <button
+            type="button"
+            data-testid={`${testIdPrefix}-settle-btn`}
+            onClick={onSettleAxis}
+            disabled={busy || !Number.isFinite(Number(escapeMm)) || Number(escapeMm) <= 0}
+            style={{
+              padding: "8px 16px",
+              border: "none",
+              borderRadius: "var(--radius-sm)",
+              background: "var(--color-live)",
+              color: "var(--color-canvas)",
+              fontWeight: 500,
+              cursor: "pointer",
+            }}
+          >
+            {copy.partReport.settle}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
 
 interface ImportReportProps {
   /** The design-state envelope's `part` (the ONLY source of truth). */
@@ -261,121 +422,39 @@ export function ImportReport({
               {copy.partReport.changeUnits}
             </button>
             {/* Issue #350 (operator decision 1): the assumed part's unit
-                choice is the SAME three-option unit choice plus the
-                measurement escape the unsettled path uses — never a
-                silent settle to one unit. Choosing an option settles the
-                part; the escape input settles it from a real mm value. */}
-            {unitChoiceOpen && part.options && part.options.length > 0 && (
-              <div
-                data-testid="import-report-assumed-options"
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                  marginTop: 12,
-                }}
-              >
-                {part.options.map((opt) => (
-                  <button
-                    key={opt.unit}
-                    type="button"
-                    data-testid={`import-report-option-${opt.unit}`}
-                    onClick={() => settleUnit(opt.unit as "mm" | "cm" | "inch")}
-                    disabled={busy}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "10px 14px",
-                      border: "1px solid var(--color-hairline)",
-                      borderRadius: "var(--radius-sm)",
-                      background: "var(--color-recess)",
-                      color: "var(--color-fg)",
-                      cursor: busy ? "not-allowed" : "pointer",
-                    }}
-                  >
-                    <span>{copy.partReport.unitLabels[opt.unit] ?? opt.unit}</span>
-                    <span style={{ fontFamily: "var(--font-mono)" }}>
-                      {opt.extents_mm.map((e) => mm(e)).join(" × ")}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
+                choice is the SAME shared UnitChoice the unsettled path
+                uses — never a silent settle to one unit. When the server
+                sent no options, the shared choice renders just the
+                measurement escape, and the one-line note explains that
+                only the measurement option is available (no bare escape
+                with no explanation). */}
             {unitChoiceOpen && (
-              <div
-                data-testid="import-report-assumed-escape"
-                style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}
-              >
-                <span style={{ fontSize: "var(--font-size-xs)", color: "var(--color-fg-2)" }}>
-                  {copy.partReport.escapeLine}
-                </span>
-                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <div
-                    data-testid="import-report-assumed-escape-axis"
-                    style={{ display: "inline-flex", gap: 4 }}
-                  >
-                    {(["W", "D", "H"] as const).map((axis) => (
-                      <button
-                        key={axis}
-                        type="button"
-                        data-testid={`import-report-assumed-axis-${axis}`}
-                        onClick={() => setEscapeAxis(axis)}
-                        style={{
-                          padding: "4px 10px",
-                          border: `1px solid ${
-                            escapeAxis === axis ? "var(--color-live)" : "var(--color-hairline)"
-                          }`,
-                          borderRadius: "var(--radius-sm)",
-                          background: escapeAxis === axis ? "var(--color-live)" : "var(--color-recess)",
-                          color: escapeAxis === axis ? "var(--color-canvas)" : "var(--color-fg)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {axis}
-                      </button>
-                    ))}
-                  </div>
-                  <input
-                    type="number"
-                    data-testid="import-report-assumed-escape-mm"
-                    min="0"
-                    step="any"
-                    value={escapeMm}
-                    onChange={(e) => setEscapeMm(e.target.value)}
-                    placeholder={copy.partReport.escapePlaceholder}
-                    aria-label={copy.partReport.axisLabels[escapeAxis]}
+              <>
+                {!part.options && (
+                  <p
+                    data-testid="import-report-assumed-no-options"
                     style={{
-                      flex: "1 1 0",
-                      minWidth: 0,
-                      padding: "8px 12px",
-                      fontSize: "var(--font-size-base)",
-                      color: "var(--color-fg)",
-                      background: "var(--color-recess)",
-                      border: "1px solid var(--color-hairline)",
-                      borderRadius: "var(--radius-sm)",
-                      fontFamily: "var(--font-mono)",
-                    }}
-                  />
-                  <button
-                    type="button"
-                    data-testid="import-report-assumed-settle-btn"
-                    onClick={settleAxis}
-                    disabled={busy || !Number.isFinite(Number(escapeMm)) || Number(escapeMm) <= 0}
-                    style={{
-                      padding: "8px 16px",
-                      border: "none",
-                      borderRadius: "var(--radius-sm)",
-                      background: "var(--color-live)",
-                      color: "var(--color-canvas)",
-                      fontWeight: 500,
-                      cursor: "pointer",
+                      margin: "12px 0 0",
+                      textAlign: "center",
+                      color: "var(--color-fg-2)",
+                      fontSize: "var(--font-size-xs)",
                     }}
                   >
-                    {copy.partReport.settle}
-                  </button>
-                </div>
-              </div>
+                    {copy.partReport.assumedNoOptionsLine}
+                  </p>
+                )}
+                <UnitChoice
+                  testIdPrefix="import-report-assumed"
+                  options={part.options}
+                  escapeAxis={escapeAxis}
+                  onEscapeAxis={setEscapeAxis}
+                  escapeMm={escapeMm}
+                  onEscapeMm={setEscapeMm}
+                  onSettleUnit={settleUnit}
+                  onSettleAxis={settleAxis}
+                  busy={busy}
+                />
+              </>
             )}
           </div>
         )}
@@ -384,122 +463,22 @@ export function ImportReport({
             <p data-testid="import-report-waiting" style={{ margin: 0, textAlign: "center" }}>
               {copy.partReport.waitingOnUnits}
             </p>
-            {part.options && part.options.length > 0 && (
-              <div
-                data-testid="import-report-options"
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 8,
-                  marginTop: 12,
-                }}
-              >
-                {part.options.map((opt) => (
-                  <button
-                    key={opt.unit}
-                    type="button"
-                    data-testid={`import-report-option-${opt.unit}`}
-                    onClick={() => settleUnit(opt.unit as "mm" | "cm" | "inch")}
-                    disabled={busy}
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      padding: "10px 14px",
-                      border: "1px solid var(--color-hairline)",
-                      borderRadius: "var(--radius-sm)",
-                      background: "var(--color-recess)",
-                      color: "var(--color-fg)",
-                      cursor: busy ? "not-allowed" : "pointer",
-                    }}
-                  >
-                    <span>{copy.partReport.unitLabels[opt.unit] ?? opt.unit}</span>
-                    <span style={{ fontFamily: "var(--font-mono)" }}>
-                      {opt.extents_mm.map((e) => mm(e)).join(" × ")}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-            {/* The escape input: explicit W/D/H segmented choice + number. */}
-            <div
-              data-testid="import-report-escape"
-              style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 8 }}
-            >
-              <span style={{ fontSize: "var(--font-size-xs)", color: "var(--color-fg-2)" }}>
-                {copy.partReport.escapeLine}
-              </span>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <div
-                  data-testid="import-report-escape-axis"
-                  style={{ display: "inline-flex", gap: 4 }}
-                >
-                  {(["W", "D", "H"] as const).map((axis) => (
-                    <button
-                      key={axis}
-                      type="button"
-                      data-testid={`import-report-axis-${axis}`}
-                      onClick={() => setEscapeAxis(axis)}
-                      style={{
-                        padding: "4px 10px",
-                        border: `1px solid ${
-                          escapeAxis === axis ? "var(--color-live)" : "var(--color-hairline)"
-                        }`,
-                        borderRadius: "var(--radius-sm)",
-                        background: escapeAxis === axis ? "var(--color-live)" : "var(--color-recess)",
-                        color: escapeAxis === axis ? "var(--color-canvas)" : "var(--color-fg)",
-                        cursor: "pointer",
-                      }}
-                    >
-                      {axis}
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="number"
-                  data-testid="import-report-escape-mm"
-                  min="0"
-                  step="any"
-                  value={escapeMm}
-                  onChange={(e) => setEscapeMm(e.target.value)}
-                  placeholder={copy.partReport.escapePlaceholder}
-                  aria-label={copy.partReport.axisLabels[escapeAxis]}
-                  style={{
-                    flex: "1 1 0",
-                    minWidth: 0,
-                    padding: "8px 12px",
-                    fontSize: "var(--font-size-base)",
-                    color: "var(--color-fg)",
-                    background: "var(--color-recess)",
-                    border: "1px solid var(--color-hairline)",
-                    borderRadius: "var(--radius-sm)",
-                    fontFamily: "var(--font-mono)",
-                  }}
-                />
-                <button
-                  type="button"
-                  data-testid="import-report-settle-btn"
-                  onClick={settleAxis}
-                  disabled={busy || !Number.isFinite(Number(escapeMm)) || Number(escapeMm) <= 0}
-                  style={{
-                    padding: "8px 16px",
-                    border: "none",
-                    borderRadius: "var(--radius-sm)",
-                    background: "var(--color-live)",
-                    color: "var(--color-canvas)",
-                    fontWeight: 500,
-                    cursor: "pointer",
-                  }}
-                >
-                  {copy.partReport.settle}
-                </button>
-              </div>
-            </div>
+            <UnitChoice
+              testIdPrefix="import-report"
+              options={part.options}
+              escapeAxis={escapeAxis}
+              onEscapeAxis={setEscapeAxis}
+              escapeMm={escapeMm}
+              onEscapeMm={setEscapeMm}
+              onSettleUnit={settleUnit}
+              onSettleAxis={settleAxis}
+              busy={busy}
+            />
           </div>
         )}
 
         {/* The settle error (a failed settle's detail verbatim — blocked). */}
-      {settleError && (
+        {settleError && (
           <p
             data-testid="import-report-settle-error"
             role="alert"

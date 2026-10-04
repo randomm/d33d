@@ -106,8 +106,7 @@ export function Export3MF({
   // backend 409s it with `units_unsettled`). An "assumed" part is usable:
   // its mm bbox is established, so the export stays enabled. No part
   // (undefined/null) leaves the existing version-based gating untouched.
-  const partUnsettled =
-    part !== null && part !== undefined && part.unit_status === "unsettled";
+  const partUnsettled = part != null && part.unit_status === "unsettled";
 
   const handleExport = async () => {
     setState("downloading");
