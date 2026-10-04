@@ -1661,6 +1661,9 @@ def render_for_design_loop(
         # harnesses (test_iteration_stamp, test_per_view_progress) which
         # stub subprocess.run without a docker-image-inspect branch.
         try:
+            # The design loop's pre-flight already checks the image (issue
+            # 346); this per-render check is the authoritative re-check
+            # for renders not entered through the loop.
             _verify_render_worker_image(RENDER_WORKER_IMAGE, repo_root=repo_root)
         except FileNotFoundError as exc:
             # Missing build input is a repo-state problem, not image

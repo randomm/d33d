@@ -87,6 +87,29 @@ export function FailureTurn({
         : copy.failure.modelUnresolved
       : null;
 
+  // The renderer image pre-flight (issue #346): the terminal
+  // `renderer_image_stale` frame's `renderer_detail` field is carried
+  // STRUCTURED on the mapped error (`rendererDetail` — the mapping
+  // validates the frame field and copies it through; the disclosure
+  // `detail` stays the plain reason string). The reason line (image
+  // missing, or the label mismatch naming both values) and the exact
+  // rebuild command (a measurement, mono face) render only when the
+  // structured field is established. Absent → nothing extra is rendered;
+  // the collapsed disclosure still shows whatever `detail` carried. No
+  // number, no value, no command the SPA has not established.
+  const rendererDetail =
+    error.reason === "renderer_image_stale" ? error.rendererDetail : undefined;
+  const faultLine =
+    rendererDetail !== undefined
+      ? rendererDetail.reason === "image_missing"
+        ? copy.failure.rendererImageMissing
+        : copy.failure.rendererImageLabelMismatch(
+            rendererDetail.actual ?? "(unlabeled)",
+            rendererDetail.expected ?? "(unknown)",
+          )
+      : null;
+  const rebuildCommand = rendererDetail?.rebuild_command ?? null;
+
   // Part 1 — the sentence. For the envelope gate with a measurement, the
   // deck's body names measured and limit together (the headline stays as
   // the lead line).
@@ -144,6 +167,25 @@ export function FailureTurn({
         <p className="failure-turn-body" data-testid="failure-turn-model-helper">
           {modelHelper}
         </p>
+      )}
+
+      {/* Part 1d — the renderer image pre-flight detail (issue #346):
+          the verified fault (image missing / label X vs expected Y) and
+          the exact rebuild command in the mono face. Only when the frame
+          carried the structured `renderer_detail` field — never a
+          fabricated command or value. */}
+      {faultLine !== null && (
+        <p className="failure-turn-body" data-testid="failure-turn-renderer-fault">
+          {faultLine}
+        </p>
+      )}
+      {rebuildCommand !== null && (
+        <code
+          className="failure-turn-body"
+          data-testid="failure-turn-rebuild-command"
+        >
+          {rebuildCommand}
+        </code>
       )}
 
       {/* Part 1b — the per-param mismatch detail (issue #276): one line
@@ -242,9 +284,10 @@ export function FailureTurn({
           </>
         ) : (
           // The retry control is offered only when the failure is
-          // retryable: the `model_unconfigured` pre-flight failure (issue
-          // #303) is a configuration state — retrying just fails again —
-          // so it renders NO retry button (the helper sentence in part 1
+          // retryable: pre-flight configuration failures (issue #303's
+          // `model_unconfigured`, issue #346's `renderer_image_stale`)
+          // are configuration states — retrying just fails again — so
+          // they render NO retry button (the helper sentence in part 1
           // says what to do instead).
           error.retryable ? (
             <button
@@ -267,6 +310,11 @@ export function FailureTurn({
         <details className="failure-turn-raw" data-testid="failure-turn-raw">
           <summary>{copy.failure.rawDisclosure}</summary>
           <code data-testid="failure-turn-raw-code">{error.detail}</code>
+          {rebuildCommand !== null && (
+            <code data-testid="failure-turn-raw-rebuild">
+              {copy.failure.rebuildLabel}: {rebuildCommand}
+            </code>
+          )}
         </details>
       )}
     </div>

@@ -40,7 +40,7 @@ from typing import Any
 
 from PIL import Image
 
-from d33d.design_loop import MODEL_UNCONFIGURED, BboxInfo
+from d33d.design_loop import MODEL_UNCONFIGURED, RENDERER_IMAGE_STALE, BboxInfo
 from d33d.render_worker import VIEWS, RenderResult
 
 logger = logging.getLogger(__name__)
@@ -679,7 +679,9 @@ def _structured_reason(result: Any) -> str | None:
     loop-level reason (``renderer_unavailable`` — the renderer pre-flight
     failed before any LLM call, issue #277; ``model_unconfigured`` — the
     model pre-flight found the LLM model unusable before any LLM call,
-    issue #303); ``None`` (absent from the frame) is the "no reason" case.
+    issue #303; ``renderer_image_stale`` — the render-worker image pre-
+    flight verified the image missing/stale before any LLM call, issue
+    #346); ``None`` (absent from the frame) is the "no reason" case.
     """
     reason = getattr(result, "failure_reason", None)
     if isinstance(reason, str) and reason:
@@ -2066,6 +2068,24 @@ async def run_design_loop_with_events(
         env_var = getattr(result, "env_var", None)
         if reason == MODEL_UNCONFIGURED and isinstance(env_var, str) and env_var:
             error_data["env_var"] = env_var
+        # The verified render-worker image fault (issue #346): the
+        # pre-flight's structured ``renderer_detail`` (``image_missing`` vs
+        # ``label_mismatch`` + the exact rebuild command) rides the result
+        # as ``renderer_detail`` so the SPA's ``FailureTurn`` can render
+        # the real reason + rebuild command in the mono face. Omitted for
+        # every other reason and when the pre-flight produced no fault
+        # detail (omit-not-null).
+        renderer_detail = getattr(result, "renderer_detail", None)
+        if (
+            reason == RENDERER_IMAGE_STALE
+            and isinstance(renderer_detail, dict)
+            and renderer_detail
+        ):
+            error_data["renderer_detail"] = {
+                key: value
+                for key, value in renderer_detail.items()
+                if isinstance(value, str) and value
+            }
         # The gate's per-axis enforced set (issue #261 fix batch): lets
         # the failure copy name the value that was HELD when a carried
         # axis fails ("I kept the height you set earlier (12.0 mm)").

@@ -68,6 +68,12 @@ from d33d.design_loop import (
     scad_looks_valid,
     score,
 )
+
+# Captured at module import time — BEFORE the conftest hermetic stub
+# (issue #346) monkeypatches the module attribute. The probe test below
+# needs the real function to re-point the stub (via
+# ``image_detail_override``).
+from d33d.design_loop import _render_worker_image_detail as _real_image_detail
 from d33d.failure_classes import (
     FAILURE_CLASSES,
     classify_failure,
@@ -1990,6 +1996,286 @@ def test_renderer_is_available_maps_probe_errors_to_unavailable(
         assert renderer_is_available() is False
     finally:
         reset_renderer_preflight_cache()
+
+
+# ---------------------------------------------------------------------------
+# Issue #346: the render-worker IMAGE pre-flight (daemon up, image
+# missing / stale / present / docker-query-fails) — the distinct
+# loop-level ``renderer_image_stale`` configuration fault (terminal, no
+# retry, structured ``renderer_detail``), never a generic
+# ``container_error`` and never a false fault on a docker query failure.
+# ---------------------------------------------------------------------------
+
+
+def test_preflight_image_missing_reports_image_stale_no_llm_call():
+    """Issue #346: the daemon is UP but the render-worker image is missing
+    → the run ends at once with ``renderer_image_stale`` (the distinct
+    configuration fault, NOT renderer_unavailable and NOT container_error),
+    NO LLM call, and the structured ``renderer_detail`` (image_missing +
+    expected hash + the canonical rebuild command)."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    detail = {
+        "reason": "image_missing",
+        "expected": "abc123",
+        "rebuild_command": "docker build ... -t d33d/render-worker:local .",
+    }
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: True,
+        image_check=lambda: dict(detail),
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_image_stale"
+    assert result.iterations_used == 0
+    assert result.iterations == ()
+    assert llm_calls["n"] == 0
+    assert result.renderer_detail == detail
+
+
+def test_preflight_image_label_mismatch_reports_image_stale_no_llm_call():
+    """Issue #346: daemon up, image present but build-hash label stale →
+    ``renderer_image_stale`` with the ``label_mismatch`` detail (actual vs
+    expected) and the rebuild command; zero LLM calls."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    detail = {
+        "reason": "label_mismatch",
+        "expected": "abc123",
+        "actual": "stale999",
+        "rebuild_command": "docker build ...",
+    }
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: True,
+        image_check=lambda: dict(detail),
+    )
+    assert result.failure_reason == "renderer_image_stale"
+    assert result.iterations_used == 0
+    assert llm_calls["n"] == 0
+    assert result.renderer_detail == detail
+
+
+def test_preflight_image_present_runs_normal_loop():
+    """Issue #346: a present, label-matching image (probe returns None) →
+    the normal loop proceeds (LLM call made)."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+        renderer_check=lambda: True,
+        image_check=lambda: None,
+    )
+    assert result.status == "pass"
+    assert llm_calls["n"] == 1
+
+
+def _raise_image_probe_oserror(*a, **kw):
+    """An image-probe stub that simulates a docker-query failure (the
+    ``OSError`` degradation: daemon unreachable during inspect, binary
+    vanished, inspect timeout) — issue #346 operator decision 1."""
+    raise OSError("render-worker image pre-flight could not query docker")
+
+
+def test_preflight_info_up_but_image_query_fails_reports_renderer_unavailable():
+    """Issue #346 operator decision 1: ``docker info`` succeeds but the
+    image probe raises OSError (daemon transiently unreachable during
+    ``docker image inspect``, binary vanished, inspect timeout) → the loop
+    falls back to the RETRYABLE ``renderer_unavailable`` — never the
+    terminal ``renderer_image_stale`` configuration fault."""
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: True,
+        image_check=_raise_image_probe_oserror,
+    )
+    assert result.status == "exhausted"
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.renderer_detail is None
+    assert llm_calls["n"] == 0
+
+
+def test_render_worker_image_detail_maps_probe_outcomes(monkeypatch):
+    """Issue #346: the pre-flight probe REUSES
+    ``d33d.render_worker._verify_render_worker_image`` (Docker-free via
+    the ``expected_hash`` stub + a monkeypatched inspect branch):
+    label-match → None (healthy); image absent → image_missing; label
+    mismatch → label_mismatch with actual; OSError (docker-query failure)
+    → None (the caller degrades to renderer_unavailable, never a fault);
+    rebuild_command is always the canonical command."""
+    import subprocess
+
+    import d33d.render_worker as rw
+    from d33d import design_loop
+
+    # Override the conftest hermetic stub (issue #346): this test
+    # deliberately exercises the REAL probe function (the inspect branch
+    # is stubbed via ``rw.subprocess`` below, the rest is production
+    # code).
+    from tests.conftest import image_detail_override
+
+    image_detail_override(_real_image_detail)
+
+    probe_labels = {"labels": {rw.BUILD_HASH_LABEL: "abc123"}}
+
+    def _inspect_stub(argv, *a, **kw):
+        if argv[:2] == ["docker", "image"]:
+            import json as _json
+
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0,
+                stdout=_json.dumps(probe_labels["labels"]).encode(),
+                stderr=b"",
+            )
+        raise AssertionError(f"unexpected argv in probe test: {argv}")
+
+    # 1. Label matches → healthy (None).
+    probe_labels["labels"] = {rw.BUILD_HASH_LABEL: "abc123"}
+    monkeypatch.setattr(rw.subprocess, "run", _inspect_stub)
+    assert design_loop._render_worker_image_detail(expected_hash="abc123") is None
+
+    # 2. Image absent (inspect non-zero) → image_missing + expected.
+    monkeypatch.setattr(
+        rw.subprocess,
+        "run",
+        lambda argv, *a, **kw: subprocess.CompletedProcess(
+            args=argv, returncode=1, stdout=b"", stderr=b"no such image"
+        ),
+    )
+    detail = design_loop._render_worker_image_detail(expected_hash="abc123")
+    assert detail is not None
+    assert detail["reason"] == "image_missing"
+    assert detail["expected"] == "abc123"
+    assert detail["rebuild_command"] == rw.canonical_build_command()
+
+    # 3. Label mismatch → label_mismatch with actual + expected.
+    probe_labels["labels"] = {rw.BUILD_HASH_LABEL: "stale999"}
+    monkeypatch.setattr(rw.subprocess, "run", _inspect_stub)
+    detail = design_loop._render_worker_image_detail(expected_hash="abc123")
+    assert detail is not None
+    assert detail["reason"] == "label_mismatch"
+    assert detail["actual"] == "stale999"
+    assert detail["expected"] == "abc123"
+    assert detail["rebuild_command"] == rw.canonical_build_command()
+
+    # 4. Docker-query failure (OSError) → None (never a fabricated fault).
+    monkeypatch.setattr(
+        rw.subprocess,
+        "run",
+        lambda argv, *a, **kw: (_ for _ in ()).throw(
+            subprocess.TimeoutExpired(cmd=argv, timeout=15)
+        ),
+    )
+    assert design_loop._render_worker_image_detail(expected_hash="abc123") is None
+
+
+def test_render_worker_image_detail_missing_build_input_degrades_none(tmp_path):
+    """Issue #346: ``build_hash`` raising FileNotFoundError (a hashed build
+    input missing from the tree) degrades to ``None`` (the per-render
+    guard's established mapping — log + continue) — never a crash, never
+    a fabricated image fault."""
+    import d33d.design_loop as dl
+
+    root = tmp_path / "empty-tree"
+    root.mkdir()
+    assert dl._render_worker_image_detail(repo_root=root) is None
+
+
+def test_renderer_check_false_short_circuits_before_image_probe():
+    """Issue #346: a failing ``renderer_check`` (daemon down — #277)
+    short-circuits on ``renderer_unavailable`` BEFORE the image probe runs
+    (the image probe is never called for a dead daemon) — the #277 path is
+    untouched by the new pre-flight."""
+    probe_calls = {"n": 0}
+
+    def _image_check():
+        probe_calls["n"] += 1
+        return {"reason": "image_missing", "expected": "x"}
+
+    llm_calls = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: False,
+        image_check=_image_check,
+    )
+    assert result.failure_reason == "renderer_unavailable"
+    assert result.renderer_detail is None
+    assert probe_calls["n"] == 0, "the image probe must not run when the daemon is down"
+    assert llm_calls["n"] == 0
+
+
+def test_image_stale_result_cache_never_masks_rebuild():
+    """Issue #346 edge: a FAILED image probe is never cached (the 30 s
+    success-only cache applies to the docker-info probe only) — a rebuild
+    mid-session is picked up on the next design loop: an injected
+    ``image_check`` that flips fault → healthy between two runs ends the
+    first run on ``renderer_image_stale`` and the second on a pass."""
+    llm_calls = {"n": 0}
+    state = {"detail": {"reason": "image_missing", "expected": "x"}}
+
+    def llm_fn(role, messages, system):
+        llm_calls["n"] += 1
+        return _scad_llm(GOOD_SCAD)
+
+    first = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        renderer_check=lambda: True,
+        image_check=lambda: state["detail"],
+    )
+    assert first.failure_reason == "renderer_image_stale"
+    state["detail"] = None  # the operator rebuilt the image
+    second = run_design_loop(
+        photo=PHOTO,
+        stated_dims=STATED,
+        render_fn=lambda scad, defines: _render(),
+        llm_fn=llm_fn,
+        bbox_fn=_bbox_ok,
+        renderer_check=lambda: True,
+        image_check=lambda: state["detail"],
+    )
+    assert second.status == "pass"
 
 
 # ---------------------------------------------------------------------------

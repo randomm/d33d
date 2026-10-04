@@ -415,6 +415,67 @@ describe("App layout", () => {
     expect(screen.getByTestId("validation-pane")).toBeTruthy();
   });
 
+  it("a renderer_image_stale error frame renders the rebuild notice with no retry in the transcript (issue #346)", async () => {
+    // The terminal pre-flight frame (issue #346): the renderer pre-flight
+    // verified the render-worker image is missing, so the loop ends before
+    // iteration 1 with reason `renderer_image_stale` plus the omit-not-
+    // null `renderer_detail` field (the real reason and the exact rebuild
+    // command). End-to-end: the error frame → displayDesignLoopError →
+    // the FailureTurn in the conversation transcript — the honest
+    // "The renderer needs rebuilding." headline, the fault line and the
+    // rebuild command in the mono face, and NO retry button (the fault is
+    // terminal until the operator rebuilds).
+    const rebuild =
+      'docker build --platform=linux/amd64 -t d33d/render-worker:local .';
+    const staleClient = new ApiClient();
+    vi.spyOn(staleClient, "createProject").mockResolvedValue(PROJECT);
+    vi.spyOn(staleClient, "listVersions").mockResolvedValue([]);
+    vi.spyOn(staleClient, "postChat").mockResolvedValue({ status: "accepted" });
+    vi.spyOn(staleClient, "streamEvents").mockImplementation(
+      async (_id, handlers) => {
+        handlers.onError?.({
+          message: "Design loop exhausted: renderer_image_stale",
+          reason: "renderer_image_stale",
+          renderer_detail: {
+            reason: "image_missing",
+            rebuild_command: rebuild,
+          },
+        });
+      },
+    );
+
+    render(<App client={staleClient} />);
+    sendFirstComposerMessage("make a box");
+    await waitFor(() =>
+      expect(screen.getByTestId("failure-turn-sentence")).toBeTruthy(),
+    );
+    // The honest copy: the deck's reason sentence, with no "try again"
+    // wording (the container_error phrasing was the QA-observed defect).
+    const sentence = screen.getByTestId("failure-turn-sentence");
+    expect(sentence.textContent).toContain("The renderer needs rebuilding.");
+    expect(sentence.textContent).not.toContain("try again");
+    // The fault line names the verified reason (image missing) and the
+    // disclosure folds in the rebuild command below it.
+    const fault = screen.getByTestId("failure-turn-renderer-fault");
+    expect(fault.textContent).toContain("image missing");
+    expect(fault.textContent).not.toContain(rebuild);
+    // The disclosure is the plain reason string; the rebuild command
+    // renders in its own labeled mono line below it.
+    expect(screen.getByTestId("failure-turn-raw-code").textContent).toBe(
+      "renderer_image_stale",
+    );
+    // The rebuild command renders verbatim in the mono face.
+    const rebuildEl = screen.getByTestId("failure-turn-rebuild-command");
+    expect(rebuildEl.tagName).toBe("CODE");
+    expect(rebuildEl.textContent).toBe(rebuild);
+    // The disclosure carries it too.
+    expect(screen.getByTestId("failure-turn-raw-rebuild").textContent).toBe(
+      `${copy.failure.rebuildLabel}: ${rebuild}`,
+    );
+    // No retry button — the fault is terminal until the rebuild.
+    expect(screen.queryByTestId("failure-action-retry")).toBeNull();
+  });
+
   it("does NOT render an auto-generated slider/parameter panel", async () => {
     const { container } = render(<App client={client} />);
     expect(container.querySelectorAll("input[type='range']")).toHaveLength(0);

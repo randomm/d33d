@@ -51,6 +51,10 @@ const LOOP_FAILURE_REASONS = [
   // the configured LLM model could not be used before the first iteration;
   // NOT a render-worker ErrorClass (nothing ran). Terminal (no retry).
   "model_unconfigured",
+  // Loop-level pre-flight reason (d33d/design_loop.py, issue #346) — the
+  // renderer pre-flight verified the render-worker image is missing or its
+  // build-hash label mismatches, before any work ran. Terminal (no retry).
+  "renderer_image_stale",
 ];
 
 const CLOSED_SET = [...GATE_REASON_BITS, ...ERROR_CLASSES, ...LOOP_FAILURE_REASONS];
@@ -145,9 +149,74 @@ describe("errorMapping", () => {
     expect(display.retryable).toBe(true);
   });
 
+  it("the renderer_image_stale frame carries the STRUCTURED rendererDetail and is NOT retryable (issue #346)", () => {
+    // The terminal frame carries `reason: "renderer_image_stale"` plus an
+    // `renderer_detail` field (omit-not-null: the verified reason — image
+    // missing or label mismatch — and the exact rebuild command). The
+    // headline is the reason-keyed `copy.failure.reasons` entry; the
+    // structured `rendererDetail` is copied onto the mapped error (the
+    // failure turn renders the reason line + the mono rebuild command
+    // from it). `detail` stays the plain reason string for the generic
+    // disclosure. The reason is terminal — no retry button, because
+    // retrying changes nothing until the operator rebuilds the image.
+    const detail = {
+      reason: "image_missing" as const,
+      rebuild_command: "docker build -t d33d/render-worker:local .",
+    };
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_image_stale",
+      reason: "renderer_image_stale",
+      renderer_detail: detail,
+    });
+    expect(display.message).toBe(copy.failure.reasons.renderer_image_stale);
+    expect(display.message).toBe("The renderer needs rebuilding.");
+    expect(display.retryable).toBe(false);
+    expect(display.reason).toBe("renderer_image_stale");
+    // The structured detail rides on the mapped error (the turn renders
+    // the reason line + the mono rebuild command from this field).
+    expect(display.rendererDetail).toEqual(detail);
+    // `detail` stays the plain reason string — the generic disclosure.
+    expect(display.detail).toBe("renderer_image_stale");
+    // The label_mismatch variant carries both values structurally.
+    const mismatchInput = {
+      reason: "label_mismatch" as const,
+      expected: "abc123",
+      actual: "def456",
+      rebuild_command: "docker build -t d33d/render-worker:local .",
+    };
+    const mismatch = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_image_stale",
+      reason: "renderer_image_stale",
+      renderer_detail: mismatchInput,
+    });
+    expect(mismatch.rendererDetail).toEqual(mismatchInput);
+    expect(mismatch.detail).toBe("renderer_image_stale");
+    expect(mismatch.retryable).toBe(false);
+
+    // A malformed renderer_detail is DROPPED — the plain reason string
+    // disclosure stands, and no half-established detail is carried.
+    const malformed = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_image_stale",
+      reason: "renderer_image_stale",
+      renderer_detail: "not an object",
+    });
+    expect(malformed.rendererDetail).toBeUndefined();
+    expect(malformed.detail).toBe("renderer_image_stale");
+
+    // No renderer_detail at all → no structured field, plain reason
+    // disclosure, as before.
+    const headless = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_image_stale",
+      reason: "renderer_image_stale",
+    });
+    expect(headless.rendererDetail).toBeUndefined();
+    expect(headless.detail).toBe("renderer_image_stale");
+  });
+
   it("an unknown or missing reason stays retryable (issue #303 pins the inversion)", () => {
     // Every OTHER closed-set reason keeps the retry control — the
-    // non-retryable branch is exclusive to `model_unconfigured`.
+    // non-retryable branch is exclusive to `model_unconfigured` and
+    // `renderer_image_stale` (issues #303 / #346).
     const generic = displayDesignLoopError({ message: "boom" });
     expect(generic.retryable).toBe(true);
     const unknown = displayDesignLoopError({ reason: "totally_unknown" });

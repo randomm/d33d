@@ -35,6 +35,19 @@ import d33d.render_worker as rw
 from d33d.design_loop import LLMResult, run_design_loop_async
 
 
+@pytest.fixture(autouse=True)
+def _image_preflight_available(monkeypatch):
+    """Default the design loop's image pre-flight (issue #346) to
+    "healthy" so no test in this module shells out to a real
+    ``docker image inspect``. The render's own staleness guard is already
+    patched by ``_patch_ok_render`` (the per-render path); this covers the
+    NEW loop-level pre-flight probe, which defaults to the real
+    ``_render_worker_image_detail``."""
+    import d33d.design_loop as dl
+
+    monkeypatch.setattr(dl, "_render_worker_image_detail", lambda *a, **kw: None)
+
+
 def _llm_result() -> LLMResult:
     """A minimal design-role LLMResult: fenced SCAD the loop accepts."""
     return LLMResult(

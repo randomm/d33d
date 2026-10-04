@@ -9,9 +9,12 @@
  * distinct from the render-worker `timeout` ErrorClass) plus the
  * loop-level pre-flight reasons (`renderer_unavailable`, issue #277 —
  * emitted when the renderer reachability check fails before the first
- * iteration; and `model_unconfigured`, issue #303 — emitted when the
- * model pre-flight finds the configured LLM model cannot be used before
- * any LLM call, so the loop never starts). Both are loop-level reasons,
+ * iteration; `model_unconfigured`, issue #303 — emitted when the model
+ * pre-flight finds the configured LLM model cannot be used before any
+ * LLM call, so the loop never starts; and `renderer_image_stale`,
+ * issue #346 — emitted when the renderer pre-flight verifies the
+ * render-worker image is missing or its build-hash label no longer
+ * matches the tree, before any work runs). All are loop-level reasons,
  * NOT render-worker `ErrorClass` values.
  * `displayDesignLoopError` maps that closed set to the
  * failure turn's part 1 — a sentence a person would say — plus the raw
@@ -66,6 +69,14 @@ export const FAILURE_REASONS: readonly string[] = [
   // not resolve) selects the helper sentence, and no retry is offered.
   "renderer_unavailable",
   "model_unconfigured",
+  // `renderer_image_stale` (d33d/design_loop.py, issue #346): the
+  // renderer pre-flight verified the render-worker image is missing or
+  // its build-hash label mismatches the tree BEFORE the first iteration;
+  // NOT a render-worker ErrorClass (nothing rendered). Terminal: the
+  // frame's `renderer_detail` field (omit-not-null — the real reason and
+  // the rebuild command) feeds the "What the checker actually said"
+  // disclosure, and no retry is offered (rebuilding is the operator's).
+  "renderer_image_stale",
 ];
 
 /** The generic fallback for a reason code outside the closed set. */
@@ -102,6 +113,28 @@ export interface DisplayError {
    *  what the SPA renders ("Set <NAME> where the server runs, then
    *  restart it."); absent → the "Check the model settings." variant. */
   envVar?: string;
+  /** The renderer image pre-flight detail (issue #346, `renderer_image_stale`
+   *  frame's `renderer_detail` field, omit-not-null): the verified real
+   *  reason plus the exact rebuild command, carried STRUCTURED on the
+   *  mapped error so the failure turn renders the reason line and the
+   *  mono rebuild command from the structure itself (never re-parsing
+   *  the disclosure string). `detail` stays the plain reason string for
+   *  the generic disclosure — the structured fields do not fold into
+   *  it. Absent (the frame did not carry a well-formed `renderer_detail`)
+   *  → the turn renders the headline and the plain disclosure, nothing
+   *  more. */
+  rendererDetail?: {
+    /** "image_missing" (the image is not in the daemon) or
+     *  "label_mismatch" (the image's build-hash label differs). */
+    reason: "image_missing" | "label_mismatch";
+    /** The expected build-hash label (label_mismatch frames). */
+    expected?: string;
+    /** The image's actual build-hash label (label_mismatch frames). */
+    actual?: string;
+    /** The exact rebuild command (the docs/bosl2-pinning.md canonical
+     *  form). */
+    rebuild_command: string;
+  };
   mismatches?: Array<{
     label: string;
     model: number;
@@ -129,6 +162,33 @@ export interface DisplayError {
  *  string is an envelope gate-7a failure and an axis limit is available;
  *  `null` for any other shape (keep-out branch, non-envelope gate,
  *  missing limit) — a number that is not established is not rendered. */
+/** Validate the frame's `renderer_detail` field (issue #346, omit-not-
+ *  null): a well-formed object is returned; anything else (absent,
+ *  wrong shape, non-string reason/command) is `undefined` — the
+ *  disclosure then falls back to the plain reason string, and a half-
+ *  established detail is never rendered. */
+function parseRendererDetail(raw: unknown): DisplayError["rendererDetail"] | undefined {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const entry = raw as Record<string, unknown>;
+  if (entry.reason !== "image_missing" && entry.reason !== "label_mismatch") return undefined;
+  if (typeof entry.rebuild_command !== "string" || entry.rebuild_command === "") return undefined;
+  const out: DisplayError["rendererDetail"] = {
+    reason: entry.reason,
+    rebuild_command: entry.rebuild_command,
+  };
+  if (entry.expected !== undefined) {
+    if (typeof entry.expected !== "string") return undefined;
+    out.expected = entry.expected;
+  }
+  if (entry.actual !== undefined) {
+    if (typeof entry.actual !== "string") return undefined;
+    out.actual = entry.actual;
+  }
+  return out;
+}
+
+
+
 export function parseEnvelopeGateDetail(
   detail: string,
   limits: [number, number, number] | undefined,
@@ -188,6 +248,13 @@ export function displayDesignLoopError(
      *  The mapping ignores it (the headline is reason-keyed); the
      *  failure turn renders the helper sentence from it. */
     env_var?: unknown;
+    /** The renderer image pre-flight detail (issue #346, `renderer_detail`
+     *  frame field, omit-not-null): the verified reason the render-worker
+     *  image is unusable plus the exact rebuild command. Only meaningful
+     *  on a `renderer_image_stale` frame; malformed shapes are dropped
+     *  (the disclosure falls back to the plain reason, never a half-
+     *  established detail). */
+    renderer_detail?: unknown;
   },
   envelopeLimits?: [number, number, number],
 ): DisplayError {
@@ -197,6 +264,13 @@ export function displayDesignLoopError(
   // null on the frame): the key value never crosses the wire, so the name
   // is safe to render in the helper sentence.
   const envVar = typeof data.env_var === "string" && data.env_var !== "" ? data.env_var : undefined;
+  // The renderer image pre-flight detail (issue #346, omit-not-null on
+  // the frame): carried STRUCTURED on the failure turn for the fault line
+  // and the mono rebuild command, while `detail` stays the plain reason
+  // string — the structured fields do not fold into it. Validated here —
+  // a malformed object yields undefined (the plain-reason
+  // disclosure stands, nothing half-established is rendered).
+  const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
     const mapped = (copy.failure.reasons as Record<string, string>)[reason];
     let message = mapped ?? UNKNOWN_REASON_COPY;
@@ -231,6 +305,10 @@ export function displayDesignLoopError(
     let detail = reason;
     let envelope: DisplayError["envelope"];
     let mismatches: DisplayError["mismatches"];
+    // The renderer image fault (issue #346): the disclosure carries the
+    // REAL reason (image missing, or the label mismatch) and the exact
+    // rebuild command, in the mono face — never the generic reason code
+    // alone.
     if (reason === "axis_params_mismatch" && Array.isArray(data.mismatches)) {
       const parsed = (data.mismatches as unknown[]).flatMap((m) => {
         if (
@@ -279,14 +357,18 @@ export function displayDesignLoopError(
     return {
       message,
       detail,
-      // A pre-flight configuration failure is not retryable (issue #303):
-      // `model_unconfigured` renders no retry button in the FailureTurn;
-      // every other closed-set reason keeps the retry control.
-      retryable: reason !== "model_unconfigured",
+      // A pre-flight configuration failure is not retryable: `model_un-
+      // configured` (issue #303) and `renderer_image_stale` (issue #346)
+      // render no retry button in the FailureTurn — retrying changes
+      // nothing until the operator fixes the setting or rebuilds the
+      // image; every other closed-set reason keeps the retry control.
+      retryable:
+        reason !== "model_unconfigured" && reason !== "renderer_image_stale",
       reason,
       ...(envelope !== undefined ? { envelope } : {}),
       ...(mismatches !== undefined ? { mismatches } : {}),
       ...(envVar !== undefined ? { envVar } : {}),
+      ...(rendererDetail !== undefined ? { rendererDetail } : {}),
     };
   }
   return {

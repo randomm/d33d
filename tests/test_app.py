@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import sqlite3
 import textwrap
 import uuid
@@ -669,6 +670,176 @@ def test_create_app_registers_projects_router(app):
     r = _run_async(app, _call)
     assert r.status_code == 200, r.text  # not 404 route-not-found
     assert r.json() == []  # empty list, no projects yet
+
+
+# ---------------------------------------------------------------------------
+# Issue #346: the render-worker image pre-flight at startup — the one-shot
+# WARNING (image missing / label mismatch + the exact rebuild command)
+# through the injectable ``image_check`` seam; no WARNING for a healthy
+# image. No real Docker: the seam is injected, not the daemon probed.
+# ---------------------------------------------------------------------------
+
+
+def test_startup_image_missing_logs_one_warning_with_rebuild_command(
+    app_paths, tmp_path, env_key, caplog
+):
+    """Issue #346: startup with a missing render-worker image logs ONE
+    WARNING naming the problem (the image) and the exact rebuild command —
+    the operator decision's startup observability; the seam is injected so
+    no real Docker probe runs."""
+    from d33d.app import create_app
+
+    detail = {
+        "reason": "image_missing",
+        "expected": "abc123",
+        "rebuild_command": "docker build --platform=linux/amd64 -t d33d/render-worker:local .",
+    }
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
+        image_check=lambda: dict(detail),
+    )
+
+    async def _call(client):
+        return None
+
+    with caplog.at_level("WARNING"):
+        _run_async(app, _call)
+
+    startup_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "renderer image pre-flight" in r.getMessage()
+    ]
+    assert len(startup_warnings) == 1, "exactly one startup WARNING (not zero, not many)"
+    msg = startup_warnings[0].getMessage()
+    assert "image_missing" in msg or "missing" in msg, f"names the problem: {msg}"
+    assert detail["rebuild_command"] in msg, f"names the rebuild command: {msg}"
+
+
+def test_startup_image_label_mismatch_logs_one_warning_naming_both_hashes(
+    app_paths, tmp_path, env_key, caplog
+):
+    """Issue #346: a label mismatch names BOTH build-hash values (actual
+    vs expected) in the one startup WARNING + the rebuild command."""
+    from d33d.app import create_app
+
+    detail = {
+        "reason": "label_mismatch",
+        "expected": "abc123",
+        "actual": "stale999",
+        "rebuild_command": "docker build --platform=linux/amd64 -t d33d/render-worker:local .",
+    }
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
+        image_check=lambda: dict(detail),
+    )
+
+    async def _call(client):
+        return None
+
+    with caplog.at_level("WARNING"):
+        _run_async(app, _call)
+
+    startup_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "renderer image pre-flight" in r.getMessage()
+    ]
+    assert len(startup_warnings) == 1
+    msg = startup_warnings[0].getMessage()
+    assert "stale999" in msg, f"names the image's actual label: {msg}"
+    assert "abc123" in msg, f"names the working tree's expected hash: {msg}"
+    assert detail["rebuild_command"] in msg
+
+
+def test_startup_image_healthy_logs_no_renderer_image_warning(
+    app_paths, tmp_path, env_key, caplog
+):
+    """Issue #346: a healthy image (probe returns None) logs NO
+    renderer-image startup warning — the WARNING fires only on a verified
+    fault."""
+    from d33d.app import create_app
+
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
+        image_check=lambda: None,
+    )
+
+    async def _call(client):
+        return None
+
+    with caplog.at_level("WARNING"):
+        _run_async(app, _call)
+
+    startup_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "renderer image pre-flight" in r.getMessage()
+    ]
+    assert startup_warnings == [], (
+        f"no renderer-image WARNING for a healthy image; got {startup_warnings}"
+    )
+
+
+def test_startup_image_probe_past_wall_clock_bound_logs_timeout_warning_and_completes(
+    app_paths, tmp_path, env_key, monkeypatch, caplog
+):
+    """Issue #346: the startup image probe runs OFF the event loop with a
+    wall-clock bound (``asyncio.wait_for(asyncio.to_thread(...), 20)``).
+    A probe past the bound (a hung docker daemon) is treated like an
+    ``OSError``: ONE WARNING saying the image check timed out, NO
+    stale-image warning (the fault is not established), and startup still
+    completes. The bound is patched down to 0.05 s so the test stays
+    fast; the seam is injected, so no real Docker runs."""
+    import d33d.app as app_mod
+
+    monkeypatch.setattr(app_mod, "_IMAGE_CHECK_TIMEOUT_SECONDS", 0.05)
+
+    def _slow_probe() -> dict[str, str] | None:
+        import time
+
+        time.sleep(0.3)
+        return {
+            "reason": "image_missing",
+            "expected": "abc123",
+            "rebuild_command": "docker build -t d33d/render-worker:local .",
+        }
+
+    app = create_app(
+        app_paths["db"],
+        master_key_path=app_paths["key"],
+        catalogue_path=app_paths["cat"],
+        spa_dist_dir=tmp_path / "no-dist-here",
+        image_check=_slow_probe,
+    )
+
+    async def _call(client):
+        return None
+
+    with caplog.at_level("WARNING"):
+        _run_async(app, _call)  # must return — startup completes
+
+    startup_warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "renderer image pre-flight" in r.getMessage()
+    ]
+    assert len(startup_warnings) == 1, "exactly one startup WARNING"
+    msg = startup_warnings[0].getMessage()
+    assert "timed out" in msg, f"the timeout WARNING names the timeout: {msg}"
+    # The stale-image warning (the fault naming + rebuild command) must
+    # NOT be emitted — the fault was not established.
+    assert "rebuild" not in msg, f"no stale-image warning: {msg}"
+    assert "image_missing" not in msg and "missing from" not in msg
 
 
 def test_create_app_registers_streaming_router(app):

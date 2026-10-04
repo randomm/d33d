@@ -266,6 +266,44 @@ describe("design contract", () => {
     expect(display.retryable).toBe(false);
   });
 
+  /* ---------------------------------------- W346 */
+
+  it("the renderer image pre-flight failure copy lives in the deck (issue #346)", () => {
+    // Issue #346: the terminal `renderer_image_stale` frame (the renderer
+    // pre-flight verified the render-worker image is missing or its
+    // build-hash label mismatches the tree) maps to the deck's reason
+    // sentence. The frame's `renderer_detail` field (omit-not-null) carries
+    // the real reason (image missing, or label X vs expected Y) and the
+    // exact rebuild command, which the failure turn renders in the mono
+    // face under "What the checker actually said". The reason is TERMINAL
+    // — errorMapping marks it non-retryable so the failure turn offers no
+    // retry button (rebuilding is the operator's, not a user action).
+    const headline = copy.failure.reasons.renderer_image_stale;
+    expect(headline).toBe("The renderer needs rebuilding.");
+    // No digit: a number in the reason sentence the SPA has not
+    // established is the house anti-pattern.
+    expect(headline).not.toMatch(/\d/);
+    // The closed set includes the reason and it is non-retryable (no
+    // retry button on the failure turn) — the mapping is the seam the
+    // SPA never overrides.
+    expect(FAILURE_REASONS).toContain("renderer_image_stale");
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: renderer_image_stale",
+      reason: "renderer_image_stale",
+    });
+    expect(display.retryable).toBe(false);
+    // The disclosure fault lines and the rebuild label are copy.ts entries
+    // (design-contract: all user-facing strings live in the deck).
+    expect(copy.failure.rendererImageMissing).toContain("image missing");
+    expect(copy.failure.rendererImageMissing).toContain("Docker daemon");
+    const mismatch = copy.failure.rendererImageLabelMismatch("abc123", "def456");
+    expect(mismatch).toContain("label mismatch");
+    expect(mismatch).toContain("abc123");
+    expect(mismatch).toContain("def456");
+    expect(copy.failure.rebuildLabel).toBe("rebuild");
+    expect(display.message).toBe(headline);
+  });
+
   /* ---------------------------------------- W260 */
 
   it("the question pre-route's no-run replies live in the deck (issue #260)", () => {
