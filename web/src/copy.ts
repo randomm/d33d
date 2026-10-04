@@ -471,11 +471,6 @@ export const failure = {
      *  (import projects, or an axis the user never stated). */
     madeOnly: (axisWord: string, madeMm: number): string =>
       `${axisWord}: ${mm(madeMm)}`,
-    /** The per-axis row when the asked value is set but the made value
-     *  is not yet established (the not-established phrase, never a
-     *  number). */
-    madeNotEstablished: (axisWord: string): string =>
-      `${axisWord}: not measured yet`,
     /** The follow-up question (operator decision 3): at most ONE per
      *  card, the first axis in W/D/H order that has both asked and made
      *  and they differ beyond the gate tolerance. Asks which

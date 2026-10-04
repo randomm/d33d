@@ -87,7 +87,7 @@ export function FailureTurn({
   // instead.
   const isEnvelope = error.envelope !== undefined;
   const envelopeData: DisplayError["envelope"] | null =
-    isEnvelope && error.envelope !== undefined ? error.envelope : null;
+    error.envelope ?? null;
 
   // The size-mismatch card (issue #367, operator decision 2): a
   // `bbox_out_of_tolerance` frame WITHOUT the gate-7 envelope string.
@@ -174,7 +174,7 @@ export function FailureTurn({
                 ? copy.failure.sizeMismatch.row(word, c, m)
                 : m !== undefined
                   ? copy.failure.sizeMismatch.madeOnly(word, m)
-                  : copy.failure.sizeMismatch.madeNotEstablished(word);
+                  : copy.failure.envelope.axisNotMeasured(word);
             return { key: a, text };
           })
       : null;
@@ -193,9 +193,13 @@ export function FailureTurn({
         if (Math.abs(m - c) > tol) {
           return copy.failure.sizeMismatch.whichMeasurement(c, AX_WORD[a]);
         }
-        // This axis is within tolerance — fall through to the next
-        // axis. But if this was the only axis with both values, no
-        // follow-up (the gate would have passed on it).
+        // Defensive fall-through, unreachable for genuine frames: a
+        // bbox-gate FAILURE frame by definition has at least one
+        // confirmed axis beyond tolerance (that is what failed the
+        // gate), so a genuine frame's first with-both-values axis
+        // always differs beyond tolerance and returns above. The
+        // branch exists only for a malformed frame (a within-tolerance
+        // axis carrying both values) so the loop still moves on.
       }
     }
     return null;
