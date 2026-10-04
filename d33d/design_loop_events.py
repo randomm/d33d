@@ -758,6 +758,27 @@ def _axis_mismatches(result: Any) -> list[dict[str, Any]] | None:
     return out or None
 
 
+def _positive_axis_map(gate_axes: Any) -> dict[str, float] | None:
+    """Normalise the gate's confirmed per-axis set to ``{str(axis): float}``
+    (positive, finite, bool-excluded), or ``None`` when it is not a
+    non-empty dict of usable entries — the shared coercion both
+    ``_carried_axes`` and ``_measured_axes`` apply (identical rule, one
+    definition)."""
+    if not isinstance(gate_axes, dict) or not gate_axes:
+        return None
+    out: dict[str, float] = {}
+    for axis, value in gate_axes.items():
+        if isinstance(value, bool):  # bool is a subclass of int — exclude
+            continue
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            continue
+        if f > 0:
+            out[str(axis)] = f
+    return out or None
+
+
 def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     """The axes the bbox gate ENFORCED on this turn (the caller's
     per-axis set, ``{"H": 12.0, ...}`` — the carried-plus-cued effective
@@ -775,19 +796,7 @@ def _carried_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
         return None
-    if not isinstance(gate_axes, dict) or not gate_axes:
-        return None
-    out: dict[str, float] = {}
-    for axis, value in gate_axes.items():
-        if isinstance(value, bool):  # bool is a subclass of int — exclude
-            continue
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            continue
-        if f > 0:
-            out[str(axis)] = f
-    return out or None
+    return _positive_axis_map(gate_axes)
 
 
 def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
@@ -825,21 +834,10 @@ def _measured_axes(result: Any, gate_axes: Any) -> dict[str, float] | None:
     reason = getattr(result, "failure_reason", None)
     if reason != "bbox_out_of_tolerance":
         return None
-    if not isinstance(gate_axes, dict) or not gate_axes:
-        return None
     # Normalise the confirmed set to a zero-filled (W, D, H) triple —
     # the gate's own input shape (``_bbox_within_tolerance``'s contract).
-    confirmed: dict[str, float] = {}
-    for axis, value in gate_axes.items():
-        if isinstance(value, bool):  # bool is a subclass of int — exclude
-            continue
-        try:
-            f = float(value)
-        except (TypeError, ValueError):
-            continue
-        if f > 0:
-            confirmed[str(axis)] = f
-    if not confirmed:
+    confirmed = _positive_axis_map(gate_axes)
+    if confirmed is None:
         return None
     triple = (
         confirmed.get("W", 0.0),

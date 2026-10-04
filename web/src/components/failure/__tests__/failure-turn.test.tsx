@@ -605,10 +605,13 @@ describe("FailureTurn", () => {
     expect(container.querySelector("[data-testid='failure-turn-size-row-H']")).toBeNull();
   });
 
-  it("an import project (no carried_axes, measured_axes only) shows made-only rows with no asked label (issue #367)", () => {
-    // Import projects: carried_axes is empty (the gate target comes from
-    // the part's own bbox), so rows show made only. No row is labelled
-    // as the user's ask.
+  it("a measured_axes-only frame (no carried_axes) renders made-only rows with no asked label (issue #367)", () => {
+    // Defensive coverage for a frame carrying measured_axes WITHOUT
+    // carried_axes. Note: the real backend does NOT emit this exact
+    // shape for import projects — `_measured_axes` omits the field
+    // whenever the confirmed set is empty (issue #332), so import
+    // projects render the generic card. This pins the made-only row
+    // shape any future frame shape could reach.
     const error: DisplayError = {
       message: copy.failure.reasons.bbox_out_of_tolerance,
       detail: "bbox_out_of_tolerance",
@@ -630,9 +633,11 @@ describe("FailureTurn", () => {
     );
   });
 
-  it("the follow-up question renders when asked and made differ beyond tolerance (issue #367, operator decision 3)", () => {
-    // W: asked 60, made 66. Tolerance = max(1% of 60, 0.5) = max(0.6, 0.5) = 0.6.
-    // |66 - 60| = 6 > 0.6 → follow-up shown.
+  it("the follow-up question renders for the first axis with both asked and made (issue #367, operator decision 3)", () => {
+    // W: asked 60, made 66 — the first axis with both values. The frame's
+    // bbox_out_of_tolerance reason already establishes that some confirmed
+    // axis exceeded the gate tolerance, so the SPA asks which measurement
+    // the stated number refers to.
     const error: DisplayError = {
       message: copy.failure.reasons.bbox_out_of_tolerance,
       detail: "bbox_out_of_tolerance",
@@ -655,21 +660,6 @@ describe("FailureTurn", () => {
     );
     // No bed actions.
     expect(screen.queryByTestId("failure-action-split")).toBeNull();
-  });
-
-  it("no follow-up when asked and made are within tolerance (issue #367)", () => {
-    // W: asked 60, made 60.3. Tolerance = max(0.6, 0.5) = 0.6.
-    // |60.3 - 60| = 0.3 ≤ 0.6 → no follow-up.
-    const error: DisplayError = {
-      message: copy.failure.reasons.bbox_out_of_tolerance,
-      detail: "bbox_out_of_tolerance",
-      retryable: true,
-      reason: "bbox_out_of_tolerance",
-      carriedAxes: { W: 60 },
-      measuredAxes: { W: 60.3 },
-    };
-    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
-    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
   });
 
   it("no follow-up when only made is present (no asked value to compare) (issue #367)", () => {

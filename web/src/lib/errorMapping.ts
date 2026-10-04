@@ -32,6 +32,19 @@
 
 import { copy } from "../copy";
 
+/** The W/D/H axis letter → sentence-case noun ("width", "depth",
+ *  "height") — the single source for the size-mismatch rows (issue
+ *  #367) and the carried-axis sentence. Note this is NOT the backend's
+ *  `AXIS_LABELS` (the x/y/z bed-letter tuple in `d33d/design_loop.py`);
+ *  it is the dimension protocol's own axis vocabulary, sentence-cased
+ *  (the escape-input's capitalised `copy.partReport.axisLabels` is a
+ *  different, display-cased form). */
+export const SIZE_AXIS_WORDS = {
+  W: "width",
+  D: "depth",
+  H: "height",
+} as const;
+
 /** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
  *  the terminal error frame's `reason` field can hold.
@@ -308,8 +321,9 @@ export function displayDesignLoopError(
         ]
           .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
           .sort((a, b) => b[1] - a[1]);
-        const axisLabels: Record<string, string> = { W: "width", D: "depth", H: "height" };
-        const label = axes.map(([a]) => axisLabels[a]).join(" and ");
+        const label = axes
+          .map(([a]) => SIZE_AXIS_WORDS[a as keyof typeof SIZE_AXIS_WORDS])
+          .join(" and ");
         message = copy.failure.bboxCarried(label, axes[0][1]);
       }
     }

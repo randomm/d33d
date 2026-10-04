@@ -19,7 +19,7 @@
  */
 
 import { copy } from "../../copy";
-import type { DisplayError } from "../../lib/errorMapping";
+import { SIZE_AXIS_WORDS, type DisplayError } from "../../lib/errorMapping";
 
 /** The model pre-flight frame's `env_var` field (issue #303) as carried
  *  on the mapped `DisplayError` (the `envVar` field — the mapping copies
@@ -78,27 +78,28 @@ export function FailureTurn({
   inFlight,
   onAction,
 }: FailureTurnProps) {
-  // Card selection (issue #367, operator decision 1): the bed card
-  // renders if and only if the envelope gate is established — i.e.
-  // `displayDesignLoopError` attached `envelope` (the gate-7/envelope
-  // string was parsed). Never keyed on the reason alone: a stated-size
-  // gate failure also arrives as `bbox_out_of_tolerance` but carries no
-  // gate-7 string, so `envelope` is absent and the size card renders
-  // instead.
+  // Card selection (issue #367): one value names the card.
+  //   "bed"    — the envelope gate is established, i.e. `displayDesignLoopError`
+  //              attached `envelope` (the gate-7 string was parsed). Never
+  //              keyed on the reason alone: a stated-size gate failure also
+  //              arrives as `bbox_out_of_tolerance` but carries no gate-7
+  //              string, so `envelope` is absent.
+  //   "size"   — a `bbox_out_of_tolerance` frame WITHOUT the gate-7 string
+  //              (the stated-size gate, operator decision 2).
+  //   "generic"— everything else, or a size frame with no carried/measured
+  //              axes (rule 2(b): the reason sentence, no rows).
   const isEnvelope = error.envelope !== undefined;
+  const hasSizeData =
+    !isEnvelope &&
+    error.reason === "bbox_out_of_tolerance" &&
+    (error.carriedAxes !== undefined || error.measuredAxes !== undefined);
+  const card: "bed" | "size" | "generic" = isEnvelope
+    ? "bed"
+    : hasSizeData
+      ? "size"
+      : "generic";
   const envelopeData: DisplayError["envelope"] | null =
     error.envelope ?? null;
-
-  // The size-mismatch card (issue #367, operator decision 2): a
-  // `bbox_out_of_tolerance` frame WITHOUT the gate-7 envelope string.
-  // Rule 2(a): carried_axes and/or measured_axes present → size card
-  // with asked → made rows. Rule 2(b): neither present → generic card
-  // (the existing reason sentence, no rows). Never the bed card.
-  const isSizeMismatch =
-    error.reason === "bbox_out_of_tolerance" && !isEnvelope;
-  const hasSizeData =
-    isSizeMismatch &&
-    (error.carriedAxes !== undefined || error.measuredAxes !== undefined);
 
   // The model pre-flight helper (issue #303): the terminal
   // `model_unconfigured` frame's `env_var` field selects the second
@@ -155,10 +156,8 @@ export function FailureTurn({
   //   asked + made  → "width: 60.0 mm → 66.0 mm"
   //   made only     → "depth: 42.0 mm"
   //   asked only    → "height: not measured yet"
-  // The axisWord map mirrors the backend's AXIS_LABELS noun forms.
-  const AX_WORD: Record<string, string> = { W: "width", D: "depth", H: "height" };
   const sizeRows: Array<{ key: string; text: string }> | null =
-    hasSizeData
+    card === "size"
       ? (["W", "D", "H"] as const)
           .filter((a) => {
             const c = error.carriedAxes?.[a];
@@ -168,7 +167,7 @@ export function FailureTurn({
           .map((a) => {
             const c = error.carriedAxes?.[a];
             const m = error.measuredAxes?.[a];
-            const word = AX_WORD[a];
+            const word = SIZE_AXIS_WORDS[a];
             const text =
               c !== undefined && m !== undefined
                 ? copy.failure.sizeMismatch.row(word, c, m)
@@ -180,26 +179,21 @@ export function FailureTurn({
       : null;
 
   // The follow-up question (issue #367, operator decision 3): at most
-  // ONE per card. Uses the first axis in W, D, H order that has BOTH an
-  // asked and a made value, and only if they differ beyond the gate
-  // tolerance (max(1%, 0.5 mm)). If no axis qualifies, no follow-up.
+  // ONE per card — the first axis in W, D, H order that has BOTH an
+  // asked and a made value. The frame's `bbox_out_of_tolerance` reason
+  // already establishes that some confirmed axis was beyond the gate
+  // tolerance (that is what failed the gate), so the SPA does not
+  // re-derive the tolerance; an axis that merely fits still gets the
+  // question, which remains a useful clarification.
   const sizeFollowUp: string | null = (() => {
-    if (!hasSizeData) return null;
     for (const a of ["W", "D", "H"] as const) {
       const c = error.carriedAxes?.[a];
       const m = error.measuredAxes?.[a];
       if (c !== undefined && m !== undefined) {
-        const tol = Math.max(0.01 * c, 0.5);
-        if (Math.abs(m - c) > tol) {
-          return copy.failure.sizeMismatch.whichMeasurement(c, AX_WORD[a]);
-        }
-        // Defensive fall-through, unreachable for genuine frames: a
-        // bbox-gate FAILURE frame by definition has at least one
-        // confirmed axis beyond tolerance (that is what failed the
-        // gate), so a genuine frame's first with-both-values axis
-        // always differs beyond tolerance and returns above. The
-        // branch exists only for a malformed frame (a within-tolerance
-        // axis carrying both values) so the loop still moves on.
+        return copy.failure.sizeMismatch.whichMeasurement(
+          c,
+          SIZE_AXIS_WORDS[a],
+        );
       }
     }
     return null;
@@ -388,12 +382,11 @@ export function FailureTurn({
               {copy.failure.envelope.actions.biggerPrinter}
             </button>
           </>
-        ) : isSizeMismatch && sizeFollowUp !== null ? (
+        ) : card === "size" && sizeFollowUp !== null ? (
           // The size-mismatch card offers ONE follow-up question (issue
           // #367, operator decision 3): the first axis in W/D/H order
-          // that has both asked and made, differing beyond the gate
-          // tolerance. Clicking prefills the composer via the existing
-          // onAction→onSend path.
+          // that has both asked and made. Clicking prefills the composer
+          // via the existing onAction→onSend path.
           <button
             type="button"
             className="failure-turn-action"
