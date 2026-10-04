@@ -36,8 +36,10 @@
 import { expect, test } from "@playwright/test";
 
 const VIEWPORTS: ReadonlyArray<{ w: number; h: number }> = [
-  { w: 1440, h: 900 },
+  { w: 1024, h: 640 },
   { w: 1280, h: 800 },
+  { w: 1440, h: 900 },
+  { w: 1920, h: 1080 },
 ];
 
 /** The first-run controls that must each be the topmost element at their
@@ -72,12 +74,7 @@ for (const { w, h } of VIEWPORTS) {
       .toBeVisible();
 
     const pane = page.getByTestId("app-left-pane");
-    await expect
-      .soft(
-        pane,
-        `PRECONDITION (issue #347, ${w}x${h}): the conversation pane must stay MOUNTED (the photo label route depends on it)`,
-      )
-      .toBeTruthy();
+    await expect(pane).toBeAttached();
 
     // The pane must be invisible while first-run is up — pointer-events:
     // none alone is NOT sufficient (the hints would still show through
@@ -97,59 +94,33 @@ for (const { w, h } of VIEWPORTS) {
       ...CONTROLS,
       { testid: "first-run-file-card", label: "file card" } as const,
     ]) {
+      // Gap-gate decision 4 (issue #347): for the file card, the hit may
+      // be the card or ANY of its descendants (its centre can land on the
+      // caption prose); for every other control, the hit must BE the
+      // control or a descendant of it. One evaluate, containment check.
       const hit = await page.evaluate((tid: string) => {
         const el = document.querySelector<HTMLElement>(`[data-testid="${tid}"]`);
-        if (!el) return { found: false, hit: null as string | null };
+        if (!el) return { found: false, isControlOrDescendant: false, inPane: false };
         const rect = el.getBoundingClientRect();
         const cx = rect.left + rect.width / 2;
         const cy = rect.top + rect.height / 2;
         const target = document.elementFromPoint(cx, cy);
         return {
           found: true,
-          hit: target ? target.getAttribute("data-testid") ?? target.className ?? target.tagName : null,
+          isControlOrDescendant: !!target && el.contains(target),
+          inPane: !!target?.closest('[data-testid="app-left-pane"]'),
         };
       }, testid);
 
       expect(hit.found, `at ${w}x${h} the ${label} must be present`).toBe(true);
-
-      const hitTestid = hit.hit;
-      const isSelf = hitTestid === testid;
-      const isPane =
-        hitTestid === "app-left-pane" ||
-        (await page.evaluate((tid: string) => {
-          const el = document.querySelector<HTMLElement>(`[data-testid="${tid}"]`);
-          if (!el) return false;
-          const rect = el.getBoundingClientRect();
-          const cx = rect.left + rect.width / 2;
-          const cy = rect.top + rect.height / 2;
-          const target = document.elementFromPoint(cx, cy);
-          return !!target?.closest('[data-testid="app-left-pane"]');
-        }, testid));
-
       expect(
-        isSelf || !isPane,
-        `at ${w}x${h} the ${label} (${testid}) centre must not resolve to the conversation pane — elementFromPoint returned "${hitTestid}"`,
+        hit.inPane,
+        `at ${w}x${h} the ${label} (${testid}) centre must not resolve to the conversation pane`,
+      ).toBe(false);
+      expect(
+        hit.isControlOrDescendant,
+        `at ${w}x${h} the ${label} (${testid}) centre must resolve to the ${testid === "first-run-file-card" ? "card or a descendant of it" : "control or a descendant of it"}`,
       ).toBe(true);
-
-      // For non-card controls, the hit must be the control itself (or a
-      // descendant of it) — the strictest reading of the criterion.
-      if (testid === "first-run-file-card") {
-        // The card passes if elementFromPoint returns the card or any
-        // descendant (gap-gate decision 4).
-        const isCardOrDescendant = await page.evaluate((tid: string) => {
-          const el = document.querySelector<HTMLElement>(`[data-testid="${tid}"]`);
-          if (!el) return false;
-          const rect = el.getBoundingClientRect();
-          const cx = rect.left + rect.width / 2;
-          const cy = rect.top + rect.height / 2;
-          const target = document.elementFromPoint(cx, cy);
-          return !!target && (el.contains(target) || target === el);
-        }, testid);
-        expect(
-          isCardOrDescendant,
-          `at ${w}x${h} the file card centre must resolve to the card or a descendant`,
-        ).toBe(true);
-      }
     }
 
     // The four starter chips (all share testid first-run-starter).
