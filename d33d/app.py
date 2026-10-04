@@ -413,8 +413,8 @@ async def _lifespan(app: FastAPI):
     # mismatch) plus the exact rebuild command when the image check finds
     # a fault. A fault that cannot be established (probe returned None —
     # image present/fresh, or a docker-query failure the design loop will
-    # report as retryable renderer_unavailable) logs nothing. Never crashes
-    # startup. The seam is injectable (``create_app(image_check=...)``)
+    # report as retryable renderer_unavailable) logs nothing. A docker-query
+    # failure or timeout never crashes startup. The seam is injectable (``create_app(image_check=...)``)
     # so the fast suite runs it without real Docker.
     #
     # The probe (``docker image inspect`` over the daemon) blocks: run it
@@ -429,10 +429,7 @@ async def _lifespan(app: FastAPI):
 
     def _startup_image_probe() -> dict[str, str] | None:
         if _image_check is None:
-            return _dl_mod._render_worker_image_detail(
-                image=_dl_mod.RENDER_WORKER_IMAGE,
-                rebuild_command=_dl_mod.canonical_build_command(),
-            )
+            return _dl_mod.default_image_check()
         return _image_check()
 
     try:

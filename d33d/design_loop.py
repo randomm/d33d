@@ -1583,11 +1583,7 @@ async def run_design_loop_async(
     # The probe is injectable (``image_check``, ``None`` runs the real
     # probe) so the fast suite never shells out to real Docker.
     if image_check is None:
-        image_detail = await asyncio.to_thread(
-            _render_worker_image_detail,
-            image=RENDER_WORKER_IMAGE,
-            rebuild_command=canonical_build_command(),
-        )
+        image_detail = await asyncio.to_thread(default_image_check)
     else:
         try:
             image_detail = image_check()
@@ -2010,17 +2006,33 @@ def _render_worker_image_detail(
         detail: dict[str, str] = {
             "rebuild_command": rebuild_command or canonical_build_command()
         }
+        if expected is not None:
+            detail["expected"] = expected
         if "image not found" in str(exc):
             detail["reason"] = "image_missing"
-            detail["expected"] = expected
         else:
             detail["reason"] = "label_mismatch"
-            detail["expected"] = expected
             actual = _image_label_or_none(image)
             if actual is not None:
                 detail["actual"] = actual
         return detail
     return None
+
+
+def default_image_check() -> dict[str, str] | None:
+    """The design loop's default pre-flight image probe (issue #346):
+    the canonical :func:`_render_worker_image_detail` construction — the
+    render-worker image, no injected repo/expected overrides, and the
+    canonical rebuild command. Shared by the loop's ``image_check is
+    None`` branch and ``d33d.app``'s startup lifespan so the probe
+    construction lives in one place. Looked up at call time (module
+    global) so the conftest hermetic stub, which patches
+    ``d33d.design_loop._render_worker_image_detail`` by name, still
+    intercepts both call sites."""
+    return _render_worker_image_detail(
+        image=RENDER_WORKER_IMAGE,
+        rebuild_command=canonical_build_command(),
+    )
 
 
 def _image_label_or_none(image: str) -> str | None:

@@ -265,9 +265,10 @@ export function displayDesignLoopError(
   // is safe to render in the helper sentence.
   const envVar = typeof data.env_var === "string" && data.env_var !== "" ? data.env_var : undefined;
   // The renderer image pre-flight detail (issue #346, omit-not-null on
-  // the frame): folded into the disclosure so the real reason and the
-  // rebuild command reach "What the checker actually said". Validated
-  // here — a malformed object yields undefined (the plain-reason
+  // the frame): carried STRUCTURED on the failure turn for the fault line
+  // and the mono rebuild command, while `detail` stays the plain reason
+  // string — the structured fields do not fold into it. Validated here —
+  // a malformed object yields undefined (the plain-reason
   // disclosure stands, nothing half-established is rendered).
   const rendererDetail = parseRendererDetail(data.renderer_detail);
   if (reason !== undefined) {
