@@ -20,6 +20,7 @@ stall the app's other requests while it does.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 import stat
@@ -30,6 +31,8 @@ import numpy as np
 import trimesh
 
 from d33d.part_holes import watertight_genus
+
+logger = logging.getLogger(__name__)
 
 #: The named face cap for an import (a distinct constant from
 #: ``print_validation.MAX_FACES`` — that bound belongs to the render
@@ -340,8 +343,9 @@ def parse_and_repair(
       a post-repair count would read 0 for a holey part (the loops are the
       signal, not a bug to fix).
     - ``genus`` — the total closed-body genus (``watertight_genus``, from
-      ``d33d.part_holes``) of
-      the PRE-REPAIR merged mesh, one per closed through-hole. A
+      ``d33d.part_holes``) of the PRE-REPAIR merged mesh's watertight
+      components (the same one split that counts the bodies — no second
+      split), one per closed through-hole. A
       CAD-exported part with a real drilled through-bore is WATERTIGHT:
       0 boundary loops but genus 1. Gaps alone would count it 0 and the
       fill-recut gate would refuse the very part it exists for, so closed
@@ -392,11 +396,16 @@ def parse_and_repair(
     if not _is_finite(merged):
         raise PartUploadError("mesh has non-finite vertices")
 
-    # Body count: connected components after merging (the honest count the
-    # report carries — a multi-body import is reported, not dropped).
+    # ONE split serves both the bodies count and the genus: the bodies
+    # are the watertight components (== ``len(split(only_watertight=True))``,
+    # pinned by a fixture test), and the genus reads the SAME subset.
+    # ``merge_vertices`` is kept — the component split needs merged
+    # vertices and the euler count reads the merged topology.
     merged.merge_vertices()
     merged.update_faces(merged.nondegenerate_faces())
-    bodies = len(merged.split(only_watertight=True))
+    components = merged.split(only_watertight=False)
+    watertight_bodies = [c for c in components if c.is_watertight]
+    bodies = len(watertight_bodies)
     if len(merged.faces) == 0:
         raise PartUploadError("mesh is empty after cleanup")
 
@@ -407,11 +416,10 @@ def parse_and_repair(
         raise PartUploadError("mesh has invalid extents")
 
     # The 3MF's declared unit, read from the ORIGINAL (pre-repair)
-    # geometry — pymeshfix does not change units, but reading it from the
-    # original load is the only place the ``unit`` attribute is guaranteed
-    # to be present. Only an ABSENT unit (``None``) means the 3MF default
-    # (millimeters); a non-string unit, or a string outside the closed
-    # mm/cm/inch synonym sets, is a 422 — never a silent mm assumption.
+    # geometry — the only place the ``unit`` attribute is guaranteed
+    # present. Only an ABSENT unit (``None``) means the 3MF default
+    # (millimeters); a non-string unit, or a string outside the mm/cm/inch
+    # synonym sets, is a 422 — never a silent mm assumption.
     file_unit: str | None = None
     if part_format == "3mf":
         file_unit = mesh_units(
@@ -425,19 +433,16 @@ def parse_and_repair(
     # preserved): merge → pymeshfix.repair → fix_normals.
     gaps_before = _boundary_loops(merged)
 
-    # The genus half of the hole count, measured on the PRE-REPAIR merged
-    # mesh: the closed through-holes the repair will later close over /
-    # leave as-is are already present here. Computed before the repair
-    # call (and not from the repaired mesh — see docstring) so the repair
-    # chain itself stays exactly as it is on main, single MeshFix call.
+    # Genus over the SAME split (measured pre-repair — see docstring); a
+    # failure degrades to the boundary-loop signal alone, never a 422.
     try:
-        holes = gaps_before + watertight_genus(merged)
-    # A genus measurement failure must not 422 the import — the count
-    # degrades to the boundary-loop signal alone. ``watertight_genus`` is a
-    # topology read (``split`` / vertex-merge / euler_number); the failure
-    # modes are numeric/topology errors on a malformed mesh (the guard's
-    # job is to degrade the count, not to 422 the import over it).
+        holes = gaps_before + watertight_genus(watertight_bodies)
     except (ArithmeticError, ValueError, TypeError, RuntimeError):
+        logger.debug(
+            "parse_and_repair: watertight_genus failed on the pre-repair "
+            "merged mesh — falling back to the boundary-loop count alone",
+            exc_info=True,
+        )
         holes = gaps_before
 
     import pymeshfix as _pmf

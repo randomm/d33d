@@ -1137,6 +1137,75 @@ def test_fill_recut_trigger_no_hole_report_no_offer(app_with_projects):
     assert offer["size"] == 10.0, offer
 
 
+def test_fill_recut_trigger_no_hole_reply_carries_triggering_noun_chat(
+    app_with_projects,
+):
+    """Issue #351 fix — a BORE trigger on a ``hole_count: 0`` part gets
+    the honest no-hole reply with the TRIGGERING noun ("I don't see a
+    bore…"), not the hardcoded "hole" (the reply formats from the
+    trigger's own noun — chat route)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Bore Box"})
+        pid = r.json()["id"]
+        _set_part_columns(
+            app_with_projects, pid, unit_status="settled", hole_count=0
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the bore 10 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0]["message"]
+    assert "I don't see a bore on the part you brought" in msg, msg
+    assert "I don't see a hole" not in msg, msg
+    assert "That bore came with your file" not in msg, msg
+    assert not done[0].get("fill_recut_offer"), done
+    assert svc.get_pending_offer(pid) is None
+
+
+def test_fill_recut_trigger_no_hole_reply_carries_triggering_noun_region(
+    app_with_projects,
+):
+    """Issue #351 fix — a BORE trigger on a ``hole_count: 0`` part gets
+    the honest no-hole reply with the TRIGGERING noun ("I don't see a
+    bore…") on the REGION-EDIT route too (the reply formats from the
+    trigger's own noun on both routes — parity with the chat route)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Bore Box Region"})
+        pid = r.json()["id"]
+        _set_part_columns(
+            app_with_projects, pid, unit_status="settled", hole_count=0
+        )
+        r2 = await client.post(
+            f"/api/projects/{pid}/region-edits",
+            json=_parity_region_edit_body(
+                "make the bore 10 mm",
+                face_normal=(0.0, 1.0, 0.0),
+            ),
+        )
+        frames = await _parity_run_loop(app_with_projects, pid)
+        return r2.status_code, pid, frames
+
+    status, pid, frames = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    svc = _svc(app_with_projects)
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    msg = done[0]["message"]
+    assert "I don't see a bore on the part you brought" in msg, msg
+    assert "I don't see a hole" not in msg, msg
+    assert not done[0].get("fill_recut_offer"), done
+    assert svc.get_pending_offer(pid) is None
+
+
 def test_fill_recut_offer_fires_for_annulus_import(app_with_projects):
     """Issue #351 — route-level: a project whose part_report carries the
     ``hole_count`` from a real watertight annulus import (a real drilled
@@ -1960,12 +2029,17 @@ def test_fill_recut_decline_reply_equals_copy_ts() -> None:
     assert fill_recut.FILL_RECUT_DECLINE_REPLY == m.group(1)
 
 
-def test_fill_recut_no_hole_reply_equals_copy_ts() -> None:
-    """Issue #351 — ``FILL_RECUT_NO_HOLE_REPLY`` equals ``copy.ts``'s
+def test_no_hole_reply_template_equals_copy_ts() -> None:
+    """Issue #351 — ``part_holes.no_hole_reply`` renders ``copy.ts``'s
     ``fillRecut.noHole`` template with the noun substituted (the same
     two-way pin as the decline reply — a drift in either copy breaks the
-    SPA/backend agreement).``"""
+    SPA/backend agreement). Both sides are rendered with a SENTINEL noun
+    so a hardcoded noun in either side is caught, and again with a
+    second noun so the slot, not the sentence, is what carries the
+    difference."""
     import re
+
+    from d33d.part_holes import no_hole_reply
 
     m = re.search(r'noHole:.*?`([^`]*)`', _copy_ts_text(), re.DOTALL)
     assert m is not None, "copy.ts must define fillRecut.noHole"
@@ -1973,20 +2047,24 @@ def test_fill_recut_no_hole_reply_equals_copy_ts() -> None:
     assert "${noun}" in ts_template, (
         f"copy.ts noHole must carry the ${{noun}} slot: {ts_template!r}"
     )
-    ts_rendered = ts_template.replace("${noun}", "hole")
-    assert fill_recut.FILL_RECUT_NO_HOLE_REPLY == ts_rendered, (
-        f"backend: {fill_recut.FILL_RECUT_NO_HOLE_REPLY!r}\n"
-        f"copy.ts (noun='hole'): {ts_rendered!r}"
-    )
+    for noun in ("__SENTINEL__", "bore"):
+        ts_rendered = ts_template.replace("${noun}", noun)
+        assert no_hole_reply(noun) == ts_rendered, (
+            f"backend (noun={noun!r}): {no_hole_reply(noun)!r}\n"
+            f"copy.ts (noun={noun!r}): {ts_rendered!r}"
+        )
 
 
-def test_fill_recut_no_hole_reply_in_fill_recut_all() -> None:
-    """Issue #351 — ``FILL_RECUT_NO_HOLE_REPLY`` and the helper are
-    exported (``d33d.projects`` / ``d33d.fill_recut_region`` reference
-    them by name)."""
-    assert "FILL_RECUT_NO_HOLE_REPLY" in fill_recut.__all__
-    assert "part_has_hole_evidence" in fill_recut.__all__
-    assert "HOLE_NOUNS" in fill_recut.__all__
+def test_no_hole_reply_uses_triggering_noun() -> None:
+    """Issue #351 — the no-hole reply carries the TRIGGERING noun, not a
+    hardcoded 'hole' (a bore/counterbore trigger answers 'I don't see a
+    bore…', not 'I don't see a hole…')."""
+    from d33d.part_holes import no_hole_reply
+
+    assert "a bore" in no_hole_reply("bore")
+    assert "a counterbore" in no_hole_reply("counterbore")
+    assert "a hole" in no_hole_reply("hole")
+    assert "bore" not in no_hole_reply("hole")
 
 
 def test_part_has_hole_evidence_reads_stored_fact_only() -> None:
@@ -1997,7 +2075,7 @@ def test_part_has_hole_evidence_reads_stored_fact_only() -> None:
     (no report / legacy row), missing key, and corrupt values (bool,
     string, negative, float) → None (unknown — keep the offer). A
     non-dict ``part`` (no part at all) is None."""
-    from d33d.fill_recut import part_has_hole_evidence
+    from d33d.part_holes import part_has_hole_evidence
 
     assert part_has_hole_evidence({"report": {"hole_count": 1}}) is True
     assert part_has_hole_evidence({"report": {"hole_count": 2}}) is True
@@ -2039,7 +2117,7 @@ def test_part_public_corrupt_report_degrades_to_no_report():
     part = part_http_mod.part_public(row)
     assert part is not None
     assert part["report"] is None, part
-    from d33d.fill_recut import part_has_hole_evidence
+    from d33d.part_holes import part_has_hole_evidence
 
     assert part_has_hole_evidence(part) is None
 

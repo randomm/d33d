@@ -36,11 +36,7 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
-from d33d.part_holes import (
-    FILL_RECUT_NO_HOLE_REPLY,
-    HOLE_NOUNS,
-    part_has_hole_evidence,
-)
+from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +205,7 @@ def fill_recut_region_edit(
     ):
         return {
             "kind": "answer",
-            "answer": FILL_RECUT_NO_HOLE_REPLY,
+            "answer": no_hole_reply(trigger["noun"]),
             "run_loop": False,
             "outcome": "no_feature",
         }

@@ -5,10 +5,13 @@ only when the import stored evidence the part actually has a hole. This
 module is the small, self-contained half of that gate — the stored-fact
 reader, the gated noun set, and the honest no-hole reply — factored out
 of ``d33d.fill_recut`` (which owns the trigger, the offer lifecycle, and
-the boundary copy). Both offer paths (the chat pre-route and the
-region-edit seam) read the stored ``part_report.hole_count`` through
-:func:`part_has_hole_evidence`; the mesh work happens once at import
-(``d33d.part_mesh.parse_and_repair``), never here.
+the boundary copy). It also hosts the import-time topology helper
+:func:`watertight_genus` (the closed-body half of ``d33d.part_mesh``'s
+``hole_count``, measured on the pre-repair merged mesh). Both offer
+paths (the chat pre-route and the region-edit seam) read the stored
+``part_report.hole_count`` through :func:`part_has_hole_evidence`; the
+mesh work happens once at import (``d33d.part_mesh.parse_and_repair``),
+never at offer time.
 """
 
 from __future__ import annotations
@@ -17,18 +20,29 @@ from typing import Any
 
 import trimesh
 
-#: Issue #351 (operator decision 2) — the honest no-hole reply: a
-#: hole/bore/counterbore resize request on a part the import measured to
+#: Issue #351 (operator decision 2) — the honest no-hole reply TEMPLATE:
+#: a hole/bore/counterbore resize request on a part the import measured to
 #: carry ZERO holes (``part_report.hole_count == 0``, the stored fact
 #: computed once at import — the pre-route reads the stored fact, never
 #: re-parses the mesh). The offer is NOT made for a feature the part does
-#: not have, and the reply says so plainly (a verbatim copy of the
-#: copy.ts sentence — the parity test in ``tests/test_projects.py`` pins
-#: the two-way agreement against ``web/src/copy.ts``). The loop must not
-#: run — this is an answer, not a change request.
-FILL_RECUT_NO_HOLE_REPLY = (
-    "I don't see a hole on the part you brought — want me to drill one?"
+#: not have, and the reply says so plainly. The ``{noun}`` slot is the
+#: TRIGGERING noun the user asked about (``no_hole_reply(trigger["noun"]``)
+#: — "a bore" and "a counterbore" are both fine), never a hardcoded
+#: "hole". A verbatim template copy of the copy.ts ``fillRecut.noHole``
+#: sentence — the parity test in ``tests/test_projects.py`` pins the
+#: two-way agreement against ``web/src/copy.ts``. The loop must not run —
+#: this is an answer, not a change request.
+_NO_HOLE_REPLY_TEMPLATE = (
+    "I don't see a {noun} on the part you brought — want me to drill one?"
 )
+
+
+def no_hole_reply(noun: str) -> str:
+    """The honest no-hole reply for the TRIGGERING feature ``noun`` (the
+    user asked about a hole/bore/counterbore, the part was measured with
+    zero — say so with the noun the user used, never a hardcoded
+    "hole")."""
+    return _NO_HOLE_REPLY_TEMPLATE.format(noun=noun)
 
 
 def part_has_hole_evidence(part: dict[str, Any] | None) -> bool | None:
@@ -76,29 +90,30 @@ def part_has_hole_evidence(part: dict[str, Any] | None) -> bool | None:
 HOLE_NOUNS = frozenset({"hole", "holes", "bore", "counterbore"})
 
 
-def watertight_genus(mesh: trimesh.Trimesh) -> int:
-    """Total genus across the watertight connected bodies of ``mesh``.
+def watertight_genus(components: list[trimesh.Trimesh]) -> int:
+    """Total genus across the WATERTIGHT bodies of an already-split mesh.
 
-    Genus is the closed-body hole count: for a closed orientable body,
-    ``genus = (2 - euler_number) / 2`` (sphere 0, ring 1, torus-with-2 2).
-    Summed over every watertight component (``split(only_watertight=False)``
-    so a gapped remainder still contributes its closed bodies, not the whole
-    mesh as one). Cheap — an euler_number is a vertex/edge/face count, no
-    geometry passes — but the caller wraps it in a guard (any exception
-    falls back to the boundary-loop count alone, never a crash).
+    ``components`` is the caller's ``mesh.split(only_watertight=False)``
+    list (the caller splits ONCE — the bodies count and this genus both
+    read the same split, never two). Genus is the closed-body hole count:
+    for a closed orientable body, ``genus = (2 - euler_number) / 2`
+    (sphere 0, ring 1, torus-with-2 2). Only watertight components count
+    (a gapped remainder is an OPEN edge the boundary-loop count owns, not
+    a closed hole). Cheap — an euler_number is a vertex/edge/face count, no
+    geometry passes — but the caller wraps the call in a guard (any
+    exception falls back to the boundary-loop count alone, never a crash).
     """
     genus = 0
-    for body in mesh.split(only_watertight=False):
+    for body in components:
         if body.is_watertight:
-            body.merge_vertices()
             g = (2 - int(body.euler_number)) // 2
             genus += max(0, g)
     return genus
 
 
 __all__ = [
-    "FILL_RECUT_NO_HOLE_REPLY",
     "HOLE_NOUNS",
+    "no_hole_reply",
     "part_has_hole_evidence",
     "watertight_genus",
 ]

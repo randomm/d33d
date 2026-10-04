@@ -16,8 +16,10 @@ The module's ONE entry point is :func:`fill_recut_turn`, which
 answer-frame plumbing — event-source registration and the 202 body —
 stays in the router). The #351 hole-evidence half (the stored-fact
 reader, the gated noun set, the no-hole reply) lives in
-:mod:`d33d.part_holes`; it is re-exported from this module for the
-region-edit seam and the tests.
+:mod:`d33d.part_holes`; this module imports the pieces it calls
+(``HOLE_NOUNS``, ``part_has_hole_evidence``, ``no_hole_reply``) directly
+from there — the region-edit seam and the tests import from
+``d33d.part_holes`` themselves.
 """
 
 from __future__ import annotations
@@ -25,11 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from d33d.part_holes import (
-    FILL_RECUT_NO_HOLE_REPLY,  # re-exported for the region-edit seam + tests
-    HOLE_NOUNS,
-    part_has_hole_evidence,
-)
+from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.versions import valid_axis
 
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
@@ -459,7 +457,7 @@ def fill_recut_turn(
                 ):
                     return {
                         "kind": "answer",
-                        "answer": FILL_RECUT_NO_HOLE_REPLY,
+                        "answer": no_hole_reply(trigger["noun"]),
                         "run_loop": False,
                         "outcome": "no_feature",
                     }
@@ -490,13 +488,11 @@ def fill_recut_turn(
 __all__ = [
     "FEATURE_NOUNS",
     "FILL_RECUT_DECLINE_REPLY",
-    "FILL_RECUT_NO_HOLE_REPLY",
     "FRILL_HOLE_DIAMETER_REPLY",
     "FRILL_MOVE_DISTANCE_REPLY",
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
-    "HOLE_NOUNS",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
@@ -506,5 +502,4 @@ __all__ = [
     "is_clean_no",
     "is_clean_yes",
     "own_feature_names",
-    "part_has_hole_evidence",
 ]

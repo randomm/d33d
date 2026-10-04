@@ -616,6 +616,43 @@ def test_hole_count_two_watertight_rings(app_with_projects):
     assert report["hole_count"] == 2, f"two rings → genus 2: {report}"
 
 
+def test_bodies_count_split_equivalence_on_fixtures():
+    """Issue #351 perf — the single-split refactor: on the four #351
+    fixtures (box, holey, annulus, two rings), the number of watertight
+    components in ``split(only_watertight=False)`` equals
+    ``len(split(only_watertight=True))``, so the bodies count and the
+    genus can read the SAME split (the refactor's premise — pinned here
+    so the premise is a test, not an assumption)."""
+    import trimesh
+
+    box = trimesh.creation.box(extents=[20, 20, 20])
+    holey = trimesh.load(str(FIXTURES / "holey.stl"))
+    annulus = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    two_rings = trimesh.util.concatenate([ring_a, ring_b])
+
+    for name, mesh in [
+        ("box", box),
+        ("holey", holey),
+        ("annulus", annulus),
+        ("two_rings", two_rings),
+    ]:
+        if isinstance(mesh, trimesh.Scene):
+            mesh = mesh.to_mesh()
+        merged = mesh.copy()
+        merged.merge_vertices()
+        merged.update_faces(merged.nondegenerate_faces())
+        strict = len(merged.split(only_watertight=True))
+        loose = merged.split(only_watertight=False)
+        watertight_count = sum(1 for c in loose if c.is_watertight)
+        assert strict == watertight_count, (
+            f"{name}: split(only_watertight=True) count {strict} != "
+            f"watertight count in split(only_watertight=False) {watertight_count}"
+        )
+
+
 def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     """Issue #351: any exception in the genus computation degrades to
     ``gaps_before`` alone — never a crash, never ``None``. A holey part
