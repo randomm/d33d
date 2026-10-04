@@ -318,6 +318,35 @@ export default function App({ client }: AppProps) {
     seq: 0,
     projectId: null,
   });
+  // Issue #354: the pending 300 ms design-state retry timer, owned by the
+  // effect that scheduled it. The .catch that creates the setTimeout is a
+  // closure inside the callback (not the effect body), so the effect's
+  // cleanup cannot see the timer directly — this ref is the handoff the
+  // cleanup reads to cancel it on unmount (a timer that fires after the
+  // component is gone rejects outside act() and surfaces as an unhandled
+  // rejection under vitest teardown).
+  const designStateRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Issue #354: the single retry-timer scheduling helper. Clears any pending
+  // timer, arms a new one, and the callback nulls the ref (identity-checked
+  // so an overlapping retry's newer timer is never untracked by an older
+  // timer firing) then calls fn.
+  const scheduleDesignStateRetry = useCallback(
+    (fn: () => void) => {
+      if (designStateRetryTimerRef.current !== null) {
+        clearTimeout(designStateRetryTimerRef.current);
+      }
+      const retryHandle = setTimeout(() => {
+        // Identity check: only null if THIS timer is still the tracked one.
+        if (designStateRetryTimerRef.current === retryHandle) {
+          designStateRetryTimerRef.current = null;
+        }
+        fn();
+      }, 300);
+      designStateRetryTimerRef.current = retryHandle;
+    },
+    [],
+  );
 
   const refetchDesignState = useCallback((projectIdOverride?: number) => {
     const effectiveProjectId = projectIdOverride ?? projectId;
@@ -358,7 +387,7 @@ export default function App({ client }: AppProps) {
       .catch(() => {
         // First attempt failed: retry exactly once, ~300 ms later.
         if (isStale()) return;
-        setTimeout(() => {
+        scheduleDesignStateRetry(() => {
           if (isStale()) return;
           apiClient
             .getDesignState(effectiveProjectId)
@@ -371,15 +400,25 @@ export default function App({ client }: AppProps) {
                 setDesignStateStale(true);
               }
             });
-        }, 300);
+        });
       });
-  }, [projectId, apiClient]);
+  }, [projectId, apiClient, scheduleDesignStateRetry]);
 
   // The mount-time refetch effect: fires when projectId changes (from null
   // to the created project's id). This is the "project change" effect that
-  // drives the initial design-state fetch.
+  // drives the initial design-state fetch. The cleanup cancels any pending
+  // 300 ms retry timer (issue #354): the seq guard inside the callback
+  // covers a NEWER refetch but not unmount — after unmount the ref still
+  // equals seq, so without this the timer would fire into a torn-down
+  // component.
   useEffect(() => {
     refetchDesignState();
+    return () => {
+      if (designStateRetryTimerRef.current !== null) {
+        clearTimeout(designStateRetryTimerRef.current);
+        designStateRetryTimerRef.current = null;
+      }
+    };
   }, [refetchDesignState]);
 
   // Responsive shell state (issue #119). The floor and the Brief chip

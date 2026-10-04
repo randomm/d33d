@@ -82,11 +82,20 @@ All checks must pass locally before push:
 - [ ] Linting passing (0 errors)
 - [ ] Type checking passing (0 errors)
 
-## Zero technical debt
+## Zero technical debt (ratchet)
 
-- ❌ No `# noqa`, `@ts-ignore`, `# type: ignore`
-- ❌ No `// biome-ignore` without explicit justification
-- ❌ No suppressions in the diff
+Suppression markers (`# noqa`, `# type: ignore`, `@ts-ignore`,
+`@ts-expect-error`, `eslint-disable`, `biome-ignore`) are ratcheted, not
+banned:
+
+- ❌ No NEW suppressions — `tests/fast/test_suppression_ratchet.py` (CI,
+  fast suite) fails if the count of suppressed lines across `d33d/`,
+  `tests/` and `web/src/` rises above the recorded baseline
+  (`BASELINE` in `tests/fast/test_suppression_ratchet.py`); lower it
+  when you remove one.
+- ✅ Existing suppressions are removed opportunistically; when one is
+  removed, lower the baseline in the ratchet test so the guard ratchets
+  down and never up.
 
 # Context7 Protocol
 

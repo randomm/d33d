@@ -761,6 +761,8 @@ def build_registry_glb(
                 continue
             geometries[site.registry_name] = mesh
         finally:
+            # render-{run_id} has no --rm: remove it on every path (issue #354)
+            _cleanup_container(f"render-{run_id}")
             _remove_named_volume(volume)
 
     if not geometries:

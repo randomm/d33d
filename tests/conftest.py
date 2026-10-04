@@ -13,6 +13,7 @@ keeps ``./scripts/test`` green on a fresh checkout without Docker.
 
 from __future__ import annotations
 
+import importlib
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +24,8 @@ import pytest
 # tests/__init__.py (dependency + provenance). If either guard fails it
 # calls sys.exit() with a diagnostic and the pytest session aborts
 # before collecting a single test.
-import tests  # noqa: F401  (side-effect: guard checks)
+# Side-effect-only import via ``importlib`` — the call below is the guard.
+importlib.import_module("tests")
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 root_str = str(_REPO_ROOT)
@@ -38,9 +40,9 @@ def _project_entry_names() -> set[str]:
     return set()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="session")
 def _preimport_part_mesh():
-    """Warm up the heavy mesh stack before every test's measurement window.
+    """Warm up the heavy mesh stack before the first test's measurement window.
 
     ``d33d.part_mesh`` imports numpy and trimesh at module top (heavy
     native-extension loads — numpy's BLAS, trimesh's shapely/CGAL deps).
@@ -52,11 +54,12 @@ def _preimport_part_mesh():
     ``test_parse_and_repair_runs_off_event_loop`` after the eval
     staging tests ran earlier in the same session (issue #344).
 
-    Importing the module here (main thread; cached in ``sys.modules``
-    afterwards, so the import cost is paid once per process) removes
-    that variable from every test.
+    Importing the module here (session scope — runs once on the main
+    thread at session start, before the first test; cached in
+    ``sys.modules`` afterwards) pays the import cost once per process,
+    outside any test's measurement window. The ``importlib`` form is a side-effect-only import — no module-level binding to flag.
     """
-    import d33d.part_mesh  # noqa: F401  (side-effect: numpy/trimesh import)
+    importlib.import_module("d33d.part_mesh")
     yield
 
 
