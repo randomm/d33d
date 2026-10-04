@@ -7043,8 +7043,8 @@ def test_design_path_role_resolution_failure_warning_carries_exc_info(
         f"expected a role-resolution request_logs warning, got "
         f"{[r.getMessage() for r in warns]}"
     )
-    assert any(r.exc_text and r.exc_text for r in resolve_warns), (
-        "expected the resolution-failure exception in the warning "
+    assert any(r.exc_text and "unknown role" in r.exc_text for r in resolve_warns), (
+        "expected the resolution-failure exception text in the warning "
         "(exc_info=True)"
     )
     rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
