@@ -6857,3 +6857,68 @@ def test_design_path_write_from_non_main_thread_succeeds(
         assert r["prompt_hash"] == "h" * 64
         assert r["status"] == "ok"
         assert r["project_id"] == 1
+
+
+def test_chat_path_rows_carry_the_chat_projects_id(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """The chat seam (``design_loop_events.run_design_loop_with_events``)
+    threads the chat project's id into the loop kwargs — a chat-path row
+    carries the CHAT project's id, not the finalize project's (operator
+    decision 1: rows carry the real project id from the design request)."""
+    from d33d.app import _build_production_design_loop
+    from d33d.design_llm import LLMResult
+    from d33d.design_loop_events import run_design_loop_with_events
+
+    _SCAD_TCS = ({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},)
+
+    class _LLM:
+        async def __call__(self, role, messages, system):
+            return LLMResult(
+                content="",
+                tool_calls=_SCAD_TCS,
+                prompt_hash="c" * 64,
+                tier="t0",
+                status="ok",
+                request_body={},
+                usage={},
+            )
+
+    llm = _LLM()
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    app_with_versions.state.run_design_loop = _build_production_design_loop()
+
+    from d33d.db import connect as _connect355
+
+    _db = _connect355(app_with_versions.state.db_path)
+    _db.create_project(name="chat project")
+    _db.create_project(name="finalize project")
+    _db._conn.execute("DELETE FROM request_logs")
+    _db._conn.commit()
+
+    async def _drain(client):
+        frames = []
+        async for frame in run_design_loop_with_events(
+            app_with_versions,
+            1,  # the chat project
+            user_message="make a box",
+            stated_dims=(10.0, 10.0, 10.0),
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make a box",
+        ):
+            frames.append(frame)
+        return frames
+
+    frames = run_async(app_with_versions, _drain)
+    terminal = [f for f in frames if f[0] in ("done", "error")]
+    assert terminal, f"no terminal frame: {frames[:5]}"
+    rows = _db._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert rows, "expected chat-path request_logs rows"
+    for row in rows:
+        assert row["project_id"] == 1, f"row carries wrong project: {row}"
+        assert row["prompt_hash"] == "c" * 64
