@@ -802,7 +802,7 @@ def test_startup_image_probe_past_wall_clock_bound_logs_timeout_warning_and_comp
     fast; the seam is injected, so no real Docker runs."""
     import d33d.app as app_mod
 
-    app_mod._IMAGE_CHECK_TIMEOUT_SECONDS = 0.05
+    monkeypatch.setattr(app_mod, "_IMAGE_CHECK_TIMEOUT_SECONDS", 0.05)
 
     def _slow_probe() -> dict[str, str] | None:
         import time

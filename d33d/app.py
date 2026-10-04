@@ -449,10 +449,11 @@ async def _lifespan(app: FastAPI):
         # as the retryable renderer_unavailable.
         if isinstance(_image_exc, TimeoutError):
             logger.warning(
-                "renderer image pre-flight timed out after 20 s (cannot "
+                "renderer image pre-flight timed out after %g s (cannot "
                 "query docker) — no image fault established; the design "
                 "loop will report 'renderer_unavailable' per run until the "
-                "daemon responds"
+                "daemon responds",
+                _IMAGE_CHECK_TIMEOUT_SECONDS,
             )
         else:
             logger.warning(
