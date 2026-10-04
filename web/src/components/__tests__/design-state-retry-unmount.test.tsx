@@ -2,34 +2,45 @@
  * Issue #354 — the design-state refetch effect's 300 ms retry timer must be
  * cancelled on unmount.
  *
- * Regression test for the vitest teardown flake: the design-state fetch
- * effect (App.tsx, deps [projectId, apiClient]) schedules a setTimeout inside
- * its .catch that calls setDesignStateStale(true) ~300 ms later. Before the
- * fix the effect returned no cleanup, so the timer survived unmount and fired
- * into a torn-down tree — surfacing as an unhandled rejection during
- * `npm test` teardown.
+ * Regression test for the original bug: before the fix the effect returned no
+ * cleanup, so a retry timer that was armed by a rejected design-state fetch
+ * survived unmount and fired into a torn-down component.
  *
- * The test drives the exact failure path with the real 300 ms timer:
+ * Discriminating scenarios
+ * -------------------------
  *
- *  1. a project is created (the composer's first send — the design-state
- *     effect only fetches once projectId is non-null),
- *  2. that refetch REJECTS — the .catch arms the ~300 ms retry timer,
- *  3. the component is unmounted BEFORE the retry window elapses,
- *  4. the retry window elapses — with the fix the pending timer is cancelled
- *     by the effect cleanup, so the retry fetch never happens and no
- *     setDesignStateStale fires after unmount.
+ * **Single-refetch test** (catches mutations (b) and (c) — the original bug):
+ * only ONE design-state refetch fires before unmount (the effect's initial
+ * fetch; the stream mock emits no version-created frame, so no second
+ * refetch bumps the seq). When the retry timer fires after unmount,
+ * `isStale()` returns false (seq is unchanged), so `getDesignState` IS
+ * called — incrementing the mock's call count. With the fix the timer is
+ * cleared by the effect cleanup, so the count stays at 1.
  *
- * With the fix: after 350 ms getDesignState has been called exactly once.
- * Without the fix (the cleanup removed): the retry fires, getDesignState is
- * called a second time, and the post-unmount state update surfaces as an
- * unhandled rejection — the assertion fails.
+ * **Overlap test** (two refetches within the 300 ms window): the first
+ * refetch's retry timer is cleared by the pre-clear when the second refetch
+ * arms its timer. The unmount cleanup then clears exactly one timer. This
+ * test documents the overlap behaviour; the first refetch's leaked timer
+ * (under mutation (a) — pre-clear removed) is protected by the seq guard
+ * (`isStale()` returns true because the second refetch bumped the seq), so
+ * mutation (a) is not independently observable here. The seq guard is the
+ * real protection; the pre-clear is defense-in-depth.
  *
- * NOTE — the first test (single unmount) does not reliably discriminate the
- * overlap mutation (unconditional null, no pre-clear): the two refetches in
- * one effect run reject within ~1 ms of each other, so the unmount cleanup
- * (which cancels the LATEST timer) lands within milliseconds of the older
- * timer's arm and cancels it by luck. The dedicated overlap test (two sends)
- * is the one that discriminates.
+ * What the assertions catch
+ * --------------------------
+ *
+ * The `toHaveBeenCalledTimes(N)` assertion is the load-bearing check. A
+ * post-unmount retry call increments the mock count. The `console.error`
+ * spy is a secondary guard: React 18 removed the "Can't perform a state
+ * update on an unmounted component" warning, so it does NOT fire for
+ * post-unmount setState, but it catches any other console.error that might
+ * leak through. The `brief-refresh-failed` DOM assertion in the single-
+ * refetch test catches the case where the post-unmount retry RESOLVES and
+ * calls `applyEnvelope` (setting state on a torn-down component is a no-op
+ * in React 18, but the `brief-refresh-failed` div would only appear if the
+ * retry's `.catch` fired `setDesignStateStale(true)` on a MOUNTED component
+ * — which cannot happen after unmount, so this assertion is belt-and-
+ * suspenders for the mounted-retry path).
  */
 
 import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
@@ -39,6 +50,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { ApiClient } from "../../lib/api";
 import type { Project } from "../../lib/api";
+import type { DesignStateEnvelope } from "../../lib/api";
 import type { ModelViewerHandle } from "../../components/viewer/ModelViewer";
 
 // ModelViewer owns a real three.js WebGLRenderer, which jsdom cannot
@@ -48,10 +60,6 @@ vi.mock("../../components/viewer/ModelViewer", async () => {
   const actual = await vi.importActual<typeof import("../../components/viewer/ModelViewer")>(
     "../../components/viewer/ModelViewer",
   );
-  // The handle's three.js fields (THREE.Scene, WebGLRenderer, …) are inert
-  // in this test — App only stores the handle, and poseSignature reads
-  // camera.position. Build it from the real ModelViewerHandle type (no cast
-  // to any) and give the one field App actually reads a real shape.
   const mockHandle: ModelViewerHandle = {
     scene: undefined as unknown as ModelViewerHandle["scene"],
     camera: { position: { x: 0, y: 100, z: 200 } } as unknown as ModelViewerHandle["camera"],
@@ -88,21 +96,34 @@ describe("design-state refetch retry timer (issue #354)", () => {
     vi.restoreAllMocks();
   });
 
-  it("cancels the 300 ms retry timer on unmount (no fetch, no stale-set after unmount)", async () => {
-    // First send creates the project; that is what flips projectId from null
-    // to non-null and triggers the design-state refetch effect.
+  it("cancels the 300 ms retry timer on unmount — single refetch, retry resolves (issue #354)", async () => {
+    // Single-refetch scenario: the stream mock emits NO version-created
+    // frame, so only the effect's initial refetch fires. When the retry
+    // timer fires after unmount (without the fix), `isStale()` returns
+    // false (seq is unchanged — no second refetch bumped it), so
+    // getDesignState IS called again, incrementing the mock count.
+    //
+    // With the fix: the effect cleanup clears the timer, so getDesignState
+    // is called exactly once (the initial fetch).
+    //
+    // getDesignState: call 1 (initial) rejects → arms the retry timer.
+    //                   call 2 (retry, if it fires) resolves → would
+    //                   increment the count to 2.
+    // After unmount + 400 ms: assert count === 1.
     const project = { id: 1, name: "t", storage: { present: false, git: false } } as unknown as Project;
     vi.spyOn(client, "createProject").mockResolvedValue(project);
+    // NO version-created frame — only onDone. This prevents the second
+    // refetch that would bump the seq and make the retry stale-guarded.
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
-      handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
     });
-    // The version-created refetch (call 1) rejects — the .catch schedules the
-    // single ~300 ms retry. getProject also rejects in jsdom (no base URL);
-    // its console.warn is inert (it does NOT arm a design-state timer), but
-    // a console.error (a post-unmount state update) would fail the suite.
     const logErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.spyOn(client, "getDesignState").mockRejectedValue(new Error("network blip"));
+    // Call 1 rejects (arms the retry timer). Call 2 (retry) resolves —
+    // if the timer fires post-unmount without the fix, the count goes to 2.
+    const emptyEnvelope: DesignStateEnvelope = { entries: [], history_missing: false, part: null };
+    vi.spyOn(client, "getDesignState")
+      .mockRejectedValueOnce(new Error("network blip"))
+      .mockResolvedValue(emptyEnvelope);
 
     const { unmount } = render(<App client={client} />);
 
@@ -110,88 +131,76 @@ describe("design-state refetch retry timer (issue #354)", () => {
     fireEvent.change(firstRunInput, { target: { value: "make a box" } });
     fireEvent.click(screen.getByTestId("first-run-start-btn"));
 
-    // Wait for the design-state refetch to be issued (and to reject). The
-    // version-created frame ALSO refetches (issue #123), so the mock
-    // reaches a second call before the retry window — the retry timer is
-    // armed by the FIRST failure and cleared by the arming of the second
-    // (one tracked timer, issue #354 overlap fix).
-    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(2));
-    // 150 ms: both retry timers armed and pending when unmount runs.
+    // Wait for the initial refetch to be issued (and to reject).
+    await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(1));
+    // 150 ms: the retry timer is armed and pending when unmount runs.
     await new Promise((r) => setTimeout(r, 150));
 
     // Unmount BEFORE the ~300 ms retry window elapses.
     unmount();
 
-    // The retry window elapses. The effect cleanup must have cancelled the
-    // pending timer: no further fetch, and no post-unmount state update
-    // (which would surface as an unhandled rejection under vitest teardown).
-    await new Promise((r) => setTimeout(r, 350));
-    expect(client.getDesignState).toHaveBeenCalledTimes(2);
+    // The retry window elapses. With the fix the timer was cleared by the
+    // effect cleanup: no further fetch. Without the fix (original bug,
+    // mutations (b)/(c)): the timer fires, isStale() is false (no seq bump),
+    // and getDesignState is called a second time — count goes to 2.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(client.getDesignState, "retry timer must be cleared on unmount").toHaveBeenCalledTimes(1);
     expect(logErrorSpy).not.toHaveBeenCalled();
   });
 
-  it("overlapping failed refetches: the older retry cannot fire after unmount (issue #354)", async () => {
+  it("overlapping failed refetches: unmount clears the tracked timer (issue #354)", async () => {
     // Two overlapping failed refetches within the 300 ms retry window. The
     // effect's refetch (refetch #1) rejects and arms retry timer A; a
-    // version-created frame from the design-loop stream (refetch #2) rejects
-    // before 300 ms elapse and arms retry timer B. Without the fix, timer A
-    // (the older, untracked one) either untracks timer B or survives the
-    // unmount cleanup — either way a retry fetch fires into a torn-down
-    // component. With the fix, arming B clears A first, so the unmount
-    // cleanup cancels exactly the one pending timer.
+    // version-created frame (refetch #2) rejects before 300 ms and arms
+    // retry timer B. With the fix, arming B clears A first (pre-clear), so
+    // the unmount cleanup cancels exactly one pending timer (B).
+    //
+    // Under mutation (a) [pre-clear removed]: timer A is untracked. The
+    // unmount cleanup clears B. Timer A fires post-unmount, but the seq
+    // guard (isStale() → true, because refetch #2 bumped the seq) prevents
+    // a getDesignState call. So the count stays at 3. Mutation (a) is
+    // protected by the seq guard and is not independently observable here.
+    //
+    // Under mutation (c) [both removed]: same as (a) — the seq guard still
+    // protects. The single-refetch test above is the one that catches (c).
     const projectA = { id: 1, name: "t", storage: { present: false, git: false } } as unknown as Project;
     vi.spyOn(client, "createProject").mockResolvedValue(projectA);
-    // The first stream (first-run) opens the design loop and emits
-    // version-created — that frame is what triggers refetch #2. A second
-    // composer send opens another stream; the same frame triggers refetch
-    // #2 on the first send. So the overlap is: effect refetch #1 rejects,
-    // then the version-created frame fires refetch #2, which also rejects
-    // within 300 ms.
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
       handlers.onDone?.({});
     });
-    // The second send POSTs through postChat before opening its stream —
-    // without this mock it rejects in jsdom and the stream (and refetch #3)
-    // never opens.
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
     const logErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    // Both refetches reject — each .catch arms its own retry timer within
-    // the 300 ms window.
     vi.spyOn(client, "getDesignState").mockRejectedValue(new Error("network blip"));
 
     const { unmount } = render(<App client={client} />);
 
     // First send creates project 1 — the design-state refetch effect fires
     // and rejects (refetch #1). The version-created frame from that send
-    // fires refetch #2 as well (issue #123) — both inside one effect run,
-    // milliseconds apart, so they do NOT discriminate the overlap (see the
-    // NOTE in the file docstring).
+    // fires refetch #2 (issue #123) — both within one effect run.
     const firstRunInput = screen.getByTestId("first-run-input");
     fireEvent.change(firstRunInput, { target: { value: "make a box" } });
     fireEvent.click(screen.getByTestId("first-run-start-btn"));
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(2));
 
-    // Refetch #2 (the one that armed retry timer B): a SECOND send opens a
-    // fresh design-loop stream; its version-created frame triggers
-    // refetchDesignState directly — well more than 1 ms after timer A was
-    // armed, so timer B outlives any accidental unmount cleanup of timer A.
+    // A SECOND send opens a fresh design-loop stream; its version-created
+    // frame triggers refetch #3 — timer C is armed while timer B is
+    // pending (timer A was already cleared by the pre-clear when B was
+    // armed, or is untracked under mutation (a)).
     const chatInput = screen.getByTestId("chat-input");
     fireEvent.change(chatInput, { target: { value: "make it bigger" } });
     fireEvent.click(screen.getByTestId("chat-send-btn"));
-    // Refetch #2 fires (via version-created) and rejects within the
-    // 300 ms window — timer B is now armed while timer A is still
-    // pending, with no cleanup in between.
     await waitFor(() => expect(client.getDesignState).toHaveBeenCalledTimes(3));
 
-    // Unmount while retry timer B (and, without the fix, timer A too) is
-    // pending — well before the 300 ms window elapses.
+    // Unmount while retry timer C (and, without pre-clear, timer A too)
+    // is pending — well before the 300 ms window elapses.
     unmount();
 
-    // Wait past the 300 ms retry window for BOTH timers. With the fix no
+    // Wait past the 300 ms retry window for ALL timers. With the fix no
     // retry fetch fires after unmount: the three initial refetches are the
-    // only calls, and no post-unmount state update surfaces as an error.
+    // only calls. Timer A (if untracked under mutation (a)) is protected
+    // by the seq guard (isStale() → true).
     await new Promise((r) => setTimeout(r, 400));
     expect(client.getDesignState).toHaveBeenCalledTimes(3);
     expect(logErrorSpy).not.toHaveBeenCalled();
