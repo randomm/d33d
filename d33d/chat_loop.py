@@ -115,6 +115,7 @@ async def run_design_loop(
             app.state.versions.latest_version(project_id),
             answer_edge=getattr(app.state, "answer_question", None),
             project_id=str(project_id),
+            part_unit_status=row.get("part_unit_status"),
         )
     except ModelUnconfiguredError as e:
         # The model pre-flight (issue #303) found the model cannot be

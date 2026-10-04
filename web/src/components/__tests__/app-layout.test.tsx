@@ -2541,6 +2541,17 @@ describe("App photo upload wiring", () => {
     installUrlKeyedFetchStub();
   });
 
+  // Cleanup (issue #352): vitest runs a describe's beforeEach for EVERY
+  // test in the file — without an afterEach here, the stubbed fetch
+  // (and its `part: null` design-state reply) leaks into the later
+  // Screen 2 tests, whose per-test getDesignState spy then sees a
+  // resolved fetch instead of a real network call. Restoring the real
+  // fetch and the client methods each test keeps the suites independent.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
   it("PhotoUpload receives the real project id (upload POSTs to the right URL)", async () => {
     const client = makeClient();
 

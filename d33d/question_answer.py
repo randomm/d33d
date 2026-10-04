@@ -106,6 +106,7 @@ __all__ = [
     "NO_OFFER_AFFIRMATION_REPLY",
     "NO_VERSION_QUESTION_REPLY",
     "UNANSWERABLE_MISSING_TEMPLATE",
+    "UNSETTLED_SIZE_REPLY",
     "AnswerOutcome",
     "ModelUnconfiguredError",
     "ask_answer_call",
@@ -210,6 +211,23 @@ NO_VERSION_QUESTION_REPLY = (
 #: nothingWaitingForYes`` (pinned the same way).
 NO_OFFER_AFFIRMATION_REPLY = (
     "There's nothing waiting for a yes right now — what would you like to change?"
+)
+
+#: The size-unknown reply for a dimension question on a part whose units
+#: are NOT settled (issue #352, operator decision 1): the v1 import's
+#: file-unit bbox is not an mm measurement until the units are settled,
+#: so the deterministic stage must never emit "It measures 80.0 mm" for
+#: an unsettled part. A single fixed sentence (no per-axis form) for
+#: both the single-axis and the dimension-list questions. The route's
+#: unsettled pre-route (``fill_recut.UNSETTLED_PART_REPLY`` in
+#: ``d33d.projects.post_chat``) already pre-empts EVERY message on an
+#: unsettled part, so this constant is the deterministic stage's own
+#: guard — defence in depth (the operator decision). Verbatim copy of
+#: ``copy.ts deterministicAnswer.sizeUnknownWhileUnsettled`` (pinned by
+#: the design-contract test and the backend parity test — the #260
+#: way).
+UNSETTLED_SIZE_REPLY = (
+    "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real."
 )
 
 
@@ -1151,6 +1169,7 @@ def _axis_value_for(
 def _deterministic_decision(
     message: str,
     latest: dict[str, Any] | None,
+    part_unit_status: str | None = None,
 ) -> tuple[str, str, str] | None:
     """The deterministic stage's ONE derivation for ONE message, or
     ``None`` (the stage does not take the message — fall through to
@@ -1170,6 +1189,19 @@ def _deterministic_decision(
     never free text).
     """
     if latest is None:
+        return None
+    # The unsettled-part gate (issue #352, operator decision 1): the part's
+    # units are not settled, so the v1 import's file-unit bbox is NOT an mm
+    # measurement — no numeric size answer may be emitted. The route's
+    # unsettled pre-route already pre-empts every message on an unsettled
+    # part, so this is the stage's own defence-in-depth guard: the
+    # dimension question gets the size-unknown reply (no number, no LLM
+    # call), and any other message falls through exactly as today. "Assumed"
+    # parts are USABLE (issue #350) — their answers may be labelled
+    # assumed there; only "unsettled" triggers this gate.
+    if part_unit_status == "unsettled":
+        if DETERMINISTIC_DIMENSION_LIST_RE.search(message) is not None:
+            return ("list", "unsettled", UNSETTLED_SIZE_REPLY)
         return None
     # Target-number guard (adversarial finding 1): a message carrying a
     # number ("Can it be 15 mm tall?", "Is it 12 mm tall?") is a
@@ -1224,6 +1256,7 @@ def _deterministic_decision(
 def deterministic_axis_answer(
     message: str,
     latest: dict[str, Any] | None,
+    part_unit_status: str | None = None,
 ) -> str | None:
     """The deterministic axis-size answer for ONE message, or ``None``
     (fall through to stage 2).
@@ -1240,7 +1273,7 @@ def deterministic_axis_answer(
     project the same :func:`_deterministic_decision`, so they cannot
     diverge.
     """
-    decision = _deterministic_decision(message, latest)
+    decision = _deterministic_decision(message, latest, part_unit_status)
     if decision is None:
         return None
     return decision[2]
@@ -1249,6 +1282,7 @@ def deterministic_axis_answer(
 def deterministic_axis_outcome(
     message: str,
     latest: dict[str, Any] | None,
+    part_unit_status: str | None = None,
 ) -> tuple[str, str] | None:
     """The deterministic stage's log outcome for ONE message, or ``None``
     (the stage does not take the message — fall through to stage 2).
@@ -1266,7 +1300,7 @@ def deterministic_axis_outcome(
     :func:`deterministic_axis_answer`, so the log fields and the wire
     answer are derived from one computation.
     """
-    decision = _deterministic_decision(message, latest)
+    decision = _deterministic_decision(message, latest, part_unit_status)
     if decision is None:
         return None
     return decision[0], decision[1]
@@ -1628,6 +1662,7 @@ async def route_chat_message(
     answer_edge: AnswerEdge | None = None,
     timeout: float = LLM_CALL_TIMEOUT_SECONDS,
     project_id: str | None = None,
+    part_unit_status: str | None = None,
 ) -> dict[str, Any] | None:
     """The pre-route decision for ONE chat message.
 
@@ -1669,6 +1704,14 @@ async def route_chat_message(
     The ``project_id`` (issue #313) rides the stage-2 INFO line (``-``
     when absent); the existing callers/tests pass nothing and keep
     working (the default ``None``).
+
+    The ``part_unit_status`` (issue #352, operator decision 1) is the
+    project's part ``unit_status`` (``"unsettled"`` / ``"assumed"`` /
+    ``"settled"``), ``None`` when the project has no part. When it is
+    ``"unsettled"`` the deterministic axis stage answers a dimension
+    question with the size-unknown reply (never the v1 import's
+    file-unit bbox as mm) and any other message falls through as
+    today; any other value routes exactly as before.
 
     The stage-1 short-circuits log at INFO; every stage-2 outcome logs
     at WARNING and (except the ``request`` outcome) at INFO from
@@ -1744,8 +1787,8 @@ async def route_chat_message(
     # (:func:`_deterministic_decision`) yields the stage decision, the
     # log fields and the wire answer at once, so they cannot diverge;
     # ONE WARNING names the outcome (axis, provenance class — no
-    # message text).
-    decision = _deterministic_decision(message, latest)
+    # message text). 
+    decision = _deterministic_decision(message, latest, part_unit_status)
     if decision is not None:
         axis, prov, deterministic = decision
         logger.warning(

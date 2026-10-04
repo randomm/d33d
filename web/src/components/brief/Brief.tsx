@@ -246,7 +246,14 @@ export function Brief({
         </span>
       )}
 
-      {safeEntries.length === 0 ? (
+      {/* Issue #352: "Nothing yet" is the no-part empty state. When the
+          design-state `part` block is present the part zone ("The part
+          you brought" — W/D/H "waiting on units" while the units are
+          unsettled) IS the content, so the empty body never renders,
+          even with zero design-state entries. The two-zone layout below
+          renders the part zone in both cases (it does not depend on
+          `safeEntries`). */}
+      {safeEntries.length === 0 && !part ? (
         <p
           className="brief-empty"
           data-testid="brief-empty"

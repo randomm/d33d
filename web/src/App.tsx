@@ -1631,6 +1631,22 @@ export default function App({ client }: AppProps) {
   // (an implausible STL) hides the plate and shows the caption.
   const partUnsettled = isScreen2 && designStatePart.unit_status === "unsettled";
 
+  // Issue #352 (operator decision 2): the "I read…" import report is a
+  // full viewport overlay while the units are unsettled (it carries the
+  // settle controls, so it stays in place until the part is settled). Once
+  // the units are settled or assumed — or the first design turn has
+  // produced a version (versions.length > 1) on an IMPORT-derived project
+  // (v1's source_kind is "import" — the only v1 that ever has a file-unit
+  // bbox the numeric gate protects) — the card collapses to its compact
+  // line. The full report stays reachable from the Brief's "The part you
+  // brought" zone (the note + W/D/H rows).
+  const importReportCollapsed =
+    isScreen2 &&
+    designStatePart !== null &&
+    (designStatePart.unit_status !== "unsettled" ||
+      (versions.length > 1 &&
+        versions[0]?.source_kind === "import"));
+
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the
   // pre-pass empty state, issue #107).
@@ -1781,6 +1797,7 @@ export default function App({ client }: AppProps) {
           client={apiClient}
           onSettled={() => refetchDesignState()}
           showPlate={!partUnsettled}
+          collapsed={importReportCollapsed}
         />
       )}
 
@@ -1870,6 +1887,7 @@ export default function App({ client }: AppProps) {
           onPartUploaded={handlePartUploaded}
           partClient={apiClient}
           hasPart={designStatePart !== null}
+          partUnsettled={partUnsettled}
         />
       )}
 

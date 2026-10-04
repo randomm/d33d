@@ -122,6 +122,38 @@ describe("copy.ts Screen 2 strings", () => {
     );
   });
 
+  it("brief.partBroughtNoteFromFile is the spec's exact 3MF sentence (issue #352, operator decision 3)", () => {
+    expect(copy.brief.partBroughtNoteFromFile).toBe(
+      "Measured, in the file's own millimetres. Its own features are fixed — I can add and cut, not resize.",
+    );
+    // The file-derived variant is distinct from the user-confirmed one —
+    // "you confirmed" must be absent from the 3MF note.
+    expect(copy.brief.partBroughtNote("mm")).not.toBe(
+      copy.brief.partBroughtNoteFromFile,
+    );
+    expect(copy.brief.partBroughtNoteFromFile).not.toContain("you confirmed");
+  });
+
+  it("deterministicAnswer.sizeUnknownWhileUnsettled is the size-unknown sentence (issue #352, operator decision 1)", () => {
+    // The backend's UNSETTLED_SIZE_REPLY carries the same sentence (the
+    // parity pin is in design-contract.test.ts + the backend test).
+    expect(copy.deterministicAnswer.sizeUnknownWhileUnsettled).toBe(
+      "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real.",
+    );
+    // No number: a size-unknown reply never carries a measurement.
+    expect(copy.deterministicAnswer.sizeUnknownWhileUnsettled).not.toMatch(/\d/);
+  });
+
+  it("failure.survivedNoExport names the survivor without the export claim (issue #352, operator decision 4)", () => {
+    expect(copy.failure.survivedNoExport("v4")).toBe("v4 is unchanged.");
+    // Distinct from the exportable variant — no "still exportable" claim
+    // when the export button is disabled.
+    expect(copy.failure.survivedNoExport("v4")).not.toBe(
+      copy.failure.survived("v4"),
+    );
+    expect(copy.failure.survivedNoExport("v4")).not.toContain("exportable");
+  });
+
   it("partReport.watertightGaps is singular for n=1", () => {
     expect(copy.partReport.watertightGaps(1)).toBe(
       "watertight, after closing 1 small gap",

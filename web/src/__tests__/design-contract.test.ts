@@ -467,6 +467,38 @@ describe("design contract", () => {
 
     // The dimension list carries the × character (U+00D7), not the letter x.
     expect(dimList).toContain("\u00d7");
+
+    // (7) Unsettled size unknown (issue #352, operator decision 1): the
+    //     sentence a dimension question gets while the part's units are
+    //     unsettled — no number is ever emitted for an unsettled part.
+    //     The backend's UNSETTLED_SIZE_REPLY carries the same sentence
+    //     (pinned by the backend parity test in
+    //     tests/versioning/test_question_answer.py).
+    const unknown = copy.deterministicAnswer.sizeUnknownWhileUnsettled;
+    expect(unknown).toBe(
+      "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real.",
+    );
+    expect(unknown).not.toMatch(/\d/);
+    // Distinct from every established-answer sentence — never a number.
+    expect(unknown).not.toBe(dimList);
+    expect(unknown).not.toBe(copy.deterministicAnswer.measuredOnly(H, "tall"));
+  });
+
+  it("the 3MF part-zone note variant lives in the deck (issue #352, operator decision 3)", () => {
+    // A 3MF's units came FROM THE FILE (d33d/part_import.py stores it
+    // settled as mm — never a user choice), so the Brief's part zone
+    // renders the file-own variant; "you confirmed" is reserved for the
+    // user-settled case. The discriminator on the wire is
+    // `part.format === "3mf"` — the two deck variants must be distinct.
+    expect(copy.brief.partBroughtNoteFromFile).toBe(
+      "Measured, in the file's own millimetres. Its own features are fixed — I can add and cut, not resize.",
+    );
+    expect(copy.brief.partBroughtNote("mm")).toBe(
+      "Measured, in mm you confirmed. Its own features are fixed — I can add and cut, not resize.",
+    );
+    expect(copy.brief.partBroughtNoteFromFile).not.toBe(copy.brief.partBroughtNote("mm"));
+    expect(copy.brief.partBroughtNoteFromFile).not.toContain("you confirmed");
+    expect(copy.brief.partBroughtNote("mm")).not.toContain("the file's own millimetres");
   });
 
   /* ---------------------------------------- W313 */

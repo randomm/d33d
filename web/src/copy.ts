@@ -178,6 +178,14 @@ export const brief = {
    *  assumed part (a settled part keeps `partBroughtNote`). */
   partBroughtNoteAssumed:
     "Read as millimetres — if it's in inches, tell me.",
+  /** The part-zone note for a part whose units came FROM THE FILE
+   *  (issue #352, operator decision 3 — the wire discriminator is
+   *  `part.format === "3mf"`): a 3MF is always stored settled as mm by
+   *  the import (d33d/part_import.py), so the units were never the
+   *  user's choice. The spec's exact sentence — "you confirmed" is
+   *  reserved for the user-settled case (`partBroughtNote`). */
+  partBroughtNoteFromFile:
+    "Measured, in the file's own millimetres. Its own features are fixed — I can add and cut, not resize.",
   /** The W/D/H value cell when the part's units are unsettled (issue #338).
    *  Never a number, never 0. */
   waitingOnUnits: "waiting on units",
@@ -290,6 +298,13 @@ export const failure = {
   /** Always say what survived. */
   survived: (version: string): string =>
     `${version} is unchanged and still exportable.`,
+  /** The survived line when the export button is actually disabled
+   *  (issue #352, operator decision 4: the part's units are unsettled or
+   *  a design pass is in flight — the 409 gate the export button renders
+   *  the same way). Names the survivor, never claims exportability.
+   *  Rendered from FailureTurn only when `exportable` is false. */
+  survivedNoExport: (version: string): string =>
+    `${version} is unchanged.`,
 
   envelope: {
     headline: "It won't fit on the bed.",
@@ -741,6 +756,18 @@ export const deterministicAnswer = {
     measured: string,
   ): string =>
     `How ${axisAdjective} is ${object}? The part is ${measured} ${axisAdjective}.`,
+
+  /** The size-unknown reply (issue #352, operator decision 1): a
+   *  dimension question on a part whose units are unsettled — the
+   *  backend's `UNSETTLED_SIZE_REPLY` carries the same sentence (the
+   *  design-contract test pins the two-way agreement, the #260 way).
+   *  No number is ever emitted for an unsettled part: the v1 import's
+   *  file-unit bbox is not an mm measurement until the units are
+   *  settled. The route's unsettled pre-route already pre-empts every
+   *  message on an unsettled part; this sentence is the deterministic
+   *  stage's own guard (defence in depth). */
+  sizeUnknownWhileUnsettled:
+    "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real.",
 } as const;
 
 export const shell = {

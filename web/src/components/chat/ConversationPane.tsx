@@ -101,6 +101,11 @@ interface ConversationPaneProps {
    *  on the first run; once a part exists the Screen 2 report owns the
    *  surface). */
   hasPart?: boolean;
+  /** Issue #352 (operator decision 4): true when the part's units are
+   *  unsettled — the failure turn's "still exportable" claim is then
+   *  omitted (the export 409s on unsettled units, so the claim would be
+   *  a contradiction). Absent defaults to false (no part). */
+  partUnsettled?: boolean;
 }
 
 export function ConversationPane({
@@ -133,6 +138,7 @@ export function ConversationPane({
   onPartUploaded,
   partClient,
   hasPart = false,
+  partUnsettled = false,
 }: ConversationPaneProps) {
   // The pane shell's base style (floating vs docked — issue #194). While
   // hidden (issue #347, first-run up) the same box gets visibility:hidden
@@ -268,6 +274,7 @@ export function ConversationPane({
               keptVersion={
                 versions.length > 0 ? versions[versions.length - 1].name : null
               }
+              exportable={!partUnsettled && !inFlight}
               hideComposer={hideComposer}
             />
             {inFlight && (

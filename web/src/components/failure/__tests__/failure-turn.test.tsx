@@ -180,6 +180,48 @@ describe("FailureTurn", () => {
     );
   });
 
+  it("when the export is disabled, the survived line omits the 'still exportable' claim (issue #352, operator decision 4)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.empty_model,
+      detail: "empty_model",
+      retryable: true,
+      reason: "empty_model",
+    };
+    render(
+      <FailureTurn
+        error={error}
+        keptVersion="v4"
+        exportable={false}
+        inFlight={false}
+        onAction={vi.fn()}
+      />,
+    );
+    // The survivor is named, but no exportability claim — the export
+    // button is disabled (unsettled units / pass in flight), so the claim
+    // would contradict it.
+    expect(screen.getByTestId("failure-turn-survived").textContent).toBe(
+      copy.failure.survivedNoExport("v4"),
+    );
+    expect(screen.getByTestId("failure-turn-survived").textContent).not.toContain(
+      "exportable",
+    );
+  });
+
+  it("the survived line keeps the export claim by default (exportable absent) and when exportable is true", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.empty_model,
+      detail: "empty_model",
+      retryable: true,
+      reason: "empty_model",
+    };
+    render(
+      <FailureTurn error={error} keptVersion="v4" exportable inFlight={false} onAction={vi.fn()} />,
+    );
+    expect(screen.getByTestId("failure-turn-survived").textContent).toBe(
+      copy.failure.survived("v4"),
+    );
+  });
+
   it("renders the raw reason collapsed (part 4)", () => {
     const error: DisplayError = {
       message: copy.failure.reasons.artifact_error,

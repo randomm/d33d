@@ -176,6 +176,16 @@ export function Filmstrip({
           const isCurrent = v.id === latestId;
           const fork = siblings.get(v.id);
           const diff = diffFragment(v, versions);
+          // Issue #352 (operator decision 5): the slot's position label is
+          // the user-facing version ORDINAL — the 1-based position in the
+          // timeline list — never the DB row id (which diverges from the
+          // ordinal once branches/restores create non-sequential ids). An
+          // import version carries its own "v1 — Imported {filename}" label
+          // (importedVersionLabel) and renders NO position span: the two
+          // numbers ("v1 … · v40") were the same version's ordinal and DB id
+          // side by side.
+          const ordinal = versions.findIndex((x) => x.id === v.id) + 1;
+          const isImport = v.source_kind === "import";
           return (
             <span
               key={v.id}
@@ -222,10 +232,12 @@ export function Filmstrip({
                 >
                   {importedVersionLabel(v, part)}
                 </span>
-                <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                  {` · v${v.id}`}
-                  {diff !== null ? ` · ${diff}` : ""}
-                </span>
+                {!isImport && (
+                  <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
+                    {` · v${ordinal}`}
+                    {diff !== null ? ` · ${diff}` : ""}
+                  </span>
+                )}
                 {fork !== undefined && (
                   <span
                     className="filmstrip-fork"

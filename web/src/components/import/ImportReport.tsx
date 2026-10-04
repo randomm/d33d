@@ -44,6 +44,13 @@ interface ImportReportProps {
   /** The plate is visible (units settled). The unsettled caption renders
    *  when this is false (D7). */
   showPlate: boolean;
+  /** Issue #352 (operator decision 2): true once the units are settled or
+   *  assumed, or the first design turn has started — the full viewport
+   *  overlay collapses to a compact line (the settle controls stay in the
+   *  card only while the part is unsettled, which is the only state where
+   *  the card is full). The full report stays reachable from the Brief's
+   *  "The part you brought" zone. */
+  collapsed?: boolean;
 }
 
 export function ImportReport({
@@ -52,6 +59,7 @@ export function ImportReport({
   client,
   onSettled,
   showPlate,
+  collapsed = false,
 }: ImportReportProps) {
   const api = client;
   const [settleError, setSettleError] = useState<string | null>(null);
@@ -145,12 +153,26 @@ export function ImportReport({
     <div
       className="import-report"
       data-testid="import-report"
+      data-collapsed={collapsed || undefined}
       style={{
         position: "absolute",
-        inset: 0,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
+        // Issue #352 (operator decision 2): the collapsed card stops
+        // covering the viewport — a compact top-left line instead of the
+        // centred inset-0 overlay (the model, the plate and the other
+        // panels are no longer hidden behind it). The full form keeps
+        // the centred overlay while the user settles the units.
+        ...(collapsed
+          ? {
+              inset: "auto auto auto 0",
+              display: "block",
+              padding: 24,
+            }
+          : {
+              inset: 0,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+            }),
         zIndex: 10,
         pointerEvents: "none",
       }}
@@ -161,7 +183,7 @@ export function ImportReport({
           flexDirection: "column",
           alignItems: "stretch",
           gap: 16,
-          width: "min(720px, 92vw)",
+          width: collapsed ? "min(560px, 80vw)" : "min(720px, 92vw)",
           maxWidth: "100%",
           padding: 24,
           borderRadius: "var(--radius)",
@@ -171,31 +193,40 @@ export function ImportReport({
           pointerEvents: "auto",
         }}
       >
-        {/* The report header: "I read {filename}" (filename in mono). */}
+        {/* The report header: "I read {filename}" (filename in mono).
+            Collapsed: a smaller line — the hero text, nothing else. */}
         <h1
           className="import-report-title"
           data-testid="import-report-title"
-          style={{ margin: 0, fontSize: "var(--font-size-lg)", fontWeight: 500, textAlign: "center" }}
+          style={{
+            margin: 0,
+            fontSize: collapsed ? "var(--font-size-sm)" : "var(--font-size-lg)",
+            fontWeight: 500,
+            textAlign: "center",
+          }}
         >
           <span data-testid="import-report-iRead">{copy.partReport.iRead(part.filename)}</span>
         </h1>
-        {/* The filename in mono (with ellipsis) — the report's hero string. */}
-        <span
-          data-testid="import-report-filename"
-          style={{
-            fontFamily: "var(--font-mono)",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            display: "block",
-            textAlign: "center",
-            color: "var(--color-fg-2)",
-          }}
-        >
-          {part.filename}
-        </span>
+        {/* The filename in mono (with ellipsis) — the report's hero string.
+            Full form only: the compact line keeps the title. */}
+        {!collapsed && (
+          <span
+            data-testid="import-report-filename"
+            style={{
+              fontFamily: "var(--font-mono)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              display: "block",
+              textAlign: "center",
+              color: "var(--color-fg-2)",
+            }}
+          >
+            {part.filename}
+          </span>
+        )}
 
         {/* The triangle / body / watertight line (numbers in mono). */}
-        {triangles !== null && bodies !== null && (
+        {!collapsed && triangles !== null && bodies !== null && (
           <p
             className="import-report-metrics"
             data-testid="import-report-metrics"
@@ -224,8 +255,9 @@ export function ImportReport({
           </p>
         )}
 
-        {/* Units (per the table). */}
-        {isSettled && mmBbox && (
+        {/* Units (per the table). Full form only: the compact line is the
+            title (the part's facts stay in the Brief's part zone). */}
+        {!collapsed && isSettled && mmBbox && (
           <div data-testid="import-report-settled">
             <p data-testid="import-report-wdh" style={{ margin: 0, textAlign: "center" }}>
               <span style={{ fontFamily: "var(--font-mono)" }}>
@@ -234,7 +266,7 @@ export function ImportReport({
             </p>
           </div>
         )}
-        {isAssumed && mmBbox && (
+        {!collapsed && isAssumed && mmBbox && (
           <div data-testid="import-report-assumed">
             <p style={{ margin: 0, textAlign: "center" }}>
               {copy.partReport.assumedLine(
@@ -298,7 +330,7 @@ export function ImportReport({
             )}
           </div>
         )}
-        {status === "unsettled" && (
+        {status === "unsettled" && !collapsed && (
           <div data-testid="import-report-unsettled">
             <p data-testid="import-report-waiting" style={{ margin: 0, textAlign: "center" }}>
               {copy.partReport.waitingOnUnits}
@@ -318,7 +350,7 @@ export function ImportReport({
         )}
 
         {/* The settle error (a failed settle's detail verbatim — blocked). */}
-        {settleError && (
+        {settleError !== null && (
           <p
             data-testid="import-report-settle-error"
             role="alert"
@@ -335,7 +367,7 @@ export function ImportReport({
 
         {/* The unsettled viewport caption (D7): the plate is hidden, the
             size is unknown. Rendered only while unsettled. */}
-        {!showPlate && (
+        {!showPlate && !collapsed && (
           <p
             data-testid="import-report-unsettled-caption"
             style={{
