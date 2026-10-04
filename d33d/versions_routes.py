@@ -722,6 +722,13 @@ def create_versions_router() -> APIRouter:
                 per_axis_stated = effective_stated_dims(_carried, explicit_axes)
             else:
                 _am = stated_axes_from_message(msg_text, chat_history=())
+                # Issue #369: ``_classify_axis_cues`` is ``classify`` (the
+                # full ``Cues`` — absolute + relative + global). When the
+                # message alone states no axis, the ``Cues`` fallback
+                # carries the release semantics a bare ``dict`` cannot
+                # express: a relative-only message ("make it taller")
+                # releases the carried axis, mirroring the chat route
+                # ("both routes consistently").
                 per_axis_stated = effective_stated_dims(
                     _carried,
                     _am if _am else _classify_axis_cues(msg_text),
@@ -1036,10 +1043,16 @@ def _finalize_loop_kwargs(
         } or None
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
-        _am = stated_axes_from_message(body.request or body.message or "")
+        _msg = body.request or body.message or ""
+        _am = stated_axes_from_message(_msg)
+        # Issue #369: the full ``Cues`` fallback carries the relative
+        # release semantics a bare ``dict`` (the old
+        # ``_classify_axis_cues`` return) cannot express — a relative-only
+        # message ("make it taller") releases the carried axis here too,
+        # mirroring the chat route ("both routes consistently").
         current_axes = effective_stated_dims(
             _carried_gate,
-            _am if _am else _classify_axis_cues(body.request or body.message or ""),
+            _am if _am else _classify_axis_cues(_msg),
         )
     stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest

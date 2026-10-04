@@ -1037,6 +1037,86 @@ class TestNewestWinsPerAxis:
         assert "H" not in axes  # released by the newer relative word
         assert "W" in axes
 
+    def test_empty_history_message_alone_sets_axes_not_history(self):
+        """``stated_axes_from_message(message, [])`` with an EMPTY history
+        (the chat route's release path) extracts the message's own
+        explicit statement — the empty history is load-bearing: the
+        carried set already holds the earlier turns, so the message is
+        read alone, and a relative-only message extracts nothing (the
+        lexicon's release semantics then release the carried value, per
+        ``effective_stated_dims``)."""
+        assert stated_axes_from_message("a 40mm wide box", []) == {"W": 40.0}
+        # A relative-only message states no axis on its own:
+        assert stated_axes_from_message("make it taller", []) == {}
+
+    def test_empty_history_release_drops_carried_axis(self):
+        """The end-to-end chat-route release: message alone (empty history)
+        states no axis → the lexicon classification releases the carried
+        H, and the merge drops it."""
+        from d33d.axis_lexicon import classify
+
+        carried = {"W": 40.0, "H": 12.0}
+        extracted = stated_axes_from_message("make it taller", [])
+        cues = extracted if extracted else classify("make it taller")
+        assert effective_stated_dims(carried, cues) == {"W": 40.0}
+
+    def test_history_window_is_last_50(self):
+        """The extraction's history window is the LAST 50 turns (the
+        ``QUOTED_UNMAPPED_MAX_MESSAGES`` bound): a statement older than
+        the window does not survive, and a release older than the window
+        does not fire. (The wrapper appends the current message, so the
+        window is the last 50 of the 51 turns.)"""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES)]
+        # The old statement sits OUTSIDE the window (51 turns, statement
+        # at idx 0 — the window is idx 1..50) → not stated:
+        axes = stated_axes_from_message("filler X", ["W: 40", *filler])
+        assert "W" not in axes
+        # INSIDE the window (51 turns, statement at idx 1) → stated:
+        axes = stated_axes_from_message(
+            "filler X", ["W: 40", *filler[:48]]
+        )
+        assert axes["W"] == 40.0
+        # A release older than the window does not release an in-window
+        # statement (the released axis survives):
+        axes = stated_axes_from_message(
+            "filler X", ["make it taller", "H: 12", *filler[:48]]
+        )
+        assert axes["H"] == 12.0
+
+
+class TestGateReleasesAxes:
+    """Issue #369: ``require_dimensions_confirmed``'s gate input runs the
+    same release pass — a newer relative word releases the axis the gate
+    would otherwise enforce (conservative: ask, never enforce a stale
+    value the user just disputed)."""
+
+    def test_gate_released_axis_stays_open(self):
+        """'a 40mm wide box, 12mm tall' + a slip fit, then 'make it taller'
+        → NOT confirmed; W stays stated, H is released (the gate asks
+        about H instead of enforcing the stale 12)."""
+        c = require_dimensions_confirmed(
+            ["a 40mm wide box, 12mm tall", "it's a slip fit", "make it taller"],
+            None,
+        )
+        assert c.confirmed is False
+        assert any("H" in q for q in c.questions)
+
+    def test_gate_unchanged_without_release(self):
+        """The same conversation without the release confirms W/D/H —
+        the release is what keeps the gate open."""
+        c = require_dimensions_confirmed(
+            [
+                "a 40mm wide box, 12mm tall",
+                "it's 30mm deep",
+                "it's a slip fit",
+            ],
+            None,
+        )
+        assert c.confirmed is True
+        assert c.params["H"] == 12.0
+
 
 class TestTripleExtraction:
     """W×D×H triple extraction via ``stated_axes_from_message`` / ``stated_dims_from_message``

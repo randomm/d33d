@@ -161,21 +161,13 @@ async def run_design_loop(
     # persists NULL (abstain, never a fabricated axis row).
     # The per-axis stated evidence (issue #246/#261/#369) — the SINGLE
     # value the carry-forward merge helper (``effective_stated_dims``)
-    # feeds BOTH the gate (``axes_to_gate_triple``) and the new
-    # version row's persisted ``stated_dims`` (never two divergent
-    # copies). The effective set starts as the project's CARRIED set
-    # (issue #312's project-level column, seeded from the latest
-    # version's persisted ``stated_dims``) and is adjusted by this
-    # turn's cues: the body's explicit ``stated_dims`` field OVERRIDES
-    # (precedence: body > explicit protocol cues > lexicon — no
-    # release semantics), else the protocol's per-axis extraction of
-    # the message (``stated_axes_from_message`` — newest-wins per axis
-    # over the user's own history, issue #369) is an ABSOLUTE override,
-    # else the closed axis lexicon classifies the message alone
-    # (relative cues release their axis, global cues release all,
-    # absolute cues set — uncued axes carry forward). A statement that
-    # yields no axis is ``{}`` → the version row persists NULL (never
-    # a fabricated axis row).
+    # feeds BOTH the gate and the new version row. Cue precedence and
+    # release semantics are documented in ``effective_stated_dims``; the
+    # new behavior here is that the message's protocol cues are
+    # extracted with an EMPTY history (the carried set already holds
+    # earlier turns) and an EMPTY extraction falls back to the lexicon
+    # classification, which carries the RELATIVE/RELEASE semantics the
+    # dict shape cannot express.
     explicit_body: dict[str, float] | None = None
     if stated_dims is not None:
         _w, _d, _h = stated_dims
@@ -191,22 +183,13 @@ async def run_design_loop(
     else:
         _latest = _carried
         try:
-            # Issue #369: the current-message cues are the protocol's
-            # per-axis extraction of the message ALONE (``stated_axes_from_message``
-            # with an EMPTY history — the carried set already holds the
-            # earlier turns; a history re-scan would restate the carried
-            # values the current message is releasing, and the merge's
-            # dict-cues contract treats any extracted axis as an absolute
-            # override, which would mask the release). The cues feed the
-            # merge as an ABSOLUTE override of the carried set; an EMPTY
-            # extraction (the current message states no axis — e.g.
-            # "make it taller") falls back to the LEXICON classification
-            # of the message alone, which carries the RELATIVE/RELEASE
-            # semantics the dict shape cannot express ("make it taller"
-            # releases the carried H instead of re-enforcing it). A
-            # statement that yields no axis is ``{}`` → the version row
-            # persists NULL (never a fabricated axis row).
-            _am = stated_axes_from_message(message, ())
+            # Issue #369: the message alone — an EMPTY history (``[]``) is
+            # load-bearing: with the echoed history, a relative message
+            # would restate the carried value the user is releasing, and
+            # the merge treats any extracted axis as an absolute override,
+            # masking the release. An EMPTY extraction ("make it taller")
+            # falls back to the lexicon's RELATIVE/RELEASE semantics below.
+            _am = stated_axes_from_message(message, [])
             _cues_arg = _am if _am else _classify_axis_cues(message)
         except Exception:
             # A cue-resolution failure degrades to the carried set

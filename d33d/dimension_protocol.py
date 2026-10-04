@@ -213,12 +213,16 @@ def _extract_stated(
     — a bare pre-fill without user confirmation is NOT a stated dimension
     and will leave the gate closed.
 
-    ``_release_history`` (internal): the issue #369 release pass runs only
-    on the OUTERMOST call. The per-turn re-extractions it performs (the
-    same-message explicit-beats-release check) pass ``False`` to stop the
-    recursion.
+    The history window is the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50)
+    messages — the same window ``user_quoted_unmapped_mm`` uses, so the
+    step-2 set and the release pass below agree on exactly which turns
+    they see. Statements and releases older than the window are simply
+    not present (a release of an already-dropped axis is a no-op).
     """
     out: dict[str, float] = {}
+    # Which turn last explicitly stated each axis (step 2 records it while
+    # walking; the release pass, step 4, reads it — never re-derives it).
+    stated_at: dict[str, int] = {}
 
     # 1. Explicit stated_dims (highest priority — the caller parsed these).
     if stated_dims:
@@ -252,9 +256,17 @@ def _extract_stated(
     # keeps the axis-prefixed value and never completes the triple from
     # the shorthand (the gate abstains rather than mixing sources within
     # one turn).
+    history = list(chat_history or [])
+    # The window is the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns
+    # of ``history`` — the same last-50 slice ``user_quoted_unmapped_mm``
+    # uses (the wrappers pass ``(*chat_history, message)`` in, so the
+    # current message is the newest turn in the slice). Statements and
+    # releases before ``window_start`` are simply not present.
+    window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
+
     if not all(a in out for a in DIMENSION_AXES):
-        for idx, turn in enumerate(chat_history or []):
-            if idx < len(chat_history) - QUOTED_UNMAPPED_MAX_MESSAGES:
+        for idx, turn in enumerate(history):
+            if idx < window_start:
                 continue
             text = str(turn)
             # Issue #369: per axis, the NEWEST explicit stated value wins.
@@ -300,12 +312,16 @@ def _extract_stated(
                     v = _coerce(m.group(1))
                     if v is not None:
                         turn_axes = {axis: v for axis in DIMENSION_AXES}
-            # Merge this turn's axes into the global out (newest wins).
+            # Merge this turn's axes into the global out (newest wins),
+            # recording which turn stated each axis (the release pass,
+            # step 4, needs it — no re-extraction of the same text).
+            for axis in turn_axes:
+                stated_at[axis] = idx
             out.update(turn_axes)
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
-        confirmed_tokens = _confirmed_suggestion_tokens(chat_history or [])
+        confirmed_tokens = _confirmed_suggestion_tokens(history)
         for axis, v in ai_suggested.items():
             if axis in out:
                 continue
@@ -317,37 +333,25 @@ def _extract_stated(
 
     # 4. Issue #369 release pass: a RELATIVE word for an axis in a NEWER
     #    message releases that axis — the axis's LATEST explicit statement
-    #    must be OLDER than the releasing turn. A turn's own explicit
-    #    statement beats the release ("make it taller, 20 mm" → H=20),
-    #    mirroring ``effective_stated_dims``' existing absolute-over-release
+    #    (recorded in ``stated_at`` while walking, step 2) must be OLDER
+    #    than the releasing turn. A turn's own explicit statement beats the
+    #    release ("make it taller, 20 mm" → H=20), mirroring
+    #    ``effective_stated_dims``' existing absolute-over-release
     #    composition. The explicit ``stated_dims`` (step 1) and confirmed AI
     #    suggestions (step 3) are caller-structured ground truth and never
-    #    release.
-    from d33d.axis_lexicon import RELATIVE_WORDS
-
+    #    release. The chat route reaches this pass with the FULL history
+    #    (``stated_axes_from_message``); the lexicon fallback in
+    #    ``d33d.chat_loop`` releases the SAME relative words at the route
+    #    level — one pipeline, two seams, the same word set.
     if _release_history:
-        # Track which turn set each axis's surviving value (newest wins).
-        stated_at: dict[str, int] = {}
-        for idx, turn in enumerate(chat_history or []):
-            if idx < len(chat_history) - QUOTED_UNMAPPED_MAX_MESSAGES:
-                continue
-            text = str(turn)
-            turn_axes = set(
-                _extract_stated([text], None, None, _release_history=False)
-            )
-            for axis in turn_axes:
-                stated_at[axis] = idx
         # Walk oldest-first: each turn's relative words release axes whose
         # latest statement is OLDER than this turn.
-        for idx, turn in enumerate(chat_history or []):
-            if idx < len(chat_history) - QUOTED_UNMAPPED_MAX_MESSAGES:
+        for idx, turn in enumerate(history):
+            if idx < window_start:
                 continue
-            low = str(turn).lower()
-            relative_axes = {
-                RELATIVE_WORDS[w] for w in RELATIVE_WORDS if re.search(
-                    rf"(?<!\w){re.escape(w)}(?!\w)", low
-                )
-            }
+            from d33d.axis_lexicon import classify as _lexicon_classify
+
+            relative_axes = set(_lexicon_classify(str(turn)).relative)
             for axis in relative_axes:
                 if axis in stated_at and stated_at[axis] < idx:
                     out.pop(axis, None)
