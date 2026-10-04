@@ -995,6 +995,36 @@ def test_design_state_part_present_after_import(app_with_projects):
     assert part["unit"] == "mm"
 
 
+def test_design_state_assumed_part_bbox_mm_present(app_with_projects):
+    """Issue #350: an ASSUMED part (plausible STL read as mm) →
+    GET /design-state's ``part.bbox_mm`` is the ``[w, d, h]`` mm list
+    (NOT ``None``) — the root-cause test for the empty-Brief bug
+    (``part_bbox_mm``'s settled-only gate nullified the measurement for
+    assumed parts, so the Brief's W/D/H rows showed "waiting on units"
+    while the assumed line said the size was known)."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "DS Assumed"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        await client.post(f"/api/projects/{pid}/part", files=files)
+        ds_r = await client.get(f"/api/projects/{pid}/design-state")
+        return ds_r
+
+    ds_r = _run_async(app_with_projects, _call)
+    assert ds_r.status_code == 200
+    body = ds_r.json()
+    part = body["part"]
+    assert part is not None
+    assert part["unit_status"] == "assumed"
+    bbox_mm = part.get("bbox_mm")
+    assert bbox_mm is not None, f"bbox_mm must be present for an assumed part: {part}"
+    # A 20 mm box — the three extents are all 20.0 (the fixture is a
+    # 20×20×20 box; order is [w, d, h] = [x, y, z] of the v1 bbox).
+    assert bbox_mm == [20.0, 20.0, 20.0], bbox_mm
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1013,26 +1043,29 @@ def test_max_part_faces_is_2m():
 # ---------------------------------------------------------------------------
 
 
-def test_export_refused_409_units_unsettled_assumed(app_with_projects) -> None:
-    """An import project whose part's unit status is "assumed" (not
-    settled) → GET /model.3mf returns 409 with ``error_class:
-    "units_unsettled"`` — the check fires BEFORE the render-missing 409
-    (no render is seeded here, so the render-missing 409 WOULD also fire
-    if it were checked first; the units-unsettled 409 must win)."""
+def test_export_assumed_part_is_not_units_unsettled(app_with_projects) -> None:
+    """Issue #350: an import project whose part's unit status is
+    "assumed" (a plausible STL read as mm — usable, not unsettled) →
+    GET /model.3mf does NOT return the ``units_unsettled`` 409 (that gate
+    now fires only for "unsettled"). No render is seeded, so the next gate
+    (render-missing / no-versions) fires instead — the ``units_unsettled``
+    error_class must be ABSENT, proving the assumed part cleared the
+    units-unsettled gate."""
     app = app_with_projects
 
     async def _call(client):
-        r = await client.post("/api/projects", json={"name": "Unsettled part"})
+        r = await client.post("/api/projects", json={"name": "Assumed export"})
         pid = r.json()["id"]
         _set_part_columns(app.state.conn, pid, unit_status="assumed")
         return await client.get(f"/api/projects/{pid}/model.3mf")
 
     resp = _run_async(app, _call)
-    assert resp.status_code == 409, f"expected 409, got {resp.status_code}: {resp.text}"
-    body = resp.json()
-    assert body["error_class"] == "units_unsettled"
-    assert "error" in body and len(body["error"]) > 0
-    assert resp.headers.get("content-type", "").startswith("application/json")
+    # The assumed part cleared the units-unsettled gate: the response is
+    # NOT the units_unsettled 409 (the no-versions 404 fires instead, since
+    # no render is seeded — the gate order the spec's test-surface pins).
+    assert resp.status_code != 409 or resp.json().get("error_class") != "units_unsettled", (
+        f"assumed part must not 409 with units_unsettled: {resp.text}"
+    )
 
 
 def test_export_refused_409_units_unsettled_unsettled(app_with_projects) -> None:
@@ -1149,7 +1182,10 @@ def test_export_units_unsettled_persists_across_reload(app_with_projects) -> Non
     """The units-unsettled 409 is server-side state on the project row —
     a reload (a second ``_run_async`` against the same app, i.e. a new
     request after the first response) sees the same 409; it is never
-    client-side state that clears on its own."""
+    client-side state that clears on its own. Issue #350: the 409 now
+    fires only for "unsettled" (assumed is usable) — the test's
+    ``unit_status`` is "unsettled" to pin the 409-persistence contract.
+    """
     app = app_with_projects
     pid: int
 
@@ -1157,7 +1193,7 @@ def test_export_units_unsettled_persists_across_reload(app_with_projects) -> Non
         nonlocal pid
         r = await client.post("/api/projects", json={"name": "Reload check"})
         pid = r.json()["id"]
-        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        _set_part_columns(app.state.conn, pid, unit_status="unsettled", scale=None)
         first = await client.get(f"/api/projects/{pid}/model.3mf")
         # A second GET in the same session (state must persist per
         # request — never cleared by a prior read).
@@ -2418,6 +2454,20 @@ def test_part_bbox_mm_settled_returns_wdh_list(tmp_path: Path):
 
     conn, pid = _conn_with_part_bbox(
         tmp_path, bbox={"x": 20.0, "y": 10.0, "z": 5.0}, unit_status="settled"
+    )
+    row = conn.get_project(pid)
+    assert part_bbox_mm(row, conn) == [20.0, 10.0, 5.0]
+
+
+def test_part_bbox_mm_assumed_returns_wdh_list(tmp_path: Path):
+    """Issue #350: an ASSUMED part with a positive v1 bbox (the mm
+    reading written at import — scale 1.0) → the [w, d, h] mm list
+    (NOT ``None``). The settled-only gate that returned ``None`` for
+    assumed parts was the root cause of the empty-Brief bug."""
+    from d33d.part_http import part_bbox_mm
+
+    conn, pid = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 20.0, "y": 10.0, "z": 5.0}, unit_status="assumed"
     )
     row = conn.get_project(pid)
     assert part_bbox_mm(row, conn) == [20.0, 10.0, 5.0]

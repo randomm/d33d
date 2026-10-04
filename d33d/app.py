@@ -1163,7 +1163,9 @@ def create_app(
         # ``error_class`` to a sentence — ``units_unsettled`` is a new
         # class with its own copy entry). A settled import with no render
         # keeps today's render-missing 409 until sub-issue 2.
-        if row.get("part_filename") and row.get("part_unit_status") != "settled":
+        if row.get("part_filename") and row.get("part_unit_status") not in (
+            "assumed", "settled"
+        ):
             return JSONResponse(
                 status_code=409,
                 content={

@@ -4889,6 +4889,69 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
+  it("assumed: the plate returns, the unsettled caption is gone, and export is enabled (issue #350: assumed is usable, not unsettled)", async () => {
+    // A version exists so the export button's versionId is defined (the
+    // D8 gate is the only thing that can disable it once the version
+    // exists — the part is assumed, so the gate lifts per issue #350).
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+      source_kind: null,
+      },
+    ]);
+    vi.spyOn(client, "getProject").mockResolvedValue({
+      ...PROJECT,
+      storage: { repo_present: true, photo_present: null },
+    });
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      part: partStub({ unit_status: "assumed" }), // the default stub is assumed
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    const fetchSpy = vi
+      .spyOn(client, "fetchPartStl")
+      .mockResolvedValue(partBytes as ArrayBuffer);
+
+    // Use settleModelMount to create the project (the design-state effect
+    // requires a resolved project id — the App's mount-time fetch is a
+    // no-op until the project exists).
+    await settleModelMount(client);
+    // The version-created frame's design-state refetch may race the
+    // initial mount-time fetch — wait for the import report to appear.
+    await waitFor(() => {
+      expect(screen.queryByTestId("import-report")).toBeTruthy();
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByTestId("import-report")).toBeTruthy();
+    // The plate is SHOWN (an assumed part is usable — not unsettled).
+    // The SPA fix (issue #350, task-spa workstream) flips App.tsx's
+    // partUnsettled derivation to `=== "unsettled"` — the plate renders
+    // once the SPA fix lands. This test pins the expected post-fix
+    // behaviour; it is expected to FAIL until the SPA workstream lands
+    // its App.tsx change (the driver merges both workstreams together).
+    expect(screen.getByTestId("plate-backdrop")).toBeTruthy();
+    // The unsettled caption is ABSENT (the self-contradiction symptom —
+    // assumedLine above "Its size isn't known" is the bug this pins).
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
+    // The viewport data comes from part.stl (the fetch fired).
+    expect(fetchSpy).toHaveBeenCalled();
+    // Export is enabled: the version exists AND the part is assumed (the
+    // D8 gate lifts for an assumed part — issue #350).
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
   it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
     vi.spyOn(client, "getDesignState").mockResolvedValue({

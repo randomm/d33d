@@ -173,11 +173,14 @@ def part_bbox_mm(
     non-numeric axis degrades to ``None``). ``None`` while the part is
     unsettled (a file-unit bbox is not a meaningful mm measurement until
     the unit is settled — the Brief shows "waiting on units", never a
-    confident number), and ``None`` when the project has no part.
+    confident number), and ``None`` when the project has no part. An
+    "assumed" part IS a valid mm measurement (issue #350: an assumed STL
+    is read as mm — a positive scale and a v1 mm bbox written at import),
+    so its ``bbox_mm`` is the ``[w, d, h]`` mm list, not ``None``.
     """
     if row is None or conn is None or not row.get("part_filename"):
         return None
-    if row.get("part_unit_status") != "settled":
+    if row.get("part_unit_status") not in ("assumed", "settled"):
         return None
     env = part_envelope_with_bbox(row, conn)
     if env is None or env["bbox_mm"] is None:
