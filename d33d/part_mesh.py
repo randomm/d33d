@@ -30,7 +30,7 @@ from typing import Any
 import numpy as np
 import trimesh
 
-from d33d.part_holes import watertight_genus
+from d33d.part_holes import _boundary_loops, watertight_genus
 
 logger = logging.getLogger(__name__)
 
@@ -138,41 +138,6 @@ class PartFileTooLargeError(OSError):
     413 mapping, the render worker's staging) can map by TYPE instead of
     string-matching the message. The message is informative but never
     parsed. Carries ``errno = 28`` (EDQUOT)."""
-
-
-def _boundary_loops(mesh: trimesh.Trimesh) -> int:
-    """The number of boundary loops (connected open-edge components) on a
-    mesh — one loop per gap. The repair report's ``gaps_closed`` is the
-    count BEFORE repair minus AFTER (pymeshfix closes them)."""
-    edges, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
-    open_edges = edges[counts == 1]
-    if len(open_edges) == 0:
-        return 0
-    adj: dict[int, set[int]] = {i: set() for i in range(len(open_edges))}
-    pos: dict[tuple[int, int], int] = {}
-    for i, (a, b) in enumerate(open_edges):
-        pos[(int(a), int(b))] = i
-    for i, (a, b) in enumerate(open_edges):
-        j = pos.get((int(b), int(a)))
-        if j is not None:
-            adj[i].add(j)
-            adj[j].add(i)
-    seen: set[int] = set()
-    n = 0
-    for i in range(len(open_edges)):
-        if i in seen:
-            continue
-        n += 1
-        stack = [i]
-        while stack:
-            x = stack.pop()
-            if x in seen:
-                continue
-            seen.add(x)
-            for y in adj[x]:
-                if y not in seen:
-                    stack.append(y)
-    return n
 
 
 def _total_faces(loaded: Any) -> int:
@@ -438,7 +403,7 @@ def parse_and_repair(
     try:
         holes = gaps_before + watertight_genus(watertight_bodies)
     except (ArithmeticError, ValueError, TypeError, RuntimeError):
-        logger.debug(
+        logger.warning(
             "parse_and_repair: watertight_genus failed on the pre-repair "
             "merged mesh — falling back to the boundary-loop count alone",
             exc_info=True,
@@ -457,6 +422,8 @@ def parse_and_repair(
             np.asarray(fix.faces, dtype=np.int32),
             process=False,
         )
+    except PartUploadError:
+        raise
     except Exception as e:
         raise PartUploadError(f"repair failed: {e}") from e
 

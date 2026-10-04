@@ -17,9 +17,9 @@ from typing import Any
 
 from fastapi import Request
 
-logger = logging.getLogger(__name__)
-
 from d33d import db as db_mod
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Upload bounds (committed by the issue spec)

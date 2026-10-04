@@ -682,6 +682,39 @@ def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     assert report["hole_count"] == 4, f"genus failure falls back to gaps: {report}"
 
 
+def test_part_upload_error_in_repair_block_propagates_verbatim(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch
+):
+    """Issue #351 regression: a ``PartUploadError`` raised INSIDE the repair
+    try-block (pymeshfix's repair step) propagates with its ORIGINAL message
+    — the ``except PartUploadError: raise`` passthrough — NOT wrapped as
+    ``PartUploadError("repair failed: …")``. The 422 mapping at the route
+    consumes the type, but the original message is what the logs carry.
+    ``parse_and_repair`` is driven directly (synchronously) with the
+    in-function ``pymeshfix`` import monkeypatched: a valid STL is loaded
+    for real, then ``_pmf.MeshFix.repair`` raises the PartUploadError."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    mesh = trimesh.creation.box(extents=[20, 20, 20])
+    data = _stl_bytes_from_mesh(mesh)
+
+    import pymeshfix  # the real module; the monkeypatch replaces its MeshFix
+
+    class _BoomyFix:
+        def __init__(self, *args, **kwargs):
+            raise part_mesh_mod.PartUploadError("boom in repair")
+
+    monkeypatch.setattr(pymeshfix, "MeshFix", _BoomyFix)
+
+    with pytest.raises(part_mesh_mod.PartUploadError) as excinfo:
+        part_mesh_mod.parse_and_repair(data, "stl")
+    # The ORIGINAL message survives verbatim — no "repair failed: " prefix.
+    assert str(excinfo.value) == "boom in repair"
+    assert "repair failed" not in str(excinfo.value)
+
+
 def test_repair_report_two_body(app_with_projects):
     """two_body_multisolid.stl: 2 bodies."""
     data = _stl_bytes(FIXTURES / "two_body_multisolid.stl")

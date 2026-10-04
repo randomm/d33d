@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import numpy as np
 import trimesh
 
 #: Issue #351 (operator decision 2) — the honest no-hole reply TEMPLATE:
@@ -109,6 +110,43 @@ def watertight_genus(components: list[trimesh.Trimesh]) -> int:
             g = (2 - int(body.euler_number)) // 2
             genus += max(0, g)
     return genus
+
+
+def _boundary_loops(mesh: trimesh.Trimesh) -> int:
+    """The number of boundary loops (connected open-edge components) on a
+    mesh — one loop per gap. The repair report's ``gaps_closed`` is the
+    count BEFORE repair minus AFTER (pymeshfix closes them). The OPEN-hole
+    half of ``d33d.part_mesh``'s ``hole_count`` (``gaps_before + genus``),
+    measured on the PRE-REPAIR merged mesh."""
+    edges, counts = np.unique(mesh.edges_sorted, axis=0, return_counts=True)
+    open_edges = edges[counts == 1]
+    if len(open_edges) == 0:
+        return 0
+    adj: dict[int, set[int]] = {i: set() for i in range(len(open_edges))}
+    pos: dict[tuple[int, int], int] = {}
+    for i, (a, b) in enumerate(open_edges):
+        pos[(int(a), int(b))] = i
+    for i, (a, b) in enumerate(open_edges):
+        j = pos.get((int(b), int(a)))
+        if j is not None:
+            adj[i].add(j)
+            adj[j].add(i)
+    seen: set[int] = set()
+    n = 0
+    for i in range(len(open_edges)):
+        if i in seen:
+            continue
+        n += 1
+        stack = [i]
+        while stack:
+            x = stack.pop()
+            if x in seen:
+                continue
+            seen.add(x)
+            for y in adj[x]:
+                if y not in seen:
+                    stack.append(y)
+    return n
 
 
 __all__ = [
