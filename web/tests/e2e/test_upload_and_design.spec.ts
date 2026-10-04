@@ -134,7 +134,9 @@ test("happy path: send a message → upload photo → settle", async ({ page }) 
   await expect(page.getByTestId("photo-preview")).toBeVisible({
     timeout: 10_000,
   });
-  await expect(page.getByText("📎 Attach reference photo")).toHaveCount(0);
+  // Issue #347: the 📎 glyph is gone — the prompt is the deck's
+  // copy.partUpload.photoAttachLine, text-only.
+  await expect(page.getByText("Attach reference photo")).toHaveCount(0);
 
   // --- Settle -------------------------------------------------------------
   // The validation pane shows the real validation state or nothing — no

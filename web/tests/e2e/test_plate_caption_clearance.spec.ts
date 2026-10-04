@@ -25,9 +25,10 @@
  * bottom + 8px ≤ caption top) — both are clearances. Asserting one fixed
  * order would false-fail a re-arrangement that still clears. The invariant
  * the ticket protects is "no intersection AND ≥ 8px between the boxes",
- * and gap = max(0, …) is exactly that: gap ≥ MIN_CLEARANCE_PX passes
- * iff the boxes are separated by at least 8px in either order, and
- * intersects fail with gap 0.
+ * and gap = max(0, captionTop − btnBottom, btnTop − captionBottom) is
+ * exactly that: gap ≥ MIN_CLEARANCE_PX passes iff the boxes are separated
+ * by at least 8px in either order, and intersects (or touch) fail with
+ * gap 0.
  *
  * The "both boxes present" precondition (a distinct failure, not a
  * geometric one): a missing plate-caption means the envelope fetch
@@ -123,7 +124,8 @@ for (const { w, h } of VIEWPORTS) {
     // positive value, if any, of the space between the two boxes.
     const gap = Math.max(
       0,
-      Math.max(captionBottom - btnBottom, btnBottom - captionTop),
+      captionTop - btnBottom,
+      btnTop - captionBottom,
     );
 
     // No intersection AND ≥ MIN_CLEARANCE_PX of separation — measured in
