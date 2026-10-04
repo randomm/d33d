@@ -158,16 +158,19 @@ def _is_bare_affirmation_no_offer(
     already returned None upstream) — lets the guard fire. A fill-recut
     row, while present, is always live (it is consumed by its own
     accept/decline path before this guard runs); a #250 row is live
-    ONLY while its ``version_id`` is still the project's latest version.
+    ONLY while its ``version_id`` is still the project's latest version. The
+    liveness check is the single :func:`d33d.confirm_offer.is_live_param_offer`
+    predicate — the same rule the offer pre-route applies via
+    ``is_pending_offer_acceptance``.
     """
+    from d33d.confirm_offer import is_live_param_offer
+
     offer = app.state.versions.get_pending_offer(project_id)
-    if offer is not None and offer.get("kind") != "fill_recut":
-        # The #250 param shape: live only while its version is latest
-        # (the caller's read — this guard performs no second read).
-        if latest is not None and latest.get("id") == offer.get("version_id"):
-            return False
-    elif offer is not None:
-        # A live fill-recut offer — handled by the fill-recut pre-route.
+    if offer is not None and (
+        offer.get("kind") == "fill_recut" or is_live_param_offer(offer, latest)
+    ):
+        # A live offer of either shape (param or fill-recut) — its own
+        # pre-route handles it; the guard never steals that acceptance.
         return False
     return _is_clean_affirmation(message)
 
@@ -589,6 +592,8 @@ def create_projects_router() -> APIRouter:
         # stale #250 offer (a newer version superseded it) must be
         # treated as "no live offer", which is the same
         # ``version_id != latest`` check the offer pre-route applies.
+        # A fresh read is correct here: the offer pre-route's read ran
+        # first in this turn and no route in between creates versions.
         if _is_bare_affirmation_no_offer(
             app, project_id, body.message, app.state.versions.latest_version(project_id)
         ):

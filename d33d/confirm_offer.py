@@ -96,6 +96,7 @@ __all__ = [
     "CONFIRMED_VALUE_TOLERANCE",
     "ack_sentence",
     "format_param_value",
+    "is_live_param_offer",
     "is_pending_offer_acceptance",
     "mm_formatted",
     "mm_value_str",
@@ -718,6 +719,36 @@ def ack_sentence(entry: dict[str, Any]) -> str:
     return f"Got it — {label} stays {value_str}."
 
 
+def is_live_param_offer(
+    offer: dict[str, Any] | None,
+    latest: dict[str, Any] | None,
+) -> bool:
+    """The single "this #250 param offer is still LIVE" predicate.
+
+    True iff ``offer`` is a pending #250 param offer (NOT a fill-recut
+    offer — those are live for their whole lifetime and are governed by
+    their own accept/decline path) AND its ``version_id`` still equals
+    the project's current latest version id (a newer version supersedes
+    the offer — a stale offer lapses).
+
+    Deliberately NOT included: the offered value being unchanged on the
+    latest version — that check needs the design-state block (not the
+    raw version row) and lives in the offer-acceptance pre-route
+    (``d33d.projects._confirm_offer_route``). The no-offer guard's
+    contract is "no offer that a yes COULD accept": a stale offer is
+    not acceptable (this predicate); a value-moved offer is not
+    acceptable either (the pre-route's block check) — the pre-route
+    runs first on every turn, so by the time the guard runs, any offer
+    its own check lapses has already returned None upstream. The
+    value check therefore stays out of "live" and in exactly one
+    place: the pre-route."""
+    if offer is None or latest is None:
+        return False
+    if offer.get("kind") == "fill_recut":
+        return False
+    return offer.get("version_id") == latest.get("id")
+
+
 def is_pending_offer_acceptance(
     message: str,
     offer: dict[str, Any] | None,
@@ -726,18 +757,17 @@ def is_pending_offer_acceptance(
     """True iff the user's message is a CLEAN AFFIRMATION (the issue
     #249 heuristic, ``_is_clean_affirmation`` — "yes" yes; "yes but make
     it 2 mm" no — a change request, a question, or a hedge is NOT an
-    acceptance) AND a pending offer is LIVE: the offer's version is the
-    project's CURRENT LATEST version (a newer version supersedes the
-    offer — the stale offer lapses and the message routes normally).
+    acceptance) AND a pending #250 offer is LIVE (the single
+    :func:`is_live_param_offer` predicate — the offer's version is the
+    project's current latest version; a newer version supersedes the
+    offer, the stale offer lapses and the message routes normally).
 
     The value-unchanged check (the param must still carry the offered
     value) happens in the caller (it needs the design-state block, not
     the raw row)."""
     from d33d.dimension_protocol import _is_clean_affirmation
 
-    if offer is None or latest is None:
-        return False
-    if offer.get("version_id") != latest.get("id"):
+    if not is_live_param_offer(offer, latest):
         return False
     return _is_clean_affirmation(message)
 

@@ -395,29 +395,26 @@ _REQUEST_WHAT_ABOUT_RE = re.compile(
 
 def carries_request_cue(message: str) -> bool:
     """True iff the message carries a design/request cue: any stage-1
-    imperative cue (the :data:`_ALL_IMPERATIVE_WORDS` union scan, which
-    already includes "make"/"set"/"add"/…), any multi-word imperative
-    form ("can you make", …), one of :data:`_REQUEST_CUE_WORDS` ("design",
-    "create", "build", "print", "get", "hold"/"holds" — the request verbs
-    the stage-1 scan lacks, issue #349), or a "what about" / "how about"
-    proposal form. Used ONLY by the no-version guard: a message with any
-    such cue that the no-version branch would otherwise answer "nothing
-    built yet" is a request in question form, and it starts the design
-    loop instead. The comparison-form carve-out deliberately does NOT
-    apply here — a design never exists at this point, so a "taller than"
-    form is not a comparison and still routes to the loop (the stage-1
-    carve-out's purpose — keeping genuine comparisons answerable — is
-    moot)."""
+    imperative cue (the :data:`_ALL_IMPERATIVE_WORDS` union, including
+    "make"/"set"/"add"/…), any multi-word imperative form ("can you
+    make", …), one of :data:`_REQUEST_CUE_WORDS` ("design", "create",
+    "build", "print", "get", "hold"/"holds"), or a "what about" /
+    "how about" proposal form. Used ONLY by the no-version guard.
+    The comparison-form carve-out deliberately does NOT apply here —
+    a design never exists at this point, so a "taller than" form is
+    not a comparison and still routes to the loop."""
     m = message.strip()
     if not m:
         return False
-    if _IMPERATIVE_RE.search(m) is not None:
-        return True
-    if _MULTIWORD_IMPERATIVE_RE.search(m) is not None:
-        return True
-    if _REQUEST_WHAT_ABOUT_RE.search(m) is not None:
-        return True
-    return _REQUEST_CUE_RE.search(m) is not None
+    return any(
+        rx.search(m) is not None
+        for rx in (
+            _IMPERATIVE_RE,
+            _MULTIWORD_IMPERATIVE_RE,
+            _REQUEST_CUE_RE,
+            _REQUEST_WHAT_ABOUT_RE,
+        )
+    )
 
 
 def is_interrogative(message: str) -> bool:
