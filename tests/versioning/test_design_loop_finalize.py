@@ -6441,27 +6441,6 @@ def test_production_closure_unset_env_var_rides_the_result(
 # ---------------------------------------------------------------------------
 
 
-def _swap_to_file_db(app, tmp_path: Path) -> None:
-    """Swap an ":memory:" app DB for a tmp_path file DB (issue #355).
-
-    The wrapper writes through a short-lived connection to
-    ``app.state.db_path`` (operator decision 3) — a short-lived
-    ":memory:" connection is an empty database, so the fixture's
-    DB is replaced with a file-backed one (the schema is applied by
-    ``db.connect``) so the wrapper's rows land in a file the tests
-    read back from below.
-    """
-    db_path = app.state.db_path
-    if not (isinstance(db_path, str) and db_path == ":memory:"):
-        return
-    real_path = tmp_path / "real.sqlite3"
-    app.state.db_path = real_path
-    # ``app.state.conn`` is NOT touched here: the ``run_async``
-    # lifespan re-creates it from ``app.state.db_path`` (the file) at
-    # entry — the in-lifespan writer and the post-lifespan reads use
-    # the same file-backed connection the lifespan creates.
-
-
 def _write_request_logs_yaml(tmp_path: Path, key_env: str = "SK_355_KEY") -> Path:
     p = tmp_path / "models355.yaml"
     p.write_text(
@@ -6512,16 +6491,37 @@ def _stub_production_closure_deps(monkeypatch, app, tmp_path: Path, llm):
     monkeypatch.setattr(_dl_mod, "make_llm_fn", lambda cat, f, c: llm)
     monkeypatch.setattr(_dl_mod, "renderer_is_available", lambda: True)
     monkeypatch.setattr(_dl_mod, "default_image_check", lambda: None)
-    # The wrapper writes through a short-lived connection to
-    # ``app.state.db_path`` (operator decision 3). The versioning
-    # fixture's app is ":memory:"-backed, and a short-lived
-    # ":memory:" connection is an empty database — so the fixture's
-    # DB is swapped to a tmp_path file BEFORE the ``run_async``
-    # lifespan (the lifespan then re-creates ``state.conn`` from
-    # ``state.db_path`` — the file — so the in-lifespan writer and
-    # the post-lifespan reads use the same database).
-    _swap_to_file_db(app, tmp_path)
     return p
+
+
+# The SCAD tool-calls channel (the T0 protocol): the loop's
+# ``_scad_from_result`` extracts the SCAD verbatim — no content-fence
+# heuristics, no real OpenSCAD compile (the render is stubbed via the
+# test's ``render_fn``).
+_SCAD_TCS = ({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},)
+
+
+def _make_llm(
+    *,
+    prompt_hash: str,
+    usage: dict[str, int] | None = None,
+    status: str = "ok",
+):
+    from d33d.design_llm import LLMResult
+
+    class _LLM:
+        async def __call__(self, role, messages, system):
+            return LLMResult(
+                content="",
+                tool_calls=_SCAD_TCS,
+                prompt_hash=prompt_hash,
+                tier="t0",
+                status=status,
+                request_body={},
+                usage=usage if usage is not None else {},
+            )
+
+    return _LLM()
 
 
 def _ok_render() -> RenderResult:
@@ -6547,19 +6547,15 @@ def test_design_path_llm_calls_write_one_request_log_row_each(
     from d33d.app import _build_production_design_loop
     from d33d.design_llm import LLMResult
 
-    # The SCAD rides the tool-calls channel (the T0 protocol) so the
-    # loop's ``_scad_from_result`` extracts it verbatim — no content-fence
-    # heuristics, no real OpenSCAD compile (the render is stubbed via the
-    # test's ``render_fn``).
-    _SCAD_TCS = ({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},)
-
     class _LLM:
-        def __init__(self) -> None:
-            self.n = 0
+        n = 0
 
         async def __call__(self, role, messages, system):
-            self.n += 1
-            if self.n >= 2:
+            # Async stub: the wrapper awaits the callable's result, and
+            # the loop's ``_call`` awaits coroutine results too — so
+            # ``__call__`` is ``async`` and returns the ``LLMResult``.
+            _LLM.n += 1
+            if _LLM.n >= 2:
                 return LLMResult(
                     content="",
                     tool_calls=_SCAD_TCS,
@@ -6569,8 +6565,9 @@ def test_design_path_llm_calls_write_one_request_log_row_each(
                     request_body={},
                     usage={"prompt_tokens": 10, "completion_tokens": 5},
                 )
+            # No tool calls — blank SCAD, fail-fast.
             return LLMResult(
-                content="",  # no tool calls — blank SCAD, fail-fast
+                content="",
                 tool_calls=(),
                 prompt_hash="x" * 64,
                 tier="t0",
@@ -6597,7 +6594,7 @@ def test_design_path_llm_calls_write_one_request_log_row_each(
         )
 
     run_async(app_with_versions, _call)
-    n = llm.n
+    n = _LLM.n
     assert n >= 2, f"expected at least 2 LLM calls, got {n}"
     from d33d.db import connect as _connect355
 
@@ -6674,6 +6671,56 @@ def test_design_path_sender_error_row_and_reraise(
     assert row["provider"] == "p"
 
 
+def test_design_path_write_uses_new_connection_not_app_state_conn(
+    app_with_versions, tmp_path, monkeypatch
+) -> None:
+    """The finalize path (the thread that created ``app.state.conn``) still
+    writes through a NEW short-lived connection — ``app.state.conn`` is
+    never touched (operator decision 3: ALWAYS a short-lived
+    ``db.connect(db_path)`` handle). Proven by closing
+    ``app.state.conn`` before the loop runs: the row is written anyway."""
+    from d33d.app import _build_production_design_loop
+    from d33d.db import connect as _connect355
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+
+    # The app's own handle is seeded (the fresh app has none) and closed —
+    # a writer that touched ``app.state.conn`` would raise
+    # ``sqlite3.ProgrammingError`` (closed handle) and its warning would
+    # swallow the row.
+    _app_conn = _connect355(app_with_versions.state.db_path)
+    _app_conn.close()
+    app_with_versions.state.conn = _app_conn
+
+    closure = _build_production_design_loop()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    run_async(app_with_versions, _call)
+    _reader = _connect355(app_with_versions.state.db_path)
+    rows = _reader._conn.execute(
+        "SELECT * FROM request_logs WHERE role = 'design' ORDER BY id"
+    ).fetchall()
+    rows = [dict(r) for r in rows]
+    assert len(rows) >= 1, (
+        "row missing — the write must go through a NEW short-lived "
+        f"connection, not the closed app.state.conn: {rows}"
+    )
+    assert rows[0]["prompt_hash"] == "h" * 64
+
+
 def test_design_path_log_write_failure_warns_without_failing_loop(
     app_with_versions, tmp_path, monkeypatch, caplog
 ) -> None:
@@ -6683,21 +6730,8 @@ def test_design_path_log_write_failure_warns_without_failing_loop(
 
     import d33d.db as db_mod
     from d33d.app import _build_production_design_loop
-    from d33d.design_llm import LLMResult
 
-    class _LLM:
-        async def __call__(self, role, messages, system):
-            return LLMResult(
-                content="",
-                tool_calls=({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},),
-                prompt_hash="h" * 64,
-                tier="t0",
-                status="ok",
-                request_body={},
-                usage={},
-            )
-
-    llm = _LLM()
+    llm = _make_llm(prompt_hash="h" * 64)
     _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
 
     real_connect = db_mod.connect
@@ -6734,8 +6768,18 @@ def test_design_path_log_write_failure_warns_without_failing_loop(
     # the gate decided (pass or exhausted — either way, no crash).
     assert result.status in ("pass", "exhausted")
     warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
-    assert any("request_logs" in r.getMessage() for r in warns), (
-        f"expected a request_logs warning, got {[r.getMessage() for r in warns]}"
+    write_warns = [r for r in warns if "failed to write row" in r.getMessage()]
+    assert write_warns, (
+        f"expected a failed-write request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    # The exception text rides the warning (``exc_info=True`` — the
+    # traceback lands in ``LogRecord.exc_text``, not the message).
+    assert any(
+        r.exc_text and "db failure" in r.exc_text for r in write_warns
+    ), (
+        "expected the write-failure exception text in the warning "
+        "(exc_info=True)"
     )
 
 
@@ -6745,23 +6789,10 @@ def test_design_path_row_never_contains_provider_key(
     """A sentinel provider key in the resolved model's provider appears in
     NO column of any written request_logs row."""
     from d33d.app import _build_production_design_loop
-    from d33d.design_llm import LLMResult
 
     sentinel = _KEY_SENTINEL
 
-    class _LLM:
-        async def __call__(self, role, messages, system):
-            return LLMResult(
-                content="",
-                tool_calls=({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},),
-                prompt_hash="h" * 64,
-                tier="t0",
-                status="ok",
-                request_body={},
-                usage={},
-            )
-
-    llm = _LLM()
+    llm = _make_llm(prompt_hash="h" * 64)
     _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
     app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
     closure = _build_production_design_loop()
@@ -6802,21 +6833,8 @@ def test_design_path_write_from_non_main_thread_succeeds(
     to the main thread, is NOT used for the cross-thread write)."""
     from d33d.app import _build_production_design_loop
     from d33d.db import connect as _connect355
-    from d33d.design_llm import LLMResult
 
-    class _LLM:
-        async def __call__(self, role, messages, system):
-            return LLMResult(
-                content="",
-                tool_calls=({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},),
-                prompt_hash="h" * 64,
-                tier="t0",
-                status="ok",
-                request_body={},
-                usage={},
-            )
-
-    llm = _LLM()
+    llm = _make_llm(prompt_hash="h" * 64)
     _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
     app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
 
@@ -6867,24 +6885,9 @@ def test_chat_path_rows_carry_the_chat_projects_id(
     carries the CHAT project's id, not the finalize project's (operator
     decision 1: rows carry the real project id from the design request)."""
     from d33d.app import _build_production_design_loop
-    from d33d.design_llm import LLMResult
     from d33d.design_loop_events import run_design_loop_with_events
 
-    _SCAD_TCS = ({"function": {"arguments": {"scad": "cube([10, 10, 10]);"}}},)
-
-    class _LLM:
-        async def __call__(self, role, messages, system):
-            return LLMResult(
-                content="",
-                tool_calls=_SCAD_TCS,
-                prompt_hash="c" * 64,
-                tier="t0",
-                status="ok",
-                request_body={},
-                usage={},
-            )
-
-    llm = _LLM()
+    llm = _make_llm(prompt_hash="c" * 64)
     _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
     app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
     app_with_versions.state.run_design_loop = _build_production_design_loop()

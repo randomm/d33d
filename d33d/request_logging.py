@@ -8,8 +8,9 @@ run on a worker thread (``asyncio.to_thread`` in
 ``d33d.design_loop_events``), and ``app.state.conn`` is a
 ``check_same_thread=True`` handle: a direct call from the worker raises
 ``sqlite3.ProgrammingError`` and would silently zero every design row. So
-the write ALWAYS goes through a short-lived connection to ``db_path``
-(closed after the insert).
+the write ALWAYS goes through a short-lived ``db.connect(db_path)``
+handle — even when called on the thread that created ``app.state.conn``
+(the finalize path) — and the handle is closed in a ``finally``.
 
 The row's model fields come from ``resolve_model`` for the call's OWN role
 (a critique row carries the critique model, not the design one);
@@ -21,15 +22,9 @@ never fails the design loop.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any
 
 logger = logging.getLogger(__name__)
-
-# The thread that owns ``app.state.conn`` — created on the main thread at
-# startup / lifespan. Cached at module import (the import always runs on
-# main); stable for the process lifetime.
-_MAIN_THREAD_IDENT = threading.get_ident()
 
 
 def log_design_request(
@@ -66,15 +61,24 @@ def log_design_request(
         return
     prompt_tokens = usage.get("prompt_tokens", 0) if usage else 0
     completion_tokens = usage.get("completion_tokens", 0) if usage else 0
-    if not isinstance(prompt_tokens, int):
+    # ``bool`` is an ``int`` subclass — a True/False token count is a
+    # corrupted usage payload and lands as 0.
+    if isinstance(prompt_tokens, bool) or not isinstance(prompt_tokens, int):
         prompt_tokens = 0
-    if not isinstance(completion_tokens, int):
+    if isinstance(completion_tokens, bool) or not isinstance(completion_tokens, int):
         completion_tokens = 0
     db_path = getattr(app_state, "db_path", None)
     if db_path is None:
+        logger.warning(
+            "design request_logs: app state has no db_path — row not "
+            "written for role %r status %s",
+            role,
+            status,
+        )
         return
 
-    def _write(conn: Any) -> None:
+    conn = db_mod.connect(db_path)
+    try:
         conn.log_request(
             project_id=project_id,
             model_alias=res.entry.id,
@@ -87,52 +91,15 @@ def log_design_request(
             latency_ms=latency_ms,
             prompt_hash=prompt_hash,
         )
-
-    # The app's own handle is only safe on the thread that created it
-    # (``check_same_thread=True`` is the default): an open, same-thread,
-    # file-backed ``app.state.conn`` is reused (the question-path
-    # pattern); anything else — a cross-thread call (the design loop's
-    # worker thread), a closed/dead handle, or a ":memory:" db (whose
-    # short-lived connection would be an empty database) — takes the
-    # short-lived file connection (the operator decision's default for
-    # the design path).
-    own = getattr(app_state, "conn", None)
-    own_is_file = not (isinstance(db_path, str) and db_path == ":memory:")
-    if (
-        own is not None
-        and not own.closed
-        and own_is_file
-        and threading.get_ident() == _MAIN_THREAD_IDENT
-    ):
-        # Same thread as the connection was created on — safe.
-        try:
-            _write(own)
-        except Exception:  # noqa: BLE001 — a logging failure must
-            # never fail the design loop; the warning IS the
-            # observability.
-            logger.warning(
-                "design request_logs: failed to write row for role %r "
-                "status %s",
-                role,
-                status,
-            )
-        return
-    if not own_is_file:
-        # A ":memory:" DB the short-lived path cannot reach and the
-        # app's handle is unusable (closed / cross-thread): skip the
-        # row (test-seam-only shape — production is always
-        # file-backed).
-        return
-    conn = db_mod.connect(db_path)
-    try:
-        _write(conn)
-    except Exception:  # noqa: BLE001 — a logging failure must never
-        # fail the design loop; the warning IS the observability.
+    except Exception:
+        # A logging failure must never fail the design loop; the warning
+        # (with the exception text) IS the observability.
         logger.warning(
             "design request_logs: failed to write row for role %r "
             "status %s",
             role,
             status,
+            exc_info=True,
         )
     finally:
         try:
@@ -177,7 +144,7 @@ def make_logged_llm_fn(llm_fn: Any, app_state: Any, catalogue: Any, project_id: 
             app_state,
             catalogue,
             role,
-            status=result.status or "ok",
+            status=result.status,
             project_id=project_id,
             latency_ms=int((time.monotonic() - t0) * 1000),
             prompt_hash=getattr(result, "prompt_hash", None) or "",

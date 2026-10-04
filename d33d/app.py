@@ -1941,13 +1941,7 @@ def _build_production_design_loop():
             {"design": factory, "critique": factory},
             {"design": capability, "critique": capability},
         )
-        # The request_logs wrapper (issue #355): every design-path LLM
-        # invocation writes exactly one ``request_logs`` row — the writer
-        # and its short-lived-connection mechanics live in
-        # ``d33d.request_logging`` (the question path's
-        # ``conn.log_request`` call is the reference row shape; a
-        # ``SenderError`` writes a row with the exception's ``status``
-        # and an empty hash, then re-raises).
+        # request_logs wrapper (issue #355) — see d33d/request_logging.
         _logged_llm_fn = make_logged_llm_fn(
             llm_fn, app_state, cat, kwargs.get("project_id")
         )
