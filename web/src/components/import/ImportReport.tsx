@@ -97,6 +97,7 @@ export function ImportReport({
   const report = part.report;
   const triangles = report ? report.triangles : null;
   const bodies = report ? report.bodies : null;
+  const bodiesBefore = report ? report.bodies_before ?? null : null;
   const watertight = report ? report.watertight : null;
   const fileBbox = report ? report.bbox_file_units : null;
 
@@ -244,6 +245,20 @@ export function ImportReport({
             <span style={{ fontFamily: "var(--font-mono)" }}>
               {numberFmt.format(bodies)} {bodies === 1 ? "body" : "bodies"}
             </span>
+            {/* Issue #375: the dropped-body line — only when the report
+                carries `bodies_before` (repair dropped a body). Numbers in
+                the mono face. */}
+            {bodiesBefore !== null && (
+              <>
+                {" "}·{" "}
+                <span
+                  data-testid="import-report-bodies-after-repair"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {copy.partReport.bodiesAfterRepair(bodiesBefore, bodies)}
+                </span>
+              </>
+            )}
             {watertightLine !== null && (
               <>
                 {" "}·{" "}

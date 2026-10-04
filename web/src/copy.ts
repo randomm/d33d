@@ -1037,6 +1037,10 @@ export const partReport = {
   /** The watertight-with-gaps form: "watertight, after closing {n} small gap(s)". */
   watertightGaps: (n: number): string =>
     `watertight, after closing ${n} small gap${n === 1 ? "" : "s"}`,
+  /** Issue #375: the dropped-body line, shown only when the report carries
+   *  `bodies_before` (repair dropped a body): "N bodies → M after repair". */
+  bodiesAfterRepair: (before: number, after: number): string =>
+    `${before} bod${before === 1 ? "y" : "ies"} → ${after} after repair`,
 } as const;
 
 /**
