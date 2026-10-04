@@ -110,7 +110,16 @@ describe("design-state refetch retry timer (issue #354)", () => {
     //                   call 2 (retry, if it fires) resolves → would
     //                   increment the count to 2.
     // After unmount + 400 ms: assert count === 1.
-    const project = { id: 1, name: "t", storage: { present: false, git: false } } as unknown as Project;
+    const project: Project = {
+      id: 1,
+      name: "t",
+      git_repo_path: "/tmp/proj-1",
+      tags: [],
+      notes: "",
+      source_photo_path: null,
+      created_at: "2026-01-01T00:00:00Z",
+      storage: { repo_present: false, photo_present: null },
+    };
     vi.spyOn(client, "createProject").mockResolvedValue(project);
     // NO version-created frame — only onDone. This prevents the second
     // refetch that would bump the seq and make the retry stale-guarded.
@@ -163,7 +172,16 @@ describe("design-state refetch retry timer (issue #354)", () => {
     //
     // Under mutation (c) [both removed]: same as (a) — the seq guard still
     // protects. The single-refetch test above is the one that catches (c).
-    const projectA = { id: 1, name: "t", storage: { present: false, git: false } } as unknown as Project;
+    const projectA: Project = {
+      id: 1,
+      name: "t",
+      git_repo_path: "/tmp/proj-1",
+      tags: [],
+      notes: "",
+      source_photo_path: null,
+      created_at: "2026-01-01T00:00:00Z",
+      storage: { repo_present: false, photo_present: null },
+    };
     vi.spyOn(client, "createProject").mockResolvedValue(projectA);
     vi.spyOn(client, "streamEvents").mockImplementation(async (_id, handlers) => {
       handlers.onProgress("version-created", { step: "version-created", version_id: 3 });
