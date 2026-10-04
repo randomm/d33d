@@ -1634,12 +1634,14 @@ export default function App({ client }: AppProps) {
   // Issue #352 (operator decision 2): the "I read…" import report is a
   // full viewport overlay while the units are unsettled (it carries the
   // settle controls, so it stays in place until the part is settled). Once
-  // the units are settled or assumed — or the first design turn has
-  // produced a version (versions.length > 1) on an IMPORT-derived project
-  // (v1's source_kind is "import" — the only v1 that ever has a file-unit
-  // bbox the numeric gate protects) — the card collapses to its compact
-  // line. The full report stays reachable from the Brief's "The part you
-  // brought" zone (the note + W/D/H rows).
+  // the first design turn has produced a version (versions.length > 1 — v1
+  // is the import, so any further version means the design loop ran) on an
+  // IMPORT-derived project (v1's source_kind is "import" — the only v1
+  // that ever has a file-unit bbox the numeric gate protects), the card
+  // collapses to its compact line. The full report stays reachable from
+  // the Brief's "The part you brought" zone (the note + W/D/H rows).
+  // While a settled/assumed part still has no design version, the card
+  // stays full (it carries the unit-change affordance for an assumed part).
   const importReportCollapsed =
     isScreen2 &&
     designStatePart !== null &&
