@@ -20,7 +20,7 @@
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, act, cleanup } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect } from "react";
 import App from "../../App";
@@ -5008,6 +5008,92 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     // Export is ENABLED for an assumed part (the D8 gate lifts — issue
     // #350: only an unsettled part 409s with units_unsettled).
     expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
+  it("collapse truth table: settled/1 → collapsed; assumed/1, unsettled/1, assumed/2 → full (issue #352 predicate)", async () => {
+    const oneImport = [
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+        source_kind: "import",
+      },
+    ] as VersionTimelineEntry[];
+    const twoImport = [
+      oneImport[0],
+      { ...oneImport[0], id: 2, name: "v2", source_kind: null },
+    ];
+    const cases = [
+      { unit_status: "settled", versions: oneImport, collapsed: true },
+      { unit_status: "assumed", versions: oneImport, collapsed: false },
+      {
+        unit_status: "unsettled",
+        versions: oneImport,
+        collapsed: false,
+      },
+      { unit_status: "assumed", versions: twoImport, collapsed: true },
+    ] as const;
+    for (const c of cases) {
+      const clientCase = makeClient();
+      vi.spyOn(clientCase, "listVersions").mockResolvedValue(
+        [...c.versions],
+      );
+      vi.spyOn(clientCase, "getDesignState").mockResolvedValue({
+        entries: [],
+        history_missing: false,
+        part: partStub({
+          unit_status: c.unit_status,
+          ...(c.unit_status === "unsettled"
+            ? { unit: null, scale: null }
+            : {}),
+        }),
+      } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+      vi.spyOn(clientCase, "fetchPartStl").mockResolvedValue(
+        partBytes as ArrayBuffer,
+      );
+      // The hand-driven upload POSTs through this — mock the response so
+      // the usePartUpload success path fires the design-state refetch.
+      vi.spyOn(clientCase, "uploadPart").mockResolvedValue({
+        id: 1,
+        version_id: 1,
+        part: partStub({
+          unit_status: c.unit_status,
+          ...(c.unit_status === "unsettled"
+            ? { unit: null, scale: null }
+            : {}),
+        }),
+      } as Awaited<ReturnType<ApiClient["uploadPart"]>>);
+      render(<App client={clientCase} />);
+      // Drive the upload path by hand (the part card's own file input is
+      // not stubable here) so the ensure-project latch fires, the part
+      // upload succeeds (a mocked POST), and the design-state refetch
+      // mounts the report from the mocked envelope.
+      const fileInput = screen.getByTestId("part-file-input");
+      fireEvent.change(fileInput, {
+        target: {
+          files: [new File([new Uint8Array(4)], "box.stl")],
+        },
+      });
+      const report = await waitFor(() => {
+        const el = screen.queryByTestId("import-report");
+        if (!el) throw new Error("not mounted yet");
+        return el;
+      });
+      expect(report.getAttribute("data-collapsed"), `case ${c.unit_status}/${c.versions.length}`).toBe(
+        c.collapsed ? "true" : null,
+      );
+      cleanup();
+    }
   });
 
   it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {

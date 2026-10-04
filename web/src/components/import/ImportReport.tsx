@@ -24,8 +24,7 @@
  * the mono face; prose in the UI face.
  */
 
-import { useState } from "react";
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { ApiClient, ApiError, type PartReportInfo } from "../../lib/api";
 import copy, { mm } from "../../copy";
 import { UnitChoice } from "./UnitChoice";
@@ -41,7 +40,7 @@ const GEOMETRY_COLLAPSED: CSSProperties = {
   display: "block",
   padding: 24,
 };
-const GEOMETRY_FULL: React.CSSProperties = {
+const GEOMETRY_FULL: CSSProperties = {
   inset: 0,
   display: "flex",
   alignItems: "center",
