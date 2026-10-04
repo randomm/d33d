@@ -6925,3 +6925,127 @@ def test_chat_path_rows_carry_the_chat_projects_id(
     for row in rows:
         assert row["project_id"] == 1, f"row carries wrong project: {row}"
         assert row["prompt_hash"] == "c" * 64
+
+
+def test_design_path_connect_failure_warns_without_failing_loop(
+    app_with_versions, tmp_path, monkeypatch, caplog
+) -> None:
+    """A ``db.connect`` failure (e.g. an unwritable path raising
+    ``sqlite3.OperationalError``) is caught like the write failures:
+    the loop completes, a warning with ``exc_info`` is logged, and zero
+    rows are written — the connect lives INSIDE the guarded block, so
+    it can never escape into the design loop."""
+    import asyncio
+    import logging as _logging
+
+    import d33d.db as db_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.db import connect as _connect355
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+
+    # Seed the project BEFORE the connect patch goes live (the connect
+    # below is the only thing that will raise in the loop).
+    _db = _connect355(app_with_versions.state.db_path)
+    _db.create_project(name="connect-failure project")
+    pid = _db.get_project(1)["id"]
+
+    # Patch connect to raise.
+    def _raising_connect(path):
+        raise sqlite3.OperationalError("unable to open database file")
+
+    monkeypatch.setattr(db_mod, "connect", _raising_connect)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+    closure = _build_production_design_loop()
+
+    async def _call():
+        return await closure(
+            app=app_with_versions,
+            project_id=pid,
+            photo="data:image/png;base64,x",
+            stated_dims=(10.0, 10.0, 10.0),
+            render_fn=lambda scad, defines: _ok_render(),
+            request="make a box",
+        )
+
+    with caplog.at_level(_logging.WARNING):
+        result = asyncio.run(_call())
+    # The connect failure is the ONLY thing that failed: the loop ran
+    # normally to its gate decision (no crash, no fabricated row).
+    assert result.status in ("pass", "exhausted")
+    warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    write_warns = [r for r in warns if "failed to write row" in r.getMessage()]
+    assert write_warns, (
+        f"expected a connect-failure request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    # The exception text rides the warning (``exc_info=True`` — the
+    # traceback lands in ``LogRecord.exc_text``, not the message).
+    assert any(
+        r.exc_text and "unable to open database file" in r.exc_text
+        for r in write_warns
+    ), (
+        "expected the connect-failure exception text in the warning "
+        "(exc_info=True)"
+    )
+    # Zero rows: the connection never existed, so nothing was written.
+    # Read through the handle opened BEFORE the patch went live.
+    rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
+    assert rows == [], f"expected no rows on a connect failure, got {rows}"
+
+
+def test_design_path_role_resolution_failure_warning_carries_exc_info(
+    app_with_versions, tmp_path, monkeypatch, caplog
+) -> None:
+    """A role-resolution failure (the wrapper's ``resolve_model`` raises
+    ``CatalogueError`` — the role is missing from the catalogue's roles
+    map) warns with ``exc_info=True``: the traceback rides the warning,
+    so the misconfiguration is diagnosable from the log alone. Proven
+    via the wrapper's own ``_logged_llm_fn``: the closure's pre-flight
+    short-circuits to ``model_unconfigured`` before any loop call, so
+    the test drives the wrapper directly with a role its catalogue
+    cannot resolve."""
+    import logging as _logging
+
+    from d33d.config.catalogue import load_catalogue
+    from d33d.request_logging import make_logged_llm_fn
+
+    llm = _make_llm(prompt_hash="h" * 64)
+    _stub_production_closure_deps(monkeypatch, app_with_versions, tmp_path, llm)
+    app_with_versions.state.failures_jsonl_path = str(tmp_path / "failures.jsonl")
+
+    # Load the catalogue from the real file (the stub closure wrote it via
+    # ``_stub_production_closure_deps``). The unresolvable role is one the
+    # catalogue has no entry for, which makes ``resolve_model`` raise
+    # ``CatalogueError``.
+    cat = load_catalogue(app_with_versions.state.catalogue_path)
+
+    from d33d.db import connect as _connect355
+
+    _db = _connect355(app_with_versions.state.db_path)
+    _db._conn.execute("DELETE FROM request_logs")
+    _db._conn.commit()
+
+    logged = make_logged_llm_fn(llm, app_with_versions, cat, 1)
+
+    async def _call(_client):
+        return await logged("unresolvable_role", [], None)
+
+    with caplog.at_level(_logging.WARNING):
+        result = run_async(app_with_versions, _call)
+    # The llm behaviour is unchanged: the call succeeded and returned
+    # the LLM result — only the row was skipped.
+    assert result.status == "ok"
+    warns = [r for r in caplog.records if r.levelno >= _logging.WARNING]
+    resolve_warns = [r for r in warns if "could not resolve role" in r.getMessage()]
+    assert resolve_warns, (
+        f"expected a role-resolution request_logs warning, got "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    assert any(r.exc_text and r.exc_text for r in resolve_warns), (
+        "expected the resolution-failure exception in the warning "
+        "(exc_info=True)"
+    )
+    rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
+    assert rows == [], f"expected no rows on a resolution failure, got {rows}"

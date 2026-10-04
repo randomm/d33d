@@ -47,16 +47,17 @@ def log_design_request(
     land as zero tokens).
     """
     from d33d import db as db_mod
-    from d33d.config.catalogue import ResolutionError
+    from d33d.config.catalogue import CatalogueError, ResolutionError
     from d33d.config.resolve import resolve_model
 
     try:
         res = resolve_model(catalogue, role)
-    except (ResolutionError, KeyError, AttributeError):
+    except (ResolutionError, CatalogueError, KeyError, AttributeError):
         logger.warning(
             "design request_logs: could not resolve role %r — row "
             "not written",
             role,
+            exc_info=True,
         )
         return
     prompt_tokens = usage.get("prompt_tokens", 0) if usage else 0
@@ -77,8 +78,8 @@ def log_design_request(
         )
         return
 
-    conn = db_mod.connect(db_path)
     try:
+        conn = db_mod.connect(db_path)
         conn.log_request(
             project_id=project_id,
             model_alias=res.entry.id,
