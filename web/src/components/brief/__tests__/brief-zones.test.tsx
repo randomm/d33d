@@ -77,6 +77,25 @@ const unsettledPart = (): PartReportInfo => ({
   options: null,
 });
 
+/** The assumed part fixture (issue #350) — a part the server read as mm
+ *  (unit_status "assumed", scale 1) with an established mm bbox. */
+const assumedPart = (): PartReportInfo => ({
+  filename: "motor-mount.stl",
+  format: "stl",
+  unit: "mm",
+  unit_status: "assumed",
+  bbox_mm: [60, 45, 80],
+  scale: 1,
+  report: {
+    triangles: 12,
+    bodies: 1,
+    watertight: true,
+    gaps_closed: 0,
+    bbox_file_units: [60, 45, 80],
+  },
+  options: null,
+});
+
 describe("BriefZones — no part (single list, no zone headers)", () => {
   it("renders the single list with NO zone headers when there is no part", () => {
     render(
@@ -106,13 +125,11 @@ describe("BriefZones — part present (two zones)", () => {
         part={settledPart()}
       />,
     );
-    // The part-zone header is present.
+    // The part-zone header is present (the literal is pinned in the
+    // design-contract test — assert it here only against copy.ts).
     expect(
       screen.getByTestId("brief-zone-part-header").textContent,
     ).toBe(copy.brief.partBroughtHeader);
-    expect(
-      screen.getByTestId("brief-zone-part-header").textContent,
-    ).toBe("The part you brought");
     // The three W/D/H part rows are present, in measured provenance.
     expect(screen.getByTestId("brief-part-row-W")).toBeTruthy();
     expect(screen.getByTestId("brief-part-row-D")).toBeTruthy();
@@ -131,6 +148,12 @@ describe("BriefZones — part present (two zones)", () => {
     expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
       copy.brief.partBroughtNote("mm"),
     );
+    // The W/D/H rows carry measured provenance (a settled part).
+    for (const axis of ["W", "D", "H"] as const) {
+      expect(
+        screen.getByTestId(`brief-part-row-${axis}`).getAttribute("data-provenance"),
+      ).toBe("measured");
+    }
   });
 
   it('"Your changes" header renders only when it has at least one row', () => {
@@ -187,6 +210,44 @@ describe("BriefZones — part present (two zones)", () => {
     }
     // The note is NOT shown (unsettled part).
     expect(screen.queryByTestId("brief-zone-part-note")).toBeNull();
+  });
+
+  it("assumed part: W/D/H rows show the mm values (not 'waiting on units') with assumed provenance + the assumed note (issue #350)", () => {
+    render(
+      <Brief
+        {...baseProps}
+        entries={[stated("rod_bore", 34)]}
+        part={assumedPart()}
+      />,
+    );
+    // The part zone is present (the part block exists).
+    expect(screen.getByTestId("brief-zone-part-header")).toBeTruthy();
+    // Each W/D/H row shows the mm value from `part.bbox_mm` — never the
+    // waiting control (the empty-Brief symptom QA §4 item 1).
+    expect(
+      screen.getByTestId("brief-part-row-W").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("60.0\u202Fmm");
+    expect(
+      screen.getByTestId("brief-part-row-D").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("45.0\u202Fmm");
+    expect(
+      screen.getByTestId("brief-part-row-H").querySelector("[data-testid='brief-value']")?.textContent,
+    ).toBe("80.0\u202Fmm");
+    // Assumed provenance on the rows (not measured — the mm reading is
+    // assumed, not confirmed).
+    for (const axis of ["W", "D", "H"] as const) {
+      expect(
+        screen.getByTestId(`brief-part-row-${axis}`).getAttribute("data-provenance"),
+      ).toBe("assumed");
+    }
+    // The assumed note (issue #350, operator decision 3) — not the
+    // settled "you confirmed" note.
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      copy.brief.partBroughtNoteAssumed,
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      "Read as millimetres — if it's in inches, tell me.",
+    );
   });
 
   it("the part rows survive the MAX_LIST_ROWS collapse (never folded)", () => {

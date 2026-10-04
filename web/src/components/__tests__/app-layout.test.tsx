@@ -4889,6 +4889,68 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
   });
 
+  it("assumed: the plate shows, the unsettled caption is ABSENT, export is enabled, and part.stl is fetched (issue #350 — assumed = usable)", async () => {
+    // A version exists so the export button's versionId is defined — the
+    // only thing that can disable the button now is the part gate, which
+    // for an assumed part is lifted (issue #350: only "unsettled" blocks).
+    vi.spyOn(client, "listVersions").mockResolvedValue([
+      {
+        id: 1,
+        name: "v1",
+        params: {},
+        created_by_message: "",
+        parent: null,
+        restored_from: null,
+        forked_from: null,
+        pinned: false,
+        archived: false,
+        thumbnail: null,
+        created_at: "2026-01-01T00:00:00Z",
+        diff_count: 0,
+        exported_at: null,
+        source_kind: null,
+      },
+    ]);
+    vi.spyOn(client, "getProject").mockResolvedValue({
+      ...PROJECT,
+      storage: { repo_present: true, photo_present: null },
+    });
+    // The envelope's mm bbox rides with the assumed part (the server's
+    // root-cause fix: bbox_mm is present for assumed, not just settled).
+    vi.spyOn(client, "getDesignState").mockResolvedValue({
+      entries: [],
+      history_missing: false,
+      // The assumed part (partStub's default state): the plate shows.
+      part: { ...partStub({ unit_status: "assumed" }), bbox_mm: [20, 20, 20] },
+    } as Awaited<ReturnType<ApiClient["getDesignState"]>>);
+    const fetchSpy = vi
+      .spyOn(client, "fetchPartStl")
+      .mockResolvedValue(partBytes as ArrayBuffer);
+
+    await settleModelMount(client);
+    await waitFor(() => {
+      expect(screen.queryByTestId("import-report")).toBeTruthy();
+    });
+    // The plate is SHOWN for an assumed part (the D7 gate only fires on
+    // "unsettled") — the self-contradiction symptom is gone.
+    expect(screen.queryByTestId("plate-backdrop")).toBeTruthy();
+    // The unsettled caption is ABSENT (the assumed card carries the
+    // read-as-mm line, never "Its size isn't…").
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
+    // The assumed branch of the report is up (read-as-mm line + the
+    // one-tap change affordance — now a choice, never a silent settle).
+    expect(screen.getByTestId("import-report-assumed")).toBeTruthy();
+    expect(screen.getByTestId("import-report-change-units")).toBeTruthy();
+    // The viewport data comes from part.stl.
+    expect(fetchSpy).toHaveBeenCalled();
+    const viewer = screen.getByTestId("model-viewer-mock");
+    expect(viewer.getAttribute("data-has-data")).toBe("true");
+    expect(viewer.getAttribute("data-format")).toBe("stl");
+    // Export is ENABLED for an assumed part (the D8 gate lifts — issue
+    // #350: only an unsettled part 409s with units_unsettled).
+    expect(screen.getByTestId("export-3mf-button")).not.toBeDisabled();
+  });
+
   it("no part: the first-run photo button is present and routes to the photo input (D2 photo decision)", async () => {
     vi.spyOn(client, "listVersions").mockResolvedValue([]);
     vi.spyOn(client, "getDesignState").mockResolvedValue({

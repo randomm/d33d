@@ -111,7 +111,7 @@ describe("ImportReport — the import report (issue #334, D6)", () => {
     expect(screen.queryByTestId("import-report-waiting")).toBeNull();
   });
 
-  it("an assumed part shows the read-as-mm line + the change-units affordance", () => {
+  it("an assumed part shows the read-as-mm line + the change-units affordance, and NO unsettled caption (issue #350: the self-contradiction symptom)", () => {
     const client = makeClient();
     const assumed: PartReportInfo = {
       filename: "gear.stl",
@@ -125,6 +125,49 @@ describe("ImportReport — the import report (issue #334, D6)", () => {
     render(<ImportReport part={assumed} projectId={7} client={client} onSettled={vi.fn()} showPlate={true} />);
     expect(screen.getByTestId("import-report-assumed")).toBeTruthy();
     expect(screen.getByTestId("import-report-change-units")).toBeTruthy();
+    // Issue #350: the assumed card carries the read-as-mm line AND the
+    // plate — the "Its size isn't…" caption is the UNSETTLED state's and
+    // must never render above it (the self-contradiction QA §4 item 1).
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
+  });
+
+  it("an assumed part: 'Change the units' opens the same three-option unit choice + measurement escape, and picking one settles (issue #350, operator decision 1)", async () => {
+    const onSettled = vi.fn();
+    const client = makeClient();
+    const assumed: PartReportInfo = {
+      filename: "gear.stl",
+      format: "stl",
+      unit: "mm",
+      unit_status: "assumed",
+      scale: 1,
+      report: { triangles: 100, bodies: 1, watertight: true, gaps_closed: 0, bbox_file_units: [50, 30, 20] },
+      options: [
+        { unit: "mm", scale: 1, extents_mm: [50, 30, 20], fits_envelope: true, at_least_5mm: true },
+        { unit: "cm", scale: 10, extents_mm: [500, 300, 200], fits_envelope: true, at_least_5mm: true },
+        { unit: "inch", scale: 25.4, extents_mm: [1270, 762, 508], fits_envelope: false, at_least_5mm: true },
+      ],
+    };
+    render(<ImportReport part={assumed} projectId={7} client={client} onSettled={onSettled} showPlate={true} />);
+    // The choice is closed initially (the card adds nothing until tapped).
+    expect(screen.queryByTestId("import-report-assumed-options")).toBeNull();
+    fireEvent.click(screen.getByTestId("import-report-change-units"));
+    // The SAME three-option choice + escape the unsettled path uses.
+    expect(screen.getByTestId("import-report-assumed-options")).toBeTruthy();
+    expect(screen.getByTestId("import-report-option-mm")).toBeTruthy();
+    expect(screen.getByTestId("import-report-option-cm")).toBeTruthy();
+    expect(screen.getByTestId("import-report-option-inch")).toBeTruthy();
+    expect(screen.getByTestId("import-report-assumed-escape")).toBeTruthy();
+    // No silent settle: the tap alone changes nothing.
+    expect(client.setPartUnit).not.toHaveBeenCalled();
+    expect(client.setPartAxisMeasurement).not.toHaveBeenCalled();
+    // Choosing an option settles the part (the existing setPartUnit POST),
+    // then refetches — after the tap the part is settled-as-{unit}, and the
+    // fresh envelope re-renders it settled with the confirmed note.
+    fireEvent.click(screen.getByTestId("import-report-option-inch"));
+    await waitFor(() =>
+      expect((client.setPartUnit as ReturnType<typeof vi.fn>)).toHaveBeenCalledWith(7, "inch"),
+    );
+    await waitFor(() => expect(onSettled).toHaveBeenCalled());
   });
 
   it("the unsettled caption shows when the plate is hidden (unit_status !== settled)", () => {
@@ -197,5 +240,90 @@ describe("ImportReport — settlement (issue #334, D8)", () => {
       expect(el.textContent).toContain("The unit is already locked");
     });
     expect(onSettled).not.toHaveBeenCalled();
+  });
+});
+
+describe("ImportReport — shared UnitChoice (issue #350 fix round)", () => {
+  const assumedWithOptions: PartReportInfo = {
+    filename: "gear.stl",
+    format: "stl",
+    unit: "mm",
+    unit_status: "assumed",
+    scale: 1,
+    report: { triangles: 100, bodies: 1, watertight: true, gaps_closed: 0, bbox_file_units: [50, 30, 20] },
+    options: [
+      { unit: "mm", scale: 1, extents_mm: [50, 30, 20], fits_envelope: true, at_least_5mm: true },
+      { unit: "cm", scale: 10, extents_mm: [500, 300, 200], fits_envelope: true, at_least_5mm: true },
+      { unit: "inch", scale: 25.4, extents_mm: [1270, 762, 508], fits_envelope: false, at_least_5mm: true },
+    ],
+  };
+
+  const optionTestIds = ["import-report-option-mm", "import-report-option-cm", "import-report-option-inch"];
+
+  it("both branches render the SAME option set from the shared UnitChoice", () => {
+    const client = makeClient();
+    // Assumed branch: open the shared choice, capture the option testids.
+    const assumedRender = render(
+      <ImportReport part={assumedWithOptions} projectId={7} client={client} onSettled={vi.fn()} showPlate={true} />,
+    );
+    fireEvent.click(screen.getByTestId("import-report-change-units"));
+    const assumedOptionTestIds = optionTestIds.map((id) => screen.getByTestId(id).getAttribute("data-testid"));
+    assumedRender.unmount();
+    // Unsettled branch: the shared choice is open by default — capture.
+    const unsettledRender = render(
+      <ImportReport part={unsettledPart} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />,
+    );
+    const unsettledOptionTestIds = optionTestIds.map((id) => screen.getByTestId(id).getAttribute("data-testid"));
+    unsettledRender.unmount();
+    // The same three options, in the same order, in both branches — the
+    // shared component, not two copies that could drift.
+    expect(assumedOptionTestIds).toEqual(unsettledOptionTestIds);
+    expect(assumedOptionTestIds).toHaveLength(3);
+    // The escape + settle exist in both branches under the prefixed testids.
+    for (const prefix of ["import-report-assumed", "import-report"]) {
+      const r = render(
+        <ImportReport
+          part={prefix === "import-report-assumed" ? assumedWithOptions : unsettledPart}
+          projectId={7}
+          client={client}
+          onSettled={vi.fn()}
+          showPlate={prefix === "import-report-assumed"}
+        />,
+      );
+      if (prefix === "import-report-assumed") {
+        fireEvent.click(screen.getByTestId("import-report-change-units"));
+      }
+      expect(screen.getByTestId(`${prefix}-escape`)).toBeTruthy();
+      expect(screen.getByTestId(`${prefix}-escape-axis`)).toBeTruthy();
+      expect(screen.getByTestId(`${prefix}-escape-mm`)).toBeTruthy();
+      expect(screen.getByTestId(`${prefix}-settle-btn`)).toBeTruthy();
+      r.unmount();
+    }
+  });
+
+  it("an assumed part with NO options: 'Change the units' opens the shared choice showing only the measurement option (the one-line note, no unit options)", () => {
+    const client = makeClient();
+    const assumedNoOptions: PartReportInfo = {
+      filename: "gear.stl",
+      format: "stl",
+      unit: "mm",
+      unit_status: "assumed",
+      scale: 1,
+      report: { triangles: 100, bodies: 1, watertight: true, gaps_closed: 0, bbox_file_units: [50, 30, 20] },
+      options: null,
+    };
+    render(<ImportReport part={assumedNoOptions} projectId={7} client={client} onSettled={vi.fn()} showPlate={true} />);
+    // The read-as-mm line + the change-units affordance still show…
+    expect(screen.getByTestId("import-report-assumed")).toBeTruthy();
+    expect(screen.getByTestId("import-report-change-units")).toBeTruthy();
+    // …but opening it shows the one-line note (only the measurement option
+    // is available) plus the measurement escape — never a bare escape with
+    // no explanation, and no unit-option rows.
+    fireEvent.click(screen.getByTestId("import-report-change-units"));
+    expect(screen.getByTestId("import-report-assumed-no-options").textContent).toBe(
+      copy.partReport.assumedNoOptionsLine,
+    );
+    expect(screen.queryByTestId("import-report-assumed-options")).toBeNull();
+    expect(screen.getByTestId("import-report-assumed-escape")).toBeTruthy();
   });
 });

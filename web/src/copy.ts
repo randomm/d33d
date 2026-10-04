@@ -172,6 +172,12 @@ export const brief = {
    *  Rendered only for a settled part. */
   partBroughtNote: (units: string): string =>
     `Measured, in ${units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
+  /** The part-zone note for an ASSUMED part (issue #350, operator decision
+   *  3): the mm reading is assumed, not confirmed — the W/D/H rows carry
+   *  assumed provenance, and this note says so. Rendered only for an
+   *  assumed part (a settled part keeps `partBroughtNote`). */
+  partBroughtNoteAssumed:
+    "Read as millimetres — if it's in inches, tell me.",
   /** The W/D/H value cell when the part's units are unsettled (issue #338).
    *  Never a number, never 0. */
   waitingOnUnits: "waiting on units",
@@ -934,8 +940,13 @@ export const partReport = {
   /** The assumed-mm line: "I read it as millimetres: {W} × {D} × {H} mm. If it's in inches, tell me." */
   assumedLine: (w: string, d: string, h: string): string =>
     `I read it as millimetres: ${w} × ${d} × ${h}. If it's in inches, tell me.`,
-  /** The one-tap change link. */
+  /** The one-tap change link (issue #350: it opens the unit choice +
+   *  measurement escape — the same surface the unsettled card uses). */
   changeUnits: "Change the units",
+  /** The one-line note shown when the server sent no unit options and the
+   *  user opens the choice anyway (issue #350): only the measurement
+   *  escape is available — never a bare escape with no explanation. */
+  assumedNoOptionsLine: "There's no unit to pick from here.",
   /** The unit option labels. */
   unitLabels: {
     inch: "Inches",

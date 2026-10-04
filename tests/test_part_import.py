@@ -995,6 +995,36 @@ def test_design_state_part_present_after_import(app_with_projects):
     assert part["unit"] == "mm"
 
 
+def test_design_state_assumed_part_bbox_mm_present(app_with_projects):
+    """Issue #350: an ASSUMED part (plausible STL read as mm) →
+    GET /design-state's ``part.bbox_mm`` is the ``[w, d, h]`` mm list
+    (NOT ``None``) — the root-cause test for the empty-Brief bug
+    (``part_bbox_mm``'s settled-only gate nullified the measurement for
+    assumed parts, so the Brief's W/D/H rows showed "waiting on units"
+    while the assumed line said the size was known)."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "DS Assumed"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        await client.post(f"/api/projects/{pid}/part", files=files)
+        ds_r = await client.get(f"/api/projects/{pid}/design-state")
+        return ds_r
+
+    ds_r = _run_async(app_with_projects, _call)
+    assert ds_r.status_code == 200
+    body = ds_r.json()
+    part = body["part"]
+    assert part is not None
+    assert part["unit_status"] == "assumed"
+    bbox_mm = part.get("bbox_mm")
+    assert bbox_mm is not None, f"bbox_mm must be present for an assumed part: {part}"
+    # A 20 mm box — the three extents are all 20.0 (the fixture is a
+    # 20×20×20 box; order is [w, d, h] = [x, y, z] of the v1 bbox).
+    assert bbox_mm == [20.0, 20.0, 20.0], bbox_mm
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -1013,26 +1043,84 @@ def test_max_part_faces_is_2m():
 # ---------------------------------------------------------------------------
 
 
-def test_export_refused_409_units_unsettled_assumed(app_with_projects) -> None:
-    """An import project whose part's unit status is "assumed" (not
-    settled) → GET /model.3mf returns 409 with ``error_class:
-    "units_unsettled"`` — the check fires BEFORE the render-missing 409
-    (no render is seeded here, so the render-missing 409 WOULD also fire
-    if it were checked first; the units-unsettled 409 must win)."""
+def test_loop_runs_for_assumed_part(app_with_projects):
+    """Issue #350 (regression): an assumed-status part runs the design
+    loop on chat — the guard at ``d33d/projects.py`` fires only for
+    ``unsettled`` (``not in ("assumed", "settled")``), so an assumed part
+    must NOT get the ``fill_recut.UNSETTLED_PART_REPLY`` settle-first
+    notice. The message is a non-boundary change request ("make it 10 mm
+    taller" is an add, never a fill-recut boundary), so no fill-recut
+    offer is recorded either — the request falls through to the design
+    loop. The test app has no LLM configured, so the registered source
+    is the terminal ``model_unconfigured`` error frame (the loop's no-op
+    outcome); the guard's reply (a ``kind: "answer"`` done frame reading
+    "Settle the units first") is the discriminator this test pins
+    against."""
+    from d33d.fill_recut import UNSETTLED_PART_REPLY
+
     app = app_with_projects
 
     async def _call(client):
-        r = await client.post("/api/projects", json={"name": "Unsettled part"})
+        r = await client.post("/api/projects", json={"name": "Loop assumed"})
+        pid = r.json()["id"]
+        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make it 10 mm taller"}
+        )
+        frames = []
+        source = app.state.event_sources.get(pid)
+        if source is not None:
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+        # Read the pending offer under the LIVE connection (the lifespan
+        # closes it on teardown — a post-teardown read would raise).
+        offer = app.state.versions.get_pending_offer(pid)
+        return r2.status_code, frames, offer
+
+    status, frames, offer = _run_async(app, _call)
+    assert status == 202, status
+    assert offer is None, "10 mm taller is an add, not a boundary"
+    # The source must NOT be the guard's answer frame (a single done frame
+    # whose message is the settle-first notice). Under a no-LLM test app
+    # the loop registers a progress frame + the model_unconfigured
+    # terminal error frame instead — that terminal frame proves the
+    # request fell THROUGH to the design loop (loop-usable).
+    assert frames, f"no frames from the event source: {frames}"
+    assert "done" not in [e for e, _ in frames], (
+        f"a done frame would be a pre-route reply, not the loop: {frames}"
+    )
+    errors = [d for e, d in frames if e == "error"]
+    assert errors, f"no terminal error frame from the loop: {frames}"
+    assert errors[0].get("reason") == "model_unconfigured", errors
+    assert UNSETTLED_PART_REPLY not in str(errors[0].get("message", "")), errors
+
+
+def test_export_assumed_part_is_not_units_unsettled(app_with_projects) -> None:
+    """Issue #350: an import project whose part's unit status is
+    "assumed" (a plausible STL read as mm — usable, not unsettled) →
+    GET /model.3mf does NOT return the ``units_unsettled`` 409 (that gate
+    now fires only for "unsettled"). No render is seeded, so the next gate
+    (render-missing / no-versions) fires instead — the ``units_unsettled``
+    error_class must be ABSENT, proving the assumed part cleared the
+    units-unsettled gate."""
+    app = app_with_projects
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Assumed export"})
         pid = r.json()["id"]
         _set_part_columns(app.state.conn, pid, unit_status="assumed")
         return await client.get(f"/api/projects/{pid}/model.3mf")
 
     resp = _run_async(app, _call)
-    assert resp.status_code == 409, f"expected 409, got {resp.status_code}: {resp.text}"
-    body = resp.json()
-    assert body["error_class"] == "units_unsettled"
-    assert "error" in body and len(body["error"]) > 0
-    assert resp.headers.get("content-type", "").startswith("application/json")
+    # The assumed part cleared the units-unsettled gate: with no render
+    # seeded, the no-versions gate fires instead — a 404 (the gate order
+    # the spec's test-surface pins: units-unsettled 409 is checked before
+    # the render gates, and it no longer fires for assumed).
+    assert resp.status_code == 404, (
+        f"assumed part must 404 (no-versions), got {resp.status_code}: {resp.text}"
+    )
 
 
 def test_export_refused_409_units_unsettled_unsettled(app_with_projects) -> None:
@@ -1149,7 +1237,10 @@ def test_export_units_unsettled_persists_across_reload(app_with_projects) -> Non
     """The units-unsettled 409 is server-side state on the project row —
     a reload (a second ``_run_async`` against the same app, i.e. a new
     request after the first response) sees the same 409; it is never
-    client-side state that clears on its own."""
+    client-side state that clears on its own. Issue #350: the 409 now
+    fires only for "unsettled" (assumed is usable) — the test's
+    ``unit_status`` is "unsettled" to pin the 409-persistence contract.
+    """
     app = app_with_projects
     pid: int
 
@@ -1157,7 +1248,7 @@ def test_export_units_unsettled_persists_across_reload(app_with_projects) -> Non
         nonlocal pid
         r = await client.post("/api/projects", json={"name": "Reload check"})
         pid = r.json()["id"]
-        _set_part_columns(app.state.conn, pid, unit_status="assumed")
+        _set_part_columns(app.state.conn, pid, unit_status="unsettled", scale=None)
         first = await client.get(f"/api/projects/{pid}/model.3mf")
         # A second GET in the same session (state must persist per
         # request — never cleared by a prior read).
@@ -2418,6 +2509,20 @@ def test_part_bbox_mm_settled_returns_wdh_list(tmp_path: Path):
 
     conn, pid = _conn_with_part_bbox(
         tmp_path, bbox={"x": 20.0, "y": 10.0, "z": 5.0}, unit_status="settled"
+    )
+    row = conn.get_project(pid)
+    assert part_bbox_mm(row, conn) == [20.0, 10.0, 5.0]
+
+
+def test_part_bbox_mm_assumed_returns_wdh_list(tmp_path: Path):
+    """Issue #350: an ASSUMED part with a positive v1 bbox (the mm
+    reading written at import — scale 1.0) → the [w, d, h] mm list
+    (NOT ``None``). The settled-only gate that returned ``None`` for
+    assumed parts was the root cause of the empty-Brief bug."""
+    from d33d.part_http import part_bbox_mm
+
+    conn, pid = _conn_with_part_bbox(
+        tmp_path, bbox={"x": 20.0, "y": 10.0, "z": 5.0}, unit_status="assumed"
     )
     row = conn.get_project(pid)
     assert part_bbox_mm(row, conn) == [20.0, 10.0, 5.0]

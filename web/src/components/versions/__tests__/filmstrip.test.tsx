@@ -12,7 +12,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { Filmstrip } from "../Filmstrip";
-import type { VersionTimelineEntry } from "../../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../../lib/api";
 
 function entry(
   id: number,
@@ -348,7 +348,7 @@ describe("Filmstrip", () => {
 // ---------------------------------------------------------------------------
 
 describe("Filmstrip — imported version label (issue #338)", () => {
-  const part = {
+  const part: PartReportInfo = {
     filename: "bracket.stl",
     format: "stl" as const,
     unit: "mm",

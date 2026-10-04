@@ -116,6 +116,12 @@ describe("copy.ts Screen 2 strings", () => {
     expect(copy.partReport.settle).toBe("Settle");
   });
 
+  it("brief.partBroughtNoteAssumed is verbatim (issue #350: the assumed-Brief note)", () => {
+    expect(copy.brief.partBroughtNoteAssumed).toBe(
+      "Read as millimetres — if it's in inches, tell me.",
+    );
+  });
+
   it("partReport.watertightGaps is singular for n=1", () => {
     expect(copy.partReport.watertightGaps(1)).toBe(
       "watertight, after closing 1 small gap",

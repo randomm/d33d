@@ -449,7 +449,10 @@ def create_versions_router() -> APIRouter:
         # W/D/H axis rows render ``measured``; the mesh is the ground
         # truth, stronger than stated).
         _has_part = project_row.get("part_filename") is not None
-        _part_unsettled = _has_part and project_row.get("part_unit_status") != "settled"
+        _part_unsettled = _has_part and project_row.get("part_unit_status") not in (
+            "assumed",
+            "settled",
+        )
         measurement = latest["bbox"] if latest is not None else None
         if _part_unsettled:
             measurement = None
