@@ -12,6 +12,7 @@ shared/CI machines. This is the process entrypoint only.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -36,6 +37,19 @@ def _resolve_data_dir() -> Path:
 
 def main() -> None:
     """Run the d33d FastAPI app on the configured port (default 8080)."""
+    # Issue #356 — the process-level logging setup. Neither this module nor
+    # ``create_app`` configured logging before, so the d33d.* loggers
+    # inherited the stdlib ``logging.lastResort`` handler (WARNING+ to
+    # stderr) — an operator who greps the server log for the lost/undecodable
+    # photo WARNING can never trust what they are looking for. A plain
+    # ``basicConfig`` gives the root logger an explicit stream handler so
+    # d33d.* WARNING (and INFO) records reliably reach the server log at the
+    # default level. Must run before ``uvicorn.run`` (its own logging setup
+    # only configures the ``uvicorn`` loggers and never touches ours).
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
     data_dir = _resolve_data_dir()
     app = create_app(
         data_dir / "d33d.sqlite3",

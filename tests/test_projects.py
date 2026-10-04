@@ -342,6 +342,57 @@ def test_list_projects_storage_signal_is_memoized_not_per_row_decode(
     assert memo_len >= 1
 
 
+def test_get_project_undecodable_photo_no_warning(app_with_projects, caplog):
+    """Issue #356, operator decision #3: the GET / list storage signal
+    does NOT warn. The storage endpoint is POLLED (every SPA render of
+    the project list or header calls it), so a WARNING there would spam
+    the live log — the operator-visible signal for a lost/undecodable
+    photo lives on the CHAT and FINALIZE read sites instead. A project
+    whose stored photo is present but undecodable must still report
+    ``photo_present: false`` (the cheap structural check, unchanged
+    behaviour), and a GET must capture ZERO log records from the d33d
+    loggers for the undecodable photo."""
+    import logging as _logging
+
+    import d33d.design_loop_events as dle
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "U1"})
+        pid = r.json()["id"]
+        files = {"file": ("p.png", _valid_png_1x1(), "image/png")}
+        await client.post(f"/api/projects/{pid}/photos", files=files)
+        row = app_with_projects.state.conn.get_project(pid)
+        assert row is not None
+        photo_path = Path(row["source_photo_path"])
+        # Corrupt the stored photo in place (the ticket's repro bytes —
+        # the file's on-disk target of source_photo_path).
+        photo_path.write_bytes(b"fake-png")
+        # Flush any memo entry for the GOOD bytes (keyed on path/mtime/size
+        # — the overwrite changes the key, but flush to be safe).
+        dle._photo_signal_cache.clear()
+        # Mark the start of the storage read — the lifespan's startup
+        # records (repo scan, model pre-flight) precede this point and are
+        # not the GET path's doing.
+        caplog.clear()
+        body = (await client.get(f"/api/projects/{pid}")).json()
+        return body["storage"]
+
+    caplog.set_level(_logging.INFO)
+    storage = _run_async(app_with_projects, _call)
+    # Unchanged behaviour: the undecodable file reads as NOT present.
+    assert storage == {"repo_present": True, "photo_present": False}, storage
+    # No record from any d33d logger for the undecodable photo — the
+    # GET/storage path is silent by design (the operator's signal lives on
+    # the chat and finalize read sites, which are not polled).
+    d33d_records = [
+        r for r in caplog.get_records("call") if r.name.startswith("d33d.")
+    ]
+    assert d33d_records == [], (
+        f"the GET/storage path must not log for an undecodable photo, got: "
+        f"{[r.getMessage() for r in d33d_records]}"
+    )
+
+
 def test_storage_signal_memo_invalidates_on_in_place_overwrite(
     app_with_projects, monkeypatch
 ):
