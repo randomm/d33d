@@ -291,7 +291,7 @@ def parse_and_repair(
     (``{triangles, bodies, watertight, gaps_closed, bbox_file_units,
     hole_count}``, plus the OPTIONAL ``bodies_before`` — present ONLY when
     repair still dropped a body, i.e. post-repair bodies < pre-repair
-    bodies, so the import report can state "2 bodies → 1 after repair"),
+    bodies, so the import report can state "2 bodies → 1 body after repair"),
     and ``file_unit`` is the 3MF's declared unit string read
     from the ORIGINAL (pre-repair) loaded geometry (``None`` for STL —
     unitless, or a 3MF with no ``unit`` attribute — the 3MF default is
@@ -304,36 +304,33 @@ def parse_and_repair(
     component separately and concatenates, so the stored mesh keeps all
     N watertight bodies (issue #375 — the one-call repair on the merged
     mesh kept only one component). ``report["bodies"]`` is recomputed
-    from the STORED (post-repair) mesh and asserted to equal the counted
-    bodies. Non-watertight debris shells are excluded exactly as before
-    (the watertight filter on the single split) — the per-body loop
+    from the STORED (post-repair) mesh. Non-watertight debris shells are
+    excluded from the stored mesh in BOTH the single-body and multi-body
+    branches, as on main where the single ``MeshFix(merged).repair()`` keeps
+    only the largest component (verified: a watertight box plus a far open
+    shell loses the open shell under main's one-call repair) — this debris
+    exclusion is unchanged. The multi-body branch's per-body loop therefore
     repairs only the watertight components; the debris is not resurrected,
     not double-counted, and not rejected on new grounds.
 
-    ``hole_count`` is the number of holes the imported part actually has,
-    computed ONCE here at import and stored with the part, as
-    ``gaps_before + genus``:
+    ``hole_count`` is the number of holes the part actually has, computed
+    ONCE here and stored, as ``gaps_before + genus``:
 
     - ``gaps_before`` — the PRE-REPAIR merged mesh's boundary loops
-      (``_boundary_loops``), one per OPEN hole opening. The pre-repair
-      merged mesh is the right surface for these: the repair chain
-      (``pymeshfix``) CLOSES those loops before the stored mesh exists, so
-      a post-repair count would read 0 for a holey part (the loops are the
-      signal, not a bug to fix).
-    - ``genus`` — the total closed-body genus (``watertight_genus``, from
-      ``d33d.part_holes``) of the PRE-REPAIR merged mesh's watertight
-      components (the same one split that counts the bodies — no second
-      split), one per closed through-hole. A
-      CAD-exported part with a real drilled through-bore is WATERTIGHT:
-      0 boundary loops but genus 1. Gaps alone would count it 0 and the
-      fill-recut gate would refuse the very part it exists for, so closed
-      holes are counted too.
+      (``_boundary_loops``), one per OPEN hole opening. The pre-repair mesh
+      is the right surface: the repair chain (``pymeshfix``) CLOSES those
+      loops before the stored mesh exists, so a post-repair count would
+      read 0 for a holey part (the loops are the signal, not a bug to fix).
+    - ``genus`` — the total closed-body genus (``watertight_genus``) of the
+      same split's watertight components, one per closed through-hole. A
+      CAD part with a real drilled bore is WATERTIGHT (0 boundary loops but
+      genus 1); gaps alone would count it 0 and the fill-recut gate would
+      refuse the very part it exists for, so closed holes are counted too.
 
-    A plain watertight box has neither → ``0``; an open holey part has one
-    boundary loop per opening (and the closed body under each contributes
-    the matching genus); a watertight ring has genus 1 → ``1``. The genus
-    computation is wrapped so any exception falls back to ``gaps_before``
-    alone — the count degrades, never crashes, never ``None``.
+    A plain watertight box has neither → ``0``; a watertight ring has genus
+    1 → ``1``. The genus computation is wrapped so any exception falls back
+    to ``gaps_before`` alone — the count degrades, never crashes, never
+    ``None``.
 
     Raises ``PartUploadError`` (the 422) on any failure: unparseable,
     empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
@@ -446,19 +443,21 @@ def parse_and_repair(
         raise PartUploadError("mesh has non-finite vertices after repair")
     if len(repaired.faces) == 0:
         raise PartUploadError("mesh is empty after repair")
-    # ``bodies`` is the number of watertight components in the STORED
+    # ``bodies`` is the number of WATERTIGHT components in the STORED
     # (post-repair) mesh — recomputed, never the pre-repair count, so the
-    # report describes what was actually kept (issue #375).
+    # report describes what was actually kept (issue #375). One split
+    # serves the count AND the leak check; a non-watertight component in
+    # the stored mesh is a 422 (the dedicated message — a body lost
+    # non-fatally during repair), never a green 201 with a wrong count.
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
-    bodies = len(repaired.split(only_watertight=True))
-    if bodies != len(repaired.split(only_watertight=False)):
-        raise PartUploadError("mesh has non-finite vertices after repair")
-    # invariant: every stored component is watertight (pinned by the
-    # leaky-repair test)
-    assert bodies == len(
-        [c for c in repaired.split(only_watertight=False) if c.is_watertight]
-    )
+    comps = repaired.split(only_watertight=False)
+    watertight = [c for c in comps if c.is_watertight]
+    bodies = len(watertight)
+    if bodies != len(comps):
+        raise PartUploadError(
+            "stored mesh has a non-watertight component after repair"
+        )
     gaps_after = _boundary_loops(repaired)
 
     # ``hole_count``: open-mesh gaps + closed through-holes, both measured
@@ -476,7 +475,7 @@ def parse_and_repair(
     }
     # OPTIONAL field (issue #375 operator decision 1): present ONLY when
     # repair still dropped a body, so the import report can state
-    # "2 bodies → 1 after repair". Absent on every input where repair
+    # "2 bodies → 1 body after repair". Absent on every input where repair
     # kept all bodies — including single-body imports.
     if bodies < bodies_before:
         report["bodies_before"] = bodies_before

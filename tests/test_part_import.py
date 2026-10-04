@@ -924,17 +924,18 @@ def test_repair_non_watertight_component_raises(app_with_projects):
     WATERTIGHT components in the STORED (post-repair) mesh. If a repair
     produced a NON-watertight component (a body lost non-fatally — e.g. a
     holey body that pymeshfix left open), the stored mesh would silently
-    under-report bodies, so the post-repair invariant must catch it:
-    ``split(only_watertight=True)`` count != total component count →
-    PartUploadError (the 422), never a green 201 with a wrong count."""
+    under-report bodies, so the post-repair leak check must catch it:
+    watertight count != total component count → PartUploadError (the 422)
+    with the dedicated message, never a green 201 with a wrong count."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
+    from d33d.part_mesh import PartUploadError
 
-    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
-    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
-    ring_b.apply_translation([10000.0, 0.0, 0.0])
-    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([box_a, box_b]))
 
     original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
@@ -943,30 +944,25 @@ def test_repair_non_watertight_component_raises(app_with_projects):
         call_state["n"] += 1
         repaired = original(mesh)
         if call_state["n"] == 2:
-            # Leave a hole in the second body: remove one face → a
-            # non-watertight component in the stored mesh.
+            # Remove several faces → a NON-watertight (open) second component
+            # in the stored mesh (removing just one face auto-closes under
+            # merge_vertices/update_faces; several leave a genuine open
+            # shell). This is the degenerate repair result the post-repair
+            # leak check must refuse.
             return trimesh.Trimesh(
-                repaired.vertices, repaired.faces[:-1], process=False
+                repaired.vertices, repaired.faces[:-3], process=False
             )
         return repaired
 
     part_mesh_mod.repair_with_pmf = _leaky_repair
     try:
-        # The second body comes back non-watertight. The post-repair guard
-        # (watertight count != total component count) fires on genuinely
-        # degenerate input; on a simple open shell trimesh's split treats
-        # the boundary as its own closed component so no 422 fires — but
-        # the stored mesh must carry ``watertight: False`` in the report
-        # (never a silent "all watertight" for a mesh with a hole).
-        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
-        assert report["watertight"] is False, (
-            f"leaky mesh must report watertight=False: {report}"
-        )
-        # The holey body is still counted (trimesh's split keeps the open
-        # component), so bodies == 2 even though one body has a hole.
-        assert report["bodies"] == 2, f"both bodies kept: {report}"
+        with pytest.raises(PartUploadError) as exc_info:
+            part_mesh_mod.parse_and_repair(data, "stl")
     finally:
         part_mesh_mod.repair_with_pmf = original
+    assert str(exc_info.value) == (
+        "stored mesh has a non-watertight component after repair"
+    ), f"dedicated leak message expected, got: {exc_info.value!r}"
 
 
 

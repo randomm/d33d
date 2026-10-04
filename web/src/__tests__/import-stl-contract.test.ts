@@ -184,10 +184,14 @@ describe("copy.ts Screen 2 strings", () => {
   });
 
   it("partReport.bodiesAfterRepair is the spec's exact drop line (issue #375, operator rule)", () => {
-    expect(copy.partReport.bodiesAfterRepair(2, 1)).toBe("2 bodies → 1 after repair");
+    expect(copy.partReport.bodiesAfterRepair(2, 1)).toBe("2 bodies → 1 body after repair");
+  });
+
+  it("partReport.bodiesAfterRepair pluralizes BOTH counts on a real 3→1 drop (issue #375)", () => {
+    expect(copy.partReport.bodiesAfterRepair(3, 1)).toBe("3 bodies → 1 body after repair");
   });
 
   it("partReport.bodiesAfterRepair is singular for before=1", () => {
-    expect(copy.partReport.bodiesAfterRepair(1, 1)).toBe("1 body → 1 after repair");
+    expect(copy.partReport.bodiesAfterRepair(1, 1)).toBe("1 body → 1 body after repair");
   });
 });

@@ -229,7 +229,7 @@ export interface PartReportInfo {
     /** Issue #375, operator decision 1 (optional): the pre-repair body
      *  count, emitted ONLY when repair dropped a body (post-repair
      *  `bodies` < `bodies_before`). The read card shows the
-     *  "N bodies → M after repair" line only when this is present. */
+     *  "N bodies → M bodies after repair" line only when this is present. */
     bodies_before?: number;
     watertight: boolean;
     gaps_closed: number;
