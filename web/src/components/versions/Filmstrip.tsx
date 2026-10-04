@@ -125,9 +125,15 @@ export function Filmstrip({
   // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
   // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
   // for a long timeline.
-  const ordinalById = new Map<number, number>(
-    versions.map((v, i) => [v.id, i + 1]),
-  );
+  const ordinalById = new Map<number, number>();
+  versions.forEach((v, i) => {
+    // The first occurrence wins (identical to findIndex): a duplicate id
+    // (DB-unique in practice — auto-increment rows) would otherwise be
+    // overridden by its later slot.
+    if (!ordinalById.has(v.id)) {
+      ordinalById.set(v.id, i + 1);
+    }
+  });
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;
   const latestId = versions.length > 0 ? versions[versions.length - 1].id : null;

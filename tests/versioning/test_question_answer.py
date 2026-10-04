@@ -1063,6 +1063,56 @@ class TestDeterministicAxisStage:
         )
         assert result is None
 
+    def test_unsettled_comparison_gate_suppresses_numeric_answer(
+        self, monkeypatch
+    ) -> None:
+        # Issue #352 (operator decision 1): the COMPARISON stage runs
+        # BEFORE the decision gate and emits the measured value as a
+        # number. On an unsettled part with a file-unit bbox of 80.0,
+        # "is it wider than 50 mm?" must never emit "80.0" — the gate
+        # covers the comparison stage too. The pure public API
+        # (``deterministic_axis_answer``) covers only the decision stage,
+        # so this test drives the REAL ``route_chat_message`` with the
+        # answer edge stubbed (it must never be called) and pins the
+        # comparison-stage gate's output.
+        from d33d.question_answer import route_chat_message
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "It is 80.0 mm wide."
+
+        latest = _latest263(bbox={"x": 80.0, "y": 80.0, "z": 80.0})
+        result = run_async_safe(
+            route_chat_message(
+                "Is it wider than 50 mm?",
+                latest,
+                _edge,
+                part_unit_status="unsettled",
+            )
+        )
+        assert result is not None
+        assert result["kind"] == ANSWER_DONE_KIND
+        assert result["answer"] == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in result["answer"]
+        assert not edge_called[0], (
+            "the answer edge must NOT be called for the comparison gate"
+        )
+
+    def test_unsettled_comparison_gate_feature_noun_falls_through(self) -> None:
+        # A comparison about a FEATURE ("is the post wider than 50 mm?")
+        # is not a part-size comparison — the gate does not take it; it
+        # falls through exactly as today (no number, no size-unknown
+        # sentence at this pure stage — the comparison stage itself also
+        # falls through on a feature noun, landing on stage 2 at the
+        # route level).
+        latest = _latest263(bbox={"x": 80.0, "y": 80.0, "z": 80.0})
+        result = deterministic_axis_answer(
+            "Is the post wider than 50 mm?", latest, part_unit_status="unsettled"
+        )
+        assert result is None
+
     def test_settled_part_answers_normally(self) -> None:
         # The gate is "unsettled"-only: a settled part answers exactly as
         # before (the v1 import's bbox is an mm measurement once settled).
@@ -2363,6 +2413,73 @@ class TestDeterministicAxisStageRouteLevel:
                 client,
                 pid,
                 {"message": "How tall is it now?", "chat_history": []},
+            )
+            versions = app_with_versions.state.versions.list_versions(pid)
+            return r, frames, len(versions), edge_called[0]
+
+        r, frames, version_count, was_edge_called = run_async(app_with_versions, _call)
+        assert r.status_code == 202, r.text
+        assert not was_edge_called, "the answer edge must NOT be called for the gate"
+        assert version_count == 1, f"expected 1 version, got {version_count}"
+        assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+        event, data = frames[0]
+        assert event == "done"
+        assert data.get("kind") == ANSWER_DONE_KIND
+        assert data["message"] == UNSETTLED_SIZE_REPLY
+        assert "80.0" not in data["message"]
+
+    def test_unsettled_comparison_gate_fires_on_live_chat_path(
+        self, app_with_versions, monkeypatch
+    ) -> None:
+        """OD1 on the COMPARISON path through the LIVE chat wiring: drive
+        the real POST /chat route on an unsettled import with a
+        DIGIT-bearing question ("Is it wider than 50 mm?") — the message
+        shape the decision gate's digit-abstain would let through to
+        stage 2, and that the comparison stage would otherwise answer
+        with the file-unit bbox. The unsettled pre-route is bypassed
+        (``fill_recut.part_public`` → None, the same seam as the
+        single-axis test); the comparison gate must return the
+        size-unknown reply — never "80.0", with no LLM call and no
+        version. Dropping the ``part_unit_status`` kwarg from
+        ``route_chat_message``'s comparison call makes this fail (the
+        stage emits "Yes — it measures 80.0 mm wide, …")."""
+
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return "It is 80.0 mm wide."
+
+        def _loop(app, **kwargs):
+            raise AssertionError("the design loop must NOT be called on the answer path")
+
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            _set_part_columns(
+                app_with_versions,
+                pid,
+                part_filename="wide-part.stl",
+                part_format="stl",
+                part_unit=None,
+                part_unit_status="unsettled",
+                part_scale=None,
+                part_report=None,
+                part_options=None,
+            )
+            await app_with_versions.state.versions.create_version(
+                pid,
+                {"W": 80.0, "D": 40.0, "H": 30.0},
+                bbox=(80.0, 40.0, 30.0),
+            )
+            app_with_versions.state.run_design_loop = _loop
+            app_with_versions.state.answer_question = _edge
+            monkeypatch.setattr("d33d.part_http.part_public", lambda row: None)
+            r, frames = await _drive_chat_with_answer(
+                app_with_versions,
+                client,
+                pid,
+                {"message": "Is it wider than 50 mm?", "chat_history": []},
             )
             versions = app_with_versions.state.versions.list_versions(pid)
             return r, frames, len(versions), edge_called[0]
