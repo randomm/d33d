@@ -1866,13 +1866,13 @@ def test_chat_yes_after_offer_on_unchanged_param_confirms(app_with_versions):
     assert done[-1].get("confirm_offer") == "wall_thickness", done
 
 
-def test_chat_yes_without_pending_offer_routes_normally(app_with_versions):
-    """A bare "yes" with NO pending offer state falls through to the
-    normal routing (the design loop) — the acceptance requires the
-    server-side offer, never a client-side guess."""
+def test_chat_yes_without_pending_offer_replies_no_offer_no_loop(app_with_versions):
+    """issue #349: a bare "yes" with NO pending offer (neither a #250
+    param offer nor a fill-recut offer) gets the deterministic no-run
+    reply — the design loop is NOT called, NO version is created,
+    NO LLM call. The reply is ONE done frame with kind "answer"."""
 
-    async def _loop(app, **kwargs):
-        return _OfferStubResult({"wall_thickness": 3.0})
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
 
     async def _call(client):
         proj = await create_project(client)
@@ -1887,15 +1887,282 @@ def test_chat_yes_without_pending_offer_routes_normally(app_with_versions):
         r, frames = await _drive_chat(
             app_with_versions, client, pid, {"message": "yes"}
         )
-        return r.status_code, frames, loop_called["n"]
+        version_count = len(
+            app_with_versions.state.versions.list_versions(pid)
+        )
+        return r.status_code, frames, loop_called["n"], version_count
 
-    status, frames, loop_n = run_async(app_with_versions, _call)
+    status, frames, loop_n, version_count = run_async(app_with_versions, _call)
     assert status == 202
-    assert loop_n == 1, "a bare yes with no pending offer must route to the loop"
-    # No kind "answer" frame from an offer (the loop's done frame has no
-    # kind field — the pass created a version normally).
-    done = [d for e, d in frames if e == "done"]
-    assert "kind" not in done[-1], done
+    assert loop_n == 0, (
+        "a bare yes with no pending offer must NOT route to the loop"
+    )
+    assert version_count == 0, (
+        f"no version may be created for a bare yes with no offer (got {version_count})"
+    )
+    # Exactly ONE frame: the terminal done frame with kind "answer".
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == "answer", data
+    assert data["message"] == NO_OFFER_AFFIRMATION_REPLY
+
+
+def test_chat_yes_hedge_with_no_offer_still_routes_to_loop(app_with_versions):
+    """issue #349: a HEDGED affirmation ("yes but make it 2 mm") with no
+    pending offer is NOT a clean affirmation — it flows to the design
+    loop as today."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        r, _frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes but make it 2 mm"}
+        )
+        return r.status_code, loop_called["n"]
+
+    status, loop_n = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 1, (
+        "a hedged affirmation with no offer must still route to the loop"
+    )
+
+
+def test_chat_yes_stale_offer_replies_no_offer_no_loop(app_with_versions):
+    """issue #349: a STALE #250 offer (the offer's version is no longer
+    the project's latest — a newer version superseded it, so
+    ``is_pending_offer_acceptance`` lapses and the offer pre-route
+    returns None) followed by a bare "yes" gets the deterministic
+    no-offer reply — no design loop, no new version. The self-sufficient
+    guard (``_is_bare_affirmation_no_offer`` reads ``get_pending_offer``
+    itself) treats a lapsed #250 offer as "no live offer" and fires."""
+
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        v1 = await svc.create_version(
+            pid, {"wall_thickness": 3.0},
+            param_meta={"wall_thickness": {"label": "Wall thickness", "unit": "mm"}},
+        )
+        svc.set_pending_offer(pid, {"version_id": v1["id"], "param": "wall_thickness"})
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        # A second version supersedes v1 — the offer on v1 is now STALE.
+        v2 = await svc.create_version(
+            pid, {"wall_thickness": 4.0},
+            param_meta={"wall_thickness": {"label": "Wall thickness", "unit": "mm"}},
+        )
+        assert v2["id"] != v1["id"]
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        version_count = len(svc.list_versions(pid))
+        latest_v2 = svc.latest_version(pid)
+        return (
+            r.status_code,
+            frames,
+            loop_called["n"],
+            version_count,
+            svc.get_pending_offer(pid),
+            latest_v2,
+        )
+
+    status, frames, loop_n, version_count, row_offer, latest_v2 = run_async(
+        app_with_versions, _call
+    )
+    assert status == 202
+    assert loop_n == 0, (
+        "a bare yes on a stale offer must NOT route to the design loop"
+    )
+    assert version_count == 2, (
+        f"no version may be created for a bare yes on a stale offer (got {version_count})"
+    )
+    # The stale offer row is untouched (neither consumed nor cleared by
+    # this turn — the no-offer notice is a pure reply): it is still the
+    # param-shaped row pointing at v1, which is NO LONGER the latest
+    # version (v2 superseded it).
+    assert row_offer is not None
+    assert "kind" not in row_offer, row_offer
+    assert row_offer["param"] == "wall_thickness", row_offer
+    # v1 is NO LONGER the latest version (v2 superseded it — the offer
+    # is stale): the latest row comes from the return tuple above.
+    assert latest_v2 is not None and latest_v2["id"] != row_offer["version_id"]
+    # Exactly ONE frame: the terminal done frame with kind "answer" —
+    # the deterministic no-offer reply (not an ack of a consumed offer).
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == "answer", data
+    assert data["message"] == NO_OFFER_AFFIRMATION_REPLY
+
+
+def test_chat_yes_after_declined_fill_recut_offer_replies_no_offer(app_with_versions):
+    """issue #349: a fill-recut offer that was DECLINED (a clean "no"
+    cleared it — a consumed offer never re-fires) followed by a LATER
+    bare "yes" gets the deterministic no-offer reply — no design loop,
+    no new version."""
+
+    from d33d.question_answer import NO_OFFER_AFFIRMATION_REPLY
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        # The project needs a PART with settled units for the fill-recut
+        # pre-route (``fill_recut_turn``) to fire at all — set the part
+        # columns directly on the DB (the ``_set_part_columns`` pattern).
+        conn = app_with_versions.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0 WHERE id=?",
+            (pid,),
+        )
+        conn.commit()
+        # Seed a fill-recut offer, then decline it with a clean "no"
+        # (``fill_recut_turn``'s decline path clears the pending offer).
+        svc.set_pending_offer(pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0})
+        await _drive_chat(app_with_versions, client, pid, {"message": "no"})
+        assert svc.get_pending_offer(pid) is None, "decline must clear the offer"
+        # Release the inflight flag between turns (the SSE endpoint's
+        # ``finally`` does this in production; the test mirrors it).
+        inflight = getattr(app_with_versions.state, "design_loop_inflight", None)
+        if inflight is not None:
+            inflight.discard(pid)
+        # A LATER bare "yes" — the offer is gone; the self-sufficient
+        # guard must fire now.
+        r, frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        version_count = len(svc.list_versions(pid))
+        return (
+            r.status_code,
+            frames,
+            loop_called["n"],
+            version_count,
+            svc.get_pending_offer(pid),
+        )
+
+    status, frames, loop_n, version_count, row_offer = run_async(
+        app_with_versions, _call
+    )
+    assert status == 202
+    assert loop_n == 0, (
+        "a bare yes after a declined fill-recut offer must NOT route to "
+        "the design loop"
+    )
+    assert version_count == 0, (
+        f"no version may be created for a bare yes after a cleared offer (got {version_count})"
+    )
+    assert row_offer is None, "the declined offer must stay cleared"
+    assert len(frames) == 1, f"expected 1 frame, got {len(frames)}: {frames}"
+    event, data = frames[0]
+    assert event == "done"
+    assert data.get("kind") == "answer", data
+    assert data["message"] == NO_OFFER_AFFIRMATION_REPLY
+
+
+def test_chat_change_request_no_version_still_starts_loop(app_with_versions):
+    """issue #349: a real change request on an empty project (no versions,
+    no offers) still starts the design loop and creates a version."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        r, _frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "make a 30 mm plate"}
+        )
+        version_count = len(
+            app_with_versions.state.versions.list_versions(pid)
+        )
+        return r.status_code, loop_called["n"], version_count
+
+    status, loop_n, version_count = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 1, (
+        "a change request on an empty project must start the design loop"
+    )
+    assert version_count == 1, (
+        f"a change request must create a version (got {version_count})"
+    )
+
+
+def test_chat_yes_live_fill_recut_offer_runs_loop(app_with_versions):
+    """issue #349 adversarial round 1: a bare "yes" with a LIVE
+    fill-recut offer is NOT a no-offer situation — the #349 guard must
+    respect the live offer (never fire) and the fill-recut pre-route
+    must run the design loop with the accepted fill-and-recut
+    instruction. UNPATCHED: this test does not monkeypatch
+    ``_is_bare_affirmation_no_offer`` — it pins that the guard's
+    live-offer check (the fill-recut branch of
+    ``_is_bare_affirmation_no_offer``) lets the acceptance through on
+    the real pre-route order (``fill_recut_turn`` before the #349
+    guard)."""
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        # The fill-recut pre-route needs a PART with settled units to
+        # fire at all (the ``_set_part_columns`` pattern).
+        conn = app_with_versions.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0 "
+            "WHERE id=?",
+            (pid,),
+        )
+        conn.commit()
+        # Seed a LIVE fill-recut offer, then accept it with a bare yes.
+        svc.set_pending_offer(pid, {"kind": "fill_recut", "noun": "hole", "size": 38.0})
+        r, _frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        return r.status_code, loop_called["n"], svc.get_pending_offer(pid)
+
+    status, loop_n, row_offer = run_async(app_with_versions, _call)
+    assert status == 202
+    assert loop_n == 1, (
+        "a bare yes with a LIVE fill-recut offer must run the design loop "
+        "(the fill-recut pre-route) — the #349 no-offer guard must respect "
+        "the live offer and never fire"
+    )
+    assert row_offer is None, "the accepted fill-recut offer must be consumed"
 
 
 def test_offer_state_survives_reopen_round_trip(app_with_versions):

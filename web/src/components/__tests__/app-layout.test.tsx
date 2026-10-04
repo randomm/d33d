@@ -684,20 +684,26 @@ describe("App layout", () => {
       source_kind: null,
       },
     ]);
-    vi.spyOn(client, "streamEvents").mockImplementation(
-      async (_id, _handlers) => new Promise<void>(() => {}),
-    );
+    let capturedHandlers: Parameters<typeof client.streamEvents>[1] | null = null;
+    vi.spyOn(client, "streamEvents").mockImplementation((_id, handlers) => {
+      capturedHandlers = handlers;
+      return new Promise<void>(() => {});
+    });
 
     render(<App client={client} />);
     // The first send both creates the project and starts the (never-ending)
-    // loop — the flag is set before postChat and the mocked stream never
-    // resolves, so it is never released.
+    // loop — the flag is set on the first design-loop progress frame (issue
+    // #349) and the mocked stream never resolves, so it is never released.
     sendFirstComposerMessage("make a box");
     await waitFor(() => expect(client.createProject).toHaveBeenCalled());
     await waitFor(() => expect(client.listVersions).toHaveBeenCalled());
+    await waitFor(() => expect(capturedHandlers).not.toBeNull());
+    act(() => {
+      capturedHandlers?.onProgress?.("design-loop-start", { step: "design-loop-start" });
+    });
 
-    const button = screen.getByTestId("export-3mf-button") as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    const button = await screen.findByTestId("export-3mf-button");
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(true));
   });
 
   it("a completed design loop flips the export button from disabled to enabled (issue #197)", async () => {
@@ -4220,15 +4226,27 @@ describe("App design-loop progress indicator (issue #82)", () => {
   it("is present when designLoopInFlight is true (after send)", async () => {
     vi.spyOn(client, "createProject").mockResolvedValue(PROJECT);
     vi.spyOn(client, "postChat").mockResolvedValue({ status: "accepted" });
-    vi.spyOn(client, "streamEvents").mockImplementation(() => new Promise(() => {}));
+    let capturedHandlers: Parameters<typeof client.streamEvents>[1] | null = null;
+    vi.spyOn(client, "streamEvents").mockImplementation((_id, handlers) => {
+      capturedHandlers = handlers;
+      return new Promise(() => {});
+    });
 
     render(<App client={client} />);
     // Issue #192: the first explicit send creates the project and starts
-    // the (hanging) design loop — the indicator shows while in flight
-    // (issue #193: via the first-run composer).
+    // the (hanging) design loop. The in-flight indicator is deferred until
+    // the first design-loop progress frame (issue #349), so the loop's
+    // start frame is what makes the indicator appear.
     sendFirstComposerMessage("hi");
     await act(async () => {
       await Promise.resolve();
+    });
+
+    await waitFor(() => {
+      expect(capturedHandlers).not.toBeNull();
+    });
+    act(() => {
+      capturedHandlers?.onProgress?.("design-loop-start", { step: "design-loop-start" });
     });
 
     // The send button is disabled while in flight

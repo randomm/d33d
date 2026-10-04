@@ -588,11 +588,11 @@ export const confirmOffer = {
 } as const;
 
 /**
- * The question pre-route's two no-run replies (issue #260). When a
+ * The question pre-route's no-run replies (issue #260). When a
  * chat question the stage-1 filter accepts cannot be answered — the
  * stage-2 call times out, errors, returns a malformed reply, trips the
  * number guard, or says the design state does not establish the value —
- * the chat replies with one of these two fixed plain messages: no
+ * the chat replies with one of these fixed plain messages: no
  * design run, no version. The strings are written in copy.ts and the
  * backend emits the same strings verbatim (pinned by the design-
  * contract test), so the wire and the deck are one sentence.
@@ -619,6 +619,24 @@ export const answerRoute = {
    *  that the deck's and the server's templates match. */
   unanswerableMissing: (missing: string): string =>
     `I don't know ${missing}. Tell me and I'll check — nothing was changed.`,
+  /** The no-version reply (issue #349): a question arrives on a project
+   *  that has no version yet (the imported v1 counts as a version, so
+   *  this fires only for projects with nothing at all). The question
+   *  never starts the design loop and never creates a pending version;
+   *  the backend emits this string verbatim on the done frame's `answer`
+   *  field. The deck carries the same fixed string so wording drift
+   *  between deck and server fails here, the #260 way. */
+  nothingBuiltYet:
+    "Nothing is built yet — tell me what to make first.",
+  /** The bare-affirmation no-offer reply (issue #349): a clean
+   *  affirmation ("yes", "ok", "sure") arrives when no offer is pending
+   *  — neither a #250 param offer nor a fill-recut offer. The bare yes
+   *  never starts the design loop; the backend emits this string verbatim
+   *  on the done frame's `answer` field. The deck carries the same fixed
+   *  string so wording drift between deck and server fails here, the #260
+   *  way. */
+  nothingWaitingForYes:
+    "There's nothing waiting for a yes right now — what would you like to change?",
 } as const;
 
 /**

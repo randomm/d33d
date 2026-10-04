@@ -103,6 +103,8 @@ __all__ = [
     "DETERMINISTIC_DIMENSION_LIST_RE",
     "LLM_CALL_TIMEOUT_SECONDS",
     "NOT_ESTABLISHED",
+    "NO_OFFER_AFFIRMATION_REPLY",
+    "NO_VERSION_QUESTION_REPLY",
     "UNANSWERABLE_MISSING_TEMPLATE",
     "AnswerOutcome",
     "ModelUnconfiguredError",
@@ -183,6 +185,31 @@ NOT_ESTABLISHED = "The design as it stands doesn't establish that — nothing wa
 #: verbatim — no client-side build).
 UNANSWERABLE_MISSING_TEMPLATE = (
     "I don't know {missing}. Tell me and I'll check — nothing was changed."
+)
+
+#: The no-loop reply for a question on a project with NO version yet
+#: (issue #349, operator decision 2): a question (``is_candidate_question``
+#: true — every question gets a reply, none is silently dropped) arrives
+#: before anything is built. The design loop is never the fallback — a
+#: version named after the question is not an answer. The imported v1
+#: counts as a version, so this fires only for projects with nothing at
+#: all. Verbatim copy of ``copy.ts answerRoute.nothingBuiltYet`` (pinned
+#: by the design-contract test and the backend parity test — the #260
+#: way).
+NO_VERSION_QUESTION_REPLY = (
+    "Nothing is built yet — tell me what to make first."
+)
+
+#: The no-loop reply for a BARE AFFIRMATION with NO offer pending
+#: (issue #349): a clean affirmation (``_is_clean_affirmation`` — the
+#: same predicate the #250 offer pre-route uses, unchanged per operator
+#: decision 1 — "yes", "ok", …; a hedge like "yes but make it 2 mm" is
+#: neither and flows to the loop) arrives when neither a #250 param
+#: offer nor a fill-recut offer is live. The design loop is never the
+#: fallback for a bare yes. Verbatim copy of ``copy.ts answerRoute.
+#: nothingWaitingForYes`` (pinned the same way).
+NO_OFFER_AFFIRMATION_REPLY = (
+    "There's nothing waiting for a yes right now — what would you like to change?"
 )
 
 
@@ -333,6 +360,61 @@ _MULTIWORD_IMPERATIVE_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+
+#: The design/request cues the no-version guard excludes from the
+#: "nothing built" reply (issue #349, adversarial review round 1): the
+#: STAGE-1 imperative scan alone misses request-questions whose verb is
+#: not in the change-cue set — "Could you design a phone stand 80 mm
+#: wide?" (design), "Can I get a box 60 × 40 × 30 mm?" (get), "How
+#: about a hook that holds 5 kg?" (hold), "What about a 30 mm spacer?"
+#: (noun + dimensions, no verb at all). Such a message is a request, not
+#: a question about the current design — it MUST start the loop (the
+#: ticket's dispatch rule: an imperative verb such as make, design,
+#: create, build, print, get, add; or a noun plus dimensions). The
+#: predicate is the EXISTING stage-1 cue scan (the imperative union plus
+#: the multi-word imperative forms — never widened, it has version-exists
+#: callers through :func:`is_candidate_question`) OR one of these
+#: request verbs. It is used ONLY in the no-version branch — a message
+#: with a live version routes exactly as today.
+_REQUEST_CUE_WORDS: frozenset[str] = frozenset(
+    ["design", "create", "build", "print", "get", "hold", "holds"]
+)
+_REQUEST_CUE_RE = re.compile(
+    r"\b(?:" + "|".join(sorted(_REQUEST_CUE_WORDS)) + r")\b",
+    re.IGNORECASE,
+)
+#: A "what about …?" / "how about …?" proposal — the noun-plus-dimensions
+#: request shape with no verb at all ("What about a 30 mm spacer?").
+#: Such a message proposes a design rather than asking about the current
+#: one, so the no-version guard must let it start the loop.
+_REQUEST_WHAT_ABOUT_RE = re.compile(
+    r"\b(?:what|how)\s+about\b", re.IGNORECASE
+)
+
+
+def carries_request_cue(message: str) -> bool:
+    """True iff the message carries a design/request cue: any stage-1
+    imperative cue (the :data:`_ALL_IMPERATIVE_WORDS` union, including
+    "make"/"set"/"add"/…), any multi-word imperative form ("can you
+    make", …), one of :data:`_REQUEST_CUE_WORDS` ("design", "create",
+    "build", "print", "get", "hold"/"holds"), or a "what about" /
+    "how about" proposal form. Used ONLY by the no-version guard.
+    The comparison-form carve-out deliberately does NOT apply here —
+    a design never exists at this point, so a "taller than" form is
+    not a comparison and still routes to the loop."""
+    m = message.strip()
+    if not m:
+        return False
+    return any(
+        rx.search(m) is not None
+        for rx in (
+            _IMPERATIVE_RE,
+            _MULTIWORD_IMPERATIVE_RE,
+            _REQUEST_CUE_RE,
+            _REQUEST_WHAT_ABOUT_RE,
+        )
+    )
 
 
 def is_interrogative(message: str) -> bool:
@@ -1569,10 +1651,11 @@ async def route_chat_message(
     Returns ``None`` (the caller routes to the design loop exactly as
     today) ONLY when:
 
-    * no version yet (the design-state block is empty — nothing to
-      answer from);
     * stage 1 rejects (not a question, or an imperative is present —
       ambiguous → loop, per the ticket);
+    * the no-version guard declines the message (NOT a question —
+      a change request on an empty project still starts the loop,
+      issue #349);
     * no answer edge is wired;
     * stage 2 classifies the message as a ``"request"`` — the model
       says the message asks for a change, and the design loop is the
@@ -1592,7 +1675,37 @@ async def route_chat_message(
     :func:`ask_answer_call` (issues #260 / #313).
     """
     if latest is None:
-        logger.info("question-answer: no versions yet — design loop")
+        # The no-version guard (issue #349, operator decision 2 — keyed
+        # on ``latest is None``; the imported v1 IS a version, so it
+        # never reaches this branch): a QUESTION with nothing built gets
+        # the deterministic "nothing built" reply (``kind: "answer"``
+        # done frame — the same wire shape as every other no-run reply),
+        # never the design loop (no pending version named after the
+        # question, no LLM call). Every question gets a reply — none is
+        # silently dropped. A change request (stage 1 rejects it —
+        # imperative cue or no interrogative form) still starts the
+        # loop exactly as today, including the first design request on
+        # an empty project.
+        # A question-shaped message carrying a request cue ("Could you
+        # design …?" / "Can I get a box …?" / "What about a 30 mm
+        # spacer?" — a noun + dimensions, no change verb) is a request
+        # in question form, not a question about the current design:
+        # it starts the loop exactly like any other first design request
+        # (issue #349 — the no-version reply is reserved for genuine
+        # questions about something that does not yet exist).
+        if is_candidate_question(message) and not carries_request_cue(message):
+            logger.info(
+                "question-answer: no versions yet — replying with the "
+                "nothing-built notice (len(message)=%d)",
+                len(message),
+            )
+            return {
+                "kind": ANSWER_DONE_KIND,
+                "answer": NO_VERSION_QUESTION_REPLY,
+            }
+        logger.info(
+            "question-answer: no versions yet — design loop"
+        )
         return None
     if not is_candidate_question(message):
         # Length-only log (no PII — the message text is never logged).

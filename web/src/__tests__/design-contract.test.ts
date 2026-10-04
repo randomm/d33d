@@ -350,6 +350,38 @@ describe("design contract", () => {
     ).not.toBe(copy.answerRoute.notEstablished);
   });
 
+  /* ---------------------------------------- W349 */
+
+  it("the no-version and no-offer no-loop replies live in the deck (issue #349)", () => {
+    // Issue #349: two new deterministic no-loop replies — a question on a
+    // project with no version ("nothing built yet") and a bare
+    // affirmation with no live offer ("nothing waiting for a yes"). The
+    // backend emits each string verbatim on the done frame's `answer`
+    // field (the server is the writer of the wire string); the deck
+    // carries the same fixed strings so wording drift between deck and
+    // server fails here, the #260 / #278 way. Both replies never start
+    // the design loop and never create a pending version, so neither
+    // implies a run: they must not read like a change happened.
+    expect(copy.answerRoute.nothingBuiltYet).toBe(
+      "Nothing is built yet — tell me what to make first.",
+    );
+    expect(copy.answerRoute.nothingWaitingForYes).toBe(
+      "There's nothing waiting for a yes right now — what would you like to change?",
+    );
+    // The two replies are distinct — a no-version question and a bare yes
+    // with no offer are different situations and must not read the same.
+    expect(copy.answerRoute.nothingBuiltYet).not.toBe(
+      copy.answerRoute.nothingWaitingForYes,
+    );
+    // Neither reply may imply a version was created (a no-loop reply that
+    // read like a design run happened would be the house anti-pattern).
+    expect(copy.answerRoute.nothingBuiltYet).not.toMatch(/\d/);
+    expect(copy.answerRoute.nothingWaitingForYes).not.toMatch(/\d/);
+    // The no-offer reply points the user back to change requests (the only
+    // thing that starts the loop) — it does not affirm anything.
+    expect(copy.answerRoute.nothingWaitingForYes).toContain("what would you like to change?");
+  });
+
   /* ---------------------------------------- W263 */
 
   it("the deterministic axis-size answer copy lives in the deck (issue #263)", () => {
