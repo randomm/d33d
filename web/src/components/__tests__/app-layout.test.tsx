@@ -2545,11 +2545,12 @@ describe("App photo upload wiring", () => {
   // test in the file — without an afterEach here, the stubbed fetch
   // (and its `part: null` design-state reply) leaks into the later
   // Screen 2 tests, whose per-test getDesignState spy then sees a
-  // resolved fetch instead of a real network call. Restoring the real
-  // fetch and the client methods each test keeps the suites independent.
+  // resolved fetch instead of a real network call. Unstub the fetch
+  // global only — `vi.restoreAllMocks()` is too broad here: it also
+  // restores the module-level `vi.mock` for DimensionCanvas / ModelViewer
+  // / PickLayer, breaking the later test that depends on the mock.
   afterEach(() => {
     vi.unstubAllGlobals();
-    vi.restoreAllMocks();
   });
 
   it("PhotoUpload receives the real project id (upload POSTs to the right URL)", async () => {
@@ -2579,6 +2580,14 @@ describe("App photo upload wiring", () => {
 
   it("mounts DimensionCanvas once a photo has been uploaded", async () => {
     const client = makeClient();
+    // The previous test's `vi.unstubAllGlobals()` restored `Image` to
+    // jsdom's constructor (whose `onload`/`onerror` are null), so re-stub
+    // it: PhotoUpload's post-upload microtask (`readImageDimensions`)
+    // runs AFTER the test's fetch unstub in the previous test's
+    // `afterEach`, and a broken `Image` makes `img.onload = …` throw
+    // `TypeError: Cannot set properties of undefined` (the upload's
+    // catch swallows it, DimensionCanvas never mounts).
+    vi.stubGlobal("Image", FakeImage);
 
     render(<App client={client} />);
     // Issue #192: the project is created lazily on the first explicit send
