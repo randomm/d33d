@@ -5584,6 +5584,24 @@ def _model_unconfigured_result(env_var=None):
     return _Result()
 
 
+def _renderer_image_stale_result(renderer_detail=None):
+    """An exhausted result shaped like the image pre-flight short-circuit:
+    the reason + ``renderer_detail`` (issue #346 frame field, omit-not-null
+    — ``None`` means the key is absent from the result, never a null)."""
+    record = IterationRecord(iteration=0, scad_source="", render=None, score=None)
+    detail = renderer_detail
+
+    class _Result:
+        status = "exhausted"
+        best = record
+        failure_reason = "renderer_image_stale"
+        iterations_used = 0
+        env_var = None
+        renderer_detail = detail
+
+    return _Result()
+
+
 def test_chat_model_unconfigured_error_frame_carries_reason_and_env_var(
     app_with_versions,
 ):
@@ -5652,6 +5670,170 @@ def test_chat_model_unconfigured_frame_omits_env_var_when_unknown(
     assert "env_var" not in error_frames[0], (
         "env_var must be omitted (never null) when the pre-flight could "
         f"not name a variable; got {error_frames[0].get('env_var')!r}"
+    )
+
+
+def test_chat_renderer_image_stale_frame_carries_reason_and_renderer_detail(
+    app_with_versions,
+):
+    """Issue #346: the terminal ``error`` frame for the render-worker
+    image pre-flight carries ``reason: renderer_image_stale`` PLUS the
+    structured ``renderer_detail`` (image missing, expected hash, the
+    exact rebuild command) — the SPA renders the real reason + rebuild
+    command in the mono face, never a bare reason string; no version is
+    created (no LLM call happened)."""
+    detail = {
+        "reason": "image_missing",
+        "expected": "abc123",
+        "rebuild_command": "docker build --platform=linux/amd64 -t d33d/render-worker:local .",
+    }
+
+    async def _loop(app, **kwargs):
+        return _renderer_image_stale_result(dict(detail))
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        timeline = (await client.get(f"/api/projects/{pid}/versions")).json()
+        return frames, timeline
+
+    frames, timeline = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "renderer_image_stale"
+    carried = error_frames[0]["renderer_detail"]
+    assert carried["reason"] == "image_missing"
+    assert carried["expected"] == "abc123"
+    assert carried["rebuild_command"] == detail["rebuild_command"], (
+        "the frame carries the EXACT canonical rebuild command (the "
+        "disclosure renders it in mono)"
+    )
+    assert error_frames[0]["message"] == "Design loop exhausted: renderer_image_stale"
+    # No version is created for a pre-flight failure (no LLM call happened).
+    assert timeline == []
+
+
+def test_chat_renderer_image_stale_label_mismatch_frame_carries_actual_and_expected(
+    app_with_versions,
+):
+    """Issue #346: a ``label_mismatch`` fault carries BOTH hash values
+    (actual from the image, expected from the working tree) on the frame —
+    the SPA's "label X vs expected Y" line renders only established
+    numbers."""
+    detail = {
+        "reason": "label_mismatch",
+        "expected": "abc123",
+        "actual": "stale999",
+        "rebuild_command": "docker build ...",
+    }
+
+    async def _loop(app, **kwargs):
+        return _renderer_image_stale_result(dict(detail))
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    carried = error_frames[0]["renderer_detail"]
+    assert carried["reason"] == "label_mismatch"
+    assert carried["actual"] == "stale999"
+    assert carried["expected"] == "abc123"
+
+
+def test_chat_renderer_image_stale_frame_omits_renderer_detail_when_absent(
+    app_with_versions,
+):
+    """Omit-not-null: a ``renderer_image_stale`` result whose pre-flight
+    produced no structured detail (``renderer_detail=None``) emits the
+    frame WITHOUT the ``renderer_detail`` key (the SPA falls back to the
+    headline copy) — never a null; the reason is still carried."""
+
+    async def _loop(app, **kwargs):
+        return _renderer_image_stale_result(None)
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "renderer_image_stale"
+    assert "renderer_detail" not in error_frames[0], (
+        "renderer_detail must be omitted (never null) when the pre-flight "
+        f"produced no detail; got {error_frames[0].get('renderer_detail')!r}"
+    )
+
+
+def test_chat_error_frame_omits_renderer_detail_for_other_reasons(
+    app_with_versions,
+):
+    """Omit-not-null: a non-``renderer_image_stale`` result carrying a
+    stray ``renderer_detail`` (e.g. a stub) does NOT put it on the
+    terminal frame — the field rides the frame only for the
+    ``renderer_image_stale`` reason (same discipline as ``env_var``)."""
+    detail = {"reason": "image_missing", "expected": "abc123"}
+
+    class _Result:
+        status = "exhausted"
+        best = IterationRecord(iteration=0, scad_source="", render=None, score=None)
+        failure_reason = "bbox_out_of_tolerance"
+        iterations_used = 1
+        env_var = None
+        renderer_detail = detail
+
+    async def _loop(app, **kwargs):
+        return _Result()
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = _loop
+        await client.post(f"/api/projects/{pid}/chat", json={"message": "hi"})
+        source = app_with_versions.state.event_sources[pid]
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = run_async(app_with_versions, _call)
+    error_frames = [data for event, data in frames if event == "error"]
+    assert error_frames, "no error frame emitted"
+    assert error_frames[0]["reason"] == "bbox_out_of_tolerance"
+    assert "renderer_detail" not in error_frames[0], (
+        f"renderer_detail must be omitted for other reasons; got "
+        f"{error_frames[0].get('renderer_detail')!r}"
     )
 
 

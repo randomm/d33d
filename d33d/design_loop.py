@@ -60,6 +60,7 @@ import subprocess
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from d33d.config.catalogue import Catalogue
@@ -73,7 +74,13 @@ from d33d.failure_classes import (
     detect_magic_numbers,
     route_repair,
 )
-from d33d.render_worker import RenderResult
+from d33d.render_worker import (
+    RENDER_WORKER_IMAGE,
+    RenderResult,
+    _verify_render_worker_image,
+    build_hash,
+    canonical_build_command,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +88,7 @@ __all__ = [
     "MAX_ITERATIONS",
     "MODEL_UNCONFIGURED",
     "NO_IMPROVEMENT_LIMIT",
+    "RENDERER_IMAGE_STALE",
     "RENDERER_PREFLIGHT_CACHE_SECONDS",
     "RENDERER_UNAVAILABLE",
     "BboxInfo",
@@ -124,6 +132,17 @@ RENDERER_UNAVAILABLE = "renderer_unavailable"
 #: and NO LLM call — the same pre-flight pattern as
 #: :data:`RENDERER_UNAVAILABLE`, but for the model rather than the renderer.
 MODEL_UNCONFIGURED = "model_unconfigured"
+
+#: The loop-level (NOT an error_class) failure reason emitted when the
+#: render-worker IMAGE pre-flight check finds the ``d33d/render-worker:
+#: local`` image missing, or its build-hash label no longer matching the
+#: working tree, before the first iteration (issue #346). The run ends at
+#: once with this reason, NO LLM call, and a structured
+#: ``renderer_detail`` on the result (``image_missing`` vs
+#: ``label_mismatch`` + the exact rebuild command). Terminal — retrying
+#: changes nothing until the operator rebuilds the image. Distinct from
+#: :data:`RENDERER_UNAVAILABLE` (a docker-query failure stays retryable).
+RENDERER_IMAGE_STALE = "renderer_image_stale"
 
 #: How long a SUCCESSFUL renderer pre-flight check is trusted before the
 #: next design-loop run re-checks (per-process cache; issue #277 operator
@@ -358,6 +377,12 @@ class DesignResult:
     ``${ENV}`` variable NAME (never the value) when the loop short-circuits
     on ``model_unconfigured`` — the adapter's terminal frame picks it up.
     ``None`` for every other outcome.
+
+    ``renderer_detail`` (issue #346) carries the structured verified
+    fault when the loop short-circuits on :data:`RENDERER_IMAGE_STALE`:
+    ``{"reason": "image_missing" | "label_mismatch", "expected"?,
+    "actual"?, "rebuild_command"}`` — the terminal frame rides it verbatim
+    (omit-not-null). ``None`` for every other outcome.
     """
 
     status: str
@@ -366,6 +391,7 @@ class DesignResult:
     failure_reason: str | None = None
     iterations_used: int = 0
     env_var: str | None = None
+    renderer_detail: dict[str, str] | None = None
 
 
 #: Structured failure reasons for an exhausted loop, in bit order — each
@@ -1475,6 +1501,7 @@ async def run_design_loop_async(
     part_bbox_mm: tuple[float, float, float] | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
+    image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
     """Run the bounded iterate-and-score design loop (async core).
 
@@ -1526,7 +1553,9 @@ async def run_design_loop_async(
     # run it off the event loop so a hung/slow daemon never stalls other
     # SSE streams. An injected ``renderer_check`` is assumed to be a cheap
     # test stub — a plain direct call keeps the stubs trivial (a sync
-    # zero-arg callable, no coroutine wiring needed).
+    # zero-arg callable, no coroutine wiring needed). The image probe
+    # (issue #346) follows the same injectability convention: an injected
+    # ``image_check`` is a sync stub, the real probe runs off the loop.
     if renderer_check is None:
         renderer_ok = await asyncio.to_thread(renderer_is_available)
     else:
@@ -1539,6 +1568,47 @@ async def run_design_loop_async(
             failure_reason=RENDERER_UNAVAILABLE,
             iterations_used=0,
         )
+
+    # Pre-flight render-worker IMAGE check (issue #346): the daemon being up
+    # is not enough — the image must EXIST and carry a build-hash label
+    # matching the working tree (``d33d.render_worker._verify_render_worker_
+    # image`` — the same guard the per-render path runs, promoted to
+    # pre-flight). A VERIFIED missing/stale image ends the run at once with
+    # :data:`RENDERER_IMAGE_STALE` + the structured ``renderer_detail``
+    # (image missing vs label X vs expected Y, plus the exact rebuild
+    # command), still before any LLM call. A docker-query FAILURE (the
+    # probe raising ``OSError`` — daemon down, inspect timeout, binary
+    # vanished) is NOT staleness: it stays :data:`RENDERER_UNAVAILABLE`
+    # (retryable, issue #277 semantics) — never the terminal rebuild fault.
+    # The probe is injectable (``image_check``, ``None`` runs the real
+    # probe) so the fast suite never shells out to real Docker.
+    if image_check is None:
+        image_detail = await asyncio.to_thread(
+            _render_worker_image_detail,
+            image=RENDER_WORKER_IMAGE,
+            rebuild_command=canonical_build_command(),
+        )
+    else:
+        try:
+            image_detail = image_check()
+        except OSError:
+            # A docker-query failure from the image probe (daemon down,
+            # inspect timeout, binary vanished — issue #346 operator
+            # decision 1) is NOT a verified image fault: fall back to the
+            # RETRYABLE ``renderer_unavailable`` path, never the terminal
+            # ``renderer_image_stale`` (a transient daemon outage must not
+            # become a "rebuild the image" notice).
+            return DesignResult(
+                status="exhausted",
+                best=IterationRecord(
+                    iteration=0, scad_source="", render=None, score=None
+                ),
+                iterations=(),
+                failure_reason=RENDERER_UNAVAILABLE,
+                iterations_used=0,
+            )
+    if image_detail is not None:
+        return _image_stale_result(image_detail)
 
     repair: dict[str, Any] | None = None
     best: IterationRecord | None = None
@@ -1863,6 +1933,115 @@ def _stamp_on_progress_iteration(on_progress: Any, iteration: int) -> None:
             pass
 
 
+def _render_worker_image_detail(
+    image: str = RENDER_WORKER_IMAGE,
+    *,
+    repo_root: Path | None = None,
+    expected_hash: str | None = None,
+    rebuild_command: str | None = None,
+) -> dict[str, str] | None:
+    """Pre-flight image probe (issue #346): the render-worker image must
+    exist and carry a build-hash label matching the working tree.
+
+    Reuses :func:`d33d.render_worker._verify_render_worker_image` (the same
+    guard the per-render path runs) and maps its exceptions to the
+    structured fault the terminal frame rides:
+
+    * ``RuntimeError`` (verified image missing / label missing or
+      mismatched) → ``{"reason": "image_missing" | "label_mismatch",
+      ...}`` — the ``reason`` follows the verifier's own message
+      (``image not found`` vs ``label mismatch/missing``), never reworded.
+      ``label_mismatch`` carries ``expected`` (the working-tree
+      :func:`build_hash`) and ``actual`` (the image's label, when the
+      image itself exists); ``image_missing`` carries only ``expected``.
+      ``rebuild_command`` is always the canonical command
+      (``d33d.render_worker.canonical_build_command``).
+    * ``OSError`` (a docker-query FAILURE — daemon down, binary missing,
+      inspect timeout: the verifier deliberately re-raises it so callers
+      can distinguish "cannot query docker" from a verified fault) →
+      ``None``. The caller falls back to the retryable
+      :data:`RENDERER_UNAVAILABLE` path (issue #277 semantics) — a daemon
+      outage is never a terminal "rebuild the image" fault.
+
+    Returns ``None`` when the image is present and the label matches
+    (nothing wrong). A missing build input (``FileNotFoundError`` from
+    :func:`build_hash` — an incomplete tree) degrades to ``None`` with one
+    WARNING (the per-render guard's established mapping: not an image
+    fault) — never a crash, never a fabricated fault.
+
+    Bounded by the verifier's own 15 s inspect timeout (issue #277's
+    "bounded by a timeout" requirement); the caller runs it off the event
+    loop (``asyncio.to_thread``).
+    """
+    expected: str | None = None
+    if expected_hash is None:
+        try:
+            expected = build_hash(repo_root)
+        except FileNotFoundError as exc:
+            logger.warning("render-worker image pre-flight skipped: %s", exc)
+            return None
+    else:
+        expected = expected_hash
+    try:
+        _verify_render_worker_image(image, repo_root=repo_root, expected_hash=expected)
+    except FileNotFoundError as exc:
+        logger.warning("render-worker image pre-flight skipped: %s", exc)
+        return None
+    except OSError:
+        # A docker-query failure is "cannot query docker" — NOT staleness.
+        # The caller's daemon check (or its absence) degrades this run to
+        # renderer_unavailable (retryable), never the terminal rebuild fault.
+        return None
+    except RuntimeError as exc:
+        detail: dict[str, str] = {
+            "rebuild_command": rebuild_command or canonical_build_command()
+        }
+        if "image not found" in str(exc):
+            detail["reason"] = "image_missing"
+            detail["expected"] = expected
+        else:
+            detail["reason"] = "label_mismatch"
+            detail["expected"] = expected
+            actual = _image_label_or_none(image)
+            if actual is not None:
+                detail["actual"] = actual
+        return detail
+    return None
+
+
+def _image_label_or_none(image: str) -> str | None:
+    """The image's build-hash label, or ``None`` when it cannot be
+    established (image absent, label missing/non-string, or a docker-query
+    failure). Never a fabricated value (issue #346 disclosure must name
+    only established numbers)."""
+    try:
+        from d33d.render_worker import BUILD_HASH_LABEL, _docker_image_labels
+
+        labels = _docker_image_labels(image)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    if not labels:
+        return None
+    value = labels.get(BUILD_HASH_LABEL)
+    return value if isinstance(value, str) and value else None
+
+
+def _image_stale_result(image_detail: dict[str, str]) -> DesignResult:
+    """The synthetic :data:`RENDERER_IMAGE_STALE` pre-flight result (issue
+    #346): the same zero-iteration exhausted shape as
+    :data:`RENDERER_UNAVAILABLE`, carrying the structured ``renderer_detail``
+    the terminal frame rides verbatim (no render ever ran — no fabricated
+    render data)."""
+    return DesignResult(
+        status="exhausted",
+        best=IterationRecord(iteration=0, scad_source="", render=None, score=None),
+        iterations=(),
+        failure_reason=RENDERER_IMAGE_STALE,
+        iterations_used=0,
+        renderer_detail=dict(image_detail),
+    )
+
+
 def renderer_is_available(probe: Callable[[], bool] | None = None) -> bool:
     """Is the renderer (Docker daemon) reachable right now?
 
@@ -1944,6 +2123,7 @@ def run_design_loop(
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
     renderer_check: Callable[[], bool] | None = None,
+    image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
     """Synchronous entry point for the bounded design loop.
 
@@ -1972,6 +2152,7 @@ def run_design_loop(
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,
             renderer_check=renderer_check,
+            image_check=image_check,
         )
     )
 

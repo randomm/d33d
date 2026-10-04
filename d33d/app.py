@@ -72,7 +72,7 @@ import os
 import re
 import subprocess
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -110,7 +110,7 @@ from d33d.module_registry import (
     build_registry_glb,
 )
 from d33d.projects import create_projects_router
-from d33d.render_worker import render_for_design_loop
+from d33d.render_worker import RENDER_WORKER_IMAGE, render_for_design_loop
 from d33d.security import credentials as cred
 from d33d.streaming import create_streaming_router
 from d33d.versions_routes import create_versions_router
@@ -399,10 +399,51 @@ async def _lifespan(app: FastAPI):
                 "the design loop will report 'model_unconfigured' until it "
                 "is"
             )
+    # Issue #346 — the render-worker image pre-flight at startup: a one-shot
+    # WARNING naming the verified fault (image missing or build-hash label
+    # mismatch) plus the exact rebuild command when the image check finds
+    # a fault. A fault that cannot be established (probe returned None —
+    # image present/fresh, or a docker-query failure the design loop will
+    # report as retryable renderer_unavailable) logs nothing. Never crashes
+    # startup. The seam is injectable (``create_app(image_check=...)``)
+    # so the fast suite runs it without real Docker.
+    _image_check = state.image_check
+    from d33d import design_loop as _dl_mod
+
+    _image_detail = _image_check() if _image_check is not None else _dl_mod._render_worker_image_detail()
+    if _image_detail:
+        logger.warning(
+            "renderer image pre-flight: %s — the design loop will report "
+            "'renderer_image_stale' until the image is rebuilt with: %s",
+            _image_fault_message(_image_detail),
+            _image_detail.get("rebuild_command", ""),
+        )
     yield
     db.APP_DATA_DIR = prior_app_data_dir
     if state.conn is not None:
         state.conn.close()
+
+
+def _image_fault_message(detail: dict[str, str]) -> str:
+    """The one-line naming of a verified image fault for the startup
+    WARNING (issue #346): the image name / both hash values, never a
+    value the probe did not establish."""
+    reason = detail.get("reason")
+    if reason == "image_missing":
+        return (
+            f"the render-worker image {RENDER_WORKER_IMAGE!r} is missing from "
+            "the docker daemon"
+        )
+    if reason == "label_mismatch":
+        actual = detail.get("actual")
+        expected = detail.get("expected")
+        if actual and expected:
+            return (
+                f"the render-worker image's build-hash label {actual!r} does "
+                f"not match the working tree's {expected!r}"
+            )
+        return "the render-worker image's build-hash label is missing or stale"
+    return "the render-worker image pre-flight found an image fault"
 
 
 def _serialise_catalogue(cat: Catalogue) -> dict[str, Any]:
@@ -618,6 +659,7 @@ def create_app(
     master_key_path: str | Path | None = None,
     catalogue_path: str | Path | None = None,
     spa_dist_dir: str | Path | None = None,
+    image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> FastAPI:
     """Build the FastAPI app.
 
@@ -638,6 +680,17 @@ def create_app(
         tests, or a fresh checkout before ``npm run build`` has run), the
         app falls back to :data:`STUB_HTML` at ``/`` instead of mounting
         static files — startup never crashes on a missing dist dir.
+      ``image_check``: the render-worker IMAGE pre-flight seam (issue
+        #346): a zero-arg callable returning the structured image fault
+        (``{"reason": "image_missing" | "label_mismatch", "expected"?,
+        "actual"?, "rebuild_command"}``) or ``None`` when the image is
+        present and fresh (or the probe could not establish a fault). The
+        lifespan runs it once at startup (one WARNING naming the problem
+        + the rebuild command when it returns a fault — never a crash) and
+        the production design loop runs it before every design loop. The
+        default (``None``) is the real probe (the render-worker's
+        ``_verify_render_worker_image`` over the working tree); the fast
+        suite injects a stub so no test shells out to real Docker.
     """
     db_path_p = Path(db_path)
     data_dir = (
@@ -681,6 +734,10 @@ def create_app(
     # never spawn Docker; production wiring is the real
     # ``d33d.module_registry.build_registry_glb`` (default below).
     app.state.build_registry_glb = build_registry_glb
+    # The render-worker image pre-flight probe (issue #346) — the
+    # lifespan's startup WARNING seam AND the per-design-loop probe the
+    # production design loop runs. ``None`` → the real probe.
+    app.state.image_check = image_check
     # The design-loop runner for FINALIZE (issue #8/#9) — injected (same
     # seam as build_registry_glb) so tests wire a stub loop. Production
     # wires the REAL d33d.design_loop.run_design_loop (resolved per call
@@ -1858,6 +1915,7 @@ def _build_production_design_loop():
             llm_fn=llm_fn,
             bbox_fn=bbox_fn,
             request=request,
+            image_check=getattr(app_state, "image_check", None),
             state_params=kwargs.get("state_params"),
             state_bbox=kwargs.get("state_bbox"),
             state_stated=kwargs.get("state_stated"),

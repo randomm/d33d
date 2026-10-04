@@ -136,7 +136,7 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
 #: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
 #: archive would log an exception on EVERY such turn.
 LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
-    {"renderer_unavailable", "model_unconfigured"}
+    {"renderer_unavailable", "model_unconfigured", "renderer_image_stale"}
 )
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM

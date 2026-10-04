@@ -225,6 +225,66 @@ def test_verify_inspect_timeout_is_docker_query_failure_not_staleness(
         rw._verify_render_worker_image("d33d/render-worker:local", expected_hash="abc123")
 
 
+# --- the design-loop pre-flight probe (issue #346) ------------------------
+
+
+def test_preflight_probe_reuses_verify_and_canonical_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Issue #346: the pre-flight probe
+    (``d33d.design_loop._render_worker_image_detail``) reuses
+    ``_verify_render_worker_image`` / ``canonical_build_command``: all
+    three image outcomes map to the configuration fault with the rebuild
+    command (or ``None`` when healthy / docker-query failure), Docker-free.
+    """
+    import d33d.design_loop as dl
+
+    # Image present + label match → healthy (None — no fault, no probe
+    # crash, no real Docker).
+    monkeypatch.setattr(rw.subprocess, "run", _stub_labels({rw.BUILD_HASH_LABEL: "abc123"}))
+    assert dl._render_worker_image_detail(expected_hash="abc123") is None
+
+    # Image missing → image_missing fault with the canonical rebuild
+    # command in mono.
+    monkeypatch.setattr(rw.subprocess, "run", _stub_labels(None))
+    detail = dl._render_worker_image_detail(expected_hash="abc123")
+    assert detail is not None
+    assert detail["reason"] == "image_missing"
+    assert detail["rebuild_command"] == rw.canonical_build_command()
+
+    # Label mismatch → label_mismatch fault carrying actual + expected.
+    monkeypatch.setattr(rw.subprocess, "run", _stub_labels({rw.BUILD_HASH_LABEL: "stale"}))
+    detail = dl._render_worker_image_detail(expected_hash="abc123")
+    assert detail is not None
+    assert detail["reason"] == "label_mismatch"
+    assert detail["actual"] == "stale"
+    assert detail["expected"] == "abc123"
+    assert detail["rebuild_command"] == rw.canonical_build_command()
+
+    # Docker-query failure (inspect timeout) → None (NOT the configuration
+    # fault — the loop degrades to renderer_unavailable, issue #277
+    # semantics; operator decision 1).
+    def _hang(argv: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.TimeoutExpired(cmd=argv, timeout=15)
+
+    monkeypatch.setattr(rw.subprocess, "run", _hang)
+    assert dl._render_worker_image_detail(expected_hash="abc123") is None
+
+
+def test_preflight_probe_missing_build_input_degrades_no_fault(
+    tmp_path: Path,
+) -> None:
+    """Issue #346: ``build_hash``'s ``FileNotFoundError`` (a hashed build
+    input missing from the tree) degrades the pre-flight to ``None``
+    (honest degradation, the per-render guard's established mapping) —
+    never a crash, never a fabricated fault; no Docker involved."""
+    import d33d.design_loop as dl
+
+    root = tmp_path / "incomplete-tree"
+    root.mkdir()
+    assert dl._render_worker_image_detail(repo_root=root) is None
+
+
 # --- doc-drift guard -------------------------------------------------------
 
 
