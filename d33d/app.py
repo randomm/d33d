@@ -1954,6 +1954,8 @@ def _build_production_design_loop():
             state_meta=kwargs.get("state_meta"),
             state_confirmed=kwargs.get("state_confirmed"),
             design_source=kwargs.get("design_source"),
+            part_scale=kwargs.get("part_scale"),
+            part_bbox_mm=kwargs.get("part_bbox_mm"),
             model=res.entry.model,
             prompt_version=prompt_version,
             on_progress=on_progress,

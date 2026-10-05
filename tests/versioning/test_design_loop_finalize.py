@@ -7759,3 +7759,42 @@ def test_design_path_role_resolution_failure_warning_carries_exc_info(
     )
     rows = _db._conn.execute("SELECT * FROM request_logs").fetchall()
     assert rows == [], f"expected no rows on a resolution failure, got {rows}"
+
+
+def test_finalize_loop_kwargs_include_part_scale_and_bbox(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #380 (guard): the finalize seam's ``_finalize_loop_kwargs``
+    includes ``part_scale`` / ``part_bbox_mm`` for a settled part project
+    (the seam sets both when ``part_envelope_with_bbox`` is non-None). The
+    production loop call uses ``**kwargs`` so a FUTURE drop at this seam
+    (the #380 bug's shape — an explicit forward list that forgets the part
+    inputs) would surface here: the guard's ``part_scale is not None``
+    gate would silently die."""
+    import d33d.db as db_mod
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    _pid, _ = _seed_file_backed_part_project(
+        db_path, tmp_path,
+        part_filename="part.stl", part_format="stl",
+        part_unit_status="settled", part_scale=1.0,
+    )
+    # The v1 row's measured mm bbox — the seam reads the ground-truth
+    # baseline from there (``part_envelope_with_bbox``).
+    conn = db_mod.connect(db_path)
+    conn.execute(
+        "UPDATE versions SET bbox=? WHERE project_id=?",
+        ('{"x": 20.0, "y": 20.0, "z": 20.0}', _pid),
+    )
+    conn.commit()
+    _spy_render(monkeypatch, {}, _default_render())
+
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row is not None else None
+
+    kwargs = _finalize_kwargs_for(db_path, _pid, get_project=_get_project, conn=conn)
+    conn.close()
+    assert kwargs.get("part_scale") == 1.0
+    assert tuple(kwargs.get("part_bbox_mm")) == (20.0, 20.0, 20.0)
