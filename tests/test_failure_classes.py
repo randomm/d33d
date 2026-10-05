@@ -83,9 +83,9 @@ def test_repairable_and_non_repairable_are_disjoint() -> None:
 
 
 def test_repairable_plus_non_repairable_covers_all() -> None:
-    """REPAIRABLE + NON_REPAIRABLE covers all 18 FAILURE_CLASSES entries."""
+    """REPAIRABLE + NON_REPAIRABLE covers all 19 FAILURE_CLASSES entries."""
     assert fc.REPAIRABLE_CLASSES | fc.NON_REPAIRABLE_CLASSES == fc.FAILURE_CLASSES
-    assert len(fc.FAILURE_CLASSES) == 18
+    assert len(fc.FAILURE_CLASSES) == 19
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +241,39 @@ def test_syntax_error_zup_yup_confusion() -> None:
     )
     assert classified.failure_class == "zup_yup_confusion"
     assert classified.repairable is True
+
+
+def test_syntax_error_unknown_variable_in_stderr() -> None:
+    """stderr carries the OpenSCAD unknown-variable warning →
+    unknown_variable (issue #383). The variable name is named in the
+    evidence — the repair instruction is variable-specific, not generic."""
+    stderr = 'WARNING: Ignoring unknown variable "H" in file model.scad, line 1'
+    classified = fc.classify_failure(
+        error_class="syntax_error",
+        stderr=stderr,
+    )
+    assert classified.failure_class == "unknown_variable"
+    assert classified.repairable is True
+    assert "H" in classified.evidence
+    directive = fc.route_repair(classified=classified, scad_source="cube(H);")
+    assert directive is not None
+    assert "variable" in directive.instruction.lower()
+
+
+def test_syntax_error_unknown_variable_in_render_log() -> None:
+    """Issue #383: the real render path — the warning lives in the HARVESTED
+    render.log (the container stderr carries only [entrypoint] markers), so
+    ``classify_failure`` must inspect ``render_log`` to reach the named class
+    and name the variable."""
+    warning = 'WARNING: Ignoring unknown variable "H" in file model.scad, line 1'
+    classified = fc.classify_failure(
+        error_class="syntax_error",
+        stderr="[entrypoint] Starting render of /work/model.scad\n",
+        render_log=warning,
+    )
+    assert classified.failure_class == "unknown_variable"
+    assert classified.repairable is True
+    assert "H" in classified.evidence
 
 
 def test_syntax_error_unclassified_fallback() -> None:

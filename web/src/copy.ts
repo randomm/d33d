@@ -422,6 +422,8 @@ export const failure = {
       "The part came out a different size from its own measurements.",
     ok: "The design step produced nothing usable.",
     syntax_error: "The generated design had a syntax error, so nothing was built.",
+    unknown_variable:
+      "The generated design referenced a size that was never set, so nothing was built.",
     empty_model: "The design produced an empty model — there is nothing to print.",
     artifact_error: "The model file came out unreadable.",
     timeout: "The render ran out of time. A simpler shape will get through.",

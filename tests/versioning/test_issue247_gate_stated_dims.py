@@ -278,13 +278,40 @@ def test_measured_axes_frame_field_best_matching_component() -> None:
 
 
 def test_measured_axes_omitted_on_pure_import_project() -> None:
-    """Pure import projects (issue #332): the gate target is the part's
-    own bbox, not the user's statements, so ``carried_axes`` is empty
-    there — and with NO user-confirmed axis the gate abstains, so
-    ``measured_axes`` is omitted too (the SPA renders the generic card),
-    never "emitted without an asked value" — pin that here so the
-    helper's rule is explicit."""
+    """Pure import projects (issue #332, extended by #383): the gate target
+    is the part's own bbox (the #383 floor fills every unconfirmed axis with
+    the part's extent). With NO user-confirmed axis and NO part bbox (the
+    test passes ``part_bbox_mm=None``), ``_bbox_target`` keeps the zero
+    stated triple, the gate abstains, and ``measured_axes`` is omitted
+    (the SPA renders the generic card), never "emitted without an asked
+    value" — pin that here so the helper's rule is explicit.
+
+    When the part IS present (the #383 case), the gate no longer abstains:
+    the floor fills the axes and a shrunken candidate can genuinely fail
+    on it, so ``measured_axes`` is emitted (the gate compared the part's
+    extents) — see the sibling test below."""
     assert _measured_axes(_bbox_result("bbox_out_of_tolerance", BboxInfo(x=66.0, y=45.0, z=30.0)), {}) is None
+
+
+def test_measured_axes_emitted_on_pure_import_with_part_floor() -> None:
+    """Issue #383: a pure import project WITH a part (``part_bbox_mm``
+    present) — the gate NO LONGER abstains (the floor fills every
+    unconfirmed axis with the part's extent), so a shrunken candidate can
+    genuinely fail the bbox gate. ``measured_axes`` is then EMITTED with
+    the whole-mesh extents (the gate compared the part's overall extents)
+    — pin that the field is no longer omitted in this case."""
+    bbox = BboxInfo(x=5.0, y=5.0, z=1.0)
+    result = _bbox_result("bbox_out_of_tolerance", bbox)
+    measured = _measured_axes(result, {}, (20.0, 20.0, 20.0))
+    assert measured is not None, (
+        "issue #383: a pure import candidate that fails the part-baseline "
+        "floor must emit measured_axes (the gate compared the part's "
+        f"extents), not omit it: {measured!r}"
+    )
+    assert measured == {"W": 5.0, "D": 5.0, "H": 1.0}, (
+        f"measured_axes must carry the whole-mesh extents the gate "
+        f"compared: {measured!r}"
+    )
 
 
 def test_measured_axes_equals_gate_comparison_extents() -> None:

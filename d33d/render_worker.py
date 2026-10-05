@@ -71,6 +71,7 @@ from d33d.part_mesh import (
 from d33d.part_mesh import (
     validate_part_path as _validate_part_path_impl,
 )
+from d33d.render_diagnostics import unknown_variables
 
 logger = logging.getLogger(__name__)
 
@@ -1284,14 +1285,27 @@ def classify(
     6. ``empty_model`` — all eight artifacts present but the STL has
        vertex count 0 / is not watertight / volume <= 0
     7. ``ok`` — all eight artifacts present and valid, exit 0, STL
-       non-degenerate
+       non-degenerate, and NO OpenSCAD unknown-variable warning in the
+       stderr or render.log tail (issue #383 — an exit-0 render carrying
+       the warning is ``syntax_error``; the check runs LAST so it never
+       regresses a run that already landed in a more specific class)
 
     ``render_log`` (issue #309): the bounded tail of the on-volume
-    /work/render.log harvested on the non-zero path (``""`` when the
-    harvest found nothing) — the second, ``ERROR:``-inspected source.
-    ``views`` must be a 6-element sequence of non-empty filename strings
-    for class 5/6/7 to be reachable; a wrong length or a missing entry
-    counts as the PNG missing.
+    /work/render.log harvested on the render path (``""`` when the
+    harvest found nothing) — the second, ``ERROR:``-inspected source. On
+    a non-zero exit the entrypoint's openscad stderr lives there (the
+    host harvests it after the container exits); on an exit-0 run the
+    entrypoint redirects every openscad invocation's stderr there too
+    (issue #383), so an undefined-variable warning on an otherwise
+    successful render is only visible through this tail — the caller
+    harvests it on the exit-0 path as well. The container's ``stderr``
+    carries only the ``[entrypoint]`` markers on this image, but the
+    warning is checked in BOTH sources so a future image change that
+    stops redirecting to the log cannot silently un-detect it (issue
+    #383 binding decision 1: inspect both buffers). ``views``
+    must be a 6-element sequence of non-empty filename strings for class
+    5/6/7 to be reachable; a wrong length or a missing entry counts as
+    the PNG missing.
     """
     if timed_out:
         return "timeout"
@@ -1309,9 +1323,15 @@ def classify(
         return "artifact_error"
     if not _stl_valid(stl_path, vertex_count, watertight, volume):
         return "empty_model"
-    if exit_code == 0:
-        return "ok"
-    return "container_error"
+    if exit_code != 0:
+        return "container_error"
+    # Issue #383: an exit-0 render whose stderr or render.log tail carries
+    # an OpenSCAD "Ignoring unknown variable" warning is NOT ok — the
+    # geometry silently lost whatever the undefined variable sized. Last
+    # in the table: every more-specific class above already won.
+    if unknown_variables(stderr) or unknown_variables(render_log):
+        return "syntax_error"
+    return "ok"
 
 
 def derive_ok(
@@ -1360,6 +1380,14 @@ class RenderResult:
     csg: str | None
     views: tuple[str, ...]
     render_artifact_dir: str | None = None
+    #: Bounded tail of the on-volume /work/render.log (issue #383): the
+    #: entrypoint appends every openscad invocation's stderr there, so on
+    #: an exit-0 render the OpenSCAD unknown-variable warning lives ONLY in
+    #: this tail (the container's ``stderr`` carries only the
+    #: ``[entrypoint]`` markers) — the repair path's
+    #: ``classify_failure(stderr + render_log)`` reads it to name the
+    #: undefined variable. ``""`` when the harvest found nothing.
+    render_log: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1391,6 +1419,7 @@ class RenderResult:
             stl=artifacts.get("stl"),
             csg=artifacts.get("csg"),
             views=tuple(views_raw),
+            render_log=str(data.get("render_log") or ""),
         )
 
 
@@ -1917,6 +1946,11 @@ def render_for_design_loop(
                 return result
 
             stl, csg, views = _harvest()
+            # Issue #383: the entrypoint appends every openscad invocation's
+            # stderr to /work/render.log on the SUCCESS path too — the
+            # unknown-variable warning (exit 0, valid STL) lives only in
+            # the log, so harvest the tail on exit 0 as well.
+            render_log = _harvest_render_log(volume, host_tmp)
             vertex_count = 0
             watertight = False
             volume_mm3 = 0.0
@@ -1973,6 +2007,7 @@ def render_for_design_loop(
                 vertex_count=vertex_count,
                 watertight=watertight,
                 volume=volume_mm3,
+                render_log=render_log,
             )
             # Post-harvest persistence (issue #72): a fully ``ok`` render
             # copies the STL + 6 view PNGs to the durable per-render
@@ -2012,9 +2047,13 @@ def render_for_design_loop(
                 csg=str(csg) if csg.is_file() else None,
                 views=views_paths,
                 render_artifact_dir=render_artifact_dir,
+                render_log=render_log,
             )
             if error_class != "ok":
-                _log_render_failure(result, "", project_id)
+                # Issue #383: the exit-0 warning path reaches here with the
+                # harvested log in hand — pass it through so the ERROR line
+                # carries the actual diagnostic, not an empty tail.
+                _log_render_failure(result, render_log, project_id)
             return result
     except (OSError, RuntimeError, ValueError) as e:
         return RenderResult(

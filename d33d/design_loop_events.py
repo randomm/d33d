@@ -830,13 +830,17 @@ def _measured_axes(
     non-positive (a zero is the encoded absence, issue #91 — it is never
     emitted as a measured number).
 
-    Import projects (issue #332), exactly:
+    Import projects (issue #332, extended by issue #383), exactly:
 
-    - PURE import (empty stated set): ``_bbox_target`` keeps the zero
-      stated triple — a failing candidate's bbox has DIVERGED beyond
-      tolerance from the part, so the part-extent fallback never applies.
-      No axis is confirmed → the gate abstains → this field is OMITTED
-      (the SPA renders the generic card); ``carried_axes`` is empty too.
+    - PURE import (empty stated set): issue #383's part-baseline floor
+      means the gate NO LONGER abstains — ``_bbox_target`` fills every
+      unconfirmed axis with the part's own extent, so the gate compares
+      the whole-mesh extents against the part and a shrunken candidate
+      can genuinely fail on it. The field then carries the whole-mesh
+      extents (the gate compared the part's extents); ``carried_axes``
+      is empty (the user asked for nothing) — the field is OMITTED only
+      when there is no failing bbox gate, no bbox, or the gate truly
+      abstained (no part, no confirmed axis).
     - MIXED import (the user stated SOME axes): the partial confirmed
       triple makes ``gate_comparison_extents`` compare the WHOLE-MESH
       extents, and this field carries that made (W, D, H) — with
@@ -868,11 +872,23 @@ def _measured_axes(
     # The gate's own selection, verbatim: route the resolved target
     # through :func:`gate_comparison_extents` — the same call the gate
     # makes (``_bbox_within_tolerance``), the single definition of the
-    # component vs whole-mesh decision (issue #367 lens review).
-    extents = gate_comparison_extents(bbox, target)
+    # component vs whole-mesh decision (issue #367 lens review). Issue
+    # #383: the USER's OWN confirmed triple (``triple``) selects the
+    # comparison shape (a user-confirmed full triple ranks components;
+    # the floor-filled pure-import case keeps the whole-mesh extents).
+    # When no user axis is confirmed but a floor target IS resolved
+    # (the part-baseline floor, issue #383), the gate compared the
+    # whole-mesh extents — emit them (the gate genuinely measured
+    # something; omitting the field would hide the comparison).
+    if any(t > 0 for t in triple):
+        extents = gate_comparison_extents(bbox, triple)
+    elif any(t > 0 for t in target):
+        extents = (bbox.x, bbox.y, bbox.z)
+    else:
+        extents = None
     if extents is None:
-        # No axis confirmed (the gate abstained — it cannot fail here
-        # either): omit, never emit a vacuous measurement.
+        # No axis confirmed AND no floor (the gate abstained — it cannot
+        # fail here either): omit, never emit a vacuous measurement.
         return None
     if any(e <= 0 for e in extents):
         return None

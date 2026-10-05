@@ -47,6 +47,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from d33d.render_diagnostics import UNKNOWN_VARIABLE_RE as _RE_UNKNOWN_VARIABLE
+
 # ---------------------------------------------------------------------------
 # Failure class enum
 # ---------------------------------------------------------------------------
@@ -65,6 +67,7 @@ OpenSCADFailureClass = Literal[
     "hallucinated_bosl2",
     "geometrically_wrong",
     "axis_params_mismatch",
+    "unknown_variable",
     # Non-repairable render-worker classes
     "timeout",
     "oom",
@@ -75,7 +78,7 @@ OpenSCADFailureClass = Literal[
     "unclassified_syntax_error",
 ]
 
-#: Closed enum of all 17 entries: 11 named LLM failure classes, 5
+#: Closed enum of all 18 entries: 12 named LLM failure classes, 5
 #: non-repairable render-worker classes, and 1 fallback.
 FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     {
@@ -91,6 +94,7 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "hallucinated_bosl2",
         "geometrically_wrong",
         "axis_params_mismatch",
+        "unknown_variable",
         "timeout",
         "oom",
         "container_error",
@@ -100,11 +104,13 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     }
 )
 
-#: The 13 classes that are repairable by the design loop.
+#: The 14 classes that are repairable by the design loop.
 #: ``unclassified_syntax_error`` is included because the LLM can fix
 #: generic syntax errors even when the specific cause is unknown.
 #: ``axis_params_mismatch`` (issue #276) is included because the LLM can
 #: correct an axis-declared parameter that the geometry contradicts.
+#: ``unknown_variable`` (issue #383) is included because the LLM can
+#: declare or define the variable OpenSCAD reported as undefined.
 REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     {
         "trailing_semicolon",
@@ -119,6 +125,7 @@ REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "hallucinated_bosl2",
         "geometrically_wrong",
         "axis_params_mismatch",
+        "unknown_variable",
         "unclassified_syntax_error",
     }
 )
@@ -192,6 +199,14 @@ _RE_TRAILING_SEMICOLON = re.compile(
     r"translate\s*\([^)]*\)\s*;\s*\w",
     re.IGNORECASE,
 )
+
+#: Undefined-variable warning (issue #383): the single shared definition in
+#: :mod:`d33d.render_diagnostics` (the render worker's ``classify`` and this
+#: classifier both must recognise the warning, so the pattern lives there
+#: once). The named class below is routed via ``_classify_syntax_error`` —
+#: placed BEFORE the generic fallback and after the more specific
+#: OpenSCAD-error patterns so a render that also carries a real
+#: ``ERROR:`` line still lands in the class that pattern names.
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +332,12 @@ _REPAIR_INSTRUCTIONS: dict[OpenSCADFailureClass, str] = {
         "syntax errors (mismatched braces, missing semicolons, invalid expressions). "
         "Fix the syntax and re-render."
     ),
+    "unknown_variable": (
+        "The render reported an undefined variable: OpenSCAD ignored it and the "
+        "geometry silently lost whatever that variable sized (the named variable "
+        "appears in the evidence). Declare the variable in the parameter block or "
+        "define it before use, and make sure the name matches exactly."
+    ),
     # Non-repairable classes — no repair instruction
     "timeout": "",
     "oom": "",
@@ -366,7 +387,14 @@ def _classify_syntax_error(stderr: str) -> OpenSCADFailureClass:
     # 9. Trailing semicolon (rare in stderr)
     if _RE_TRAILING_SEMICOLON.search(stderr):
         return "trailing_semicolon"
-    # 10. Fallback
+    # 10. Undefined variable (issue #383): the exit-0 warning path — the
+    #     render compiled, the STL is valid, but an undefined variable
+    #     silently sized geometry to nothing. Distinct named class so the
+    #     repair instruction can name the variable(s) directly (the
+    #     generic fallback cannot).
+    if _RE_UNKNOWN_VARIABLE.search(stderr):
+        return "unknown_variable"
+    # 11. Fallback
     return "unclassified_syntax_error"
 
 
@@ -375,6 +403,7 @@ def classify_failure(
     error_class: str,
     stderr: str = "",
     scad_source: str = "",
+    render_log: str = "",
 ) -> ClassifiedFailure:
     """Classify a render run failure into a named OpenSCAD LLM failure class.
 
@@ -384,9 +413,17 @@ def classify_failure(
         The render-worker ``ErrorClass`` (ok, syntax_error, empty_model,
         artifact_error, timeout, oom, container_error).
     stderr:
-        The OpenSCAD diagnostic output (truncated to 256 KiB).
+        The container's stderr (the ``[entrypoint]`` markers).
     scad_source:
         The .scad source code.
+    render_log:
+        The bounded tail of the on-volume /work/render.log (issue #383):
+        on the pinned image the entrypoint redirects every openscad
+        invocation's stderr there, so an exit-0 render's undefined-variable
+        warning lives in THIS buffer, not ``stderr`` — the caller passes it
+        through so the ``unknown_variable`` class (and its variable-naming
+        evidence) is reachable on the real render path. ``""`` when the
+        harvest found nothing (non-import / pre-#383 callers are unaffected).
 
     Returns
     -------
@@ -398,8 +435,9 @@ def classify_failure(
     - ``ok`` → ``geometrically_wrong`` (vision-only class)
     - ``timeout`` / ``oom`` / ``container_error`` / ``artifact_error`` /
       ``empty_model`` → the corresponding non-repairable class
-    - ``syntax_error`` → inspect stderr for specific patterns; first match
-      wins; fallback is ``unclassified_syntax_error``
+    - ``syntax_error`` → inspect the diagnostic text (``stderr`` +
+      ``render_log``) for specific patterns; first match wins; fallback is
+      ``unclassified_syntax_error``
     """
     if error_class == "ok":
         return ClassifiedFailure(
@@ -421,11 +459,15 @@ def classify_failure(
             repairable=False,
         )
 
-    # syntax_error — inspect stderr
-    failure_class = _classify_syntax_error(stderr)
+    # syntax_error — inspect the diagnostic text. The unknown-variable
+    # warning (issue #383) lives in the harvested render.log on the pinned
+    # image, so both buffers are inspected — the variable-naming evidence
+    # must be reachable on the real render path, not just synthetic ones.
+    diagnostic = stderr if not render_log else f"{stderr}\n{render_log}"
+    failure_class = _classify_syntax_error(diagnostic)
     return ClassifiedFailure(
         failure_class=failure_class,
-        evidence=stderr[:256] if stderr else "syntax_error (no stderr)",
+        evidence=(diagnostic[:256] if diagnostic else "syntax_error (no stderr)"),
         repairable=True,
     )
 

@@ -458,33 +458,38 @@ def _bbox_target(
     bbox: BboxInfo | None,
     part_bbox_mm: tuple[float, float, float] | None,
 ) -> tuple[float, float, float]:
-    """The bbox gate's per-axis target for the run (issue #332, sub-issue 3).
+    """The bbox gate's per-axis target for the run (issue #332 sub-issue 3,
+    extended by issue #383 — the part-baseline floor).
 
-    The pure decision the loop's ``score()`` calls before the gate: the
-    part's measured mm extents (v1 bbox × part_scale, as recorded —
-    ``part_bbox_mm``) ARE the ground truth for an import project. When
-    the candidate's bbox matches the part's own extent within the gate's
-    own tolerance (add/cut worked only on the surface — a 0.6 mm lip, a
-    1 mm split offset), the gate measures against the PART's extent: a
-    marginally larger add/cut candidate must not fail for being "larger
-    than the user's stated dims" (the mesh measures itself). A candidate
-    whose bbox DIVERGES beyond the tolerance (re-modelled, moved, or
-    rebuilt) keeps the stated-dims comparison (it fails — the mesh is
-    fixed). ``part_bbox_mm is None`` (no import project) returns
-    ``stated`` unchanged — today's behaviour verbatim (the no-part
-    regression anchor, byte-identical prompts AND gate semantics).
-    """
-    if (
-        part_bbox_mm is not None
-        and bbox is not None
-        and all(
-            abs(extent - part_extent)
-            <= max(BBOX_TOLERANCE_REL * part_extent, BBOX_TOLERANCE_MIN_MM)
-            for extent, part_extent in zip((bbox.x, bbox.y, bbox.z), part_bbox_mm)
-        )
-    ):
-        return (part_bbox_mm[0], part_bbox_mm[1], part_bbox_mm[2])
-    return stated
+    Per axis (the floor is a PER-AXIS rule, never a blanket one):
+
+    - an axis with a CONFIRMED stated value (``> 0``) always wins — the
+      gate compares that axis against the stated value, exactly as today
+      (a "cut it down to 15 mm tall" request keeps comparing against 15,
+      never against the part's 20);
+    - an axis with NO confirmed stated value takes the part's own extent
+      as its target when ``part_bbox_mm`` is present (issue #383: a pure
+      import project previously abstained on every axis and the gate
+      passed a 17.7 mm³ garbage fragment of a 20 mm part) — the rendered
+      extent on that axis may not come out SMALLER than the part's extent
+      beyond the gate's own tolerance (growth is free — add-ons enlarge;
+      the shrink direction is the one the floor constrains);
+    - no part (``part_bbox_mm is None``) → the stated triple, unchanged —
+      the no-part regression anchor, byte-identical gate semantics.
+
+    ``bbox`` is no longer consulted: the old "candidate already matches
+    the part" precondition is subsumed by the per-axis rule (a matching
+    candidate measures itself against the part exactly as before; a
+    divergent, LARGER candidate now measures against the part on the
+    unconfirmed axes instead of falling back to an abstaining (0,0,0) —
+    which is a strict tightening of exactly the bug class #383 fixes,
+    and a no-op for the confirmed axes). """
+    if part_bbox_mm is None:
+        return stated
+    target: list[float] = []
+    for s, p in zip(stated, part_bbox_mm):
+        target.append(s if s > 0 else p)
+    return tuple(target)
 
 
 def gate_comparison_extents(
@@ -532,7 +537,11 @@ def gate_comparison_extents(
     return extents
 
 
-def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
+def _bbox_within_tolerance(
+    bbox: BboxInfo,
+    stated: tuple[float, ...],
+    user_stated: tuple[float, ...] | None = None,
+) -> bool:
     """True iff every rendered axis the user CONFIRMED is within
     max(1%, 0.5 mm) of its confirmed dimension (order x, y, z).
 
@@ -584,19 +593,47 @@ def _bbox_within_tolerance(bbox: BboxInfo, stated: tuple[float, ...]) -> bool:
     # abstention, the >3-axis contract violation) lives in
     # :func:`gate_comparison_extents` — the single definition shared with
     # the terminal error frame's ``measured_axes`` (issue #367).
-    extents = gate_comparison_extents(bbox, stated)
+    # Issue #383: ``stated`` is the RESOLVED gate target (the part-baseline
+    # floor fills unconfirmed import-project axes); ``user_stated`` (the
+    # caller's own confirmed set) selects the comparison shape — a user-
+    # confirmed FULL triple ranks components (issue #100), while the
+    # floor-filled axes of a pure-import project keep the whole-mesh
+    # comparison (the floor compares the OVERALL extents, not a
+    # per-component match).
+    user = tuple(stated) if user_stated is None else tuple(user_stated)
+    if any(t > 0 for t in user):
+        # A user-confirmed axis exists: the gate's own selection decides
+        # the comparison shape (issue #247/#367 — a full confirmed triple
+        # with a component breakdown ranks the best-matching component,
+        # a partial set compares the whole mesh).
+        extents = gate_comparison_extents(bbox, user)
+    else:
+        # No user-confirmed axis (issue #383): the resolved ``stated``
+        # triple is entirely the part-baseline floor — the gate compares
+        # the WHOLE-MESH extents against the part's overall extents (the
+        # user confirmed nothing, so a component match is never a
+        # well-defined target).
+        extents = (bbox.x, bbox.y, bbox.z)
     if extents is None:
         # No axis confirmed: the gate abstains (True) — an unmeasurable
         # gate must not hard-fail every candidate (ticket #91). The
         # abstention is recorded DISTINCTLY by :func:`score`'s
         # ``bbox_abstained`` field, never a vacuous unmarked pass.
         return True
-    for extent, target in zip(extents, stated):
-        if target <= 0:
-            continue  # axis not confirmed: per-axis abstention, skip
+    for extent, target, user_target in zip(extents, stated, user):
         tol = max(BBOX_TOLERANCE_REL * target, BBOX_TOLERANCE_MIN_MM)
-        if abs(extent - target) > tol:
-            return False
+        if user_target > 0:
+            # A user-confirmed axis: the two-sided ``abs()`` comparison,
+            # exactly as today (issue #247 semantics unchanged).
+            if abs(extent - target) > tol:
+                return False
+        else:
+            # A floor axis (issue #383): the part's extent is the target
+            # and the user did not confirm it — one-sided. Smaller than
+            # the part beyond tolerance fails; larger is allowed (the
+            # floor constrains the shrunken-garbage direction only).
+            if extent < target - tol:
+                return False
     return True
 
 
@@ -830,15 +867,16 @@ def score(
     the old all-or-nothing meaning ("all axes unknown") is a strict
     subset of the new one.
     """
-    # Issue #332 (sub-issue 3): the bbox gate's target — the part's
-    # measured mm extent when this is an import project and the
-    # candidate's bbox matches the part (add/cut on the surface), else
-    # the stated triple (unchanged — see :func:`_bbox_target`).
+    # Issue #332 (sub-issue 3) / #383: the bbox gate's target — the
+    # part's measured extent fills every UNCONFIRMED axis of an import
+    # project (the part-baseline floor), else the stated triple (see
+    # :func:`_bbox_target`).
     _bbox_stated = _bbox_target(stated_dims, bbox, part_bbox_mm)
     bits = (
         render.error_class == "ok",
         _views_non_blank(render),
-        bbox is not None and _bbox_within_tolerance(bbox, _bbox_stated),
+        bbox is not None
+        and _bbox_within_tolerance(bbox, _bbox_stated, user_stated=stated_dims),
         _named_params_present(scad_source, stated_dims),
         _axis_params_match_geometry(
             bbox,
@@ -849,8 +887,13 @@ def score(
     # An abstained axis is ANY unknown target, independent of whether the
     # other (measured) axes happened to pass — a partial triple whose known
     # axes match still carries an unmeasured axis (ticket #91 round-2: the
-    # flag must be True, never left to bit 2's happenstance).
-    bbox_abstained = bbox is not None and bits[2] and any(t <= 0 for t in stated_dims)
+    # flag must be True, never left to bit 2's happenstance). Issue #383:
+    # the resolved gate target (``_bbox_stated`` — the part-baseline floor
+    # fills unconfirmed import-project axes) is what was actually measured,
+    # so the flag now tracks THAT: a pure-import candidate measured against
+    # the part's extent is fully measured (flag False), while the old
+    # abstaining (0,0,0) target (no part) keeps the flag exactly as before.
+    bbox_abstained = bbox is not None and bits[2] and any(t <= 0 for t in _bbox_stated)
     return Score(
         bits=bits, rank=sum(bits), tiebreak=bits, bbox_abstained=bbox_abstained
     )
@@ -1732,6 +1775,7 @@ async def run_design_loop_async(
             error_class=render.error_class,
             stderr=render.stderr,
             scad_source=scad_source,
+            render_log=getattr(render, "render_log", ""),
         )
         if render.error_class != "ok":
             # Non-LLM-addressable render classes (timeout/oom/container_
