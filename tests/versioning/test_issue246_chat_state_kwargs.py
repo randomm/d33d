@@ -363,3 +363,124 @@ def test_production_design_loop_forwards_state_stated():
     # hook (which hands it to ``run_design_loop_async`` — the chat
     # path's design-state inputs must survive the production closure).
     assert inner.get("state_stated") == {"W": 30.0}
+
+
+def test_production_design_loop_forwards_part_kwargs():
+    """Issue #380 (regression): the production closure's hook call FORWARDS
+    ``part_scale`` / ``part_bbox_mm`` (the import section's inputs — the
+    adapter sets both on an import project) to the inner hook. The pre-fix
+    drop: ``_loop``'s explicit kwarg list omitted both, so ``run_design_
+    loop_async`` received ``None`` and the import guard (gated on
+    ``part_scale is not None``) never fired on the live chat path. The
+    captured-hook pattern (``fc.default_run_design_loop_hook`` monkeypatched
+    BEFORE the fresh ``_build_production_design_loop()``) makes the drop
+    visible: without the forward the captured dict has no ``part_scale`` /
+    ``part_bbox_mm`` at all (a ``kwargs.get(...)`` absent key is ``None``
+    either way — the discriminator is presence AND value)."""
+    import asyncio
+    from pathlib import Path
+
+    import d33d.app as app_mod
+    import d33d.config.catalogue as cat_mod
+    import d33d.config.probes as probes_mod
+    import d33d.config.resolve as resolve_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.config.catalogue import Catalogue, ModelEntry, Provider
+    from d33d.config.probes import CapabilityResult
+    from d33d.config.resolve import RoleResolution
+    from d33d.evals import failure_capture as fc
+
+    provider = Provider(name="stub", base="http://stub", key="stub")
+    entry = ModelEntry(id="design", provider="stub", model="stub-model")
+    catalogue = Catalogue(
+        source=Path("/dev/null"),
+        providers={"stub": provider},
+        models={"design": entry},
+        roles={"design": "design"},
+    )
+    resolution = RoleResolution(role="design", entry=entry, provider=provider)
+    capability = CapabilityResult(
+        tools=True, json_schema=True, vision=False, max_images=0,
+        fenced_json=True, validated=False,
+    )
+
+    def _stub_load_catalogue(_path):
+        return catalogue
+
+    def _stub_resolve_model(_cat, _role, **_kw):
+        return resolution
+
+    async def _stub_probe_capabilities(*_a, **_k):
+        return capability
+
+    def _stub_http_request_factory(_base, _key):
+        return (lambda *a, **k: None)
+
+    class _StubAppState:
+        catalogue_path = Path("/dev/null")
+        db_path = Path("/dev/null")
+        failures_jsonl_path = Path("/dev/null")
+
+    app = type("App", (), {"state": _StubAppState()})()
+
+    def _drive(**loop_kwargs):
+        captured: dict[str, Any] = {}
+
+        async def _inner_hook(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return None
+
+        def _inner_hook_factory(*, path: Any = None) -> Any:
+            return _inner_hook
+
+        originals = {
+            "cat": cat_mod.load_catalogue,
+            "res": resolve_mod.resolve_model,
+            "probe": probes_mod.probe_capabilities,
+            "fc_hook": fc.default_run_design_loop_hook,
+            "app_lc": getattr(app_mod, "load_catalogue", None),
+            "app_rm": getattr(app_mod, "resolve_model", None),
+            "app_http": getattr(app_mod, "_http_request_factory", None),
+        }
+        try:
+            cat_mod.load_catalogue = _stub_load_catalogue
+            resolve_mod.resolve_model = _stub_resolve_model
+            probes_mod.probe_capabilities = _stub_probe_capabilities
+            if originals["app_lc"] is not None:
+                app_mod.load_catalogue = _stub_load_catalogue
+            if originals["app_rm"] is not None:
+                app_mod.resolve_model = _stub_resolve_model
+            if originals["app_http"] is not None:
+                app_mod._http_request_factory = _stub_http_request_factory
+            fc.default_run_design_loop_hook = _inner_hook_factory
+            wrapper = _build_production_design_loop()
+            asyncio.run(wrapper(app, **loop_kwargs))
+        finally:
+            cat_mod.load_catalogue = originals["cat"]
+            resolve_mod.resolve_model = originals["res"]
+            probes_mod.probe_capabilities = originals["probe"]
+            fc.default_run_design_loop_hook = originals["fc_hook"]
+            if originals["app_lc"] is not None:
+                app_mod.load_catalogue = originals["app_lc"]
+            if originals["app_rm"] is not None:
+                app_mod.resolve_model = originals["app_rm"]
+            if originals["app_http"] is not None:
+                app_mod._http_request_factory = originals["app_http"]
+        return captured
+
+    # Import project (the adapter's shape: both kwargs present).
+    captured = _drive(
+        part_scale=1.0,
+        part_bbox_mm=(20.0, 20.0, 20.0),
+    )
+    assert "part_scale" in captured, "the hook call must forward part_scale"
+    assert "part_bbox_mm" in captured, "the hook call must forward part_bbox_mm"
+    assert captured["part_scale"] == 1.0
+    assert tuple(captured["part_bbox_mm"]) == (20.0, 20.0, 20.0)
+
+    # No-part project (the adapter omits both): ``kwargs.get`` degrades to
+    # ``None`` — the loop's own default — so a part-less run stays
+    # byte-identical (the import guard must NOT fire).
+    captured = _drive()
+    assert captured.get("part_scale") is None
+    assert captured.get("part_bbox_mm") is None
