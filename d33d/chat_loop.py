@@ -21,7 +21,6 @@ import json
 import logging
 from typing import Any
 
-from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_frames import model_unconfigured_frames as _model_unconfigured_frames
 from d33d.design_loop_events import (
@@ -32,7 +31,7 @@ from d33d.design_loop_events import (
 from d33d.dimension_protocol import (
     carried_stated_set,
     effective_stated_dims,
-    stated_axes_from_message,
+    resolve_stated_cues,
 )
 
 logger = logging.getLogger(__name__)
@@ -178,27 +177,11 @@ async def run_design_loop(
     if explicit_body is not None:
         per_axis_stated = effective_stated_dims(_carried, explicit_body)
     else:
-        _latest = _carried
-        try:
-            # Issue #369: the message alone — an EMPTY history (``[]``) is
-            # load-bearing (the rationale is in the module comment above);
-            # an EMPTY extraction ("make it taller") falls back to the
-            # lexicon's RELATIVE/RELEASE semantics below.
-            _am = stated_axes_from_message(message, [])
-            _cues_arg = _am if _am else _classify_axis_cues(message)
-        except Exception:
-            # A cue-resolution failure degrades to the carried set
-            # unchanged (no release, no override — the conservative
-            # outcome). The warning carries lengths only (no message
-            # text — no PII in logs).
-            logger.warning(
-                "dimension cue resolution failed; carrying the latest "
-                "stated set unchanged (len(message)=%d)",
-                len(message),
-                exc_info=True,
-            )
-            _cues_arg = None
-        per_axis_stated = effective_stated_dims(_latest, _cues_arg)
+        # Issue #369: the message alone — an EMPTY history (``[]``) is
+        # load-bearing (the rationale is in the module comment above).
+        per_axis_stated = resolve_stated_cues(
+            _carried, message, label="chat", project_id=project_id
+        )
 
     stated = axes_to_gate_triple(per_axis_stated)
 

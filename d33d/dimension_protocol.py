@@ -42,7 +42,8 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from functools import cache
+from typing import Any, Literal
 
 from d33d.axis_lexicon import (
     _ABSOLUTE,
@@ -69,7 +70,6 @@ __all__ = [
     "FDM_CLEARANCE_TABLE",
     "HOLES_PRINT_UNDERSIZE_MM",
     "QUOTED_UNMAPPED_MAX_MESSAGES",
-    "CuesLike",
     "DimensionClarification",
     "FitType",
     "_extract_triple",
@@ -82,6 +82,7 @@ __all__ = [
     "offer_tier_signals",
     "require_dimensions_confirmed",
     "resolution_questions",
+    "resolve_stated_cues",
     "resolve_tolerance_mm",
     "stated_axes_from_message",
     "stated_dims_from_message",
@@ -204,13 +205,37 @@ class DimensionClarification:
 # new value is unknown — the gate asks), never enforce it as an absolute
 # ("taller by 5 mm" on a 12 mm part must not set H=5.0 — that is a
 # physically shorter target).
-_DELTA_MARKER_RE = re.compile(
-    r"\bby\s+(?=[\d.])"
-    r"|\b\d+(?:\.\d+)?\s*mm\s+(?:"
-    + "|".join(sorted(set(_ABSOLUTE) | set(RELATIVE_WORDS), key=len, reverse=True))
-    + r")\b",
-    re.IGNORECASE,
-)
+def _delta_marker_for(number: float) -> re.Pattern[str]:
+    """A RELATIVE-delta matcher ANCHORED to ``number``'s own occurrence
+    (issue #369 round 2): the preposition "by" immediately before the
+    number ("taller by 5 mm") or an axis word (absolute or relative)
+    immediately after the number + "mm" ("5 mm taller") — so only "by
+    <this number>" or "<this number> mm <axis word>" counts as a delta.
+    The number position is baked into the pattern (anchored, never a
+    message-wide search), so a delta marker on a DIFFERENT number in the
+    same clause ("make it taller by 5 mm, 30 mm") never suppresses THIS
+    number's absolute statement. Cached: the number set is small per
+    turn and the release pass rebuilds the same pattern per call."""
+    words = sorted(set(_ABSOLUTE) | set(RELATIVE_WORDS), key=len, reverse=True)
+    return re.compile(
+        r"\bby\s+" + re.escape(f"{number:g}") + r"\s*mm\b"
+        r"|" + re.escape(f"{number:g}") + r"\s*mm\s+(?:"
+        + "|".join(words)
+        + r")\b",
+        re.IGNORECASE,
+    )
+
+
+@cache
+def _axis_letter_pattern(axis: str) -> re.Pattern[str]:
+    """The axis-letter cue pattern (``W: 42`` / ``H = 20 mm``) for one
+    axis, compiled once (issue #369 round 2: the axis pass used to build
+    this inline per axis per turn). The closed axis set is three —
+    ``cache`` keeps the same three patterns for the process lifetime."""
+    return re.compile(
+        rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)(?:{MM_UNIT_ALTERNATION})?\b",
+        re.IGNORECASE,
+    )
 
 
 def _coerce(value: Any) -> float | None:
@@ -301,12 +326,7 @@ def _extract_stated(
             # turns, the newest turn's values overwrite older ones.
             turn_axes: dict[str, float] = {}
             for axis in DIMENSION_AXES:
-                m = re.search(
-                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)"
-                    rf"(?:{MM_UNIT_ALTERNATION})?\b",
-                    text,
-                    re.IGNORECASE,
-                )
+                m = _axis_letter_pattern(axis).search(text)
                 if m:
                     v = _coerce(m.group(1))
                     if v is not None:
@@ -360,8 +380,13 @@ def _extract_stated(
     #    statement (``stated_at``, recorded in step 2) is OLDER than the
     #    releasing turn — an explicit value in the releasing turn itself
     #    (same-message ABSOLUTE cue, or a single unmapped mm number with no
-    #    feature noun in its clause) beats the relative word and sets
-    #    instead of releases.
+    #    feature noun in its clause and no anchored delta marker) beats the
+    #    relative word and sets instead of releases. An axis the LEXICON'S
+    #    CLAUSE GUARDS left unmapped (two-axes-one-number, mating
+    #    connector) is skipped by this pass and stays in the carried set —
+    #    the lexicon deliberately did not assign that number to the axis,
+    #    so reassigning it here would override a guard (the conservative
+    #    outcome: the carried value stays, the gate keeps enforcing it).
     for idx, turn in enumerate(history):
         if idx < window_start:
             continue
@@ -371,8 +396,15 @@ def _extract_stated(
             # A classification failure degrades to no release for this
             # turn (the carried set is unchanged — the conservative
             # outcome), mirroring the lexicon feed's try/except in
-            # ``chat_loop`` and ``versions_routes``.
-            logger.debug("release-pass classify failed", exc_info=True)
+            # ``chat_loop`` and ``versions_routes``. Length only, no
+            # message text (no PII in logs).
+            logger.warning(
+                "release-pass classify failed for turn %d (len=%d); "
+                "carrying that turn's stated axes unchanged",
+                idx,
+                len(turn),
+                exc_info=True,
+            )
             continue
         for axis in cues.relative:
             if axis in cues.absolute:
@@ -393,6 +425,14 @@ def _extract_stated(
             if any(_FEATURE_NOUN_RE.search(clause) for clause in _split_clauses(str(turn))):
                 out.pop(axis, None)
                 continue
+            # A clause guard that left the axis unmapped (two-axes-one-
+            # number: "40 mm wide and 12 mm tall" maps nothing; mating
+            # connector: the number describes the mating part) — the
+            # lexicon deliberately did not assign that number to the
+            # axis; reassigning it here would override the guard, so the
+            # carried value stays (conservative).
+            if axis in cues.absolute:
+                continue
             v = _unmapped_value_for_axis(cues, str(turn))
             if v is not None:
                 # The turn restates the axis with an explicit value the
@@ -410,38 +450,53 @@ def _unmapped_value_for_axis(
     """The unmapped mm number a releasing turn assigns to ``axis``.
 
     An unmapped number ("make it taller, 20 mm") restates the released
-    axis ONLY when the message carries EXACTLY ONE unmapped mm number,
-    the clause containing it has no feature noun, and the clause carries
-    no RELATIVE-delta marker — "by 5 mm" / "5 mm taller" states an
+    axis ONLY when the message carries EXACTLY ONE unmapped mm number
+    that is NOT an anchored delta, the clause containing it has no
+    feature noun, and the clause carries no RELATIVE-delta marker
+    ANCHORED to THIS number — "by 5 mm" / "5 mm taller" states an
     increment whose new value is unknown, so the axis is released (asked
     about), never enforced as the absolute 5.0 (a "taller by 5 mm" on a
-    12 mm part must not yield a physically shorter H=5.0). Otherwise —
-    the number belongs to a feature ("keep the 25 mm peg") or is
-    ambiguous (two unmapped numbers) — the axis is released instead.
-    ``None`` (release) when any condition fails."""
-    numbers = cues.unmapped_mm_numbers
-    if len(numbers) != 1:
+    12 mm part must not yield a physically shorter H=5.0). The delta
+    check is anchored to the specific unmapped number's occurrence
+    (``_delta_marker_for``): a delta marker on a DIFFERENT number in the
+    same clause ("make it taller by 5 mm, 30 mm" — "by" binds to 5, not
+    30) never suppresses THIS number's absolute statement. An unmapped
+    number that IS an anchored delta ("by 5 mm" / "5 mm taller") is
+    excluded from the count — it is an increment, not an absolute — so
+    the remaining non-delta numbers are what the ambiguity check sees.
+    Otherwise — the number belongs to a feature ("keep the 25 mm peg")
+    or is ambiguous (two or more non-delta unmapped numbers) — the axis
+    is released instead. ``None`` (release) when any condition fails.
+    """
+    all_numbers = cues.unmapped_mm_numbers
+    # Filter out numbers that are anchored deltas ("by 5 mm" / "5 mm
+    # taller") — they are increments, not absolute targets, and do not
+    # count toward the ambiguity check.
+    clauses = [p.strip() for p in _CLAUSE_SPLIT_RE.split(turn) if p.strip()]
+    non_delta_numbers: list[float] = []
+    for number in all_numbers:
+        pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
+        for clause in clauses:
+            if re.search(pattern, clause, re.IGNORECASE):
+                if not _delta_marker_for(number).search(clause):
+                    non_delta_numbers.append(number)
+                break
+    if len(non_delta_numbers) != 1:
         return None
-    number = numbers[0]
+    number = non_delta_numbers[0]
     # The ``:g`` form is the shortest decimal spelling (20.0 → "20") —
     # the exact text the user typed, and never a wider net. The leading
     # lookbehind rejects a signed form ("-5 mm" — the lexicon strips the
     # sign when it unmapped it), so a negative statement can never
     # re-enter as a positive one (a non-positive value is never stated).
     pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
-    for clause in (p.strip() for p in _CLAUSE_SPLIT_RE.split(turn)):
-        if clause and re.search(pattern, clause, re.IGNORECASE):
+    for clause in clauses:
+        if re.search(pattern, clause, re.IGNORECASE):
             # Found the number's clause: a feature noun there means the
             # number belongs to the feature, not the axis (release);
             # otherwise ``_coerce`` validates it (non-positive → None →
             # release, never stated).
             if _FEATURE_NOUN_RE.search(clause):
-                return None
-            # A delta marker ("by 5 mm" / "5 mm taller") means the number
-            # is a relative increment, not an absolute target: release —
-            # the gate asks for the new value, never enforces the delta
-            # as an absolute.
-            if _DELTA_MARKER_RE.search(clause):
                 return None
             return _coerce(number)
     # No clause claims the number (a signed form like "-5 mm", or a
@@ -536,26 +591,52 @@ def carried_stated_set(
     return latest_stated_dims_dict(versions, project_id)
 
 
-class CuesLike(Protocol):
-    """Structural type for the lexicon cue object
-    (``d33d.axis_lexicon.Cues``) — the ``cues`` input
-    :func:`effective_stated_dims` accepts (declared shape instead of
-    duck-typing via ``getattr``). Read-only: the merge only reads the
-    cue's fields, never mutates them.
-
-    ``effective_stated_dims`` itself types ``cues`` directly as
-    ``dict[str, float] | Cues | None`` (``Cues`` imported from
-    ``axis_lexicon``); this Protocol documents the structural contract
-    any object of that shape must satisfy."""
-
-    @property
-    def absolute(self) -> dict[str, float]: ...
-
-    @property
-    def relative(self) -> set[str]: ...
-
-    @property
-    def global_(self) -> bool: ...
+def resolve_stated_cues(
+    carried: dict[str, float] | None,
+    message: str,
+    *,
+    label: str,
+    project_id: int | None = None,
+) -> dict[str, float]:
+    """The carry-forward merge for ONE message (issue #369 round 2):
+    try the per-axis extraction (``stated_axes_from_message``), fall back
+    to the lexicon's ``classify`` (the ``Cues`` — absolute + relative +
+    global) when the extraction yields no axis (a relative-only message
+    like "make it taller" states nothing on its own but RELEASES the
+    carried axis — semantics a bare dict cannot express), then merge into
+    the carried set via :func:`effective_stated_dims`. A cue-resolution
+    failure degrades to the carried set unchanged (no release, no
+    override — the conservative outcome) with a WARNING that carries
+    lengths only (no message text — no PII in logs). Used at the chat
+    seam (``chat_loop``) and both finalize seams (``versions_routes``).
+    """
+    try:
+        _am = stated_axes_from_message(message)
+        _cues_arg = _am if _am else classify(message)
+    except Exception:
+        # A cue-resolution failure degrades to the carried set unchanged
+        # (no release, no override — the conservative outcome). The
+        # warning carries lengths only (no message text — no PII in
+        # logs).
+        if project_id is not None:
+            logger.warning(
+                "%s: stated-axes cue resolution failed; carrying the "
+                "latest stated set unchanged (project_id=%s, len(message)=%d)",
+                label,
+                project_id,
+                len(message),
+                exc_info=True,
+            )
+        else:
+            logger.warning(
+                "%s: stated-axes cue resolution failed; carrying the "
+                "latest stated set unchanged (len(message)=%d)",
+                label,
+                len(message),
+                exc_info=True,
+            )
+        return effective_stated_dims(carried, None)
+    return effective_stated_dims(carried, _cues_arg)
 
 
 def offer_tier_signals(

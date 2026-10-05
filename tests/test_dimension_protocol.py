@@ -42,6 +42,7 @@ from d33d.dimension_protocol import (
     offer_tier_signals,
     require_dimensions_confirmed,
     resolution_questions,
+    resolve_stated_cues,
     resolve_tolerance_mm,
     stated_axes_from_message,
     stated_dims_from_message,
@@ -1157,6 +1158,71 @@ class TestNewestWinsPerAxis:
             "filler X", ["make it taller", "H: 12", *filler[:48]]
         )
         assert axes["H"] == 12.0
+
+
+    def test_unanchored_delta_marker_on_other_number_does_not_release(self):
+        """"make it taller by 5 mm, 30 mm" → H=30: the delta marker ("by")
+        binds to 5, not 30 — the 30 is an unmapped number with no anchored
+        delta marker in its clause, so it restates the released axis."""
+        axes = stated_axes_from_message(
+            "make it taller by 5 mm, 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+        assert axes["W"] == 40.0
+
+    def test_taller_by_5mm_still_releases(self):
+        """"taller by 5 mm" → H released: the delta marker IS anchored to
+        the sole unmapped number (5), so the axis is released."""
+        axes = stated_axes_from_message(
+            "taller by 5 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+    def test_make_it_5mm_taller_still_releases(self):
+        """"make it 5 mm taller" → H released: the delta marker IS anchored
+        to the sole unmapped number (5), so the axis is released."""
+        axes = stated_axes_from_message(
+            "make it 5 mm taller", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+
+class TestResolveStatedCues:
+    """Issue #369 round 2: the ONE helper that does try /
+    stated_axes_from_message / classify fallback / effective_stated_dims
+    with the degrade-and-warn behaviour."""
+
+    def test_sets_axis_from_message(self):
+        """A message that states an axis sets it in the result."""
+        result = resolve_stated_cues(
+            {"W": 40.0}, "make it 12 mm tall", label="test"
+        )
+        assert result["H"] == 12.0
+        assert result["W"] == 40.0
+
+    def test_releases_axis_via_lexicon_fallback(self):
+        """A relative-only message ("make it taller") states nothing on
+        its own → falls back to the lexicon's Cues → releases the carried
+        H."""
+        result = resolve_stated_cues(
+            {"W": 40.0, "H": 12.0}, "make it taller", label="test"
+        )
+        assert "H" not in result
+        assert result["W"] == 40.0
+
+    def test_degrades_on_classify_failure(self, monkeypatch):
+        """A classify failure degrades to the carried set unchanged."""
+        import d33d.dimension_protocol as dp
+
+        def _boom(message: str):
+            raise RuntimeError("lexicon on fire")
+
+        monkeypatch.setattr(dp, "classify", _boom)
+        result = resolve_stated_cues(
+            {"W": 40.0, "H": 12.0}, "make it taller", label="test"
+        )
+        assert result == {"W": 40.0, "H": 12.0}
 
 
 class TestGateReleasesAxes:

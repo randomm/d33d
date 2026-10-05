@@ -671,7 +671,6 @@ def create_versions_router() -> APIRouter:
         # ``render_artifact_dir`` (``None`` when the render did not record
         # one). Computing them on the pass path only (never on the
         # 422/502 early returns above).
-        from d33d.axis_lexicon import classify as _classify_cues
         from d33d.design_loop_events import _version_param_meta
 
         # The per-axis stated evidence for the run (issue #246): the
@@ -691,7 +690,7 @@ def create_versions_router() -> APIRouter:
         from d33d.dimension_protocol import (
             carried_stated_set,
             effective_stated_dims,
-            stated_axes_from_message,
+            resolve_stated_cues,
         )
         from d33d.versions import resolve_version_name
 
@@ -721,35 +720,9 @@ def create_versions_router() -> APIRouter:
                 } or None
                 per_axis_stated = effective_stated_dims(_carried, explicit_axes)
             else:
-                try:
-                    _am = stated_axes_from_message(msg_text, chat_history=())
-                    # Issue #369: ``_classify_cues`` is ``classify`` (the
-                    # full ``Cues`` — absolute + relative + global). When
-                    # the message alone states no axis, the ``Cues``
-                    # fallback carries the release semantics a bare
-                    # ``dict`` cannot express: a relative-only message
-                    # ("make it taller") releases the carried axis,
-                    # mirroring the chat route ("both routes
-                    # consistently").
-                    per_axis_stated = effective_stated_dims(
-                        _carried,
-                        _am if _am else _classify_cues(msg_text),
-                    )
-                except Exception:
-                    # A cue-resolution failure degrades to the carried set
-                    # unchanged (no release, no override — the
-                    # conservative outcome), mirroring ``chat_loop``'s
-                    # guard. The warning carries lengths only (no message
-                    # text — no PII in logs).
-                    logger.warning(
-                        "finalize stated-axes cue resolution failed; "
-                        "carrying the latest stated set unchanged "
-                        "(project_id=%s, len(message)=%d)",
-                        project_id,
-                        len(msg_text),
-                        exc_info=True,
-                    )
-                    per_axis_stated = effective_stated_dims(_carried, None)
+                per_axis_stated = resolve_stated_cues(
+                    _carried, msg_text, label="finalize", project_id=project_id
+                )
             # The project-level carried set (issue #312): written on every
             # finalize turn (pass or fail — the write is here because the
             # effective set is final once cues are resolved). A failed
@@ -899,7 +872,6 @@ def _finalize_loop_kwargs(
       readable), and the user's request text (guaranteed non-empty — the
       failures.jsonl line is un-archivable without it).
     """
-    from d33d.axis_lexicon import classify as _classify_cues
     from d33d.config.catalogue import CatalogueError, ResolutionError
     from d33d.design_loop_events import (
         EMPTY_PHOTO_DATA_URI,
@@ -910,7 +882,7 @@ def _finalize_loop_kwargs(
     from d33d.dimension_protocol import (
         carried_stated_set,
         effective_stated_dims,
-        stated_axes_from_message,
+        resolve_stated_cues,
     )
     from d33d.part_http import resolve_part_paths
     from d33d.prompt_hash import canonical_hash
@@ -1061,31 +1033,9 @@ def _finalize_loop_kwargs(
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
         _msg = body.request or body.message or ""
-        try:
-            _am = stated_axes_from_message(_msg)
-            # Issue #369: the full ``Cues`` fallback carries the relative
-            # release semantics a bare ``dict`` cannot express — a
-            # relative-only message ("make it taller") releases the carried
-            # axis here too, mirroring the chat route ("both routes
-            # consistently").
-            current_axes = effective_stated_dims(
-                _carried_gate,
-                _am if _am else _classify_cues(_msg),
-            )
-        except Exception:
-            # A cue-resolution failure degrades to the carried set
-            # unchanged (no release, no override — the conservative
-            # outcome), mirroring ``chat_loop``'s guard. The warning
-            # carries lengths only (no message text — no PII in logs).
-            logger.warning(
-                "gate stated-axes cue resolution failed; carrying the "
-                "latest stated set unchanged (project_id=%s, "
-                "len(message)=%d)",
-                project_id,
-                len(_msg),
-                exc_info=True,
-            )
-            current_axes = effective_stated_dims(_carried_gate, None)
+        current_axes = resolve_stated_cues(
+            _carried_gate, _msg, label="gate", project_id=project_id
+        )
     stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest
     # version's full params snapshot, passed INTO the loop (the loop's
