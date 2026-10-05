@@ -1171,6 +1171,24 @@ class TestNewestWinsPerAxis:
         assert axes["H"] == 30.0
         assert axes["W"] == 40.0
 
+    def test_same_clause_delta_marker_on_other_number_keeps_absolute(self):
+        """DISCRIMINATOR (issue #369 round 2): same clause (no comma) —
+        "make it taller by 5 mm and 30 mm". The preposition "by" sits in
+        the SAME clause as the unmapped 30. The anchoring excludes 5
+        (an anchored delta) from the ambiguity count, and the clause-local
+        marker check for 30 must be anchored to 30 itself: with the
+        unanchored pattern ("\\bby\\s+(?=\\d)") the "by" of "by 5 mm"
+        matches inside 30's own clause and releases H; anchored, the 30
+        restates the released axis (H=30). Fails when "_delta_marker_for"
+        is reverted to the unanchored form (proven in the PR review:
+        revert → this test fails with "H" absent → restore → passes)."""
+        axes = stated_axes_from_message(
+            "make it taller by 5 mm and 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+        assert axes["W"] == 40.0
+
     def test_taller_by_5mm_still_releases(self):
         """"taller by 5 mm" → H released: the delta marker IS anchored to
         the sole unmapped number (5), so the axis is released."""
