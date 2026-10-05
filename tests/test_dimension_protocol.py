@@ -1139,25 +1139,58 @@ class TestNewestWinsPerAxis:
 
     def test_history_window_is_last_50(self):
         """Window semantics: the rule lives at ``window_start`` in
-        ``_extract_stated``; this test pins its behaviour."""
+        ``_extract_stated``; this test pins its behaviour. The window is
+        the LAST 50 turns of ``turns`` = ``history`` + the current
+        message (the wrappers append the current message last), so the
+        current message is ALWAYS inside the window and an older turn is
+        inside only while fewer than 50 turns sit between it and the
+        current message."""
         from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
 
         filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES)]
-        # The old statement sits OUTSIDE the window (51 turns, statement
-        # at idx 0 — the window is idx 1..50) → not stated:
+        # OUTSIDE the window (52 turns total: statement at idx 0, the
+        # current message at idx 51 — the window is idx 3..51) → not
+        # stated:
         axes = stated_axes_from_message("filler X", ["W: 40", *filler])
         assert "W" not in axes
-        # INSIDE the window (51 turns, statement at idx 1) → stated:
+        # INSIDE the window (51 turns total: statement at idx 2, the
+        # current message at idx 50 — the window is idx 2..50) → stated:
         axes = stated_axes_from_message(
-            "filler X", ["W: 40", *filler[:48]]
+            "filler X", ["filler 0", "filler 0b", "W: 40", *filler[:47]]
         )
         assert axes["W"] == 40.0
-        # A release older than the window does not release an in-window
-        # statement (the released axis survives):
+        # A release and an in-window statement: the release at idx 0
+        # (outside the window) does not release the in-window H:12 at
+        # idx 2 (the window is idx 2..50 — the released axis survives):
         axes = stated_axes_from_message(
-            "filler X", ["make it taller", "H: 12", *filler[:48]]
+            "filler X", ["make it taller", "filler 0b", "H: 12", *filler[:47]]
         )
         assert axes["H"] == 12.0
+
+    def test_window_always_includes_current_message(self):
+        """REGRESSION (issue #369 round 3): with 51+ prior turns the old
+        arithmetic (``len(history) - 50``) dropped the CURRENT message
+        from the window — its own statement was never scanned. The window
+        must be the last 50 turns INCLUDING the current message."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        axes = stated_axes_from_message("a 40 mm wide box, 20 mm tall", filler)
+        assert axes["W"] == 40.0
+        assert axes["H"] == 20.0
+
+    def test_window_old_statement_outside_newest_wins(self):
+        """REGRESSION (issue #369 round 3): an old "H: 12" OUTSIDE the
+        window never wins over the current message's "make it 20 mm
+        tall" — with 51+ prior turns the current message is the newest
+        statement and must be scanned (old arithmetic skipped it, and the
+        out-of-window "H: 12" was the only H statement the scan saw)."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        filler[5] = "H: 12"
+        axes = stated_axes_from_message("make it 20 mm tall", filler)
+        assert axes["H"] == 20.0
 
 
     def test_unanchored_delta_marker_on_other_number_does_not_release(self):

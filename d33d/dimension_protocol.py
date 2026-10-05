@@ -205,6 +205,7 @@ class DimensionClarification:
 # new value is unknown — the gate asks), never enforce it as an absolute
 # ("taller by 5 mm" on a 12 mm part must not set H=5.0 — that is a
 # physically shorter target).
+@cache
 def _delta_marker_for(number: float) -> re.Pattern[str]:
     """A RELATIVE-delta matcher ANCHORED to ``number``'s own occurrence
     (issue #369 round 2): the preposition "by" immediately before the
@@ -305,13 +306,10 @@ def _extract_stated(
     # one turn).
     history = list(chat_history or [])
     # The extraction's history window is the LAST
-    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of ``history``; with 51+
-    # turns, ``user_quoted_unmapped_mm`` (called with ``chat_history``
-    # alone) sees a different 50-turn slice: the wrappers append the
-    # current message last, so the two windows differ by at most one turn
-    # at the boundary. Statements and releases before ``window_start``
-    # are simply not present.
-    window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
+    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of ``history``, INCLUSIVE
+    # of the current message (the wrappers append it last): statements and
+    # releases before ``window_start`` are simply not present.
+    window_start = max(0, len(history) + 1 - QUOTED_UNMAPPED_MAX_MESSAGES)
 
     if not all(a in out for a in DIMENSION_AXES):
         for idx, turn in enumerate(history):
@@ -425,14 +423,6 @@ def _extract_stated(
             if any(_FEATURE_NOUN_RE.search(clause) for clause in _split_clauses(str(turn))):
                 out.pop(axis, None)
                 continue
-            # A clause guard that left the axis unmapped (two-axes-one-
-            # number: "40 mm wide and 12 mm tall" maps nothing; mating
-            # connector: the number describes the mating part) — the
-            # lexicon deliberately did not assign that number to the
-            # axis; reassigning it here would override the guard, so the
-            # carried value stays (conservative).
-            if axis in cues.absolute:
-                continue
             v = _unmapped_value_for_axis(cues, str(turn))
             if v is not None:
                 # The turn restates the axis with an explicit value the
@@ -471,8 +461,11 @@ def _unmapped_value_for_axis(
     all_numbers = cues.unmapped_mm_numbers
     # Filter out numbers that are anchored deltas ("by 5 mm" / "5 mm
     # taller") — they are increments, not absolute targets, and do not
-    # count toward the ambiguity check.
+    # count toward the ambiguity check. The number→clause mapping is
+    # built once here and reused by the feature-noun check below (a
+    # single clause walk).
     clauses = [p.strip() for p in _CLAUSE_SPLIT_RE.split(turn) if p.strip()]
+    number_to_clause: dict[float, str] = {}
     non_delta_numbers: list[float] = []
     for number in all_numbers:
         pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
@@ -480,29 +473,19 @@ def _unmapped_value_for_axis(
             if re.search(pattern, clause, re.IGNORECASE):
                 if not _delta_marker_for(number).search(clause):
                     non_delta_numbers.append(number)
+                    number_to_clause[number] = clause
                 break
     if len(non_delta_numbers) != 1:
         return None
     number = non_delta_numbers[0]
-    # The ``:g`` form is the shortest decimal spelling (20.0 → "20") —
-    # the exact text the user typed, and never a wider net. The leading
-    # lookbehind rejects a signed form ("-5 mm" — the lexicon strips the
-    # sign when it unmapped it), so a negative statement can never
-    # re-enter as a positive one (a non-positive value is never stated).
-    pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
-    for clause in clauses:
-        if re.search(pattern, clause, re.IGNORECASE):
-            # Found the number's clause: a feature noun there means the
-            # number belongs to the feature, not the axis (release);
-            # otherwise ``_coerce`` validates it (non-positive → None →
-            # release, never stated).
-            if _FEATURE_NOUN_RE.search(clause):
-                return None
-            return _coerce(number)
-    # No clause claims the number (a signed form like "-5 mm", or a
-    # spelling the lexicon normalised away): release — a number no clause
-    # claims as positive never states an axis.
-    return None
+    # Found the number's clause: a feature noun there means the number
+    # belongs to the feature, not the axis (release); otherwise
+    # ``_coerce`` validates it (non-positive → None → release, never
+    # stated).
+    clause = number_to_clause[number]
+    if _FEATURE_NOUN_RE.search(clause):
+        return None
+    return _coerce(number)
 
 
 def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:
@@ -617,24 +600,16 @@ def resolve_stated_cues(
         # A cue-resolution failure degrades to the carried set unchanged
         # (no release, no override — the conservative outcome). The
         # warning carries lengths only (no message text — no PII in
-        # logs).
-        if project_id is not None:
-            logger.warning(
-                "%s: stated-axes cue resolution failed; carrying the "
-                "latest stated set unchanged (project_id=%s, len(message)=%d)",
-                label,
-                project_id,
-                len(message),
-                exc_info=True,
-            )
-        else:
-            logger.warning(
-                "%s: stated-axes cue resolution failed; carrying the "
-                "latest stated set unchanged (len(message)=%d)",
-                label,
-                len(message),
-                exc_info=True,
-            )
+        # logs); ``project_id`` may be None (not always known at the
+        # call site).
+        logger.warning(
+            "%s: stated-axes cue resolution failed; carrying the "
+            "latest stated set unchanged (project_id=%s, len(message)=%d)",
+            label,
+            project_id,
+            len(message),
+            exc_info=True,
+        )
         return effective_stated_dims(carried, None)
     return effective_stated_dims(carried, _cues_arg)
 
