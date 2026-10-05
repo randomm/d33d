@@ -445,19 +445,16 @@ def parse_and_repair(
         raise PartUploadError("mesh is empty after repair")
     # ``bodies`` is the number of WATERTIGHT components in the STORED
     # (post-repair) mesh — recomputed, never the pre-repair count, so the
-    # report describes what was actually kept (issue #375). One split
-    # serves the count AND the leak check; a non-watertight component in
-    # the stored mesh is a 422 (the dedicated message — a body lost
-    # non-fatally during repair), never a green 201 with a wrong count.
+    # report describes what was actually kept (issue #375). A
+    # non-watertight component in the stored mesh is NOT a rejection
+    # ground (issue #375 adds no new rejections): the stored mesh is kept
+    # as-is and ``report["watertight"]`` reports the STORED mesh honestly
+    # (False when any component is non-watertight), as on main.
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
     comps = repaired.split(only_watertight=False)
     watertight = [c for c in comps if c.is_watertight]
     bodies = len(watertight)
-    if bodies != len(comps):
-        raise PartUploadError(
-            "stored mesh has a non-watertight component after repair"
-        )
     gaps_after = _boundary_loops(repaired)
 
     # ``hole_count``: open-mesh gaps + closed through-holes, both measured

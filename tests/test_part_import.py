@@ -919,18 +919,15 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     )
 
 
-def test_repair_non_watertight_component_raises(app_with_projects):
-    """Issue #375 operator decision 2: report.bodies is the number of
-    WATERTIGHT components in the STORED (post-repair) mesh. If a repair
-    produced a NON-watertight component (a body lost non-fatally — e.g. a
-    holey body that pymeshfix left open), the stored mesh would silently
-    under-report bodies, so the post-repair leak check must catch it:
-    watertight count != total component count → PartUploadError (the 422)
-    with the dedicated message, never a green 201 with a wrong count."""
+def test_repair_non_watertight_component_kept(app_with_projects):
+    """Issue #375 adds no new rejection grounds: a repair that produces a
+    NON-watertight component in the stored mesh is kept as-is (no
+    PartUploadError) — the report simply describes the STORED mesh
+    honestly: ``watertight`` is False and ``bodies`` is the watertight
+    count, as on main."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
-    from d33d.part_mesh import PartUploadError
 
     box_a = trimesh.creation.box(extents=[10, 10, 10])
     box_b = trimesh.creation.box(extents=[10, 10, 10])
@@ -947,8 +944,7 @@ def test_repair_non_watertight_component_raises(app_with_projects):
             # Remove several faces → a NON-watertight (open) second component
             # in the stored mesh (removing just one face auto-closes under
             # merge_vertices/update_faces; several leave a genuine open
-            # shell). This is the degenerate repair result the post-repair
-            # leak check must refuse.
+            # shell). The stored mesh keeps it; the report must be honest.
             return trimesh.Trimesh(
                 repaired.vertices, repaired.faces[:-3], process=False
             )
@@ -956,13 +952,46 @@ def test_repair_non_watertight_component_raises(app_with_projects):
 
     part_mesh_mod.repair_with_pmf = _leaky_repair
     try:
-        with pytest.raises(PartUploadError) as exc_info:
-            part_mesh_mod.parse_and_repair(data, "stl")
+        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
         part_mesh_mod.repair_with_pmf = original
-    assert str(exc_info.value) == (
-        "stored mesh has a non-watertight component after repair"
-    ), f"dedicated leak message expected, got: {exc_info.value!r}"
+    assert report["watertight"] is False, f"report must say not watertight: {report}"
+    assert report["bodies"] == 1, (
+        f"bodies must be the WATERTIGHT component count (1 of 2): {report}"
+    )
+    # The leaked (open) second component is not a watertight body: repair
+    # effectively dropped a watertight body (2 → 1), so the OPTIONAL
+    # bodies_before line is present (unchanged rule).
+    assert report["bodies_before"] == 2, f"dropped watertight body: {report}"
+
+
+def test_issue_223_asymmetric_a_fixture_not_rejected(app_with_projects):
+    """issue-223-asymmetric-a.stl (8 loose triangles — unrepairable,
+    non-watertight components): parse_and_repair must NOT raise and the
+    report must match main's behaviour (watertight False, bodies 0),
+    pinned here so the post-repair "leak check" cannot resurrect as a
+    422."""
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "issue-223-asymmetric-a.stl")
+    _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    assert report["watertight"] is False, f"fixture is not watertight: {report}"
+    assert report["bodies"] == 0, (
+        f"no watertight components (main's value): {report}"
+    )
+
+
+def test_all_stl_fixtures_parse_without_raising(app_with_projects):
+    """Every ``tests/fixtures/stl/*.stl`` must survive ``parse_and_repair``
+    without a PartUploadError — no fixture may hit a rejection that main
+    did not have (issue #375 adds no new rejection grounds)."""
+    import d33d.part_mesh as part_mesh_mod
+
+    for path in sorted(FIXTURES.glob("*.stl")):
+        try:
+            part_mesh_mod.parse_and_repair(path.read_bytes(), "stl")
+        except part_mesh_mod.PartUploadError as e:
+            pytest.fail(f"{path.name} raised PartUploadError: {e}")
 
 
 
