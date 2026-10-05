@@ -2863,6 +2863,31 @@ def test_import_guard_no_part_project_no_guard():
     assert result.iterations[0].failure_class is None
 
 
+def test_import_guard_catches_rebuild_when_part_scale_set():
+    """Issue #374 (deterministic gate): a model candidate that does NOT
+    ``import("part.stl")`` on an imported project (a cube()-rebuild) must
+    NOT pass silently — the existing ``import_guard_violation``
+    (``no_import`` → the ``geometrically_wrong`` repair route) catches it.
+    The guard fires only when ``part_scale`` is set, so a part wiring that
+    silently degrades to part-less would let the rebuild pass; this
+    asserts the guard fires while the wiring is intact."""
+    from d33d.import_guard import import_guard_violation
+
+    det = import_guard_violation("W = 20;\ncube([W, 25, 30]);\n", part_scale=1.0)
+    assert det is not None
+    assert det[0] == "no_import"
+
+    llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
+    result = _run_import_loop(llm, part_scale=1.0, bbox=BboxInfo(20.0, 25.0, 30.0))
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert "import" in result.iterations[0].repair["instruction"]
+
+    assert import_guard_violation(
+        'scale(1) import("part.stl");\n', part_scale=1.0
+    ) is None
+
+
 # ---------------------------------------------------------------------------
 # Issue #332 — ground truth: score() with part_bbox_mm
 # ---------------------------------------------------------------------------
