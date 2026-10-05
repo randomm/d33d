@@ -2863,7 +2863,7 @@ def test_import_guard_no_part_project_no_guard():
     assert result.iterations[0].failure_class is None
 
 
-def test_e2e_scad_without_import_is_repair_not_silent():
+def test_import_guard_catches_rebuild_when_part_scale_set():
     """Issue #374 (deterministic gate): a model candidate that does NOT
     ``import("part.stl")`` on an imported project (a cube()-rebuild) must
     NOT pass silently — the existing ``import_guard_violation``

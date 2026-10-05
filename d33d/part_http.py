@@ -245,6 +245,10 @@ def project_row_for_worker(
     """ONE short-lived ``db.connect(db_path)`` handle for a worker-thread read
     (issue #374), opened and closed by this context manager.
 
+    Intended for worker-thread callers: on the event-loop thread use
+    ``app.state.conn`` instead — this helper opens a connection per call,
+    which is the cost an event-loop caller never needs to pay.
+
     The design-loop render closures (``d33d.app``'s ``_loop`` and
     ``d33d.versions_routes``'s finalize ``_render_fn``) run on an
     ``asyncio.to_thread`` worker thread, where the app's event-loop-bound
@@ -256,21 +260,29 @@ def project_row_for_worker(
     ``db.connect(db_path)`` handle (the request_logging pattern), closing it
     here — never in the caller.
 
-    Yields ``(row, conn)``. ``row`` is ``None`` (and ``conn`` too, on a
-    connect failure) when the row cannot be read: a missing ``db_path``
-    (narrowed BEFORE the connect call — ``db.connect`` would otherwise
-    create a stray file named ``"None"``), a connect that raises
-    ``sqlite3.Error`` or ``OSError`` (a bad/unwritable path), or a read that
-    raises ``sqlite3.Error`` (a closed/broken handle). Each unreadable
-    shape degrades with ONE warning that names the project id only (never
-    a path) and carries the exception class name via
-    ``exc_info=True`` — the render never raises an unclassified error
-    because of part resolution (issue #330's binding operator decision).
-    A project with NO part keeps part-less rendering silently — the row
-    is ``None`` with no warning. ``db.connect`` re-runs its idempotent
-    schema per call; the extra ``CREATE ... IF NOT EXISTS`` cost is
-    accepted — the handle is one per render iteration, per the binding
-    operator decision.
+    Yields ``(row, conn)``. ``row`` is ``None`` — and so is ``conn``, on
+    EVERY unreadable shape — when the row cannot be read: a missing
+    ``db_path`` (narrowed BEFORE the connect call — ``db.connect`` would
+    otherwise create a stray file named ``"None"``), a connect that raises
+    ``sqlite3.Error`` or ``OSError`` (a bad/unwritable path), or a read
+    that raises ``sqlite3.Error`` or ``ValueError`` (a closed/broken
+    handle; a corrupt JSON column such as ``tags``, which ``get_project``
+    decodes and which ``json.loads`` rejects with ``ValueError``).
+    ``"row unreadable"`` uniformly means ``"no handle"``: the caller can
+    never be handed a conn to read a row it does not have. Each unreadable
+    shape degrades with ONE warning that names the project id and the
+    exception class name ONLY (never a path, never the exception text — a
+    raw ``str(e)`` can carry a path) and carries ``exc_info=True`` — the
+    render never raises an unclassified error because of part resolution
+    (issue #330's binding operator decision). A project with NO part keeps
+    part-less rendering silently — the row is ``None`` with no warning.
+    ``db.connect`` re-runs its idempotent schema per call; the extra
+    ``CREATE ... IF NOT EXISTS`` cost is accepted — the handle is one per
+    render iteration, per the binding operator decision. The finally-block
+    ``close()`` is guarded: a ``close`` that raises (a broken handle) is
+    swallowed at ``logger.debug`` with ``exc_info=True`` so the context
+    manager's contract (the row, or its degradation, always yields) never
+    turns into an exception escape.
     """
     import sqlite3
 
@@ -289,39 +301,51 @@ def project_row_for_worker(
         conn = db_mod.connect(db_path)
     except (sqlite3.Error, OSError) as e:
         # A connect that raises (a closed/broken handle, a bad or
-        # unwritable path) is an unreadable row — degrade to no part; never
-        # raise into the design loop.
+        # unwritable path) is an unreadable row — degrade to no part and NO
+        # handle; never raise into the design loop. The warning carries the
+        # class name only (never the raw text — a raw ``str(e)`` can carry
+        # a path), with ``exc_info=True``.
         logger.warning(
             "design loop for project %s: the project row could not "
-            "be read (connect %s: %s) — the render proceeds part-less",
+            "be read (connect %s) — the render proceeds part-less",
             project_id,
             type(e).__name__,
-            e,
             exc_info=True,
         )
         yield None, None
         return
     try:
         row = conn.get_project(project_id)
-    except sqlite3.Error as e:
-        # A closed/broken handle is an unreadable row — degrade to no part
-        # (the render proceeds part-less); never raise into the design
-        # loop. (``TypeError``/``AttributeError`` — a non-Connection object
-        # where a Connection was expected — is a wiring bug, not an
-        # unreadable row: let it surface.)
+    except (sqlite3.Error, ValueError) as e:
+        # A closed/broken handle (``sqlite3.Error``) or a corrupt JSON
+        # column such as ``tags`` (``get_project`` decodes it and
+        # ``json.loads`` raises ``ValueError``) is an unreadable row —
+        # degrade to no part and NO handle (the render proceeds
+        # part-less); never raise into the design loop. (``TypeError``/
+        # ``AttributeError`` — a non-Connection object where a Connection
+        # was expected — is a wiring bug, not an unreadable row: let it
+        # surface.)
         logger.warning(
             "design loop for project %s: the project row could not "
-            "be read (get_project %s: %s) — the render proceeds part-less",
+            "be read (get_project %s) — the render proceeds part-less",
             project_id,
             type(e).__name__,
-            e,
             exc_info=True,
         )
-        row = None
+        yield None, None
+        return
     try:
         yield row, conn
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except (sqlite3.Error, OSError):
+            logger.debug(
+                "design loop for project %s: the worker handle's close() "
+                "raised (degraded row already yielded) — swallowed",
+                project_id,
+                exc_info=True,
+            )
 
 
 def resolve_part_paths(

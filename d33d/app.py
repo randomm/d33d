@@ -1844,24 +1844,11 @@ def _build_production_design_loop():
             (issue #330 sub-issue 2 — the production closure's half of the
             ``render_for_design_loop`` part wiring). Row acquisition is the
             shared helper
-            :func:`d33d.part_http.project_row_for_worker` (this closure runs
-            on the ``asyncio.to_thread`` worker thread, where
-            ``app.state.conn`` (bound to the event-loop thread, check_
-            same_thread=True) would raise ``sqlite3.ProgrammingError`` on
-            first use — the helper's ONE short-lived ``db.connect(db_path)``
-            handle, opened and closed in the helper, is worker-thread-safe;
-            issue #374); the binding decision itself is the shared helper
-            :func:`d33d.part_http.resolve_part_paths`. An unreadable row
-            (a connect or row read that raises ``sqlite3.Error``, an
-            ``OSError`` connect, or a missing ``db_path`` — a closed/broken
-            handle, an unwritable path) degrades to ``part_path=None`` with
-            one WARNING (with ``exc_info``) naming the project id only
-            (never a path); the render never raises an unclassified error
-            because of part resolution (issue #330's binding operator
-            decision). A project with NO part keeps part-less rendering
-            silently — the WARNING is for genuine unreadable-row shapes
-            only. The closure does NOT scale the part (``part_scale`` is
-            sub-issue 3's domain, not the worker's).
+            :func:`d33d.part_http.project_row_for_worker` (worker-thread
+            handle; degrade contract in its docstring); the binding decision
+            is :func:`d33d.part_http.resolve_part_paths`. The closure does
+            NOT scale the part (``part_scale`` is sub-issue 3's domain, not
+            the worker's).
             """
             from d33d.part_http import project_row_for_worker, resolve_part_paths
 

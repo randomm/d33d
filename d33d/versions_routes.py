@@ -904,25 +904,9 @@ def _finalize_loop_kwargs(
         # The design-side part's ``part_path``/``repo_dir`` wiring (issue
         # #330 sub-issue 2 — the finalize seam's half of the
         # ``render_for_design_loop`` part wiring): row acquisition is the
-        # shared helper
-        # :func:`d33d.part_http.project_row_for_worker` (this closure runs
-        # on the ``asyncio.to_thread`` worker thread, where
-        # ``app.state.versions`` (its underlying connection) and
-        # ``app.state.conn`` are check_same_thread=True handles bound to
-        # the event-loop thread — a direct read raises
-        # ``sqlite3.ProgrammingError`` and silently degraded every part to
-        # part-less; the helper's ONE short-lived ``db.connect(db_path)``
-        # handle is worker-thread-safe, issue #374), and the binding
-        # decision is :func:`d33d.part_http.resolve_part_paths`. An
-        # unreadable row (a connect or read that raises ``sqlite3.Error``,
-        # an ``OSError`` connect, or a missing ``db_path`` — a closed/broken
-        # handle, an unwritable path) degrades to ``part_path=None`` with
-        # one WARNING (with ``exc_info``), project id only, never a path
-        # (issue #330's binding operator decision — the render never raises
-        # an unclassified error because of part resolution). A project with
-        # NO part keeps part-less rendering silently. The closure does NOT
-        # scale the part (``part_scale`` is sub-issue 3's domain, not the
-        # worker's).
+        # shared helper :func:`d33d.part_http.project_row_for_worker`
+        # (worker-thread handle; degrade contract in its docstring) and the
+        # binding decision is :func:`d33d.part_http.resolve_part_paths`.
         from d33d.part_http import project_row_for_worker, resolve_part_paths
         with project_row_for_worker(db_path, project_id) as (proj_row, conn):
             part_path, repo_dir = resolve_part_paths(proj_row, conn)
