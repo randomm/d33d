@@ -199,17 +199,17 @@ _PART_NOUNS: frozenset[str] = frozenset({"lid"})
 def _is_bare_measurement(clause: str) -> bool:
     """True if ``clause`` is a BARE MEASUREMENT — just a number + axis
     word (and optional filler like "mm", "around", "from", "the", etc.)
-    with NO verb, pronoun, or article-introduced subject (issue #398).
+    with NO pronoun- or article-introduced subject (issue #398).
 
     A bare measurement is a fragment like "5 mm deep" or "10 mm wide"
     that modifies a feature described in a sibling clause, not a
-    standalone part statement. The test: the clause contains a number
-    and an axis word but NO verb, pronoun, or article.
+    standalone part statement. The test: the clause contains no
+    pronoun or article ("a", "an", "the", "it", "this", ...) that would
+    introduce a subject. Verbs are NOT checked here — a feature-verb
+    clause is handled by the feature-verb branch of the suppression
+    (see ``_classify_clause``), not by this test.
     """
-    # A bare measurement has no verb, pronoun, or article.
-    if re.search(r"\b(?:a|an|the|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b", clause, re.IGNORECASE):
-        return False
-    return True
+    return re.search(r"\b(?:a|an|the|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b", clause, re.IGNORECASE) is None
 
 
 # The feature verbs (closed set, issue #398): verbs that create or modify
