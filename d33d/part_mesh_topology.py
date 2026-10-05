@@ -17,11 +17,14 @@ The helper returns a small flat dict — the caller owns interpretation.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import trimesh
 
 from d33d.part_holes import _boundary_loops, watertight_genus
+
+logger = logging.getLogger(__name__)
 
 
 def mesh_topology(
@@ -52,29 +55,33 @@ def mesh_topology(
     with inconsistent winding is NOT clean even if boundary-loop-free —
     pymeshfix would be needed to fix the winding.
 
-    Any exception inside the genus or winding check is caught and the
-    affected field degrades to a safe default (genus → 0, winding_consistent
-    → False) — the measurement never raises.
+    Any exception inside the genus or winding check is caught, logged,
+    and the affected field degrades to a safe default (genus → 0,
+    winding_consistent → False) — the measurement never raises.
     """
     boundary_loops = _boundary_loops(merged)
 
     watertight_bodies = [c for c in components if c.is_watertight]
 
     # Winding consistency: trimesh's check returns a bool. Any failure
-    # degrades to False (the mesh is NOT clean — repair is taken). The
-    # blind catch is intentional: the topology measurement is a helper
-    # that must never raise (a measurement failure must degrade to the
-    # safe "not clean / no holes" defaults, never crash the import).
+    # degrades to False (the mesh is NOT clean — repair is taken).
     try:
         winding_consistent = bool(merged.is_winding_consistent)
-    except (ArithmeticError, ValueError, TypeError, RuntimeError):
+    except Exception:
+        logger.warning(
+            "winding consistency check failed, degrading to False", exc_info=True,
+        )
         winding_consistent = False
 
     # Genus: reuse the existing watertight_genus, wrapped. Any exception
     # falls back to 0 (the count degrades, never crashes — issue #351).
     try:
         genus = watertight_genus(components)
-    except (ArithmeticError, ValueError, TypeError, RuntimeError):
+    except Exception:
+        logger.warning(
+            "genus computation failed, falling back to boundary-loop count",
+            exc_info=True,
+        )
         genus = 0
 
     return {

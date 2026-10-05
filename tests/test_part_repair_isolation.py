@@ -33,7 +33,6 @@ import pytest
 
 from d33d.part_repair import (
     RepairTimeoutError,
-    is_repair_timeout,
     repair_with_pmf,
 )
 
@@ -85,40 +84,18 @@ def _run_async(coro_factory) -> Any:
 
 def test_repair_timeout_error_is_a_part_upload_error_subclass():
     """``RepairTimeoutError`` subclasses ``PartUploadError`` (the route's
-    ``except PartUploadError`` catches it) — and ``is_repair_timeout``
-    checks with ``isinstance``, not string matching."""
-    import d33d.part_repair as part_repair_mod
-
-    # Force lazy resolution of the real PartUploadError class (the
-    # re-base onto ``d33d.part_mesh.PartUploadError`` happens on first use
-    # of ``repair_with_pmf``, not at import time — to avoid a circular
-    # import). Constructing a RepairTimeoutError before that re-base would
-    # leave it subclassing the local placeholder, so resolve first.
-    part_repair_mod._resolve_part_upload_error()
-    from d33d.part_mesh import PartUploadError
+    ``except PartUploadError`` catches it) — and the timeout is detected
+    by TYPE, not by message: a ``PartUploadError`` whose message happens
+    to contain ``"timed out"`` is NOT a repair timeout."""
+    from d33d.part_errors import PartUploadError
 
     e = RepairTimeoutError("repair timed out: exceeded 120s")
     assert isinstance(e, PartUploadError)
-    assert is_repair_timeout(e)
     # A plain PartUploadError with "timed out" in the message is NOT a
-    # repair timeout (the string match is gone — the type is the signal).
+    # repair timeout (the type, not the message, is the signal).
     plain = PartUploadError("the worker said: timed out")
-    assert not is_repair_timeout(plain)
+    assert not isinstance(plain, RepairTimeoutError)
     assert isinstance(plain, PartUploadError)
-
-
-def test_is_repair_timeout_does_not_string_match():
-    """``is_repair_timeout`` is a pure ``isinstance`` check — a
-    ``PartUploadError`` whose message contains ``"timed out"`` is NOT
-    classified as a repair timeout (the old string match is gone)."""
-    from d33d.part_mesh import PartUploadError
-
-    e = PartUploadError("repair timed out: exceeded 120s")
-    assert not is_repair_timeout(e)
-    # A RepairTimeoutError with an EMPTY message is still a repair timeout
-    # (the type, not the message, is the signal).
-    e2 = RepairTimeoutError("")
-    assert is_repair_timeout(e2)
 
 
 # ---------------------------------------------------------------------------
@@ -357,3 +334,150 @@ def test_repair_seam_gil_holding_stub_does_not_starve_event_loop(
         f"(> 200 ms) while the GIL-holding repair stub ran — the repair "
         f"must be process-isolated, not thread-isolated"
     )
+
+
+# ---------------------------------------------------------------------------
+# New tests: winding check degrades to False on AttributeError, genus
+# fallback logs, in_q.put OSError → PartUploadError, multi-body aggregate
+# budget
+# ---------------------------------------------------------------------------
+
+
+def test_winding_check_degrades_to_false_on_attribute_error(monkeypatch):
+    """The documented 'measurement never raises' contract: when
+    ``is_winding_consistent`` raises AttributeError, ``mesh_topology``
+    returns ``winding_consistent=False`` and does NOT raise."""
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    box = trimesh.creation.box(extents=[5, 5, 5])
+    box.merge_vertices()
+    box.update_faces(box.nondegenerate_faces())
+    components = box.split(only_watertight=False)
+
+    # Monkeypatch trimesh's is_winding_consistent property to raise
+    # AttributeError (simulating trimesh API drift).
+
+    class _RaisingProp:
+        def __get__(self, obj, objtype=None):
+            raise AttributeError("intentional: simulate trimesh drift")
+
+    monkeypatch.setattr(
+        trimesh.Trimesh, "is_winding_consistent", _RaisingProp()
+    )
+    try:
+        topo = mesh_topology(box, components)
+    finally:
+        monkeypatch.undo()
+    assert topo["winding_consistent"] is False
+
+
+def test_genus_fallback_logs_warning(caplog):
+    """The genus fallback: when ``watertight_genus`` raises, ``mesh_topology``
+    logs a warning (exc_info=True) and returns genus=0."""
+    from unittest.mock import patch
+
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    box = trimesh.creation.box(extents=[5, 5, 5])
+    box.merge_vertices()
+    box.update_faces(box.nondegenerate_faces())
+    components = box.split(only_watertight=False)
+
+    def _boom(c):
+        raise RuntimeError("genus computation failed")
+
+    with patch("d33d.part_mesh_topology.watertight_genus", side_effect=_boom), caplog.at_level("WARNING"):
+        topo = mesh_topology(box, components)
+
+    assert topo["genus"] == 0
+    assert any("genus" in r.message for r in caplog.records), (
+        f"expected a warning about genus failure, got: {[r.message for r in caplog.records]}"
+    )
+
+
+class _FailingQueue:
+    """A SimpleQueue stub whose put() raises OSError (top-level → picklable)."""
+    def put(self, *a, **kw):
+        raise OSError("broken pipe")
+    def close(self):
+        pass
+
+
+def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
+    """Finding 6: when ``in_q.put(...)`` raises OSError (BrokenPipeError,
+    etc.), ``repair_with_pmf`` maps it to ``PartUploadError`` with the
+    'could not send mesh to worker' message."""
+    import d33d.part_repair as part_repair_mod
+    from d33d.part_errors import PartUploadError
+
+    box = _box_mesh()
+
+    original_get_context = part_repair_mod.multiprocessing.get_context
+
+    def _failing_get_context(name):
+        real_ctx = original_get_context(name)
+
+        def _failing_simple_queue():
+            return _FailingQueue()
+
+        real_ctx.SimpleQueue = _failing_simple_queue
+        return real_ctx
+
+    monkeypatch.setattr(part_repair_mod.multiprocessing, "get_context", _failing_get_context)
+
+    with pytest.raises(PartUploadError) as excinfo:
+        repair_with_pmf(box, timeout=5)
+
+    assert "could not send mesh to worker" in str(excinfo.value)
+
+
+def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch):
+    """Finding 4: the multi-body repair loop is bounded by an aggregate
+    wall-clock budget of REPAIR_TIMEOUT_SECONDS. With an injected small
+    budget and a stub repair that consumes time, RepairTimeoutError is
+    raised when the remaining time drops to ≤ 0."""
+    import time
+
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    # Two watertight boxes far apart → 2 bodies, NOT clean (we add a gap).
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0, 0])
+    # Add a gapped shell to make the mesh NOT clean.
+    debris = trimesh.creation.box(extents=[5, 5, 5])
+    debris.apply_translation([20000.0, 0, 0])
+    debris = trimesh.Trimesh(debris.vertices, debris.faces[:-6], process=False)
+    combined = trimesh.util.concatenate([box_a, box_b, debris])
+    data = _stl_bytes_from_mesh(combined)
+
+    # Inject a very small aggregate budget (0.5 s).
+    monkeypatch.setattr(part_mesh_mod, "REPAIR_TIMEOUT_SECONDS", 0.5)
+
+    # A stub repair that sleeps briefly to consume budget.
+    def _slow_repair(mesh, timeout=None):
+        time.sleep(0.6)  # longer than the budget
+        return mesh
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _slow_repair)
+
+    from d33d.part_repair import RepairTimeoutError
+
+    with pytest.raises(RepairTimeoutError):
+        part_mesh_mod.parse_and_repair(data, "stl")
+
+
+def _stl_bytes_from_mesh(mesh):
+    """Export a trimesh mesh as STL bytes."""
+    import io
+
+    buf = io.BytesIO()
+    mesh.export(buf, file_type="stl")
+    return buf.getvalue()
+

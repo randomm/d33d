@@ -132,8 +132,7 @@ def _run_parse_and_repair(
     """The upload's decode gate (run OFF the event loop by the route's
     ``asyncio.to_thread``): ``parse_and_repair`` mapped to its 422 contract.
 
-    A ``RepairTimeoutError`` (checked by TYPE, not by message — the mesh
-    isn't broken, just slow) gets the distinct ``REPAIR_TIMEOUT_DETAIL``;
+    A ``RepairTimeoutError`` gets the distinct ``REPAIR_TIMEOUT_DETAIL``;
     every other ``PartUploadError`` gets the unparseable detail.
     """
     try:

@@ -915,9 +915,9 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
 
-    def _dropping_repair(mesh):
+    def _dropping_repair(mesh, timeout=None):
         call_state["n"] += 1
-        repaired = original(mesh)
+        repaired = original(mesh, timeout=timeout)
         if call_state["n"] == 2:
             # Drop the second body (return an empty mesh).
             return trimesh.Trimesh(
@@ -965,9 +965,9 @@ def test_repair_non_watertight_component_kept(app_with_projects):
     original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
 
-    def _leaky_repair(mesh):
+    def _leaky_repair(mesh, timeout=None):
         call_state["n"] += 1
-        repaired = original(mesh)
+        repaired = original(mesh, timeout=timeout)
         if call_state["n"] == 2:
             # Remove several faces → a NON-watertight (open) second component
             # in the stored mesh.
@@ -3584,7 +3584,7 @@ def test_decimate_before_repair_above_budget(monkeypatch):
     # subprocess; the assertion is about the face count passed to repair).
     repair_face_counts: list[int] = []
 
-    def _spied_repair(mesh):
+    def _spied_repair(mesh, timeout=None):
         repair_face_counts.append(len(mesh.faces))
         return mesh
 
@@ -3636,3 +3636,32 @@ def test_clean_mesh_below_budget_not_decimated():
         f"clean mesh below budget must not be decimated: "
         f"report={report['triangles']}, original={len(loaded.faces)}"
     )
+
+
+def test_decimate_oserror_maps_to_part_upload_error(monkeypatch):
+    """Finding 3: any unexpected exception from the C library during
+    quadric decimation (e.g. OSError) must become PartUploadError
+    (the 422), not a raw 500."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+    from d33d.part_errors import PartUploadError
+
+    # A mesh above the budget that will trigger decimation.
+    # Use a small budget so a tiny mesh triggers the decimate path.
+    monkeypatch.setattr(part_mesh_mod, "REPAIR_FACE_BUDGET", 5)
+
+    box = trimesh.creation.box(extents=[10, 10, 10])  # 12 faces > 5
+
+    def _raise_oserror(self, face_count=None, **kw):
+        raise OSError("C library exploded")
+
+    monkeypatch.setattr(
+        trimesh.Trimesh, "simplify_quadric_decimation", _raise_oserror
+    )
+
+    with pytest.raises(PartUploadError) as excinfo:
+        part_mesh_mod._decimate(box, 5)
+
+    assert "quadric decimation failed" in str(excinfo.value)
+    assert "OSError" in str(excinfo.value)

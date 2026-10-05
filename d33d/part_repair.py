@@ -3,10 +3,9 @@
 Extracted from ``part_mesh.py`` (issue #375, the 500-line rule): the
 repair machinery is a single self-contained function with no state, so it
 lives in its own module. ``part_mesh`` imports it — never the other way
-round (no circular import; this module imports nothing from ``d33d``
-except the ``PartUploadError`` type it must passthrough, imported
-inside the function to keep the import edge one-way even in case
-``part_mesh``'s module body ever needs to grow).
+round (no circular import; the error classes are imported from the leaf
+module ``d33d.part_errors`` at the top level — no lazy resolution, no
+``sys.modules`` mutation).
 
 Issue #395: the repair runs in a **separate process** with a timeout, so
 pymeshfix's GIL-holding C work can never block the event loop or other
@@ -52,6 +51,8 @@ logger = logging.getLogger(__name__)
 import numpy as np
 import trimesh
 
+from d33d.part_errors import PartUploadError, RepairTimeoutError
+
 #: The repair timeout in seconds. A mesh that pymeshfix genuinely cannot
 #: repair in this time will hit the timeout path → 422, never a hang.
 REPAIR_TIMEOUT_SECONDS = 120
@@ -65,21 +66,14 @@ REPAIR_TIMEOUT_DETAIL = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Process-boundary worker function (must be top-level for pickling)
-# ---------------------------------------------------------------------------
-
-
 def _repair_in_process(vertices: np.ndarray, faces: np.ndarray) -> tuple:
-    """The pymeshfix repair, run in the worker process.
+    """The pymeshfix repair, run in the worker process (top-level → picklable).
 
     Receives raw numpy arrays (picklable — not trimesh objects) and
     returns the repaired ``(vertices, faces)`` raw-arrays tuple (the
     parent rebuilds the ``Trimesh``). The worker imports pymeshfix here
     (not at module top) so the parent process doesn't pay the import
     cost.
-
-    Must be a top-level (picklable) function for the spawn child.
     """
     import pymeshfix as _pmf
 
@@ -103,59 +97,6 @@ def _repair_in_process(vertices: np.ndarray, faces: np.ndarray) -> tuple:
 _REPAIR_WORKER = _repair_in_process
 
 
-class PartUploadError(ValueError):
-    """The import-decode error.
-
-    At first use this placeholder is re-bound to
-    ``d33d.part_mesh.PartUploadError`` (the same class the rest of the
-    package raises and catches) so ``isinstance`` checks work across the
-    boundary. The re-bind is lazy (``_resolve_part_upload_error``) because
-    ``part_mesh`` imports this module at its top level — an import-time
-    re-bind would hit a partially-initialised module.
-    """
-
-
-class RepairTimeoutError(PartUploadError):
-    """A typed repair-timeout signal (issue #395). The route checks
-    ``isinstance(error, RepairTimeoutError)`` instead of matching the
-    string ``"timed out"`` in the message."""
-
-
-_real_part_upload_error: type | None = None
-
-
-def _resolve_part_upload_error() -> type:
-    """The real ``d33d.part_mesh.PartUploadError`` (lazy-resolved once).
-
-    Re-binds this module's ``PartUploadError`` placeholder to the real
-    class and re-bases ``RepairTimeoutError`` onto it, so
-    ``isinstance(e, PartUploadError)`` works against the class the rest of
-    the package raises. Called from :func:`repair_with_pmf`.
-    """
-    global _real_part_upload_error
-    if _real_part_upload_error is None:
-        import sys
-
-        from d33d import part_mesh
-
-        _real_part_upload_error = part_mesh.PartUploadError
-        sys.modules[__name__].PartUploadError = _real_part_upload_error
-        RepairTimeoutError.__bases__ = (_real_part_upload_error,)
-    return _real_part_upload_error
-
-
-def is_repair_timeout(error: BaseException) -> bool:
-    """True if ``error`` is a :class:`RepairTimeoutError` — the typed
-    signal the route checks with ``isinstance`` (issue #395: replaces
-    string-matching ``"timed out" in str(error)``)."""
-    return isinstance(error, RepairTimeoutError)
-
-
-# ---------------------------------------------------------------------------
-# Process-boundary worker function (must be top-level for pickling)
-# ---------------------------------------------------------------------------
-
-
 def _child_main(
     queue: SimpleQueue, send_conn: Any, worker: Any
 ) -> None:
@@ -173,8 +114,7 @@ def _child_main(
         result = worker(verts, faces)
         send_conn.send(("ok", "", result))
     except Exception as e:
-        # Log the full traceback in the child (BLE001-clean: a broad
-        # except that logs is not a blind swallow) and ship the type name
+        # Log the full traceback in the child and ship the type name
         # back so the parent classifies by type, not by message text.
         logging.getLogger(__name__).exception("repair worker failed")
         send_conn.send(("err", type(e).__name__, str(e)))
@@ -208,7 +148,6 @@ def repair_with_pmf(
     ``timeout``: override the default timeout (seconds). Useful in tests
     where a very short timeout can be injected.
     """
-    _resolve_part_upload_error()
     if timeout is None:
         timeout = REPAIR_TIMEOUT_SECONDS
 
@@ -232,7 +171,14 @@ def repair_with_pmf(
     proc.start()
 
     try:
-        in_q.put((verts, faces))
+        try:
+            in_q.put((verts, faces))
+        except OSError as e:
+            # The send-side pipe broke (child died before consuming input,
+            # or the pipe buffer was full). Map to PartUploadError (the 422).
+            raise PartUploadError(
+                f"repair failed: could not send mesh to worker: {type(e).__name__}: {e}"
+            ) from e
         if not pipe_parent.poll(timeout):
             # The timeout bounds only THIS call's own work (the child is
             # per-call). ``poll`` returning False means the child has not
@@ -264,13 +210,19 @@ def repair_with_pmf(
             pass
         if proc.is_alive():
             proc.kill()
-        proc.join()
+        # Bounded join: never block indefinitely.
+        proc.join(timeout=5)
+        if proc.is_alive():
+            logger.warning(
+                "repair worker process %d still alive after join(timeout=5); "
+                "leaving it (daemon=True, will be reaped on exit)",
+                proc.pid,
+            )
 
 
 __all__ = [
     "REPAIR_TIMEOUT_DETAIL",
     "REPAIR_TIMEOUT_SECONDS",
     "RepairTimeoutError",
-    "is_repair_timeout",
     "repair_with_pmf",
 ]

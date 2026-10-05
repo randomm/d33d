@@ -24,18 +24,27 @@ it via ``asyncio.to_thread`` — a mesh this size takes seconds to parse.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import os
 import stat
+import time
 import zipfile
 from typing import Any
 
 import numpy as np
 import trimesh
 
+from d33d.part_errors import PartUploadError  # re-exported for #395 compat
 from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import mesh_topology
-from d33d.part_repair import repair_with_pmf
+from d33d.part_repair import (
+    REPAIR_TIMEOUT_SECONDS,
+    RepairTimeoutError,
+    repair_with_pmf,
+)
+
+logger = logging.getLogger(__name__)
 
 #: The named face cap for an import (a distinct constant from
 #: ``print_validation.MAX_FACES`` — that bound belongs to the render
@@ -127,14 +136,6 @@ def validate_part_path(part_path, repo_dir) -> str | None:
             return f"path component {component.name} is inaccessible"
 
     return None
-
-
-class PartUploadError(ValueError):
-    """A part upload failed the decode gate (unparseable, empty,
-    non-finite, over the face cap, zip-bomb, or an unconvertible 3MF
-    unit). The route maps it to the 422 with the verbatim
-    ``partUpload.unparseable`` detail — nothing is persisted on the way
-    out."""
 
 
 class PartFileTooLargeError(OSError):
@@ -297,11 +298,18 @@ def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
             f"{len(mesh.faces)}-face mesh above the {target_faces}-face "
             "budget cannot be simplified. Repair the install and retry."
         )
-    except (ArithmeticError, ValueError) as e:
+    except Exception as e:
+        # A broad ``except Exception`` (a decimation failure from the C
+        # library — arithmetic, memory, or anything else it raises) is
+        # logged and re-raised as a ``PartUploadError`` (the 422): an
+        # oversized mesh that cannot be simplified must 422, never
+        # proceed to repair at its full size.
+        logger.exception(
+            "quadric decimation failed for the %d-face mesh above the "
+            "%d-face budget", len(mesh.faces), target_faces,
+        )
         raise PartUploadError(
-            f"parse_and_repair: quadric decimation failed for the "
-            f"{len(mesh.faces)}-face mesh above the {target_faces}-face "
-            f"budget: {e}"
+            f"parse_and_repair: quadric decimation failed: {type(e).__name__}: {e}"
         ) from e
 
 
@@ -335,6 +343,7 @@ def parse_and_repair(
 
     Raises ``PartUploadError`` (the 422) on any failure.
     """
+    _t0 = time.monotonic()  # aggregate wall-clock budget for the multi-body loop
     # Load via a file object with an EXPLICIT loader.
     try:
         if part_format == "3mf":
@@ -410,12 +419,23 @@ def parse_and_repair(
     else:
         # Multi-body, not clean: repair EACH watertight body separately
         # and concatenate (issue #375). Decimate each body before repair
-        # if above the budget.
+        # if above the budget. The whole loop is bounded by an aggregate
+        # wall-clock budget of REPAIR_TIMEOUT_SECONDS (the total multi-body
+        # repair must not exceed the same budget as a single body): each
+        # per-body call gets ``timeout=remaining`` and a non-positive
+        # remaining budget raises RepairTimeoutError before the next call.
+        budget = REPAIR_TIMEOUT_SECONDS
         repaired_bodies = []
         for body in watertight_bodies:
+            remaining = budget - (time.monotonic() - _t0)
+            if remaining <= 0:
+                raise RepairTimeoutError(
+                    f"repair timed out: exceeded {budget:.0f}s total budget "
+                    f"across {len(watertight_bodies)} bodies"
+                )
             if len(body.faces) > REPAIR_FACE_BUDGET:
                 body = _decimate(body, REPAIR_FACE_BUDGET)
-            repaired_bodies.append(repair_with_pmf(body))
+            repaired_bodies.append(repair_with_pmf(body, timeout=remaining))
         repaired = trimesh.util.concatenate(repaired_bodies)
 
     # Finiteness AGAIN after pymeshfix (it can emit NaN from degenerate
