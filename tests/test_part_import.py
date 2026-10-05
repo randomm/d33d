@@ -3234,13 +3234,17 @@ def test_project_row_for_worker_corrupt_tags_column_degrades(
     seed.commit()
     seed.close()
 
-    with caplog.at_level("WARNING"):
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None
+    with (
+        caplog.at_level("WARNING"),
+        project_row_for_worker(db_path, pid) as (row, conn),
+    ):
+        assert row is None
+        assert conn is None
     warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
     assert len(warns) == 1
-    assert "ValueError" in warns[0].getMessage()
+    # json.loads rejects the corrupt tags with JSONDecodeError — a
+    # ValueError subclass — the class-name contract names the class.
+    assert "JSONDecodeError" in warns[0].getMessage()
     assert db_path not in warns[0].getMessage()  # never the path
 
 
@@ -3281,177 +3285,18 @@ def test_project_row_for_worker_warnings_are_class_name_only(
     from d33d.part_http import project_row_for_worker
 
     db_path, pid = _seed_file_backed_project(tmp_path)
-    real_connect = db_mod.connect
 
     def _boom(_path):
         raise OSError("bad db path /Users/someone/secret.sqlite3")
 
     monkeypatch.setattr(db_mod, "connect", _boom)
 
-    with caplog.at_level("WARNING"):
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None
-    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
-    assert len(warns) == 1
-    assert "OSError" in warns[0].getMessage()
-    # The raw text (with its path) must not appear in the message — the
-    # traceback in exc_text is not part of the message.
-    assert "/Users/someone/secret.sqlite3" not in warns[0].getMessage()
-    assert "/" not in warns[0].getMessage()
-    assert warns[0].exc_text, "the warning must carry the exception (exc_info=True)"
-
-
-# ---------------------------------------------------------------------------
-# project_row_for_worker (issue #374)
-# ---------------------------------------------------------------------------
-
-
-def _seed_file_backed_project(tmp_path: Path) -> tuple[str, int]:
-    """One project (no part) in a FILE-BACKED DB — returns (db_path, pid)."""
-    import d33d.db as db_mod
-    from d33d.versions import migrate as _migrate
-
-    db_path = str(tmp_path / "d33d.sqlite3")
-    conn = db_mod.connect(db_path)
-    _migrate(conn)
-    pid = conn.create_project(name="p")
-    conn.commit()
-    conn.close()
-    return db_path, pid
-
-
-def _run_off_main_thread(fn) -> Any:
-    """Run fn on a plain non-main thread (the production worker-thread
-    shape) and propagate any exception it raises."""
-    import concurrent.futures as _cf
-
-    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
-        return _ex.submit(fn).result(timeout=30)
-
-
-def test_project_row_for_worker_get_project_error_yields_no_handle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """(issue #374 fix round 1) When get_project raises, the helper yields
-    (None, None) — 'row unreadable' uniformly means 'no handle' (the
-    caller never receives a conn to read a row it does not have), and the
-    finally still runs without error."""
-    import sqlite3 as _sqlite3
-
-    from d33d.part_http import project_row_for_worker
-
-    db_path, pid = _seed_file_backed_project(tmp_path)
-    monkeypatch.setattr(
-        "d33d.db.Connection.get_project",
-        lambda self, project_id: (_ for _ in ()).throw(_sqlite3.OperationalError("closed")),
-    )
-
-    def _body():
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None, "an unreadable row must mean NO handle"
-
-    _run_off_main_thread(_body)
-
-
-def test_project_row_for_worker_value_error_yields_no_handle(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """(issue #374 fix round 1) A ValueError from get_project (a corrupt
-    JSON column such as tags — json.loads rejects it) is an unreadable row:
-    (None, None), never an escaped ValueError."""
-    from d33d.part_http import project_row_for_worker
-
-    db_path, pid = _seed_file_backed_project(tmp_path)
-    monkeypatch.setattr(
-        "d33d.db.Connection.get_project",
-        lambda self, project_id: (_ for _ in ()).throw(ValueError("corrupt tags")),
-    )
-
-    def _body():
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None, "a ValueError row read must mean NO handle"
-
-    _run_off_main_thread(_body)
-
-
-def test_project_row_for_worker_corrupt_tags_column_degrades(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """(issue #374 fix round 1) A row whose tags column is corrupt (the
-    real ValueError path — get_project decodes tags via json.loads)
-    degrades to part-less with exactly ONE 'could not be read' warning
-    naming the ValueError class; the row's path never appears in the
-    message."""
-    import d33d.db as db_mod
-    from d33d.part_http import project_row_for_worker
-
-    db_path, pid = _seed_file_backed_project(tmp_path)
-    seed = db_mod.connect(db_path)
-    seed.execute("UPDATE projects SET tags='not-json{' WHERE id=?", (pid,))
-    seed.commit()
-    seed.close()
-
-    with caplog.at_level("WARNING"):
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None
-    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
-    assert len(warns) == 1
-    assert ("JSONDecodeError" in warns[0].getMessage() or "ValueError" in warns[0].getMessage())
-    assert db_path not in warns[0].getMessage()  # never the path
-
-
-def test_project_row_for_worker_close_error_is_swallowed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """(issue #374 fix round 1) A close() that raises (a broken handle)
-    never escapes the helper — the context manager's contract (the row, or
-    its degradation, always yields) holds even when the teardown itself
-    fails."""
-    import sqlite3 as _sqlite3
-
-    from d33d.part_http import project_row_for_worker
-
-    db_path, pid = _seed_file_backed_project(tmp_path)
-    monkeypatch.setattr(
-        "d33d.db.Connection.close",
-        lambda self: (_ for _ in ()).throw(_sqlite3.OperationalError("broken handle")),
-    )
-
-    def _body():
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is not None
-            assert conn is not None
-    # If the unguarded close() escaped, the ThreadPoolExecutor would
-    # re-raise it here — the bare .result() is the assertion that no
-    # exception escapes the helper.
-    _run_off_main_thread(_body)
-
-
-def test_project_row_for_worker_warnings_are_class_name_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """(issue #374 fix round 1) The unreadable-row warnings carry ONLY the
-    exception class name + project id — never the raw exception text (a
-    raw str(e) can contain a path), never any filesystem path."""
-    import d33d.db as db_mod
-    from d33d.part_http import project_row_for_worker
-
-    db_path, pid = _seed_file_backed_project(tmp_path)
-    real_connect = db_mod.connect
-
-    def _boom(_path):
-        raise OSError("bad db path /Users/someone/secret.sqlite3")
-
-    monkeypatch.setattr(db_mod, "connect", _boom)
-
-    with caplog.at_level("WARNING"):
-        with project_row_for_worker(db_path, pid) as (row, conn):
-            assert row is None
-            assert conn is None
+    with (
+        caplog.at_level("WARNING"),
+        project_row_for_worker(db_path, pid) as (row, conn),
+    ):
+        assert row is None
+        assert conn is None
     warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
     assert len(warns) == 1
     assert "OSError" in warns[0].getMessage()
