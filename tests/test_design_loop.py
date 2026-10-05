@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -2861,6 +2862,180 @@ def test_import_guard_no_part_project_no_guard():
     llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
     result = _run_import_loop(llm, part_scale=None, bbox=BboxInfo(20.0, 25.0, 30.0))
     assert result.iterations[0].failure_class is None
+
+
+def test_e2e_edit_on_imported_part_stages_part_and_scad_imports_it():
+    """Issue #374 (end-to-end, hermetic, fast suite): after an edit on a
+    SETTLED imported part, the render invocation receives
+    ``part_path`` pointing at the committed part file (the render worker
+    stages it into the render volume as ``part.stl`` — the #330 worker
+    contract: seed only when ``part_path`` is not None, and verify
+    ``test -f /work/part.stl`` before the render) AND the SCAD sent to the
+    renderer references the staged file (``import("part.stl")``).
+
+    The part wiring on both production render closures runs on the
+    ``asyncio.to_thread`` worker, where ``app.state.conn`` (check_
+    same_thread=True, bound to the event-loop thread) raised
+    ``sqlite3.ProgrammingError`` and silently degraded to part-less — the
+    render worker then never staged the part while the prompt's import
+    section and the bbox baseline still assumed it. The chat closure's
+    wiring is driven here on a non-main thread through a FILE-BACKED DB
+    (the production shape), with a stubbed LLM whose SCAD references the
+    staged part and a spy in place of ``render_for_design_loop``.
+    """
+    import threading as _t
+
+    import d33d.render_worker as rw_mod
+    from d33d.db import connect as _connect
+    from d33d.versions import migrate as _migrate
+    from d33d.versions_routes import FinalizeBody, _finalize_loop_kwargs
+
+    # --- the file-backed DB + the settled part (the production shape) ----
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp_p = Path(tmp_str)
+        db_path = str(tmp_p / "d33d.sqlite3")
+        conn = _connect(db_path)  # the file + schema
+        _migrate(conn)  # the versions table
+        repo = tmp_p / "repo"
+        pid = conn.create_project(name="p", git_repo_path=str(repo))
+        cur = conn.execute(
+            "INSERT INTO versions (project_id, name, params) VALUES (?, ?, ?)",
+            (pid, "v1", "{}"),
+        )
+        v1 = int(cur.lastrowid or 0)
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, pid),
+        )
+        conn.commit()
+        conn.close()
+        part_path = repo / "versions" / str(v1) / "part.stl"
+        part_path.parent.mkdir(parents=True, exist_ok=True)
+        part_path.write_bytes(b"stl-bytes")
+
+        # --- the spy in place of render_for_design_loop --------------------
+        spy_calls: list[dict] = []
+
+        def _spy(
+            scad_source: str,
+            defines: dict,
+            renders_dir=None,
+            on_progress=None,
+            project_id=None,
+            part_path=None,
+            repo_dir=None,
+        ) -> RenderResult:
+            spy_calls.append(
+                {
+                    "scad": scad_source,
+                    "part_path": part_path,
+                    "repo_dir": repo_dir,
+                }
+            )
+            return RenderResult(
+                ok=True,
+                exit_code=0,
+                duration_ms=0,
+                error_class="ok",
+                stderr="",
+                stl=None,
+                csg=None,
+                views=("v",) * 6,
+            )
+
+        _monkey = pytest.MonkeyPatch()
+        try:
+            _monkey.setattr(rw_mod, "render_for_design_loop", _spy)
+
+            # --- the finalize closure, driven on a NON-MAIN thread ---------
+            conn2 = _connect(db_path)
+
+            class _Svc:
+                def get_project(self, project_id_):
+                    row = conn2.get_project(project_id_)
+                    return dict(row) if row else None
+
+                def latest_version(self, project_id_):
+                    return None
+
+            class _State:
+                pass
+
+            state = _State()
+            state.db_path = db_path
+            state.catalogue = None
+            state.conn = conn2
+            state.versions = _Svc()
+
+            class _Request:
+                app = type("App", (), {"state": state})()
+
+            body = FinalizeBody(
+                params=None, name=None, message="drill a hole in the part"
+            )
+            kwargs = _finalize_loop_kwargs(_Request(), pid, body)
+            render_fn = kwargs["render_fn"]
+
+            scad = 'scale(1) import("part.stl");\n'
+            outcome: dict = {}
+
+            def _worker() -> None:
+                try:
+                    outcome["result"] = render_fn(scad, {"W": "20"})
+                except BaseException as exc:  # noqa: BLE001
+                    outcome["exc"] = exc
+
+            _th = _t.Thread(target=_worker)
+            _th.start()
+            _th.join(timeout=30)
+            assert _th.is_alive() is False, "worker thread timed out"
+            if "exc" in outcome:
+                raise outcome["exc"]
+        finally:
+            conn2.close()
+            _monkey.undo()
+
+        assert len(spy_calls) == 1, f"expected exactly one render call, got {spy_calls}"
+        call = spy_calls[0]
+        # The render worker's part_path contract: the committed part file is
+        # staged into the render volume (seed + test -f /work/part.stl).
+        assert call["part_path"] == part_path, (
+            f"part_path {call['part_path']} != committed file {part_path}"
+        )
+        assert call["repo_dir"] == repo
+        # The SCAD sent to the renderer references the staged part file.
+        assert 'import("part.stl")' in call["scad"]
+
+
+def test_e2e_scad_without_import_is_repair_not_silent():
+    """Issue #374 (deterministic gate): a model candidate that does NOT
+    ``import("part.stl")`` on an imported project (a cube()-rebuild) must
+    NOT pass silently — the existing ``import_guard_violation``
+    (``no_import`` → the ``geometrically_wrong`` repair route) catches it.
+    The guard fires only when ``part_scale`` is set, so a part wiring that
+    silently degrades to part-less would let the rebuild pass; this
+    asserts the guard fires while the wiring is intact."""
+    from d33d.import_guard import import_guard_violation
+
+    # A cube()-rebuild with no import at all — the guard fires (no_import).
+    det = import_guard_violation("W = 20;\ncube([W, 25, 30]);\n", part_scale=1.0)
+    assert det is not None
+    assert det[0] == "no_import"
+
+    # Through the loop itself: the no-import candidate is routed to
+    # repair (it never passes as an edit of the imported part).
+    llm = [_import_scad_llm("W = 20;\ncube([W, 25, 30]);\n")]
+    result = _run_import_loop(llm, part_scale=1.0, bbox=BboxInfo(20.0, 25.0, 30.0))
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert "import" in result.iterations[0].repair["instruction"]
+
+    # A candidate WITH the correct import passes the guard (the guard is
+    # specific to the import contract, not a blanket reject).
+    assert import_guard_violation(
+        'scale(1) import("part.stl");\n', part_scale=1.0
+    ) is None
 
 
 # ---------------------------------------------------------------------------

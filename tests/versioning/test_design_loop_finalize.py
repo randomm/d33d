@@ -3178,75 +3178,31 @@ def test_finalize_closure_passes_part_path_when_settled(
     ``repo_dir`` is the git repo path. No Docker, no live LLM, no
     catalogue — the ``render_for_design_loop`` edge is a spy.
     """
-    import d33d.render_worker as rw_mod
-    import d33d.versions_routes as routes_mod
+    import d33d.db as db_mod
 
-    repo = tmp_path / "repo"
-    repo.mkdir(parents=True)
-    conn = _make_app_conn_with_project(
-        tmp_path,
-        part_filename="part.stl",
-        part_format="stl",
-        part_unit_status="settled",
-        git_repo_path=str(repo),
-        versions=1,
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, expected_part_path = _seed_file_backed_part_project(
+        db_path, tmp_path,
+        part_filename="part.stl", part_format="stl",
+        part_unit_status="settled", part_scale=1.0,
     )
-    # The v1 version id (the row the part is committed under).
-    v1 = conn.raw.execute(
-        "SELECT id FROM versions WHERE project_id=1 ORDER BY id ASC LIMIT 1"
-    ).fetchone()
-    expected_part_path = repo / "versions" / str(v1["id"]) / "part.stl"
-    expected_repo_dir = repo
+    expected_repo_dir = tmp_path / "repo"
 
     spy_calls: dict = {}
-    canned = _default_render()
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
 
-    def _spy(
-        scad_source: str,
-        defines: dict,
-        renders_dir=None,
-        on_progress=None,
-        project_id=None,
-        part_path=None,
-        repo_dir=None,
-    ) -> RenderResult:
-        spy_calls["part_path"] = part_path
-        spy_calls["repo_dir"] = repo_dir
-        return canned
+    conn = db_mod.connect(db_path)
 
-    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
 
-    class _VersionsSvc:
-        def get_project(self, project_id: int):
-            # The project row with the part columns set.
-            row = conn.get_project(project_id)
-            return dict(row) if row else None
-
-        def latest_version(self, project_id: int):
-            return None
-
-    class _State:
-        pass
-
-    state = _State()
-    state.db_path = str(tmp_path / "d33d.sqlite3")
-    state.versions = _VersionsSvc()
-    state.catalogue = None
-    state.conn = conn
-
-    class _Request:
-        app = type("App", (), {"state": state})()
-
-    body = routes_mod.FinalizeBody(
-        params=None, name=None, message="make a 20mm wide bracket"
-    )
-
-    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=conn)
     render_fn = kwargs["render_fn"]
-    assert callable(render_fn)
 
-    result = render_fn("W = 20; cube([W]);", {"W": "20"})
-    assert result is canned
+    render_fn("W = 20; cube([W]);", {"W": "20"})
+    conn.close()
     assert spy_calls["part_path"] == expected_part_path, (
         f"part_path {spy_calls['part_path']} != {expected_part_path}"
     )
@@ -3262,22 +3218,107 @@ def test_finalize_closure_passes_part_none_when_unsettled(
     unsettled part's size is untrusted, so it is never staged into the
     render volume). ``repo_dir`` is also None.
     """
-    import d33d.render_worker as rw_mod
-    import d33d.versions_routes as routes_mod
+    import d33d.db as db_mod
 
-    repo = tmp_path / "repo"
-    repo.mkdir(parents=True)
-    conn = _make_app_conn_with_project(
-        tmp_path,
-        part_filename="part.stl",
-        part_format="stl",
-        part_unit_status="unsettled",
-        git_repo_path=str(repo),
-        versions=1,
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, _ = _seed_file_backed_part_project(
+        db_path, tmp_path,
+        part_filename="part.stl", part_format="stl",
+        part_unit_status="unsettled", part_scale=1.0,
     )
 
     spy_calls: dict = {}
-    canned = _default_render()
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    conn = db_mod.connect(db_path)
+
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
+
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=conn)
+    render_fn = kwargs["render_fn"]
+    render_fn("W = 20; cube([W]);", {"W": "20"})
+    conn.close()
+    assert spy_calls["part_path"] is None, (
+        "an unsettled part must NOT be staged into the render volume"
+    )
+    # repo_dir is still set (the project has a git repo path) — the worker
+    # uses it only when part_path is not None (the containment boundary).
+    assert spy_calls["repo_dir"] is not None
+
+
+def _seed_file_backed_part_project(
+    db_path: str,
+    tmp_path: Path,
+    *,
+    part_filename: str | None = "part.stl",
+    part_format: str | None = "stl",
+    part_unit_status: str | None = "settled",
+    part_scale: float | None = 1.0,
+) -> tuple[int, Path]:
+    """One part project in a FILE-BACKED DB (the production shape — the
+    worker-thread read must see a committed row through a fresh
+    connection, which ``:memory:`` cannot provide) with the committed v1
+    part file on disk. Returns ``(project_id, expected_part_path)``
+    (``expected_part_path`` is meaningless when there is no part)."""
+    import d33d.db as db_mod
+    from d33d.versions import migrate as _migrate
+
+    conn = db_mod.connect(db_path)
+    _migrate(conn)
+    repo = tmp_path / "repo"
+    pid = conn.create_project(name="p", git_repo_path=str(repo))
+    cur = conn.execute(
+        "INSERT INTO versions (project_id, name, params) VALUES (?, ?, ?)",
+        (pid, "v1", "{}"),
+    )
+    v1 = int(cur.lastrowid or 0)
+    if part_filename is not None:
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=? WHERE id=?",
+            (part_filename, part_format, part_unit_status, part_scale, pid),
+        )
+    conn.commit()
+    conn.close()
+    if part_filename is None:
+        return pid, None
+    part_path = repo / "versions" / str(v1) / part_filename
+    part_path.parent.mkdir(parents=True, exist_ok=True)
+    part_path.write_bytes(b"stl-bytes")
+    return pid, part_path
+
+
+def _run_render_fn_off_main_thread(render_fn: Any, scad: str, defines: dict) -> Any:
+    """Drive a finalize ``render_fn`` closure on a plain non-main thread
+    (the production shape: ``asyncio.to_thread`` → ``asyncio.run`` on a
+    worker thread). The result (or the raised exception) is
+    propagated."""
+    import threading as _t
+
+    outcome: dict = {}
+
+    def _worker() -> None:
+        try:
+            outcome["result"] = render_fn(scad, defines)
+        except BaseException as exc:  # noqa: BLE001
+            outcome["exc"] = exc
+
+    _th = _t.Thread(target=_worker)
+    _th.start()
+    _th.join(timeout=30)
+    assert _th.is_alive() is False, "worker thread timed out"
+    if "exc" in outcome:
+        raise outcome["exc"]
+    return outcome["result"]
+
+
+def _spy_render_fn(
+    monkeypatch: pytest.MonkeyPatch, spy_calls: dict, canned: RenderResult
+) -> None:
+    import d33d.render_worker as rw_mod
 
     def _spy(
         scad_source: str,
@@ -3294,22 +3335,43 @@ def test_finalize_closure_passes_part_none_when_unsettled(
 
     monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
 
-    class _VersionsSvc:
-        def get_project(self, project_id: int):
-            row = conn.get_project(project_id)
-            return dict(row) if row else None
 
-        def latest_version(self, project_id: int):
-            return None
+def _finalize_kwargs_for(
+    db_path: str,
+    project_id: int,
+    *,
+    get_project: Any = None,
+    conn: Any = None,
+) -> dict[str, Any]:
+    """Build the finalize seam's ``_finalize_loop_kwargs`` over a minimal
+    app state backed by the FILE-BACKED DB at ``db_path``. The outer seam
+    reads (``get_project`` / ``carried_stated_set``) go through the
+    caller-supplied short-lived handles — the same pattern the fix applies
+    to the inner closure's worker-thread reads."""
+    import d33d.db as db_mod
+    import d33d.versions_routes as routes_mod
+
+    if conn is None:
+        conn = db_mod.connect(db_path)
 
     class _State:
         pass
 
     state = _State()
-    state.db_path = str(tmp_path / "d33d.sqlite3")
-    state.versions = _VersionsSvc()
+    state.db_path = db_path
     state.catalogue = None
     state.conn = conn
+
+    if get_project is not None:
+
+        class _Svc:
+            def get_project(self, _project_id: int):
+                return get_project(_project_id)
+
+            def latest_version(self, _project_id: int):
+                return None
+
+        state.versions = _Svc()
 
     class _Request:
         app = type("App", (), {"state": state})()
@@ -3317,16 +3379,152 @@ def test_finalize_closure_passes_part_none_when_unsettled(
     body = routes_mod.FinalizeBody(
         params=None, name=None, message="make a 20mm wide bracket"
     )
+    return routes_mod._finalize_loop_kwargs(_Request(), project_id, body)
 
-    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+
+def test_finalize_closure_passes_part_path_when_settled_from_worker_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374) The finalize ``render_fn`` closure runs on the
+    ``asyncio.to_thread`` worker in production, where ``app.state.conn``
+    (check_same_thread=True, bound to the event-loop thread) raises
+    ``sqlite3.ProgrammingError`` — the pre-fix wiring silently degraded
+    every part to part-less. With the short-lived ``db.connect(db_path)``
+    handle, a settled part's committed file is staged: ``part_path``
+    equals ``{repo}/versions/{v1}/part.stl`` and NO "could not be read"
+    warning fires. A file-backed DB (an in-memory connection cannot be
+    seen from the fresh worker-thread connection — the production
+    shape)."""
+    import d33d.db as db_mod
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, expected_part_path = _seed_file_backed_part_project(db_path, tmp_path)
+
+    spy_calls: dict = {}
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    # The outer seam's row read (event-loop thread in production) goes
+    # through a short-lived handle just like the inner closure's do.
+    conn = db_mod.connect(db_path)
+
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
+
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project)
     render_fn = kwargs["render_fn"]
-    render_fn("W = 20; cube([W]);", {"W": "20"})
-    assert spy_calls["part_path"] is None, (
-        "an unsettled part must NOT be staged into the render volume"
+
+    with caplog.at_level("WARNING"):
+        _run_render_fn_off_main_thread(render_fn, 'import("part.stl");', {"W": "20"})
+    conn.close()
+
+    assert spy_calls["part_path"] == expected_part_path, (
+        f"part_path {spy_calls['part_path']} != {expected_part_path}"
     )
-    # repo_dir is still set (the project has a git repo path) — the worker
-    # uses it only when part_path is not None (the containment boundary).
-    assert spy_calls["repo_dir"] is not None
+    assert spy_calls["repo_dir"] == tmp_path / "repo"
+    # The part IS wired: the unreadable-row warning never fired (a no-op
+    # render must not look like a db failure in the log).
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert warns == [], f"unexpected warnings: {[r.getMessage() for r in warns]}"
+
+
+def test_finalize_closure_no_part_from_worker_thread_is_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374) A project with NO part, driven on a non-main thread
+    with a file-backed DB, keeps part-less rendering — ``part_path=None``
+    and NO warning (the pre-fix code logged "could not be read" on EVERY
+    run, even for part-less projects, because the cross-thread read
+    raised)."""
+    import d33d.db as db_mod
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, _ = _seed_file_backed_part_project(
+        db_path, tmp_path,
+        part_filename=None, part_format=None,
+        part_unit_status=None, part_scale=None,
+    )
+
+    spy_calls: dict = {}
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    conn = db_mod.connect(db_path)
+
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
+
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project)
+    render_fn = kwargs["render_fn"]
+
+    with caplog.at_level("WARNING"):
+        _run_render_fn_off_main_thread(render_fn, "W = 20;\ncube([W]);", {"W": "20"})
+    conn.close()
+
+    assert spy_calls["part_path"] is None
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert warns == [], f"no-part render must be silent, got: {[r.getMessage() for r in warns]}"
+
+
+def test_finalize_closure_unreadable_row_warns_with_exc_info(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374) A genuine unreadable row (the short-lived handle's
+    ``get_project`` raises ``sqlite3.Error`` — the closed/broken-handle
+    shape) degrades to ``part_path=None`` with ONE warning that carries
+    the exception (``exc_info=True``) — the operator can distinguish a
+    real db failure from a part-less project, which logs nothing."""
+    import d33d.db as db_mod
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, _ = _seed_file_backed_part_project(db_path, tmp_path)
+
+    spy_calls: dict = {}
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    real_connect = db_mod.connect
+
+    class _InnerConn:
+        """A connect that succeeds but whose ``get_project`` raises —
+        the closed/broken-handle shape the unreadable-row guard exists
+        for."""
+
+        def __init__(self, path):
+            self._c = real_connect(path)
+
+        def get_project(self, _project_id: int):
+            raise sqlite3.OperationalError("closed")
+
+        def close(self):
+            self._c.close()
+
+    monkeypatch.setattr(db_mod, "connect", _InnerConn)
+
+    outer = real_connect(db_path)
+
+    def _get_project(_project_id: int):
+        row = outer.get_project(_project_id)
+        return dict(row) if row else None
+
+    kwargs = _finalize_kwargs_for(
+        db_path, pid, get_project=_get_project, conn=outer
+    )
+    render_fn = kwargs["render_fn"]
+
+    with caplog.at_level("WARNING"):
+        _run_render_fn_off_main_thread(render_fn, "W = 20;\ncube([W]);", {"W": "20"})
+    outer.close()
+
+    assert spy_calls["part_path"] is None
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(warns) == 1, (
+        f"expected 1 unreadable-row warning, got: {[r.getMessage() for r in warns]}"
+    )
+    assert warns[0].exc_text, "the warning must carry the exception (exc_info=True)"
+    assert "/" not in warns[0].getMessage()  # never a path
 
 
 def test_finalize_closure_passes_part_none_when_no_part(
@@ -3337,157 +3535,40 @@ def test_finalize_closure_passes_part_none_when_no_part(
     has NO part (``part_filename`` is NULL — the common case, a design
     project that never imported a mesh). The render proceeds part-less.
     """
-    import d33d.render_worker as rw_mod
-    import d33d.versions_routes as routes_mod
+    import d33d.db as db_mod
 
-    conn = _make_app_conn_with_project(
-        tmp_path, part_filename=None, git_repo_path=str(tmp_path / "repo"), versions=1
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()  # the file + schema
+    pid, _ = _seed_file_backed_part_project(
+        db_path, tmp_path,
+        part_filename=None, part_format=None,
+        part_unit_status=None, part_scale=None,
     )
-    (tmp_path / "repo").mkdir(parents=True)
 
     spy_calls: dict = {}
-    canned = _default_render()
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
 
-    def _spy(
-        scad_source: str,
-        defines: dict,
-        renders_dir=None,
-        on_progress=None,
-        project_id=None,
-        part_path=None,
-        repo_dir=None,
-    ) -> RenderResult:
-        spy_calls["part_path"] = part_path
-        spy_calls["repo_dir"] = repo_dir
-        return canned
+    conn = db_mod.connect(db_path)
 
-    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
 
-    class _VersionsSvc:
-        def get_project(self, project_id: int):
-            row = conn.get_project(project_id)
-            return dict(row) if row else None
-
-        def latest_version(self, project_id: int):
-            return None
-
-    class _State:
-        pass
-
-    state = _State()
-    state.db_path = str(tmp_path / "d33d.sqlite3")
-    state.versions = _VersionsSvc()
-    state.catalogue = None
-    state.conn = conn
-
-    class _Request:
-        app = type("App", (), {"state": state})()
-
-    body = routes_mod.FinalizeBody(
-        params=None, name=None, message="make a 20mm wide bracket"
-    )
-
-    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 1, body)
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=conn)
     render_fn = kwargs["render_fn"]
     render_fn("W = 20; cube([W]);", {"W": "20"})
+    conn.close()
     assert spy_calls["part_path"] is None
     # repo_dir is still set (the project has a git repo path) — the worker
     # uses it only when part_path is not None (the containment boundary).
     assert spy_calls["repo_dir"] is not None
 
 
-def test_finalize_closure_unreadable_row_degrades_to_none_and_warns(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    """(issue #330 sub-issue 2 wiring) An unreadable project row (the row
-    read raises sqlite3.Error — a closed/broken handle) degrades to
-    part_path=None + repo_dir=None, logs ONE WARNING naming the project id
-    (never a path), and never raises into the loop.
-
-    Regression for the #330 noqa sweep: the unreadable-row guard catches
-    ``sqlite3.Error`` (specific) rather than a bare ``Exception`` — the
-    degraded path still fires for the real closed-handle case.
-    """
-    import sqlite3 as _sqlite3
-
-    import d33d.render_worker as rw_mod
-    import d33d.versions_routes as routes_mod
-
-    spy_calls: dict = {}
-    canned = _default_render()
-
-    def _spy(
-        scad_source: str,
-        defines: dict,
-        renders_dir=None,
-        on_progress=None,
-        project_id=None,
-        part_path=None,
-        repo_dir=None,
-    ) -> RenderResult:
-        spy_calls["part_path"] = part_path
-        spy_calls["repo_dir"] = repo_dir
-        return canned
-
-    monkeypatch.setattr(rw_mod, "render_for_design_loop", _spy)
-
-    # The OUTER _finalize_loop_kwargs calls both app.state.versions.get_project
-    # and app.state.conn.get_project (via carried_stated_set). Those must
-    # succeed. The INNER render_fn closure's wiring calls
-    # app.state.versions.get_project AGAIN (for part resolution) — that's
-    # where the broken handle raises. Simulate: versions service returns a
-    # valid row on the first call (outer path), then raises on the second
-    # call (inner wiring). The conn is fine (outer path only).
-    call_count = {"n": 0}
-
-    class _FlakyVersionsSvc:
-        def get_project(self, project_id: int):
-            call_count["n"] += 1
-            if call_count["n"] == 1:
-                # First call (outer path): return a valid row with no part
-                return {"id": project_id, "current_version": None, "part_filename": None}
-            # Second call (inner wiring): broken handle
-            raise _sqlite3.OperationalError("closed")
-
-        def latest_version(self, project_id: int):
-            return None
-
-    class _State:
-        pass
-
-    state = _State()
-    state.db_path = str(tmp_path / "d33d.sqlite3")
-    state.versions = _FlakyVersionsSvc()
-    state.catalogue = None
-
-    class _GoodConn:
-        def get_project(self, project_id):
-            return {"id": project_id, "carried_stated_dims": None}
-
-    state.conn = _GoodConn()
-
-    class _Request:
-        app = type("App", (), {"state": state})()
-
-    body = routes_mod.FinalizeBody(params=None, name=None, message="make a part")
-    kwargs = routes_mod._finalize_loop_kwargs(_Request(), 7, body)
-    render_fn = kwargs["render_fn"]
-    result = render_fn("W = 20; cube([W]);", {"W": "20"})
-    assert result is canned  # the closure did NOT raise
-    assert spy_calls["part_path"] is None
-    assert spy_calls["repo_dir"] is None
-
-    # Exactly one WARNING from the part-wiring path, naming the project id
-    # and never a path.
-    warns = [
-        r
-        for r in caplog.records
-        if r.levelname == "WARNING" and "could not" in r.getMessage()
-    ]
-    assert len(warns) == 1, f"expected 1 unreadable-row WARNING, got: {[r.getMessage() for r in caplog.records]}"
-    msg = warns[0].getMessage()
-    assert "7" in msg  # the project id is named
-    assert "/" not in msg  # never a path
+# The unreadable-row test is covered by
+# test_finalize_closure_unreadable_row_warns_with_exc_info (issue #374),
+# which uses the short-lived ``db.connect(db_path)`` handle the fix
+# introduces — the old in-memory-connection shape is no longer on the
+# production path.
 
 
 def _spy_render(monkeypatch: pytest.MonkeyPatch, spy_calls: dict, canned: RenderResult) -> None:
