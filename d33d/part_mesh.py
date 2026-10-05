@@ -36,7 +36,7 @@ import trimesh
 
 from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import mesh_topology
-from d33d.part_repair import REPAIR_TIMEOUT_SECONDS, repair_with_pmf
+from d33d.part_repair import repair_with_pmf
 
 logger = logging.getLogger(__name__)
 
@@ -427,7 +427,6 @@ __all__ = [
     "MAX_PART_ZIP_ENTRIES",
     "MAX_PART_ZIP_UNCOMPRESSED",
     "REPAIR_FACE_BUDGET",
-    "REPAIR_TIMEOUT_SECONDS",
     "PartFileTooLargeError",
     "PartUploadError",
     "load_part_geometry",

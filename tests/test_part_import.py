@@ -2146,17 +2146,22 @@ def test_project_pointer_update_failure_rolls_back(app_with_projects):
 def test_parse_and_repair_runs_off_event_loop(
     app_with_projects, monkeypatch
 ) -> None:
-    """A CPU-bound (GIL-holding) ``parse_and_repair`` stub does NOT block a
-    concurrent request on the same app — the decode runs in a worker thread
+    """A CPU-bound ``parse_and_repair`` stub does NOT block a concurrent
+    request on the same app — the decode runs in a worker thread
     (``asyncio.to_thread``), not on the event loop.
 
-    Issue #395: the stub uses a pure-Python busy loop that HOLDS the GIL
-    (a `for i in range(N): x = i * i` loop) instead of ``time.sleep``
-    (which releases the GIL). This is the test that must FAIL on the old
-    implementation (where pymeshfix runs in-process on the same thread) and
-    PASS with process isolation: if the decode ran ON the event loop thread,
-    the GIL-holding busy loop would block every other handler — the GET could
-    only complete after the upload.
+    The stub uses a pure-Python busy loop (a `for i in range(N): x = i * i`
+    loop) instead of ``time.sleep`` (which releases the GIL immediately).
+    CPython's eval loop releases the GIL periodically (every ~5 ms), so a
+    pure-Python busy loop in a thread does NOT block the event loop — the
+    completion-order discriminator (the GET must complete before the
+    upload) is stable.
+
+    This test proves the decode runs OFF the event loop (thread isolation).
+    The process isolation (pymeshfix's GIL-holding C work in a separate
+    process) is exercised by ``test_holey_mesh_still_repairs``, which calls
+    the real ``repair_with_pmf`` (the process-boundary path) on a holey
+    mesh and verifies the repair completes correctly.
 
     Two invariants make the probe robust regardless of what earlier
     tests did in the same pytest process (issue #344):
@@ -3444,7 +3449,7 @@ def test_holey_mesh_still_repairs(app_with_projects, monkeypatch):
 def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
     """Issue #395: a repair timeout (injected via a monkeypatched
     ``repair_with_pmf`` that raises a timeout ``PartUploadError``) must
-    return a clean 422 with the new ``PART_UPLOAD_REPAIR_TIMEOUT_DETAIL``
+    return a clean 422 with the new ``REPAIR_TIMEOUT_DETAIL``
     message — never a hung request. The monkeypatch simulates the
     process-boundary timeout (the real 120 s timeout is impractical in a
     test; the contract is that a timeout error produces a 422 with the
@@ -3469,23 +3474,21 @@ def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
 
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 422, f"expected 422 on timeout, got {r.status_code}: {r.text}"
-    from d33d.part_import import PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+    from d33d.part_repair import REPAIR_TIMEOUT_DETAIL
 
-    assert r.json()["detail"] == PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+    assert r.json()["detail"] == REPAIR_TIMEOUT_DETAIL
 
 
 def test_repair_timeout_detail_is_distinct_from_unparseable():
     """Issue #395: the repair-timeout 422 detail is a DIFFERENT string from
     the unparseable detail — the timeout message must not imply the mesh
     is broken, only that repair timed out."""
-    from d33d.part_import import (
-        PART_UPLOAD_REPAIR_TIMEOUT_DETAIL,
-        PART_UPLOAD_UNPARSEABLE_DETAIL,
-    )
+    from d33d.part_import import PART_UPLOAD_UNPARSEABLE_DETAIL
+    from d33d.part_repair import REPAIR_TIMEOUT_DETAIL
 
-    assert PART_UPLOAD_REPAIR_TIMEOUT_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
+    assert REPAIR_TIMEOUT_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
     # The timeout message should mention simplifying (actionable advice).
-    assert "simplifying" in PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+    assert "simplifying" in REPAIR_TIMEOUT_DETAIL
 
 
 def test_mesh_topology_helper_box():

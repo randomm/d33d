@@ -17,6 +17,8 @@ process boundary is a single-worker pool, created lazily on first use.
 
 from __future__ import annotations
 
+import os
+import signal
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures import TimeoutError as FutTimeoutError
 
@@ -26,6 +28,14 @@ import trimesh
 #: The repair timeout in seconds. A mesh that pymeshfix genuinely cannot
 #: repair in this time will hit the timeout path → 422, never a hang.
 REPAIR_TIMEOUT_SECONDS = 120
+
+#: The 422 detail for a repair timeout (issue #395). Distinct from the
+#: unparseable detail: the mesh is NOT broken, it's just too slow to repair.
+#: The copy.ts key ``partUpload.repairTimeout`` must match this string
+#: exactly (parity pinned in the import-stl-contract test).
+REPAIR_TIMEOUT_DETAIL = (
+    "The file is too complex to repair in time. Try simplifying the mesh."
+)
 
 # The ProcessPoolExecutor is created lazily (single worker) so the import
 # of this module is cheap and test environments that monkeypatch
@@ -46,11 +56,35 @@ def _shutdown_executor() -> None:
 
     Called on repair timeout (the stuck worker is killed so the next
     ``_get_executor`` creates a fresh pool) and at test teardown.
+
+    ``shutdown(wait=False)`` alone does NOT kill a stuck worker — it only
+    stops accepting new work. The worker process continues running until
+    the current task completes. On a timeout (the worker is stuck on a
+    pathological mesh) we must SIGKILL the worker so it doesn't leak.
     """
     global _executor
     if _executor is not None:
+        # Collect worker PIDs before shutdown (the pool's internal state
+        # is cleared after shutdown).
+        try:
+            worker_pids = list(_executor._processes.keys())  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            worker_pids = []
         _executor.shutdown(wait=False)
         _executor = None
+        for pid in worker_pids:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+
+
+def is_repair_timeout(error: Exception) -> bool:
+    """True if ``error`` is a ``PartUploadError`` raised by the process-
+    boundary timeout (the message contains ``"timed out"``). The route
+    uses this to pick the repair-timeout 422 detail over the generic
+    unparseable detail."""
+    return "timed out" in str(error)
 
 # ---------------------------------------------------------------------------
 # Process-boundary worker function (must be top-level for pickling)
@@ -143,4 +177,9 @@ def repair_with_pmf(
     return trimesh.Trimesh(repaired_verts, repaired_faces, process=False)
 
 
-__all__ = ["REPAIR_TIMEOUT_SECONDS", "repair_with_pmf"]
+__all__ = [
+    "REPAIR_TIMEOUT_DETAIL",
+    "REPAIR_TIMEOUT_SECONDS",
+    "is_repair_timeout",
+    "repair_with_pmf",
+]
