@@ -1027,6 +1027,40 @@ class TestNewestWinsPerAxis:
         )
         assert axes["H"] == 20.0
 
+    def test_single_unmapped_number_restates_released_axis(self):
+        """'make it taller, 20 mm' → H=20: the message carries EXACTLY ONE
+        unmapped mm number and its clause has no feature noun, so the number
+        is the released axis's own new value — set, not release."""
+        axes = stated_axes_from_message(
+            "make it taller, 20 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.0
+
+    def test_feature_clause_unmapped_number_releases_axis(self):
+        """'make it taller, keep the 25 mm peg' → H released: the sole
+        unmapped number sits in a feature-noun clause ('peg'), so it belongs
+        to the feature, not the part — never enforce a stray feature number."""
+        axes = stated_axes_from_message(
+            "make it taller, keep the 25 mm peg", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+    def test_two_unmapped_numbers_release_axis(self):
+        """'make it taller, 20 mm, and the hole 5 mm' → H released: two
+        unmapped numbers are ambiguous about which restates the axis."""
+        axes = stated_axes_from_message(
+            "make it taller, 20 mm, and the hole 5 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert "H" not in axes
+
+    def test_nonpositive_unmapped_value_never_stated(self):
+        """A non-positive explicit value ("0 mm") is never stated — the
+        released axis is released, and the gate abstains."""
+        for msg in ("make it taller, 0 mm", "make it taller, -5 mm"):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            assert "H" not in axes
+
     def test_older_relative_does_not_consume_axis(self):
         """A relative word in an OLDER message must not 'consume' the axis
         such that a NEWER explicit value is lost."""
@@ -1038,13 +1072,9 @@ class TestNewestWinsPerAxis:
         assert "W" in axes
 
     def test_empty_history_message_alone_sets_axes_not_history(self):
-        """``stated_axes_from_message(message, [])`` with an EMPTY history
-        (the chat route's release path) extracts the message's own
-        explicit statement — the empty history is load-bearing: the
-        carried set already holds the earlier turns, so the message is
-        read alone, and a relative-only message extracts nothing (the
-        lexicon's release semantics then release the carried value, per
-        ``effective_stated_dims``)."""
+        """EMPTY-history extraction (the chat route's deliberate empty-history
+        call — rationale in ``chat_loop``'s module comment) reads the message
+        alone; a relative-only message extracts nothing."""
         assert stated_axes_from_message("a 40mm wide box", []) == {"W": 40.0}
         # A relative-only message states no axis on its own:
         assert stated_axes_from_message("make it taller", []) == {}
@@ -1061,11 +1091,8 @@ class TestNewestWinsPerAxis:
         assert effective_stated_dims(carried, cues) == {"W": 40.0}
 
     def test_history_window_is_last_50(self):
-        """The extraction's history window is the LAST 50 turns (the
-        ``QUOTED_UNMAPPED_MAX_MESSAGES`` bound): a statement older than
-        the window does not survive, and a release older than the window
-        does not fire. (The wrapper appends the current message, so the
-        window is the last 50 of the 51 turns.)"""
+        """Window semantics: the rule lives at ``window_start`` in
+        ``_extract_stated``; this test pins its behaviour."""
         from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
 
         filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES)]

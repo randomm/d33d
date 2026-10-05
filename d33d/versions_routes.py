@@ -721,18 +721,35 @@ def create_versions_router() -> APIRouter:
                 } or None
                 per_axis_stated = effective_stated_dims(_carried, explicit_axes)
             else:
-                _am = stated_axes_from_message(msg_text, chat_history=())
-                # Issue #369: ``_classify_cues`` is ``classify`` (the full
-                # ``Cues`` — absolute + relative + global). When the message
-                # alone states no axis, the ``Cues`` fallback carries the
-                # release semantics a bare ``dict`` cannot express: a
-                # relative-only message ("make it taller") releases the
-                # carried axis, mirroring the chat route ("both routes
-                # consistently").
-                per_axis_stated = effective_stated_dims(
-                    _carried,
-                    _am if _am else _classify_cues(msg_text),
-                )
+                try:
+                    _am = stated_axes_from_message(msg_text, chat_history=())
+                    # Issue #369: ``_classify_cues`` is ``classify`` (the
+                    # full ``Cues`` — absolute + relative + global). When
+                    # the message alone states no axis, the ``Cues``
+                    # fallback carries the release semantics a bare
+                    # ``dict`` cannot express: a relative-only message
+                    # ("make it taller") releases the carried axis,
+                    # mirroring the chat route ("both routes
+                    # consistently").
+                    per_axis_stated = effective_stated_dims(
+                        _carried,
+                        _am if _am else _classify_cues(msg_text),
+                    )
+                except Exception:
+                    # A cue-resolution failure degrades to the carried set
+                    # unchanged (no release, no override — the
+                    # conservative outcome), mirroring ``chat_loop``'s
+                    # guard. The warning carries lengths only (no message
+                    # text — no PII in logs).
+                    logger.warning(
+                        "finalize stated-axes cue resolution failed; "
+                        "carrying the latest stated set unchanged "
+                        "(project_id=%s, len(message)=%d)",
+                        project_id,
+                        len(msg_text),
+                        exc_info=True,
+                    )
+                    per_axis_stated = effective_stated_dims(_carried, None)
             # The project-level carried set (issue #312): written on every
             # finalize turn (pass or fail — the write is here because the
             # effective set is final once cues are resolved). A failed
@@ -1044,15 +1061,31 @@ def _finalize_loop_kwargs(
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
         _msg = body.request or body.message or ""
-        _am = stated_axes_from_message(_msg)
-        # Issue #369: the full ``Cues`` fallback carries the relative
-        # release semantics a bare ``dict`` cannot express — a relative-only
-        # message ("make it taller") releases the carried axis here too,
-        # mirroring the chat route ("both routes consistently").
-        current_axes = effective_stated_dims(
-            _carried_gate,
-            _am if _am else _classify_cues(_msg),
-        )
+        try:
+            _am = stated_axes_from_message(_msg)
+            # Issue #369: the full ``Cues`` fallback carries the relative
+            # release semantics a bare ``dict`` cannot express — a
+            # relative-only message ("make it taller") releases the carried
+            # axis here too, mirroring the chat route ("both routes
+            # consistently").
+            current_axes = effective_stated_dims(
+                _carried_gate,
+                _am if _am else _classify_cues(_msg),
+            )
+        except Exception:
+            # A cue-resolution failure degrades to the carried set
+            # unchanged (no release, no override — the conservative
+            # outcome), mirroring ``chat_loop``'s guard. The warning
+            # carries lengths only (no message text — no PII in logs).
+            logger.warning(
+                "gate stated-axes cue resolution failed; carrying the "
+                "latest stated set unchanged (project_id=%s, "
+                "len(message)=%d)",
+                project_id,
+                len(_msg),
+                exc_info=True,
+            )
+            current_axes = effective_stated_dims(_carried_gate, None)
     stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest
     # version's full params snapshot, passed INTO the loop (the loop's

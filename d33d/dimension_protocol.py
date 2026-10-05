@@ -44,7 +44,13 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
-from d33d.axis_lexicon import MM_UNIT_ALTERNATION, classify
+from d33d.axis_lexicon import (
+    _CLAUSE_SPLIT_RE,
+    _FEATURE_NOUN_RE,
+    MM_UNIT_ALTERNATION,
+    Cues,
+    classify,
+)
 from d33d.triple_extraction import (
     QUOTED_UNMAPPED_MAX_MESSAGES,
     _extract_triple,
@@ -211,10 +217,8 @@ def _extract_stated(
     — a bare pre-fill without user confirmation is NOT a stated dimension
     and will leave the gate closed.
 
-    The history window is the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50)
-    turns of ``history`` — see the inline comment at ``window_start`` for
-    the exact boundary semantics. Statements and releases older than the
-    window are simply not present.
+    Only the last ``QUOTED_UNMAPPED_MAX_MESSAGES`` turns count — see the
+    inline comment at ``window_start`` for the exact boundary semantics.
     """
     out: dict[str, float] = {}
     # Which turn last explicitly stated each axis (step 2 records it while
@@ -254,12 +258,13 @@ def _extract_stated(
     # the shorthand (the gate abstains rather than mixing sources within
     # one turn).
     history = list(chat_history or [])
-    # The window is the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns
-    # of ``history``. With 51+ turns, ``user_quoted_unmapped_mm`` (called
-    # with ``chat_history`` alone) sees a different 50-turn slice: the
-    # wrappers append the current message last, so the two windows differ
-    # by at most one turn at the boundary. Statements and releases
-    # before ``window_start`` are simply not present.
+    # The extraction's history window is the LAST
+    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of ``history``; with 51+
+    # turns, ``user_quoted_unmapped_mm`` (called with ``chat_history``
+    # alone) sees a different 50-turn slice: the wrappers append the
+    # current message last, so the two windows differ by at most one turn
+    # at the boundary. Statements and releases before ``window_start``
+    # are simply not present.
     window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
 
     if not all(a in out for a in DIMENSION_AXES):
@@ -330,21 +335,12 @@ def _extract_stated(
                     out[axis] = cv
 
     # 4. Issue #369 release pass: a RELATIVE word for an axis in a NEWER
-    #    message releases that axis — the axis's LATEST explicit statement
-    #    (recorded in ``stated_at`` while walking, step 2) must be OLDER
-    #    than the releasing turn. A turn's own explicit statement beats the
-    #    release ("make it taller, 20 mm" → H=20): an axis whose turn has a
-    #    same-message ABSOLUTE cue (``cues.absolute``) or an UNMAPPED mm
-    #    number (the explicit value the clause splitter left unassigned —
-    #    "make it taller, 20 mm" classifies as ``absolute={}, relative={'H'},
-    #    unmapped=[20.0]``) is suppressed from release, mirroring
-    #    ``effective_stated_dims``' existing absolute-over-release
-    #    composition. The explicit ``stated_dims`` (step 1) and confirmed AI
-    #    suggestions (step 3) are caller-structured ground truth and never
-    #    release. The chat route reaches this pass with the FULL history
-    #    (``stated_axes_from_message``); the lexicon fallback in
-    #    ``d33d.chat_loop`` releases the SAME relative words at the route
-    #    level — one pipeline, two seams, the same word set.
+    #    message releases that axis when the axis's LATEST explicit
+    #    statement (``stated_at``, recorded in step 2) is OLDER than the
+    #    releasing turn — an explicit value in the releasing turn itself
+    #    (same-message ABSOLUTE cue, or a single unmapped mm number with no
+    #    feature noun in its clause) beats the relative word and sets
+    #    instead of releases.
     for idx, turn in enumerate(history):
         if idx < window_start:
             continue
@@ -357,28 +353,59 @@ def _extract_stated(
             # ``chat_loop`` and ``versions_routes``.
             logger.debug("release-pass classify failed", exc_info=True)
             continue
-        # An axis with a same-message explicit value (absolute cue or
-        # unmapped mm number) is NOT released — the explicit value wins.
         for axis in cues.relative:
             if axis in cues.absolute:
                 # The lexicon already mapped the absolute value for this
                 # axis in the same turn; step 2 recorded it in ``out``
                 # and ``stated_at``. No release needed.
                 continue
-            if axis in stated_at and stated_at[axis] < idx:
-                if cues.unmapped_mm_numbers:
-                    # The clause-splitter's comma break put the explicit
-                    # value in a different clause than the relative word —
-                    # "make it taller, 20 mm" classifies as
-                    # ``absolute={}, relative={'H'}, unmapped=[20.0]``.
-                    # The unmapped number is the user's explicit value for
-                    # this axis (the only relative axis in the message); it
-                    # beats the relative word, so the axis is SET to the
-                    # unmapped value, not released.
-                    out[axis] = cues.unmapped_mm_numbers[0]
-                else:
-                    out.pop(axis, None)
+            if axis not in stated_at or stated_at[axis] >= idx:
+                continue
+            v = _unmapped_value_for_axis(cues, str(turn))
+            if v is not None:
+                # The turn restates the axis with an explicit value the
+                # clause splitter left unassigned ("make it taller,
+                # 20 mm") — the value beats the relative word.
+                out[axis] = v
+            else:
+                out.pop(axis, None)
     return out
+
+
+def _unmapped_value_for_axis(
+    cues: Any, turn: str
+) -> float | None:
+    """The unmapped mm number a releasing turn assigns to ``axis``.
+
+    An unmapped number ("make it taller, 20 mm") restates the released
+    axis ONLY when the message carries EXACTLY ONE unmapped mm number AND
+    the clause containing it has no feature noun — otherwise the number
+    belongs to a feature ("keep the 25 mm peg") or is ambiguous (two
+    unmapped numbers) and the axis is released instead. ``None`` (release)
+    when either condition fails."""
+    numbers = cues.unmapped_mm_numbers
+    if len(numbers) != 1:
+        return None
+    number = numbers[0]
+    # The ``:g`` form is the shortest decimal spelling (20.0 → "20") —
+    # the exact text the user typed, and never a wider net. The leading
+    # lookbehind rejects a signed form ("-5 mm" — the lexicon strips the
+    # sign when it unmapped it), so a negative statement can never
+    # re-enter as a positive one (a non-positive value is never stated).
+    pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
+    for clause in (p.strip() for p in _CLAUSE_SPLIT_RE.split(turn)):
+        if clause and re.search(pattern, clause, re.IGNORECASE):
+            # Found the number's clause: a feature noun there means the
+            # number belongs to the feature, not the axis (release);
+            # otherwise ``_coerce`` validates it (non-positive → None →
+            # release, never stated).
+            if _FEATURE_NOUN_RE.search(clause):
+                return None
+            return _coerce(number)
+    # No clause claims the number (a signed form like "-5 mm", or a
+    # spelling the lexicon normalised away): release — a number no clause
+    # claims as positive never states an axis.
+    return None
 
 
 def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:
@@ -471,11 +498,22 @@ class CuesLike(Protocol):
     """Structural type for the lexicon cue object
     (``d33d.axis_lexicon.Cues``) — the ``cues`` input
     :func:`effective_stated_dims` accepts (declared shape instead of
-    duck-typing via ``getattr``)."""
+    duck-typing via ``getattr``). Read-only: the merge only reads the
+    cue's fields, never mutates them.
 
-    absolute: dict[str, float]
-    relative: set[str]
-    global_: bool
+    ``effective_stated_dims`` itself types ``cues`` directly as
+    ``dict[str, float] | Cues | None`` (``Cues`` imported from
+    ``axis_lexicon``); this Protocol documents the structural contract
+    any object of that shape must satisfy."""
+
+    @property
+    def absolute(self) -> dict[str, float]: ...
+
+    @property
+    def relative(self) -> set[str]: ...
+
+    @property
+    def global_(self) -> bool: ...
 
 
 def offer_tier_signals(
@@ -515,7 +553,7 @@ def offer_tier_signals(
 
 def effective_stated_dims(
     latest_stated: dict[str, float] | None,
-    cues: CuesLike | dict[str, float] | None = None,
+    cues: dict[str, float] | Cues | None = None,
 ) -> dict[str, float]:
     """The carry-forward merge helper (issue #261's operator decision —
     ONE function, THREE call sites: chat ``post_chat``, finalize

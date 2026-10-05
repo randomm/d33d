@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import cache
 
 __all__ = [
     "GLOBAL_WORDS",
@@ -245,9 +246,12 @@ _NUMBER_TOKEN_RE = re.compile(
 )
 
 
+@cache
 def _word_re(word: str) -> re.Pattern[str]:
     """An absolute axis word at a word boundary (underscore is a word
-    char, so "height" inside "spacer_height" does NOT match)."""
+    char, so "height" inside "spacer_height" does NOT match). Cached: the
+    closed word set is small and every clause pass rebuilds the same
+    patterns per call."""
     return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
 
 

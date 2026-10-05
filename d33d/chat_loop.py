@@ -155,12 +155,16 @@ async def run_design_loop(
     # feeds BOTH the gate and the new version row. Cue precedence and
     # release semantics are documented in ``effective_stated_dims``.
     # The message's protocol cues are extracted with an EMPTY history
-    # (the carried set already holds earlier turns; see the inline
-    # comment at the ``stated_axes_from_message`` call below) and an
-    # EMPTY extraction falls back to the lexicon classification, which
-    # carries the RELATIVE/RELEASE semantics the dict shape cannot
-    # express. A statement that yields no axis is ``{}`` → the version
-    # row persists NULL (abstain, never a fabricated axis row).
+    # (deliberate: the carried set already holds earlier turns — with the
+    # echoed history, a relative message would restate the carried value
+    # the user is releasing, and the merge treats any extracted axis as
+    # an absolute override, masking the release. The finalize route
+    # (``versions_routes``) passes full history to the same pipeline; the
+    # two call sites differ by design, not by pipeline.) and an EMPTY
+    # extraction falls back to the lexicon classification, which carries
+    # the RELATIVE/RELEASE semantics the dict shape cannot express. A
+    # statement that yields no axis is ``{}`` → the version row persists
+    # NULL (abstain, never a fabricated axis row).
     explicit_body: dict[str, float] | None = None
     if stated_dims is not None:
         _w, _d, _h = stated_dims
@@ -177,13 +181,9 @@ async def run_design_loop(
         _latest = _carried
         try:
             # Issue #369: the message alone — an EMPTY history (``[]``) is
-            # load-bearing: with the echoed history, a relative message
-            # would restate the carried value the user is releasing, and
-            # the merge treats any extracted axis as an absolute override,
-            # masking the release. An EMPTY extraction ("make it taller")
-            # falls back to the lexicon's RELATIVE/RELEASE semantics below.
-            # The finalize route (``versions_routes``) passes full history
-            # to the same pipeline; the two seams differ deliberately.
+            # load-bearing (the rationale is in the module comment above);
+            # an EMPTY extraction ("make it taller") falls back to the
+            # lexicon's RELATIVE/RELEASE semantics below.
             _am = stated_axes_from_message(message, [])
             _cues_arg = _am if _am else _classify_axis_cues(message)
         except Exception:
