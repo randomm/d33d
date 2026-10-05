@@ -109,14 +109,11 @@ def test_finalize_classify_failure_degrades_not_500(app_with_versions, monkeypat
     """A lexicon ``classify`` failure during finalize degrades the
     stated-axes cue resolution to the carried set (mirroring
     ``chat_loop``'s guard) instead of surfacing as a 500."""
-    import d33d.versions_routes as routes_mod
-
     def _boom(message: str):
         raise RuntimeError("lexicon on fire")
 
-    monkeypatch.setattr(routes_mod, "_classify_cues", _boom, raising=False)
     # The route imports classify locally inside the handler; patch the
-    # source module it imports from instead.
+    # source module it imports from.
     import d33d.axis_lexicon as lexicon_mod
 
     monkeypatch.setattr(lexicon_mod, "classify", _boom)

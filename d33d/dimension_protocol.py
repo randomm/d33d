@@ -46,19 +46,20 @@ from functools import cache
 from typing import Any, Literal
 
 from d33d.axis_lexicon import (
-    _ABSOLUTE,
-    _FEATURE_NOUN_RE,
+    ABSOLUTE_WORDS,
+    FEATURE_NOUN_RE,
     MM_UNIT_ALTERNATION,
     RELATIVE_WORDS,
     Cues,
-    _split_clauses,
     classify,
+    split_clauses,
 )
 from d33d.triple_extraction import (
     QUOTED_UNMAPPED_MAX_MESSAGES,
     _extract_triple,
     _mm_cue_values,
     _triple_suppressed_by_feature_noun,
+    history_window_start,
     user_quoted_unmapped_mm,
 )
 
@@ -211,7 +212,7 @@ def _delta_marker_for(number: float) -> re.Pattern[str]:
     by 5 mm" on a 12 mm part must not set H=5.0 — a physically shorter
     target). Cached: the number set is small per turn and the release
     pass rebuilds the same pattern per call."""
-    words = sorted(set(_ABSOLUTE) | set(RELATIVE_WORDS), key=len, reverse=True)
+    words = sorted(set(ABSOLUTE_WORDS) | set(RELATIVE_WORDS), key=len, reverse=True)
     return re.compile(
         r"\bby\s+" + re.escape(f"{number:g}") + r"\s*mm\b"
         r"|" + re.escape(f"{number:g}") + r"\s*mm\s+(?:"
@@ -265,6 +266,10 @@ def _extract_stated(
     # Which turn last explicitly stated each axis (step 2 records it while
     # walking; the release pass, step 4, reads it — never re-derives it).
     stated_at: dict[str, int] = {}
+    # Step 2's classify result per turn index (``{idx: cues}``) — the
+    # release pass (step 4) reuses it; a turn whose classify failed is
+    # absent and skipped there (guarded degrade to the carried set).
+    turn_cues: dict[int, Cues] = {}
 
     # 1. Explicit stated_dims (highest priority — the caller parsed these).
     if stated_dims:
@@ -299,14 +304,13 @@ def _extract_stated(
     # one turn).
     history = list(chat_history or [])
     # ONE window, computed once, for BOTH the extraction pass (step 2)
-    # and the release pass (step 4); it mirrors ``user_quoted_unmapped_mm``
-    # (called with the prior turns alone): the LAST
-    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns, INCLUDING the current
-    # message (the wrappers append it last, and it is always the newest
-    # element — never dropped by ``window_start``). It bounds extraction
-    # too: statements and releases before ``window_start`` are simply not
-    # present.
-    window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
+    # and the release pass (step 4), via the shared
+    # ``history_window_start`` (``user_quoted_unmapped_mm`` uses it too):
+    # the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns, INCLUDING the
+    # current message (the wrappers append it last, and it is always the
+    # newest element — never dropped). It bounds extraction too: statements
+    # and releases before ``window_start`` are simply not present.
+    window_start = history_window_start(len(history))
     window = range(window_start, len(history))
 
     if not all(a in out for a in DIMENSION_AXES):
@@ -357,6 +361,20 @@ def _extract_stated(
             for axis in turn_axes:
                 stated_at[axis] = idx
             out.update(turn_axes)
+            # ONE classify per turn: the release pass (step 4) reuses
+            # this result instead of classifying the same text again —
+            # a turn whose classify failed is absent from ``turn_cues``
+            # and is skipped there (guarded degrade to the carried set).
+            try:
+                turn_cues[idx] = classify(text)
+            except Exception:
+                logger.warning(
+                    "stated-extraction classify failed for turn %d (len=%d); "
+                    "the release pass will skip that turn",
+                    idx,
+                    len(turn),
+                    exc_info=True,
+                )
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
@@ -370,7 +388,10 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
 
-    # 4. Issue #369 release pass: a RELATIVE word for an axis in a NEWER
+    # 4. Issue #369 release pass (reuses step 2's classify per turn, in
+    #    ``turn_cues`` — no second classification; a turn whose classify
+    #    failed is absent from ``turn_cues`` and is skipped, degrading to
+    #    the carried set): a RELATIVE word for an axis in a NEWER
     #    message releases that axis when the axis's LATEST explicit
     #    statement (``stated_at``, recorded in step 2) is OLDER than the
     #    releasing turn — an explicit value in the releasing turn itself
@@ -385,21 +406,13 @@ def _extract_stated(
     #    Unmapped-number semantics: see :func:`_unmapped_value_for_axis`.
     for idx in window:
         turn = history[idx]
-        try:
-            cues = classify(str(turn))
-        except Exception:
-            # A classification failure degrades to no release for this
-            # turn (the carried set is unchanged — the conservative
-            # outcome), mirroring the lexicon feed's try/except in
-            # ``chat_loop`` and ``versions_routes``. Length only, no
-            # message text (no PII in logs).
-            logger.warning(
-                "release-pass classify failed for turn %d (len=%d); "
-                "carrying that turn's stated axes unchanged",
-                idx,
-                len(turn),
-                exc_info=True,
-            )
+        cues = turn_cues.get(idx)
+        if cues is None:
+            # Step 2's classify failed for this turn (``turn_cues`` is
+            # ``{idx: cues}`` — a failed classify is simply absent) — the
+            # turn releases nothing (the carried set is unchanged — the
+            # conservative outcome), mirroring the lexicon feed's
+            # try/except in ``chat_loop`` and ``versions_routes``.
             continue
         for axis in cues.relative:
             if axis in cues.absolute:
@@ -409,18 +422,19 @@ def _extract_stated(
                 continue
             if axis not in stated_at or stated_at[axis] >= idx:
                 continue
-            # A relative word in a FEATURE-noun clause ("make the lid
-            # taller") releases only: the feature is what grows, so an
-            # unmapped number in ANOTHER clause of the same turn (the
-            # "20 mm" in "make the lid taller, 20 mm") belongs to the
-            # feature and can never restate the part's axis. The feature-
-            # noun test runs on every clause — the number's own clause
-            # may be feature-free while the relative word's is not, and
-            # the number must not be assigned to the part. ONE split per
-            # turn: it serves both this test and the unmapped-number
-            # lookup below.
-            clauses = _split_clauses(str(turn))
-            if any(_FEATURE_NOUN_RE.search(clause) for clause in clauses):
+            # ONE split per turn: it serves both the feature-noun test
+            # below and the unmapped-number lookup.
+            clauses = split_clauses(str(turn))
+            # A feature noun in ANY clause of the releasing turn means
+            # release-only (deliberate: release beats a possibly-wrong
+            # absolute): the feature is what grows, so an unmapped number
+            # in ANOTHER clause of the same turn (the "20 mm" in "make the
+            # lid taller, 20 mm") belongs to the feature and can never
+            # restate the part's axis. The test runs on EVERY clause — the
+            # number's own clause may be feature-free while the relative
+            # word's is not, and the number must not be assigned to the
+            # part.
+            if any(FEATURE_NOUN_RE.search(clause) for clause in clauses):
                 out.pop(axis, None)
                 continue
             v = _unmapped_value_for_axis(cues, clauses)
@@ -437,7 +451,7 @@ def _extract_stated(
 def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
     """The unmapped mm number a releasing turn assigns to its axis.
 
-    ``clauses`` is the turn's clause split (:func:`_split_clauses`),
+    ``clauses`` is the turn's clause split (:func:`split_clauses`),
     computed once by the release pass.
 
     An unmapped number ("make it taller, 20 mm") restates the released
@@ -483,7 +497,7 @@ def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
     # ``_coerce`` validates it (non-positive → None → release, never
     # stated).
     clause = number_to_clause[number]
-    if _FEATURE_NOUN_RE.search(clause):
+    if FEATURE_NOUN_RE.search(clause):
         return None
     return _coerce(number)
 
@@ -587,11 +601,13 @@ def resolve_stated_cues(
     global) when the extraction yields no axis (a relative-only message
     like "make it taller" states nothing on its own but RELEASES the
     carried axis — semantics a bare dict cannot express), then merge into
-    the carried set via :func:`effective_stated_dims`. A cue-resolution
-    failure degrades to the carried set unchanged (no release, no
-    override — the conservative outcome) with a WARNING that carries
-    lengths only (no message text — no PII in logs). Used at the chat
-    seam (``chat_loop``) and both finalize seams (``versions_routes``).
+    the carried set via :func:`effective_stated_dims`. ANY failure in the
+    statement extraction OR the lexicon fallback degrades to the carried
+    set unchanged (no release, no override — a deliberate, conservative
+    choice: a failed classification must never manufacture a release or an
+    override), with a WARNING that carries lengths only (no message text —
+    no PII in logs). Used at the chat seam (``chat_loop``) and both
+    finalize seams (``versions_routes``).
     """
     try:
         _am = stated_axes_from_message(message)

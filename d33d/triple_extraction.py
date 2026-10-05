@@ -24,6 +24,7 @@ __all__ = [
     "_in_mating_zone",
     "_mm_cue_values",
     "_triple_suppressed_by_feature_noun",
+    "history_window_start",
     "user_quoted_unmapped_mm",
 ]
 
@@ -34,6 +35,27 @@ __all__ = [
 #: wasted work on a hot path. Messages older than the window do not make
 #: a number eligible.
 QUOTED_UNMAPPED_MAX_MESSAGES = 50
+
+
+def history_window_start(n: int) -> int:
+    """The index of the first element inside the tier-2 scan window
+    (ONE definition for both users of ``QUOTED_UNMAPPED_MAX_MESSAGES``).
+
+    ``n`` is the TOTAL number of elements in the list being scanned. The
+    window is the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) elements —
+    ``list(messages)[-50:]`` — so the start index is ``max(0, n - 50)``.
+    Both call sites pass ``len(list)``:
+
+    * ``user_quoted_unmapped_mm`` passes ``len(messages)`` (prior turns
+      only — the current message is not in the list);
+    * ``_extract_stated`` passes ``len(history)`` (includes the current
+      message, which is always the newest element and always inside the
+      window).
+
+    An off-by-one in either direction changes which boundary turn is
+    included — pinned by ``test_history_window_boundary_is_exact``.
+    """
+    return max(0, n - QUOTED_UNMAPPED_MAX_MESSAGES)
 
 #: A no-unit double ("60x45", "5x5") whose numbers exceed this value is
 #: a resolution or a count pair ("1920x1080" pixels, "2x4" pieces),
@@ -457,7 +479,8 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     did not map is offered first" rule) — the tier-2 helper.
 
     Scans the project's recent user messages (the LAST
-    ``QUOTED_UNMAPPED_MAX_MESSAGES`` — 50 — not just this turn). Only
+    ``QUOTED_UNMAPPED_MAX_MESSAGES`` — 50 — not just this turn; the window
+    boundary is :func:`history_window_start`). Only
     numbers written with an explicit ``mm`` unit count ("12 mm", "12mm",
     "12.5 mm" — no cm/in conversion, no bare numbers). A number is MAPPED
     — and excluded — when the closed axis lexicon
@@ -470,7 +493,7 @@ def user_quoted_unmapped_mm(messages: list[str] | tuple[str, ...]) -> set[float]
     from d33d.axis_lexicon import classify
 
     unmapped: set[float] = set()
-    for msg in list(messages)[-QUOTED_UNMAPPED_MAX_MESSAGES:]:
+    for msg in list(messages)[history_window_start(len(messages)) :]:
         text = str(msg)
         # Mapped by the lexicon: the mm numbers it assigned to an axis
         # (``classify(text).absolute`` — an axis-word clause with its
