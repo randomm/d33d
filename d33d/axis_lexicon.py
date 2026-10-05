@@ -41,6 +41,11 @@ import re
 from dataclasses import dataclass, field
 from functools import cache
 
+# Stable internal API — the following private names are ALSO consumed by
+# d33d.dimension_protocol: ``_ABSOLUTE`` and ``RELATIVE_WORDS`` (delta
+# markers), ``_FEATURE_NOUN_RE`` (feature-noun suppression) and
+# ``_CLAUSE_SPLIT_RE`` (clause splitting).
+
 __all__ = [
     "GLOBAL_WORDS",
     "MM_UNIT_ALTERNATION",
@@ -53,7 +58,6 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Closed word sets
 # ---------------------------------------------------------------------------
-# Stable internal API: also consumed by d33d.dimension_protocol.
 
 _ABSOLUTE: dict[str, str] = {
     "tall": "H",
@@ -163,7 +167,6 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
     }
 )
 
-# Stable internal API: also consumed by d33d.dimension_protocol.
 _FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
@@ -319,7 +322,6 @@ class Cues:
 # Clause splitting
 # ---------------------------------------------------------------------------
 
-# Stable internal API: also consumed by d33d.dimension_protocol.
 _CLAUSE_SPLIT_RE = re.compile(r"[,;]|[.!?]\s")
 
 

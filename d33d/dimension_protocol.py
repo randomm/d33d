@@ -47,7 +47,6 @@ from typing import Any, Literal
 
 from d33d.axis_lexicon import (
     _ABSOLUTE,
-    _CLAUSE_SPLIT_RE,
     _FEATURE_NOUN_RE,
     MM_UNIT_ALTERNATION,
     RELATIVE_WORDS,
@@ -196,15 +195,7 @@ class DimensionClarification:
         return "\n".join(lines)
 
 
-# A RELATIVE delta in a releasing turn: the mm number is an INCREMENT
-# ("make it taller by 5 mm" / "wider by 3 mm" / "5 mm taller"), never an
-# absolute target. Either of two marker shapes — the preposition "by"
-# immediately before the number ("taller by 5 mm") or an axis word
-# (absolute or relative) immediately after the number ("5 mm taller") —
-# means the clause states a delta. A delta must RELEASE the axis (the
-# new value is unknown — the gate asks), never enforce it as an absolute
-# ("taller by 5 mm" on a 12 mm part must not set H=5.0 — that is a
-# physically shorter target).
+# The anchored RELATIVE-delta matcher — see :func:`_delta_marker_for`.
 @cache
 def _delta_marker_for(number: float) -> re.Pattern[str]:
     """A RELATIVE-delta matcher ANCHORED to ``number``'s own occurrence
@@ -215,8 +206,11 @@ def _delta_marker_for(number: float) -> re.Pattern[str]:
     The number position is baked into the pattern (anchored, never a
     message-wide search), so a delta marker on a DIFFERENT number in the
     same clause ("make it taller by 5 mm, 30 mm") never suppresses THIS
-    number's absolute statement. Cached: the number set is small per
-    turn and the release pass rebuilds the same pattern per call."""
+    number's absolute statement. A delta RELEASES the axis (the new value
+    is unknown — the gate asks), never enforces it as an absolute ("taller
+    by 5 mm" on a 12 mm part must not set H=5.0 — a physically shorter
+    target). Cached: the number set is small per turn and the release
+    pass rebuilds the same pattern per call."""
     words = sorted(set(_ABSOLUTE) | set(RELATIVE_WORDS), key=len, reverse=True)
     return re.compile(
         r"\bby\s+" + re.escape(f"{number:g}") + r"\s*mm\b"
@@ -264,8 +258,8 @@ def _extract_stated(
     — a bare pre-fill without user confirmation is NOT a stated dimension
     and will leave the gate closed.
 
-    Only the last ``QUOTED_UNMAPPED_MAX_MESSAGES`` turns count — see the
-    inline comment at ``window_start`` for the exact boundary semantics.
+    Only the last ``QUOTED_UNMAPPED_MAX_MESSAGES`` turns count (see the
+    ``window_start`` comment).
     """
     out: dict[str, float] = {}
     # Which turn last explicitly stated each axis (step 2 records it while
@@ -280,44 +274,44 @@ def _extract_stated(
                 out[axis] = v
 
     # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
-    # plus a W×D×H triple ("60 × 45 × 80 mm" / "60x45x80mm" / "60mm x
-    # 45mm x 20mm" — issue #275 task-a), plus an equal-axis size shorthand
-    # ("a 20 mm cube" / "a 10mm box" / "a 15mm sphere") — the ONLY chat
-    # text allowed to fill all three axes from ONE number, and ONLY when
-    # the text also names an equal-axis shape (cube/box/sphere/ball: all
-    # three edges equal), in explicit millimetres ("mm" required — a bare
-    # "m"/meters must never be read as mm). A single number with no
-    # equal-axis shape ("make a 20mm hole in the lid", "a 20mm tall vase",
-    # "add a 5mm fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE
-    # or a one-axis measurement — filling three axes from it would
+    # plus a W×D×H triple ("60 × 45 × 80 mm" — issue #275 task-a), plus
+    # an equal-axis size shorthand ("a 20 mm cube" / "a 10mm box") — the
+    # ONLY chat text allowed to fill all three axes from ONE number, and
+    # ONLY when the text also names an equal-axis shape (cube/box/sphere/
+    # ball: all three edges equal), in explicit millimetres ("mm" required
+    # — a bare "m"/meters must never be read as mm). A single number with
+    # no equal-axis shape ("make a 20mm hole in the lid", "a 20mm tall
+    # vase", "add a 5mm fillet", "mount a 6mm bolt", "a 3 m beam") is a
+    # FEATURE or a one-axis measurement — filling three axes from it would
     # fabricate a part envelope the user never stated, the exact
     # fabricate-don't-measure anti-pattern ticket #91 removes: the gate
     # would then run against a wrong target (spurious FAIL, or worse,
     # spurious PASS), instead of abstaining (None) and leaving the gate
     # unmeasurable. A stated equal-axis shape is the only defensible
-    # ground truth the loop can compare a rendered bbox against on a
-    # bare "Create a 20mm cube" first turn (no latest version yet).
-    # Precedence inside this pass: axis-prefixed form ("W: 42") >
-    # W×D×H triple > shorthand — the triple only fills axes the axis pass
-    # left empty, and the shorthand only fills axes the axis pass and the
+    # ground truth the loop can compare a rendered bbox against on a bare
+    # "Create a 20mm cube" first turn (no latest version yet).
+    # Precedence inside this pass: axis-prefixed form ("W: 42") > W×D×H
+    # triple > shorthand — the triple only fills axes the axis pass left
+    # empty, and the shorthand only fills axes the axis pass and the
     # triple left empty. A turn like "W is 30mm... make it a 20mm cube"
     # keeps the axis-prefixed value and never completes the triple from
     # the shorthand (the gate abstains rather than mixing sources within
     # one turn).
     history = list(chat_history or [])
-    # The extraction's history window mirrors ``user_quoted_unmapped_mm``
+    # ONE window, computed once, for BOTH the extraction pass (step 2)
+    # and the release pass (step 4); it mirrors ``user_quoted_unmapped_mm``
     # (called with the prior turns alone): the LAST
-    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of the PRIOR history,
-    # plus the current message (the wrappers append it last, and it is
-    # always the newest element — never dropped by ``window_start``).
-    # Statements and releases before ``window_start`` are simply not
+    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns, INCLUDING the current
+    # message (the wrappers append it last, and it is always the newest
+    # element — never dropped by ``window_start``). It bounds extraction
+    # too: statements and releases before ``window_start`` are simply not
     # present.
     window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
+    window = range(window_start, len(history))
 
     if not all(a in out for a in DIMENSION_AXES):
-        for idx, turn in enumerate(history):
-            if idx < window_start:
-                continue
+        for idx in window:
+            turn = history[idx]
             text = str(turn)
             # Issue #369: per axis, the NEWEST explicit stated value wins.
             # The loop walks oldest-first, so a value found here is
@@ -388,9 +382,9 @@ def _extract_stated(
     #    the lexicon deliberately did not assign that number to the axis,
     #    so reassigning it here would override a guard (the conservative
     #    outcome: the carried value stays, the gate keeps enforcing it).
-    for idx, turn in enumerate(history):
-        if idx < window_start:
-            continue
+    #    Unmapped-number semantics: see :func:`_unmapped_value_for_axis`.
+    for idx in window:
+        turn = history[idx]
         try:
             cues = classify(str(turn))
         except Exception:
@@ -422,11 +416,14 @@ def _extract_stated(
             # feature and can never restate the part's axis. The feature-
             # noun test runs on every clause — the number's own clause
             # may be feature-free while the relative word's is not, and
-            # the number must not be assigned to the part.
-            if any(_FEATURE_NOUN_RE.search(clause) for clause in _split_clauses(str(turn))):
+            # the number must not be assigned to the part. ONE split per
+            # turn: it serves both this test and the unmapped-number
+            # lookup below.
+            clauses = _split_clauses(str(turn))
+            if any(_FEATURE_NOUN_RE.search(clause) for clause in clauses):
                 out.pop(axis, None)
                 continue
-            v = _unmapped_value_for_axis(cues, str(turn))
+            v = _unmapped_value_for_axis(cues, clauses)
             if v is not None:
                 # The turn restates the axis with an explicit value the
                 # clause splitter left unassigned ("make it taller,
@@ -437,10 +434,11 @@ def _extract_stated(
     return out
 
 
-def _unmapped_value_for_axis(
-    cues: Any, turn: str
-) -> float | None:
-    """The unmapped mm number a releasing turn assigns to ``axis``.
+def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
+    """The unmapped mm number a releasing turn assigns to its axis.
+
+    ``clauses`` is the turn's clause split (:func:`_split_clauses`),
+    computed once by the release pass.
 
     An unmapped number ("make it taller, 20 mm") restates the released
     axis ONLY when the message carries EXACTLY ONE unmapped mm number
@@ -467,7 +465,6 @@ def _unmapped_value_for_axis(
     # count toward the ambiguity check. The number→clause mapping is
     # built once here and reused by the feature-noun check below (a
     # single clause walk).
-    clauses = [p.strip() for p in _CLAUSE_SPLIT_RE.split(turn) if p.strip()]
     number_to_clause: dict[float, str] = {}
     non_delta_numbers: list[float] = []
     for number in all_numbers:
