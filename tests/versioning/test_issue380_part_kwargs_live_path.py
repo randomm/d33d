@@ -17,6 +17,18 @@ bbox matching the part, and the import guard's ``no_import`` detection is
 the ONLY thing that can fail iteration one — a gate failure would be
 indistinguishable from the guard, so the test pins the guard's own
 evidence text on the repair directive.
+
+Hermetic pre-flight: the test supplies ``image_check`` (via the app
+state, forwarded to the loop's ``image_check`` seam) and ``renderer_check``
+(never — the conftest hermetic stub covers the ``renderer_is_available``
+probe) so the loop's Docker pre-flight never shells out. On CI the render
+worker image is absent while the Docker daemon IS present, so without
+``image_check`` the real image probe reports ``image_missing`` and the
+loop short-circuits to ``renderer_image_stale`` BEFORE iteration one —
+the guard never runs and the test fails on ``failure_class is None``.
+Injecting ``image_check=lambda: None`` (the hermetic "image present, label
+matches" default) makes the outcome independent of the host's Docker
+state, matching the conftest hermetic stub's contract.
 """
 
 from __future__ import annotations
@@ -119,6 +131,16 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         catalogue_path = Path("/dev/null")
         db_path = Path(_db_path)
         failures_jsonl_path = Path("/dev/null")
+        # The loop's pre-flight image probe (issue #346): the app forwards
+        # ``getattr(app_state, "image_check", None)`` to the loop's
+        # ``image_check`` seam. On CI the Docker daemon is present but the
+        # render-worker image is absent, so a ``None`` here lets the REAL
+        # probe report ``image_missing`` and short-circuit the loop to
+        # ``renderer_image_stale`` before iteration one (the guard never
+        # runs). The hermetic "image present, label matches" default is
+        # ``None`` (no fault) — the same value the conftest hermetic stub
+        # installs, keeping the test independent of host Docker state.
+        image_check = staticmethod(lambda: None)
 
     bbox = BboxInfo(
         x=20.0, y=20.0, z=20.0,
@@ -151,7 +173,8 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         probes_mod.probe_capabilities = _stub_probe_capabilities
         app_mod._http_request_factory = _no_import_llm_factory
         # The loop's pre-flight ``docker info`` probe (issue #277) — the
-        # stub render must run without a Docker daemon.
+        # stub render must run without a Docker daemon. The image probe is
+        # handled by ``_StubAppState.image_check`` (see class body above).
         dl_mod.renderer_is_available = lambda: True
 
         wrapper = _build_production_design_loop()
