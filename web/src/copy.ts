@@ -1040,6 +1040,19 @@ export const partUpload = {
   /** The upload-in-flight status line (the label swaps to it while the
    *  part upload is in flight). */
   uploading: "Uploading…",
+  /** The in-flight status line while the upload AND the server-side parse
+   *  are in flight (issue #395): a big mesh can take a long time to read
+   *  and repair, so the card shows "Reading your file… Ns" with the
+   *  client-side elapsed seconds instead of nothing for 80 s. The seconds
+   *  update once per second; the client measures from the POST start, so
+   *  the count covers the upload and the parse together. */
+  reading: (seconds: number): string => `Reading your file… ${seconds}s`,
+  /** The 422 `detail` body: the repair timed out (issue #395). The mesh
+   *  is NOT broken — it is just too slow to repair in the allotted time.
+   *  Must equal the backend's ``PART_UPLOAD_REPAIR_TIMEOUT_DETAIL``
+   *  exactly (parity pinned in import-stl-contract.test.ts). */
+  repairTimeout:
+    "The file is too complex to repair in time. Try simplifying the mesh.",
 } as const;
 
 /**

@@ -213,4 +213,41 @@ describe("PartUpload (issue #334, D5)", () => {
     );
     expect(client.uploadPart).not.toHaveBeenCalled();
   });
+
+  it("shows the elapsed-seconds reading state while the upload is in flight (issue #395)", async () => {
+    // A big mesh can take a long time to read and repair — the card ticks
+    // "Reading your file… Ns" with the client-side elapsed seconds instead
+    // of showing nothing for 80 s. The label is the copy.ts interpolation,
+    // so the test asserts against `copy.partUpload.reading`, never a
+    // hardcoded sentence (the ticking itself is pinned by the component's
+    // 1 s interval, which this test observes at the 0 s boundary).
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const client = makeClient({
+      uploadPart: vi.fn().mockImplementation(async () => {
+        await gate;
+        return { id: 7, version_id: 1, part: partReport };
+      }),
+    });
+    const onUploaded = vi.fn();
+    const file = makeFile("big.stl");
+    render(<PartUpload projectId={7} onUploaded={onUploaded} onError={vi.fn()} client={client} />);
+    fireEvent.change(screen.getByTestId("part-file-input"), {
+      target: { files: [file] },
+    });
+    // In flight: the status line shows the copy.ts reading state at 0 s.
+    await waitFor(() =>
+      expect(screen.getByTestId("part-upload-status").textContent).toBe(
+        copy.partUpload.reading(0),
+      ),
+    );
+    // The old static "Uploading…" label is gone while in flight.
+    expect(screen.getByTestId("part-upload-status").textContent).not.toBe(
+      copy.partUpload.uploading,
+    );
+    // Settles to success once the POST completes: the status line is gone.
+    release();
+    await waitFor(() => expect(onUploaded).toHaveBeenCalledWith(7));
+    expect(screen.queryByTestId("part-upload-status")).toBeNull();
+  });
 });
