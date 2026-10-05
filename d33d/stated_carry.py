@@ -18,9 +18,8 @@ import json
 import logging
 from typing import Any
 
-from d33d.axis_lexicon import classify
+from d33d.axis_lexicon import DIMENSION_AXES, Cues, classify
 from d33d.statement_extraction import (
-    _axes,
     _coerce,
     stated_axes_from_message,
 )
@@ -165,7 +164,7 @@ def resolve_stated_cues(
 
 def effective_stated_dims(
     latest_stated: dict[str, float] | None,
-    cues: dict[str, float] | Any | None = None,
+    cues: dict[str, float] | Cues | None = None,
 ) -> dict[str, float]:
     """The carry-forward merge helper (issue #261's operator decision —
     ONE function, THREE call sites: chat ``post_chat``, finalize
@@ -222,7 +221,7 @@ def effective_stated_dims(
         absolute = dict(getattr(cues, "absolute", None) or {})
         released = set(getattr(cues, "relative", None) or ())
         if getattr(cues, "global_", False):
-            released.update(_axes())
+            released.update(DIMENSION_AXES)
 
     effective = {axis: v for axis, v in carried.items() if axis not in released}
     for axis, value in absolute.items():

@@ -43,8 +43,9 @@ carry-forward resolution (``latest_stated_dims_dict`` / ``carried_stated_set``
 and imports the extraction surface from there. The dependency edge is
 strictly ``axis_lexicon`` -> ``triple_extraction`` ->
 ``statement_extraction`` -> ``stated_carry`` -> ``dimension_protocol``
-(never back). ``DIMENSION_AXES`` is defined here (the clarification/gate
-half owns the closed protocol constants); the historical
+(never back). ``DIMENSION_AXES`` is defined in
+:mod:`d33d.axis_lexicon` (the bottom of the import graph, issue #393)
+and re-exported here; the historical
 ``from d33d.dimension_protocol import DIMENSION_AXES`` importers keep
 working unchanged.
 """
@@ -56,6 +57,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from d33d.axis_lexicon import DIMENSION_AXES
 from d33d.triple_extraction import (
     QUOTED_UNMAPPED_MAX_MESSAGES,
     _extract_triple,
@@ -111,16 +113,11 @@ FDM_CLEARANCE_TABLE: dict[FitType, tuple[float, float]] = {
 #: ``d - hole_undersize``; use the mid-value as the default.
 HOLES_PRINT_UNDERSIZE_MM: tuple[float, float] = (0.1, 0.25)
 
-#: The canonical named-parameter axes for the W/D/H stated-dimension triple
-#: (mm). These are the param names the design loop's bbox gate compares
-#: against the render — they must match ``d33d.design_loop``'s W/D/H
-#: naming so the named-parameter structure produced here is directly
-#: usable. Defined here (the clarification/gate half owns the closed
-#: protocol constants); :mod:`d33d.statement_extraction` imports it for
-#: the extraction pass (issue #393) — the import graph stays strictly
-#: unidirectional: ``axis_lexicon`` -> ``triple_extraction`` ->
-#: ``dimension_protocol`` -> ``statement_extraction`` (never back).
-DIMENSION_AXES: tuple[str, ...] = ("W", "D", "H")
+# The canonical W/D/H axes live in :mod:`d33d.axis_lexicon` (the bottom
+# of the import graph, issue #393); ``DIMENSION_AXES`` above is the
+# re-export, kept so the historical
+# ``from d33d.dimension_protocol import DIMENSION_AXES`` importers keep
+# working.
 
 # Late import (issue #393): the statement-extraction half now lives in
 # :mod:`d33d.statement_extraction`; it needs ``DIMENSION_AXES`` above and
@@ -237,7 +234,7 @@ def offer_tier_signals(
         quoted: set[float] | None = None
         cues = classify(user_message)
         if cues.relative or cues.global_:
-            released = set(cues.relative) | (set(DIMENSION_AXES) if cues.global_ else set())
+            released = set(cues.relative) | ({"W", "D", "H"} if cues.global_ else set())
         quoted = user_quoted_unmapped_mm((*chat_history, user_message))
         return released, quoted
     except Exception:

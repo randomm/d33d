@@ -43,6 +43,7 @@ from functools import cache
 
 __all__ = [
     "ABSOLUTE_WORDS",
+    "DIMENSION_AXES",
     "FEATURE_NOUN_RE",
     "GLOBAL_WORDS",
     "MM_UNIT_ALTERNATION",
@@ -56,6 +57,13 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Closed word sets
 # ---------------------------------------------------------------------------
+
+#: The canonical named-parameter axes for the W/D/H stated-dimension triple
+#: (mm). Defined here, at the bottom of the import graph (issue #393):
+#: :mod:`d33d.dimension_protocol` re-exports it for its historical
+#: importers, and ``statement_extraction`` / ``stated_carry`` import it
+#: directly (no lazy import, no cycle).
+DIMENSION_AXES: tuple[str, ...] = ("W", "D", "H")
 
 ABSOLUTE_WORDS: dict[str, str] = {
     "tall": "H",

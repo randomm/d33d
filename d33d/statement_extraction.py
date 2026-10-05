@@ -9,8 +9,8 @@ confirmation-text helpers (``_is_clean_affirmation`` /
 Carry-forward resolution lives in :mod:`d33d.stated_carry`.
 Import graph (unidirectional): ``axis_lexicon`` -> ``triple_extraction``
 -> this module -> ``stated_carry`` -> ``dimension_protocol`` (never back).
-``DIMENSION_AXES`` is imported lazily from ``dimension_protocol`` (no
-load-time cycle).
+``DIMENSION_AXES`` lives in ``d33d.axis_lexicon`` (the bottom of the
+import graph, issue #393).
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from typing import Any
 
 from d33d.axis_lexicon import (
     ABSOLUTE_WORDS,
+    DIMENSION_AXES,
     FEATURE_NOUN_RE,
     MM_UNIT_ALTERNATION,
     RELATIVE_WORDS,
@@ -35,17 +36,6 @@ from d33d.triple_extraction import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _axes() -> tuple[str, ...]:
-    """The canonical W/D/H axes — lazy import to avoid a circular
-    import (issue #393): the constant is defined in
-    ``d33d.dimension_protocol``. The lazy import defers the resolution
-    to first call time, by which point both modules are fully loaded."""
-    from d33d.dimension_protocol import DIMENSION_AXES
-
-    return DIMENSION_AXES
-
 
 __all__ = [
     "stated_axes_from_message",
@@ -139,7 +129,7 @@ def _extract_stated(
     # The release pass only pops axes whose ``stated_at`` was recorded by
     # step 2 (chat text); this step writes no ``stated_at`` entry.
     if stated_dims:
-        for axis in _axes():
+        for axis in DIMENSION_AXES:
             v = _coerce(stated_dims.get(axis))
             if v is not None:
                 out[axis] = v
@@ -152,12 +142,12 @@ def _extract_stated(
     window_start = history_window_start(len(history))
     window = range(window_start, len(history))
 
-    if not all(a in out for a in _axes()):
+    if not all(a in out for a in DIMENSION_AXES):
         for idx in window:
             turn = history[idx]
             text = str(turn)
             turn_axes: dict[str, float] = {}
-            for axis in _axes():
+            for axis in DIMENSION_AXES:
                 m = _axis_letter_pattern(axis).search(text)
                 if m:
                     v = _coerce(m.group(1))
@@ -198,7 +188,7 @@ def _extract_stated(
                 if m:
                     v = _coerce(m.group(1))
                     if v is not None:
-                        turn_axes = {axis: v for axis in _axes()}
+                        turn_axes = {axis: v for axis in DIMENSION_AXES}
             for axis in turn_axes:
                 stated_at[axis] = idx
             out.update(turn_axes)
@@ -288,7 +278,7 @@ def stated_axes_from_message(
     stated = _extract_stated(turns, explicit, None)
     return {
         axis: float(stated[axis])
-        for axis in _axes()
+        for axis in DIMENSION_AXES
         if axis in stated
     }
 
@@ -312,7 +302,7 @@ def stated_dims_from_message(
     are stated (the bbox gate is unmeasurable; never fabricate targets)."""
     turns = [str(t) for t in (chat_history or ())] + [str(message)]
     stated = _extract_stated(turns, explicit, None)
-    if all(axis in stated for axis in _axes()):
+    if all(axis in stated for axis in DIMENSION_AXES):
         return (
             float(stated["W"]),
             float(stated["D"]),
@@ -399,7 +389,7 @@ def _confirmed_suggestion_tokens(chat_history: list[str]) -> set[str]:
     if not _is_clean_affirmation(text):
         return tokens
     tokens.add("suggested")
-    for axis in _axes():
+    for axis in DIMENSION_AXES:
         if re.search(rf"\b{axis}\b", text, re.IGNORECASE):
             tokens.add(f"suggested:{axis}")
     return tokens
