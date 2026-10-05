@@ -676,7 +676,12 @@ def test_bodies_count_split_equivalence_on_fixtures():
 def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     """Issue #351: any exception in the genus computation degrades to
     ``gaps_before`` alone — never a crash, never ``None``. A holey part
-    still gets its boundary-loop count (4), not an error response."""
+    still gets its boundary-loop count (4), not an error response.
+
+    Issue #395: the genus computation moved to ``d33d.part_mesh_topology``
+    (the shared ``mesh_topology`` helper), so the monkeypatch targets that
+    module."""
+    import d33d.part_mesh_topology as part_mesh_topology_mod
     data = _stl_bytes(FIXTURES / "holey.stl")
 
     async def _call(client):
@@ -688,18 +693,12 @@ def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     def _boom(mesh):
         raise RuntimeError("genus computation failed")
 
-    # Issue #395: the genus call moved into mesh_topology (which binds
-    # watertight_genus in its own module), so the monkeypatch targets the
-    # ACTUAL call site — d33d.part_mesh_topology.watertight_genus — not
-    # part_mesh (whose import of the name is gone).
-    import d33d.part_mesh_topology as topo_mod
-
-    original = topo_mod.watertight_genus
-    topo_mod.watertight_genus = _boom
+    original = part_mesh_topology_mod.watertight_genus
+    part_mesh_topology_mod.watertight_genus = _boom
     try:
         r = _run_async(app_with_projects, _call)
     finally:
-        topo_mod.watertight_genus = original
+        part_mesh_topology_mod.watertight_genus = original
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
     # Fallback: gaps_before (4 boundary loops) alone, never None/crash.
@@ -3550,7 +3549,7 @@ def test_decimate_before_repair_above_budget(monkeypatch):
     face removed (not clean → repair path) and a budget of 20 forces the
     decimate path; a spy on the repair seam asserts the mesh handed TO the
     repair is at or below the budget — proof the decimation ran BEFORE the
-    repair call, not on the result after."""
+    repair call, not on the result after."
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod

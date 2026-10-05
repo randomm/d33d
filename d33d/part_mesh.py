@@ -1,8 +1,8 @@
 """Part mesh decode: parse / repair / measure for imported STL/3MF (issue #325).
 
 The CPU-bound half of the part import: ``parse_and_repair`` loads the
-uploaded bytes in-process with trimesh (no shell, no subprocess — the bytes
-are never written to a path carrying the user's filename), applies the
+uploaded bytes in-process with trimesh (no shell — the bytes are never
+written to a path carrying the user's filename), applies the
 face-cap and finiteness gates, runs the repair chain (merge_vertices +
 pymeshfix + fix_normals — NO decimation of the user's part below the
 budget), and measures.

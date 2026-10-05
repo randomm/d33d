@@ -17,13 +17,11 @@ process boundary is a single-worker pool, created lazily on first use.
 
 from __future__ import annotations
 
-import logging
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import TimeoutError as FutTimeoutError
 
 import numpy as np
 import trimesh
-
-logger = logging.getLogger(__name__)
 
 #: The repair timeout in seconds. A mesh that pymeshfix genuinely cannot
 #: repair in this time will hit the timeout path → 422, never a hang.
@@ -53,7 +51,6 @@ def _shutdown_executor() -> None:
     if _executor is not None:
         _executor.shutdown(wait=False)
         _executor = None
-
 
 # ---------------------------------------------------------------------------
 # Process-boundary worker function (must be top-level for pickling)
@@ -107,9 +104,6 @@ def repair_with_pmf(
     ``timeout``: override the default timeout (seconds). Useful in tests
     where a very short timeout can be injected.
     """
-    from concurrent.futures import Future
-    from concurrent.futures import TimeoutError as FutTimeoutError
-
     from d33d.part_mesh import PartUploadError  # local: keep the edge one-way
 
     if timeout is None:

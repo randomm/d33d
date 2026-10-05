@@ -67,14 +67,14 @@ def mesh_topology(
     # safe "not clean / no holes" defaults, never crash the import).
     try:
         winding_consistent = bool(merged.is_winding_consistent)
-    except Exception:  # noqa: BLE001 - measurement must never raise
+    except (ArithmeticError, ValueError, TypeError, RuntimeError):
         winding_consistent = False
 
     # Genus: reuse the existing watertight_genus, wrapped. Any exception
     # falls back to 0 (the count degrades, never crashes — issue #351).
     try:
         genus = watertight_genus(components)
-    except Exception:  # noqa: BLE001 - measurement must never raise
+    except (ArithmeticError, ValueError, TypeError, RuntimeError):
         genus = 0
 
     return {

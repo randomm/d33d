@@ -29,10 +29,12 @@ upload bounds, and the multipart handling.
   already-settled part.
 
 Security (untrusted input, in the backend process only): trimesh parses in
-process — no shell, no subprocess, and the user's filename is never a path
-component (the bytes are parsed in memory and, on success, written only to
-the fixed in-repo name ``versions/{v1_id}/part.stl`` / ``part.3mf`` —
-there is no temp file). Parse cost is bounded by the named
+process — no shell, and the user's filename is never a path component (the
+bytes are parsed in memory and, on success, written only to the fixed
+in-repo name ``versions/{v1_id}/part.stl`` / ``part.3mf`` — there is no
+temp file). The pymeshfix repair runs in a subprocess (ProcessPoolExecutor)
+with a timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``); no shell
+commands are executed. Parse cost is bounded by the named
 ``MAX_PART_FACES`` cap (checked after ``trimesh.load``, before repair).
 3MF (a ZIP) is guarded against zip bombs from the central directory BEFORE
 extraction (entry count and declared-uncompressed total). Non-finite
