@@ -305,11 +305,14 @@ def _extract_stated(
     # the shorthand (the gate abstains rather than mixing sources within
     # one turn).
     history = list(chat_history or [])
-    # The extraction's history window is the LAST
-    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of ``history``, INCLUSIVE
-    # of the current message (the wrappers append it last): statements and
-    # releases before ``window_start`` are simply not present.
-    window_start = max(0, len(history) + 1 - QUOTED_UNMAPPED_MAX_MESSAGES)
+    # The extraction's history window mirrors ``user_quoted_unmapped_mm``
+    # (called with the prior turns alone): the LAST
+    # ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns of the PRIOR history,
+    # plus the current message (the wrappers append it last, and it is
+    # always the newest element — never dropped by ``window_start``).
+    # Statements and releases before ``window_start`` are simply not
+    # present.
+    window_start = max(0, len(history) - QUOTED_UNMAPPED_MAX_MESSAGES)
 
     if not all(a in out for a in DIMENSION_AXES):
         for idx, turn in enumerate(history):
