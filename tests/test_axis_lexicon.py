@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 
 from d33d.axis_lexicon import axis_for_question_word, classify
-from d33d.dimension_protocol import stated_axes_from_message
+from d33d.statement_extraction import stated_axes_from_message
 
 # ---------------------------------------------------------------------------
 # Absolute cues — each word maps its axis with the number
