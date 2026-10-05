@@ -3639,3 +3639,111 @@ def test_clean_mesh_below_budget_not_decimated():
         f"report={report['triangles']}, original={len(loaded.faces)}"
     )
 
+
+# ---------------------------------------------------------------------------
+# 422 contract on a non-PartUploadError decode failure; boundary-loop guard
+# ---------------------------------------------------------------------------
+
+
+def test_decode_memory_error_becomes_422(app_with_projects, monkeypatch):
+    """A MemoryError (or any non-PartUploadError) raised by
+    ``parse_and_repair`` during the upload's decode must surface as a
+    422 with the unparseable detail — never a raw 500. Nothing is
+    persisted (no version row, no part columns)."""
+    from d33d import part_import as pi
+
+    # Force a non-PartUploadError out of the decode.
+    def _boom(content: bytes, part_format: str):
+        raise MemoryError("decode OOM")
+
+    monkeypatch.setattr(pi, "parse_and_repair", _boom)
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "DecodeMemErr"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        return upload_r, pid
+
+    upload_r, pid = _run_async(app_with_projects, _call)
+
+    # The 422 must carry the unparseable detail (NOT a 500, NOT a MemoryError).
+    assert upload_r.status_code == 422, (
+        f"decode MemoryError must be a 422, got {upload_r.status_code}: {upload_r.text}"
+    )
+    assert upload_r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+
+    # Nothing persisted: the project has no part columns (a fresh connection
+    # — the app's conn is closed once the lifespan ends; the DB file is still
+    # on disk at ``app_paths["db"]``).
+    import sqlite3
+
+    db_path = str(app_with_projects.state.db_path)
+    with sqlite3.connect(db_path) as _c:
+        row = _c.execute(
+            "SELECT part_filename FROM projects WHERE id = ?", (pid,)
+        ).fetchone()
+    assert row is not None, f"project {pid} must exist"
+    assert row[0] is None, "no part must be persisted on decode error"
+
+
+def test_boundary_loops_failure_does_not_make_clean(monkeypatch):
+    """A failure inside ``_boundary_loops`` must NOT be treated as 0
+    (clean): the mesh must be flagged NOT clean (so repair is taken) and
+    ``mesh_topology`` must not raise. ``hole_count`` degrades to the genus
+    fallback (treats the gap count as 0, as the genus fallback does)."""
+    import trimesh
+
+    import d33d.part_mesh_topology as topo_mod
+    from d33d.part_mesh import _is_clean
+
+    box = trimesh.creation.box(extents=[10, 10, 10])
+    box.merge_vertices()
+    box.update_faces(box.nondegenerate_faces())
+    components = box.split(only_watertight=False)
+
+    def _boom(mesh):
+        raise RuntimeError("boundary loops failed")
+
+    monkeypatch.setattr(topo_mod, "_boundary_loops", _boom)
+
+    topo = topo_mod.mesh_topology(box, components)
+
+    # The boundary_loops value must make _is_clean False (unknown, not 0).
+    assert not _is_clean(topo), (
+        f"a boundary-loop failure must NOT be treated as clean: {topo}"
+    )
+    # The value itself is -1 (unknown) per the contract.
+    assert topo["boundary_loops"] == -1, (
+        f"boundary_loops must be -1 (unknown) on failure, "
+        f"got {topo['boundary_loops']}"
+    )
+
+
+def test_mesh_topology_typed_dict_exists():
+    """``mesh_topology`` returns a ``MeshTopology`` TypedDict (typed
+    fields), and the function is annotated with it."""
+    import typing
+
+    from d33d.part_mesh_topology import MeshTopology, mesh_topology
+
+    # The TypedDict exists and is a typing.TypedDict.
+    assert issubclass(MeshTopology, dict)
+    # It carries the five fields.
+    fields = set(MeshTopology.__annotations__)
+    assert {
+        "boundary_loops",
+        "bodies",
+        "watertight_bodies",
+        "winding_consistent",
+        "genus",
+    } <= fields, f"MeshTopology must carry the five fields, got {fields}"
+
+    # The return annotation is MeshTopology (or references it).
+    ann = typing.get_type_hints(mesh_topology)["return"]
+    assert "MeshTopology" in getattr(ann, "__name__", str(ann)), (
+        f"mesh_topology must be annotated -> MeshTopology, got {ann}"
+    )
+

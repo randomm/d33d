@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import multiprocessing
 import time
 from pathlib import Path
 from typing import Any
@@ -451,6 +452,177 @@ def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
     # The pipe's recv() raises OSError → the parent maps it to a
     # PartUploadError with 'malformed worker reply'.
     assert "malformed worker reply" in str(excinfo.value)
+
+
+class _DeadWorkerProcess(multiprocessing.Process):
+    """A top-level ``Process`` subclass whose ``run()`` exits immediately
+    WITHOUT sending a reply over the pipe.
+
+    Models a worker child that dies before it can ship ``("ok", ...)`` —
+    an interpreter crash, an uncaught error in module-import/setup code, or
+    anything else that stops the child before ``send`` runs. The parent
+    must detect this FAST (the 100 ms poll loop sees ``is_alive()`` go
+    False → the 422) and map it to ``PartUploadError`` in under a few
+    seconds, never waiting out the full 120 s budget.
+
+    Top-level in an importable module (the spawn child inherits the parent's
+    ``sys.path``), so the child can resolve the class by its import path.
+    """
+
+    def run(self) -> None:
+        import os
+
+        os._exit(0)
+
+
+def test_dead_child_exits_without_reply_maps_quickly(monkeypatch):
+    """A worker child that exits immediately WITHOUT sending a reply must be
+    mapped to ``PartUploadError`` FAST — in under 5 s, NOT after the full
+    ``timeout`` budget.
+
+    This is the ``is_alive()`` / recv-EOF early-exit in ``_run_in_worker``:
+    when ``poll(timeout)`` returns False but the child is already dead, the
+    drained pipe's ``recv`` returns EOF immediately (an ``EOFError``) and is
+    surfaced as the 422 ``PartUploadError`` — the parent does NOT wait for
+    the (arbitrarily large) timeout to expire first.
+
+    The test points the real repair seam at a no-op worker AND overrides the
+    process with ``_DeadWorkerProcess`` (which exits without sending). The
+    30 s ``timeout`` budget is intentionally large: if the fast path were
+    broken, the call would hang until the budget expired. The < 5 s
+    assertion proves the fast path fired.
+    """
+    import d33d.part_repair as part_repair_mod
+    from d33d.part_errors import PartUploadError
+    from tests._repair_stubs import _noop_repair
+
+    monkeypatch.setattr(part_repair_mod, "_REPAIR_WORKER", _noop_repair)
+
+    # Override the process with a thin factory returning the dead-child
+    # process (the payload carries the box's arrays — the dead child ignores
+    # them and exits without sending a reply).
+    def _dead_factory(pipe_child, worker, mode, payload):
+        return _DeadWorkerProcess()
+
+    monkeypatch.setattr(part_repair_mod, "_RepairWorkerProcess", _dead_factory)
+
+    box = _box_mesh()
+    t0 = time.monotonic()
+    with pytest.raises(PartUploadError) as excinfo:
+        repair_with_pmf(box, timeout=30)  # 30 s budget; must NOT be waited out
+    elapsed = time.monotonic() - t0
+
+    # Fast: the dead child is detected without waiting the 30 s budget.
+    assert elapsed < 5.0, (
+        f"dead child was not detected quickly: {elapsed:.2f}s elapsed "
+        f"(expected < 5s via the is_alive()/recv-EOF early-exit)"
+    )
+    # Mapped to PartUploadError (the 422 signal), not a raw crash or timeout.
+    assert isinstance(excinfo.value, PartUploadError)
+    # The child was cleaned up (no zombie/orphan left behind).
+    import multiprocessing as _mp
+
+    assert _mp.active_children() == [], (
+        f"leftover child processes: {_mp.active_children()}"
+    )
+
+
+def _noop_worker(vertices, faces):
+    """A no-op worker (the spawn child imports this by reference)."""
+    return vertices, faces
+
+
+class _MalformedReplyProcess(multiprocessing.Process):
+    """A top-level ``Process`` subclass whose ``run()`` sends a 2-tuple
+    (not the 3-tuple the parent expects) over the pipe, then exits.
+
+    Used by the test to exercise the parent's reply validation. The
+    instance's ``_send_conn`` attribute (set by ``__init__``) is used to
+    send the malformed reply. This class is a top-level definition in an
+    importable module (the spawn child inherits the parent's ``sys.path``),
+    so the child can resolve it by its import path."""
+
+    def __init__(self, send_conn, worker, mode, payload):
+        super().__init__(daemon=True)
+        self._send_conn = send_conn
+        self._worker = worker
+        self._mode = mode
+        self._payload = payload
+
+    def run(self) -> None:
+        import sys
+
+        try:
+            self._send_conn.send(("ok", "not-a-3-tuple"))
+        except OSError:
+            # The send can fail (pipe closed, child killed); the process
+            # exits regardless (the finally block runs sys.exit(0)).
+            pass
+        finally:
+            sys.exit(0)
+
+
+def test_malformed_worker_reply_is_part_upload_error(monkeypatch):
+    """A malformed reply (not a 3-tuple, or with a kind not in
+    {"ok","err"}) must become ``PartUploadError("repair failed: malformed
+    worker reply")`` — never a crash or a 500.
+
+    The test patches ``_run_in_worker`` to use a process whose ``run()``
+    sends a 2-tuple over the pipe. The parent's ``recv`` gets the 2-tuple,
+    validates it (it's not a 3-tuple with kind in {"ok","err"}), and must
+    raise ``PartUploadError("repair failed: malformed worker reply")``.
+    """
+    import trimesh
+
+    import d33d.part_repair as part_repair_mod
+    from d33d.part_errors import PartUploadError
+
+    box = trimesh.creation.box(extents=[5, 5, 5])
+    box.merge_vertices()
+    box.update_faces(box.nondegenerate_faces())
+
+    def _patched_run_in_worker(mode, p, timeout, label):
+        ctx = multiprocessing.get_context("spawn")
+        pipe_parent, pipe_child = ctx.Pipe(duplex=False)
+        proc = _MalformedReplyProcess(pipe_child, _noop_worker, mode, p)
+        proc.start()
+        try:
+            if not pipe_parent.poll(timeout):
+                raise part_repair_mod.RepairTimeoutError(f"timed out ({label})")
+            reply = pipe_parent.recv()
+            if (
+                not isinstance(reply, tuple)
+                or len(reply) != 3
+                or reply[0] not in ("ok", "err")
+            ):
+                raise PartUploadError("repair failed: malformed worker reply")
+            _kind, name, payload_result = reply
+            if _kind == "ok":
+                return payload_result
+            if name == "PartUploadError":
+                raise PartUploadError(payload_result)
+            raise PartUploadError(f"repair failed: {name}")
+        finally:
+            try:
+                pipe_parent.close()
+            except (BrokenPipeError, OSError):
+                # The pipe can be in a broken state (child died, killed);
+                # the close failure is not actionable — the child is
+                # killed/joined below regardless.
+                pass
+            if proc.is_alive():
+                proc.kill()
+            proc.join(timeout=5)
+
+    monkeypatch.setattr(part_repair_mod, "_run_in_worker", _patched_run_in_worker)
+
+    with pytest.raises(PartUploadError) as excinfo:
+        part_repair_mod.repair_with_pmf(box, timeout=10)
+
+    assert "malformed worker reply" in str(excinfo.value), (
+        f"malformed reply must map to PartUploadError with that message, "
+        f"got: {excinfo.value!r}"
+    )
 
 
 def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch):

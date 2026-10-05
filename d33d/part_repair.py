@@ -279,10 +279,42 @@ def _run_in_worker(
     proc.start()
 
     try:
-        if not pipe_parent.poll(timeout):
-            # The timeout bounds only THIS call's own work (the child is
-            # per-call). ``poll`` returning False means the child has not
-            # finished within the budget — the finally block kills it.
+        # Wait for the reply with a bounded, interruptible poll: a short
+        # ``poll`` interval (100 ms) in a loop, checking both the pipe
+        # (for data) and the child's liveness (for a dead child). This
+        # detects a dead child within ~100 ms of its exit, not after the
+        # full ``timeout`` budget (a ``poll(timeout)`` would block for the
+        # full budget even if the child died at t=0.2 s, because macOS does
+        # not always signal pipe EOF through ``poll``). The loop exits when
+        # EITHER the pipe has data (a reply is ready) OR the child has died
+        # (no reply will ever come) OR the timeout budget is spent (a
+        # genuinely slow repair).
+        import time as _time
+
+        _POLL_INTERVAL = 0.1  # 100 ms — responsive dead-child detection
+        _deadline = _time.monotonic() + timeout
+        _child_dead = False
+        while True:
+            if pipe_parent.poll(_POLL_INTERVAL):
+                break  # data available → a reply is ready
+            if not proc.is_alive():
+                _child_dead = True
+                break
+            if _time.monotonic() >= _deadline:
+                break  # timeout budget spent
+        if _child_dead:
+            # The child died without sending a reply — the 422. A ``recv``
+            # on the drained pipe would hang on some platforms (macOS does
+            # not always signal EOF through ``poll``), so we detect the dead
+            # child directly and raise immediately. The child is already
+            # gone; there is no reply to wait for.
+            raise PartUploadError(
+                "repair failed: worker child exited without replying"
+            )
+        if not pipe_parent.poll(0):
+            # The timeout budget is spent and the child is still alive (a
+            # genuinely slow repair) — the 422 timeout; the finally block
+            # kills the child.
             raise RepairTimeoutError(
                 f"repair timed out: exceeded {timeout:.0f}s ({label})"
             )
