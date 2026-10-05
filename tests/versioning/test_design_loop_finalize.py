@@ -3192,17 +3192,28 @@ def test_finalize_closure_passes_part_path_when_settled(
     spy_calls: dict = {}
     _spy_render(monkeypatch, spy_calls, _default_render())
 
+    # The app's handle: a REAL ``db.Connection`` created on the MAIN
+    # thread (the production shape) — the outer seam's row read rides it
+    # and must NOT raise.
     conn = db_mod.connect(db_path)
+    conn.get_project(pid)
+    app_state_conn = conn
 
     def _get_project(_project_id: int):
-        row = conn.get_project(_project_id)
+        row = app_state_conn.get_project(_project_id)
         return dict(row) if row else None
 
-    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=conn)
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=app_state_conn)
     render_fn = kwargs["render_fn"]
-
     render_fn("W = 20; cube([W]);", {"W": "20"})
     conn.close()
+    # Mutation proof (issue #374): under the pre-fix wiring (the outer
+    # seam's row read through ``app.state.versions`` + the v1 read through
+    # ``app.state.conn`` — the main-thread handle ``conn`` above) the v1
+    # read raises ``sqlite3.ProgrammingError`` when driven off the main
+    # thread and the spy receives ``part_path=None``. With the short-lived
+    # ``db.connect(db_path)`` handle the committed file stages on every
+    # thread.
     assert spy_calls["part_path"] == expected_part_path, (
         f"part_path {spy_calls['part_path']} != {expected_part_path}"
     )
@@ -3370,25 +3381,38 @@ def test_finalize_closure_passes_part_path_when_settled_from_worker_thread(
     spy_calls: dict = {}
     _spy_render(monkeypatch, spy_calls, _default_render())
 
+    # The app's handle: a REAL ``db.Connection`` created on the MAIN
+    # thread (the production shape) — the outer seam's row read rides it
+    # and must NOT raise; the mutation proof is the inner closure's v1
+    # read on it from the worker thread (the short-lived handle now).
     conn = db_mod.connect(db_path)
+    conn.get_project(pid)
+    app_state_conn = conn
 
     def _get_project(_project_id: int):
-        row = conn.get_project(_project_id)
+        row = app_state_conn.get_project(_project_id)
         return dict(row) if row else None
 
-    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project)
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=app_state_conn)
     render_fn = kwargs["render_fn"]
 
     with caplog.at_level("WARNING"):
         _run_render_fn_off_main_thread(render_fn, 'import("part.stl");', {"W": "20"})
     conn.close()
-
+    # Mutation proof (issue #374): under the pre-fix wiring (the outer
+    # seam's row read through ``app.state.versions`` + the v1 read through
+    # ``app.state.conn``, both the main-thread handle ``conn`` above)
+    # driven on a non-main thread, the v1 read raises
+    # ``sqlite3.ProgrammingError`` and the spy receives
+    # ``part_path=None`` — this test fails. With the short-lived
+    # ``db.connect(db_path)`` handle the committed file is staged.
     assert spy_calls["part_path"] == expected_part_path, (
         f"part_path {spy_calls['part_path']} != {expected_part_path}"
     )
     assert spy_calls["repo_dir"] == tmp_path / "repo"
     warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
     assert warns == [], f"unexpected warnings: {[r.getMessage() for r in warns]}"
+
 
 
 def test_finalize_closure_no_part_from_worker_thread_is_silent(
@@ -3412,13 +3436,19 @@ def test_finalize_closure_no_part_from_worker_thread_is_silent(
     spy_calls: dict = {}
     _spy_render(monkeypatch, spy_calls, _default_render())
 
+    # The app's handle: a REAL ``db.Connection`` created on the MAIN
+    # thread (the production shape) — the outer seam's row read rides it
+    # and must NOT raise; the no-part row keeps the render part-less and
+    # silent on every thread.
     conn = db_mod.connect(db_path)
+    conn.get_project(pid)
+    app_state_conn = conn
 
     def _get_project(_project_id: int):
-        row = conn.get_project(_project_id)
+        row = app_state_conn.get_project(_project_id)
         return dict(row) if row else None
 
-    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project)
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=app_state_conn)
     render_fn = kwargs["render_fn"]
 
     with caplog.at_level("WARNING"):
@@ -7379,6 +7409,14 @@ def test_chat_closure_stages_settled_part_from_worker_thread(
     from d33d.versions import migrate as _migrate374
 
     db_path = app_with_versions.state.db_path
+    # A REAL ``db.Connection`` created on the MAIN thread (the production
+    # shape — ``check_same_thread=True``, bound to the creating thread).
+    # ``app.state.conn`` is assigned this handle so that under the pre-fix
+    # mutation (``conn = getattr(app_state, "conn", None)`` →
+    # ``conn.get_project`` from the worker thread) the read raises
+    # ``sqlite3.ProgrammingError`` — the real production degrade path.
+    app_state_conn = _connect374(db_path)
+    app_with_versions.state.conn = app_state_conn
     _db = _connect374(db_path)
     _migrate374(_db)
     pid = _db.create_project(name="part project")
@@ -7398,6 +7436,7 @@ def test_chat_closure_stages_settled_part_from_worker_thread(
     expected_part_path = repo / "versions" / str(v1) / "part.stl"
     expected_part_path.parent.mkdir(parents=True, exist_ok=True)
     expected_part_path.write_bytes(b"stl-bytes")
+    app_state_conn.close()
 
     class _ImportLLM:
         async def __call__(self, role, messages, system):
@@ -7479,7 +7518,14 @@ def test_chat_closure_no_part_from_worker_thread_is_silent(
 
     _db = _connect374(app_with_versions.state.db_path)
     pid = _db.create_project(name="no-part project")
+    _db._conn.commit()
     _db.close()
+    # A REAL ``db.Connection`` on the MAIN thread as ``app.state.conn`` —
+    # the production shape (the pre-fix mutation must trip
+    # ``sqlite3.ProgrammingError`` on the cross-thread read, not
+    # ``AttributeError`` on a missing attribute).
+    app_state_conn = _connect374(app_with_versions.state.db_path)
+    app_with_versions.state.conn = app_state_conn
 
     spy_calls: list[dict] = []
 
