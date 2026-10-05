@@ -41,6 +41,8 @@ import re
 from dataclasses import dataclass, field
 from functools import cache
 
+from d33d import feature_clause
+
 __all__ = [
     "ABSOLUTE_WORDS",
     "DIMENSION_AXES",
@@ -54,15 +56,8 @@ __all__ = [
     "split_clauses",
 ]
 
-# Feature verbs (closed set, issue #398): verbs that describe CREATING or
-# MODIFYING a feature on the part — "add a 3 mm wide groove", "drill a
-# 6 mm hole", "cut a 6 mm wide channel". A clause introduced by a feature
-# verb that contains an axis word + number is describing a FEATURE's size,
-# not the part's envelope — UNLESS the clause itself contains a feature
-# noun (already handled by the existing feature-noun guard) or the message
-# has no other feature-noun clause (in which case the size is about the
-# part: "make it 40 mm wide with a 5 mm hole" → W=40). The "make" verb is
-# deliberately NOT a feature verb ("make a 30 mm wide block" states W=30).
+# Feature-verb rules (issue #398) live in ``d33d.feature_clause``
+# (imported above; used by ``_classify_clause`` and ``classify``).
 
 # ---------------------------------------------------------------------------
 # Closed word sets
@@ -195,35 +190,6 @@ FEATURE_NOUN_RE = re.compile(
 #: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
 #: (the subset pin).
 _PART_NOUNS: frozenset[str] = frozenset({"lid"})
-
-def _is_bare_measurement(clause: str) -> bool:
-    """True if ``clause`` is a BARE MEASUREMENT — just a number + axis
-    word (and optional filler like "mm", "around", "from", "the", etc.)
-    with NO pronoun- or article-introduced subject (issue #398).
-
-    A bare measurement is a fragment like "5 mm deep" or "10 mm wide"
-    that modifies a feature described in a sibling clause, not a
-    standalone part statement. The test: the clause contains no
-    pronoun or article ("a", "an", "the", "it", "this", ...) that would
-    introduce a subject. Verbs are NOT checked here — a feature-verb
-    clause is handled by the feature-verb branch of the suppression
-    (see ``_classify_clause``), not by this test.
-    """
-    return re.search(r"\b(?:a|an|the|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b", clause, re.IGNORECASE) is None
-
-
-# The feature verbs (closed set, issue #398): verbs that create or modify
-# a FEATURE on the part. A clause introduced by one of these that contains
-# an axis word + number is describing the feature's size, not the part's
-# envelope. The cross-clause check (the message must have another clause
-# with a feature noun) prevents false positives on part-level statements
-# like "make it 40 mm wide with a 5 mm hole" ("make" is not a feature
-# verb, and even if it were, "hole" alone in the same clause would be
-# caught by the feature-noun guard). "make" is deliberately NOT in this
-# set: "make a 30 mm wide block" still states W=30.
-_FEATURE_VERBS: frozenset[str] = frozenset(
-    {"add", "cut", "drill", "bore", "engrave", "emboss"}
-)
 
 #: The mating connectors (issue #314): words and phrases that introduce the
 #: MATING PART of a design — the part the user's part must fit or sit on.
@@ -479,6 +445,7 @@ def _classify_clause(
     absolute axis cue is suppressed — the size describes a feature whose
     noun lives in a sibling clause ("add a 3 mm wide, 2 mm deep groove":
     clause 1 has the verb + axis word + number, clause 2 has the noun).
+    See ``d33d.feature_clause.feature_clause_suppresses``.
     """
     relative: set[str] = set()
     global_: bool = False
@@ -536,46 +503,18 @@ def _classify_clause(
     if FEATURE_NOUN_RE.search(clause):
         return ({}, relative, global_, cue_words)
 
-    # Feature-verb cross-clause suppression (issue #398): a top-level
-    # clause (from ``split_clauses``, not a sub-clause from
-    # ``_split_on_and``) that contains an axis word + number but NO
-    # feature noun of its own is describing a feature whose noun lives in
-    # a SIBLING top-level clause. The suppression fires when:
-    #
-    #   (a) the clause is introduced by a feature verb (add, cut, drill,
-    #       bore, engrave, emboss) — "add a 3 mm wide, 2 mm deep groove"
-    #       splits into ["add a 3 mm wide", "2 mm deep groove"]: clause 1
-    #       has the verb + axis word + number, clause 2 has the noun.
-    #       The 3 is the groove's width, not the part's.
-    #
-    #   (b) the clause is a BARE MEASUREMENT — just the number + axis word
-    #       (no article-introduced subject noun) — and the message has a
-    #       feature noun in another top-level clause. "add a 10 mm wide
-    #       slot across the top, 5 mm deep" splits into ["add a 10 mm
-    #       wide slot across the top", "5 mm deep"]: clause 1 has the
-    #       feature noun, clause 2 is a bare measurement ("5 mm deep").
-    #       The 5 is the slot's depth, not the part's.
-    #
-    # The gate for BOTH: the message must have a feature noun in another
-    # top-level clause. This prevents false positives on part-level
-    # statements: "a 40 mm wide box with a 5 mm deep groove" is ONE
-    # top-level clause (the "with" split creates sub-clauses, not new
-    # top-level clauses), so the cross-clause rule does not fire and the
-    # box's width still states W=40. "make it 40 mm wide with a 5 mm
-    # hole" — "make" is not a feature verb and "a 5 mm hole" is in the
-    # same top-level clause, so the feature-noun guard handles it within
-    # the clause and the cross-clause rule doesn't fire.
-    #
-    # Relative/global cues are KEPT (same conservative choice as the
-    # feature-noun guard: a release only stops enforcement).
-    if (
-        feature_noun_in_message
-        and set(cue_words) & set(ABSOLUTE_WORDS)
-        and _numbers_in(clause)
-        and (
-            any(_word_re(v).search(clause) for v in _FEATURE_VERBS)
-            or _is_bare_measurement(clause)
-        )
+    # Feature-verb cross-clause suppression (issue #398) — see
+    # ``d33d.feature_clause.feature_clause_suppresses`` for the full
+    # rationale. Relative/global cues are KEPT (same conservative choice
+    # as the feature-noun guard: a release only stops enforcement).
+    if feature_clause.feature_clause_suppresses(
+        clause,
+        cue_words,
+        feature_noun_in_message=feature_noun_in_message,
+        absolute_words=ABSOLUTE_WORDS,
+        numbers_in=_numbers_in,
+        word_re=_word_re,
+        feature_verb_re=_word_re,
     ):
         return ({}, relative, global_, cue_words)
 
@@ -683,9 +622,11 @@ def classify(message: str) -> Cues:
     """
     clauses = split_clauses(message)
 
-    # Pre-scan: does any clause in the message contain a feature noun?
-    # Used by the feature-verb cross-clause suppression (issue #398).
-    _feature_noun_in_message = any(FEATURE_NOUN_RE.search(c) for c in clauses)
+    # Pre-scan for the feature-verb cross-clause suppression (issue
+    # #398) — see ``d33d.feature_clause.message_has_feature_noun``.
+    _feature_noun_in_message = feature_clause.message_has_feature_noun(
+        clauses, FEATURE_NOUN_RE
+    )
 
     all_absolute: dict[str, float] = {}
     all_relative: set[str] = set()
