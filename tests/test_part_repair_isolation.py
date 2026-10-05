@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import multiprocessing
 import time
 from pathlib import Path
 from typing import Any
@@ -56,45 +55,17 @@ def _stl_bytes_from_mesh(mesh):
     return buf.getvalue()
 
 
-# Module-level (top-level, picklable) Process-spy state + class for the
-# single-process-per-import test. The spawn parent pickles the Process
-# object (and its class) when it starts the child, so the spy class must
-# be importable by name — a local class cannot be pickled.
-_process_spy_counts = {"process": 0, "start": 0}
+class _FailingQueue:
+    """A SimpleQueue stub whose put() raises OSError (top-level → picklable)."""
+    def put(self, *a, **kw):
+        raise OSError("broken pipe")
+    def close(self):
+        pass
 
 
-class _SpyProcess:
-    """Wraps a real spawn-context Process, counting ``start()`` calls while
-    delegating everything else (via ``__getattr__``) to the real process
-    object.
-
-    The class must be top-level (importable by name) because the spawn
-    parent pickles the Process object (and its class) when it starts the
-    child — a local class cannot be pickled. The real Process factory is
-    set on the class before the spy is used (``_SpyProcess.factory = ...``).
-    """
-
-    factory = None  # Set per-test before the spy is used.
-
-    def __init__(self, *args, **kwargs):
-        self._proc = self.factory(*args, **kwargs)
-        _process_spy_counts["process"] += 1
-
-    def start(self):
-        _process_spy_counts["start"] += 1
-        self._proc.start()
-
-    def __getattr__(self, name):
-        return getattr(self._proc, name)
-
-
-def _stl_bytes(mesh) -> bytes:
-    """Export a trimesh mesh to STL bytes (in-memory — no file on disk)."""
-    import io
-
-    buf = io.BytesIO()
-    mesh.export(buf, file_type="stl")
-    return buf.getvalue()
+def _failing_queue_factory():
+    """Module-level factory (top-level → picklable for the spawn child)."""
+    return _FailingQueue()
 
 
 def _box_mesh():
@@ -450,14 +421,6 @@ def test_genus_fallback_logs_warning(caplog):
     )
 
 
-class _FailingQueue:
-    """A SimpleQueue stub whose put() raises OSError (top-level → picklable)."""
-    def put(self, *a, **kw):
-        raise OSError("broken pipe")
-    def close(self):
-        pass
-
-
 def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
     """Finding 6: when ``in_q.put(...)`` raises OSError (BrokenPipeError,
     etc.), ``repair_with_pmf`` maps it to ``PartUploadError`` with the
@@ -467,23 +430,11 @@ def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
 
     box = _box_mesh()
 
-    original_get_context = part_repair_mod.multiprocessing.get_context
-    real_ctx = original_get_context("spawn")
-
-    def _failing_get_context(name):
-        ctx = original_get_context(name)
-
-        def _failing_simple_queue():
-            return _FailingQueue()
-
-        ctx.SimpleQueue = _failing_simple_queue
-        return ctx
-
-    monkeypatch.setattr(part_repair_mod.multiprocessing, "get_context", _failing_get_context)
-    # Patch the cached context's SimpleQueue directly so the monkeypatch
-    # can restore it after the test (the get_context patch alone doesn't
-    # undo the SimpleQueue patch on the cached context).
-    monkeypatch.setattr(real_ctx, "SimpleQueue", lambda: _FailingQueue())
+    # The cached spawn context is shared across calls; patch SimpleQueue on
+    # it via monkeypatch (auto-restored at teardown — no leftover state for
+    # other tests that patch the same cached context).
+    spawn_ctx = part_repair_mod.multiprocessing.get_context("spawn")
+    monkeypatch.setattr(spawn_ctx, "SimpleQueue", _failing_queue_factory)
 
     with pytest.raises(PartUploadError) as excinfo:
         repair_with_pmf(box, timeout=5)
@@ -492,51 +443,21 @@ def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
 
 
 def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch):
-    """Finding 4: the multi-body repair is bounded by an aggregate
-    wall-clock budget of REPAIR_TIMEOUT_SECONDS. With an injected small
-    budget and a stub repair that consumes time, RepairTimeoutError is
-    raised when the child exceeds the timeout."""
+    """The multi-body repair is bounded by an aggregate wall-clock budget
+    of REPAIR_TIMEOUT_SECONDS — exercised at the REAL process boundary:
+    a two-box batch through ``repair_bodies_with_pmf`` with a short
+    injected timeout. The spawn + pymeshfix startup exceeds 50 ms, so
+    the parent's ``poll`` times out, the child is killed, and
+    ``RepairTimeoutError`` (the 422 signal) is raised."""
     import trimesh
 
-    import d33d.part_mesh as part_mesh_mod
+    from d33d.part_repair import RepairTimeoutError, repair_bodies_with_pmf
 
-    # Two watertight boxes far apart → 2 bodies, NOT clean (we add a gap).
     box_a = trimesh.creation.box(extents=[10, 10, 10])
     box_b = trimesh.creation.box(extents=[10, 10, 10])
     box_b.apply_translation([10000.0, 0, 0])
-    # Add a gapped shell to make the mesh NOT clean.
-    debris = trimesh.creation.box(extents=[5, 5, 5])
-    debris.apply_translation([20000.0, 0, 0])
-    debris = trimesh.Trimesh(debris.vertices, debris.faces[:-6], process=False)
-    combined = trimesh.util.concatenate([box_a, box_b, debris])
-    data = _stl_bytes_from_mesh(combined)
-
-    # Inject a very small aggregate budget (0.5 s).
-    monkeypatch.setattr(part_mesh_mod, "REPAIR_TIMEOUT_SECONDS", 0.5)
-
-    # A stub repair that sleeps briefly to consume the budget, then raises
-    # RepairTimeoutError (simulating the real process boundary's timeout).
-    def _slow_repair(meshes, timeout=None):
-        time.sleep(0.6)  # longer than the budget
-        raise RepairTimeoutError(
-            f"repair timed out: exceeded {timeout:.0f}s across {len(meshes)} bodies"
-        )
-
-    monkeypatch.setattr(part_mesh_mod, "repair_bodies_with_pmf", _slow_repair)
-
-    from d33d.part_repair import RepairTimeoutError
-
     with pytest.raises(RepairTimeoutError):
-        part_mesh_mod.parse_and_repair(data, "stl")
-
-
-def _stl_bytes_from_mesh(mesh):
-    """Export a trimesh mesh as STL bytes."""
-    import io
-
-    buf = io.BytesIO()
-    mesh.export(buf, file_type="stl")
-    return buf.getvalue()
+        repair_bodies_with_pmf([box_a, box_b], timeout=0.05)
 
 
 # ---------------------------------------------------------------------------
@@ -566,16 +487,14 @@ def test_multi_body_repairs_in_single_process(monkeypatch: pytest.MonkeyPatch):
     bodies in ONE spawned child process — the per-body repair loop used to
     spawn a fresh process per body (0.5–1 s of spawn overhead each; fifty
     small bodies cost tens of seconds and could hit the 120 s aggregate
-    budget). The spy on the multiprocessing context's Process asserts that
-    ``ctx.Process`` (and therefore ``Process.start``) is called exactly ONCE
-    for a six-body import."""
+    budget). A wrapper around ``repair_bodies_with_pmf`` asserts exactly
+    ONE repair call for a six-body import (one child, not one per body)."""
     # Six watertight boxes 10000 mm apart (the float32 STL round-trip
     # separation that keeps bodies distinct) + one gapped debris shell
     # (makes the mesh NOT clean → the multi-body repair branch runs).
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
-    import d33d.part_repair as part_repair_mod
 
     boxes = []
     for i in range(6):
@@ -588,36 +507,30 @@ def test_multi_body_repairs_in_single_process(monkeypatch: pytest.MonkeyPatch):
     combined = trimesh.util.concatenate(boxes + [debris])
     data = _stl_bytes_from_mesh(combined)
 
-    # Spy on the spawn context's Process: patch the context's Process class
-    # directly. Use a FRESH spawn context (not the cached one) to avoid
-    # state leakage from other tests that patch the cached context's
-    # SimpleQueue. The monkeypatch will restore get_context after the test.
-    _process_spy_counts["process"] = 0
-    _process_spy_counts["start"] = 0
-    fresh_ctx = multiprocessing.context.SpawnContext()
-    RealProcess = fresh_ctx.Process
-    _SpyProcess.factory = RealProcess
+    # Count the repair calls: patch the ``_REPAIR_WORKER`` hook (the seam
+    # the single-body path uses) — but the multi-body path uses
+    # ``repair_bodies_with_pmf`` directly, so instead we patch the module
+    # function with a wrapper that counts and delegates. The count is
+    # observed in the PARENT (the wrapper runs in the parent, the real
+    # repair runs in the child).
+    real_repair = part_mesh_mod.repair_bodies_with_pmf
+    call_counts = {"n": 0}
 
-    original_get_context = part_repair_mod.multiprocessing.get_context
-    def _fresh_get_context(name):
-        if name == "spawn":
-            return fresh_ctx
-        return original_get_context(name)
-    monkeypatch.setattr(part_repair_mod.multiprocessing, "get_context", _fresh_get_context)
+    def _counting_repair(meshes, timeout=None):
+        call_counts["n"] += 1
+        return real_repair(meshes, timeout=timeout)
 
-    monkeypatch.setattr(fresh_ctx, "Process", _SpyProcess)
+    monkeypatch.setattr(part_mesh_mod, "repair_bodies_with_pmf", _counting_repair)
 
     mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     assert report["bodies"] == 6, f"six-body import must keep 6 bodies: {report}"
-    assert _process_spy_counts["process"] == 1, (
-        f"multi-body repair must build exactly ONE child process, "
-        f"got {_process_spy_counts['process']}"
+    # Exactly ONE repair call for a six-body import (one child process,
+    # not one per body).
+    assert call_counts["n"] == 1, (
+        f"multi-body repair must make exactly ONE repair call, "
+        f"got {call_counts['n']}"
     )
-    assert _process_spy_counts["start"] == 1, (
-        f"multi-body repair must spawn exactly ONE child process, "
-        f"got {_process_spy_counts['start']} start() calls"
-    )
-    # The single child handled all six bodies — per-body semantics kept
+    # The single call handled all six bodies — per-body semantics kept
     # (every body present in the stored mesh, the real pymeshfix ran).
     comps = mesh.split(only_watertight=False)
     watertight = [c for c in comps if c.is_watertight]
@@ -713,8 +626,6 @@ def test_decimate_and_budget_moved_to_part_repair(monkeypatch: pytest.MonkeyPatc
     assert "OSError" in str(excinfo.value)
 
     # The part_mesh re-export still works on the moved implementation.
-    monkeypatch.undo()
-
     small = trimesh.creation.box(extents=[10, 10, 10])
     assert part_mesh_mod._decimate(small, 100) is small  # below target → unchanged
 

@@ -3549,11 +3549,11 @@ def test_mesh_topology_helper_two_body():
 
 def test_decimate_before_repair_above_budget(monkeypatch):
     """Issue #395: a mesh above ``REPAIR_FACE_BUDGET`` that is NOT clean
-    is decimated BEFORE repair. A generated 26-face subdivided box with a
-    face removed (not clean → repair path) and a budget of 20 forces the
-    decimate path; a spy on the repair seam asserts the mesh handed TO the
-    repair is at or below the budget — proof the decimation ran BEFORE the
-    repair call, not on the result after."""
+    is decimated BEFORE repair. A generated 25-face mesh (3 boxes far
+    apart, 11 faces removed — open edges → repair path) and a budget of
+    10 force the decimate path; a spy on the repair seam asserts the mesh
+    handed TO the repair is at or below the budget — proof the decimation
+    ran BEFORE the repair call, not on the result after."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod

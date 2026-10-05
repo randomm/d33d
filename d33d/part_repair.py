@@ -178,7 +178,7 @@ _REPAIR_WORKER = _repair_in_process
 
 
 def _child_main(
-    queue: SimpleQueue, send_conn: Any, worker: Any
+    queue: SimpleQueue, send_conn: Any, worker: Any, mode: str = "single"
 ) -> None:
     """The spawn child's entry point (top-level → picklable).
 
@@ -189,18 +189,17 @@ def _child_main(
     TYPE name is sent so the parent classifies by type, not by message
     text).
 
-    The input shape depends on the worker:
-    - ``_REPAIR_WORKER`` (single-body): ``(vertices, faces)`` arrays →
-      ``(vertices, faces)`` result.
-    - ``_repair_bodies_in_process`` (multi-body): list of
-      ``(vertices, faces)`` pairs → list of repaired pairs.
+    ``mode`` is the EXPLICIT dispatch signal the parent sends (never
+    introspected from the worker's identity — the pickled reference could
+    be a stub with the batched signature):
+    - ``"single"``: the input is ``(vertices, faces)`` arrays and the
+      worker takes two args.
+    - ``"batch"``: the input is a list of ``(vertices, faces)`` pairs and
+      the worker takes one arg (a list of pairs) and returns a list.
     """
     data = queue.get()
     try:
-        # The single-body workers (``_REPAIR_WORKER``) take two args
-        # ``(vertices, faces)``; the multi-body worker
-        # (``_repair_bodies_in_process``) takes one arg (a list of pairs).
-        if worker is _repair_bodies_in_process:
+        if mode == "batch":
             result = worker(data)
         else:
             verts, faces = data
@@ -258,7 +257,7 @@ def repair_with_pmf(
     in_q: SimpleQueue = ctx.SimpleQueue()
     pipe_parent, pipe_child = ctx.Pipe(duplex=False)
     proc = ctx.Process(
-        target=_child_main, args=(in_q, pipe_child, worker),
+        target=_child_main, args=(in_q, pipe_child, worker, "single"),
         daemon=True,
     )
     proc.start()
@@ -349,7 +348,7 @@ def repair_bodies_with_pmf(
     pipe_parent, pipe_child = ctx.Pipe(duplex=False)
     proc = ctx.Process(
         target=_child_main,
-        args=(in_q, pipe_child, _repair_bodies_in_process),
+        args=(in_q, pipe_child, _repair_bodies_in_process, "batch"),
         daemon=True,
     )
     proc.start()
