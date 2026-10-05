@@ -2150,18 +2150,20 @@ def test_parse_and_repair_runs_off_event_loop(
     request on the same app — the decode runs in a worker thread
     (``asyncio.to_thread``), not on the event loop.
 
-    The stub uses a pure-Python busy loop (a `for i in range(N): x = i * i`
-    loop) instead of ``time.sleep`` (which releases the GIL immediately).
-    CPython's eval loop releases the GIL periodically (every ~5 ms), so a
-    pure-Python busy loop in a thread does NOT block the event loop — the
-    completion-order discriminator (the GET must complete before the
-    upload) is stable.
+    The stub uses a pure-Python busy loop instead of ``time.sleep`` (which
+    releases the GIL immediately). CPython's eval loop releases the GIL
+    periodically (every ~5 ms), so a pure-Python busy loop in a thread
+    does NOT block the event loop — the completion-order discriminator
+    (the GET must complete before the upload) is stable.
 
-    This test proves the decode runs OFF the event loop (thread isolation).
-    The process isolation (pymeshfix's GIL-holding C work in a separate
-    process) is exercised by ``test_holey_mesh_still_repairs``, which calls
-    the real ``repair_with_pmf`` (the process-boundary path) on a holey
-    mesh and verifies the repair completes correctly.
+    This test proves the decode runs OFF the event loop (thread
+    isolation). The process isolation for the GIL-holding repair (issue
+    #395 — pymeshfix's C work in a separate process) is exercised by
+    ``tests/test_part_repair_isolation.py::test_repair_seam_gil_holding_
+    stub_does_not_starve_event_loop``, which uses a C-level stub that
+    HOLDS the GIL (``sum(range(N))`` — a pure-Python loop would not) and
+    runs it INSIDE the real repair seam (the spawn child), asserting a
+    concurrent request's tick gaps stay under 200 ms.
 
     Two invariants make the probe robust regardless of what earlier
     tests did in the same pytest process (issue #344):
@@ -2175,9 +2177,9 @@ def test_parse_and_repair_runs_off_event_loop(
        probe is a completion-ORDER list: the lightweight GET must COMPLETE
        before the slow upload. With the decode off the loop, the GET's
        handler runs on the event loop the moment the upload reaches the
-       decode ``await``. If the decode ran ON the loop, its GIL-holding
-       busy loop would block every other handler — the GET could only
-       complete after the upload.
+       decode ``await``. If the decode ran ON the loop, its busy loop
+       would block every other handler — the GET could only complete
+       after the upload.
 
     The patch is installed via the pytest ``monkeypatch`` fixture."""
 
@@ -2186,12 +2188,11 @@ def test_parse_and_repair_runs_off_event_loop(
     original_parse = part_import_mod.parse_and_repair
     slow_calls: list[int] = []
 
-    def _busy_loop_gil_holding(n: int) -> int:
-        """A pure-Python busy loop that holds the GIL for ~0.3 s.
-
-        Unlike time.sleep (which releases the GIL), this loop occupies
-        a Python thread for its full duration — the same behaviour as
-        pymeshfix's C repair holding the GIL."""
+    def _busy_loop(n: int) -> int:
+        """A pure-Python busy loop (~0.3 s) — a CPython eval-loop loop
+        that releases the GIL every ~5 ms (so it does NOT starve the
+        event loop; the GIL-holding C-level case is covered by
+        ``tests/test_part_repair_isolation.py``)."""
         x = 0
         for i in range(n):
             x = i * i + x
@@ -2199,7 +2200,7 @@ def test_parse_and_repair_runs_off_event_loop(
 
     def slow_parse(content: bytes, part_format: str):
         slow_calls.append(1)
-        _busy_loop_gil_holding(50_000_000)  # ~0.3 s of GIL-holding work
+        _busy_loop(50_000_000)  # ~0.3 s of CPU-bound work
         return original_parse(content, part_format)
 
     monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse)
@@ -2233,8 +2234,8 @@ def test_parse_and_repair_runs_off_event_loop(
     assert upload_r.status_code == 201, upload_r.text
     assert list_r.status_code == 200
     assert len(slow_calls) == 1
-    # If the decode ran ON the event loop, the GIL-holding busy loop inside
-    # the worker-stub would block every other handler: the GET (dispatched
+    # If the decode ran ON the event loop, the busy loop inside the
+    # worker-stub would block every other handler: the GET (dispatched
     # 50 ms after the upload, itself near-instant) could only complete
     # AFTER the upload. Off the loop, the GET completes first.
     assert order == ["fast", "slow"], order
@@ -2245,9 +2246,9 @@ def test_hole_count_computation_runs_off_event_loop(
 ) -> None:
     """Issue #351: the ``hole_count`` computation happens INSIDE
     ``parse_and_repair``, which the upload route runs via
-    ``asyncio.to_thread``. Issue #395: the stub now uses a CPU-bound
-    GIL-holding busy loop instead of ``time.sleep`` — the same fix as
-    ``test_parse_and_repair_runs_off_event_loop``."""
+    ``asyncio.to_thread``. The stub uses a CPU-bound busy loop (the
+    GIL-holding C-level case is covered by
+    ``tests/test_part_repair_isolation.py``)."""
 
     import d33d.part_import as part_import_mod
 
@@ -3448,16 +3449,15 @@ def test_holey_mesh_still_repairs(app_with_projects, monkeypatch):
 
 def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
     """Issue #395: a repair timeout (injected via a monkeypatched
-    ``repair_with_pmf`` that raises a timeout ``PartUploadError``) must
-    return a clean 422 with the new ``REPAIR_TIMEOUT_DETAIL``
-    message — never a hung request. The monkeypatch simulates the
-    process-boundary timeout (the real 120 s timeout is impractical in a
-    test; the contract is that a timeout error produces a 422 with the
-    distinct timeout detail, not the unparseable detail)."""
+    ``repair_with_pmf`` that raises a ``RepairTimeoutError`` — the typed
+    signal the route checks with ``isinstance``) must return a clean 422
+    with the new ``REPAIR_TIMEOUT_DETAIL`` message — never a hung
+    request."""
     import d33d.part_mesh as part_mesh_mod
+    from d33d.part_repair import RepairTimeoutError
 
     def _timeout_repair(mesh, timeout=None):
-        raise part_mesh_mod.PartUploadError(
+        raise RepairTimeoutError(
             f"repair timed out: exceeded {timeout or 120:.0f}s"
         )
 

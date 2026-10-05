@@ -90,7 +90,7 @@ from d33d.part_mesh import (
     read_part_file_atomic,
     validate_part_path,
 )
-from d33d.part_repair import REPAIR_TIMEOUT_DETAIL, is_repair_timeout
+from d33d.part_repair import REPAIR_TIMEOUT_DETAIL, RepairTimeoutError
 from d33d.part_units import (
     axis_to_index,
     classify_stl_units,
@@ -237,11 +237,11 @@ def create_part_router() -> APIRouter:
                 parse_and_repair, content, part_format
             )
         except PartUploadError as e:
-            # A repair timeout gets its own 422 detail (the mesh isn't
-            # broken, it's just too slow to repair in the allotted time).
+            # A repair timeout gets its own 422 detail (checked by TYPE,
+            # ``RepairTimeoutError`` — the mesh isn't broken, just slow).
             detail = (
                 REPAIR_TIMEOUT_DETAIL
-                if is_repair_timeout(e)
+                if isinstance(e, RepairTimeoutError)
                 else PART_UPLOAD_UNPARSEABLE_DETAIL
             )
             raise HTTPException(status_code=422, detail=detail)
