@@ -45,8 +45,11 @@ from d33d.design_loop import (
 from d33d.design_loop_events import (
     latest_version_stated_dims,
 )
-from d33d.dimension_protocol import stated_axes_from_message, stated_dims_from_message
 from d33d.render_worker import RenderResult
+from d33d.statement_extraction import (
+    stated_axes_from_message,
+    stated_dims_from_message,
+)
 from tests.versioning.helpers import (
     create_project,
     create_version,

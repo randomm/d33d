@@ -796,7 +796,7 @@ def test_region_edit_fresh_project_persists_nothing(app_with_versions):
         captured = await _drive_region_edit_capture(
             app_with_versions, client, proj["id"]
         )
-        from d33d.dimension_protocol import (
+        from d33d.statement_extraction import (
             effective_stated_dims,
             latest_stated_dims_dict,
         )

@@ -1403,7 +1403,7 @@ def create_app(
         # (the pre-route's acceptance path runs the same loop kwargs).
         stated_dims: tuple[float, float, float] | None = None
 
-        from d33d.dimension_protocol import (
+        from d33d.statement_extraction import (
             carried_stated_set,
             effective_stated_dims,
         )
