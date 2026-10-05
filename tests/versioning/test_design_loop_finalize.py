@@ -105,6 +105,36 @@ def test_finalize_pass_creates_version_with_named_params(app_with_versions):
     assert timeline[0]["id"] == version["id"]
 
 
+def test_finalize_classify_failure_degrades_not_500(app_with_versions, monkeypatch):
+    """A lexicon ``classify`` failure during finalize degrades the
+    stated-axes cue resolution to the carried set (mirroring
+    ``chat_loop``'s guard) instead of surfacing as a 500."""
+    def _boom(message: str):
+        raise RuntimeError("lexicon on fire")
+
+    # The route imports classify locally inside the handler; patch the
+    # source module it imports from.
+    import d33d.axis_lexicon as lexicon_mod
+
+    monkeypatch.setattr(lexicon_mod, "classify", _boom)
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        app_with_versions.state.run_design_loop = lambda: _StubResult(
+            "pass", {"W": 20, "H": 25, "D": 30, "slot": 5}
+        )
+        r = await client.post(
+            f"/api/projects/{pid}/finalize",
+            json={"name": "the bracket", "message": "make it 20mm wide"},
+        )
+        return r
+
+    r = run_async(app_with_versions, _call)
+    # Degrade to 201 (the carried set, here empty), never a 500.
+    assert r.status_code == 201, r.text
+
+
 # ---------------------------------------------------------------------------
 # (1b) The finalize route persists the loop's measurement (issue #235)
 #

@@ -42,14 +42,38 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol
+from functools import cache
+from typing import Any, Literal
 
-from d33d.axis_lexicon import MM_UNIT_ALTERNATION
+from d33d.axis_lexicon import (
+    ABSOLUTE_WORDS,
+    FEATURE_NOUN_RE,
+    MM_UNIT_ALTERNATION,
+    RELATIVE_WORDS,
+    Cues,
+    classify,
+    split_clauses,
+)
+
+#: The lexicon's explicit-mm number token, anchored for span matching:
+#: one mm number (``12``, ``20.50``, ``1e-05``) followed by the lexicon's
+#: mm unit alternative (glued/spaced ``mm`` or spelled-out
+#: millimetre(s)/millimeter(s)). The number is captured as the USER'S
+#: LITERAL TEXT — matching a parsed float back to its clause by
+#: re-rendering it with ``:g`` can miss the literal (``1e-05`` → ``1e-05``
+#: happens to render the same, but ``20.50`` → ``20.5``, ``10000000`` →
+#: ``1e+07``), so every number→clause lookup matches the token text
+#: directly and compares ``float(text) == number``.
+_MM_NUMBER_SPAN_RE = re.compile(
+    r"(?<![-\d.])" r"(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:" + MM_UNIT_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
 from d33d.triple_extraction import (
     QUOTED_UNMAPPED_MAX_MESSAGES,
     _extract_triple,
     _mm_cue_values,
     _triple_suppressed_by_feature_noun,
+    history_window_start,
     user_quoted_unmapped_mm,
 )
 
@@ -60,7 +84,6 @@ __all__ = [
     "FDM_CLEARANCE_TABLE",
     "HOLES_PRINT_UNDERSIZE_MM",
     "QUOTED_UNMAPPED_MAX_MESSAGES",
-    "CuesLike",
     "DimensionClarification",
     "FitType",
     "_extract_triple",
@@ -73,6 +96,7 @@ __all__ = [
     "offer_tier_signals",
     "require_dimensions_confirmed",
     "resolution_questions",
+    "resolve_stated_cues",
     "resolve_tolerance_mm",
     "stated_axes_from_message",
     "stated_dims_from_message",
@@ -186,6 +210,58 @@ class DimensionClarification:
         return "\n".join(lines)
 
 
+def _mm_number_occurrences(clause: str) -> list[re.Match[str]]:
+    """The clause's explicit-mm number tokens (``_MM_NUMBER_SPAN_RE``
+    matches), as raw matches — the caller compares
+    ``float(m.group(1)) == number`` against the parsed value it holds.
+    Matching the literal token text (never ``f"{number:g}"``) is what
+    keeps ``1e-05`` / ``10000000`` / ``20.50``-style user text findable:
+    re-rendering a parsed float with ``:g`` is lossy in both directions
+    (``20.50`` → ``20.5``, ``10000000`` → ``1e+07``) and the user's
+    literal is the only thing the delta-marker anchoring may anchor on."""
+    return list(_MM_NUMBER_SPAN_RE.finditer(clause))
+
+
+def _delta_marker_at(number: float, clause: str) -> bool:
+    """Whether ``clause`` carries a RELATIVE-delta marker ANCHORED to
+    ``number``'s own occurrence (issue #369 round 2, literal-text
+    matching): the preposition "by" immediately before the number's
+    token ("taller by 5 mm") or an axis word (absolute or relative)
+    immediately after the number's unit ("5 mm taller") — so only "by
+    <this number>" or "<this number> mm <axis word>" counts as a delta.
+    The anchor is the matched token's own span (the "by" right before
+    the token, or the relative word right after the token's unit), never
+    a message-wide pattern, so a delta marker on a DIFFERENT number in
+    the same clause ("make it taller by 5 mm, 30 mm") never suppresses
+    THIS number's absolute statement. A delta RELEASES the axis (the new
+    value is unknown — the gate asks), never enforces it as an absolute
+    ("taller by 5 mm" on a 12 mm part must not set H=5.0 — a physically
+    shorter target)."""
+    words = sorted(set(ABSOLUTE_WORDS) | set(RELATIVE_WORDS), key=len, reverse=True)
+    for m in _mm_number_occurrences(clause):
+        if float(m.group(1)) != number:
+            continue
+        before = clause[: m.start()]
+        if re.search(r"\bby\s+$", before, re.IGNORECASE):
+            return True
+        after = clause[m.end() :]
+        if re.search(r"\s+(?:" + "|".join(words) + r")\b", after, re.IGNORECASE):
+            return True
+    return False
+
+
+@cache
+def _axis_letter_pattern(axis: str) -> re.Pattern[str]:
+    """The axis-letter cue pattern (``W: 42`` / ``H = 20 mm``) for one
+    axis, compiled once (issue #369 round 2: the axis pass used to build
+    this inline per axis per turn). The closed axis set is three —
+    ``cache`` keeps the same three patterns for the process lifetime."""
+    return re.compile(
+        rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)(?:{MM_UNIT_ALTERNATION})?\b",
+        re.IGNORECASE,
+    )
+
+
 def _coerce(value: Any) -> float | None:
     """Coerce a user-stated dimension to a positive float (mm), else None."""
     if value is None:
@@ -210,92 +286,120 @@ def _extract_stated(
     it in the chat (the "confirmable suggestion, never ground truth" rule)
     — a bare pre-fill without user confirmation is NOT a stated dimension
     and will leave the gate closed.
+
+    Only the last ``QUOTED_UNMAPPED_MAX_MESSAGES`` turns count (see the
+    ``window_start`` comment).
     """
     out: dict[str, float] = {}
+    # Which turn last explicitly stated each axis (step 2 records it while
+    # walking; the release pass, step 4, reads it — never re-derives it).
+    stated_at: dict[str, int] = {}
+    # Step 2's classify result per turn index (``{idx: cues}``) — the
+    # release pass (step 4) reuses it; a turn whose classify failed is
+    # absent and skipped there (guarded degrade to the carried set).
+    turn_cues: dict[int, Cues] = {}
 
     # 1. Explicit stated_dims (highest priority — the caller parsed these).
+    # Deliberate (issue #369 round 3): the caller's explicit set is NOT
+    # history and is never touched by the release pass (step 4) — a
+    # relative word in the CHAT ("make it taller") may release a value
+    # the user typed in chat text, but it can never release a value the
+    # caller passed in explicitly (an explicit statement is ground truth
+    # for the merge, never a carried guess). The release pass only pops
+    # axes whose ``stated_at`` was recorded by step 2 (chat text); this
+    # step writes no ``stated_at`` entry on purpose.
     if stated_dims:
         for axis in DIMENSION_AXES:
             v = _coerce(stated_dims.get(axis))
             if v is not None:
                 out[axis] = v
+                # NOTE: ``stated_at`` is deliberately NOT set here — see
+                # the "not history, never released" note above.
 
     # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
-    # plus a W×D×H triple ("60 × 45 × 80 mm" / "60x45x80mm" / "60mm x
-    # 45mm x 20mm" — issue #275 task-a), plus an equal-axis size shorthand
-    # ("a 20 mm cube" / "a 10mm box" / "a 15mm sphere") — the ONLY chat
-    # text allowed to fill all three axes from ONE number, and ONLY when
-    # the text also names an equal-axis shape (cube/box/sphere/ball: all
-    # three edges equal), in explicit millimetres ("mm" required — a bare
-    # "m"/meters must never be read as mm). A single number with no
-    # equal-axis shape ("make a 20mm hole in the lid", "a 20mm tall vase",
-    # "add a 5mm fillet", "mount a 6mm bolt", "a 3 m beam") is a FEATURE
-    # or a one-axis measurement — filling three axes from it would
+    # plus a W×D×H triple ("60 × 45 × 80 mm" — issue #275 task-a), plus
+    # an equal-axis size shorthand ("a 20 mm cube" / "a 10mm box") — the
+    # ONLY chat text allowed to fill all three axes from ONE number, and
+    # ONLY when the text also names an equal-axis shape (cube/box/sphere/
+    # ball: all three edges equal), in explicit millimetres ("mm" required
+    # — a bare "m"/meters must never be read as mm). A single number with
+    # no equal-axis shape ("make a 20mm hole in the lid", "a 20mm tall
+    # vase", "add a 5mm fillet", "mount a 6mm bolt", "a 3 m beam") is a
+    # FEATURE or a one-axis measurement — filling three axes from it would
     # fabricate a part envelope the user never stated, the exact
     # fabricate-don't-measure anti-pattern ticket #91 removes: the gate
     # would then run against a wrong target (spurious FAIL, or worse,
     # spurious PASS), instead of abstaining (None) and leaving the gate
     # unmeasurable. A stated equal-axis shape is the only defensible
-    # ground truth the loop can compare a rendered bbox against on a
-    # bare "Create a 20mm cube" first turn (no latest version yet).
-    # Precedence inside this pass: axis-prefixed form ("W: 42") >
-    # W×D×H triple > shorthand — the triple only fills axes the axis pass
-    # left empty, and the shorthand only fills axes the axis pass and the
+    # ground truth the loop can compare a rendered bbox against on a bare
+    # "Create a 20mm cube" first turn (no latest version yet).
+    # Precedence inside this pass: axis-prefixed form ("W: 42") > W×D×H
+    # triple > shorthand — the triple only fills axes the axis pass left
+    # empty, and the shorthand only fills axes the axis pass and the
     # triple left empty. A turn like "W is 30mm... make it a 20mm cube"
     # keeps the axis-prefixed value and never completes the triple from
     # the shorthand (the gate abstains rather than mixing sources within
     # one turn).
+    history = list(chat_history or [])
+    # ONE window, computed once, for BOTH the extraction pass (step 2)
+    # and the release pass (step 4), via the shared
+    # ``history_window_start`` (``user_quoted_unmapped_mm`` uses it too):
+    # the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) turns, INCLUDING the
+    # current message (the wrappers append it last, and it is always the
+    # newest element — never dropped). It bounds extraction too: statements
+    # and releases before ``window_start`` are simply not present.
+    window_start = history_window_start(len(history))
+    window = range(window_start, len(history))
+
     if not all(a in out for a in DIMENSION_AXES):
-        for turn in chat_history or []:
+        for idx in window:
+            turn = history[idx]
             text = str(turn)
+            # Issue #369: per axis, the NEWEST explicit stated value wins.
+            # The loop walks oldest-first, so a value found here is
+            # overwritten by any later turn's value; the first-wins lock is
+            # gone. Within a single turn, the priority is: axis-letter cues
+            # > triple > lexicon (the ticket's own priority order). Across
+            # turns, the newest turn's values overwrite older ones.
+            turn_axes: dict[str, float] = {}
             for axis in DIMENSION_AXES:
-                if axis in out:
-                    continue
-                m = re.search(
-                    rf"\b{axis}\b\s*[:=]?\s*(\d+(?:\.\d+)?)"
-                    rf"(?:{MM_UNIT_ALTERNATION})?\b",
-                    text,
-                    re.IGNORECASE,
-                )
+                m = _axis_letter_pattern(axis).search(text)
                 if m:
                     v = _coerce(m.group(1))
                     if v is not None:
-                        out[axis] = v
-            # W×D×H triple (issue #275 task-a): explicit cue, W, D, H
-            # order. Joiners: "×" (U+00D7), "x", "X", optional spaces.
-            # The unit goes after the last number or after each number.
-            # No unit: it states, unless any of its numbers carries a
-            # foreign unit. Two numbers state W and D only. Matched on
-            # the RAW message before any clause/and/with splitting.
-            # Feature-noun suppression: a triple is suppressed iff a
-            # feature noun occurs in the ≤3-word after-window or
-            # ≤2-word before-window (stopping at commas, sentence
-            # punctuation, and the words with/and/in/on/for).
-            if not all(a in out for a in DIMENSION_AXES):
-                triple_axes, _ = _extract_triple(text)
-                if triple_axes:
-                    for axis, value in triple_axes.items():
-                        if axis not in out:
-                            out[axis] = value
-            # Single-axis-word lexicon (issue #314, operator decision:
-            # the single-axis-word path is part of the per-axis contract,
-            # and the triple/pair path alone cannot see a single-number
-            # statement such as "a 60 mm wide stand for a 100 × 70 mm
-            # phone", where the stand's own width is the part's stated
-            # axis). Fills ONLY axes the triple left empty (precedence:
-            # axis-letter cues > triple > cube shorthand > lexicon —
-            # the ticket's own priority order), and the lexicon's own
-            # mating-connector guard ("a lid for a box 60 mm wide" →
-            # nothing) applies inside it, so the connector rule holds on
-            # this path too.
-            if not all(a in out for a in DIMENSION_AXES):
-                lexicon_axes = _classify_axis_cues(text)
+                        turn_axes[axis] = v
+            # W×D×H triple: only fills axes the axis-letter pass left
+            # empty in this turn.
+            triple_axes, _ = _extract_triple(text)
+            for axis, value in triple_axes.items():
+                if axis not in turn_axes:
+                    turn_axes[axis] = value
+            # ONE guarded classify per turn: its result serves the
+            # lexicon-absolute extraction below AND is stored for the
+            # release pass (step 4). A turn whose classify fails
+            # contributes NO lexicon cues and NO release.
+            try:
+                cues = classify(text)
+            except Exception:
+                logger.warning(
+                    "stated-extraction classify failed for turn %d (len=%d); "
+                    "the turn contributes no lexicon cues and no release",
+                    idx,
+                    len(turn),
+                    exc_info=True,
+                )
+                cues = None
+            # Single-axis-word lexicon: only fills axes the axis-letter
+            # pass and the triple left empty in this turn.
+            if cues is not None:
+                lexicon_axes = dict(cues.absolute)
                 for axis, value in lexicon_axes.items():
-                    if axis not in out:
-                        out[axis] = value
-            # Equal-axis size shorthand (only if the axis pass and the
-            # triple left axes empty).
-            if not out:
+                    if axis not in turn_axes:
+                        turn_axes[axis] = value
+                turn_cues[idx] = cues
+            # Equal-axis size shorthand (only if the other passes left
+            # axes empty in this turn).
+            if not turn_axes:
                 m = re.search(
                     r"\b(?:a|an)\s+(\d+(?:\.\d+)?)\s*mm\b"
                     r"\s+(?:cube|box|sphere|ball)\b",
@@ -305,11 +409,17 @@ def _extract_stated(
                 if m:
                     v = _coerce(m.group(1))
                     if v is not None:
-                        out = {axis: v for axis in DIMENSION_AXES}
+                        turn_axes = {axis: v for axis in DIMENSION_AXES}
+            # Merge this turn's axes into the global out (newest wins),
+            # recording which turn stated each axis (the release pass,
+            # step 4, needs it — no re-extraction of the same text).
+            for axis in turn_axes:
+                stated_at[axis] = idx
+            out.update(turn_axes)
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
-        confirmed_tokens = _confirmed_suggestion_tokens(chat_history or [])
+        confirmed_tokens = _confirmed_suggestion_tokens(history)
         for axis, v in ai_suggested.items():
             if axis in out:
                 continue
@@ -318,7 +428,134 @@ def _extract_stated(
                 cv = _coerce(v)
                 if cv is not None:
                     out[axis] = cv
+
+    # 4. Issue #369 release pass (reuses step 2's guarded classify per
+    #    turn, in ``turn_cues`` — no second classification; a turn whose
+    #    classify failed is absent from ``turn_cues`` and is skipped, so
+    #    it releases nothing and degrades to the carried set): a RELATIVE
+    #    word for an axis in a newer message releases that axis when the
+    #    axis's LATEST explicit
+    #    statement (``stated_at``, recorded in step 2) is OLDER than the
+    #    releasing turn — a statement OUTSIDE the window (older than
+    #    ``window_start``) never enters ``out`` in step 2 and never gets
+    #    a ``stated_at`` entry, so there is nothing for this pass to
+    #    release (the carried set's release job belongs to the current
+    #    message's cues via ``effective_stated_dims``, not to history)
+    #    — an explicit value in the releasing turn itself
+    #    (same-message ABSOLUTE cue, or a single unmapped mm number with no
+    #    feature noun in its clause and no anchored delta marker) beats the
+    #    relative word and sets instead of releases. An axis the LEXICON'S
+    #    CLAUSE GUARDS left unmapped (two-axes-one-number, mating
+    #    connector) is skipped by this pass and stays in the carried set —
+    #    the lexicon deliberately did not assign that number to the axis,
+    #    so reassigning it here would override a guard (the conservative
+    #    outcome: the carried value stays, the gate keeps enforcing it).
+    #    Unmapped-number semantics: see :func:`_unmapped_value_for_axis`.
+    for idx in window:
+        turn = history[idx]
+        cues = turn_cues.get(idx)
+        if cues is None:
+            # Step 2's classify failed for this turn (``turn_cues`` is
+            # ``{idx: cues}`` — a failed classify is simply absent) — the
+            # turn releases nothing (the carried set is unchanged — the
+            # conservative outcome), mirroring the lexicon feed's
+            # try/except in ``chat_loop`` and ``versions_routes``.
+            continue
+        for axis in cues.relative:
+            if axis in cues.absolute:
+                # The lexicon already mapped the absolute value for this
+                # axis in the same turn; step 2 recorded it in ``out``
+                # and ``stated_at``. No release needed.
+                continue
+            if axis not in stated_at or stated_at[axis] >= idx:
+                continue
+            # ONE split per turn: it serves both the feature-noun test
+            # below and the unmapped-number lookup.
+            clauses = split_clauses(str(turn))
+            # A feature noun in ANY clause of the releasing turn means
+            # release-only (deliberate: release beats a possibly-wrong
+            # absolute): the feature is what grows, so an unmapped number
+            # in ANOTHER clause of the same turn (the "20 mm" in "make the
+            # lid taller, 20 mm") belongs to the feature and can never
+            # restate the part's axis. The test runs on EVERY clause — the
+            # number's own clause may be feature-free while the relative
+            # word's is not, and the number must not be assigned to the
+            # part.
+            if any(FEATURE_NOUN_RE.search(clause) for clause in clauses):
+                out.pop(axis, None)
+                continue
+            v = _unmapped_value_for_axis(cues, clauses)
+            if v is not None:
+                # The turn restates the axis with an explicit value the
+                # clause splitter left unassigned ("make it taller,
+                # 20 mm") — the value beats the relative word.
+                out[axis] = v
+            else:
+                out.pop(axis, None)
     return out
+
+
+def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
+    """The unmapped mm number a releasing turn assigns to its axis.
+
+    ``clauses`` is the turn's clause split (:func:`split_clauses`),
+    computed once by the release pass.
+
+    An unmapped number ("make it taller, 20 mm") restates the released
+    axis ONLY when the message carries EXACTLY ONE unmapped mm number
+    that is NOT an anchored delta, the clause containing it has no
+    feature noun, and the clause carries no RELATIVE-delta marker
+    ANCHORED to THIS number — "by 5 mm" / "5 mm taller" states an
+    increment whose new value is unknown, so the axis is released (asked
+    about), never enforced as the absolute 5.0 (a "taller by 5 mm" on a
+    12 mm part must not yield a physically shorter H=5.0). The delta
+    check is anchored to the specific unmapped number's occurrence
+    (``_delta_marker_at``): a delta marker on a DIFFERENT number in the
+    same clause ("make it taller by 5 mm, 30 mm" — "by" binds to 5, not
+    30) never suppresses THIS number's absolute statement. An unmapped
+    number that IS an anchored delta ("by 5 mm" / "5 mm taller") is
+    excluded from the count — it is an increment, not an absolute — so
+    the remaining non-delta numbers are what the ambiguity check sees.
+    Otherwise — the number belongs to a feature ("keep the 25 mm peg")
+    or is ambiguous (two or more non-delta unmapped numbers) — the axis
+    is released instead. ``None`` (release) when any condition fails.
+    """
+    all_numbers = cues.unmapped_mm_numbers
+    # Filter out numbers that are anchored deltas ("by 5 mm" / "5 mm
+    # taller") — they are increments, not absolute targets, and do not
+    # count toward the ambiguity check. The number→clause mapping is
+    # built once here and reused by the feature-noun check below (a
+    # single clause walk).
+    # The number→clause lookup matches the USER'S LITERAL TOKEN (issue
+    # #369 round 3): each clause is scanned with the single
+    # ``_MM_NUMBER_SPAN_RE`` and the token's text is compared to the
+    # parsed value with ``float(text) == number`` — never the lossy
+    # ``f"{number:g}"`` re-render, which would miss ``20.50`` / ``1e-05``
+    # / ``10000000``-style user text.
+    number_to_clause: dict[float, str] = {}
+    non_delta_numbers: list[float] = []
+    for number in all_numbers:
+        for clause in clauses:
+            for m in _mm_number_occurrences(clause):
+                if float(m.group(1)) == number:
+                    if not _delta_marker_at(number, clause):
+                        non_delta_numbers.append(number)
+                        number_to_clause[number] = clause
+                    break
+            else:
+                continue
+            break
+    if len(non_delta_numbers) != 1:
+        return None
+    number = non_delta_numbers[0]
+    # Found the number's clause: a feature noun there means the number
+    # belongs to the feature, not the axis (release); otherwise
+    # ``_coerce`` validates it (non-positive → None → release, never
+    # stated).
+    clause = number_to_clause[number]
+    if FEATURE_NOUN_RE.search(clause):
+        return None
+    return _coerce(number)
 
 
 def latest_stated_dims_dict(versions: Any, project_id: int) -> dict[str, float] | None:
@@ -407,15 +644,46 @@ def carried_stated_set(
     return latest_stated_dims_dict(versions, project_id)
 
 
-class CuesLike(Protocol):
-    """Structural type for the lexicon cue object
-    (``d33d.axis_lexicon.Cues``) — the ``cues`` input
-    :func:`effective_stated_dims` accepts (declared shape instead of
-    duck-typing via ``getattr``)."""
-
-    absolute: dict[str, float]
-    relative: set[str]
-    global_: bool
+def resolve_stated_cues(
+    carried: dict[str, float] | None,
+    message: str,
+    *,
+    label: str,
+    project_id: int | None = None,
+) -> dict[str, float]:
+    """The carry-forward merge for ONE message (issue #369 round 2):
+    try the per-axis extraction (``stated_axes_from_message``), fall back
+    to the lexicon's ``classify`` (the ``Cues`` — absolute + relative +
+    global) when the extraction yields no axis (a relative-only message
+    like "make it taller" states nothing on its own but RELEASES the
+    carried axis — semantics a bare dict cannot express), then merge into
+    the carried set via :func:`effective_stated_dims`. ANY failure in the
+    statement extraction OR the lexicon fallback degrades to the carried
+    set unchanged (no release, no override — a deliberate, conservative
+    choice: a failed classification must never manufacture a release or an
+    override), with a WARNING that carries lengths only (no message text —
+    no PII in logs). Used at the chat seam (``chat_loop``) and both
+    finalize seams (``versions_routes``).
+    """
+    try:
+        _am = stated_axes_from_message(message)
+        _cues_arg = _am if _am else classify(message)
+    except Exception:
+        # A cue-resolution failure degrades to the carried set unchanged
+        # (no release, no override — the conservative outcome). The
+        # warning carries lengths only (no message text — no PII in
+        # logs); ``project_id`` may be None (not always known at the
+        # call site).
+        logger.warning(
+            "%s: stated-axes cue resolution failed; carrying the "
+            "latest stated set unchanged (project_id=%s, len(message)=%d)",
+            label,
+            project_id,
+            len(message),
+            exc_info=True,
+        )
+        return effective_stated_dims(carried, None)
+    return effective_stated_dims(carried, _cues_arg)
 
 
 def offer_tier_signals(
@@ -455,7 +723,7 @@ def offer_tier_signals(
 
 def effective_stated_dims(
     latest_stated: dict[str, float] | None,
-    cues: CuesLike | dict[str, float] | None = None,
+    cues: dict[str, float] | Cues | None = None,
 ) -> dict[str, float]:
     """The carry-forward merge helper (issue #261's operator decision —
     ONE function, THREE call sites: chat ``post_chat``, finalize
@@ -566,10 +834,12 @@ def _classify_axis_cues(text: str) -> dict[str, float]:
     here too (the lexicon's own mate-zone guard), and the triple path
     wins on conflicts (the explicit cue, per the ticket's precedence:
     "axis letter cues > triple > cube shorthand > lexicon"), so this
-    only fills axes the triple left empty.
+    only fills axes the triple left empty. Note the classify call also
+    feeds the RELEASE pass (``_extract_stated`` step 4 reuses the same
+    ``Cues``' relative cues to decide which carried axis a newer message
+    releases) — this wrapper only surfaces the absolute half; treat the
+    underlying ``classify`` result as the seam, not the half.
     """
-    from d33d.axis_lexicon import classify
-
     return dict(classify(text).absolute)
 
 

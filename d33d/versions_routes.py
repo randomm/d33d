@@ -671,7 +671,6 @@ def create_versions_router() -> APIRouter:
         # ``render_artifact_dir`` (``None`` when the render did not record
         # one). Computing them on the pass path only (never on the
         # 422/502 early returns above).
-        from d33d.axis_lexicon import classify as _classify_axis_cues
         from d33d.design_loop_events import _version_param_meta
 
         # The per-axis stated evidence for the run (issue #246): the
@@ -691,7 +690,7 @@ def create_versions_router() -> APIRouter:
         from d33d.dimension_protocol import (
             carried_stated_set,
             effective_stated_dims,
-            stated_axes_from_message,
+            resolve_stated_cues,
         )
         from d33d.versions import resolve_version_name
 
@@ -721,10 +720,8 @@ def create_versions_router() -> APIRouter:
                 } or None
                 per_axis_stated = effective_stated_dims(_carried, explicit_axes)
             else:
-                _am = stated_axes_from_message(msg_text, chat_history=())
-                per_axis_stated = effective_stated_dims(
-                    _carried,
-                    _am if _am else _classify_axis_cues(msg_text),
+                per_axis_stated = resolve_stated_cues(
+                    _carried, msg_text, label="finalize", project_id=project_id
                 )
             # The project-level carried set (issue #312): written on every
             # finalize turn (pass or fail — the write is here because the
@@ -875,7 +872,6 @@ def _finalize_loop_kwargs(
       readable), and the user's request text (guaranteed non-empty — the
       failures.jsonl line is un-archivable without it).
     """
-    from d33d.axis_lexicon import classify as _classify_axis_cues
     from d33d.config.catalogue import CatalogueError, ResolutionError
     from d33d.design_loop_events import (
         EMPTY_PHOTO_DATA_URI,
@@ -886,7 +882,7 @@ def _finalize_loop_kwargs(
     from d33d.dimension_protocol import (
         carried_stated_set,
         effective_stated_dims,
-        stated_axes_from_message,
+        resolve_stated_cues,
     )
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
@@ -1015,10 +1011,9 @@ def _finalize_loop_kwargs(
         } or None
         current_axes = effective_stated_dims(_carried_gate, _explicit)
     else:
-        _am = stated_axes_from_message(body.request or body.message or "")
-        current_axes = effective_stated_dims(
-            _carried_gate,
-            _am if _am else _classify_axis_cues(body.request or body.message or ""),
+        _msg = body.request or body.message or ""
+        current_axes = resolve_stated_cues(
+            _carried_gate, _msg, label="gate", project_id=project_id
         )
     stated_dims = axes_to_gate_triple(current_axes)
     # The design-state block's data source (issue #120): the latest

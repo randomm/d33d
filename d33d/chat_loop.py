@@ -21,7 +21,6 @@ import json
 import logging
 from typing import Any
 
-from d33d.axis_lexicon import classify as _classify_axis_cues
 from d33d.chat_frames import answered_frames as _answered_frames
 from d33d.chat_frames import model_unconfigured_frames as _model_unconfigured_frames
 from d33d.design_loop_events import (
@@ -32,7 +31,7 @@ from d33d.design_loop_events import (
 from d33d.dimension_protocol import (
     carried_stated_set,
     effective_stated_dims,
-    stated_axes_from_message,
+    resolve_stated_cues,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,30 +149,12 @@ async def run_design_loop(
         )
         return {"status": "accepted"}
 
-    # The per-axis stated evidence — the gate's current-message source
-    # AND what the loop pass persists on the new version row (issue
-    # #246): the body's explicit ``stated_dims`` axes when a client
-    # sends one (the protocol's highest-priority source), else the
-    # protocol's per-axis extraction of the user's own words
-    # (``stated_axes_from_message`` reuses the same ``_extract_stated``
-    # pipeline — partial statements count for the axes they state).
-    # A statement that names no axis is ``{}`` → the version row
-    # persists NULL (abstain, never a fabricated axis row).
-    # The per-axis stated evidence (issue #246/#261) — the SINGLE
+    # The per-axis stated evidence (issue #246/#261/#369) — the SINGLE
     # value the carry-forward merge helper (``effective_stated_dims``)
-    # feeds BOTH the gate (``axes_to_gate_triple``) and the new
-    # version row's persisted ``stated_dims`` (never two divergent
-    # copies; the raw ``stated_axes_from_message`` result is not used
-    # directly here). The effective set starts as the latest
-    # version's persisted ``stated_dims`` and is adjusted by this
-    # turn's cues: the body's explicit ``stated_dims`` field OVERRIDES
-    # (precedence: body > explicit protocol cues > lexicon — no
-    # release semantics), else the protocol's explicit cues override,
-    # else the closed axis lexicon classifies the message (relative
-    # cues release their axis, global cues release all, absolute cues
-    # set — uncued axes carry forward). A statement that yields no
-    # axis is ``{}`` → the version row persists NULL (never a
-    # fabricated axis row).
+    # feeds BOTH the gate and the new version row. Cue precedence and
+    # release semantics are documented in ``effective_stated_dims``.
+    # A statement that yields no axis is ``{}`` → the version row persists
+    # NULL (abstain, never a fabricated axis row).
     explicit_body: dict[str, float] | None = None
     if stated_dims is not None:
         _w, _d, _h = stated_dims
@@ -187,24 +168,19 @@ async def run_design_loop(
     if explicit_body is not None:
         per_axis_stated = effective_stated_dims(_carried, explicit_body)
     else:
-        _latest = _carried
-        try:
-            _am = stated_axes_from_message(message, chat_history)
-            _cues_arg = _am if _am else _classify_axis_cues(message)
-        except Exception:
-            # The lexicon feed must never take the project down with
-            # it: a classification failure degrades to the carried
-            # set unchanged (no release, no override — the conservative
-            # outcome). The warning carries lengths only (no message
-            # text — no PII in logs).
-            logger.warning(
-                "dimension cue resolution failed; carrying the latest "
-                "stated set unchanged (len(message)=%d)",
-                len(message),
-                exc_info=True,
-            )
-            _cues_arg = None
-        per_axis_stated = effective_stated_dims(_latest, _cues_arg)
+        # Issue #369: the message's protocol cues are extracted with an
+        # EMPTY history (``[]``) — deliberate: the carried set already
+        # holds earlier turns, and with the echoed history a relative
+        # message would restate the carried value the user is releasing,
+        # and the merge treats any extracted axis as an absolute override,
+        # masking the release. The finalize route (``versions_routes``)
+        # passes full history to the same pipeline; the two call sites
+        # differ by design, not by pipeline. An EMPTY extraction falls
+        # back to the lexicon classification, which carries the
+        # RELATIVE/RELEASE semantics the dict shape cannot express.
+        per_axis_stated = resolve_stated_cues(
+            _carried, message, label="chat", project_id=project_id
+        )
 
     stated = axes_to_gate_triple(per_axis_stated)
 

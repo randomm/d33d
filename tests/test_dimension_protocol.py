@@ -42,6 +42,7 @@ from d33d.dimension_protocol import (
     offer_tier_signals,
     require_dimensions_confirmed,
     resolution_questions,
+    resolve_stated_cues,
     resolve_tolerance_mm,
     stated_axes_from_message,
     stated_dims_from_message,
@@ -983,6 +984,435 @@ class TestOfferTierSignals:
         released, quoted = offer_tier_signals("make a part")
         assert released is None
         assert quoted == set()
+
+
+class TestNewestWinsPerAxis:
+    """Issue #369: per axis, the NEWEST explicit stated value wins; a
+    relative word in a newer message releases that axis."""
+
+    def test_later_value_overrides_earlier(self):
+        """'make it 20 mm tall' after 'a 40mm wide box, 12mm tall' → W40, H20."""
+        axes = stated_axes_from_message(
+            "make it 20 mm tall", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes == {"W": 40.0, "H": 20.0}
+
+    def test_relative_releases_axis(self):
+        """'make it taller' after 'a 40mm wide box, 12mm tall' + 'make it
+        20 mm tall' → W40, H released (H absent)."""
+        axes = stated_axes_from_message(
+            "make it taller",
+            ["a 40mm wide box, 12mm tall", "make it 20 mm tall"],
+        )
+        assert axes == {"W": 40.0}
+        assert "H" not in axes
+
+    def test_relative_releases_w(self):
+        """'make it wider' → W released; H carried from the 20 mm explicit."""
+        axes = stated_axes_from_message(
+            "make it wider",
+            ["a 40mm wide box, 12mm tall", "make it 20 mm tall", "make it taller"],
+        )
+        assert "W" not in axes
+
+    def test_two_explicit_values_newest_wins(self):
+        """Two explicit H values in different messages → the newest wins."""
+        axes = stated_axes_from_message("H: 20", ["H: 12"])
+        assert axes == {"H": 20.0}
+
+    def test_explicit_stated_dims_are_never_released_by_relative_history(
+        self,
+    ):
+        """The caller's explicit ``stated_dims`` (step 1) are NOT history:
+        the release pass only touches axes whose ``stated_at`` was
+        recorded by the chat-text scan, so a relative word in history
+        ("make it taller") can never release an explicit H."""
+        c = require_dimensions_confirmed(
+            ["a 40mm wide box, 12mm tall", "make it taller"],
+            {"W": 50.0, "D": 30.0, "H": 12.0, "fit_type": "no_fit"},
+        )
+        assert c.confirmed is True
+        assert c.stated_dims == (50.0, 30.0, 12.0)
+
+    def test_same_message_explicit_beats_relative(self):
+        """'H: 20, make it taller' → H=20 (explicit axis-letter wins over
+        the relative word in the same message)."""
+        axes = stated_axes_from_message(
+            "H: 20, make it taller", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.0
+
+class TestRelativeRelease:
+    """Issue #369: a relative word releases the axis it names — with the
+    per-turn guards (feature clauses, unmapped numbers) that decide
+    release vs restate."""
+
+    def test_single_unmapped_number_restates_released_axis(self):
+        """'make it taller, 20 mm' → H=20: the message carries EXACTLY ONE
+        unmapped mm number and its clause has no feature noun, so the number
+        is the released axis's own new value — set, not release."""
+        axes = stated_axes_from_message(
+            "make it taller, 20 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.0
+
+    def test_relative_word_in_feature_clause_releases_only(self):
+        """'make the lid taller, 20 mm' → H released: the relative word
+        ('taller') sits in a clause with a feature noun ('lid'), so the
+        releasing turn releases ONLY — an unmapped number in ANOTHER clause
+        of the same turn can never restate the part's axis (the 20 mm
+        belongs to the feature, not the part)."""
+        axes = stated_axes_from_message(
+            "make the lid taller, 20 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+        assert axes["W"] == 40.0
+
+    def test_feature_clause_unmapped_number_releases_axis(self):
+        """'make it taller, keep the 25 mm peg' → H released: the sole
+        unmapped number sits in a feature-noun clause ('peg'), so it belongs
+        to the feature, not the part — never enforce a stray feature number."""
+        axes = stated_axes_from_message(
+            "make it taller, keep the 25 mm peg", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+    def test_two_unmapped_numbers_release_axis(self):
+        """'make it taller, 20 mm, and the hole 5 mm' → H released: two
+        unmapped numbers are ambiguous about which restates the axis."""
+        axes = stated_axes_from_message(
+            "make it taller, 20 mm, and the hole 5 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert "H" not in axes
+
+    def test_relative_delta_releases_not_enforces(self):
+        """A RELATIVE delta ('by N mm' / 'N mm <axis-word>') is an
+        increment, never an absolute target: the axis is released (the
+        gate asks for the new value) instead of enforcing the delta as an
+        absolute. On a 12 mm part, 'taller by 5 mm' must NOT yield
+        H=5.0 — a physically shorter target."""
+        for msg in (
+            "taller by 5 mm",
+            "make it taller by 5 mm",
+            "5 mm taller",
+            "make it wider by 3 mm",
+            "wider by 3 mm",
+            "3 mm wider",
+            "make it 3 mm wider",
+            "deeper by 2 mm",
+            "2 mm deeper",
+            "make it 2 mm deeper",
+        ):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            target = "H" if "tall" in msg or "short" in msg else "W" if "wide" in msg or "narrow" in msg else "D"
+            assert target not in axes, (
+                f"{msg!r} is a relative delta — {target} must be released, got {axes}"
+            )
+
+class TestAnchoredDeltaMarkers:
+    """Issue #369 round 2: delta markers are anchored to their own number
+    — a marker on a different number never suppresses the other number's
+    absolute statement."""
+
+    def test_delta_marker_does_not_block_other_axes(self):
+        """A delta message releases only its own axis: 'make it wider by
+        3 mm' releases W while H=12 stays enforced (the delta marker is
+        clause-local to the delta's own clause)."""
+        axes = stated_axes_from_message(
+            "make it wider by 3 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "W" not in axes
+        assert axes["H"] == 12.0
+
+    def test_nonpositive_unmapped_value_never_stated(self):
+        """A non-positive explicit value ("0 mm") is never stated — the
+        released axis is released, and the gate abstains."""
+        for msg in ("make it taller, 0 mm", "make it taller, -5 mm"):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            assert "H" not in axes
+
+    def test_older_relative_does_not_consume_axis(self):
+        """A relative word in an OLDER message must not 'consume' the axis
+        such that a NEWER explicit value is lost."""
+        axes = stated_axes_from_message(
+            "make it shorter",
+            ["make it taller", "a 40mm wide box, 12mm tall"],
+        )
+        assert "H" not in axes  # released by the newer relative word
+        assert "W" in axes
+
+    def test_empty_history_message_alone_sets_axes_not_history(self):
+        """EMPTY-history extraction (the chat route's deliberate empty-history
+        call — rationale in ``chat_loop``'s module comment) reads the message
+        alone; a relative-only message extracts nothing."""
+        assert stated_axes_from_message("a 40mm wide box", []) == {"W": 40.0}
+        # A relative-only message states no axis on its own:
+        assert stated_axes_from_message("make it taller", []) == {}
+
+    def test_empty_history_release_drops_carried_axis(self):
+        """The end-to-end chat-route release: message alone (empty history)
+        states no axis → the lexicon classification releases the carried
+        H, and the merge drops it."""
+        from d33d.axis_lexicon import classify
+
+        carried = {"W": 40.0, "H": 12.0}
+        extracted = stated_axes_from_message("make it taller", [])
+        cues = extracted if extracted else classify("make it taller")
+        assert effective_stated_dims(carried, cues) == {"W": 40.0}
+
+class TestWindowBoundary:
+    """Issue #369: the extraction window is the last 50 prior turns plus
+    the current message — the boundary is exact and the current message
+    is never dropped."""
+
+    def test_history_window_boundary_is_exact(self):
+        """Window semantics, pinned to the EXACT boundary: the window is
+        the LAST ``QUOTED_UNMAPPED_MAX_MESSAGES`` (50) prior-history
+        turns, mirroring ``user_quoted_unmapped_mm`` (called with the
+        prior turns alone — ``list(prior_turns)[-50:]``), plus the
+        current message (appended last, index ``len(prior)`` — always in
+        the window). An off-by-one in EITHER direction fails this test:
+        ``window_start`` too large (e.g. ``len(history) + 1 - 50``)
+        drops the boundary turn (idx ``len(prior) - 50``) that the
+        aligned rule keeps; too small (e.g. ``len(history) - 51``) keeps
+        the turn (idx ``len(prior) - 51``) the aligned rule drops."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        k = QUOTED_UNMAPPED_MAX_MESSAGES
+        # BOUNDARY-INSIDE: ``k - 1`` prior turns → N = k, ``window_start``
+        # = 0, so idx 0 (the statement) is the OLDEST turn inside the
+        # window → stated:
+        inside = ["W: 40"] + [f"filler {i}" for i in range(k - 2)]
+        assert len(inside) == k - 1
+        axes = stated_axes_from_message("filler X", inside)
+        assert axes["W"] == 40.0
+        # BOUNDARY-OUTSIDE: one more filler (``k`` prior) → N = k + 1,
+        # ``window_start`` = 1; the statement at idx 0 falls one turn out
+        # of the window → not stated:
+        outside = [*inside, f"filler {k - 2}"]
+        assert len(outside) == k
+        assert outside[0] == "W: 40"
+        axes = stated_axes_from_message("filler X", outside)
+        assert "W" not in axes
+
+    def test_window_always_includes_current_message(self):
+        """The current message (the newest element, appended last by the
+        wrappers) is ALWAYS inside the window — with 51+ prior turns
+        its own statement is still scanned. True under both window
+        arithmetics (it is never the element the window drops) — this
+        pins the invariant, not an off-by-one."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        axes = stated_axes_from_message("a 40 mm wide box, 20 mm tall", filler)
+        assert axes["W"] == 40.0
+        assert axes["H"] == 20.0
+
+    def test_window_old_statement_outside_newest_wins(self):
+        """An old "H: 12" OUTSIDE the window never wins over the current
+        message's "make it 20 mm tall": with 51+ prior turns the current
+        message is the newest statement (scanned), and the out-of-window
+        "H: 12" is the only other H statement — dropped, so it cannot
+        override the current one."""
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        filler[5] = "H: 12"
+        axes = stated_axes_from_message("make it 20 mm tall", filler)
+        assert axes["H"] == 20.0
+
+
+class TestAnchoredDeltaNewestWins:
+    """Issue #369: per axis, the NEWEST explicit stated value wins — the
+    anchored-delta discriminator that the round-2 anchoring exists for."""
+
+    def test_unanchored_delta_marker_on_other_number_does_not_release(self):
+        """"make it taller by 5 mm, 30 mm" → H=30: the delta marker ("by")
+        binds to 5, not 30 — the 30 is an unmapped number with no anchored
+        delta marker in its clause, so it restates the released axis."""
+        axes = stated_axes_from_message(
+            "make it taller by 5 mm, 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+        assert axes["W"] == 40.0
+
+    def test_same_clause_delta_marker_on_other_number_keeps_absolute(self):
+        """DISCRIMINATOR (issue #369 round 2): same clause (no comma) —
+        "make it taller by 5 mm and 30 mm". The preposition "by" sits in
+        the SAME clause as the unmapped 30. The anchoring excludes 5
+        (an anchored delta) from the ambiguity count, and the clause-local
+        marker check for 30 must be anchored to 30 itself: with the
+        unanchored pattern ("\\bby\\s+(?=\\d)") the "by" of "by 5 mm"
+        matches inside 30's own clause and releases H; anchored, the 30
+        restates the released axis (H=30). Fails when "_delta_marker_for"
+        is reverted to the unanchored form (proven in the PR review:
+        revert → this test fails with "H" absent → restore → passes)."""
+        axes = stated_axes_from_message(
+            "make it taller by 5 mm and 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+        assert axes["W"] == 40.0
+
+    def test_taller_by_5mm_still_releases(self):
+        """"taller by 5 mm" → H released: the delta marker IS anchored to
+        the sole unmapped number (5), so the axis is released."""
+        axes = stated_axes_from_message(
+            "taller by 5 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+    def test_make_it_5mm_taller_still_releases(self):
+        """"make it 5 mm taller" → H released: the delta marker IS anchored
+        to the sole unmapped number (5), so the axis is released."""
+        axes = stated_axes_from_message(
+            "make it 5 mm taller", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+
+class TestLiteralNumberTextMatching:
+    """Issue #369 round 3: the number→clause lookup matches the USER'S
+    LITERAL token text (``float(token) == number``), never the lossy
+    ``f"{number:g}"`` re-render — a re-render can miss the literal in
+    both directions (``20.50`` → ``20.5``, ``10000000`` → ``1e+07``),
+    and a missed token makes the delta marker look unanchored (a release
+    that should restate, or a restate that should release)."""
+
+    def test_delta_with_scientific_delta_and_plain_absolute(self):
+        """"make it taller by 1e-05 mm, 30 mm" → H=30: the user's literal
+        ``1e-05`` only re-renders the same by luck, but the 30 token must
+        still be found by literal match and restated."""
+        axes = stated_axes_from_message(
+            "make it taller by 1e-05 mm, 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+
+    def test_scientific_delta_releases(self):
+        """"taller by 1e-05 mm" → H released: the delta marker anchors on
+        the literal scientific-notation token, and the large literal form
+        (``10000000`` mm) does the same — both would be missed by a
+        ``:g`` re-render of the parsed float."""
+        for msg in ("taller by 1e-05 mm", "taller by 10000000 mm"):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            assert "H" not in axes, (
+                f"{msg!r} is a relative delta — H must be released, got {axes}"
+            )
+
+    def test_trailing_zero_literal_restates(self):
+        """"make it taller, 20.50 mm" → H=20.5: the user's trailing-zero
+        literal (``:g`` re-renders ``20.50`` as ``20.5``) is still found,
+        so the number restates the released axis."""
+        axes = stated_axes_from_message(
+            "make it taller, 20.50 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.5
+
+class TestExplicitNotReleasedByHistory:
+    """Issue #369 round 3, pinned behaviour (a): the caller's explicit
+    ``stated_dims`` (step 1) are NOT history — a relative word in chat
+    history never releases them (the release pass only touches axes with
+    a ``stated_at`` recorded by step 2's chat-text scan)."""
+
+    def test_explicit_stated_dims_never_released_by_relative_history(self):
+        """Explicit {W, D, H} + a later chat "make it taller" → the full
+        triple is still confirmed; H survives (a relative word in history
+        cannot release the caller's explicit ground truth)."""
+        c = require_dimensions_confirmed(
+            ["make it taller"],
+            {"W": 40.0, "D": 30.0, "H": 12.0, "fit_type": "no_fit"},
+        )
+        assert c.confirmed is True
+        assert c.stated_dims == (40.0, 30.0, 12.0)
+
+class TestOutOfWindowStatementNeverReleased:
+    """Issue #369 round 3, pinned behaviour (b): a statement OLDER than
+    the window never enters ``out`` in step 2 (no ``stated_at`` entry),
+    so there is nothing for the release pass to release — releasing the
+    carried set is the CURRENT message's cues' job via
+    ``effective_stated_dims``, not the release pass' job. Pinned to the
+    actual behaviour: an out-of-window "H: 40" with a newer "make it
+    taller" yields H ABSENT — not released-then-restated, simply never
+    extracted."""
+
+    def test_out_of_window_statement_absent_not_released(self):
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        filler[0] = "H: 40"
+        axes = stated_axes_from_message("make it taller", filler)
+        assert "H" not in axes  # never in `out` → nothing to release
+
+
+class TestResolveStatedCues:
+    """Issue #369 round 2: the ONE helper that does try /
+    stated_axes_from_message / classify fallback / effective_stated_dims
+    with the degrade-and-warn behaviour."""
+
+    def test_sets_axis_from_message(self):
+        """A message that states an axis sets it in the result."""
+        result = resolve_stated_cues(
+            {"W": 40.0}, "make it 12 mm tall", label="test"
+        )
+        assert result["H"] == 12.0
+        assert result["W"] == 40.0
+
+    def test_releases_axis_via_lexicon_fallback(self):
+        """A relative-only message ("make it taller") states nothing on
+        its own → falls back to the lexicon's Cues → releases the carried
+        H."""
+        result = resolve_stated_cues(
+            {"W": 40.0, "H": 12.0}, "make it taller", label="test"
+        )
+        assert "H" not in result
+        assert result["W"] == 40.0
+
+    def test_degrades_on_classify_failure(self, monkeypatch):
+        """A classify failure degrades to the carried set unchanged."""
+        import d33d.dimension_protocol as dp
+
+        def _boom(message: str):
+            raise RuntimeError("lexicon on fire")
+
+        monkeypatch.setattr(dp, "classify", _boom)
+        result = resolve_stated_cues(
+            {"W": 40.0, "H": 12.0}, "make it taller", label="test"
+        )
+        assert result == {"W": 40.0, "H": 12.0}
+
+
+class TestGateReleasesAxes:
+    """Issue #369: ``require_dimensions_confirmed``'s gate input runs the
+    same release pass — a newer relative word releases the axis the gate
+    would otherwise enforce (conservative: ask, never enforce a stale
+    value the user just disputed)."""
+
+    def test_gate_released_axis_stays_open(self):
+        """'a 40mm wide box, 12mm tall' + a slip fit, then 'make it taller'
+        → NOT confirmed; W stays stated, H is released (the gate asks
+        about H instead of enforcing the stale 12)."""
+        c = require_dimensions_confirmed(
+            ["a 40mm wide box, 12mm tall", "it's a slip fit", "make it taller"],
+            None,
+        )
+        assert c.confirmed is False
+        assert any("H" in q for q in c.questions)
+
+    def test_gate_unchanged_without_release(self):
+        """The same conversation without the release confirms W/D/H —
+        the release is what keeps the gate open."""
+        c = require_dimensions_confirmed(
+            [
+                "a 40mm wide box, 12mm tall",
+                "it's 30mm deep",
+                "it's a slip fit",
+            ],
+            None,
+        )
+        assert c.confirmed is True
+        assert c.params["H"] == 12.0
 
 
 class TestTripleExtraction:
