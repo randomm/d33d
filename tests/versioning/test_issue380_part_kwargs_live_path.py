@@ -18,17 +18,20 @@ the ONLY thing that can fail iteration one — a gate failure would be
 indistinguishable from the guard, so the test pins the guard's own
 evidence text on the repair directive.
 
-Hermetic pre-flight: the test supplies ``image_check`` (via the app
-state, forwarded to the loop's ``image_check`` seam) and ``renderer_check``
-(never — the conftest hermetic stub covers the ``renderer_is_available``
-probe) so the loop's Docker pre-flight never shells out. On CI the render
-worker image is absent while the Docker daemon IS present, so without
-``image_check`` the real image probe reports ``image_missing`` and the
-loop short-circuits to ``renderer_image_stale`` BEFORE iteration one —
-the guard never runs and the test fails on ``failure_class is None``.
-Injecting ``image_check=lambda: None`` (the hermetic "image present, label
-matches" default) makes the outcome independent of the host's Docker
-state, matching the conftest hermetic stub's contract.
+Hermetic render: the closure's internal ``render_fn`` (built from the
+stubbed ``project_row_for_worker``) would otherwise call the REAL
+``render_for_design_loop`` — a Docker run that is hermetic on a dev
+machine (image present) but classifies ``container_error`` on CI (no
+``d33d/render-worker:local`` image), where the guard never fires and the
+test fails on ``failure_class is None`` (the iteration-1 failure class is
+never routed for a non-``ok`` render). Patching
+``d33d.app.render_for_design_loop`` (the name ``d33d.app``'s module-level
+import binds; the closure's ``_render_fn`` resolves it at call time) to
+the stub render keeps the whole render path — including the production
+closure's own ``render_fn`` — independent of host Docker state, matching
+the conftest hermetic stub's contract. The loop's ``renderer_is_available``
+/ ``_render_worker_image_detail`` pre-flight probes are covered by the
+conftest ``_hermetic_render_preflight`` autouse stub.
 """
 
 from __future__ import annotations
@@ -76,7 +79,9 @@ def _no_import_llm_factory(_base: str, _key: str):
     return _factory
 
 
-def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
+def test_production_closure_live_path_fires_import_guard(
+    tmp_path: Path, monkeypatch: Any
+):
     """The production closure, driven with a part project's kwargs
     (``part_scale=1.0`` + the part's measured 20×20×20 bbox), reaches the
     real ``run_design_loop_async`` through the real hook and the import
@@ -88,7 +93,6 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
     import d33d.config.probes as probes_mod
     import d33d.config.resolve as resolve_mod
     import d33d.db as db_mod
-    import d33d.design_loop as dl_mod
     from d33d.app import _build_production_design_loop
     from d33d.config.catalogue import Catalogue, ModelEntry, Provider
     from d33d.config.probes import CapabilityResult
@@ -131,16 +135,6 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         catalogue_path = Path("/dev/null")
         db_path = Path(_db_path)
         failures_jsonl_path = Path("/dev/null")
-        # The loop's pre-flight image probe (issue #346): the app forwards
-        # ``getattr(app_state, "image_check", None)`` to the loop's
-        # ``image_check`` seam. On CI the Docker daemon is present but the
-        # render-worker image is absent, so a ``None`` here lets the REAL
-        # probe report ``image_missing`` and short-circuit the loop to
-        # ``renderer_image_stale`` before iteration one (the guard never
-        # runs). The hermetic "image present, label matches" default is
-        # ``None`` (no fault) — the same value the conftest hermetic stub
-        # installs, keeping the test independent of host Docker state.
-        image_check = staticmethod(lambda: None)
 
     bbox = BboxInfo(
         x=20.0, y=20.0, z=20.0,
@@ -157,25 +151,34 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         views=("v0.png", "v1.png", "v2.png", "v3.png", "v4.png", "v5.png"),
     )
 
-    def _render_fn(_scad, _defines):
+    def _render_fn(_scad, _defines, **_kw: Any) -> RenderResult:
+        # Signature-agnostic stub: the loop calls it with the 2-arg
+        # ``render_fn(scad, defines)`` contract; the closure's internal
+        # ``_render_fn`` calls it with extra kwargs (``renders_dir``,
+        # ``on_progress``, ...) — all ignored.
         return ok_render
+
+    # The closure's internal ``_render_fn`` (built by
+    # ``_build_production_design_loop``) calls ``render_for_design_loop``
+    # — the name ``d33d.app`` imported at module level, resolved at call
+    # time. Patch THAT binding (not the loop's caller kwarg, which the
+    # closure ignores) so the production render path is the stub render:
+    # independent of host Docker state (a real run on CI classifies
+    # ``container_error`` — no render-worker image — and the guard
+    # never runs).
+    monkeypatch.setattr(app_mod, "render_for_design_loop", _render_fn)
 
     originals = {
         "cat": cat_mod.load_catalogue,
         "res": resolve_mod.resolve_model,
         "probe": probes_mod.probe_capabilities,
         "app_http": app_mod._http_request_factory,
-        "renderer": dl_mod.renderer_is_available,
     }
     try:
         cat_mod.load_catalogue = _stub_load_catalogue
         resolve_mod.resolve_model = _stub_resolve_model
         probes_mod.probe_capabilities = _stub_probe_capabilities
         app_mod._http_request_factory = _no_import_llm_factory
-        # The loop's pre-flight ``docker info`` probe (issue #277) — the
-        # stub render must run without a Docker daemon. The image probe is
-        # handled by ``_StubAppState.image_check`` (see class body above).
-        dl_mod.renderer_is_available = lambda: True
 
         wrapper = _build_production_design_loop()
         result = asyncio.run(
@@ -197,7 +200,6 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         resolve_mod.resolve_model = originals["res"]
         probes_mod.probe_capabilities = originals["probe"]
         app_mod._http_request_factory = originals["app_http"]
-        dl_mod.renderer_is_available = originals["renderer"]
         # The hook's failures.jsonl append (an exhausted result) pointed at
         # /dev/null — nothing on disk to clean.
 
