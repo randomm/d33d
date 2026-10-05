@@ -430,10 +430,7 @@ export function FailureTurn({
                 )
               }
             >
-              {copy.failure.sizeMismatch.lipPartItself(
-                sizeLipQuestion.asked,
-                SIZE_AXIS_WORDS[sizeLipQuestion.axis],
-              )}
+              {copy.failure.sizeMismatch.lipButtonPartItself}
             </button>
             <button
               type="button"
@@ -449,10 +446,7 @@ export function FailureTurn({
                 )
               }
             >
-              {copy.failure.sizeMismatch.lipOverallIncludingLip(
-                sizeLipQuestion.asked,
-                SIZE_AXIS_WORDS[sizeLipQuestion.axis],
-              )}
+              {copy.failure.sizeMismatch.lipButtonOverallIncludingLip}
             </button>
           </>
         ) : (

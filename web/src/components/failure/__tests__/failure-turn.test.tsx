@@ -658,17 +658,27 @@ describe("FailureTurn", () => {
     expect(heading.textContent).not.toContain("width");
     // The old single button is gone.
     expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
-    // Two buttons, each prefilling its own answer.
+    // Two buttons: the SHORT operator-chosen labels on the buttons,
+    // each prefilling the composer with its FULL answer sentence.
     const partBtn = screen.getByTestId("failure-action-lip-part-itself");
     const overallBtn = screen.getByTestId("failure-action-lip-overall");
+    const partLabel = copy.failure.sizeMismatch.lipButtonPartItself;
+    const overallLabel = copy.failure.sizeMismatch.lipButtonOverallIncludingLip;
     const partText = copy.failure.sizeMismatch.lipPartItself(60, "width");
     const overallText = copy.failure.sizeMismatch.lipOverallIncludingLip(60, "width");
-    expect(partBtn.textContent).toBe(partText);
-    expect(overallBtn.textContent).toBe(overallText);
+    // The button labels are the short operator-chosen words, not the
+    // full prefill sentences.
+    expect(partLabel).toBe("The part itself");
+    expect(overallLabel).toBe("Overall, including the lip");
+    expect(partBtn.textContent).toBe(partLabel);
+    expect(overallBtn.textContent).toBe(overallLabel);
+    // Each click prefills the composer with the full answer sentence.
     fireEvent.click(partBtn);
     expect(onAction).toHaveBeenCalledWith(partText);
+    expect(partText).toContain("60.0\u202Fmm is the part's own width");
     fireEvent.click(overallBtn);
     expect(onAction).toHaveBeenCalledWith(overallText);
+    expect(overallText).toContain("is the overall width, including the lip");
     // No bed actions.
     expect(screen.queryByTestId("failure-action-split")).toBeNull();
   });

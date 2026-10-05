@@ -498,7 +498,13 @@ export const failure = {
      *  the noun "how width" (issue #398). */
     whichMeasurement: (askedMm: number, axisAdjective: string): string =>
       `Is ${mm(askedMm)} how ${axisAdjective} the part itself is, or how the whole thing is, lip included?`,
-    /** The two lip-question buttons (operator decision 4): each prefills
+    /** The two lip-question button LABELS (operator decision 4): the short
+     *  names the operator chose for the two-button split. The buttons
+     *  prefill the composer with `lipPartItself` / `lipOverallIncludingLip`;
+     *  the labels are what is printed on the buttons themselves. */
+    lipButtonPartItself: "The part itself",
+    lipButtonOverallIncludingLip: "Overall, including the lip",
+    /** The two lip-question prefills (operator decision 4): each prefills
      *  the composer with the answer it represents, so the next design
      *  pass holds the right number. `axisNoun` is "width"/"depth"/"height"
      *  (the row's noun); the overall variant names the lip explicitly so
