@@ -41,10 +41,11 @@ import re
 from dataclasses import dataclass, field
 from functools import cache
 
-# Stable internal API — the following private names are ALSO consumed by
-# d33d.dimension_protocol: ``_ABSOLUTE`` and ``RELATIVE_WORDS`` (delta
-# markers), ``_FEATURE_NOUN_RE`` (feature-noun suppression) and
-# ``_CLAUSE_SPLIT_RE`` (clause splitting).
+# Stable internal API — the following private/internal-contract names are
+# ALSO consumed by d33d.dimension_protocol: ``_ABSOLUTE`` and
+# ``RELATIVE_WORDS`` (delta markers), ``_FEATURE_NOUN_RE`` (feature-noun
+# suppression), ``_split_clauses`` (clause splitting) and ``classify``
+# (cues).
 
 __all__ = [
     "GLOBAL_WORDS",
