@@ -44,7 +44,11 @@ def _get_executor() -> ProcessPoolExecutor:
 
 
 def _shutdown_executor() -> None:
-    """Shut down the executor (called at process exit / test teardown)."""
+    """Shut down the executor and reset it to ``None``.
+
+    Called on repair timeout (the stuck worker is killed so the next
+    ``_get_executor`` creates a fresh pool) and at test teardown.
+    """
     global _executor
     if _executor is not None:
         _executor.shutdown(wait=False)
@@ -123,8 +127,15 @@ def repair_with_pmf(
         repaired_verts, repaired_faces = future.result(timeout=timeout)
     except FutTimeoutError:
         # The worker process is stuck (pymeshfix on a pathological mesh).
-        # Cancel the future and re-raise as a clean PartUploadError.
+        # ``future.cancel()`` only works if the task hasn't started; once
+        # running it has no effect. We must kill the pool so the stuck
+        # worker doesn't block all subsequent repairs (a single-worker
+        # pool with one busy worker = every future repair queues behind
+        # it and also times out). ``_shutdown_executor`` calls
+        # ``shutdown(wait=False)`` which tears down the worker process;
+        # the next ``_get_executor`` call creates a fresh, healthy pool.
         future.cancel()
+        _shutdown_executor()
         raise PartUploadError(
             f"repair timed out: exceeded {timeout:.0f}s"
         ) from None
