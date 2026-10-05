@@ -79,6 +79,15 @@ from d33d.part_http import (
     part_public,
     resolve_v1_part_path,
 )
+
+#: Issue #395: the 422 detail for a repair timeout (process-boundary
+#: timeout on the pymeshfix repair). Distinct from the unparseable detail:
+#: the mesh is NOT broken, it's just too slow to repair. The copy.ts key
+#: ``partUpload.repairTimeout`` (added by the SPA workstream) must match
+#: this string exactly (parity pinned by the test below).
+PART_UPLOAD_REPAIR_TIMEOUT_DETAIL = (
+    "The file is too complex to repair in time. Try simplifying the mesh."
+)
 from d33d.part_mesh import (
     MAX_PART_FACES,
     PartFileTooLargeError,
@@ -233,7 +242,15 @@ def create_part_router() -> APIRouter:
             _mesh, report, file_unit = await asyncio.to_thread(
                 parse_and_repair, content, part_format
             )
-        except PartUploadError:
+        except PartUploadError as e:
+            # Distinguish a repair timeout ("repair timed out: …") from
+            # other unparseable failures — the timeout gets its own
+            # copy.ts message (the mesh isn't broken, it's just too slow
+            # to repair in the allotted time).
+            if "timed out" in str(e):
+                raise HTTPException(
+                    status_code=422, detail=PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+                )
             raise HTTPException(status_code=422, detail=PART_UPLOAD_UNPARSEABLE_DETAIL)
 
         # Unit handling (STL: plausible→assumed / else unsettled options;
@@ -668,6 +685,7 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_UPLOAD_BYTES",
     "PART_UPLOAD_COMMIT_FAILED_DETAIL",
+    "PART_UPLOAD_REPAIR_TIMEOUT_DETAIL",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
     "PART_UPLOAD_UNSUPPORTED_DETAIL",

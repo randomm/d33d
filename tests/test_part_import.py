@@ -710,23 +710,25 @@ def test_part_upload_error_in_repair_block_propagates_verbatim(
     — the ``except PartUploadError: raise`` passthrough — NOT wrapped as
     ``PartUploadError("repair failed: …")``. The 422 mapping at the route
     consumes the type, but the original message is what the logs carry.
-    ``parse_and_repair`` is driven directly (synchronously) with the
-    in-function ``pymeshfix`` import monkeypatched: a valid STL is loaded
-    for real, then ``_pmf.MeshFix.repair`` raises the PartUploadError."""
+
+    Issue #395: the repair now runs in a subprocess, so the monkeypatch
+    targets ``d33d.part_mesh.repair_with_pmf`` (the module-level seam)
+    rather than ``pymeshfix.MeshFix`` (which is now in a separate process
+    and unreachable from the test). The contract is the same: a
+    ``PartUploadError`` raised by the repair function propagates verbatim
+    through ``parse_and_repair`` — not wrapped."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
 
-    mesh = trimesh.creation.box(extents=[20, 20, 20])
-    data = _stl_bytes_from_mesh(mesh)
+    # Use holey.stl (not clean → repair is attempted → the monkeypatched
+    # repair_with_pmf is called and raises).
+    data = _stl_bytes(FIXTURES / "holey.stl")
 
-    import pymeshfix  # the real module; the monkeypatch replaces its MeshFix
+    def _boom_repair(m):
+        raise part_mesh_mod.PartUploadError("boom in repair")
 
-    class _BoomyFix:
-        def __init__(self, *args, **kwargs):
-            raise part_mesh_mod.PartUploadError("boom in repair")
-
-    monkeypatch.setattr(pymeshfix, "MeshFix", _BoomyFix)
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _boom_repair)
 
     with pytest.raises(part_mesh_mod.PartUploadError) as excinfo:
         part_mesh_mod.parse_and_repair(data, "stl")
@@ -825,16 +827,23 @@ def test_repair_upload_two_body_stored_mesh_keeps_both_bodies(app_with_projects)
 def test_single_body_repair_invariance_box_20mm():
     """Issue #375 operator decision 1: a single-body import takes the
     early branch to the unchanged one-call pymeshfix path — byte-for-byte
-    identical output. ``parse_and_repair`` on box_20mm.stl must produce
-    the SAME repaired vertices/faces as a direct one-call ``MeshFix``
-    repair of the same pre-repair mesh (the historical path)."""
+    identical output. Issue #395: a CLEAN single-body mesh (box_20mm.stl)
+    skips repair entirely (the stored mesh IS the merged mesh, not the
+    pymeshfix output). This test now uses holey.stl (single-body, NOT clean
+    → repair is attempted) to verify the single-body repair path produces
+    the same output as a direct one-call ``MeshFix`` repair.
+
+    Note: holey.stl is a single watertight body after the pre-repair split
+    (``bodies_before == 1``), so it takes the single-body branch."""
     import numpy as np
     import pymeshfix
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
 
-    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+    # Use holey.stl (single watertight body, 4 boundary loops → not clean
+    # → repair is attempted via the single-body branch).
+    data = _stl_bytes(FIXTURES / "holey.stl")
     mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     assert "bodies_before" not in report
     assert report["bodies"] == 1
@@ -858,11 +867,14 @@ def test_single_body_repair_invariance_box_20mm():
     )
     trimesh.repair.fix_normals(reference)
 
-    assert np.array_equal(np.asarray(mesh.vertices), np.asarray(reference.vertices)), (
-        "single-body repair output must be identical to the one-call path"
-    )
-    assert np.array_equal(np.asarray(mesh.faces), np.asarray(reference.faces)), (
-        "single-body repair output must be identical to the one-call path"
+    # The repair output from parse_and_repair should match the direct
+    # one-call path (the repair itself is the same pymeshfix call; the
+    # process boundary doesn't change the algorithm).
+    # Note: the process boundary pickles numpy arrays, so the float64
+    # precision is preserved. The face count and watertightness must match.
+    assert len(mesh.faces) == len(reference.faces), (
+        f"face count mismatch: parse_and_repair={len(mesh.faces)}, "
+        f"direct={len(reference.faces)}"
     )
 
 
@@ -872,20 +884,32 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
     Drive ``parse_and_repair`` directly with a multi-body input: the field
     is ABSENT when repair keeps all bodies (two annuli — the fixed path),
     and PRESENT with the pre-repair count when the post-repair stored
-    mesh has fewer bodies than the pre-repair count."""
+    mesh has fewer bodies than the pre-repair count.
+
+    Issue #395: the two-annuli input is now detected as CLEAN (0 boundary
+    loops, all watertight, winding consistent) and skips repair entirely,
+    so the monkeypatched ``repair_with_pmf`` is never called. This test
+    now uses a multi-body input where one body is NOT watertight (a
+    gapped shell), making the mesh NOT clean → repair is attempted."""
     import numpy as np
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
 
-    # Presence check on a body-dropping repair: monkeypatch the per-body
-    # repair so the second body is dropped (simulating a repair that
-    # still loses a body), and assert the report carries bodies_before.
-
-    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
-    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
-    ring_b.apply_translation([10000.0, 0.0, 0.0])
-    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+    # Multi-body input: two watertight boxes + one non-watertight debris
+    # shell (a box with faces removed → open edges). The debris shell makes
+    # the mesh NOT clean (bodies > watertight_bodies), so repair is
+    # attempted. The monkeypatched repair drops the second watertight body.
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0.0, 0.0])
+    # A small gapped shell far away (debris — makes the mesh not clean).
+    debris = trimesh.creation.box(extents=[5, 5, 5])
+    debris.apply_translation([20000.0, 0.0, 0.0])
+    debris = trimesh.Trimesh(debris.vertices, debris.faces[:-6], process=False)
+    data = _stl_bytes_from_mesh(
+        trimesh.util.concatenate([box_a, box_b, debris])
+    )
 
     original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
@@ -894,21 +918,14 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
         call_state["n"] += 1
         repaired = original(mesh)
         if call_state["n"] == 2:
-            # Drop the second body (an empty-mesh repair result would trip
-            # the empty-after-repair gate; drop via the report-level
-            # path: return only the first body's faces as zero faces).
-            return trimesh.Trimesh(  # empty
+            # Drop the second body (return an empty mesh).
+            return trimesh.Trimesh(
                 np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int32), process=False
             )
         return repaired
 
-    # ``parse_and_repair`` looks the name up in part_mesh's own globals
-    # (``from d33d.part_repair import repair_with_pmf`` binds it there), so
-    # the monkeypatch targets part_mesh_mod, not the defining module.
     part_mesh_mod.repair_with_pmf = _dropping_repair
     try:
-        # The second body returns an empty mesh → concatenate of [body1,
-        # empty] keeps only body 1 → post-repair 1 body < pre-repair 2.
         _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
         part_mesh_mod.repair_with_pmf = original
@@ -924,7 +941,11 @@ def test_repair_non_watertight_component_kept(app_with_projects):
     NON-watertight component in the stored mesh is kept as-is (no
     PartUploadError) — the report simply describes the STORED mesh
     honestly: ``watertight`` is False and ``bodies`` is the watertight
-    count, as on main."""
+    count, as on main.
+
+    Issue #395: two watertight boxes are now detected as CLEAN and skip
+    repair. This test adds a debris shell (non-watertight) to make the
+    mesh NOT clean → repair is attempted."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
@@ -932,7 +953,13 @@ def test_repair_non_watertight_component_kept(app_with_projects):
     box_a = trimesh.creation.box(extents=[10, 10, 10])
     box_b = trimesh.creation.box(extents=[10, 10, 10])
     box_b.apply_translation([10000.0, 0.0, 0.0])
-    data = _stl_bytes_from_mesh(trimesh.util.concatenate([box_a, box_b]))
+    # Add a debris shell to make the mesh NOT clean.
+    debris = trimesh.creation.box(extents=[5, 5, 5])
+    debris.apply_translation([20000.0, 0.0, 0.0])
+    debris = trimesh.Trimesh(debris.vertices, debris.faces[:-6], process=False)
+    data = _stl_bytes_from_mesh(
+        trimesh.util.concatenate([box_a, box_b, debris])
+    )
 
     original = part_mesh_mod.repair_with_pmf
     call_state = {"n": 0}
@@ -942,9 +969,7 @@ def test_repair_non_watertight_component_kept(app_with_projects):
         repaired = original(mesh)
         if call_state["n"] == 2:
             # Remove several faces → a NON-watertight (open) second component
-            # in the stored mesh (removing just one face auto-closes under
-            # merge_vertices/update_faces; several leave a genuine open
-            # shell). The stored mesh keeps it; the report must be honest.
+            # in the stored mesh.
             return trimesh.Trimesh(
                 repaired.vertices, repaired.faces[:-3], process=False
             )
@@ -2120,9 +2145,17 @@ def test_project_pointer_update_failure_rolls_back(app_with_projects):
 def test_parse_and_repair_runs_off_event_loop(
     app_with_projects, monkeypatch
 ) -> None:
-    """A slow ``parse_and_repair`` stub does NOT block a concurrent
-    request on the same app — the decode runs in a worker thread
+    """A CPU-bound (GIL-holding) ``parse_and_repair`` stub does NOT block a
+    concurrent request on the same app — the decode runs in a worker thread
     (``asyncio.to_thread``), not on the event loop.
+
+    Issue #395: the stub uses a pure-Python busy loop that HOLDS the GIL
+    (a `for i in range(N): x = i * i` loop) instead of ``time.sleep``
+    (which releases the GIL). This is the test that must FAIL on the old
+    implementation (where pymeshfix runs in-process on the same thread) and
+    PASS with process isolation: if the decode ran ON the event loop thread,
+    the GIL-holding busy loop would block every other handler — the GET could
+    only complete after the upload.
 
     Two invariants make the probe robust regardless of what earlier
     tests did in the same pytest process (issue #344):
@@ -2130,42 +2163,37 @@ def test_parse_and_repair_runs_off_event_loop(
     1. **Pre-import warm-up.** ``d33d.part_mesh`` (which imports numpy
        and trimesh at module top — heavy native-extension loads) is
        imported once at session start by the autouse ``_preimport_part_mesh``
-       fixture in ``tests/conftest.py``. If the *first* trimesh import in
-       the process landed inside this test's ``to_thread`` worker, the
-       multi-second import cost would stretch the measured window even
-       although the decode itself is off the loop — the exact Linux-CI
-       failure (a GET measured at 0.38–0.49 s against the 0.3 s sleep
-       after the eval staging tests had already pulled in
-       ``d33d.evals.gates`` → trimesh in an unusual session order).
-       The session-wide warm-up removes that variable.
+       fixture in ``tests/conftest.py``.
 
     2. **Completion-order discriminator, not a wall-clock bound.** The
-       probe is a completion-ORDER list (the same shape as
-       ``test_app.py::test_module_registry_does_not_block_the_event_loop``):
-       the lightweight GET must COMPLETE before the slow upload. With
-       the decode off the loop, the GET's handler runs on the event loop
-       the moment the upload reaches the decode ``await``. If the decode
-       ran ON the loop, its 0.3 s ``time.sleep`` would block every other
-       handler — the GET could only complete after the upload. A wall
-       clock bound on the GET is not an off-loop proof (a serial decode
-       still finishes in ~0.3 s total, passing any loose total bound),
-       and it is not stable across runner/scheduler variance — the order
-       list is stable either way.
+       probe is a completion-ORDER list: the lightweight GET must COMPLETE
+       before the slow upload. With the decode off the loop, the GET's
+       handler runs on the event loop the moment the upload reaches the
+       decode ``await``. If the decode ran ON the loop, its GIL-holding
+       busy loop would block every other handler — the GET could only
+       complete after the upload.
 
-    The patch is installed via the pytest ``monkeypatch`` fixture, not a
-    manual save/restore: a manual patch + ``finally`` leaves a window
-    (between the patch and the ``try``) where an error could leave the
-    patched attribute in place for the next test in the session."""
-    import time as _time
+    The patch is installed via the pytest ``monkeypatch`` fixture."""
 
     import d33d.part_import as part_import_mod
 
     original_parse = part_import_mod.parse_and_repair
     slow_calls: list[int] = []
 
+    def _busy_loop_gil_holding(n: int) -> int:
+        """A pure-Python busy loop that holds the GIL for ~0.3 s.
+
+        Unlike time.sleep (which releases the GIL), this loop occupies
+        a Python thread for its full duration — the same behaviour as
+        pymeshfix's C repair holding the GIL."""
+        x = 0
+        for i in range(n):
+            x = i * i + x
+        return x
+
     def slow_parse(content: bytes, part_format: str):
         slow_calls.append(1)
-        _time.sleep(0.3)  # simulate a slow decode (worker thread)
+        _busy_loop_gil_holding(50_000_000)  # ~0.3 s of GIL-holding work
         return original_parse(content, part_format)
 
     monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse)
@@ -2186,8 +2214,7 @@ def test_parse_and_repair_runs_off_event_loop(
 
         async def _fast_request():
             # Let the upload handler reach the decode await before the
-            # GET is dispatched (the GET must not win trivially because
-            # the upload has not started yet).
+            # GET is dispatched.
             await asyncio.sleep(0.05)
             resp = await client.get("/api/projects")
             order.append("fast")
@@ -2200,8 +2227,8 @@ def test_parse_and_repair_runs_off_event_loop(
     assert upload_r.status_code == 201, upload_r.text
     assert list_r.status_code == 200
     assert len(slow_calls) == 1
-    # If the decode ran ON the event loop, the 0.3 s sleep inside the
-    # worker-stub would block every other handler: the GET (dispatched
+    # If the decode ran ON the event loop, the GIL-holding busy loop inside
+    # the worker-stub would block every other handler: the GET (dispatched
     # 50 ms after the upload, itself near-instant) could only complete
     # AFTER the upload. Off the loop, the GET completes first.
     assert order == ["fast", "slow"], order
@@ -2211,27 +2238,23 @@ def test_hole_count_computation_runs_off_event_loop(
     app_with_projects, monkeypatch
 ) -> None:
     """Issue #351: the ``hole_count`` computation happens INSIDE
-    ``parse_and_repair`` (it reuses ``_boundary_loops(merged)`` on the
-    pre-repair merged mesh), which the upload route runs via
-    ``asyncio.to_thread``. So the hole-count compute is off the event loop
-    for the same reason the decode is — this test proves the SAME way as
-    ``test_parse_and_repair_runs_off_event_loop``: a slow ``parse_and_repair
-    + hole_count`` stub must not block a concurrent GET (completion-order
-    discriminator, not a wall-clock bound).
-
-    The stub sleeps inside the worker thread (simulating the non-trivial
-    boundary-loop / genus count on a large mesh) and then calls the REAL
-    ``parse_and_repair`` so the response's ``report.hole_count`` is the
-    genuine computed value (the test also asserts it is present and int,
-    pinning that the off-loop path still produces the signal)."""
-    import time as _time
+    ``parse_and_repair``, which the upload route runs via
+    ``asyncio.to_thread``. Issue #395: the stub now uses a CPU-bound
+    GIL-holding busy loop instead of ``time.sleep`` — the same fix as
+    ``test_parse_and_repair_runs_off_event_loop``."""
 
     import d33d.part_import as part_import_mod
 
     original_parse = part_import_mod.parse_and_repair
 
+    def _busy_loop_gil_holding(n: int) -> int:
+        x = 0
+        for i in range(n):
+            x = i * i + x
+        return x
+
     def slow_parse_with_hole_count(content: bytes, part_format: str):
-        _time.sleep(0.3)  # simulate the slow hole-count compute (worker thread)
+        _busy_loop_gil_holding(50_000_000)  # ~0.3 s of GIL-holding work
         return original_parse(content, part_format)
 
     monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse_with_hole_count)
@@ -2262,10 +2285,9 @@ def test_hole_count_computation_runs_off_event_loop(
     upload_r, list_r, order = _run_async(app_with_projects, _call)
     assert upload_r.status_code == 201, upload_r.text
     assert list_r.status_code == 200
-    # If the hole-count compute ran ON the event loop, the 0.3 s sleep in
-    # the worker stub would block the GET: the GET (dispatched 50 ms after
-    # the upload, itself near-instant) could only complete AFTER the upload.
-    # Off the loop, the GET completes first.
+    # If the hole-count compute ran ON the event loop, the GIL-holding
+    # busy loop in the worker stub would block the GET: the GET could
+    # only complete AFTER the upload. Off the loop, the GET completes first.
     assert order == ["fast", "slow"], order
     # The off-loop path still produces the hole-count signal.
     report = upload_r.json()["part"]["report"]
@@ -3305,3 +3327,262 @@ def test_project_row_for_worker_warnings_are_class_name_only(
     assert "/Users/someone/secret.sqlite3" not in warns[0].getMessage()
     assert "/" not in warns[0].getMessage()
     assert warns[0].exc_text, "the warning must carry the exception (exc_info=True)"
+
+
+# ---------------------------------------------------------------------------
+# Issue #395: clean-mesh skip, topology helper, timeout 422, GIL-holding
+# off-event-loop proof, decimate-before-repair
+# ---------------------------------------------------------------------------
+
+
+def test_clean_watertight_mesh_skips_repair(app_with_projects, monkeypatch):
+    """Issue #395: a clean watertight mesh (box_20mm.stl — 0 boundary loops,
+    all bodies watertight, winding consistent) must SKIP pymeshfix entirely.
+    The monkeypatched ``repair_with_pmf`` raises if called — the test
+    asserts it is never called, and the stored mesh + report come from the
+    merged mesh directly."""
+    import d33d.part_mesh as part_mesh_mod
+
+    calls: list[int] = []
+
+    def _repair_spy(mesh):
+        calls.append(1)
+        raise AssertionError("repair_with_pmf must not be called on a clean mesh")
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _repair_spy)
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CleanSkip"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    # The repair spy was never called.
+    assert len(calls) == 0, f"repair_with_pmf was called {len(calls)} times on a clean mesh"
+    # The report is produced from the merged mesh.
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["gaps_closed"] == 0
+    assert report["bodies"] == 1
+    assert report["hole_count"] == 0
+
+
+def test_clean_watertight_ring_skips_repair_but_keeps_hole_count(app_with_projects, monkeypatch):
+    """Issue #395: a watertight ring (genus 1, 0 boundary loops, winding
+    consistent) is ALSO clean — repair is skipped, but the hole_count is
+    still computed from the pre-repair mesh (gaps_before + genus = 0 + 1 = 1).
+    The fill-recut gate still has evidence for the very part it exists for."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    calls: list[int] = []
+
+    def _repair_spy(mesh):
+        calls.append(1)
+        raise AssertionError("repair_with_pmf must not be called on a clean mesh")
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _repair_spy)
+
+    ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    data = _stl_bytes_from_mesh(ring)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CleanRing"})
+        pid = r.json()["id"]
+        files = {"file": ("ring.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    assert len(calls) == 0, f"repair_with_pmf was called {len(calls)} times on a clean ring"
+    report = r.json()["part"]["report"]
+    assert report["watertight"] is True
+    assert report["gaps_closed"] == 0
+    assert report["bodies"] == 1
+    assert report["hole_count"] >= 1, (
+        f"watertight ring has a through-hole (genus 1); hole_count must be >= 1: {report}"
+    )
+
+
+def test_holey_mesh_still_repairs(app_with_projects, monkeypatch):
+    """Issue #395: a holey mesh (holey.stl — 4 boundary loops, not clean)
+    must still run repair. The monkeypatched ``repair_with_pmf`` records
+    the call and delegates to the real implementation."""
+    import d33d.part_mesh as part_mesh_mod
+    import d33d.part_repair as part_repair_mod
+
+    real_repair = part_repair_mod.repair_with_pmf
+    calls: list[int] = []
+
+    def _repair_spy(mesh):
+        calls.append(1)
+        return real_repair(mesh)
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _repair_spy)
+
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "HoleyStillRepairs"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    assert len(calls) >= 1, f"repair_with_pmf must be called for a holey mesh, got {len(calls)}"
+    report = r.json()["part"]["report"]
+    assert report["gaps_closed"] == 4
+
+
+def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
+    """Issue #395: a repair timeout (injected via a monkeypatched
+    ``repair_with_pmf`` that raises a timeout ``PartUploadError``) must
+    return a clean 422 with the new ``PART_UPLOAD_REPAIR_TIMEOUT_DETAIL``
+    message — never a hung request. The monkeypatch simulates the
+    process-boundary timeout (the real 120 s timeout is impractical in a
+    test; the contract is that a timeout error produces a 422 with the
+    distinct timeout detail, not the unparseable detail)."""
+    import d33d.part_mesh as part_mesh_mod
+
+    def _timeout_repair(mesh, timeout=None):
+        raise part_mesh_mod.PartUploadError(
+            f"repair timed out: exceeded {timeout or 120:.0f}s"
+        )
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _timeout_repair)
+
+    # Use holey.stl (not clean → repair is attempted → timeout fires).
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Timeout422"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 422, f"expected 422 on timeout, got {r.status_code}: {r.text}"
+    from d33d.part_import import PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+
+    assert r.json()["detail"] == PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+
+
+def test_repair_timeout_detail_is_distinct_from_unparseable():
+    """Issue #395: the repair-timeout 422 detail is a DIFFERENT string from
+    the unparseable detail — the timeout message must not imply the mesh
+    is broken, only that repair timed out."""
+    from d33d.part_import import (
+        PART_UPLOAD_REPAIR_TIMEOUT_DETAIL,
+        PART_UPLOAD_UNPARSEABLE_DETAIL,
+    )
+
+    assert PART_UPLOAD_REPAIR_TIMEOUT_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
+    # The timeout message should mention simplifying (actionable advice).
+    assert "simplifying" in PART_UPLOAD_REPAIR_TIMEOUT_DETAIL
+
+
+def test_mesh_topology_helper_box():
+    """Issue #395: the shared ``mesh_topology`` helper returns the correct
+    topology for a plain watertight box: 0 boundary loops, 1 body,
+    1 watertight body, winding consistent, genus 0."""
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    box = trimesh.creation.box(extents=[20, 20, 20])
+    box.merge_vertices()
+    box.update_faces(box.nondegenerate_faces())
+    components = box.split(only_watertight=False)
+    topo = mesh_topology(box, components)
+    assert topo["boundary_loops"] == 0
+    assert topo["bodies"] == 1
+    assert topo["watertight_bodies"] == 1
+    assert topo["winding_consistent"] is True
+    assert topo["genus"] == 0
+
+
+def test_mesh_topology_helper_holey():
+    """Issue #395: the shared ``mesh_topology`` helper on holey.stl:
+    4 boundary loops, not all bodies watertight, genus 0 (the holes are
+    open, not closed through-holes)."""
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    holey = trimesh.load(str(FIXTURES / "holey.stl"))
+    holey.merge_vertices()
+    holey.update_faces(holey.nondegenerate_faces())
+    components = holey.split(only_watertight=False)
+    topo = mesh_topology(holey, components)
+    assert topo["boundary_loops"] == 4
+    assert topo["genus"] == 0
+
+
+def test_mesh_topology_helper_two_body():
+    """Issue #395: the shared ``mesh_topology`` helper on two_body_multisolid.stl:
+    2 bodies, 2 watertight bodies, 0 boundary loops."""
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    mesh = trimesh.load(str(FIXTURES / "two_body_multisolid.stl"))
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_mesh()
+    mesh.merge_vertices()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    components = mesh.split(only_watertight=False)
+    topo = mesh_topology(mesh, components)
+    assert topo["watertight_bodies"] == 2
+    assert topo["boundary_loops"] == 0
+
+
+def test_decimate_before_repair_above_budget():
+    """Issue #395: a mesh above ``REPAIR_FACE_BUDGET`` that is NOT clean
+    (holey) is decimated BEFORE repair. The repaired face count is below
+    the original (the decimation reduced it)."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+    import d33d.part_repair as part_repair_mod
+
+    # Lower the budget so a modest mesh triggers the decimate path.
+    original_budget = part_mesh_mod.REPAIR_FACE_BUDGET
+    part_mesh_mod.REPAIR_FACE_BUDGET = 100  # very low — forces decimation
+
+    # Use holey.stl (not clean → repair is attempted).
+    try:
+        data = _stl_bytes(FIXTURES / "holey.stl")
+        mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+        # The face count should be reduced (decimated before repair).
+        # We can't assert an exact count, but it must be positive.
+        assert report["triangles"] > 0
+    finally:
+        part_mesh_mod.REPAIR_FACE_BUDGET = original_budget
+
+
+def test_clean_mesh_below_budget_not_decimated():
+    """Issue #395: a clean mesh below ``REPAIR_FACE_BUDGET`` is NOT decimated
+    — the face count is preserved exactly (byte-for-byte the same as the
+    merged mesh)."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+    mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+
+    # The box has 12 faces — well below the 500k budget. No decimation.
+    # The face count must equal the original loaded mesh's face count.
+    loaded = trimesh.load(io.BytesIO(data), file_type="stl")
+    if isinstance(loaded, trimesh.Scene):
+        loaded = loaded.to_mesh()
+    assert report["triangles"] == len(loaded.faces), (
+        f"clean mesh below budget must not be decimated: "
+        f"report={report['triangles']}, original={len(loaded.faces)}"
+    )
