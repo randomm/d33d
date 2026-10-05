@@ -28,7 +28,6 @@ import logging
 import math
 import os
 import stat
-import time
 import zipfile
 from typing import Any
 
@@ -39,8 +38,10 @@ from d33d.part_errors import PartUploadError  # re-exported for #395 compat
 from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import mesh_topology
 from d33d.part_repair import (
+    REPAIR_FACE_BUDGET,
     REPAIR_TIMEOUT_SECONDS,
-    RepairTimeoutError,
+    _decimate,
+    repair_bodies_with_pmf,
     repair_with_pmf,
 )
 
@@ -53,14 +54,6 @@ logger = logging.getLogger(__name__)
 #: geometries of the loaded scene, before repair.
 MAX_PART_FACES = 2_000_000
 
-#: The named face budget for decimation-before-repair (ticket #3: decimate
-#: BEFORE repair, fix_normals AFTER). A mesh above this budget is decimated
-#: to approximately this number of faces before repair is attempted. A
-#: clean mesh (0 boundary loops, all bodies watertight, winding consistent)
-#: below this budget is NOT decimated — it skips repair entirely and the
-#: stored mesh is the merged mesh unchanged. A clean mesh above this budget
-#: is decimated to this budget even though it skips repair (render safety).
-REPAIR_FACE_BUDGET = 500_000
 
 #: 3MF zip-bomb guards (checked from the ZIP central directory BEFORE any
 #: extraction — a bomb checked after extraction has already decompressed).
@@ -267,51 +260,6 @@ def _is_clean(topo: dict[str, Any]) -> bool:
     )
 
 
-def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
-    """Decimate the mesh to approximately ``target_faces`` faces.
-
-    Ticket #3: decimate BEFORE repair. Uses trimesh's quadric decimation
-    (``simplify_quadric_decimation(face_count=...)`` — backed by the
-    ``fast_simplification`` package, a declared runtime dependency).
-
-    ``fast_simplification`` is a hard dependency: a missing install is a
-    loud import-time failure (pinned by the ``test_fast_simplification_importable``
-    test in ``tests/test_part_import.py``), never a silent no-op. If the
-    mesh is already at or below the target, it is returned unchanged (no
-    work). A genuine decimation failure (degenerate input, arithmetic
-    breakdown in the C library) still raises as a ``PartUploadError`` —
-    an oversized mesh that cannot be simplified must 422, not proceed
-    to repair at its full size.
-    """
-    if len(mesh.faces) <= target_faces:
-        return mesh
-    try:
-        return mesh.simplify_quadric_decimation(face_count=target_faces)
-    except PartUploadError:
-        raise
-    except ImportError:
-        # ``fast_simplification`` is declared in pyproject.toml — an
-        # ImportError here is a broken install, not a runtime choice.
-        raise PartUploadError(
-            "parse_and_repair: decimation failed — fast_simplification is "
-            "installed as a runtime dependency; its import failed, so the "
-            f"{len(mesh.faces)}-face mesh above the {target_faces}-face "
-            "budget cannot be simplified. Repair the install and retry."
-        )
-    except Exception as e:
-        # A broad ``except Exception`` (a decimation failure from the C
-        # library — arithmetic, memory, or anything else it raises) is
-        # logged and re-raised as a ``PartUploadError`` (the 422): an
-        # oversized mesh that cannot be simplified must 422, never
-        # proceed to repair at its full size.
-        logger.exception(
-            "quadric decimation failed for the %d-face mesh above the "
-            "%d-face budget", len(mesh.faces), target_faces,
-        )
-        raise PartUploadError(
-            f"parse_and_repair: quadric decimation failed: {type(e).__name__}: {e}"
-        ) from e
-
 
 def parse_and_repair(
     data: bytes, part_format: str
@@ -343,7 +291,6 @@ def parse_and_repair(
 
     Raises ``PartUploadError`` (the 422) on any failure.
     """
-    _t0 = time.monotonic()  # aggregate wall-clock budget for the multi-body loop
     # Load via a file object with an EXPLICIT loader.
     try:
         if part_format == "3mf":
@@ -419,24 +366,18 @@ def parse_and_repair(
     else:
         # Multi-body, not clean: repair EACH watertight body separately
         # and concatenate (issue #375). Decimate each body before repair
-        # if above the budget. The whole loop is bounded by an aggregate
+        # if above the budget. The whole call is bounded by an aggregate
         # wall-clock budget of REPAIR_TIMEOUT_SECONDS (the total multi-body
-        # repair must not exceed the same budget as a single body): each
-        # per-body call gets ``timeout=remaining`` and a non-positive
-        # remaining budget raises RepairTimeoutError before the next call.
+        # repair must not exceed the same budget as a single body).
         budget = REPAIR_TIMEOUT_SECONDS
         repaired_bodies = []
         for body in watertight_bodies:
-            remaining = budget - (time.monotonic() - _t0)
-            if remaining <= 0:
-                raise RepairTimeoutError(
-                    f"repair timed out: exceeded {budget:.0f}s total budget "
-                    f"across {len(watertight_bodies)} bodies"
-                )
             if len(body.faces) > REPAIR_FACE_BUDGET:
                 body = _decimate(body, REPAIR_FACE_BUDGET)
-            repaired_bodies.append(repair_with_pmf(body, timeout=remaining))
-        repaired = trimesh.util.concatenate(repaired_bodies)
+            repaired_bodies.append(body)
+        repaired = trimesh.util.concatenate(
+            repair_bodies_with_pmf(repaired_bodies, timeout=budget)
+        )
 
     # Finiteness AGAIN after pymeshfix (it can emit NaN from degenerate
     # input).
@@ -473,6 +414,7 @@ __all__ = [
     "REPAIR_FACE_BUDGET",
     "PartFileTooLargeError",
     "PartUploadError",
+    "_decimate",
     "load_part_geometry",
     "mesh_units",
     "parse_and_repair",

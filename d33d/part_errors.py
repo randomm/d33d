@@ -35,4 +35,13 @@ class RepairTimeoutError(PartUploadError):
     """
 
 
-__all__ = ["PartUploadError", "RepairTimeoutError"]
+#: The 422 detail for a repair timeout (issue #395). Distinct from the
+#: unparseable detail: the mesh is NOT broken, it's just too slow to repair.
+#: The copy.ts key ``partUpload.repairTimeout`` must match this string
+#: exactly (parity pinned in the import-stl-contract test).
+REPAIR_TIMEOUT_DETAIL = (
+    "The file is too complex to repair in time. Try simplifying the mesh."
+)
+
+
+__all__ = ["REPAIR_TIMEOUT_DETAIL", "PartUploadError", "RepairTimeoutError"]

@@ -53,6 +53,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from d33d import db as db_mod
+from d33d.part_errors import REPAIR_TIMEOUT_DETAIL, RepairTimeoutError
 from d33d.part_http import (
     _PART_MULTIPART_ALLOWANCE,
     MAX_PART_UPLOAD_BYTES,
@@ -80,7 +81,6 @@ from d33d.part_mesh import (
     read_part_file_atomic,
     validate_part_path,
 )
-from d33d.part_repair import REPAIR_TIMEOUT_DETAIL, RepairTimeoutError
 from d33d.part_units import (
     axis_to_index,
     classify_stl_units,

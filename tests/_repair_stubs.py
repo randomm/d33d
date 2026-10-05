@@ -18,6 +18,7 @@ valid mesh).
 from __future__ import annotations
 
 import numpy as np
+import trimesh
 
 
 def _noop_repair(vertices: np.ndarray, faces: np.ndarray) -> tuple:
@@ -65,4 +66,35 @@ def _slow_spin_repair(vertices: np.ndarray, faces: np.ndarray) -> tuple:
     return vertices, faces
 
 
-__all__ = ["_busy_repair", "_noop_repair", "_slow_spin_repair"]
+def _raise_error_repair(vertices: np.ndarray, faces: np.ndarray) -> tuple:
+    """A child-side failure stub (issue #395 lens round 2: sanitized child
+    errors). Raises a ``RuntimeError`` whose message carries a marker the
+    test asserts does NOT leak into the parent's wrapped
+    ``PartUploadError`` (which must carry only the exception's type
+    name). The full payload is logged in the parent instead.
+    """
+    raise RuntimeError("child-side failure: LEAK_MARKER must not appear in the 422")
+
+
+def _bodies_worker(bodies):
+    """A batched worker for ``repair_bodies_with_pmf`` (the multi-body
+    seam): ``bodies`` is a list of ``(vertices, faces)`` raw-array pairs
+    (already decimated in the parent); each is repaired in order (the
+    per-body MeshFix + fix_normals semantics of issue #375) and the
+    repaired ``(vertices, faces)`` list is returned.
+    """
+    import pymeshfix as _pmf
+
+    repaired: list[tuple] = []
+    for verts, faces in bodies:
+        fix = _pmf.MeshFix(verts, faces)
+        fix.repair()
+        rep_verts = np.asarray(fix.points, dtype=np.float64)
+        rep_faces = np.asarray(fix.faces, dtype=np.int32)
+        m = trimesh.Trimesh(rep_verts, rep_faces, process=False)
+        trimesh.repair.fix_normals(m)
+        repaired.append((m.vertices, m.faces))
+    return repaired
+
+
+__all__ = ["_bodies_worker", "_busy_repair", "_noop_repair", "_raise_error_repair", "_slow_spin_repair"]

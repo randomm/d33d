@@ -912,24 +912,24 @@ def test_dropped_body_report_line_two_body_fixture(app_with_projects):
         trimesh.util.concatenate([box_a, box_b, debris])
     )
 
-    original = part_mesh_mod.repair_with_pmf
+    original = part_mesh_mod.repair_bodies_with_pmf
     call_state = {"n": 0}
 
-    def _dropping_repair(mesh, timeout=None):
+    def _dropping_repair(meshes, timeout=None):
         call_state["n"] += 1
-        repaired = original(mesh, timeout=timeout)
-        if call_state["n"] == 2:
-            # Drop the second body (return an empty mesh).
-            return trimesh.Trimesh(
+        repaired = original(meshes, timeout=timeout)
+        if call_state["n"] == 1 and len(repaired) >= 2:
+            # Drop the second body (return an empty mesh for it).
+            repaired[1] = trimesh.Trimesh(
                 np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int32), process=False
             )
         return repaired
 
-    part_mesh_mod.repair_with_pmf = _dropping_repair
+    part_mesh_mod.repair_bodies_with_pmf = _dropping_repair
     try:
         _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
-        part_mesh_mod.repair_with_pmf = original
+        part_mesh_mod.repair_bodies_with_pmf = original
     assert report["bodies"] == 1, f"post-repair body count: {report}"
     assert report.get("bodies_before") == 2, (
         f"dropped-body report line: bodies_before must be the pre-repair "
@@ -962,25 +962,26 @@ def test_repair_non_watertight_component_kept(app_with_projects):
         trimesh.util.concatenate([box_a, box_b, debris])
     )
 
-    original = part_mesh_mod.repair_with_pmf
+    original = part_mesh_mod.repair_bodies_with_pmf
     call_state = {"n": 0}
 
-    def _leaky_repair(mesh, timeout=None):
+    def _leaky_repair(meshes, timeout=None):
         call_state["n"] += 1
-        repaired = original(mesh, timeout=timeout)
-        if call_state["n"] == 2:
+        repaired = original(meshes, timeout=timeout)
+        if call_state["n"] == 1 and len(repaired) >= 2:
             # Remove several faces → a NON-watertight (open) second component
             # in the stored mesh.
-            return trimesh.Trimesh(
-                repaired.vertices, repaired.faces[:-3], process=False
+            m = repaired[1]
+            repaired[1] = trimesh.Trimesh(
+                m.vertices, m.faces[:-3], process=False
             )
         return repaired
 
-    part_mesh_mod.repair_with_pmf = _leaky_repair
+    part_mesh_mod.repair_bodies_with_pmf = _leaky_repair
     try:
         _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     finally:
-        part_mesh_mod.repair_with_pmf = original
+        part_mesh_mod.repair_bodies_with_pmf = original
     assert report["watertight"] is False, f"report must say not watertight: {report}"
     assert report["bodies"] == 1, (
         f"bodies must be the WATERTIGHT component count (1 of 2): {report}"
@@ -3474,7 +3475,7 @@ def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
 
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 422, f"expected 422 on timeout, got {r.status_code}: {r.text}"
-    from d33d.part_repair import REPAIR_TIMEOUT_DETAIL
+    from d33d.part_errors import REPAIR_TIMEOUT_DETAIL
 
     assert r.json()["detail"] == REPAIR_TIMEOUT_DETAIL
 
@@ -3483,8 +3484,8 @@ def test_repair_timeout_detail_is_distinct_from_unparseable():
     """Issue #395: the repair-timeout 422 detail is a DIFFERENT string from
     the unparseable detail — the timeout message must not imply the mesh
     is broken, only that repair timed out."""
+    from d33d.part_errors import REPAIR_TIMEOUT_DETAIL
     from d33d.part_import import PART_UPLOAD_UNPARSEABLE_DETAIL
-    from d33d.part_repair import REPAIR_TIMEOUT_DETAIL
 
     assert REPAIR_TIMEOUT_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
     # The timeout message should mention simplifying (actionable advice).
@@ -3579,16 +3580,17 @@ def test_decimate_before_repair_above_budget(monkeypatch):
     # the decimation ran BEFORE the repair call, and brought the mesh
     # at or below the budget (with tolerance) and below the original.
 
-    # Spy on repair_with_pmf to capture the face count of the mesh it
-    # receives. Returns the mesh unchanged (the real repair runs in a
-    # subprocess; the assertion is about the face count passed to repair).
+    # Spy on repair_bodies_with_pmf to capture the face counts of the meshes
+    # it receives. Returns the meshes unchanged (the real repair runs in a
+    # subprocess; the assertion is about the face counts passed to repair).
     repair_face_counts: list[int] = []
 
-    def _spied_repair(mesh, timeout=None):
-        repair_face_counts.append(len(mesh.faces))
-        return mesh
+    def _spied_repair(meshes, timeout=None):
+        for m in meshes:
+            repair_face_counts.append(len(m.faces))
+        return meshes
 
-    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _spied_repair)
+    monkeypatch.setattr(part_mesh_mod, "repair_bodies_with_pmf", _spied_repair)
 
     _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     # The decimate path was taken (the mesh was above the budget and not clean).
