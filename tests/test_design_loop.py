@@ -140,6 +140,7 @@ def _render(
     error_class: str = "ok",
     stderr: str = "",
     views: tuple[str, ...] = VIEWS_OK,
+    render_log: str = "",
 ) -> RenderResult:
     return RenderResult(
         ok=error_class == "ok",
@@ -150,6 +151,7 @@ def _render(
         stl="model.stl" if error_class == "ok" else None,
         csg="model.csg" if error_class == "ok" else None,
         views=views,
+        render_log=render_log,
     )
 
 
@@ -2759,18 +2761,25 @@ def test_screw_clearance_direct_check_contract():
 
 
 def _import_scad_llm(scad: str) -> LLMResult:
-    """A T1-shaped design response for import-guard tests.
-
-    A comment line makes the source pass the named-parameter gate (bit 3):
-    a candidate that imports the part and adds nothing declares no
-    parameters, and the loop only passes a fully-measured candidate —
-    the floor tests below are about bit 2, so the source declares W as a
-    neutral parameter to keep bit 3 green."""
-    scad = f"W = 20;\n{scad}"
+    """A T1-shaped design response for import-guard tests (issue #332):
+    passes ``scad`` through verbatim — the helper never mutates the source,
+    so an import-guard test that asserts ``no_import`` on a no-import SCAD
+    keeps measuring the SCAD the guard actually sees."""
     return _llm_result(
         content=_t1_tool_call_payload("emit_design", {"scad": scad}),
         tool_calls=({"name": "emit_design", "arguments": {"scad": scad}},),
     )
+
+
+def _floor_scad_llm(scad: str) -> LLMResult:
+    """A T1-shaped design response for the part-baseline FLOOR tests
+    (issue #383): prepends ``W = 20;`` so the source declares a named
+    parameter (bit 3) and exempts its own multi-digit literals (the
+    floor cases assert on bit 2, the bbox gate, in isolation). The
+    ``import("part.stl")`` / ``scale(1)`` line is still present, so the
+    import guard does not fire (bit 3 green) and the floor is the only
+    gate under test."""
+    return _import_scad_llm(f"W = 20;\n{scad}")
 
 
 def _run_import_loop(
@@ -3131,7 +3140,7 @@ def test_loop_part_floor_shrunken_render_not_a_pass():
     """Issue #383 loop level: part 20×20×20, no stated dims, render
     5×5×1 — the loop must NOT pass (the gate fails → repair, never a
     silent pass). Fails on main (the old abstention let it through)."""
-    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    llm = [_floor_scad_llm('scale(1) import("part.stl");\n')]
     result = _run_part_floor_loop(llm, BboxInfo(5.0, 5.0, 1.0, 17.7))
     assert result.status == "exhausted"
     assert result.failure_reason == "bbox_out_of_tolerance"
@@ -3142,7 +3151,7 @@ def test_loop_part_floor_exact_part_passes():
     """Issue #383 loop level: part 20×20×20, no stated dims, render
     20×20×20 — the gate passes and the loop passes (the part measures
     itself)."""
-    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    llm = [_floor_scad_llm('scale(1) import("part.stl");\n')]
     result = _run_part_floor_loop(llm, BboxInfo(20.0, 20.0, 20.0, 8000.0))
     assert result.status == "pass"
     assert result.best.score.bits[2] is True
@@ -3151,7 +3160,7 @@ def test_loop_part_floor_exact_part_passes():
 def test_loop_part_floor_addon_growth_passes():
     """Issue #383 loop level: part 20×20×20, no stated dims, render
     25×20×20 (an add-on) — growth is allowed, the loop passes."""
-    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    llm = [_floor_scad_llm('scale(1) import("part.stl");\n')]
     result = _run_part_floor_loop(llm, BboxInfo(25.0, 20.0, 20.0, 10000.0))
     assert result.status == "pass"
     assert result.best.score.bits[2] is True
@@ -3161,7 +3170,39 @@ def test_loop_part_floor_stated_height_passes():
     """Issue #383 loop level: part 20×20×20, stated H=15 (the "cut it
 to 15 mm" exception), render 20×20×15 — the gate compares H against
     15 (not the part's 20) and the loop passes."""
-    llm = [_import_scad_llm('scale(1) import("part.stl");\nH = 15;\n')]
+    llm = [_floor_scad_llm('scale(1) import("part.stl");\nH = 15;\n')]
     result = _run_part_floor_loop(llm, BboxInfo(20.0, 20.0, 15.0, 6000.0), stated=(0.0, 0.0, 15.0))
     assert result.status == "pass"
     assert result.best.score.bits[2] is True
+
+
+def test_loop_unknown_variable_render_is_repair_naming_variable():
+    """Issue #383 loop level: an exit-0 render whose HARVESTED render.log
+    carries the OpenSCAD unknown-variable warning (the real render path —
+    the container stderr carries only [entrypoint] markers, so the warning
+    is only reachable via ``render.render_log``) must be routed to repair
+    as the ``unknown_variable`` class, with the variable named in the
+    evidence. Fails without the render.log wiring (the loop then sees only
+    the marker-only stderr → the generic unclassified class)."""
+    warning = 'WARNING: Ignoring unknown variable "H" in file model.scad, line 1'
+    render = _render(
+        error_class="syntax_error",
+        stderr="[entrypoint] Starting render of /work/model.scad\n",
+        render_log=warning,
+    )
+    llm = [_scad_llm("H = 20;\ncube([H, H, H]);\n")]
+    i = {"n": 0}
+
+    def render_fn(scad, defines):
+        return render
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(0.0, 0.0, 0.0),
+        render_fn=render_fn,
+        llm_fn=(lambda role, messages, system: llm[min(i["n"], len(llm) - 1)]),
+    )
+    assert result.iterations[0].failure_class == "unknown_variable"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[0].repair["failure_class"] == "unknown_variable"
+    assert "H" in result.iterations[0].repair["evidence"]

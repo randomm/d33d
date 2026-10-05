@@ -26,11 +26,16 @@ STL_ABORT_MARKER = (
 )
 
 #: OpenSCAD's undefined-variable warning (issue #383, captured verbatim
-#: from the pinned image ``openscad/openscad:trixie.2026-01-19`` — a real
-#: render of ``cube(H);`` emits exactly this in /work/render.log with exit
-#: code 0 and a valid, non-degenerate STL).
+#: from a REAL render of ``cube(H);`` against the pinned image
+#: ``d33d/render-worker:local`` / OpenSCAD 2026.01.19 — it lands in
+#: /work/render.log with exit code 0 and a valid, non-degenerate STL).
+#: The entrypoint runs openscad from /work, so the log carries the RELATIVE
+#: filename ``model.scad`` and a comma before ``line`` (the original
+#: absolute-path / space-pinned text was never a real capture — the regex
+#: matches only the version-stable quoted-name core, so the file/line shape
+#: never gates the match).
 UNKNOWN_VARIABLE_WARNING = (
-    'WARNING: Ignoring unknown variable "H" in file /work/model.scad at line 1'
+    'WARNING: Ignoring unknown variable "H" in file model.scad, line 1'
 )
 
 #: The entrypoint's bounding-box fit abort (issue #309 table row 4): the

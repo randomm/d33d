@@ -47,6 +47,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from d33d.render_diagnostics import UNKNOWN_VARIABLE_RE as _RE_UNKNOWN_VARIABLE
+
 # ---------------------------------------------------------------------------
 # Failure class enum
 # ---------------------------------------------------------------------------
@@ -198,14 +200,13 @@ _RE_TRAILING_SEMICOLON = re.compile(
     re.IGNORECASE,
 )
 
-# Undefined-variable warning (issue #383): an exit-0 render whose geometry
-# silently lost everything an undefined variable sized. The exact text the
-# pinned image (OpenSCAD 2026.01.19) emits — see render_worker's
-# UNKNOWN_VARIABLE_RE, which shares the quoted-name anchor. Placed BEFORE
-# the generic fallback and after the more specific OpenSCAD-error patterns
-# so a render that also carries a real OpenSCAD ERROR: line still lands in
-# the class that pattern names.
-_RE_UNKNOWN_VARIABLE = re.compile(r'Ignoring unknown variable "(\w+)"')
+#: Undefined-variable warning (issue #383): the single shared definition in
+#: :mod:`d33d.render_diagnostics` (the render worker's ``classify`` and this
+#: classifier both must recognise the warning, so the pattern lives there
+#: once). The named class below is routed via ``_classify_syntax_error`` —
+#: placed BEFORE the generic fallback and after the more specific
+#: OpenSCAD-error patterns so a render that also carries a real
+#: ``ERROR:`` line still lands in the class that pattern names.
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +403,7 @@ def classify_failure(
     error_class: str,
     stderr: str = "",
     scad_source: str = "",
+    render_log: str = "",
 ) -> ClassifiedFailure:
     """Classify a render run failure into a named OpenSCAD LLM failure class.
 
@@ -411,9 +413,17 @@ def classify_failure(
         The render-worker ``ErrorClass`` (ok, syntax_error, empty_model,
         artifact_error, timeout, oom, container_error).
     stderr:
-        The OpenSCAD diagnostic output (truncated to 256 KiB).
+        The container's stderr (the ``[entrypoint]`` markers).
     scad_source:
         The .scad source code.
+    render_log:
+        The bounded tail of the on-volume /work/render.log (issue #383):
+        on the pinned image the entrypoint redirects every openscad
+        invocation's stderr there, so an exit-0 render's undefined-variable
+        warning lives in THIS buffer, not ``stderr`` — the caller passes it
+        through so the ``unknown_variable`` class (and its variable-naming
+        evidence) is reachable on the real render path. ``""`` when the
+        harvest found nothing (non-import / pre-#383 callers are unaffected).
 
     Returns
     -------
@@ -425,8 +435,9 @@ def classify_failure(
     - ``ok`` → ``geometrically_wrong`` (vision-only class)
     - ``timeout`` / ``oom`` / ``container_error`` / ``artifact_error`` /
       ``empty_model`` → the corresponding non-repairable class
-    - ``syntax_error`` → inspect stderr for specific patterns; first match
-      wins; fallback is ``unclassified_syntax_error``
+    - ``syntax_error`` → inspect the diagnostic text (``stderr`` +
+      ``render_log``) for specific patterns; first match wins; fallback is
+      ``unclassified_syntax_error``
     """
     if error_class == "ok":
         return ClassifiedFailure(
@@ -448,11 +459,15 @@ def classify_failure(
             repairable=False,
         )
 
-    # syntax_error — inspect stderr
-    failure_class = _classify_syntax_error(stderr)
+    # syntax_error — inspect the diagnostic text. The unknown-variable
+    # warning (issue #383) lives in the harvested render.log on the pinned
+    # image, so both buffers are inspected — the variable-naming evidence
+    # must be reachable on the real render path, not just synthetic ones.
+    diagnostic = stderr if not render_log else f"{stderr}\n{render_log}"
+    failure_class = _classify_syntax_error(diagnostic)
     return ClassifiedFailure(
         failure_class=failure_class,
-        evidence=stderr[:256] if stderr else "syntax_error (no stderr)",
+        evidence=(diagnostic[:256] if diagnostic else "syntax_error (no stderr)"),
         repairable=True,
     )
 

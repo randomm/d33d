@@ -1775,6 +1775,7 @@ async def run_design_loop_async(
             error_class=render.error_class,
             stderr=render.stderr,
             scad_source=scad_source,
+            render_log=getattr(render, "render_log", ""),
         )
         if render.error_class != "ok":
             # Non-LLM-addressable render classes (timeout/oom/container_
