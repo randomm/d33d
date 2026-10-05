@@ -656,8 +656,10 @@ button.chat-send-btn:disabled {
 }
 
 /* The size-mismatch rows (issue #367): one mono row per axis,
-   asked → made. The mismatch state uses --color-blocked; the
-   marker hex never appears. */
+   asked → made. Rows render NEUTRAL; only the failing axis (both values
+   beyond the gate tolerance) gets --color-blocked via the --failing
+   modifier (issue #398, operator decision (c)). The marker hex never
+   appears. */
 .failure-turn-size-rows {
   list-style: none;
   margin: 0 0 var(--space-2);
@@ -669,6 +671,10 @@ button.chat-send-btn:disabled {
 
 .failure-turn-size-row {
   font-family: var(--font-mono);
+  color: var(--color-fg-2);
+}
+
+.failure-turn-size-row--failing {
   color: var(--color-blocked);
 }
 

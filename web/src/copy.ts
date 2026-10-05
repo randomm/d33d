@@ -25,6 +25,30 @@ export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
 
+/** W/D/H axis → the adjective that belongs in a "how …?" slot ("wide",
+ *  "deep", "tall"). The carried-axis sentence and the size-mismatch
+ *  follow-up must read "how wide it should be", not "how width it should
+ *  be" (issue #398); the noun form ("width") stays in the per-axis rows
+ *  (see `SIZE_AXIS_WORDS` in lib/errorMapping). */
+export const SIZE_AXIS_ADJECTIVES = {
+  W: "wide",
+  D: "deep",
+  H: "tall",
+} as const;
+
+/** W/D/H axis letter → sentence-case noun ("width", "depth", "height") —
+ *  the single source for the size-mismatch rows (issue #367) and the
+ *  carried-axis sentence. Note this is NOT the backend's `AXIS_LABELS`
+ *  (the x/y/z bed-letter tuple in `d33d/design_loop.py`); it is the
+ *  dimension protocol's own axis vocabulary, sentence-cased (the
+ *  escape-input's capitalised `copy.partReport.axisLabels` is a different,
+ *  display-cased form). */
+export const SIZE_AXIS_WORDS = {
+  W: "width",
+  D: "depth",
+  H: "height",
+} as const;
+
 export const brief = {
   eyebrow: "What we're building",
   emptyBody:
@@ -358,8 +382,13 @@ export const failure = {
    *  by reason code; this is a parameterized sentence selected by
    *  `carried_axes` presence, not a reason code. Rendered ONLY when the
    *  frame's `carried_axes` carries an axis the gate enforced. */
-  bboxCarried: (label: string, heldMm: number): string =>
-    `I kept the ${label.toLowerCase()} you set earlier (${mm(heldMm)}). If you meant to change it, say how ${label.toLowerCase()} it should be.`,
+  bboxCarried: (axis: "W" | "D" | "H", heldMm: number): string => {
+    // One axis, its own words: the noun ("width") and the "how …" slot's
+    // adjective ("wide") both come from the single maps — no inline
+    // fallback ("how deep", never "how depth"; a multi-axis label cannot
+    // reach this signature, issue #398).
+    return `I kept the ${SIZE_AXIS_WORDS[axis]} you asked for (${mm(heldMm)}). If you meant to change it, say how ${SIZE_AXIS_ADJECTIVES[axis]} it should be.`;
+  },
 
   /** Part 2 line for an `axis_params_mismatch` failure (issue #276): the
    *  mismatching parameter's declared value and the measured extent on its
@@ -473,14 +502,29 @@ export const failure = {
      *  (import projects, or an axis the user never stated). */
     madeOnly: (axisWord: string, madeMm: number): string =>
       `${axisWord}: ${mm(madeMm)}`,
-    /** The follow-up question (operator decision 3): at most ONE per
-     *  card, the first axis in W/D/H order that has both an asked and a
-     *  made value (the backend's gate failure already establishes that
-     *  some confirmed axis was beyond tolerance — the SPA does not
-     *  re-derive it). Asks which measurement the stated number refers
-     *  to. */
-    whichMeasurement: (askedMm: number, axisWord: string): string =>
-      `Is ${mm(askedMm)} the ${axisWord} of the part itself, or the overall size including any lip or flange?`,
+    /** The follow-up question (operator decision 3): the HEADING of the
+     *  two-button lip question on the size card, the first axis in W/D/H
+     *  order that has both an asked and a made value beyond the gate
+     *  tolerance. `axisAdjective` is the per-axis adjective ("wide",
+     *  "deep", "tall") — the "how …" slot must read "how wide", never
+     *  the noun "how width" (issue #398). */
+    whichMeasurement: (askedMm: number, axisAdjective: string): string =>
+      `Is ${mm(askedMm)} how ${axisAdjective} the part itself is, or how the whole thing is, lip included?`,
+    /** The two lip-question button LABELS (operator decision 4): the short
+     *  names the operator chose for the two-button split. The buttons
+     *  prefill the composer with `lipPartItself` / `lipOverallIncludingLip`;
+     *  the labels are what is printed on the buttons themselves. */
+    lipButtonPartItself: "The part itself",
+    lipButtonOverallIncludingLip: "Overall, including the lip",
+    /** The two lip-question prefills (operator decision 4): each prefills
+     *  the composer with the answer it represents, so the next design
+     *  pass holds the right number. `axisNoun` is "width"/"depth"/"height"
+     *  (the row's noun); the overall variant names the lip explicitly so
+     *  the two answers cannot be confused. */
+    lipPartItself: (askedMm: number, axisNoun: string): string =>
+      `${mm(askedMm)} is the part's own ${axisNoun}, not the overall size.`,
+    lipOverallIncludingLip: (askedMm: number, axisNoun: string): string =>
+      `${mm(askedMm)} is the overall ${axisNoun}, including the lip.`,
   },
 
   /** Part 3 — the retry action for a failure with no dedicated action

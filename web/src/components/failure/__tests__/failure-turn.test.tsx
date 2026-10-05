@@ -633,11 +633,12 @@ describe("FailureTurn", () => {
     );
   });
 
-  it("the follow-up question renders for the first axis with both asked and made (issue #367, operator decision 3)", () => {
-    // W: asked 60, made 66 — the first axis with both values. The frame's
-    // bbox_out_of_tolerance reason already establishes that some confirmed
-    // axis exceeded the gate tolerance, so the SPA asks which measurement
-    // the stated number refers to.
+  it("the lip question renders as a heading plus TWO buttons for the first axis with both asked and made (issue #367, #398 operator decisions 3+4)", () => {
+    // W: asked 60, made 66 — the first axis with both values, beyond the
+    // gate tolerance. The question text is the HEADING (not a button);
+    // the two buttons prefill the composer with the answer each
+    // represents (the part's own width, or the overall width including
+    // the lip). The old single-button which-measurement control is gone.
     const error: DisplayError = {
       message: copy.failure.reasons.bbox_out_of_tolerance,
       detail: "bbox_out_of_tolerance",
@@ -648,16 +649,36 @@ describe("FailureTurn", () => {
     };
     const onAction = vi.fn();
     render(<FailureTurn error={error} inFlight={false} onAction={onAction} />);
-    const btn = screen.getByTestId("failure-action-which-measurement");
-    expect(btn).toBeTruthy();
-    expect(btn.textContent).toBe(
-      copy.failure.sizeMismatch.whichMeasurement(60, "width"),
+    // The heading carries the question, with the per-axis adjective.
+    const heading = screen.getByTestId("failure-question-which-measurement");
+    expect(heading.textContent).toBe(
+      copy.failure.sizeMismatch.whichMeasurement(60, "wide"),
     );
-    // Clicking prefills the composer via onAction.
-    fireEvent.click(btn);
-    expect(onAction).toHaveBeenCalledWith(
-      copy.failure.sizeMismatch.whichMeasurement(60, "width"),
-    );
+    expect(heading.textContent).toContain("how wide the part itself is");
+    expect(heading.textContent).not.toContain("width");
+    // The old single button is gone.
+    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+    // Two buttons: the SHORT operator-chosen labels on the buttons,
+    // each prefilling the composer with its FULL answer sentence.
+    const partBtn = screen.getByTestId("failure-action-lip-part-itself");
+    const overallBtn = screen.getByTestId("failure-action-lip-overall");
+    const partLabel = copy.failure.sizeMismatch.lipButtonPartItself;
+    const overallLabel = copy.failure.sizeMismatch.lipButtonOverallIncludingLip;
+    const partText = copy.failure.sizeMismatch.lipPartItself(60, "width");
+    const overallText = copy.failure.sizeMismatch.lipOverallIncludingLip(60, "width");
+    // The button labels are the short operator-chosen words, not the
+    // full prefill sentences.
+    expect(partLabel).toBe("The part itself");
+    expect(overallLabel).toBe("Overall, including the lip");
+    expect(partBtn.textContent).toBe(partLabel);
+    expect(overallBtn.textContent).toBe(overallLabel);
+    // Each click prefills the composer with the full answer sentence.
+    fireEvent.click(partBtn);
+    expect(onAction).toHaveBeenCalledWith(partText);
+    expect(partText).toContain("60.0\u202Fmm is the part's own width");
+    fireEvent.click(overallBtn);
+    expect(onAction).toHaveBeenCalledWith(overallText);
+    expect(overallText).toContain("is the overall width, including the lip");
     // No bed actions.
     expect(screen.queryByTestId("failure-action-split")).toBeNull();
   });
@@ -671,7 +692,9 @@ describe("FailureTurn", () => {
       measuredAxes: { W: 66 },
     };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
-    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+    expect(screen.queryByTestId("failure-question-which-measurement")).toBeNull();
+    expect(screen.queryByTestId("failure-action-lip-part-itself")).toBeNull();
+    expect(screen.queryByTestId("failure-action-lip-overall")).toBeNull();
   });
 
   it("no follow-up when the first with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
@@ -689,13 +712,16 @@ describe("FailureTurn", () => {
       measuredAxes: { W: 60.5, D: 44 },
     };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
-    const btn = screen.getByTestId("failure-action-which-measurement");
     // W (diff 0.5) is within tolerance -> skipped; D (diff 4) is beyond.
-    expect(btn.textContent).toBe(
-      copy.failure.sizeMismatch.whichMeasurement(40, "depth"),
+    // The heading names the DEEP axis with its adjective ("deep", not the
+    // noun "depth").
+    const heading = screen.getByTestId("failure-question-which-measurement");
+    expect(heading.textContent).toBe(
+      copy.failure.sizeMismatch.whichMeasurement(40, "deep"),
     );
+    expect(heading.textContent).toContain("how deep the part itself is");
+    expect(heading.textContent).not.toContain("depth");
   });
-
   it("no follow-up when every with-both axis is within gate tolerance (issue #367, operator decision 3)", () => {
     // OD3: "if no axis qualifies, no follow-up." W is within tolerance
     // (diff 0.5 <= max(0.6,0.5)); D has a made value but no asked value, so
@@ -710,7 +736,9 @@ describe("FailureTurn", () => {
       measuredAxes: { W: 60.5, D: 44 },
     };
     render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
-    expect(screen.queryByTestId("failure-action-which-measurement")).toBeNull();
+    expect(screen.queryByTestId("failure-question-which-measurement")).toBeNull();
+    expect(screen.queryByTestId("failure-action-lip-part-itself")).toBeNull();
+    expect(screen.queryByTestId("failure-action-lip-overall")).toBeNull();
   });
 
   it("the size card uses --color-blocked, not #FF3300 (issue #367)", () => {
@@ -727,12 +755,62 @@ describe("FailureTurn", () => {
     );
     const row = container.querySelector("[data-testid='failure-turn-size-row-W']");
     expect(row).not.toBeNull();
-    // The row uses the blocked colour (var(--color-blocked) = #D2A63C).
-    // We verify the class is present (the CSS handles the colour).
+    // The failing row uses the blocked colour class (var(--color-blocked)
+    // = #D2A63C); the CSS handles the colour itself.
     expect((row as HTMLElement).className).toContain("failure-turn-size-row");
     // #FF3300 must never appear in the size card's DOM.
     expect(container.innerHTML).not.toContain("#FF3300");
     expect(container.innerHTML).not.toContain("#ff3300");
+  });
+
+  it("only the failing axis row gets the --failing modifier; passing and made-only rows stay neutral (issue #398, operator decision (c))", () => {
+    // W: asked 60, made 66 — beyond tolerance (diff 6 > max(0.6, 0.5)) →
+    // FAILING. D: asked 40, made 40.3 — within tolerance (diff 0.3 <
+    // max(0.4, 0.5)) → passing, neutral. H: made only → neutral.
+    const error: DisplayError = {
+      message: copy.failure.reasons.bbox_out_of_tolerance,
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60, D: 40 },
+      measuredAxes: { W: 66, D: 40.3, H: 12 },
+    };
+    const { container } = render(
+      <FailureTurn error={error} inFlight={false} onAction={vi.fn()} />,
+    );
+    const wRow = container.querySelector("[data-testid='failure-turn-size-row-W']") as HTMLElement;
+    const dRow = container.querySelector("[data-testid='failure-turn-size-row-D']") as HTMLElement;
+    const hRow = container.querySelector("[data-testid='failure-turn-size-row-H']") as HTMLElement;
+    // Only W is failing — it carries the modifier class; D (passing) and
+    // H (made-only) do not.
+    expect(wRow.className).toContain("failure-turn-size-row--failing");
+    expect(dRow.className).not.toContain("failure-turn-size-row--failing");
+    expect(hRow.className).not.toContain("failure-turn-size-row--failing");
+    expect(dRow.className).toContain("failure-turn-size-row");
+    // Exactly one failing row in the card.
+    expect(container.querySelectorAll(".failure-turn-size-row--failing").length).toBe(1);
+    // No marker hex anywhere on the card.
+    expect(container.innerHTML).not.toContain("#FF3300");
+  });
+
+  it("the bboxCarried headline drops 'earlier' and uses the per-axis adjective on the card (issue #398)", () => {
+    // The card's headline is the carried-axis sentence (from the mapped
+    // error) — it says "you asked for", never "you set earlier", and the
+    // "how …" slot takes the adjective.
+    const error: DisplayError = {
+      message: copy.failure.bboxCarried("W", 60),
+      detail: "bbox_out_of_tolerance",
+      retryable: true,
+      reason: "bbox_out_of_tolerance",
+      carriedAxes: { W: 60 },
+      measuredAxes: { W: 66 },
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    const sentence = screen.getByTestId("failure-turn-sentence");
+    expect(sentence.textContent).toContain("you asked for");
+    expect(sentence.textContent).not.toContain("earlier");
+    expect(sentence.textContent).toContain("how wide it should be");
+    expect(sentence.textContent).not.toContain("how width");
   });
 
   it("a gate7-string frame still shows the bed card (issue #367 regression guard)", () => {

@@ -445,10 +445,53 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
         carried_axes: { D: 12.0 },
       },
     );
-    expect(display.message).toBe(copy.failure.bboxCarried("depth", 12.0));
+    expect(display.message).toBe(copy.failure.bboxCarried("D", 12.0));
     expect(display.message).toContain("12.0\u202Fmm");
     // The raw reason is still present for part 4 (collapsed).
     expect(display.detail).toBe("bbox_out_of_tolerance");
+  });
+
+  it("the carried-axis sentence drops 'earlier' and uses the per-axis adjective (issue #398)", () => {
+    // The sentence never says "you set earlier" — the carried axis may have
+    // been stated this turn — and the "how …" slot takes the adjective
+    // ("deep"), not the noun ("depth").
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { D: 12.0 },
+    });
+    expect(display.message).not.toContain("earlier");
+    expect(display.message).toContain("you asked for");
+    expect(display.message).toContain("how deep it should be");
+    expect(display.message).not.toContain("how depth");
+  });
+
+  it("the carried-axis sentence uses 'wide' for a width axis (issue #398)", () => {
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { W: 60 },
+    });
+    expect(display.message).toContain("how wide it should be");
+    expect(display.message).not.toContain("how width");
+    expect(display.message).not.toContain("earlier");
+  });
+
+  it("a multi-axis carried_axes frame names only the FIRST axis (issue #398)", () => {
+    // The gate enforced several carried axes; the sentence names the first
+    // one (the largest, the same axis whose value it renders) with its own
+    // adjective — never a joined label that falls through to a third
+    // axis's word.
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { W: 60, D: 40 },
+    });
+    expect(display.message).toContain("width");
+    expect(display.message).toContain("how wide it should be");
+    expect(display.message).not.toContain("tall");
+    expect(display.message).not.toContain("height");
+    expect(display.message).not.toContain("and depth");
   });
 
   it("the generic bbox sentence stands alone when the frame carries no carried_axes", () => {
@@ -489,7 +532,7 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
     expect(display.measuredAxes).toEqual({ W: 66, D: 40, H: 12 });
     // The bboxCarried sentence (issue #261) still stands alongside the
     // structured data — the mapping changed threading, not the message.
-    expect(display.message).toBe(copy.failure.bboxCarried("width", 60));
+    expect(display.message).toBe(copy.failure.bboxCarried("W", 60));
     // No gate7 string in the message → the bed card's envelope is still
     // absent (the size card's discriminator, downstream).
     expect(display.envelope).toBeUndefined();

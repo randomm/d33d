@@ -19,7 +19,7 @@
  */
 
 import { copy } from "../../copy";
-import { SIZE_AXIS_WORDS, type DisplayError } from "../../lib/errorMapping";
+import { SIZE_AXIS_ADJECTIVES, SIZE_AXIS_WORDS, type DisplayError } from "../../lib/errorMapping";
 
 /** The model pre-flight frame's `env_var` field (issue #303) as carried
  *  on the mapped `DisplayError` (the `envVar` field — the mapping copies
@@ -157,7 +157,11 @@ export function FailureTurn({
   //   asked + made  → "width: 60.0 mm → 66.0 mm"
   //   made only     → "depth: 42.0 mm"
   //   asked only    → "height: not measured yet"
-  const sizeRows: Array<{ key: string; text: string }> | null =
+  // Each row is NEUTRAL except the failing axis (both values present and
+  // beyond the gate tolerance) — only that row gets --color-blocked
+  // (issue #398, operator decision (c)); passing and made-only rows carry
+  // no colour modifier.
+  const sizeRows: Array<{ key: string; text: string; failing: boolean }> | null =
     card === "size"
       ? (["W", "D", "H"] as const)
           .filter((a) => {
@@ -175,27 +179,35 @@ export function FailureTurn({
                 : m !== undefined
                   ? copy.failure.sizeMismatch.madeOnly(word, m)
                   : copy.failure.envelope.axisNotMeasured(word);
-            return { key: a, text };
+            // Failing = both values established AND beyond the gate
+            // tolerance (the same math the follow-up uses below).
+            const failing =
+              c !== undefined &&
+              m !== undefined &&
+              Math.abs(m - c) > Math.max(0.01 * c, 0.5);
+            return { key: a, text, failing };
           })
       : null;
 
-  // The follow-up question (issue #367, operator decision 3): at most
-  // ONE per card — the FIRST axis in W, D, H order that has BOTH an
-  // asked and a made value, AND only if they differ beyond the gate
-  // tolerance (max(1%, 0.5 mm) — the same gate the failure frame came
-  // from, re-derived here from the two numbers the frame carries; the
-  // backend marks no per-axis tolerance, so the SPA owns this last step).
-  // If no axis qualifies (the first with-both axis is within tolerance —
-  // i.e. only a LATER axis actually diverged, or the frame is malformed),
-  // no follow-up is offered.
-  const sizeFollowUp: string | null = (() => {
+  // The lip question (issue #367, operator decision 3 → two-button
+  // form, issue #398): at most ONE per card — the FIRST axis in W, D, H
+  // order that has BOTH an asked and a made value, AND only if they differ
+  // beyond the gate tolerance (max(1%, 0.5 mm) — the same gate the failure
+  // frame came from, re-derived here from the two numbers the frame
+  // carries; the backend marks no per-axis tolerance, so the SPA owns this
+  // last step). The heading stays the question; the two buttons prefill
+  // the composer with the answer each represents (the part's own size, or
+  // the overall size including the lip). If no axis qualifies (the first
+  // with-both axis is within tolerance — i.e. only a LATER axis actually
+  // diverged, or the frame is malformed), no follow-up is offered.
+  const sizeLipQuestion: { asked: number; axis: "W" | "D" | "H" } | null = (() => {
     for (const a of ["W", "D", "H"] as const) {
       const c = error.carriedAxes?.[a];
       const m = error.measuredAxes?.[a];
       if (c === undefined || m === undefined) continue;
       const tolerance = Math.max(0.01 * c, 0.5);
       if (Math.abs(m - c) > tolerance) {
-        return copy.failure.sizeMismatch.whichMeasurement(c, SIZE_AXIS_WORDS[a]);
+        return { asked: c, axis: a };
       }
     }
     return null;
@@ -331,7 +343,11 @@ export function FailureTurn({
       {sizeRows !== null && sizeRows.length > 0 && (
         <ul className="failure-turn-size-rows" data-testid="failure-turn-size-rows">
           {sizeRows.map((row) => (
-            <li key={row.key} className="failure-turn-size-row" data-testid={`failure-turn-size-row-${row.key}`}>
+            <li
+              key={row.key}
+              className={`failure-turn-size-row${row.failing ? " failure-turn-size-row--failing" : ""}`}
+              data-testid={`failure-turn-size-row-${row.key}`}
+            >
               {row.text}
             </li>
           ))}
@@ -384,20 +400,55 @@ export function FailureTurn({
               {copy.failure.envelope.actions.biggerPrinter}
             </button>
           </>
-        ) : card === "size" && sizeFollowUp !== null ? (
-          // The size-mismatch card offers ONE follow-up question (issue
-          // #367, operator decision 3): the first axis in W/D/H order
-          // that has both asked and made. Clicking prefills the composer
-          // via the existing onAction→onSend path.
-          <button
-            type="button"
-            className="failure-turn-action"
-            data-testid="failure-action-which-measurement"
-            disabled={inFlight}
-            onClick={() => onAction(sizeFollowUp)}
-          >
-            {sizeFollowUp}
-          </button>
+        ) : card === "size" && sizeLipQuestion !== null ? (
+          // The size-mismatch card offers ONE lip question with TWO buttons
+          // (issue #398, operator decision 4): the question text is the
+          // heading; each button prefills the composer with the answer it
+          // represents (the part's own size, or the overall size including
+          // the lip). Both use the existing onAction→onSend path.
+          <>
+            <p
+              className="failure-turn-size-followup"
+              data-testid="failure-question-which-measurement"
+            >
+              {copy.failure.sizeMismatch.whichMeasurement(
+                sizeLipQuestion.asked,
+                SIZE_AXIS_ADJECTIVES[sizeLipQuestion.axis],
+              )}
+            </p>
+            <button
+              type="button"
+              className="failure-turn-action"
+              data-testid="failure-action-lip-part-itself"
+              disabled={inFlight}
+              onClick={() =>
+                onAction(
+                  copy.failure.sizeMismatch.lipPartItself(
+                    sizeLipQuestion.asked,
+                    SIZE_AXIS_WORDS[sizeLipQuestion.axis],
+                  ),
+                )
+              }
+            >
+              {copy.failure.sizeMismatch.lipButtonPartItself}
+            </button>
+            <button
+              type="button"
+              className="failure-turn-action"
+              data-testid="failure-action-lip-overall"
+              disabled={inFlight}
+              onClick={() =>
+                onAction(
+                  copy.failure.sizeMismatch.lipOverallIncludingLip(
+                    sizeLipQuestion.asked,
+                    SIZE_AXIS_WORDS[sizeLipQuestion.axis],
+                  ),
+                )
+              }
+            >
+              {copy.failure.sizeMismatch.lipButtonOverallIncludingLip}
+            </button>
+          </>
         ) : (
           // The retry control is offered only when the failure is
           // retryable: pre-flight configuration failures (issue #303's

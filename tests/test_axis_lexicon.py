@@ -494,6 +494,99 @@ class TestFeatureNounAbstain:
         assert axes == {"W": 60.0, "D": 45.0}
 
 
+class TestFeatureVerbClauseAbstain:
+    """Issue #398: a clause introduced by a feature verb (add, cut, drill,
+    bore, engrave, emboss) that contains an axis word + number but NO
+    feature noun of its own is describing a feature whose noun lives in a
+    sibling top-level clause. The absolute axis cue is suppressed — the
+    number is the feature's size, not the part's dimension.
+
+    The gate: the message must have a feature noun in another top-level
+    clause. This prevents false positives on part-level statements.
+    """
+
+    @pytest.mark.parametrize(
+        ("msg", "expected_abs"),
+        [
+            # Feature-verb clause (verb + axis word + number, no feature
+            # noun in the clause; feature noun in sibling clause).
+            (
+                "add a 3 mm wide, 2 mm deep groove around the outside, 10 mm from the top",
+                {},
+            ),
+            (
+                "add a 10 mm wide slot across the top, 5 mm deep",
+                {},
+            ),
+            # Feature noun in the SAME clause (existing feature-noun guard).
+            (
+                "drill a 6 mm hole through the plate, 15 mm from the left edge, centred front to back",
+                {},
+            ),
+            # 'cut' with a feature noun in the same clause.
+            ("cut a 6 mm wide channel along the side", {}),
+            # 'add' with a feature noun in the same clause.
+            ("add a 5 mm tall rib", {}),
+            # 'drill' with a feature noun in the same clause.
+            ("drill an 8 mm deep hole", {}),
+            # Positive controls: 'make' is NOT a feature verb.
+            ("make it 40 mm wide with a 5 mm hole", {"W": 40.0}),
+            ("make a 30 mm wide block", {"W": 30.0}),
+            ("make it 12 mm tall", {"H": 12.0}),
+            # 'with' joiner: the feature noun is in the same top-level
+            # clause (sub-clause), so the cross-clause rule does not fire.
+            ("a 40 mm wide box with a 5 mm deep groove", {"W": 40.0}),
+        ],
+    )
+    def test_feature_verb_clause_states(
+        self, msg: str, expected_abs: dict
+    ) -> None:
+        result = classify(msg)
+        assert result.absolute == expected_abs, (
+            f"{msg!r}: expected {expected_abs}, got {result.absolute}"
+        )
+
+    def test_feature_verb_bare_measurement_suppressed(self) -> None:
+        """A bare measurement fragment (no verb, no pronoun, no article)
+        with an axis word + number is suppressed when the message has a
+        feature noun in another top-level clause. 'add a 10 mm wide slot
+        across the top, 5 mm deep' → clause 2 '5 mm deep' is a bare
+        measurement; the slot's noun is in clause 1."""
+        result = classify("add a 10 mm wide slot across the top, 5 mm deep")
+        assert result.absolute == {}
+
+    def test_feature_verb_positions_never_state(self) -> None:
+        """Position phrases ('15 mm from the left edge', '10 mm from the
+        top', 'centred front to back') never state an axis — they have no
+        axis word."""
+        for msg in (
+            "15 mm from the left edge",
+            "10 mm from the top",
+            "centred front to back",
+        ):
+            result = classify(msg)
+            assert result.absolute == {}, msg
+
+    def test_make_is_not_a_feature_verb(self) -> None:
+        """'make' is deliberately NOT in the feature-verb set:
+        'make a 30 mm wide block' states W=30 (part-level statement).
+        'make it 40 mm wide with a 5 mm hole' states W=40 (the hole's 5
+        is caught by the feature-noun guard within the clause)."""
+        result = classify("make a 30 mm wide block")
+        assert result.absolute == {"W": 30.0}
+        result = classify("make it 40 mm wide with a 5 mm hole")
+        assert result.absolute == {"W": 40.0}
+
+    def test_feature_verb_unmapped_numbers(self) -> None:
+        """The feature size is in unmapped_mm_numbers (tier-2 offer
+        territory), not in absolute."""
+        result = classify("add a 3 mm wide, 2 mm deep groove around the outside, 10 mm from the top")
+        assert result.absolute == {}
+        assert 3.0 in result.unmapped_mm_numbers
+        assert 2.0 in result.unmapped_mm_numbers
+        assert 10.0 in result.unmapped_mm_numbers
+
+
 class TestMatingConnector:
     """Issue #314: the mating-connector rule for the lexicon path.
 
