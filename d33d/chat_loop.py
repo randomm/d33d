@@ -28,7 +28,7 @@ from d33d.design_loop_events import (
     photo_data_uri,
     run_design_loop_with_events,
 )
-from d33d.statement_extraction import (
+from d33d.stated_carry import (
     carried_stated_set,
     effective_stated_dims,
     resolve_stated_cues,

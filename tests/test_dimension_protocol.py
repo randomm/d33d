@@ -44,9 +44,11 @@ from d33d.dimension_protocol import (
     resolve_tolerance_mm,
     user_quoted_unmapped_mm,
 )
-from d33d.statement_extraction import (
+from d33d.stated_carry import (
     effective_stated_dims,
     resolve_stated_cues,
+)
+from d33d.statement_extraction import (
     stated_axes_from_message,
     stated_dims_from_message,
 )
@@ -1373,12 +1375,12 @@ class TestResolveStatedCues:
 
     def test_degrades_on_classify_failure(self, monkeypatch):
         """A classify failure degrades to the carried set unchanged."""
-        import d33d.statement_extraction as se
+        import d33d.stated_carry as sc
 
         def _boom(message: str):
             raise RuntimeError("lexicon on fire")
 
-        monkeypatch.setattr(se, "classify", _boom)
+        monkeypatch.setattr(sc, "classify", _boom)
         result = resolve_stated_cues(
             {"W": 40.0, "H": 12.0}, "make it taller", label="test"
         )

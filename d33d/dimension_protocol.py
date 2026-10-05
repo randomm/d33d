@@ -36,15 +36,17 @@ single biggest divergence from the Meshy/Tripo-style "just guess" agents:
   does not manage version history.
 
 Issue #393: the statement-extraction half (``_extract_stated`` + helpers,
-the per-message wrappers, the carry-forward readers/merge, and
-``resolve_stated_cues``) lives in :mod:`d33d.statement_extraction`; this
-module keeps the clarification/gate/fit half and imports the extraction
-surface from there. The dependency edge is strictly
-``axis_lexicon`` -> ``triple_extraction`` -> ``statement_extraction`` ->
-``dimension_protocol`` (never back). ``DIMENSION_AXES`` is re-exported
-from :mod:`d33d.statement_extraction` (the extraction half is the primary
-user); the historical ``from d33d.dimension_protocol import DIMENSION_AXES``
-importers keep working unchanged.
+the per-message wrappers) lives in :mod:`d33d.statement_extraction`; the
+carry-forward resolution (``latest_stated_dims_dict`` / ``carried_stated_set``
+/ ``effective_stated_dims`` / ``resolve_stated_cues``) lives in
+:mod:`d33d.stated_carry`. This module keeps the clarification/gate/fit half
+and imports the extraction surface from there. The dependency edge is
+strictly ``axis_lexicon`` -> ``triple_extraction`` ->
+``statement_extraction`` -> ``stated_carry`` -> ``dimension_protocol``
+(never back). ``DIMENSION_AXES`` is defined here (the clarification/gate
+half owns the closed protocol constants); the historical
+``from d33d.dimension_protocol import DIMENSION_AXES`` importers keep
+working unchanged.
 """
 
 from __future__ import annotations
@@ -123,7 +125,10 @@ DIMENSION_AXES: tuple[str, ...] = ("W", "D", "H")
 # Late import (issue #393): the statement-extraction half now lives in
 # :mod:`d33d.statement_extraction`; it needs ``DIMENSION_AXES`` above and
 # must not import this module, so the edge is one-way (dimension_protocol
-# -> statement_extraction).
+# -> statement_extraction). ``_is_clean_affirmation`` is re-exported from
+# :mod:`d33d.statement_extraction` so ``projects.py`` / ``fill_recut.py`` /
+# ``confirm_offer.py`` keep their ``from d33d.dimension_protocol import
+# _is_clean_affirmation`` import path unchanged.
 from d33d.statement_extraction import (
     _coerce,
     _extract_stated,

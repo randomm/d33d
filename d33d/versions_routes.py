@@ -687,7 +687,7 @@ def create_versions_router() -> APIRouter:
         # re-deriving from live chat. No stated axes (empty result)
         # persist a NULL — an absent statement abstains, never a
         # fabricated axis row.
-        from d33d.statement_extraction import (
+        from d33d.stated_carry import (
             carried_stated_set,
             effective_stated_dims,
             resolve_stated_cues,
@@ -881,7 +881,7 @@ def _finalize_loop_kwargs(
     )
     from d33d.prompt_hash import canonical_hash
     from d33d.render_worker import project_renders_dir, render_for_design_loop
-    from d33d.statement_extraction import (
+    from d33d.stated_carry import (
         carried_stated_set,
         effective_stated_dims,
         resolve_stated_cues,
