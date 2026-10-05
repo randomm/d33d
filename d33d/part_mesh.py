@@ -34,7 +34,7 @@ from typing import Any
 import numpy as np
 import trimesh
 
-from d33d.part_holes import _boundary_loops, watertight_genus
+from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import mesh_topology
 from d33d.part_repair import REPAIR_TIMEOUT_SECONDS, repair_with_pmf
 
@@ -274,10 +274,10 @@ def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
 
     Ticket #3: decimate BEFORE repair. Uses trimesh's quadric decimation
     (``simplify_quadric_decimation``). If the mesh is already at or below
-    the target, returns a copy unchanged (no work).
+    the target, returns the mesh unchanged (no work).
     """
     if len(mesh.faces) <= target_faces:
-        return mesh.copy()
+        return mesh
     return mesh.simplify_quadric_decimation(target_faces)
 
 
@@ -426,10 +426,10 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_ZIP_ENTRIES",
     "MAX_PART_ZIP_UNCOMPRESSED",
-    "PartFileTooLargeError",
-    "PartUploadError",
     "REPAIR_FACE_BUDGET",
     "REPAIR_TIMEOUT_SECONDS",
+    "PartFileTooLargeError",
+    "PartUploadError",
     "load_part_geometry",
     "mesh_units",
     "parse_and_repair",

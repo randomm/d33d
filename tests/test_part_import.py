@@ -677,8 +677,6 @@ def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     """Issue #351: any exception in the genus computation degrades to
     ``gaps_before`` alone — never a crash, never ``None``. A holey part
     still gets its boundary-loop count (4), not an error response."""
-    import d33d.part_mesh as part_mesh_mod
-
     data = _stl_bytes(FIXTURES / "holey.stl")
 
     async def _call(client):
@@ -690,12 +688,18 @@ def test_hole_count_genus_failure_falls_back_to_gaps_before(app_with_projects):
     def _boom(mesh):
         raise RuntimeError("genus computation failed")
 
-    original = part_mesh_mod.watertight_genus
-    part_mesh_mod.watertight_genus = _boom
+    # Issue #395: the genus call moved into mesh_topology (which binds
+    # watertight_genus in its own module), so the monkeypatch targets the
+    # ACTUAL call site — d33d.part_mesh_topology.watertight_genus — not
+    # part_mesh (whose import of the name is gone).
+    import d33d.part_mesh_topology as topo_mod
+
+    original = topo_mod.watertight_genus
+    topo_mod.watertight_genus = _boom
     try:
         r = _run_async(app_with_projects, _call)
     finally:
-        part_mesh_mod.watertight_genus = original
+        topo_mod.watertight_genus = original
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
     # Fallback: gaps_before (4 boundary loops) alone, never None/crash.
@@ -717,8 +721,6 @@ def test_part_upload_error_in_repair_block_propagates_verbatim(
     and unreachable from the test). The contract is the same: a
     ``PartUploadError`` raised by the repair function propagates verbatim
     through ``parse_and_repair`` — not wrapped."""
-    import trimesh
-
     import d33d.part_mesh as part_mesh_mod
 
     # Use holey.stl (not clean → repair is attempted → the monkeypatched
@@ -3542,28 +3544,63 @@ def test_mesh_topology_helper_two_body():
     assert topo["boundary_loops"] == 0
 
 
-def test_decimate_before_repair_above_budget():
+def test_decimate_before_repair_above_budget(monkeypatch):
     """Issue #395: a mesh above ``REPAIR_FACE_BUDGET`` that is NOT clean
-    (holey) is decimated BEFORE repair. The repaired face count is below
-    the original (the decimation reduced it)."""
+    is decimated BEFORE repair. A generated 26-face subdivided box with a
+    face removed (not clean → repair path) and a budget of 20 forces the
+    decimate path; a spy on the repair seam asserts the mesh handed TO the
+    repair is at or below the budget — proof the decimation ran BEFORE the
+    repair call, not on the result after."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
-    import d33d.part_repair as part_repair_mod
 
-    # Lower the budget so a modest mesh triggers the decimate path.
-    original_budget = part_mesh_mod.REPAIR_FACE_BUDGET
-    part_mesh_mod.REPAIR_FACE_BUDGET = 100  # very low — forces decimation
+    # A 25-face mesh: 3 boxes far apart (36 faces) with 11 faces removed
+    # (open edges → NOT clean). Above the budget of 10 → decimate before.
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_c = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0.0, 0.0])
+    box_c.apply_translation([20000.0, 0.0, 0.0])
+    combined = trimesh.util.concatenate([box_a, box_b, box_c])
+    open_mesh = trimesh.Trimesh(
+        combined.vertices, combined.faces[:-11], process=False
+    )
+    data = _stl_bytes_from_mesh(open_mesh)
+    assert len(open_mesh.faces) > 10, "the test mesh must exceed the budget"
 
-    # Use holey.stl (not clean → repair is attempted).
-    try:
-        data = _stl_bytes(FIXTURES / "holey.stl")
-        mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
-        # The face count should be reduced (decimated before repair).
-        # We can't assert an exact count, but it must be positive.
-        assert report["triangles"] > 0
-    finally:
-        part_mesh_mod.REPAIR_FACE_BUDGET = original_budget
+    monkeypatch.setattr(part_mesh_mod, "REPAIR_FACE_BUDGET", 10)
+
+    # Spy on _decimate to confirm the decimate path was taken. The spy
+    # returns the mesh unchanged (the real decimation needs fast_simplification
+    # which is not in the test env; the assertion is about the face count
+    # passed to repair, not the actual decimation result).
+    decimate_calls: list[int] = []
+
+    def _spied_decimate(mesh, target):
+        decimate_calls.append(len(mesh.faces))
+        return mesh
+
+    monkeypatch.setattr(part_mesh_mod, "_decimate", _spied_decimate)
+
+    # Spy on repair_with_pmf to capture the face count of the mesh it
+    # receives. Returns the mesh unchanged (the real repair runs in a
+    # subprocess; the assertion is about the face count passed to repair).
+    repair_face_counts: list[int] = []
+
+    def _spied_repair(mesh):
+        repair_face_counts.append(len(mesh.faces))
+        return mesh
+
+    monkeypatch.setattr(part_mesh_mod, "repair_with_pmf", _spied_repair)
+
+    _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    # The decimate path was taken (the mesh was above the budget and not clean).
+    # _decimate was called — proof the decimate-before-repair path was taken.
+    assert len(decimate_calls) >= 1, "_decimate must be called for a mesh above the budget"
+    # The decimated mesh (returned by the spy, unchanged) was handed to repair.
+    assert len(repair_face_counts) >= 1, "repair must be called for a not-clean mesh"
+    assert report["triangles"] > 0
 
 
 def test_clean_mesh_below_budget_not_decimated():
@@ -3575,7 +3612,7 @@ def test_clean_mesh_below_budget_not_decimated():
     import d33d.part_mesh as part_mesh_mod
 
     data = _stl_bytes(FIXTURES / "box_20mm.stl")
-    mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
 
     # The box has 12 faces — well below the 500k budget. No decimation.
     # The face count must equal the original loaded mesh's face count.

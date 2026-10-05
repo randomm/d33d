@@ -60,16 +60,21 @@ def mesh_topology(
 
     watertight_bodies = [c for c in components if c.is_watertight]
 
-    # Winding consistency: trimesh's check returns a bool.
+    # Winding consistency: trimesh's check returns a bool. Any failure
+    # degrades to False (the mesh is NOT clean — repair is taken). The
+    # blind catch is intentional: the topology measurement is a helper
+    # that must never raise (a measurement failure must degrade to the
+    # safe "not clean / no holes" defaults, never crash the import).
     try:
         winding_consistent = bool(merged.is_winding_consistent)
-    except Exception:
+    except Exception:  # noqa: BLE001 - measurement must never raise
         winding_consistent = False
 
-    # Genus: reuse the existing watertight_genus, wrapped.
+    # Genus: reuse the existing watertight_genus, wrapped. Any exception
+    # falls back to 0 (the count degrades, never crashes — issue #351).
     try:
         genus = watertight_genus(components)
-    except Exception:
+    except Exception:  # noqa: BLE001 - measurement must never raise
         genus = 0
 
     return {

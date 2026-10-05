@@ -18,7 +18,7 @@ process boundary is a single-worker pool, created lazily on first use.
 from __future__ import annotations
 
 import logging
-import os
+from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import trimesh
@@ -32,15 +32,13 @@ REPAIR_TIMEOUT_SECONDS = 120
 # The ProcessPoolExecutor is created lazily (single worker) so the import
 # of this module is cheap and test environments that monkeypatch
 # repair_with_pmf never spawn a subprocess.
-_executor: "ProcessPoolExecutor | None" = None
+_executor: ProcessPoolExecutor | None = None
 
 
-def _get_executor():
+def _get_executor() -> ProcessPoolExecutor:
     """Lazily create (or return) the repair ProcessPoolExecutor."""
     global _executor
     if _executor is None:
-        from concurrent.futures import ProcessPoolExecutor
-
         _executor = ProcessPoolExecutor(max_workers=1)
     return _executor
 
@@ -105,7 +103,8 @@ def repair_with_pmf(
     ``timeout``: override the default timeout (seconds). Useful in tests
     where a very short timeout can be injected.
     """
-    from concurrent.futures import Future, TimeoutError as FutTimeoutError
+    from concurrent.futures import Future
+    from concurrent.futures import TimeoutError as FutTimeoutError
 
     from d33d.part_mesh import PartUploadError  # local: keep the edge one-way
 
