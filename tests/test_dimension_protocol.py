@@ -1054,6 +1054,40 @@ class TestNewestWinsPerAxis:
         )
         assert "H" not in axes
 
+    def test_relative_delta_releases_not_enforces(self):
+        """A RELATIVE delta ('by N mm' / 'N mm <axis-word>') is an
+        increment, never an absolute target: the axis is released (the
+        gate asks for the new value) instead of enforcing the delta as an
+        absolute. On a 12 mm part, 'taller by 5 mm' must NOT yield
+        H=5.0 — a physically shorter target."""
+        for msg in (
+            "taller by 5 mm",
+            "make it taller by 5 mm",
+            "5 mm taller",
+            "make it wider by 3 mm",
+            "wider by 3 mm",
+            "3 mm wider",
+            "make it 3 mm wider",
+            "deeper by 2 mm",
+            "2 mm deeper",
+            "make it 2 mm deeper",
+        ):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            target = "H" if "tall" in msg or "short" in msg else "W" if "wide" in msg or "narrow" in msg else "D"
+            assert target not in axes, (
+                f"{msg!r} is a relative delta — {target} must be released, got {axes}"
+            )
+
+    def test_delta_marker_does_not_block_other_axes(self):
+        """A delta message releases only its own axis: 'make it wider by
+        3 mm' releases W while H=12 stays enforced (the delta marker is
+        clause-local to the delta's own clause)."""
+        axes = stated_axes_from_message(
+            "make it wider by 3 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "W" not in axes
+        assert axes["H"] == 12.0
+
     def test_nonpositive_unmapped_value_never_stated(self):
         """A non-positive explicit value ("0 mm") is never stated — the
         released axis is released, and the gate abstains."""

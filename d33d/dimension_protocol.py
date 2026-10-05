@@ -45,9 +45,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 from d33d.axis_lexicon import (
+    _ABSOLUTE,
     _CLAUSE_SPLIT_RE,
     _FEATURE_NOUN_RE,
     MM_UNIT_ALTERNATION,
+    RELATIVE_WORDS,
     Cues,
     classify,
 )
@@ -190,6 +192,24 @@ class DimensionClarification:
         lines.append(f"fit_type = {self.fit_type!r}[1:-1];")
         lines.append(f"tolerance_mm = {self.tolerance_mm:g};")
         return "\n".join(lines)
+
+
+# A RELATIVE delta in a releasing turn: the mm number is an INCREMENT
+# ("make it taller by 5 mm" / "wider by 3 mm" / "5 mm taller"), never an
+# absolute target. Either of two marker shapes — the preposition "by"
+# immediately before the number ("taller by 5 mm") or an axis word
+# (absolute or relative) immediately after the number ("5 mm taller") —
+# means the clause states a delta. A delta must RELEASE the axis (the
+# new value is unknown — the gate asks), never enforce it as an absolute
+# ("taller by 5 mm" on a 12 mm part must not set H=5.0 — that is a
+# physically shorter target).
+_DELTA_MARKER_RE = re.compile(
+    r"\bby\s+(?=[\d.])"
+    r"|\b\d+(?:\.\d+)?\s*mm\s+(?:"
+    + "|".join(sorted(set(_ABSOLUTE) | set(RELATIVE_WORDS), key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _coerce(value: Any) -> float | None:
@@ -378,11 +398,15 @@ def _unmapped_value_for_axis(
     """The unmapped mm number a releasing turn assigns to ``axis``.
 
     An unmapped number ("make it taller, 20 mm") restates the released
-    axis ONLY when the message carries EXACTLY ONE unmapped mm number AND
-    the clause containing it has no feature noun — otherwise the number
-    belongs to a feature ("keep the 25 mm peg") or is ambiguous (two
-    unmapped numbers) and the axis is released instead. ``None`` (release)
-    when either condition fails."""
+    axis ONLY when the message carries EXACTLY ONE unmapped mm number,
+    the clause containing it has no feature noun, and the clause carries
+    no RELATIVE-delta marker — "by 5 mm" / "5 mm taller" states an
+    increment whose new value is unknown, so the axis is released (asked
+    about), never enforced as the absolute 5.0 (a "taller by 5 mm" on a
+    12 mm part must not yield a physically shorter H=5.0). Otherwise —
+    the number belongs to a feature ("keep the 25 mm peg") or is
+    ambiguous (two unmapped numbers) — the axis is released instead.
+    ``None`` (release) when any condition fails."""
     numbers = cues.unmapped_mm_numbers
     if len(numbers) != 1:
         return None
@@ -400,6 +424,12 @@ def _unmapped_value_for_axis(
             # otherwise ``_coerce`` validates it (non-positive → None →
             # release, never stated).
             if _FEATURE_NOUN_RE.search(clause):
+                return None
+            # A delta marker ("by 5 mm" / "5 mm taller") means the number
+            # is a relative increment, not an absolute target: release —
+            # the gate asks for the new value, never enforces the delta
+            # as an absolute.
+            if _DELTA_MARKER_RE.search(clause):
                 return None
             return _coerce(number)
     # No clause claims the number (a signed form like "-5 mm", or a
