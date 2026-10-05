@@ -3549,7 +3549,7 @@ def test_decimate_before_repair_above_budget(monkeypatch):
     face removed (not clean → repair path) and a budget of 20 forces the
     decimate path; a spy on the repair seam asserts the mesh handed TO the
     repair is at or below the budget — proof the decimation ran BEFORE the
-    repair call, not on the result after."
+    repair call, not on the result after."""
     import trimesh
 
     import d33d.part_mesh as part_mesh_mod
