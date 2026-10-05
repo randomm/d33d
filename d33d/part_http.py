@@ -9,6 +9,7 @@ part-columns → public object.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
@@ -237,6 +238,97 @@ def _loads_or_none(blob: str | None, column: str = "part_report") -> Any | None:
         return None
 
 
+@contextlib.contextmanager
+def project_row_for_worker(
+    db_path: str | Path | None, project_id: Any
+) -> Any:
+    """ONE short-lived ``db.connect(db_path)`` handle for a worker-thread read
+    (issue #374), opened and closed by this context manager.
+
+    The design-loop render closures (``d33d.app``'s ``_loop`` and
+    ``d33d.versions_routes``'s finalize ``_render_fn``) run on an
+    ``asyncio.to_thread`` worker thread, where the app's event-loop-bound
+    ``check_same_thread=True`` connections (``app.state.conn`` /
+    ``app.state.versions``) raise ``sqlite3.ProgrammingError`` on first use
+    — the pre-fix wiring silently degraded every part to part-less. Both
+    closures therefore acquire the project row AND the v1 read
+    (``resolve_part_paths``'s ``_v1_for_part``) through this ONE short-lived
+    ``db.connect(db_path)`` handle (the request_logging pattern), closing it
+    here — never in the caller.
+
+    Yields ``(row, conn)``. ``row`` is ``None`` (and ``conn`` too, on a
+    connect failure) when the row cannot be read: a missing ``db_path``
+    (narrowed BEFORE the connect call — ``db.connect`` would otherwise
+    create a stray file named ``"None"``), a connect that raises
+    ``sqlite3.Error`` or ``OSError`` (a bad/unwritable path), or a read that
+    raises ``sqlite3.Error`` (a closed/broken handle). Each unreadable
+    shape degrades with ONE warning that names the project id only (never
+    a path) and carries the exception class name via
+    ``exc_info=True`` — the render never raises an unclassified error
+    because of part resolution (issue #330's binding operator decision).
+    A project with NO part keeps part-less rendering silently — the row
+    is ``None`` with no warning. ``db.connect`` re-runs its idempotent
+    schema per call; the extra ``CREATE ... IF NOT EXISTS`` cost is
+    accepted — the handle is one per render iteration, per the binding
+    operator decision.
+    """
+    import sqlite3
+
+    if db_path is None:
+        # No db path — the project row cannot be read. One warning, the
+        # other unreadable shapes' observability (project id only, never
+        # a path; no exception here — no connect attempt was made).
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read (no db path) — the render proceeds part-less",
+            project_id,
+        )
+        yield None, None
+        return
+    try:
+        conn = db_mod.connect(db_path)
+    except (sqlite3.Error, OSError) as e:
+        # A connect that raises (a closed/broken handle, a bad or
+        # unwritable path) is an unreadable row — degrade to no part; never
+        # raise into the design loop.
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read (connect %s: %s) — the render proceeds part-less",
+            project_id,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
+        yield None, None
+        return
+    try:
+        row = conn.get_project(project_id)
+    except sqlite3.Error as e:
+        # A closed/broken handle is an unreadable row — degrade to no part
+        # (the render proceeds part-less); never raise into the design
+        # loop. (``TypeError``/``AttributeError`` — a non-Connection object
+        # where a Connection was expected — is a wiring bug, not an
+        # unreadable row: let it surface.)
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read (get_project %s: %s) — the render proceeds part-less",
+            project_id,
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
+        row = None
+    try:
+        yield row, conn
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001, S110 — a failed close
+            # carries no new information — the read failure, if any,
+            # already warned.
+            pass
+
+
 def resolve_part_paths(
     row: dict[str, Any] | None, conn: db_mod.Connection | None
 ) -> tuple[Path | None, Path | None]:
@@ -403,6 +495,7 @@ __all__ = [
     "part_envelope",
     "part_envelope_with_bbox",
     "part_public",
+    "project_row_for_worker",
     "resolve_part_paths",
     "resolve_v1_part_path",
 ]
