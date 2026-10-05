@@ -212,96 +212,113 @@ def _child_main(
         send_conn.send(("err", type(e).__name__, str(e)))
 
 
-def repair_with_pmf(
-    mesh: trimesh.Trimesh, timeout: float | None = None
-) -> trimesh.Trimesh:
-    """The one-call pymeshfix repair (``MeshFix.repair`` → ``fix_normals``)
-    on a single mesh.
+class _RepairWorkerProcess(multiprocessing.Process):
+    """A ``Process`` subclass that calls the parent-resolved worker in
+    ``run()`` (overriding the default ``target/args`` dispatch). The
+    instance is pickled to the spawn child (carrying the resolved worker,
+    mode, and payload), and the child's ``run()`` calls the worker
+    directly — no re-import of the module attribute, so a test
+    monkeypatch of ``_REPAIR_WORKER`` is visible to the child.
 
-    The single-body path uses it UNCHANGED (the early branch keeps
-    single-body imports byte-for-byte identical to the historical one-call
-    repair); the multi-body path runs it once PER connected body so repair
-    cannot drop disconnected bodies (a single ``MeshFix.repair()`` on the
-    merged multi-body mesh keeps only one component — issue #375).
+    The ``mode`` dispatch is the same as ``_child_main``: ``"single"``
+    unpacks the payload as ``(verts, faces)``; ``"batch"`` passes the
+    list as one arg. The reply is ``(kind, name, payload)`` over the
+    pipe."""
 
-    Issue #395: the repair runs in a **separate, per-call process** with a
-    timeout (default ``REPAIR_TIMEOUT_SECONDS``), so pymeshfix's
-    GIL-holding C code can never block the event loop. The worker is a
-    fresh ``spawn`` ``Process`` per call: the timeout bounds only THIS
-    call's work, and the timeout's ``kill()`` + ``join()`` cannot affect
-    any other call's worker. On timeout a ``RepairTimeoutError`` is
-    raised; on success, failure, and timeout the child is always
-    ``join()``-ed (no zombie/orphan in any of the three cases).
+    def __init__(self, send_conn: Any, worker: Any, mode: str, payload: Any):
+        super().__init__(daemon=True)
+        self._send_conn = send_conn
+        self._worker = worker
+        self._mode = mode
+        self._payload = payload
 
-    Non-``PartUploadError`` failures are wrapped as ``PartUploadError(
-    "repair failed: …")``; a worker-side ``PartUploadError`` propagates
-    verbatim (pinned by the in-repair-block propagation test).
+    def run(self) -> None:
+        try:
+            if self._mode == "batch":
+                result = self._worker(self._payload)
+            else:
+                verts, faces = self._payload
+                result = self._worker(verts, faces)
+            self._send_conn.send(("ok", "", result))
+        except Exception as e:
+            logging.getLogger(__name__).exception("repair worker failed")
+            self._send_conn.send(("err", type(e).__name__, str(e)))
 
-    ``timeout``: override the default timeout (seconds). Useful in tests
-    where a very short timeout can be injected.
+
+def _run_in_worker(
+    mode: str, payload: Any, timeout: float, label: str
+) -> Any:
+    """The single worker-process lifecycle, shared by the single-body and
+    batched repair paths (issue #395 lens round 3: the two call sites used
+    to duplicate the spawn / send / poll / recv / cleanup logic — now
+    extracted here, stated once in the module docstring).
+
+    ``mode`` is ``"single"`` (the payload is ``(verts, faces)`` passed to
+    the worker as two args) or ``"batch"`` (the payload is a list of
+    ``(verts, faces)`` pairs passed as one list arg). ``label`` names the
+    call in the timeout / error messages (e.g. ``"single body"`` or
+    ``"2 bodies"``).
+
+    The worker is the parent-resolved ``_REPAIR_WORKER`` (single) or
+    ``_repair_bodies_in_process`` (batch), carried to the spawn child via
+    the ``_RepairWorkerProcess`` instance (the child's ``run()`` calls it
+    directly — no re-import of the module attribute, so a test monkeypatch
+    of ``_REPAIR_WORKER`` is visible to the child). The reply is VALIDATED:
+    a 3-tuple with kind in ``{"ok", "err"}`` (a malformed reply →
+    ``PartUploadError``). On success the ``ok`` payload is returned; on
+    ``err`` the worker-side ``PartUploadError`` propagates verbatim and any
+    other exception is logged and raised as
+    ``PartUploadError(f"repair failed: {name}")``. The child is always
+    cleaned up (close, kill-if-alive, bounded join).
     """
-    if timeout is None:
-        timeout = REPAIR_TIMEOUT_SECONDS
-
-    # Prepare arrays (the process boundary pickles numpy arrays, not
-    # trimesh objects — simpler and avoids trimesh pickle overhead).
-    verts = np.asarray(mesh.vertices, dtype=np.float64)
-    faces = np.asarray(mesh.faces, dtype=np.int32)
-
-    # The worker is a module-level callable (the hook, possibly a test
-    # stub) resolved in the PARENT and pickled by reference to the child —
-    # no dotted-string resolution happens anywhere.
-    worker = _REPAIR_WORKER
+    worker = _REPAIR_WORKER if mode == "single" else _repair_bodies_in_process
 
     ctx = multiprocessing.get_context("spawn")
-    in_q: SimpleQueue = ctx.SimpleQueue()
     pipe_parent, pipe_child = ctx.Pipe(duplex=False)
-    proc = ctx.Process(
-        target=_child_main, args=(in_q, pipe_child, worker, "single"),
-        daemon=True,
-    )
+    proc = _RepairWorkerProcess(pipe_child, worker, mode, payload)
     proc.start()
 
     try:
-        try:
-            in_q.put((verts, faces))
-        except OSError as e:
-            # The send-side pipe broke (child died before consuming input,
-            # or the pipe buffer was full). Map to PartUploadError (the 422).
-            raise PartUploadError(
-                f"repair failed: could not send mesh to worker: {type(e).__name__}: {e}"
-            ) from e
         if not pipe_parent.poll(timeout):
             # The timeout bounds only THIS call's own work (the child is
             # per-call). ``poll`` returning False means the child has not
-            # finished within the budget — the finally block kills it;
-            # no other call's worker is touched.
+            # finished within the budget — the finally block kills it.
             raise RepairTimeoutError(
-                f"repair timed out: exceeded {timeout:.0f}s"
+                f"repair timed out: exceeded {timeout:.0f}s ({label})"
             )
-        _kind, name, payload = pipe_parent.recv()
+        try:
+            reply = pipe_parent.recv()
+        except Exception as e:
+            # A recv failure (pipe closed, EOF, a truncated pickle) is a
+            # malformed reply — the 422, never a raw 500.
+            raise PartUploadError(
+                f"repair failed: malformed worker reply ({type(e).__name__})"
+            ) from e
+        # Validate the reply: a 3-tuple (kind, name, payload) with kind in
+        # {"ok", "err"}. Anything else is malformed (a corrupted pickled
+        # reply, a 2-tuple, a bare value) — the 422.
+        if (
+            not isinstance(reply, tuple)
+            or len(reply) != 3
+            or reply[0] not in ("ok", "err")
+        ):
+            raise PartUploadError("repair failed: malformed worker reply")
+        _kind, name, payload_result = reply
         if _kind == "ok":
-            repaired_verts, repaired_faces = payload
-            return trimesh.Trimesh(
-                repaired_verts, repaired_faces, process=False
-            )
+            return payload_result
         # kind == "err": classify by the exception's TYPE (not a message
         # match): PartUploadError → verbatim, anything else → wrapped.
         # The full payload is logged in the parent (the child's message can
         # carry arbitrary text — it must not leak into the 422 response).
         if name == "PartUploadError":
-            raise PartUploadError(payload)
-        logger.warning("repair worker failed in child: %s", payload)
+            raise PartUploadError(payload_result)
+        logger.error("repair worker failed in child: %s: %s", name, payload)
         raise PartUploadError(f"repair failed: {name}")
     finally:
         # Success / failure / timeout: never leave the child behind.
         try:
             pipe_parent.close()
         except (BrokenPipeError, OSError):
-            pass
-        try:
-            in_q.close()
-        except OSError:
             pass
         if proc.is_alive():
             proc.kill()
@@ -315,18 +332,50 @@ def repair_with_pmf(
             )
 
 
+def repair_with_pmf(
+    mesh: trimesh.Trimesh, timeout: float | None = None
+) -> trimesh.Trimesh:
+    """The one-call pymeshfix repair (``MeshFix.repair`` → ``fix_normals``)
+    on a single mesh, in a separate, per-call process (the lifecycle lives
+    in ``_run_in_worker``; the rationale is in the module docstring).
+
+    The single-body path uses it UNCHANGED (the early branch keeps
+    single-body imports byte-for-byte identical to the historical one-call
+    repair); the multi-body path runs ``repair_bodies_with_pmf`` once for
+    the whole set so repair cannot drop disconnected bodies (issue #375).
+
+    ``timeout``: override the default timeout (seconds). Useful in tests
+    where a very short timeout can be injected.
+    """
+    if timeout is None:
+        timeout = REPAIR_TIMEOUT_SECONDS
+
+    # Prepare arrays (the process boundary pickles numpy arrays, not
+    # trimesh objects — simpler and avoids trimesh pickle overhead).
+    payload = (
+        np.asarray(mesh.vertices, dtype=np.float64),
+        np.asarray(mesh.faces, dtype=np.int32),
+    )
+
+    result = _run_in_worker("single", payload, timeout, "single body")
+    repaired_verts, repaired_faces = result
+    return trimesh.Trimesh(
+        np.asarray(repaired_verts, dtype=np.float64),
+        np.asarray(repaired_faces, dtype=np.int32),
+        process=False,
+    )
+
+
 def repair_bodies_with_pmf(
     meshes: list[trimesh.Trimesh], timeout: float | None = None
 ) -> list[trimesh.Trimesh]:
-    """Repair ALL watertight bodies in ONE spawned child process.
+    """Repair ALL bodies in ONE spawned child process (the lifecycle lives
+    in ``_run_in_worker``; the rationale is in the module docstring).
 
     The multi-body import path uses this (instead of calling
     ``repair_with_pmf`` per body) so the spawn overhead is paid ONCE, not
-    once per body. The parent sends the list of ``(vertices, faces)``
-    arrays (already decimated, if above the budget) to one child; the
-    child repairs each body in order (the per-body MeshFix + fix_normals
-    semantics of issue #375) and returns the list. The whole call is
-    bounded by one timeout (default ``REPAIR_TIMEOUT_SECONDS``).
+    once per body. The whole call is bounded by one timeout (default
+    ``REPAIR_TIMEOUT_SECONDS``).
 
     ``timeout``: override the default timeout (seconds).
     """
@@ -335,7 +384,7 @@ def repair_bodies_with_pmf(
 
     # Prepare arrays (the process boundary pickles numpy arrays, not
     # trimesh objects — simpler and avoids trimesh pickle overhead).
-    bodies = [
+    payload = [
         (
             np.asarray(m.vertices, dtype=np.float64),
             np.asarray(m.faces, dtype=np.int32),
@@ -343,54 +392,15 @@ def repair_bodies_with_pmf(
         for m in meshes
     ]
 
-    ctx = multiprocessing.get_context("spawn")
-    in_q: SimpleQueue = ctx.SimpleQueue()
-    pipe_parent, pipe_child = ctx.Pipe(duplex=False)
-    proc = ctx.Process(
-        target=_child_main,
-        args=(in_q, pipe_child, _repair_bodies_in_process, "batch"),
-        daemon=True,
-    )
-    proc.start()
-
-    try:
-        try:
-            in_q.put(bodies)
-        except OSError as e:
-            raise PartUploadError(
-                f"repair failed: could not send bodies to worker: {type(e).__name__}: {e}"
-            ) from e
-        if not pipe_parent.poll(timeout):
-            raise RepairTimeoutError(
-                f"repair timed out: exceeded {timeout:.0f}s across {len(meshes)} bodies"
-            )
-        _kind, name, payload = pipe_parent.recv()
-        if _kind == "ok":
-            return [
-                trimesh.Trimesh(v, f, process=False) for v, f in payload
-            ]
-        if name == "PartUploadError":
-            raise PartUploadError(payload)
-        logger.warning("repair worker failed in child: %s", payload)
-        raise PartUploadError(f"repair failed: {name}")
-    finally:
-        try:
-            pipe_parent.close()
-        except (BrokenPipeError, OSError):
-            pass
-        try:
-            in_q.close()
-        except OSError:
-            pass
-        if proc.is_alive():
-            proc.kill()
-        proc.join(timeout=5)
-        if proc.is_alive():
-            logger.warning(
-                "repair worker process %d still alive after join(timeout=5); "
-                "leaving it (daemon=True, will be reaped on exit)",
-                proc.pid,
-            )
+    result = _run_in_worker("batch", payload, timeout, f"{len(meshes)} bodies")
+    return [
+        trimesh.Trimesh(
+            np.asarray(v, dtype=np.float64),
+            np.asarray(f, dtype=np.int32),
+            process=False,
+        )
+        for v, f in result
+    ]
 
 
 __all__ = [

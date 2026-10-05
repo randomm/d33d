@@ -36,7 +36,7 @@ import trimesh
 
 from d33d.part_errors import PartUploadError  # re-exported for #395 compat
 from d33d.part_holes import _boundary_loops
-from d33d.part_mesh_topology import mesh_topology
+from d33d.part_mesh_topology import MeshTopology, mesh_topology
 from d33d.part_repair import (
     REPAIR_FACE_BUDGET,
     REPAIR_TIMEOUT_SECONDS,
@@ -248,11 +248,13 @@ def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
         os.close(fd)
 
 
-def _is_clean(topo: dict[str, Any]) -> bool:
+def _is_clean(topo: MeshTopology) -> bool:
     """The clean-mesh predicate: 0 boundary loops, all bodies watertight,
     winding consistent. A genus ≥ 1 mesh (ring, torus) is ALSO clean —
     holes are the part's intent, not defects. A non-watertight debris
-    shell makes the mesh NOT clean (bodies > watertight_bodies)."""
+    shell makes the mesh NOT clean (bodies > watertight_bodies). A UNKNOWN
+    boundary-loop count (``-1``) makes the mesh NOT clean — a failed count
+    must never be treated as 0 (which would wrongly skip repair)."""
     return (
         topo["boundary_loops"] == 0
         and topo["watertight_bodies"] == topo["bodies"]
@@ -343,7 +345,9 @@ def parse_and_repair(
 
     # Measure topology on the merged (pre-repair) mesh.
     topo = mesh_topology(merged, components)
-    gaps_before = topo["boundary_loops"]
+    # A UNKNOWN boundary-loop count (``-1``) degrades to 0 gaps for the
+    # hole count (as the genus fallback does) — never negative, never a crash.
+    gaps_before = max(topo["boundary_loops"], 0)
 
     # hole_count: gaps_before + genus (both from the pre-repair mesh).
     holes = gaps_before + topo["genus"]

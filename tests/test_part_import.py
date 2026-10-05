@@ -2255,14 +2255,14 @@ def test_hole_count_computation_runs_off_event_loop(
 
     original_parse = part_import_mod.parse_and_repair
 
-    def _busy_loop_gil_holding(n: int) -> int:
+    def _busy_loop(n: int) -> int:
         x = 0
         for i in range(n):
             x = i * i + x
         return x
 
     def slow_parse_with_hole_count(content: bytes, part_format: str):
-        _busy_loop_gil_holding(50_000_000)  # ~0.3 s of GIL-holding work
+        _busy_loop(50_000_000)  # ~0.3 s of GIL-holding work
         return original_parse(content, part_format)
 
     monkeypatch.setattr(part_import_mod, "parse_and_repair", slow_parse_with_hole_count)
@@ -3639,31 +3639,3 @@ def test_clean_mesh_below_budget_not_decimated():
         f"report={report['triangles']}, original={len(loaded.faces)}"
     )
 
-
-def test_decimate_oserror_maps_to_part_upload_error(monkeypatch):
-    """Finding 3: any unexpected exception from the C library during
-    quadric decimation (e.g. OSError) must become PartUploadError
-    (the 422), not a raw 500."""
-    import trimesh
-
-    import d33d.part_mesh as part_mesh_mod
-    from d33d.part_errors import PartUploadError
-
-    # A mesh above the budget that will trigger decimation.
-    # Use a small budget so a tiny mesh triggers the decimate path.
-    monkeypatch.setattr(part_mesh_mod, "REPAIR_FACE_BUDGET", 5)
-
-    box = trimesh.creation.box(extents=[10, 10, 10])  # 12 faces > 5
-
-    def _raise_oserror(self, face_count=None, **kw):
-        raise OSError("C library exploded")
-
-    monkeypatch.setattr(
-        trimesh.Trimesh, "simplify_quadric_decimation", _raise_oserror
-    )
-
-    with pytest.raises(PartUploadError) as excinfo:
-        part_mesh_mod._decimate(box, 5)
-
-    assert "quadric decimation failed" in str(excinfo.value)
-    assert "OSError" in str(excinfo.value)

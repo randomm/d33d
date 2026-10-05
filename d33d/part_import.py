@@ -6,39 +6,28 @@ sub-issue 1). The decode (parse/repair/measure) and the unit math live in
 upload bounds, and the multipart handling.
 
 - ``POST /api/projects/{id}/part`` — multipart upload of an STL (binary
-  or ASCII) or 3MF mesh, stored as the project's part. Gate order per the
-  operator decision: **413 first** (the body is streamed from
-  ``request.stream()`` and accumulated in memory up to
-  ``MAX_PART_UPLOAD_BYTES`` + a 1 MiB multipart allowance, then refused —
-  an oversize body is never parsed), then **400** (content type /
-  extension), then **422** (unparseable, empty, non-finite, over the face
-  cap, zip-bomb, unconvertible 3MF unit — ``detail`` is the verbatim
-  ``web/src/copy.ts`` ``partUpload.unparseable`` string, the #299 way).
-  The decode runs OFF the event loop (``asyncio.to_thread``) — the mesh
-  parse is CPU-bound and must not stall the app's other requests. On ANY
-  error nothing is persisted: no project part columns, no version row, no
-  committed file (the commit-failure rollback deletes the row and the
-  mesh file; the part columns are written in the SAME transaction as the
-  version row, so a failed import cannot leave half a row behind).
+  or ASCII) or 3MF mesh, stored as the project's part. Gate order: **413
+  first** (the body is streamed and accumulated in memory up to
+  ``MAX_PART_UPLOAD_BYTES`` + a 1 MiB multipart allowance, then refused),
+  then **400** (content type / extension), then **422** (unparseable,
+  empty, non-finite, over the face cap, zip-bomb, unconvertible 3MF unit).
+  The decode runs OFF the event loop (``asyncio.to_thread``). On ANY error
+  nothing is persisted (the commit-failure rollback deletes the row and
+  the mesh file in the SAME transaction).
 - ``POST /api/projects/{id}/part/units`` — settle the part's units:
   ``{"unit": "mm"|"cm"|"inch"}`` (fixed scale 1 / 10 / 25.4) or
-  ``{"axis": "W"|"D"|"H", "mm": <positive float>}`` (one real measurement
+  ``{"axis": "W"|"D"|"H", "mm": <positive float>}`` (one measurement
   derives the scale, unit ``"custom"``). Settling UPDATES the project row
   and the v1 row's mm bbox in place in ONE transaction under the shared
-  write lock — it never creates a version, and is idempotent on an
-  already-settled part.
+  write lock — never creates a version, idempotent on an already-settled
+  part.
 
-Security (untrusted input, in the backend process only): trimesh parses in
-process — no shell, and the user's filename is never a path component (the
-bytes are parsed in memory and, on success, written only to the fixed
-in-repo name ``versions/{v1_id}/part.stl`` / ``part.3mf`` — there is no
-temp file). The pymeshfix repair runs in a separate per-call process with a
-timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``); no shell commands are
-executed. Parse cost is bounded by the named ``MAX_PART_FACES`` cap (checked
-after ``trimesh.load``, before repair). 3MF (a ZIP) is guarded against zip
-bombs from the central directory BEFORE extraction (entry count and
-declared-uncompressed total). Non-finite vertices are rejected both before
-any extent math and again after pymeshfix (which can emit NaN).
+Security: trimesh parses in-process (no shell, no temp file); the user's
+filename is never a path component. The pymeshfix repair runs in a separate
+per-call process with a timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``).
+Parse cost is bounded by ``MAX_PART_FACES``. 3MF (a ZIP) is guarded against
+zip bombs from the central directory BEFORE extraction. Non-finite vertices
+are rejected before any extent math and again after pymeshfix.
 """
 
 from __future__ import annotations
@@ -88,6 +77,7 @@ from d33d.part_units import (
     settle_scale,
     settle_unit_choices,
 )
+from d33d.project_git import sanitize_commit_message
 from d33d.versions import SOURCE_KIND_IMPORT, ImportCommitFailed
 
 logger = logging.getLogger(__name__)
@@ -133,7 +123,10 @@ def _run_parse_and_repair(
     ``asyncio.to_thread``): ``parse_and_repair`` mapped to its 422 contract.
 
     A ``RepairTimeoutError`` gets the distinct ``REPAIR_TIMEOUT_DETAIL``;
-    every other ``PartUploadError`` gets the unparseable detail.
+    every other ``PartUploadError`` gets the unparseable detail. ANY other
+    exception (a MemoryError, a trimesh-internal failure) also 422s with
+    the unparseable detail — the decode contract is total: a decode that
+    cannot complete is a 422, never a raw 500. Nothing is persisted.
     """
     try:
         _mesh, report, file_unit = parse_and_repair(content, part_format)
@@ -144,6 +137,13 @@ def _run_parse_and_repair(
             else PART_UPLOAD_UNPARSEABLE_DETAIL
         )
         raise HTTPException(status_code=422, detail=detail) from e
+    except Exception as e:
+        # A non-PartUploadError (MemoryError, a trimesh-internal failure)
+        # must not leak as a raw 500: the decode contract is total.
+        logger.exception("part decode failed unexpectedly")
+        raise HTTPException(
+            status_code=422, detail=PART_UPLOAD_UNPARSEABLE_DETAIL
+        ) from e
     return report, file_unit
 
 
@@ -294,7 +294,7 @@ def create_part_router() -> APIRouter:
                 project_id,
                 version_name=v1_name,
                 params={},
-                message=f"part import: {filename or 'part'}",
+                message=f"part import: {sanitize_commit_message(filename)}" if filename else "part import",
                 bbox=(tuple(mm_bbox) if mm_bbox is not None else None),
                 source_kind=SOURCE_KIND_IMPORT,
                 mesh_bytes=content,

@@ -55,17 +55,24 @@ def _stl_bytes_from_mesh(mesh):
     return buf.getvalue()
 
 
-class _FailingQueue:
-    """A SimpleQueue stub whose put() raises OSError (top-level → picklable)."""
-    def put(self, *a, **kw):
+class _FailingPipe:
+    """A pipe stub whose recv() raises OSError (top-level → picklable)."""
+    def send(self, *a, **kw):
+        pass
+    def recv(self):
         raise OSError("broken pipe")
+    def poll(self, *a, **kw):
+        return True
     def close(self):
         pass
 
 
-def _failing_queue_factory():
-    """Module-level factory (top-level → picklable for the spawn child)."""
-    return _FailingQueue()
+def _failing_pipe_factory(*args, **kw):
+    """Module-level factory (top-level → picklable for the spawn child).
+    Returns a 2-tuple of the same stub (``ctx.Pipe`` returns
+    ``(parent_conn, child_conn)`` — both must be the failing stub so the
+    parent's ``recv`` raises OSError)."""
+    return _FailingPipe(), _FailingPipe()
 
 
 def _box_mesh():
@@ -422,24 +429,28 @@ def test_genus_fallback_logs_warning(caplog):
 
 
 def test_in_q_put_oserror_maps_to_part_upload_error(monkeypatch):
-    """Finding 6: when ``in_q.put(...)`` raises OSError (BrokenPipeError,
-    etc.), ``repair_with_pmf`` maps it to ``PartUploadError`` with the
-    'could not send mesh to worker' message."""
+    """When the pipe's recv() raises OSError (BrokenPipeError, etc.),
+    ``repair_with_pmf`` maps it to ``PartUploadError`` with the
+    'malformed worker reply' message (the pipe is the send channel in the
+    new ``_RepairWorkerProcess`` design — the payload is passed via the
+    Process instance, not a queue)."""
     import d33d.part_repair as part_repair_mod
     from d33d.part_errors import PartUploadError
 
     box = _box_mesh()
 
-    # The cached spawn context is shared across calls; patch SimpleQueue on
-    # it via monkeypatch (auto-restored at teardown — no leftover state for
-    # other tests that patch the same cached context).
+    # The cached spawn context is shared across calls; patch Pipe on
+    # it via monkeypatch (auto-restored at teardown — no leftover state
+    # for other tests that patch the same cached context).
     spawn_ctx = part_repair_mod.multiprocessing.get_context("spawn")
-    monkeypatch.setattr(spawn_ctx, "SimpleQueue", _failing_queue_factory)
+    monkeypatch.setattr(spawn_ctx, "Pipe", _failing_pipe_factory)
 
     with pytest.raises(PartUploadError) as excinfo:
         repair_with_pmf(box, timeout=5)
 
-    assert "could not send mesh to worker" in str(excinfo.value)
+    # The pipe's recv() raises OSError → the parent maps it to a
+    # PartUploadError with 'malformed worker reply'.
+    assert "malformed worker reply" in str(excinfo.value)
 
 
 def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch):

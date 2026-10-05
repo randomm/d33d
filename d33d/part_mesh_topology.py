@@ -12,13 +12,13 @@ Dual use:
 - Ticket #386 will call it on the rendered candidate mesh to measure
   through-hole genus for the print gate.
 
-The helper returns a small flat dict — the caller owns interpretation.
+The helper returns a :class:`MeshTopology` — the caller owns interpretation.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TypedDict
 
 import trimesh
 
@@ -27,9 +27,33 @@ from d33d.part_holes import _boundary_loops, watertight_genus
 logger = logging.getLogger(__name__)
 
 
+class MeshTopology(TypedDict):
+    """The ``mesh_topology`` return: the merged pre-repair mesh's topology.
+
+    - ``boundary_loops`` (int): the number of open-edge loops (one per gap
+      opening). 0 for a fully watertight mesh; ``-1`` when the count is
+      UNKNOWN (a ``_boundary_loops`` failure — the mesh is NOT clean,
+      so repair is taken, and the hole count treats the gaps as 0).
+    - ``bodies`` (int): the total number of components (including non-
+      watertight debris shells).
+    - ``watertight_bodies`` (int): the number of watertight components.
+    - ``winding_consistent`` (bool): True when the merged mesh's winding
+      is globally consistent — the precondition for treating a watertight
+      mesh as repair-free.
+    - ``genus`` (int): total genus across watertight components (closed
+      through-holes). 0 for a plain box; 1 for a ring/annulus.
+    """
+
+    boundary_loops: int
+    bodies: int
+    watertight_bodies: int
+    winding_consistent: bool
+    genus: int
+
+
 def mesh_topology(
     merged: trimesh.Trimesh, components: list[trimesh.Trimesh]
-) -> dict[str, Any]:
+) -> MeshTopology:
     """Measure the topology of an already-split mesh.
 
     ``merged`` is the pre-repair merged mesh (already merge_vertices'd).
@@ -37,29 +61,22 @@ def mesh_topology(
     the caller splits ONCE and passes the same list here, so both the
     bodies count and the genus read the same split.
 
-    Returns a dict with:
-
-    - ``boundary_loops`` (int): the number of open-edge loops (one per gap
-      opening). 0 for a fully watertight mesh.
-    - ``bodies`` (int): the total number of components (including non-
-      watertight debris shells).
-    - ``watertight_bodies`` (int): the number of watertight components.
-    - ``winding_consistent`` (bool): True when the merged mesh's winding
-      (vertex ordering) is globally consistent — the precondition for
-      treating a watertight mesh as repair-free.
-    - ``genus`` (int): total genus across watertight components (closed
-      through-holes). 0 for a plain box; 1 for a ring/annulus.
-
-    The winding check uses trimesh's ``is_winding_consistent`` which
-    verifies all faces have the same normal-orientation parity. A mesh
-    with inconsistent winding is NOT clean even if boundary-loop-free —
-    pymeshfix would be needed to fix the winding.
-
-    Any exception inside the genus or winding check is caught, logged,
-    and the affected field degrades to a safe default (genus → 0,
-    winding_consistent → False) — the measurement never raises.
+    Any exception inside a measurement (boundary loops, winding, genus)
+    is caught and logged, and the affected field degrades to a safe
+    default: boundary_loops → ``-1`` (UNKNOWN — the mesh is NOT clean,
+    so repair is taken; the hole count treats the gaps as 0), genus → 0,
+    winding_consistent → False. The measurement never raises.
     """
-    boundary_loops = _boundary_loops(merged)
+    # Boundary loops: guarded (any failure → -1, UNKNOWN — the mesh is NOT
+    # clean, so repair is taken; treating it as 0 would wrongly skip it).
+    try:
+        boundary_loops = _boundary_loops(merged)
+    except Exception:
+        logger.warning(
+            "boundary loop computation failed, marking mesh as not clean",
+            exc_info=True,
+        )
+        boundary_loops = -1
 
     watertight_bodies = [c for c in components if c.is_watertight]
 
@@ -84,13 +101,13 @@ def mesh_topology(
         )
         genus = 0
 
-    return {
-        "boundary_loops": boundary_loops,
-        "bodies": len(components),
-        "watertight_bodies": len(watertight_bodies),
-        "winding_consistent": winding_consistent,
-        "genus": genus,
-    }
+    return MeshTopology(
+        boundary_loops=boundary_loops,
+        bodies=len(components),
+        watertight_bodies=len(watertight_bodies),
+        winding_consistent=winding_consistent,
+        genus=genus,
+    )
 
 
-__all__ = ["mesh_topology"]
+__all__ = ["MeshTopology", "mesh_topology"]
