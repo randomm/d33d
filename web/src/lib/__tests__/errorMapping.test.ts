@@ -451,6 +451,32 @@ describe("displayDesignLoopError — the envelope gate (part 2)", () => {
     expect(display.detail).toBe("bbox_out_of_tolerance");
   });
 
+  it("the carried-axis sentence drops 'earlier' and uses the per-axis adjective (issue #398)", () => {
+    // The sentence never says "you set earlier" — the carried axis may have
+    // been stated this turn — and the "how …" slot takes the adjective
+    // ("deep"), not the noun ("depth").
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { D: 12.0 },
+    });
+    expect(display.message).not.toContain("earlier");
+    expect(display.message).toContain("you asked for");
+    expect(display.message).toContain("how deep it should be");
+    expect(display.message).not.toContain("how depth");
+  });
+
+  it("the carried-axis sentence uses 'wide' for a width axis (issue #398)", () => {
+    const display = displayDesignLoopError({
+      message: "Design loop exhausted: bbox_out_of_tolerance",
+      reason: "bbox_out_of_tolerance",
+      carried_axes: { W: 60 },
+    });
+    expect(display.message).toContain("how wide it should be");
+    expect(display.message).not.toContain("how width");
+    expect(display.message).not.toContain("earlier");
+  });
+
   it("the generic bbox sentence stands alone when the frame carries no carried_axes", () => {
     // No `carried_axes` on the frame → the reason-code sentence, not the
     // carried variant (a value the SPA has not established is not

@@ -1114,6 +1114,43 @@ class TestRelativeRelease:
                 f"{msg!r} is a relative delta — {target} must be released, got {axes}"
             )
 
+class TestFeatureVerbClauseNoAxis:
+    """Issue #398: feature-verb clause suppression at the
+    ``stated_axes_from_message`` level. A clause introduced by a feature
+    verb (add, cut, drill, bore, engrave, emboss) that contains an axis
+    word + number but NO feature noun of its own does not state the
+    part's axis when the message has a feature noun in a sibling
+    top-level clause."""
+
+    @pytest.mark.parametrize(
+        ("msg", "expected"),
+        [
+            ("add a 3 mm wide, 2 mm deep groove around the outside, 10 mm from the top", {}),
+            ("add a 10 mm wide slot across the top, 5 mm deep", {}),
+            (
+                "drill a 6 mm hole through the plate, 15 mm from the left edge, centred front to back",
+                {},
+            ),
+            ("cut a 6 mm wide channel along the side", {}),
+            ("add a 5 mm tall rib", {}),
+            ("drill an 8 mm deep hole", {}),
+            # Positive controls: 'make' is not a feature verb.
+            ("make it 40 mm wide with a 5 mm hole", {"W": 40.0}),
+            ("a 40 mm wide box with a 5 mm deep groove", {"W": 40.0}),
+        ],
+    )
+    def test_feature_verb_clause_no_axis(self, msg: str, expected: dict) -> None:
+        axes = stated_axes_from_message(msg, [])
+        assert axes == expected, f"{msg!r}: expected {expected}, got {axes}"
+
+    def test_cut_it_to_15mm_tall_states_h(self) -> None:
+        """'cut it to 15 mm tall' on an import project still states H=15
+        (the whole-part subject rule: 'it' refers to the part, not a
+        feature). The #383 part-floor tests must stay green."""
+        axes = stated_axes_from_message("cut it to 15 mm tall", [])
+        assert axes == {"H": 15.0}
+
+
 class TestAnchoredDeltaMarkers:
     """Issue #369 round 2: delta markers are anchored to their own number
     — a marker on a different number never suppresses the other number's

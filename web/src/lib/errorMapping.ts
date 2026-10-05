@@ -45,6 +45,15 @@ export const SIZE_AXIS_WORDS = {
   H: "height",
 } as const;
 
+/** The per-axis adjective for "how …?" slots — re-exported from the copy
+ *  deck (which owns all user-facing strings; the copy deck is the other
+ *  half of this import, so the definition lives there to keep the edge
+ *  one-directional). The carried-axis sentence and the size-mismatch
+ *  follow-up must read "how wide it should be", not "how width it should
+ *  be" (issue #398); the noun form stays in `SIZE_AXIS_WORDS` for the
+ *  per-axis rows. */
+export { SIZE_AXIS_ADJECTIVES } from "../copy";
+
 /** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
  *  the terminal error frame's `reason` field can hold.

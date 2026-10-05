@@ -54,6 +54,16 @@ __all__ = [
     "split_clauses",
 ]
 
+# Feature verbs (closed set, issue #398): verbs that describe CREATING or
+# MODIFYING a feature on the part — "add a 3 mm wide groove", "drill a
+# 6 mm hole", "cut a 6 mm wide channel". A clause introduced by a feature
+# verb that contains an axis word + number is describing a FEATURE's size,
+# not the part's envelope — UNLESS the clause itself contains a feature
+# noun (already handled by the existing feature-noun guard) or the message
+# has no other feature-noun clause (in which case the size is about the
+# part: "make it 40 mm wide with a 5 mm hole" → W=40). The "make" verb is
+# deliberately NOT a feature verb ("make a 30 mm wide block" states W=30).
+
 # ---------------------------------------------------------------------------
 # Closed word sets
 # ---------------------------------------------------------------------------
@@ -185,6 +195,35 @@ FEATURE_NOUN_RE = re.compile(
 #: primary-object suppression. Pinned by ``tests/test_axis_lexicon.py``
 #: (the subset pin).
 _PART_NOUNS: frozenset[str] = frozenset({"lid"})
+
+def _is_bare_measurement(clause: str) -> bool:
+    """True if ``clause`` is a BARE MEASUREMENT — just a number + axis
+    word (and optional filler like "mm", "around", "from", "the", etc.)
+    with NO verb, pronoun, or article-introduced subject (issue #398).
+
+    A bare measurement is a fragment like "5 mm deep" or "10 mm wide"
+    that modifies a feature described in a sibling clause, not a
+    standalone part statement. The test: the clause contains a number
+    and an axis word but NO verb, pronoun, or article.
+    """
+    # A bare measurement has no verb, pronoun, or article.
+    if re.search(r"\b(?:a|an|the|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b", clause, re.IGNORECASE):
+        return False
+    return True
+
+
+# The feature verbs (closed set, issue #398): verbs that create or modify
+# a FEATURE on the part. A clause introduced by one of these that contains
+# an axis word + number is describing the feature's size, not the part's
+# envelope. The cross-clause check (the message must have another clause
+# with a feature noun) prevents false positives on part-level statements
+# like "make it 40 mm wide with a 5 mm hole" ("make" is not a feature
+# verb, and even if it were, "hole" alone in the same clause would be
+# caught by the feature-noun guard). "make" is deliberately NOT in this
+# set: "make a 30 mm wide block" still states W=30.
+_FEATURE_VERBS: frozenset[str] = frozenset(
+    {"add", "cut", "drill", "bore", "engrave", "emboss"}
+)
 
 #: The mating connectors (issue #314): words and phrases that introduce the
 #: MATING PART of a design — the part the user's part must fit or sit on.
@@ -429,8 +468,18 @@ def _split_on_and(clause: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, list[str]]:
-    """Classify one clause. Returns (absolute, relative, global_, cue_words)."""
+def _classify_clause(
+    clause: str, *, feature_noun_in_message: bool = False
+) -> tuple[dict[str, float], set[str], bool, list[str]]:
+    """Classify one clause. Returns (absolute, relative, global_, cue_words).
+
+    ``feature_noun_in_message`` (issue #398): when True and the clause is
+    introduced by a feature verb (add, cut, drill, bore, engrave, emboss)
+    and contains an axis word + number but NO feature noun of its own, the
+    absolute axis cue is suppressed — the size describes a feature whose
+    noun lives in a sibling clause ("add a 3 mm wide, 2 mm deep groove":
+    clause 1 has the verb + axis word + number, clause 2 has the noun).
+    """
     relative: set[str] = set()
     global_: bool = False
     cue_words: list[str] = []
@@ -485,6 +534,49 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     # conservative choice); the mm number falls out into
     # unmapped_mm_numbers via the normal unmapped scan below.
     if FEATURE_NOUN_RE.search(clause):
+        return ({}, relative, global_, cue_words)
+
+    # Feature-verb cross-clause suppression (issue #398): a top-level
+    # clause (from ``split_clauses``, not a sub-clause from
+    # ``_split_on_and``) that contains an axis word + number but NO
+    # feature noun of its own is describing a feature whose noun lives in
+    # a SIBLING top-level clause. The suppression fires when:
+    #
+    #   (a) the clause is introduced by a feature verb (add, cut, drill,
+    #       bore, engrave, emboss) — "add a 3 mm wide, 2 mm deep groove"
+    #       splits into ["add a 3 mm wide", "2 mm deep groove"]: clause 1
+    #       has the verb + axis word + number, clause 2 has the noun.
+    #       The 3 is the groove's width, not the part's.
+    #
+    #   (b) the clause is a BARE MEASUREMENT — just the number + axis word
+    #       (no article-introduced subject noun) — and the message has a
+    #       feature noun in another top-level clause. "add a 10 mm wide
+    #       slot across the top, 5 mm deep" splits into ["add a 10 mm
+    #       wide slot across the top", "5 mm deep"]: clause 1 has the
+    #       feature noun, clause 2 is a bare measurement ("5 mm deep").
+    #       The 5 is the slot's depth, not the part's.
+    #
+    # The gate for BOTH: the message must have a feature noun in another
+    # top-level clause. This prevents false positives on part-level
+    # statements: "a 40 mm wide box with a 5 mm deep groove" is ONE
+    # top-level clause (the "with" split creates sub-clauses, not new
+    # top-level clauses), so the cross-clause rule does not fire and the
+    # box's width still states W=40. "make it 40 mm wide with a 5 mm
+    # hole" — "make" is not a feature verb and "a 5 mm hole" is in the
+    # same top-level clause, so the feature-noun guard handles it within
+    # the clause and the cross-clause rule doesn't fire.
+    #
+    # Relative/global cues are KEPT (same conservative choice as the
+    # feature-noun guard: a release only stops enforcement).
+    if (
+        feature_noun_in_message
+        and set(cue_words) & set(ABSOLUTE_WORDS)
+        and _numbers_in(clause)
+        and (
+            any(_word_re(v).search(clause) for v in _FEATURE_VERBS)
+            or _is_bare_measurement(clause)
+        )
+    ):
         return ({}, relative, global_, cue_words)
 
     # Find all numbers in the clause.
@@ -579,8 +671,21 @@ def classify(message: str) -> Cues:
     that DOES carry an absolute axis word (or a number, which the
     number-mapping needs) keeps the strict behavior: "increase the
     height to 30 mm" sets H=30 without releasing it.
+
+    Feature-verb clauses (issue #398): a clause introduced by a feature
+    verb (add, cut, drill, bore, engrave, emboss) that contains an axis
+    word + number is describing a FEATURE's size, not the part's
+    envelope, when the message has another clause with a feature noun.
+    "add a 3 mm wide, 2 mm deep groove" → nothing stated (the 3 is the
+    groove's width); "make it 40 mm wide with a 5 mm hole" → W=40
+    ("make" is not a feature verb, and the hole's 5 is caught by the
+    feature-noun guard within the clause).
     """
     clauses = split_clauses(message)
+
+    # Pre-scan: does any clause in the message contain a feature noun?
+    # Used by the feature-verb cross-clause suppression (issue #398).
+    _feature_noun_in_message = any(FEATURE_NOUN_RE.search(c) for c in clauses)
 
     all_absolute: dict[str, float] = {}
     all_relative: set[str] = set()
@@ -592,7 +697,10 @@ def classify(message: str) -> Cues:
         # Try splitting on "and" within this clause.
         sub_clauses = _split_on_and(clause)
         for sub in sub_clauses:
-            abs_c, rel_c, glob_c, words_c = _classify_clause(sub)
+            abs_c, rel_c, glob_c, words_c = _classify_clause(
+                sub,
+                feature_noun_in_message=_feature_noun_in_message,
+            )
             for axis, val in abs_c.items():
                 all_absolute[axis] = val
                 all_mapped_numbers.add(val)

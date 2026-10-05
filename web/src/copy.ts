@@ -25,6 +25,17 @@ export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
 
+/** W/D/H axis → the adjective that belongs in a "how …?" slot ("wide",
+ *  "deep", "tall"). The carried-axis sentence and the size-mismatch
+ *  follow-up must read "how wide it should be", not "how width it should
+ *  be" (issue #398); the noun form ("width") stays in the per-axis rows
+ *  (see `SIZE_AXIS_WORDS` in lib/errorMapping). */
+export const SIZE_AXIS_ADJECTIVES = {
+  W: "wide",
+  D: "deep",
+  H: "tall",
+} as const;
+
 export const brief = {
   eyebrow: "What we're building",
   emptyBody:
@@ -358,8 +369,14 @@ export const failure = {
    *  by reason code; this is a parameterized sentence selected by
    *  `carried_axes` presence, not a reason code. Rendered ONLY when the
    *  frame's `carried_axes` carries an axis the gate enforced. */
-  bboxCarried: (label: string, heldMm: number): string =>
-    `I kept the ${label.toLowerCase()} you set earlier (${mm(heldMm)}). If you meant to change it, say how ${label.toLowerCase()} it should be.`,
+  bboxCarried: (label: string, heldMm: number): string => {
+    // The "how …" slot takes the per-axis adjective ("wide"/"deep"/"tall"),
+    // not the noun ("width"/"depth"/"height") — "how deep", never "how depth"
+    // (issue #398). The label is the noun; map it back to the adjective.
+    const adjective =
+      label === "width" ? "wide" : label === "depth" ? "deep" : "tall";
+    return `I kept the ${label.toLowerCase()} you asked for (${mm(heldMm)}). If you meant to change it, say how ${adjective} it should be.`;
+  },
 
   /** Part 2 line for an `axis_params_mismatch` failure (issue #276): the
    *  mismatching parameter's declared value and the measured extent on its
@@ -473,14 +490,23 @@ export const failure = {
      *  (import projects, or an axis the user never stated). */
     madeOnly: (axisWord: string, madeMm: number): string =>
       `${axisWord}: ${mm(madeMm)}`,
-    /** The follow-up question (operator decision 3): at most ONE per
-     *  card, the first axis in W/D/H order that has both an asked and a
-     *  made value (the backend's gate failure already establishes that
-     *  some confirmed axis was beyond tolerance — the SPA does not
-     *  re-derive it). Asks which measurement the stated number refers
-     *  to. */
-    whichMeasurement: (askedMm: number, axisWord: string): string =>
-      `Is ${mm(askedMm)} the ${axisWord} of the part itself, or the overall size including any lip or flange?`,
+    /** The follow-up question (operator decision 3): the HEADING of the
+     *  two-button lip question on the size card, the first axis in W/D/H
+     *  order that has both an asked and a made value beyond the gate
+     *  tolerance. `axisAdjective` is the per-axis adjective ("wide",
+     *  "deep", "tall") — the "how …" slot must read "how wide", never
+     *  the noun "how width" (issue #398). */
+    whichMeasurement: (askedMm: number, axisAdjective: string): string =>
+      `Is ${mm(askedMm)} how ${axisAdjective} the part itself is, or how the whole thing is, lip included?`,
+    /** The two lip-question buttons (operator decision 4): each prefills
+     *  the composer with the answer it represents, so the next design
+     *  pass holds the right number. `axisNoun` is "width"/"depth"/"height"
+     *  (the row's noun); the overall variant names the lip explicitly so
+     *  the two answers cannot be confused. */
+    lipPartItself: (askedMm: number, axisNoun: string): string =>
+      `${mm(askedMm)} is the part's own ${axisNoun}, not the overall size.`,
+    lipOverallIncludingLip: (askedMm: number, axisNoun: string): string =>
+      `${mm(askedMm)} is the overall ${axisNoun}, including the lip.`,
   },
 
   /** Part 3 — the retry action for a failure with no dedicated action
