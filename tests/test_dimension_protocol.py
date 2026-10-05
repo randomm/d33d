@@ -1209,7 +1209,7 @@ class TestWindowBoundary:
         assert axes["H"] == 20.0
 
 
-class TestNewestWinsPerAxis:
+class TestAnchoredDeltaNewestWins:
     """Issue #369: per axis, the NEWEST explicit stated value wins — the
     anchored-delta discriminator that the round-2 anchoring exists for."""
 
