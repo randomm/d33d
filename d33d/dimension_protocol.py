@@ -51,6 +51,7 @@ from d33d.axis_lexicon import (
     MM_UNIT_ALTERNATION,
     RELATIVE_WORDS,
     Cues,
+    _split_clauses,
     classify,
 )
 from d33d.triple_extraction import (
@@ -380,6 +381,17 @@ def _extract_stated(
                 # and ``stated_at``. No release needed.
                 continue
             if axis not in stated_at or stated_at[axis] >= idx:
+                continue
+            # A relative word in a FEATURE-noun clause ("make the lid
+            # taller") releases only: the feature is what grows, so an
+            # unmapped number in ANOTHER clause of the same turn (the
+            # "20 mm" in "make the lid taller, 20 mm") belongs to the
+            # feature and can never restate the part's axis. The feature-
+            # noun test runs on every clause — the number's own clause
+            # may be feature-free while the relative word's is not, and
+            # the number must not be assigned to the part.
+            if any(_FEATURE_NOUN_RE.search(clause) for clause in _split_clauses(str(turn))):
+                out.pop(axis, None)
                 continue
             v = _unmapped_value_for_axis(cues, str(turn))
             if v is not None:

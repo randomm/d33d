@@ -1036,6 +1036,18 @@ class TestNewestWinsPerAxis:
         )
         assert axes["H"] == 20.0
 
+    def test_relative_word_in_feature_clause_releases_only(self):
+        """'make the lid taller, 20 mm' → H released: the relative word
+        ('taller') sits in a clause with a feature noun ('lid'), so the
+        releasing turn releases ONLY — an unmapped number in ANOTHER clause
+        of the same turn can never restate the part's axis (the 20 mm
+        belongs to the feature, not the part)."""
+        axes = stated_axes_from_message(
+            "make the lid taller, 20 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert "H" not in axes
+        assert axes["W"] == 40.0
+
     def test_feature_clause_unmapped_number_releases_axis(self):
         """'make it taller, keep the 25 mm peg' → H released: the sole
         unmapped number sits in a feature-noun clause ('peg'), so it belongs
