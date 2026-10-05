@@ -39,21 +39,25 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import cache
 
 __all__ = [
+    "ABSOLUTE_WORDS",
+    "FEATURE_NOUN_RE",
     "GLOBAL_WORDS",
     "MM_UNIT_ALTERNATION",
     "RELATIVE_WORDS",
     "Cues",
     "axis_for_question_word",
     "classify",
+    "split_clauses",
 ]
 
 # ---------------------------------------------------------------------------
 # Closed word sets
 # ---------------------------------------------------------------------------
 
-_ABSOLUTE: dict[str, str] = {
+ABSOLUTE_WORDS: dict[str, str] = {
     "tall": "H",
     "high": "H",
     "height": "H",
@@ -161,7 +165,7 @@ _FEATURE_NOUNS: frozenset[str] = frozenset(
     }
 )
 
-_FEATURE_NOUN_RE = re.compile(
+FEATURE_NOUN_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FEATURE_NOUNS) + r")(?!\w)", re.IGNORECASE
 )
 
@@ -202,7 +206,7 @@ _MATING_CONNECTOR_RE: re.Pattern[str] = re.compile(
 )
 
 # All axis words (absolute + relative) for clause-level detection.
-_ALL_AXIS_WORDS: frozenset[str] = frozenset(_ABSOLUTE) | frozenset(RELATIVE_WORDS)
+_ALL_AXIS_WORDS: frozenset[str] = frozenset(ABSOLUTE_WORDS) | frozenset(RELATIVE_WORDS)
 
 # ---------------------------------------------------------------------------
 # Compiled patterns
@@ -245,9 +249,12 @@ _NUMBER_TOKEN_RE = re.compile(
 )
 
 
+@cache
 def _word_re(word: str) -> re.Pattern[str]:
     """An absolute axis word at a word boundary (underscore is a word
-    char, so "height" inside "spacer_height" does NOT match)."""
+    char, so "height" inside "spacer_height" does NOT match). Cached: the
+    word set is CLOSED (the finite ABSOLUTE/RELATIVE lexicon, never
+    user-derived text), so the process-lifetime cache stays small."""
     return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
 
 
@@ -316,7 +323,7 @@ class Cues:
 _CLAUSE_SPLIT_RE = re.compile(r"[,;]|[.!?]\s")
 
 
-def _split_clauses(message: str) -> list[str]:
+def split_clauses(message: str) -> list[str]:
     """Split a message into clauses on sentence punctuation, commas,
     and semicolons."""
     parts = _CLAUSE_SPLIT_RE.split(message)
@@ -428,7 +435,7 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
             break  # one global cue is enough
 
     # Check axis words (absolute and relative) in this clause.
-    for word in _ABSOLUTE:
+    for word in ABSOLUTE_WORDS:
         if _word_re(word).search(clause):
             cue_words.append(word)
 
@@ -469,7 +476,7 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     # enforcement, so keeping releases in feature clauses is the
     # conservative choice); the mm number falls out into
     # unmapped_mm_numbers via the normal unmapped scan below.
-    if _FEATURE_NOUN_RE.search(clause):
+    if FEATURE_NOUN_RE.search(clause):
         return ({}, relative, global_, cue_words)
 
     # Find all numbers in the clause.
@@ -492,7 +499,7 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     # for a statement the system cannot measure). The return below keeps
     # the clause's relative/global cues and its cue words; it only drops
     # the absolute assignment, matching the #261 round-2 semantics.
-    if axis_words_found & set(_ABSOLUTE) and _FOREIGN_UNIT_RE.search(clause):
+    if axis_words_found & set(ABSOLUTE_WORDS) and _FOREIGN_UNIT_RE.search(clause):
         return ({}, relative, global_, cue_words)
 
     # The two-axes-one-number rule — evaluated on the WHOLE clause BEFORE
@@ -512,11 +519,11 @@ def _classify_clause(clause: str) -> tuple[dict[str, float], set[str], bool, lis
     for part in _split_on_and(clause):
         part_numbers = _numbers_in(part)
         for word in axis_words_found:
-            if word not in _ABSOLUTE:
+            if word not in ABSOLUTE_WORDS:
                 continue  # relative word, handled separately
             if not _word_re(word).search(part):
                 continue  # the axis word is in another sub-clause
-            axis = _ABSOLUTE[word]
+            axis = ABSOLUTE_WORDS[word]
             if axis in absolute_result:
                 continue  # first assignment wins
             if len(part_numbers) == 1:
@@ -565,7 +572,7 @@ def classify(message: str) -> Cues:
     number-mapping needs) keeps the strict behavior: "increase the
     height to 30 mm" sets H=30 without releasing it.
     """
-    clauses = _split_clauses(message)
+    clauses = split_clauses(message)
 
     all_absolute: dict[str, float] = {}
     all_relative: set[str] = set()
@@ -667,7 +674,7 @@ def _apply_release_fallback(message: str, released: set[str]) -> bool:
     for word, axis in RELATIVE_WORDS.items():
         if _word_re(word).search(message):
             released.add(axis)
-    for word, axis in _ABSOLUTE.items():
+    for word, axis in ABSOLUTE_WORDS.items():
         if _word_re(word).search(message):
             released.add(axis)
     return _global_release(message)
@@ -680,4 +687,4 @@ def axis_for_question_word(word: str) -> str | None:
     "how deep is it?" → "D". Relative/global/excluded/unknown → None.
     """
     low = word.strip().lower()
-    return _ABSOLUTE.get(low)
+    return ABSOLUTE_WORDS.get(low)
