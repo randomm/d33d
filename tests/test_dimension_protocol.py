@@ -1028,6 +1028,11 @@ class TestNewestWinsPerAxis:
         )
         assert axes["H"] == 20.0
 
+class TestRelativeRelease:
+    """Issue #369: a relative word releases the axis it names — with the
+    per-turn guards (feature clauses, unmapped numbers) that decide
+    release vs restate."""
+
     def test_single_unmapped_number_restates_released_axis(self):
         """'make it taller, 20 mm' → H=20: the message carries EXACTLY ONE
         unmapped mm number and its clause has no feature noun, so the number
@@ -1091,6 +1096,11 @@ class TestNewestWinsPerAxis:
                 f"{msg!r} is a relative delta — {target} must be released, got {axes}"
             )
 
+class TestAnchoredDeltaMarkers:
+    """Issue #369 round 2: delta markers are anchored to their own number
+    — a marker on a different number never suppresses the other number's
+    absolute statement."""
+
     def test_delta_marker_does_not_block_other_axes(self):
         """A delta message releases only its own axis: 'make it wider by
         3 mm' releases W while H=12 stays enforced (the delta marker is
@@ -1136,6 +1146,11 @@ class TestNewestWinsPerAxis:
         extracted = stated_axes_from_message("make it taller", [])
         cues = extracted if extracted else classify("make it taller")
         assert effective_stated_dims(carried, cues) == {"W": 40.0}
+
+class TestWindowBoundary:
+    """Issue #369: the extraction window is the last 50 prior turns plus
+    the current message — the boundary is exact and the current message
+    is never dropped."""
 
     def test_history_window_boundary_is_exact(self):
         """Window semantics, pinned to the EXACT boundary: the window is
@@ -1193,6 +1208,10 @@ class TestNewestWinsPerAxis:
         axes = stated_axes_from_message("make it 20 mm tall", filler)
         assert axes["H"] == 20.0
 
+
+class TestNewestWinsPerAxis:
+    """Issue #369: per axis, the NEWEST explicit stated value wins — the
+    anchored-delta discriminator that the round-2 anchoring exists for."""
 
     def test_unanchored_delta_marker_on_other_number_does_not_release(self):
         """"make it taller by 5 mm, 30 mm" → H=30: the delta marker ("by")

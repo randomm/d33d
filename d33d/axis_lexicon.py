@@ -253,8 +253,8 @@ _NUMBER_TOKEN_RE = re.compile(
 def _word_re(word: str) -> re.Pattern[str]:
     """An absolute axis word at a word boundary (underscore is a word
     char, so "height" inside "spacer_height" does NOT match). Cached: the
-    closed word set is small and every clause pass rebuilds the same
-    patterns per call."""
+    word set is CLOSED (the finite ABSOLUTE/RELATIVE lexicon, never
+    user-derived text), so the process-lifetime cache stays small."""
     return re.compile(rf"(?<!\w){re.escape(word)}(?!\w)", re.IGNORECASE)
 
 

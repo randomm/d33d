@@ -196,8 +196,6 @@ class DimensionClarification:
         return "\n".join(lines)
 
 
-# The anchored RELATIVE-delta matcher — see :func:`_delta_marker_for`.
-@cache
 def _delta_marker_for(number: float) -> re.Pattern[str]:
     """A RELATIVE-delta matcher ANCHORED to ``number``'s own occurrence
     (issue #369 round 2): the preposition "by" immediately before the
@@ -210,8 +208,9 @@ def _delta_marker_for(number: float) -> re.Pattern[str]:
     number's absolute statement. A delta RELEASES the axis (the new value
     is unknown — the gate asks), never enforces it as an absolute ("taller
     by 5 mm" on a 12 mm part must not set H=5.0 — a physically shorter
-    target). Cached: the number set is small per turn and the release
-    pass rebuilds the same pattern per call."""
+    target). Compiled per call: the argument is a user-derived float with
+    no closed bound, so a ``cache`` keyed on it would grow without limit
+    over the process lifetime."""
     words = sorted(set(ABSOLUTE_WORDS) | set(RELATIVE_WORDS), key=len, reverse=True)
     return re.compile(
         r"\bby\s+" + re.escape(f"{number:g}") + r"\s*mm\b"
@@ -336,12 +335,29 @@ def _extract_stated(
             for axis, value in triple_axes.items():
                 if axis not in turn_axes:
                     turn_axes[axis] = value
+            # ONE guarded classify per turn: its result serves the
+            # lexicon-absolute extraction below AND is stored for the
+            # release pass (step 4). A turn whose classify fails
+            # contributes NO lexicon cues and NO release.
+            try:
+                cues = classify(text)
+            except Exception:
+                logger.warning(
+                    "stated-extraction classify failed for turn %d (len=%d); "
+                    "the turn contributes no lexicon cues and no release",
+                    idx,
+                    len(turn),
+                    exc_info=True,
+                )
+                cues = None
             # Single-axis-word lexicon: only fills axes the axis-letter
             # pass and the triple left empty in this turn.
-            lexicon_axes = _classify_axis_cues(text)
-            for axis, value in lexicon_axes.items():
-                if axis not in turn_axes:
-                    turn_axes[axis] = value
+            if cues is not None:
+                lexicon_axes = dict(cues.absolute)
+                for axis, value in lexicon_axes.items():
+                    if axis not in turn_axes:
+                        turn_axes[axis] = value
+                turn_cues[idx] = cues
             # Equal-axis size shorthand (only if the other passes left
             # axes empty in this turn).
             if not turn_axes:
@@ -361,20 +377,6 @@ def _extract_stated(
             for axis in turn_axes:
                 stated_at[axis] = idx
             out.update(turn_axes)
-            # ONE classify per turn: the release pass (step 4) reuses
-            # this result instead of classifying the same text again —
-            # a turn whose classify failed is absent from ``turn_cues``
-            # and is skipped there (guarded degrade to the carried set).
-            try:
-                turn_cues[idx] = classify(text)
-            except Exception:
-                logger.warning(
-                    "stated-extraction classify failed for turn %d (len=%d); "
-                    "the release pass will skip that turn",
-                    idx,
-                    len(turn),
-                    exc_info=True,
-                )
 
     # 3. AI-suggested dimensions, ONLY if the user confirmed them.
     if ai_suggested:
@@ -388,11 +390,12 @@ def _extract_stated(
                 if cv is not None:
                     out[axis] = cv
 
-    # 4. Issue #369 release pass (reuses step 2's classify per turn, in
-    #    ``turn_cues`` — no second classification; a turn whose classify
-    #    failed is absent from ``turn_cues`` and is skipped, degrading to
-    #    the carried set): a RELATIVE word for an axis in a NEWER
-    #    message releases that axis when the axis's LATEST explicit
+    # 4. Issue #369 release pass (reuses step 2's guarded classify per
+    #    turn, in ``turn_cues`` — no second classification; a turn whose
+    #    classify failed is absent from ``turn_cues`` and is skipped, so
+    #    it releases nothing and degrades to the carried set): a RELATIVE
+    #    word for an axis in a newer message releases that axis when the
+    #    axis's LATEST explicit
     #    statement (``stated_at``, recorded in step 2) is OLDER than the
     #    releasing turn — an explicit value in the releasing turn itself
     #    (same-message ABSOLUTE cue, or a single unmapped mm number with no
