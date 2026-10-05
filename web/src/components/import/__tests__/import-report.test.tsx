@@ -48,6 +48,25 @@ describe("ImportReport — the import report (issue #334, D6)", () => {
     expect(metrics).toContain("not watertight");
   });
 
+  it("shows the dropped-body line when bodies_before is present (issue #375, operator decision 1)", () => {
+    const client = makeClient();
+    // A genuine drop: 3 bodies pre-repair, 2 in the stored mesh.
+    const part: PartReportInfo = {
+      ...unsettledPart,
+      report: { ...unsettledPart.report!, bodies_before: 3 },
+    };
+    render(<ImportReport part={part} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
+    expect(
+      screen.getByTestId("import-report-bodies-after-repair").textContent,
+    ).toBe(copy.partReport.bodiesAfterRepair(3, 2));
+  });
+
+  it("shows no dropped-body line when bodies_before is absent (issue #375, operator decision 1)", () => {
+    const client = makeClient();
+    render(<ImportReport part={unsettledPart} projectId={7} client={client} onSettled={vi.fn()} showPlate={false} />);
+    expect(screen.queryByTestId("import-report-bodies-after-repair")).toBeNull();
+  });
+
   it("renders the watertight-positive form when watertight is true and no gaps closed", () => {
     const client = makeClient();
     const part: PartReportInfo = { ...unsettledPart, report: { ...unsettledPart.report!, watertight: true, gaps_closed: 0 } };

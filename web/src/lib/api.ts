@@ -223,7 +223,14 @@ export interface PartReportInfo {
   bbox_mm?: number[] | null;
   report: {
     triangles: number;
+    /** The number of watertight components in the STORED (post-repair)
+     *  mesh (issue #375, operator decision 2). */
     bodies: number;
+    /** Issue #375, operator decision 1 (optional): the pre-repair body
+     *  count, emitted ONLY when repair dropped a body (post-repair
+     *  `bodies` < `bodies_before`). The read card shows the
+     *  "N bodies → M bodies after repair" line only when this is present. */
+    bodies_before?: number;
     watertight: boolean;
     gaps_closed: number;
     bbox_file_units: number[];

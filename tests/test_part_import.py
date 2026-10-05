@@ -594,7 +594,9 @@ def test_hole_count_two_watertight_rings(app_with_projects):
     at a 100 mm gap the float32 vertex rounding merges the two bodies into
     one, corrupting both the body count and the genus sum). The 10000 mm
     separation is what keeps the two bodies distinct through the float32
-    round-trip."""
+    round-trip. Issue #375 additionally pins the STORED mesh: per-body
+    repair keeps both watertight components and the exact 512-face count.
+    """
     import trimesh
 
     ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
@@ -606,14 +608,32 @@ def test_hole_count_two_watertight_rings(app_with_projects):
         r = await client.post("/api/projects", json={"name": "TwoRings"})
         pid = r.json()["id"]
         files = {"file": ("two_rings.stl", data, "model/stl")}
-        return await client.post(f"/api/projects/{pid}/part", files=files)
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        v1_id = upload_r.json()["version_id"]
+        repo_path = _repo_for(app_with_projects, pid)
+        part_path = repo_path / "versions" / str(v1_id) / "part.stl"
+        return upload_r, part_path.read_bytes()
 
-    r = _run_async(app_with_projects, _call)
-    assert r.status_code == 201, r.text
-    report = r.json()["part"]["report"]
+    upload_r, stored = _run_async(app_with_projects, _call)
+    assert upload_r.status_code == 201, upload_r.text
+    report = upload_r.json()["part"]["report"]
     assert report["watertight"] is True
     assert report["bodies"] == 2, f"two disconnected rings: {report}"
     assert report["hole_count"] == 2, f"two rings → genus 2: {report}"
+    assert report["triangles"] == 512, (
+        f"two rings must keep exactly 512 faces: {report}"
+    )
+    # Issue #375: the STORED (post-repair) mesh keeps both watertight
+    # bodies — the report's bodies value is the post-repair count.
+    stored_mesh = trimesh.load(io.BytesIO(stored), file_type="stl")
+    if isinstance(stored_mesh, trimesh.Scene):
+        stored_mesh = stored_mesh.to_mesh()
+    stored_mesh.merge_vertices()
+    stored_mesh.update_faces(stored_mesh.nondegenerate_faces())
+    stored_bodies = len(stored_mesh.split(only_watertight=True))
+    assert stored_bodies == 2, (
+        f"stored mesh must keep 2 watertight bodies, got {stored_bodies}"
+    )
 
 
 def test_bodies_count_split_equivalence_on_fixtures():
@@ -729,6 +749,250 @@ def test_repair_report_two_body(app_with_projects):
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
     assert report["bodies"] == 2
+
+
+def test_repair_keeps_all_bodies_two_annuli():
+    """Issue #375: two disconnected annuli (10000 mm apart — the float32
+    STL round-trip merges closer bodies) repaired via ``parse_and_repair``
+    directly (no HTTP): the STORED mesh must keep BOTH watertight bodies
+    and the exact pre-repair face count (512). On main the one-call
+    ``MeshFix.repair()`` keeps only one component → 1 body / 256 faces,
+    so this test MUST fail on main."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+
+    mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    assert len(mesh.faces) == 512, (
+        f"two annuli must keep all 512 faces after per-body repair, "
+        f"got {len(mesh.faces)}: {report}"
+    )
+    comps = mesh.split(only_watertight=False)
+    watertight_comps = [c for c in comps if c.is_watertight]
+    assert len(watertight_comps) == 2, (
+        f"stored mesh must keep 2 watertight bodies, got "
+        f"{len(watertight_comps)}: {report}"
+    )
+    # Operator decision 2: report.bodies is the post-repair count.
+    assert report["bodies"] == 2
+    # No body dropped → no bodies_before field (operator decision 1).
+    assert "bodies_before" not in report
+
+
+def test_repair_upload_two_body_stored_mesh_keeps_both_bodies(app_with_projects):
+    """Issue #375 upload path: upload two_body_multisolid.stl, then read
+    back the STORED versions/{v1}/part.stl — the stored mesh must have 2
+    watertight bodies. On main the stored part.stl has 1 body (the
+    one-call repair dropped one; the report claimed 2), so this test MUST
+    fail on main."""
+    import trimesh
+
+    data = _stl_bytes(FIXTURES / "two_body_multisolid.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TwoBodyStored"})
+        pid = r.json()["id"]
+        files = {"file": ("two_body.stl", data, "model/stl")}
+        upload_r = await client.post(f"/api/projects/{pid}/part", files=files)
+        v1_id = upload_r.json()["version_id"]
+        repo_path = _repo_for(app_with_projects, pid)
+        part_path = repo_path / "versions" / str(v1_id) / "part.stl"
+        stored = part_path.read_bytes()
+        return upload_r, stored
+
+    upload_r, stored = _run_async(app_with_projects, _call)
+    assert upload_r.status_code == 201, upload_r.text
+    report = upload_r.json()["part"]["report"]
+    stored_mesh = trimesh.load(io.BytesIO(stored), file_type="stl")
+    if isinstance(stored_mesh, trimesh.Scene):
+        stored_mesh = stored_mesh.to_mesh()
+    stored_mesh.merge_vertices()
+    comps = stored_mesh.split(only_watertight=False)
+    watertight_comps = [c for c in comps if c.is_watertight]
+    assert len(watertight_comps) == 2, (
+        f"stored part.stl must keep 2 watertight bodies, got "
+        f"{len(watertight_comps)}: {report}"
+    )
+    # Operator decision 2: report.bodies == stored (post-repair) count.
+    assert report["bodies"] == len(watertight_comps)
+
+
+def test_single_body_repair_invariance_box_20mm():
+    """Issue #375 operator decision 1: a single-body import takes the
+    early branch to the unchanged one-call pymeshfix path — byte-for-byte
+    identical output. ``parse_and_repair`` on box_20mm.stl must produce
+    the SAME repaired vertices/faces as a direct one-call ``MeshFix``
+    repair of the same pre-repair mesh (the historical path)."""
+    import numpy as np
+    import pymeshfix
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+    mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    assert "bodies_before" not in report
+    assert report["bodies"] == 1
+
+    # The direct one-call path on the same pre-repair merged mesh (the
+    # historical single-call repair).
+    loaded = trimesh.load(io.BytesIO(data), file_type="stl")
+    if isinstance(loaded, trimesh.Scene):
+        loaded = loaded.to_mesh()
+    merged = loaded.copy()
+    merged.merge_vertices()
+    merged.update_faces(merged.nondegenerate_faces())
+    fix = pymeshfix.MeshFix(
+        merged.vertices.astype(np.float64), merged.faces.astype(np.int32)
+    )
+    fix.repair()
+    reference = trimesh.Trimesh(
+        np.asarray(fix.points, dtype=np.float64),
+        np.asarray(fix.faces, dtype=np.int32),
+        process=False,
+    )
+    trimesh.repair.fix_normals(reference)
+
+    assert np.array_equal(np.asarray(mesh.vertices), np.asarray(reference.vertices)), (
+        "single-body repair output must be identical to the one-call path"
+    )
+    assert np.array_equal(np.asarray(mesh.faces), np.asarray(reference.faces)), (
+        "single-body repair output must be identical to the one-call path"
+    )
+
+
+def test_dropped_body_report_line_two_body_fixture(app_with_projects):
+    """Issue #375 operator rule: an input where repair still drops a body
+    must surface the dropped-body report field (``bodies_before``).
+    Drive ``parse_and_repair`` directly with a multi-body input: the field
+    is ABSENT when repair keeps all bodies (two annuli — the fixed path),
+    and PRESENT with the pre-repair count when the post-repair stored
+    mesh has fewer bodies than the pre-repair count."""
+    import numpy as np
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    # Presence check on a body-dropping repair: monkeypatch the per-body
+    # repair so the second body is dropped (simulating a repair that
+    # still loses a body), and assert the report carries bodies_before.
+
+    ring_a = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    ring_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([ring_a, ring_b]))
+
+    original = part_mesh_mod.repair_with_pmf
+    call_state = {"n": 0}
+
+    def _dropping_repair(mesh):
+        call_state["n"] += 1
+        repaired = original(mesh)
+        if call_state["n"] == 2:
+            # Drop the second body (an empty-mesh repair result would trip
+            # the empty-after-repair gate; drop via the report-level
+            # path: return only the first body's faces as zero faces).
+            return trimesh.Trimesh(  # empty
+                np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int32), process=False
+            )
+        return repaired
+
+    # ``parse_and_repair`` looks the name up in part_mesh's own globals
+    # (``from d33d.part_repair import repair_with_pmf`` binds it there), so
+    # the monkeypatch targets part_mesh_mod, not the defining module.
+    part_mesh_mod.repair_with_pmf = _dropping_repair
+    try:
+        # The second body returns an empty mesh → concatenate of [body1,
+        # empty] keeps only body 1 → post-repair 1 body < pre-repair 2.
+        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    finally:
+        part_mesh_mod.repair_with_pmf = original
+    assert report["bodies"] == 1, f"post-repair body count: {report}"
+    assert report.get("bodies_before") == 2, (
+        f"dropped-body report line: bodies_before must be the pre-repair "
+        f"count 2: {report}"
+    )
+
+
+def test_repair_non_watertight_component_kept(app_with_projects):
+    """Issue #375 adds no new rejection grounds: a repair that produces a
+    NON-watertight component in the stored mesh is kept as-is (no
+    PartUploadError) — the report simply describes the STORED mesh
+    honestly: ``watertight`` is False and ``bodies`` is the watertight
+    count, as on main."""
+    import trimesh
+
+    import d33d.part_mesh as part_mesh_mod
+
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0.0, 0.0])
+    data = _stl_bytes_from_mesh(trimesh.util.concatenate([box_a, box_b]))
+
+    original = part_mesh_mod.repair_with_pmf
+    call_state = {"n": 0}
+
+    def _leaky_repair(mesh):
+        call_state["n"] += 1
+        repaired = original(mesh)
+        if call_state["n"] == 2:
+            # Remove several faces → a NON-watertight (open) second component
+            # in the stored mesh (removing just one face auto-closes under
+            # merge_vertices/update_faces; several leave a genuine open
+            # shell). The stored mesh keeps it; the report must be honest.
+            return trimesh.Trimesh(
+                repaired.vertices, repaired.faces[:-3], process=False
+            )
+        return repaired
+
+    part_mesh_mod.repair_with_pmf = _leaky_repair
+    try:
+        _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    finally:
+        part_mesh_mod.repair_with_pmf = original
+    assert report["watertight"] is False, f"report must say not watertight: {report}"
+    assert report["bodies"] == 1, (
+        f"bodies must be the WATERTIGHT component count (1 of 2): {report}"
+    )
+    # The leaked (open) second component is not a watertight body: repair
+    # effectively dropped a watertight body (2 → 1), so the OPTIONAL
+    # bodies_before line is present (unchanged rule).
+    assert report["bodies_before"] == 2, f"dropped watertight body: {report}"
+
+
+def test_issue_223_asymmetric_a_fixture_not_rejected(app_with_projects):
+    """issue-223-asymmetric-a.stl (8 loose triangles — unrepairable,
+    non-watertight components): parse_and_repair must NOT raise and the
+    report must match main's behaviour (watertight False, bodies 0),
+    pinned here so the post-repair "leak check" cannot resurrect as a
+    422."""
+    import d33d.part_mesh as part_mesh_mod
+
+    data = _stl_bytes(FIXTURES / "issue-223-asymmetric-a.stl")
+    _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
+    assert report["watertight"] is False, f"fixture is not watertight: {report}"
+    assert report["bodies"] == 0, (
+        f"no watertight components (main's value): {report}"
+    )
+
+
+def test_all_stl_fixtures_parse_without_raising(app_with_projects):
+    """Every ``tests/fixtures/stl/*.stl`` must survive ``parse_and_repair``
+    without a PartUploadError — no fixture may hit a rejection that main
+    did not have (issue #375 adds no new rejection grounds)."""
+    import d33d.part_mesh as part_mesh_mod
+
+    for path in sorted(FIXTURES.glob("*.stl")):
+        try:
+            part_mesh_mod.parse_and_repair(path.read_bytes(), "stl")
+        except part_mesh_mod.PartUploadError as e:
+            pytest.fail(f"{path.name} raised PartUploadError: {e}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -2876,3 +3140,168 @@ def test_part_bbox_mm_unsettled_is_null(tmp_path: Path):
     )
     row = conn.get_project(pid)
     assert part_bbox_mm(row, conn) is None
+
+
+# ---------------------------------------------------------------------------
+# project_row_for_worker (issue #374)
+# ---------------------------------------------------------------------------
+
+
+def _seed_file_backed_project(tmp_path: Path) -> tuple[str, int]:
+    """One project (no part) in a FILE-BACKED DB — returns (db_path, pid)."""
+    import d33d.db as db_mod
+    from d33d.versions import migrate as _migrate
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    conn = db_mod.connect(db_path)
+    _migrate(conn)
+    pid = conn.create_project(name="p")
+    conn.commit()
+    conn.close()
+    return db_path, pid
+
+
+def _run_off_main_thread(fn) -> Any:
+    """Run fn on a plain non-main thread (the production worker-thread
+    shape) and propagate any exception it raises."""
+    import concurrent.futures as _cf
+
+    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+        return _ex.submit(fn).result(timeout=30)
+
+
+def test_project_row_for_worker_get_project_error_yields_no_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #374 fix round 1) When get_project raises, the helper yields
+    (None, None) — 'row unreadable' uniformly means 'no handle' (the
+    caller never receives a conn to read a row it does not have), and the
+    finally still runs without error."""
+    import sqlite3 as _sqlite3
+
+    from d33d.part_http import project_row_for_worker
+
+    db_path, pid = _seed_file_backed_project(tmp_path)
+    monkeypatch.setattr(
+        "d33d.db.Connection.get_project",
+        lambda self, project_id: (_ for _ in ()).throw(_sqlite3.OperationalError("closed")),
+    )
+
+    def _body():
+        with project_row_for_worker(db_path, pid) as (row, conn):
+            assert row is None
+            assert conn is None, "an unreadable row must mean NO handle"
+
+    _run_off_main_thread(_body)
+
+
+def test_project_row_for_worker_value_error_yields_no_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #374 fix round 1) A ValueError from get_project (a corrupt
+    JSON column such as tags — json.loads rejects it) is an unreadable row:
+    (None, None), never an escaped ValueError."""
+    from d33d.part_http import project_row_for_worker
+
+    db_path, pid = _seed_file_backed_project(tmp_path)
+    monkeypatch.setattr(
+        "d33d.db.Connection.get_project",
+        lambda self, project_id: (_ for _ in ()).throw(ValueError("corrupt tags")),
+    )
+
+    def _body():
+        with project_row_for_worker(db_path, pid) as (row, conn):
+            assert row is None
+            assert conn is None, "a ValueError row read must mean NO handle"
+
+    _run_off_main_thread(_body)
+
+
+def test_project_row_for_worker_corrupt_tags_column_degrades(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374 fix round 1) A row whose tags column is corrupt (the
+    real ValueError path — get_project decodes tags via json.loads)
+    degrades to part-less with exactly ONE 'could not be read' warning
+    naming the ValueError class; the row's path never appears in the
+    message."""
+    import d33d.db as db_mod
+    from d33d.part_http import project_row_for_worker
+
+    db_path, pid = _seed_file_backed_project(tmp_path)
+    seed = db_mod.connect(db_path)
+    seed.execute("UPDATE projects SET tags='not-json{' WHERE id=?", (pid,))
+    seed.commit()
+    seed.close()
+
+    with (
+        caplog.at_level("WARNING"),
+        project_row_for_worker(db_path, pid) as (row, conn),
+    ):
+        assert row is None
+        assert conn is None
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(warns) == 1
+    # json.loads rejects the corrupt tags with JSONDecodeError — a
+    # ValueError subclass — the class-name contract names the class.
+    assert "JSONDecodeError" in warns[0].getMessage()
+    assert db_path not in warns[0].getMessage()  # never the path
+
+
+def test_project_row_for_worker_close_error_is_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(issue #374 fix round 1) A close() that raises (a broken handle)
+    never escapes the helper — the context manager's contract (the row, or
+    its degradation, always yields) holds even when the teardown itself
+    fails."""
+    import sqlite3 as _sqlite3
+
+    from d33d.part_http import project_row_for_worker
+
+    db_path, pid = _seed_file_backed_project(tmp_path)
+    monkeypatch.setattr(
+        "d33d.db.Connection.close",
+        lambda self: (_ for _ in ()).throw(_sqlite3.OperationalError("broken handle")),
+    )
+
+    def _body():
+        with project_row_for_worker(db_path, pid) as (row, conn):
+            assert row is not None
+            assert conn is not None
+    # If the unguarded close() escaped, the ThreadPoolExecutor would
+    # re-raise it here — the bare .result() is the assertion that no
+    # exception escapes the helper.
+    _run_off_main_thread(_body)
+
+
+def test_project_row_for_worker_warnings_are_class_name_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374 fix round 1) The unreadable-row warnings carry ONLY the
+    exception class name + project id — never the raw exception text (a
+    raw str(e) can contain a path), never any filesystem path."""
+    import d33d.db as db_mod
+    from d33d.part_http import project_row_for_worker
+
+    db_path, pid = _seed_file_backed_project(tmp_path)
+
+    def _boom(_path):
+        raise OSError("bad db path /Users/someone/secret.sqlite3")
+
+    monkeypatch.setattr(db_mod, "connect", _boom)
+
+    with (
+        caplog.at_level("WARNING"),
+        project_row_for_worker(db_path, pid) as (row, conn),
+    ):
+        assert row is None
+        assert conn is None
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(warns) == 1
+    assert "OSError" in warns[0].getMessage()
+    # The raw text (with its path) must not appear in the message — the
+    # traceback in exc_text is not part of the message.
+    assert "/Users/someone/secret.sqlite3" not in warns[0].getMessage()
+    assert "/" not in warns[0].getMessage()
+    assert warns[0].exc_text, "the warning must carry the exception (exc_info=True)"
