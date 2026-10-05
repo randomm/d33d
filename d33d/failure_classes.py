@@ -65,6 +65,7 @@ OpenSCADFailureClass = Literal[
     "hallucinated_bosl2",
     "geometrically_wrong",
     "axis_params_mismatch",
+    "unknown_variable",
     # Non-repairable render-worker classes
     "timeout",
     "oom",
@@ -75,7 +76,7 @@ OpenSCADFailureClass = Literal[
     "unclassified_syntax_error",
 ]
 
-#: Closed enum of all 17 entries: 11 named LLM failure classes, 5
+#: Closed enum of all 18 entries: 12 named LLM failure classes, 5
 #: non-repairable render-worker classes, and 1 fallback.
 FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     {
@@ -91,6 +92,7 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "hallucinated_bosl2",
         "geometrically_wrong",
         "axis_params_mismatch",
+        "unknown_variable",
         "timeout",
         "oom",
         "container_error",
@@ -100,11 +102,13 @@ FAILURE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     }
 )
 
-#: The 13 classes that are repairable by the design loop.
+#: The 14 classes that are repairable by the design loop.
 #: ``unclassified_syntax_error`` is included because the LLM can fix
 #: generic syntax errors even when the specific cause is unknown.
 #: ``axis_params_mismatch`` (issue #276) is included because the LLM can
 #: correct an axis-declared parameter that the geometry contradicts.
+#: ``unknown_variable`` (issue #383) is included because the LLM can
+#: declare or define the variable OpenSCAD reported as undefined.
 REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
     {
         "trailing_semicolon",
@@ -119,6 +123,7 @@ REPAIRABLE_CLASSES: frozenset[OpenSCADFailureClass] = frozenset(
         "hallucinated_bosl2",
         "geometrically_wrong",
         "axis_params_mismatch",
+        "unknown_variable",
         "unclassified_syntax_error",
     }
 )
@@ -192,6 +197,15 @@ _RE_TRAILING_SEMICOLON = re.compile(
     r"translate\s*\([^)]*\)\s*;\s*\w",
     re.IGNORECASE,
 )
+
+# Undefined-variable warning (issue #383): an exit-0 render whose geometry
+# silently lost everything an undefined variable sized. The exact text the
+# pinned image (OpenSCAD 2026.01.19) emits — see render_worker's
+# UNKNOWN_VARIABLE_RE, which shares the quoted-name anchor. Placed BEFORE
+# the generic fallback and after the more specific OpenSCAD-error patterns
+# so a render that also carries a real OpenSCAD ERROR: line still lands in
+# the class that pattern names.
+_RE_UNKNOWN_VARIABLE = re.compile(r'Ignoring unknown variable "(\w+)"')
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +331,12 @@ _REPAIR_INSTRUCTIONS: dict[OpenSCADFailureClass, str] = {
         "syntax errors (mismatched braces, missing semicolons, invalid expressions). "
         "Fix the syntax and re-render."
     ),
+    "unknown_variable": (
+        "The render reported an undefined variable: OpenSCAD ignored it and the "
+        "geometry silently lost whatever that variable sized (the named variable "
+        "appears in the evidence). Declare the variable in the parameter block or "
+        "define it before use, and make sure the name matches exactly."
+    ),
     # Non-repairable classes — no repair instruction
     "timeout": "",
     "oom": "",
@@ -366,7 +386,14 @@ def _classify_syntax_error(stderr: str) -> OpenSCADFailureClass:
     # 9. Trailing semicolon (rare in stderr)
     if _RE_TRAILING_SEMICOLON.search(stderr):
         return "trailing_semicolon"
-    # 10. Fallback
+    # 10. Undefined variable (issue #383): the exit-0 warning path — the
+    #     render compiled, the STL is valid, but an undefined variable
+    #     silently sized geometry to nothing. Distinct named class so the
+    #     repair instruction can name the variable(s) directly (the
+    #     generic fallback cannot).
+    if _RE_UNKNOWN_VARIABLE.search(stderr):
+        return "unknown_variable"
+    # 11. Fallback
     return "unclassified_syntax_error"
 
 

@@ -25,6 +25,14 @@ STL_ABORT_MARKER = (
     "[entrypoint] STL export failed with exit code 1 — aborting remaining steps"
 )
 
+#: OpenSCAD's undefined-variable warning (issue #383, captured verbatim
+#: from the pinned image ``openscad/openscad:trixie.2026-01-19`` — a real
+#: render of ``cube(H);`` emits exactly this in /work/render.log with exit
+#: code 0 and a valid, non-degenerate STL).
+UNKNOWN_VARIABLE_WARNING = (
+    'WARNING: Ignoring unknown variable "H" in file /work/model.scad at line 1'
+)
+
 #: The entrypoint's bounding-box fit abort (issue #309 table row 4): the
 #: line is written to BOTH the container's stderr and the on-volume
 #: /work/render.log, so ``ERROR:`` in either source reaches the classifier.
@@ -67,6 +75,7 @@ def _all_valid(
     vertex_count: int = 100,
     watertight: bool = True,
     volume: float = 1.0,
+    render_log: str = "",
 ):
     return rw.classify(
         exit_code=exit_code,
@@ -79,11 +88,50 @@ def _all_valid(
         vertex_count=vertex_count,
         watertight=watertight,
         volume=volume,
+        render_log=render_log,
     )
 
 
 def test_ok_is_classified_as_ok() -> None:
     assert _all_valid() == "ok"
+
+
+def test_exit0_valid_artifacts_with_unknown_variable_in_stderr_is_syntax_error() -> None:
+    """Issue #383: exit 0 + all valid artifacts + an OpenSCAD unknown-variable
+    warning in the container stderr → syntax_error (NOT ok — the geometry
+    silently lost whatever the undefined variable sized)."""
+    assert _all_valid(stderr=UNKNOWN_VARIABLE_WARNING) == "syntax_error"
+
+
+def test_exit0_valid_artifacts_with_unknown_variable_in_render_log_is_syntax_error() -> None:
+    """Issue #383: exit 0 + all valid artifacts + the unknown-variable warning
+    in the harvested render.log tail (the entrypoint redirects openscad's
+    stderr there on this image) → syntax_error (the render.log half of the
+    check — the container's stderr carries only [entrypoint] markers)."""
+    assert _all_valid(stderr="", render_log=UNKNOWN_VARIABLE_WARNING) == "syntax_error"
+
+
+def test_exit0_valid_artifacts_no_warning_stays_ok() -> None:
+    """Issue #383: a warning-shaped line that is NOT the OpenSCAD unknown-
+    variable warning (e.g. benign log noise) does not demote an exit-0
+    valid render."""
+    assert _all_valid(stderr="WARNING: something else entirely", render_log="benign log line") == "ok"
+
+
+def test_unknown_variable_warning_in_render_log_names_the_variable() -> None:
+    """Issue #383: the classifier surfaces the variable NAME for the repair
+    evidence — the caller (the design loop) names the undefined variable in
+    the feedback."""
+    assert rw.unknown_variables(UNKNOWN_VARIABLE_WARNING) == ["H"]
+    assert rw.unknown_variables("") == []
+    assert rw.unknown_variables("no warning here") == []
+
+
+def test_unknown_variables_deduplicates() -> None:
+    """Issue #383: multiple warnings for the same variable (e.g. across the
+    8 openscad invocations) → the deduped list names it once."""
+    text = "\n".join([UNKNOWN_VARIABLE_WARNING] * 8)
+    assert rw.unknown_variables(text) == ["H"]
 
 
 def test_timeout_has_highest_precedence() -> None:
@@ -378,9 +426,15 @@ def test_table_is_total_all_combinations_land_in_exactly_one_class() -> None:
     views_opts = [None, ["a.png"], SIX_VIEWS]
     oom_opts = [False, True]
     timeout_opts = [False, True]
+    stderr_opts = ["", UNKNOWN_VARIABLE_WARNING]
+    log_opts = ["", UNKNOWN_VARIABLE_WARNING]
+    vc_opts = [0, 100]
+    wt_opts = [False, True]
+    vol_opts = [0.0, 1.0]
 
-    for ec, stl, csg, views, oom, to in itertools.product(
-        exit_codes, stl_opts, csg_opts, views_opts, oom_opts, timeout_opts
+    for ec, stl, csg, views, oom, to, st, lg, vc, wt, vol in itertools.product(
+        exit_codes, stl_opts, csg_opts, views_opts, oom_opts, timeout_opts,
+        stderr_opts, log_opts, vc_opts, wt_opts, vol_opts,
     ):
         result = rw.classify(
             exit_code=ec,
@@ -389,6 +443,11 @@ def test_table_is_total_all_combinations_land_in_exactly_one_class() -> None:
             views=views,
             oomkilled=oom,
             timed_out=to,
+            stderr=st,
+            render_log=lg,
+            vertex_count=vc,
+            watertight=wt,
+            volume=vol,
         )
         assert result in rw.ERROR_CLASSES, (
             f"combination (ec={ec}, stl={stl!r}, csg={csg!r}, "

@@ -1846,7 +1846,10 @@ def test_container_error_after_prior_ok_render_stops_loop():
     def bbox_fn(r):
         if r.error_class != "ok":
             return None
-        return BboxInfo(99.0, 25.0, 30.0, 1.0)  # ok render fails bbox gate
+        # ok render fails the bbox gate: z is 10 mm off the stated 30 mm
+        # (the 19.3 mm z case in issue #247 — a mismatch, not a floor
+        # case; W is within tolerance so a single off-axis is enough).
+        return BboxInfo(20.0, 25.0, 40.0, 1.0)
 
     result = run_design_loop(
         photo=PHOTO,
@@ -2756,7 +2759,14 @@ def test_screw_clearance_direct_check_contract():
 
 
 def _import_scad_llm(scad: str) -> LLMResult:
-    """A T1-shaped design response for import-guard tests."""
+    """A T1-shaped design response for import-guard tests.
+
+    A comment line makes the source pass the named-parameter gate (bit 3):
+    a candidate that imports the part and adds nothing declares no
+    parameters, and the loop only passes a fully-measured candidate —
+    the floor tests below are about bit 2, so the source declares W as a
+    neutral parameter to keep bit 3 green."""
+    scad = f"W = 20;\n{scad}"
     return _llm_result(
         content=_t1_tool_call_payload("emit_design", {"scad": scad}),
         tool_calls=({"name": "emit_design", "arguments": {"scad": scad}},),
@@ -2894,22 +2904,25 @@ def test_import_guard_catches_rebuild_when_part_scale_set():
 
 
 def test_score_with_part_bbox_larger_candidate_passes():
-    """Issue #332: for an import project, a candidate whose bbox is
-    LARGER than the user's stated dims (but matches the part's measured
-    bbox within tolerance) passes the bbox gate (bit 2)."""
-    # Part bbox is 20/25/30, stated is 15/20/25 (smaller — the part is
-    # bigger than stated). A candidate that matches the part's bbox
-    # (20/25/30) should pass bit 2 via the ground-truth baseline.
+    """Issue #332 (issue #383 per-axis semantics): an import project's
+    candidate whose bbox is LARGER than the user's stated dims — but
+    within tolerance of the PART's measured extent (the #383 floor
+    direction that growth is allowed) — passes the bbox gate (bit 2)."""
+    # Part bbox is 20/25/30, stated is 20/25/30 (user confirmed the part's
+    # extent). A candidate 20/25/30.5 is a marginal add/cut: the one off
+    # axis (z) is 0.5 mm above the stated 30 — within the gate's tolerance
+    # max(0.3, 0.5) = 0.5 mm, so bit 2 passes.
     render = _render()
-    bbox = BboxInfo(20.0, 25.0, 30.0, 15000.0)
+    bbox = BboxInfo(20.0, 25.0, 30.5, 15100.0)
     s = score(
         render,
-        (15.0, 20.0, 25.0),  # stated dims (smaller than part)
+        (20.0, 25.0, 30.0),  # stated dims == part bbox
         bbox=bbox,
-        scad_source="W = 20;\ncube([W, 25, 30]);\n",
+        scad_source="W = 20;\ncube([W, 25, 30.5]);\n",
         part_bbox_mm=(20.0, 25.0, 30.0),  # part's measured bbox
     )
-    # Bit 2 (bbox) passes: the candidate matches the part's extent.
+    # Bit 2 (bbox) passes: the candidate matches the part's extent (and a
+    # marginal growth beyond it is allowed on the floor axis).
     assert s.bits[2] is True
 
 
@@ -2930,8 +2943,9 @@ def test_score_with_part_bbox_divergent_candidate_fails():
 
 
 def test_score_no_part_bbox_byte_identical():
-    """Issue #332: without part_bbox_mm (None), the score is byte-identical
-    to today's behaviour (regression anchor)."""
+    """Issue #332 / #383: without part_bbox_mm (None), the score is
+    byte-identical to today's behaviour — the part-baseline floor only
+    activates when a part is present (regression anchor)."""
     render = _render()
     bbox = BboxInfo(20.0, 25.0, 30.0, 15000.0)
     s_with = score(
@@ -2949,3 +2963,205 @@ def test_score_no_part_bbox_byte_identical():
     )
     assert s_with.bits == s_without.bits
     assert s_with.rank == s_without.rank
+    assert s_with.bbox_abstained == s_without.bbox_abstained
+
+
+# ---------------------------------------------------------------------------
+# Issue #383 — part-baseline floor: a pure import project (no stated dims)
+# no longer abstains. The rendered extent must not be SMALLER than the
+# part's extent per axis beyond max(1%, 0.5 mm) — growth is allowed.
+# ---------------------------------------------------------------------------
+
+
+def _score_part_floor(render, bbox, part=(20.0, 20.0, 20.0), stated=(0.0, 0.0, 0.0)):
+    """Score a candidate against the part-baseline floor (issue #383): the
+    part's measured extents present, the stated triple absent (or as
+    given)."""
+    return score(
+        render,
+        stated,
+        bbox=bbox,
+        scad_source="scale(1) import(\"part.stl\");\n",
+        part_bbox_mm=part,
+    )
+
+
+def test_score_part_floor_shrunken_candidate_fails():
+    """Issue #383: a pure import project (part 20×20×20, no stated dims)
+    with a rendered bbox of 5×5×1 — the 17.7 mm³ garbage fragment from
+    the live bug — must FAIL the bbox gate (bit 2), not pass via the
+    old whole-gate abstention."""
+    render = _render()
+    bbox = BboxInfo(5.0, 5.0, 1.0, 17.7)
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is False
+    # A failing bit is a measured failure, not an abstention.
+    assert s.bbox_abstained is False
+
+
+def test_score_part_floor_exact_part_passes():
+    """Issue #383: a pure import candidate whose bbox matches the part
+    (20×20×20) passes the bbox gate."""
+    render = _render()
+    bbox = BboxInfo(20.0, 20.0, 20.0, 8000.0)
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is True
+    assert s.bbox_abstained is False
+
+
+def test_score_part_floor_addon_growth_passes():
+    """Issue #383: growth is allowed — a 25×20×20 add-on on a 20×20×20
+    part passes the bbox gate (the floor constrains the shrink direction
+    only)."""
+    render = _render()
+    bbox = BboxInfo(25.0, 20.0, 20.0, 10000.0)
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is True
+
+
+def test_score_part_floor_boundary_within_tolerance_passes():
+    """Issue #383: the boundary — 19.5×20×20 on a 20×20×20 part is exactly
+    at the 0.5 mm tolerance (max(1%, 0.5 mm) = 0.5 mm at 20 mm) and must
+    PASS (the tolerance is a closed bound)."""
+    render = _render()
+    bbox = BboxInfo(19.5, 20.0, 20.0, 7600.0)
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is True
+
+
+def test_score_part_floor_just_beyond_tolerance_fails():
+    """Issue #383: 19.4×20×20 is just beyond the 0.5 mm tolerance on the
+    x axis — the floor bites and the gate fails (the boundary is real,
+    not a blanket pass)."""
+    render = _render()
+    bbox = BboxInfo(19.4, 20.0, 20.0, 7560.0)
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is False
+
+
+def test_score_part_floor_stated_axis_wins_over_part():
+    """Issue #383: a CONFIRMED stated axis always wins over the part
+    baseline — part 20×20×20 with stated H=15 and a render of 20×20×15
+    PASSES (the gate compares H against 15, not the part's 20; the
+    "cut it down to 15 mm tall" exception)."""
+    render = _render()
+    bbox = BboxInfo(20.0, 20.0, 15.0, 6000.0)
+    s = _score_part_floor(render, bbox, stated=(0.0, 0.0, 15.0))
+    assert s.bits[2] is True
+
+
+def test_score_part_floor_stated_axis_still_enforced():
+    """Issue #383: a confirmed stated axis is enforced AS TODAY — part
+    20×20×20 with stated H=15 and a render of 20×20×20 (not cut down)
+    FAILS on H (the floor only applies to unconfirmed axes)."""
+    render = _render()
+    bbox = BboxInfo(20.0, 20.0, 20.0, 8000.0)
+    s = _score_part_floor(render, bbox, stated=(0.0, 0.0, 15.0))
+    assert s.bits[2] is False
+
+
+def test_score_part_floor_multibody_whole_mesh_extent():
+    """Issue #383: the floor compares the WHOLE-MESH extent against the
+    part's overall extents — a multi-body candidate whose union is 20×
+    20×20 passes even though no single component matches the part (no
+    component matching on a partial/empty stated set, the whole-mesh path
+    is the floor's path)."""
+    render = _render()
+    bbox = BboxInfo(
+        20.0,
+        20.0,
+        20.0,
+        9000.0,
+        components=(
+            (10.0, 10.0, 10.0, 1000.0, 0.0, 0.0, 0.0),
+            (10.0, 10.0, 10.0, 1000.0, 10.0, 10.0, 10.0),
+        ),
+    )
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is True
+
+
+def test_score_part_floor_multibody_shrunken_union_fails():
+    """Issue #383: a multi-body candidate whose WHOLE-MESH extent is
+    shrunken below the part (the bodies are small, the union is 5×5×1)
+    fails the floor even though a single body might fit (the floor
+    constrains the overall extent, not per-component)."""
+    render = _render()
+    bbox = BboxInfo(
+        5.0,
+        5.0,
+        1.0,
+        25.0,
+        components=(
+            (5.0, 5.0, 1.0, 25.0, 0.0, 0.0, 0.0),
+        ),
+    )
+    s = _score_part_floor(render, bbox)
+    assert s.bits[2] is False
+
+
+def _run_part_floor_loop(
+    llm_script, bbox, stated=(0.0, 0.0, 0.0), part_bbox_mm=(20.0, 20.0, 20.0)
+):
+    """Run the design loop with an import project's part-baseline floor:
+    part_bbox_mm present, stated dims absent (the pure-import shape),
+    the given measured bbox on an ok render."""
+    i = {"n": 0}
+
+    def llm_fn(role, messages, system):
+        return llm_script[min(i["n"], len(llm_script) - 1)]
+
+    def render_fn(scad, defines):
+        r = _render()
+        i["n"] += 1
+        return r
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=stated,
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=(lambda r: bbox if r.error_class == "ok" else None),
+        part_scale=1.0,
+        part_bbox_mm=part_bbox_mm,
+    )
+
+
+def test_loop_part_floor_shrunken_render_not_a_pass():
+    """Issue #383 loop level: part 20×20×20, no stated dims, render
+    5×5×1 — the loop must NOT pass (the gate fails → repair, never a
+    silent pass). Fails on main (the old abstention let it through)."""
+    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    result = _run_part_floor_loop(llm, BboxInfo(5.0, 5.0, 1.0, 17.7))
+    assert result.status == "exhausted"
+    assert result.failure_reason == "bbox_out_of_tolerance"
+    assert result.best.score.bits[2] is False
+
+
+def test_loop_part_floor_exact_part_passes():
+    """Issue #383 loop level: part 20×20×20, no stated dims, render
+    20×20×20 — the gate passes and the loop passes (the part measures
+    itself)."""
+    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    result = _run_part_floor_loop(llm, BboxInfo(20.0, 20.0, 20.0, 8000.0))
+    assert result.status == "pass"
+    assert result.best.score.bits[2] is True
+
+
+def test_loop_part_floor_addon_growth_passes():
+    """Issue #383 loop level: part 20×20×20, no stated dims, render
+    25×20×20 (an add-on) — growth is allowed, the loop passes."""
+    llm = [_import_scad_llm('scale(1) import("part.stl");\n')]
+    result = _run_part_floor_loop(llm, BboxInfo(25.0, 20.0, 20.0, 10000.0))
+    assert result.status == "pass"
+    assert result.best.score.bits[2] is True
+
+
+def test_loop_part_floor_stated_height_passes():
+    """Issue #383 loop level: part 20×20×20, stated H=15 (the "cut it
+to 15 mm" exception), render 20×20×15 — the gate compares H against
+    15 (not the part's 20) and the loop passes."""
+    llm = [_import_scad_llm('scale(1) import("part.stl");\nH = 15;\n')]
+    result = _run_part_floor_loop(llm, BboxInfo(20.0, 20.0, 15.0, 6000.0), stated=(0.0, 0.0, 15.0))
+    assert result.status == "pass"
+    assert result.best.score.bits[2] is True
