@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import platform
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -83,6 +85,52 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
     guard fires: iteration one is NOT a pass, and the repair carries the
     ``no_import`` evidence (routed via the existing ``geometrically_wrong``
     class)."""
+    # CI-PROBE (issue #380): this block is diagnostic output for the
+    # Linux-CI-only failure of this test. Remove once the root cause is
+    # known and the fix lands.
+    import trimesh
+
+    print(
+        f"[CI-PROBE] sys.version={sys.version!r} "
+        f"platform={platform.platform()!r} trimesh={trimesh.__version__!r}",
+        file=sys.stderr,
+        flush=True,
+    )
+    try:
+        from d33d.import_guard import import_guard_violation as _igv
+
+        _guard_probe = _igv(_NO_IMPORT_SCAD, part_scale=1.0)
+        print(
+            f"[CI-PROBE] import_guard_violation(NO_IMPORT_SCAD, "
+            f"part_scale=1.0) = {_guard_probe!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception as _igv_exc:  # noqa: BLE001 - diagnostic must not raise
+        print(
+            f"[CI-PROBE] import_guard_violation raised: "
+            f"{type(_igv_exc).__name__}: {_igv_exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+    import d33d.design_loop as _dl_probe
+
+    _captured_kwargs: dict[str, Any] = {}
+    _orig_run = _dl_probe.run_design_loop_async
+
+    async def _spy_run(**_kw: Any) -> Any:
+        _captured_kwargs["part_scale"] = _kw.get("part_scale")
+        _captured_kwargs["part_bbox_mm"] = _kw.get("part_bbox_mm")
+        print(
+            f"[CI-PROBE] run_design_loop_async kwargs: "
+            f"part_scale={_captured_kwargs['part_scale']!r} "
+            f"part_bbox_mm={_captured_kwargs['part_bbox_mm']!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return await _orig_run(**_kw)
+
+    _dl_probe.run_design_loop_async = _spy_run
     import d33d.app as app_mod
     import d33d.config.catalogue as cat_mod
     import d33d.config.probes as probes_mod
@@ -167,6 +215,9 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         "app_http": app_mod._http_request_factory,
         "renderer": dl_mod.renderer_is_available,
     }
+    # CI-PROBE (issue #380): the closure is built HERE so its hook's
+    # ``real_run = _dl.run_design_loop_async`` default arg binds the SPY
+    # (the module attribute is already patched above).
     try:
         cat_mod.load_catalogue = _stub_load_catalogue
         resolve_mod.resolve_model = _stub_resolve_model
@@ -198,8 +249,38 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
         probes_mod.probe_capabilities = originals["probe"]
         app_mod._http_request_factory = originals["app_http"]
         dl_mod.renderer_is_available = originals["renderer"]
+        _dl_probe.run_design_loop_async = _orig_run
         # The hook's failures.jsonl append (an exhausted result) pointed at
         # /dev/null — nothing on disk to clean.
+
+    assert result is not None, "the loop must have run to completion"
+
+    # CI-PROBE (issue #380): diagnostics BEFORE the assertions. Every value
+    # is also embedded in the assertion message below so the CI failure
+    # summary (which truncates stderr) carries the full picture.
+    _diag: list[str] = []
+    _diag.append(f"sys.version={sys.version!r}")
+    _diag.append(f"platform={platform.platform()!r}")
+    _diag.append(f"trimesh={trimesh.__version__!r}")
+    _diag.append(f"import_guard_violation direct: {_guard_probe!r}")
+    _diag.append(f"part_scale at loop: {_captured_kwargs.get('part_scale')!r}")
+    _diag.append(
+        "part_bbox_mm at loop: "
+        f"{_captured_kwargs.get('part_bbox_mm')!r}"
+    )
+    _diag.append(f"result.status={result.status!r}")
+    _diag.append(f"result.failure_reason={result.failure_reason!r}")
+    _diag.append(f"iterations={len(result.iterations)}")
+    for _it in result.iterations:
+        _r = _it.render
+        _diag.append(
+            f"iter {_it.iteration}: render.error_class="
+            f"{getattr(_r, 'error_class', None)!r} "
+            f"failure_class={_it.failure_class!r} repair={_it.repair!r} "
+            f"scad={_it.scad_source[:120]!r}"
+        )
+    _diag_text = " | ".join(_diag)
+    print(f"[CI-PROBE] {_diag_text}", file=sys.stderr, flush=True)
 
     assert result is not None, "the loop must have run to completion"
     # The import guard fires when ``part_scale is not None`` — the
@@ -228,14 +309,16 @@ def test_production_closure_live_path_fires_import_guard(tmp_path: Path):
             "a no-import candidate on an import project must NOT pass — "
             "the import guard fires when part_scale is forwarded. "
             "Got status='pass' with iteration 1 failure_class=None "
-            "(the guard never saw the part)."
+            f"(the guard never saw the part). CI-PROBE diagnostics: "
+            f"{_diag_text}"
         )
     else:
         # The loop did not pass — verify the guard is the cause.
         it1 = result.iterations[0]
         assert it1.failure_class == "geometrically_wrong", (
             f"expected the import guard's geometrically_wrong, "
-            f"got {it1.failure_class!r}"
+            f"got {it1.failure_class!r} — CI-PROBE diagnostics: "
+            f"{_diag_text}"
         )
         assert it1.repair is not None
         assert 'import("part.stl")' in it1.repair.get("evidence", ""), (
