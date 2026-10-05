@@ -32,27 +32,14 @@
 
 import { copy } from "../copy";
 
-/** The W/D/H axis letter → sentence-case noun ("width", "depth",
- *  "height") — the single source for the size-mismatch rows (issue
- *  #367) and the carried-axis sentence. Note this is NOT the backend's
- *  `AXIS_LABELS` (the x/y/z bed-letter tuple in `d33d/design_loop.py`);
- *  it is the dimension protocol's own axis vocabulary, sentence-cased
- *  (the escape-input's capitalised `copy.partReport.axisLabels` is a
- *  different, display-cased form). */
-export const SIZE_AXIS_WORDS = {
-  W: "width",
-  D: "depth",
-  H: "height",
-} as const;
-
-/** The per-axis adjective for "how …?" slots — re-exported from the copy
- *  deck (which owns all user-facing strings; the copy deck is the other
- *  half of this import, so the definition lives there to keep the edge
- *  one-directional). The carried-axis sentence and the size-mismatch
+/** The W/D/H axis letters → nouns and adjectives — re-exported from the
+ *  copy deck (which owns all user-facing strings; the copy deck is the
+ *  other half of this import, so the definitions live there to keep the
+ *  edge one-directional). The carried-axis sentence and the size-mismatch
  *  follow-up must read "how wide it should be", not "how width it should
  *  be" (issue #398); the noun form stays in `SIZE_AXIS_WORDS` for the
  *  per-axis rows. */
-export { SIZE_AXIS_ADJECTIVES } from "../copy";
+export { SIZE_AXIS_ADJECTIVES, SIZE_AXIS_WORDS } from "../copy";
 
 /** The five GATE_REASON_BITS (d33d/design_loop.py) + the seven render-worker
  *  ErrorClass values + the design-loop-level timeout reason — the closed set
@@ -323,17 +310,17 @@ export function displayDesignLoopError(
       const parsedCarried = parsePositiveAxes(data.carried_axes);
       if (parsedCarried !== undefined) {
         carriedAxes = parsedCarried;
-        const axes: Array<[string, number]> = [
+        // The sentence names ONE axis: the largest carried one (the same
+        // axis whose value it renders) — a joined multi-axis label would
+        // fall through to the wrong adjective (issue #398).
+        const [firstAxis, firstValue] = ([
           ["W", parsedCarried.W],
           ["D", parsedCarried.D],
           ["H", parsedCarried.H],
-        ]
-          .filter((entry): entry is [string, number] => typeof entry[1] === "number" && entry[1] > 0)
-          .sort((a, b) => b[1] - a[1]);
-        const label = axes
-          .map(([a]) => SIZE_AXIS_WORDS[a as keyof typeof SIZE_AXIS_WORDS])
-          .join(" and ");
-        message = copy.failure.bboxCarried(label, axes[0][1]);
+        ] as Array<["W" | "D" | "H", number | undefined]>)
+          .filter((entry): entry is ["W" | "D" | "H", number] => typeof entry[1] === "number" && entry[1] > 0)
+          .sort((a, b) => b[1] - a[1])[0];
+        message = copy.failure.bboxCarried(firstAxis, firstValue);
       }
     }
     // The measured-axis data (issue #367): the frame's `measured_axes`

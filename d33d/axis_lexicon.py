@@ -579,7 +579,7 @@ def classify(message: str) -> Cues:
     clauses = split_clauses(message)
 
     # Pre-scan for the feature-verb cross-clause suppression (issue
-    # #398) — see ``d33d.feature_clause.message_has_feature_noun``.
+    #398) — see ``d33d.feature_clause.message_has_feature_noun``.
     _feature_noun_in_message = feature_clause.message_has_feature_noun(
         clauses, FEATURE_NOUN_RE
     )

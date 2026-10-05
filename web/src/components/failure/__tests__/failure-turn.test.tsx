@@ -798,7 +798,7 @@ describe("FailureTurn", () => {
     // error) — it says "you asked for", never "you set earlier", and the
     // "how …" slot takes the adjective.
     const error: DisplayError = {
-      message: copy.failure.bboxCarried("width", 60),
+      message: copy.failure.bboxCarried("W", 60),
       detail: "bbox_out_of_tolerance",
       retryable: true,
       reason: "bbox_out_of_tolerance",

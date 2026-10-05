@@ -36,6 +36,19 @@ export const SIZE_AXIS_ADJECTIVES = {
   H: "tall",
 } as const;
 
+/** W/D/H axis letter → sentence-case noun ("width", "depth", "height") —
+ *  the single source for the size-mismatch rows (issue #367) and the
+ *  carried-axis sentence. Note this is NOT the backend's `AXIS_LABELS`
+ *  (the x/y/z bed-letter tuple in `d33d/design_loop.py`); it is the
+ *  dimension protocol's own axis vocabulary, sentence-cased (the
+ *  escape-input's capitalised `copy.partReport.axisLabels` is a different,
+ *  display-cased form). */
+export const SIZE_AXIS_WORDS = {
+  W: "width",
+  D: "depth",
+  H: "height",
+} as const;
+
 export const brief = {
   eyebrow: "What we're building",
   emptyBody:
@@ -369,13 +382,12 @@ export const failure = {
    *  by reason code; this is a parameterized sentence selected by
    *  `carried_axes` presence, not a reason code. Rendered ONLY when the
    *  frame's `carried_axes` carries an axis the gate enforced. */
-  bboxCarried: (label: string, heldMm: number): string => {
-    // The "how …" slot takes the per-axis adjective ("wide"/"deep"/"tall"),
-    // not the noun ("width"/"depth"/"height") — "how deep", never "how depth"
-    // (issue #398). The label is the noun; map it back to the adjective.
-    const adjective =
-      label === "width" ? "wide" : label === "depth" ? "deep" : "tall";
-    return `I kept the ${label.toLowerCase()} you asked for (${mm(heldMm)}). If you meant to change it, say how ${adjective} it should be.`;
+  bboxCarried: (axis: "W" | "D" | "H", heldMm: number): string => {
+    // One axis, its own words: the noun ("width") and the "how …" slot's
+    // adjective ("wide") both come from the single maps — no inline
+    // fallback ("how deep", never "how depth"; a multi-axis label cannot
+    // reach this signature, issue #398).
+    return `I kept the ${SIZE_AXIS_WORDS[axis]} you asked for (${mm(heldMm)}). If you meant to change it, say how ${SIZE_AXIS_ADJECTIVES[axis]} it should be.`;
   },
 
   /** Part 2 line for an `axis_params_mismatch` failure (issue #276): the

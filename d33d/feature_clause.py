@@ -46,7 +46,7 @@ _FEATURE_VERBS: frozenset[str] = frozenset(
     {"add", "cut", "drill", "bore", "engrave", "emboss"}
 )
 
-_BARE_MEASUREMENT_RE = re.compile(
+_SUBJECT_INTRODUCER_RE = re.compile(
     r"\b(?:a|an|the|it|this|that|these|those|he|she|they|we|you|I|my|your|his|her|its|our|their)\b",
     re.IGNORECASE,
 )
@@ -65,7 +65,7 @@ def _is_bare_measurement(clause: str) -> bool:
     clause is handled by the feature-verb branch of the suppression
     (see ``axis_lexicon._classify_clause``), not by this test.
     """
-    return _BARE_MEASUREMENT_RE.search(clause) is None
+    return _SUBJECT_INTRODUCER_RE.search(clause) is None
 
 
 def message_has_feature_noun(
