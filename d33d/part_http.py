@@ -321,12 +321,7 @@ def project_row_for_worker(
     try:
         yield row, conn
     finally:
-        try:
-            conn.close()
-        except Exception:  # noqa: BLE001, S110 — a failed close
-            # carries no new information — the read failure, if any,
-            # already warned.
-            pass
+        conn.close()
 
 
 def resolve_part_paths(

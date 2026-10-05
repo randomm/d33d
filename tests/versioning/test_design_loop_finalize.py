@@ -3608,23 +3608,11 @@ def _run_render_fn_off_main_thread(render_fn: Any, scad: str, defines: dict) -> 
     (the production shape: ``asyncio.to_thread`` → ``asyncio.run`` on a
     worker thread). The result (or the raised exception) is
     propagated."""
-    import threading as _t
+    import concurrent.futures as _cf
 
-    outcome: dict = {}
-
-    def _worker() -> None:
-        try:
-            outcome["result"] = render_fn(scad, defines)
-        except BaseException as exc:  # noqa: BLE001
-            outcome["exc"] = exc
-
-    _th = _t.Thread(target=_worker)
-    _th.start()
-    _th.join(timeout=30)
-    assert _th.is_alive() is False, "worker thread timed out"
-    if "exc" in outcome:
-        raise outcome["exc"]
-    return outcome["result"]
+    with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+        _fut = _ex.submit(render_fn, scad, defines)
+        return _fut.result(timeout=30)
 
 
 def _finalize_kwargs_for(
