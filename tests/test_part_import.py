@@ -3573,17 +3573,11 @@ def test_decimate_before_repair_above_budget(monkeypatch):
 
     monkeypatch.setattr(part_mesh_mod, "REPAIR_FACE_BUDGET", 10)
 
-    # Spy on _decimate to confirm the decimate path was taken. The spy
-    # returns the mesh unchanged (the real decimation needs fast_simplification
-    # which is not in the test env; the assertion is about the face count
-    # passed to repair, not the actual decimation result).
-    decimate_calls: list[int] = []
-
-    def _spied_decimate(mesh, target):
-        decimate_calls.append(len(mesh.faces))
-        return mesh
-
-    monkeypatch.setattr(part_mesh_mod, "_decimate", _spied_decimate)
+    # Do NOT monkeypatch _decimate: the real trimesh quadric decimation
+    # runs (fast_simplification is a declared runtime dependency). The spy
+    # below captures the face count of the mesh handed TO repair — proof
+    # the decimation ran BEFORE the repair call, and brought the mesh
+    # at or below the budget (with tolerance) and below the original.
 
     # Spy on repair_with_pmf to capture the face count of the mesh it
     # receives. Returns the mesh unchanged (the real repair runs in a
@@ -3598,11 +3592,28 @@ def test_decimate_before_repair_above_budget(monkeypatch):
 
     _mesh, report, _ = part_mesh_mod.parse_and_repair(data, "stl")
     # The decimate path was taken (the mesh was above the budget and not clean).
-    # _decimate was called — proof the decimate-before-repair path was taken.
-    assert len(decimate_calls) >= 1, "_decimate must be called for a mesh above the budget"
-    # The decimated mesh (returned by the spy, unchanged) was handed to repair.
     assert len(repair_face_counts) >= 1, "repair must be called for a not-clean mesh"
+    # The REAL decimation ran BEFORE the repair: the face count of the mesh
+    # handed to repair is at or below the budget (with a small tolerance
+    # for the decimator's approximation) and strictly below the original.
+    original_faces = len(open_mesh.faces)
+    assert original_faces == 25, "the test mesh must have the expected face count"
+    for n in repair_face_counts:
+        assert n <= int(10 * 1.1) + 1, (
+            f"repair input {n} faces exceeds the budget 10 (tolerance 10%)"
+        )
+        assert n < original_faces, (
+            f"repair input {n} faces must be below the original {original_faces}"
+        )
     assert report["triangles"] > 0
+
+
+def test_fast_simplification_importable():
+    """Issue #395: ``fast_simplification`` is a declared runtime dependency
+    (pyproject.toml) — a missing install is a test failure here, not a
+    silent no-op at decimation time."""
+    from fast_simplification import simplify
+    assert callable(simplify)
 
 
 def test_clean_mesh_below_budget_not_decimated():

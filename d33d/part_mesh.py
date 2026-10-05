@@ -24,7 +24,6 @@ it via ``asyncio.to_thread`` — a mesh this size takes seconds to parse.
 from __future__ import annotations
 
 import io
-import logging
 import math
 import os
 import stat
@@ -37,8 +36,6 @@ import trimesh
 from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import mesh_topology
 from d33d.part_repair import repair_with_pmf
-
-logger = logging.getLogger(__name__)
 
 #: The named face cap for an import (a distinct constant from
 #: ``print_validation.MAX_FACES`` — that bound belongs to the render
@@ -273,29 +270,39 @@ def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     """Decimate the mesh to approximately ``target_faces`` faces.
 
     Ticket #3: decimate BEFORE repair. Uses trimesh's quadric decimation
-    (``simplify_quadric_decimation`` — needs ``fast_simplification``). If
-    the mesh is already at or below the target, returns the mesh unchanged
-    (no work). If ``fast_simplification`` is NOT installed (or trimesh's
-    decimation fails), decimation degrades to a logged no-op — the mesh
-    proceeds to repair at its full size (the repair process's timeout,
-    not a missing optional dependency, is the failure boundary for an
-    oversized mesh; decimation is a cost optimisation, not a correctness
-    gate).
+    (``simplify_quadric_decimation(face_count=...)`` — backed by the
+    ``fast_simplification`` package, a declared runtime dependency).
+
+    ``fast_simplification`` is a hard dependency: a missing install is a
+    loud import-time failure (pinned by the ``test_fast_simplification_importable``
+    test in ``tests/test_part_import.py``), never a silent no-op. If the
+    mesh is already at or below the target, it is returned unchanged (no
+    work). A genuine decimation failure (degenerate input, arithmetic
+    breakdown in the C library) still raises as a ``PartUploadError`` —
+    an oversized mesh that cannot be simplified must 422, not proceed
+    to repair at its full size.
     """
     if len(mesh.faces) <= target_faces:
         return mesh
     try:
-        return mesh.simplify_quadric_decimation(target_faces)
-    except (ImportError, ArithmeticError, ValueError):
-        logger.warning(
-            "parse_and_repair: quadric decimation unavailable or failed "
-            "(fast_simplification missing?) — proceeding at %d faces "
-            "above the %d-face budget",
-            len(mesh.faces),
-            target_faces,
-            exc_info=True,
+        return mesh.simplify_quadric_decimation(face_count=target_faces)
+    except PartUploadError:
+        raise
+    except ImportError:
+        # ``fast_simplification`` is declared in pyproject.toml — an
+        # ImportError here is a broken install, not a runtime choice.
+        raise PartUploadError(
+            "parse_and_repair: decimation failed — fast_simplification is "
+            "installed as a runtime dependency; its import failed, so the "
+            f"{len(mesh.faces)}-face mesh above the {target_faces}-face "
+            "budget cannot be simplified. Repair the install and retry."
         )
-        return mesh
+    except (ArithmeticError, ValueError) as e:
+        raise PartUploadError(
+            f"parse_and_repair: quadric decimation failed for the "
+            f"{len(mesh.faces)}-face mesh above the {target_faces}-face "
+            f"budget: {e}"
+        ) from e
 
 
 def parse_and_repair(
