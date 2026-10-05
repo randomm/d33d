@@ -731,6 +731,95 @@ def test_repair_report_two_body(app_with_projects):
     assert report["bodies"] == 2
 
 
+def test_repair_keeps_all_bodies_two_annuli(app_with_projects, tmp_path: Path):
+    """Issue #375 regression: a two-body import (two far-apart watertight
+    solids — the two_body_multisolid fixture's shape) keeps BOTH bodies in
+    the STORED mesh, and ``report["bodies"]`` reflects the stored mesh.
+
+    The one-call ``MeshFix.repair()`` on the merged multi-body mesh keeps
+    only ONE component and silently drops the rest — the pre-fix path
+    stored a one-body mesh while the report claimed two. The per-body
+    repair branch (repair each watertight component separately,
+    concatenate) is what a two-body import must exercise; this pins the
+    STORED file (not just the report) so a regression that drops a body
+    is caught even if the report is left untouched.
+    """
+    import trimesh
+    import d33d.db as db_mod
+
+    data = _stl_bytes(FIXTURES / "two_body_multisolid.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "TwoAnnuli"})
+        pid = r.json()["id"]
+        files = {"file": ("two.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files), pid
+
+    r, pid = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    # The report's bodies count is the STORED (post-repair) mesh's count.
+    assert r.json()["part"]["report"]["bodies"] == 2
+    # The STORED file keeps both bodies (the report alone could lie).
+    conn = db_mod.connect(str(tmp_path / "d33d.sqlite3"))
+    try:
+        row = conn.get_project(pid)
+        repo = Path(row["git_repo_path"])
+        v1 = conn.raw.execute(
+            "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    stored = trimesh.load(str(repo / "versions" / str(v1["id"]) / "part.stl"), file_type="stl")
+    if isinstance(stored, trimesh.Scene):
+        stored = stored.to_mesh()
+    components = stored.split(only_watertight=False)
+    watertight = [c for c in components if c.is_watertight]
+    assert len(watertight) == 2, (
+        f"the stored mesh must keep both bodies, got {len(watertight)} watertight component(s)"
+    )
+
+
+def test_single_body_repair_invariance_box_20mm(app_with_projects, tmp_path: Path):
+    """Issue #375 regression: a SINGLE-body import takes the unchanged
+    one-call pymeshfix path — byte-for-byte the historical repair. A plain
+    watertight box (the box_20mm fixture) stores ONE body and a watertight
+    report; if the multi-body branch were taken by mistake (or the
+    single-body path regressed), the stored mesh or the report would
+    diverge from the pre-#375 behaviour."""
+    import trimesh
+    import d33d.db as db_mod
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "BoxSingle"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files), pid
+
+    r, pid = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["bodies"] == 1
+    assert report["watertight"] is True
+    # The stored mesh is a single watertight body of the box's shape.
+    conn = db_mod.connect(str(tmp_path / "d33d.sqlite3"))
+    try:
+        row = conn.get_project(pid)
+        repo = Path(row["git_repo_path"])
+        v1 = conn.raw.execute(
+            "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1", (pid,)
+        ).fetchone()
+    finally:
+        conn.close()
+    stored = trimesh.load(str(repo / "versions" / str(v1["id"]) / "part.stl"), file_type="stl")
+    components = stored.split(only_watertight=False)
+    watertight = [c for c in components if c.is_watertight]
+    assert len(watertight) == 1, (
+        f"a single-body import must store one body, got {len(watertight)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Unit classification
 # ---------------------------------------------------------------------------

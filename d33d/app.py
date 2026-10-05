@@ -1842,69 +1842,42 @@ def _build_production_design_loop():
         def _resolve_part_wiring(project_id: Any) -> tuple[Any, Any]:
             """The design-side part's ``part_path``/``repo_dir`` wiring
             (issue #330 sub-issue 2 — the production closure's half of the
-            ``render_for_design_loop`` part wiring). Row acquisition lives
-            here (the production loop is app-scoped — its kwargs carry no
-            pre-fetched project row, so the row is read here); the binding
-            decision itself is the shared helper
-            :func:`d33d.part_http.resolve_part_paths`. This closure runs on
-            the ``asyncio.to_thread`` worker thread, where
+            ``render_for_design_loop`` part wiring). Row acquisition is the
+            shared helper
+            :func:`d33d.part_http.acquire_project_row` (this closure runs
+            on the ``asyncio.to_thread`` worker thread, where
             ``app.state.conn`` (bound to the event-loop thread, check_
             same_thread=True) would raise ``sqlite3.ProgrammingError`` on
-            first use — so the row AND the helper's v1 read both go through
-            ONE short-lived ``db.connect(db_path)`` handle, opened here and
-            closed in a ``finally`` (the request_logging pattern; issue
-            #374). An unreadable row (a row read or connect that raises
-            ``sqlite3.Error`` — a closed/broken handle, an unwritable path)
-            degrades to ``part_path=None`` with one WARNING (with
-            ``exc_info``) naming the project id only (never a path); the
-            render never raises an unclassified error because of part
-            resolution (issue #330's binding operator decision). A project
-            with NO part keeps part-less rendering silently — the WARNING
-            is for genuine unreadable-row shapes only. The closure does NOT
-            scale the part (``part_scale`` is sub-issue 3's domain, not
-            the worker's).
+            first use — the helper's ONE short-lived ``db.connect(db_path)``
+            handle, opened and closed there, is worker-thread-safe; issue
+            #374); the binding decision itself is the shared helper
+            :func:`d33d.part_http.resolve_part_paths`. An unreadable row
+            (a connect or row read that raises ``sqlite3.Error``, an
+            ``OSError`` connect, or a missing ``db_path`` — a closed/broken
+            handle, an unwritable path) degrades to ``part_path=None`` with
+            one WARNING (with ``exc_info``) naming the project id only
+            (never a path); the render never raises an unclassified error
+            because of part resolution (issue #330's binding operator
+            decision). A project with NO part keeps part-less rendering
+            silently — the WARNING is for genuine unreadable-row shapes
+            only. The closure does NOT scale the part (``part_scale`` is
+            sub-issue 3's domain, not the worker's).
             """
-            import sqlite3
+            from d33d.part_http import acquire_project_row, resolve_part_paths
 
-            from d33d import db as db_mod
-            from d33d.part_http import resolve_part_paths
-
+            row, conn = acquire_project_row(app_state.db_path, project_id)
             try:
-                conn = db_mod.connect(app_state.db_path)
-            except sqlite3.Error:
-                logger.warning(
-                    "design loop for project %s: the project row could not "
-                    "be read — the render proceeds part-less",
-                    project_id,
-                    exc_info=True,
-                )
-                return resolve_part_paths(None, None)
-            try:
-                row = conn.get_project(project_id)
-            except sqlite3.Error:
-                # A closed/broken handle is an unreadable row — degrade to no
-                # part (the render proceeds part-less); never raise into the
-                # design loop. (``TypeError``/``AttributeError`` — a
-                # non-Connection object where a Connection was expected —
-                # is a wiring bug, not an unreadable row: let it surface.)
-                logger.warning(
-                    "design loop for project %s: the project row could not "
-                    "be read — the render proceeds part-less",
-                    project_id,
-                    exc_info=True,
-                )
-                return resolve_part_paths(None, None)
-            else:
                 # The v1 read rides the SAME short-lived handle (the helper
                 # never touches ``app.state.conn`` from this thread).
                 return resolve_part_paths(row, conn)
             finally:
-                try:
-                    conn.close()
-                except Exception:  # noqa: BLE001, S110
-                    # A failed close carries no new information — the read
-                    # failure, if any, already warned.
-                    pass
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:  # noqa: BLE001, S110
+                        # A failed close carries no new information — the
+                        # read failure, if any, already warned.
+                        pass
 
         def _render_fn(scad_source: str, defines: dict[str, str]) -> Any:
             part_path, repo_dir = _resolve_part_wiring(kwargs.get("project_id"))

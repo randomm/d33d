@@ -3571,6 +3571,134 @@ def test_finalize_closure_passes_part_none_when_no_part(
 # production path.
 
 
+def test_finalize_closure_db_path_absent_degrades_silently(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374) When ``app.state.db_path`` is absent (``None``), the
+    shared acquire helper (``d33d.part_http.acquire_project_row``) narrows
+    BEFORE the ``db_mod.connect`` call: no connect, no stray file named
+    ``"None"``, one WARNING (the row cannot be read), and ``part_path``
+    degrades to ``None``. The pre-fix shape (``db_mod.connect(None)`` —
+    ``str(None)`` = ``'None'``) created a stray ``None`` file in the CWD
+    on every such call with no warning at all."""
+    import d33d.db as db_mod
+    import d33d.versions_routes as routes_mod
+
+    # A seeded project in a file-backed DB (so an absent db_path is a
+    # genuine degenerate shape, not the only data available).
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()
+    pid, _ = _seed_file_backed_part_project(db_path, tmp_path)
+
+    spy_calls: dict = {}
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    # The outer seam's reads (``versions.get_project`` / ``conn`` for
+    # ``carried_stated_set``) go through a real connection (the outer seam
+    # is not what's under test; the inner closure's acquire is).
+    conn = db_mod.connect(db_path)
+
+    class _State:
+        db_path = None  # the absent shape
+        catalogue = None
+
+        def __init__(self, c):
+            self.conn = c
+
+            class _Svc:
+                def __init__(self, c_):
+                    self._c = c_
+
+                def get_project(self, project_id_):
+                    row = self._c.get_project(project_id_)
+                    return dict(row) if row else None
+
+                def latest_version(self, project_id_):
+                    return None
+
+            self.versions = _Svc(c)
+
+    state = _State(conn)
+    body = routes_mod.FinalizeBody(
+        params=None, name=None, message="make a 20mm wide bracket"
+    )
+
+    class _Request:
+        app = type("App", (), {"state": state})()
+
+    kwargs = routes_mod._finalize_loop_kwargs(_Request(), pid, body)
+    render_fn = kwargs["render_fn"]
+
+    with caplog.at_level("WARNING"):
+        _run_render_fn_off_main_thread(render_fn, "W = 20;\ncube([W]);", {"W": "20"})
+    conn.close()
+
+    assert spy_calls["part_path"] is None
+    # No stray file named "None" was created (the pre-fix shape).
+    assert not Path("None").exists(), (
+        "a stray file named 'None' was created in the CWD — the connect "
+        "call was not narrowed on the absent db_path"
+    )
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(warns) == 1, (
+        f"expected 1 unreadable-row warning for an absent db_path, got: "
+        f"{[r.getMessage() for r in warns]}"
+    )
+
+
+def test_finalize_closure_connect_oserror_degrades_with_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(issue #374) A ``db.connect`` that raises ``OSError`` (a bad or
+    unwritable path — ``db.connect`` creates parent directories and
+    applies the schema, so an ``OSError`` is possible where a
+    ``sqlite3.Error`` is not) degrades to ``part_path=None`` with one
+    WARNING (``exc_info=True``) — the render never raises an unclassified
+    error because of part resolution. The pre-fix guard caught
+    ``sqlite3.Error`` only; an ``OSError`` from the connect escaped into
+    the design loop."""
+    import d33d.db as db_mod
+    import d33d.versions_routes as routes_mod
+
+    db_path = str(tmp_path / "d33d.sqlite3")
+    db_mod.connect(db_path).close()
+    pid, _ = _seed_file_backed_part_project(db_path, tmp_path)
+
+    spy_calls: dict = {}
+    _spy_render_fn(monkeypatch, spy_calls, _default_render())
+
+    real_connect = db_mod.connect
+
+    def _boom(path):
+        raise OSError("bad db path")
+
+    monkeypatch.setattr(db_mod, "connect", _boom)
+
+    # The outer seam's reads go through a real connection (the inner
+    # closure's connect is the one under test).
+    conn = real_connect(db_path)
+
+    def _get_project(_project_id: int):
+        row = conn.get_project(_project_id)
+        return dict(row) if row else None
+
+    kwargs = _finalize_kwargs_for(db_path, pid, get_project=_get_project, conn=conn)
+    render_fn = kwargs["render_fn"]
+
+    with caplog.at_level("WARNING"):
+        _run_render_fn_off_main_thread(render_fn, "W = 20;\ncube([W]);", {"W": "20"})
+    conn.close()
+
+    assert spy_calls["part_path"] is None
+    warns = [r for r in caplog.records if "could not be read" in r.getMessage()]
+    assert len(warns) == 1, (
+        f"expected 1 unreadable-row warning for an OSError connect, got: "
+        f"{[r.getMessage() for r in warns]}"
+    )
+    assert warns[0].exc_text, "the warning must carry the exception (exc_info=True)"
+    assert "/" not in warns[0].getMessage()  # never a path
+
+
 def _spy_render(monkeypatch: pytest.MonkeyPatch, spy_calls: dict, canned: RenderResult) -> None:
     import d33d.render_worker as rw_mod
 

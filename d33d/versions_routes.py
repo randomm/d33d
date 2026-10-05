@@ -904,63 +904,38 @@ def _finalize_loop_kwargs(
         #
         # The design-side part's ``part_path``/``repo_dir`` wiring (issue
         # #330 sub-issue 2 — the finalize seam's half of the
-        # ``render_for_design_loop`` part wiring): this closure runs on
-        # the ``asyncio.to_thread`` worker thread, where ``app.state.
-        # versions`` (its underlying connection) and ``app.state.conn``
-        # are check_same_thread=True handles bound to the event-loop
-        # thread — a direct read raises ``sqlite3.ProgrammingError`` and
-        # silently degraded every part to part-less. So the row AND the
-        # helper's v1 read both go through ONE short-lived
-        # ``db.connect(db_path)`` handle, opened here and closed in a
-        # ``finally`` (the request_logging pattern; issue #374). An
-        # unreadable row (a connect or read that raises ``sqlite3.Error``)
-        # degrades to ``part_path=None`` with one WARNING (with
-        # ``exc_info``), project id only, never a path (issue #330's
-        # binding operator decision — the render never raises an
-        # unclassified error because of part resolution). A project with
+        # ``render_for_design_loop`` part wiring): row acquisition is the
+        # shared helper :func:`d33d.part_http.acquire_project_row` (this
+        # closure runs on the ``asyncio.to_thread`` worker thread, where
+        # ``app.state.versions`` (its underlying connection) and
+        # ``app.state.conn`` are check_same_thread=True handles bound to
+        # the event-loop thread — a direct read raises
+        # ``sqlite3.ProgrammingError`` and silently degraded every part to
+        # part-less; the helper's ONE short-lived ``db.connect(db_path)``
+        # handle is worker-thread-safe, issue #374), and the binding
+        # decision is :func:`d33d.part_http.resolve_part_paths`. An
+        # unreadable row (a connect or read that raises ``sqlite3.Error``,
+        # an ``OSError`` connect, or a missing ``db_path`` — a closed/broken
+        # handle, an unwritable path) degrades to ``part_path=None`` with
+        # one WARNING (with ``exc_info``), project id only, never a path
+        # (issue #330's binding operator decision — the render never raises
+        # an unclassified error because of part resolution). A project with
         # NO part keeps part-less rendering silently. The closure does NOT
         # scale the part (``part_scale`` is sub-issue 3's domain, not the
         # worker's).
-        import sqlite3
+        from d33d.part_http import acquire_project_row, resolve_part_paths
 
-        from d33d import db as db_mod
-
+        proj_row, conn = acquire_project_row(db_path, project_id)
         try:
-            conn = db_mod.connect(db_path)
-        except sqlite3.Error:
-            logger.warning(
-                "design loop for project %s: the project row could not "
-                "be read — the render proceeds part-less",
-                project_id,
-                exc_info=True,
-            )
-            conn = None
-        if conn is None:
-            proj_row = None
-        else:
-            try:
-                proj_row = conn.get_project(project_id)
-            except sqlite3.Error:
-                # A closed/broken handle is an unreadable row — degrade to
-                # no part (the render proceeds part-less); never raise into
-                # the design loop. (``TypeError``/``AttributeError`` — a
-                # non-Connection object where one was expected — is a
-                # wiring bug, not an unreadable row: let it surface.)
-                logger.warning(
-                    "design loop for project %s: the project row could not "
-                    "be read — the render proceeds part-less",
-                    project_id,
-                    exc_info=True,
-                )
-                proj_row = None
-        part_path, repo_dir = resolve_part_paths(proj_row, conn)
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception:  # noqa: BLE001, S110
-                # A failed close carries no new information — the read
-                # failure, if any, already warned.
-                pass
+            part_path, repo_dir = resolve_part_paths(proj_row, conn)
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:  # noqa: BLE001, S110
+                    # A failed close carries no new information — the read
+                    # failure, if any, already warned.
+                    pass
         return render_for_design_loop(
             scad_source,
             defines,

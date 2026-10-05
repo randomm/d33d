@@ -237,6 +237,69 @@ def _loads_or_none(blob: str | None, column: str = "part_report") -> Any | None:
         return None
 
 
+def acquire_project_row(db_path: str | Path | None, project_id: Any) -> tuple[dict[str, Any] | None, db_mod.Connection | None]:
+    """One short-lived ``db.connect(db_path)`` handle for a worker-thread row read (issue #374).
+
+    The design-loop render closures (``d33d.app``'s ``_loop`` and
+    ``d33d.versions_routes``'s finalize ``_render_fn``) run on an
+    ``asyncio.to_thread`` worker thread, where the app's event-loop-bound
+    ``check_same_thread=True`` connections (``app.state.conn`` /
+    ``app.state.versions``) raise ``sqlite3.ProgrammingError`` on first use
+    — the pre-fix wiring silently degraded every part to part-less. Both
+    closures therefore acquire the project row AND the helper's v1 read
+    through ONE short-lived ``db.connect(db_path)`` handle, opened here and
+    closed by the caller in a ``finally`` (the request_logging pattern).
+
+    Returns ``(row, conn)``. ``row`` is ``None`` (and ``conn`` too, on a
+    connect failure) when the row cannot be read: a missing ``db_path``, a
+    connect that raises ``sqlite3.Error`` or ``OSError`` (a bad/unwritable
+    path), or a read that raises ``sqlite3.Error`` (a closed/broken
+    handle). Each unreadable shape degrades with ONE WARNING (with
+    ``exc_info``) naming the project id only (never a path) — the render
+    never raises an unclassified error because of part resolution (issue
+    #330's binding operator decision). A project with NO part keeps
+    part-less rendering silently — the row is ``None`` with no warning.
+    """
+    import sqlite3
+
+    if db_path is None:
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read — the render proceeds part-less",
+            project_id,
+        )
+        return None, None
+    try:
+        conn = db_mod.connect(db_path)
+    except (sqlite3.Error, OSError):
+        # A connect that raises (a closed/broken handle, a bad or
+        # unwritable path) is an unreadable row — degrade to no part; never
+        # raise into the design loop.
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read — the render proceeds part-less",
+            project_id,
+            exc_info=True,
+        )
+        return None, None
+    try:
+        row = conn.get_project(project_id)
+    except sqlite3.Error:
+        # A closed/broken handle is an unreadable row — degrade to no part
+        # (the render proceeds part-less); never raise into the design
+        # loop. (``TypeError``/``AttributeError`` — a non-Connection object
+        # where a Connection was expected — is a wiring bug, not an
+        # unreadable row: let it surface.)
+        logger.warning(
+            "design loop for project %s: the project row could not "
+            "be read — the render proceeds part-less",
+            project_id,
+            exc_info=True,
+        )
+        return None, conn
+    return row, conn
+
+
 def resolve_part_paths(
     row: dict[str, Any] | None, conn: db_mod.Connection | None
 ) -> tuple[Path | None, Path | None]:
@@ -399,6 +462,7 @@ __all__ = [
     "_is_positive_number",
     "_parse_multipart",
     "_v1_for_part",
+    "acquire_project_row",
     "part_bbox_mm",
     "part_envelope",
     "part_envelope_with_bbox",
