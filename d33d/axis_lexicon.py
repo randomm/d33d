@@ -14,22 +14,15 @@ Word sets (closed):
 - EXCLUDED (pinned by tests): long/length, thick/thickness,
   diameter/Ø/bore, and verbs such as lift, sit, reach, clear.
 
-Absolute cue: a number with an mm unit, or a bare number directly
-adjacent to the axis word, in the same clause as exactly one axis word.
-Clauses split on sentence punctuation, commas, and ";". Within a clause,
-split on "and" (or "with", under the same rule) ONLY when every resulting
-part contains its own number; otherwise the clause stays whole, and a
-whole clause with two or more different axis words and one number maps
-nothing.
+Absolute cue: a number with an mm unit (or bare, adjacent to the axis
+word) in a clause with exactly one axis word. Clauses split on sentence
+punctuation, commas, and ";"; "and"/"with" splits only when every part
+has its own number (otherwise the clause stays whole and a two-axis
+word clause maps nothing).
 
-Feature nouns: a clause that contains a FEATURE NOUN (the closed
-``_FEATURE_NOUNS`` set — hole, groove, foot, …) never produces an
-ABSOLUTE axis cue: its number is a feature size ("a 10 mm deep hole" is
-a hole, not a 10 mm part), so it goes to ``unmapped_mm_numbers`` (tier-2
-offer territory) instead of setting an axis. Relative and global cues
-are NOT affected by feature nouns ("make the hole deeper" still
-releases D — a release only stops enforcement, so this is the
-conservative choice).
+Feature nouns: a clause containing a FEATURE NOUN never produces an
+ABSOLUTE axis cue — the number is a feature size, not a part dimension.
+Relative/global cues are unaffected (see ``d33d.feature_clause``).
 
 Precedence (caller's responsibility, not the lexicon's):
   explicit stated_dims body field > explicit protocol cues > lexicon.
@@ -56,8 +49,7 @@ __all__ = [
     "split_clauses",
 ]
 
-# Feature-verb rules (issue #398) live in ``d33d.feature_clause``
-# (imported above; used by ``_classify_clause`` and ``classify``).
+# Feature-clause rules (issue #398) — see ``d33d.feature_clause``.
 
 # ---------------------------------------------------------------------------
 # Closed word sets
@@ -123,14 +115,10 @@ _EXCLUDED: frozenset[str] = frozenset(
     }
 )
 
-# Feature nouns (closed set, issue #261 fix batch): the parts of a design
-# that are NOT the part's envelope. A clause containing any of these words
-# (whole-word, case-insensitive; singular and plural as listed) never
-# produces an ABSOLUTE axis cue — "a 5 mm deep groove" states nothing
-# about the part's depth; the 5 is a feature size and belongs in
-# ``unmapped_mm_numbers`` (the tier-2 offer). Relative and global cues
-# still work in feature clauses ("make the hole deeper" releases D —
-# a release only stops enforcement, never sets a wrong value).
+# Feature nouns (closed set, issue #261): words that name a FEATURE on
+# the part, not the part's envelope. A clause containing one never
+# produces an ABSOLUTE axis cue; relative/global cues are kept
+# (see ``d33d.feature_clause``).
 _FEATURE_NOUNS: frozenset[str] = frozenset(
     {
         "hole",
@@ -343,16 +331,11 @@ def split_clauses(message: str) -> list[str]:
     return [p.strip() for p in parts if p.strip()]
 
 
-#: A foreign length unit (cm, inch/in, m) attached to a number (with a
-#: word boundary on both sides so "cmm"/"imm" does not match): a clause
-#: holding one does not assign an absolute axis (the operator decision
-#: "no cm/in conversion" applies to STATEMENTS, not to feature sizes —
-#: a clause with "5 cm" neither maps an axis nor leaks its number into
-#: tier-2, which is mm-only). Issue #261 round 2: without this, a user
-#: writing "make it 5 cm tall" was assigned H=5 (a 10×-wrong statement)
-#: because the bare 5 was adjacent to the axis word. Imported by
-#: ``dimension_protocol`` (issue #275 round-3, item 5) instead of
-#: recompiling the same pattern there.
+#: A foreign length unit (cm, inch/in, m) attached to a number: a clause
+#: holding one does not assign an absolute axis ("no cm/in conversion"
+#: applies to statements, not feature sizes). Without this, "make it
+#: 5 cm tall" was assigned H=5 (a 10×-wrong statement) — issue #261
+#: round 2. Imported by ``dimension_protocol`` (issue #275 round-3).
 _FOREIGN_UNIT_RE = re.compile(r"\b\d+(?:\.\d+)?\s*(?:cm|in|inches|inch|m)\b")
 
 
@@ -439,13 +422,8 @@ def _classify_clause(
 ) -> tuple[dict[str, float], set[str], bool, list[str]]:
     """Classify one clause. Returns (absolute, relative, global_, cue_words).
 
-    ``feature_noun_in_message`` (issue #398): when True and the clause is
-    introduced by a feature verb (add, cut, drill, bore, engrave, emboss)
-    and contains an axis word + number but NO feature noun of its own, the
-    absolute axis cue is suppressed — the size describes a feature whose
-    noun lives in a sibling clause ("add a 3 mm wide, 2 mm deep groove":
-    clause 1 has the verb + axis word + number, clause 2 has the noun).
-    See ``d33d.feature_clause.feature_clause_suppresses``.
+    ``feature_noun_in_message`` (issue #398) enables the feature-clause
+    suppression — see ``d33d.feature_clause``.
     """
     relative: set[str] = set()
     global_: bool = False
@@ -468,18 +446,11 @@ def _classify_clause(
             relative.add(axis)
             cue_words.append(word)
 
-    # Mating-connector suppression (issue #314): a clause that holds NO
-    # text before its first mating connector is entirely in the mating
-    # part's zone — its axis words and numbers describe the mating part
-    # ("a box 60 mm wide" in "a lid for a box 60 mm wide"), never the part
-    # being made. No ABSOLUTE axis cue is produced (the mm number falls
-    # out into unmapped_mm_numbers via the normal scan below); relative
-    # and global cues are KEPT (a release only stops enforcement, never
-    # sets a wrong value — the same conservative choice as the feature-noun
-    # guard). A clause with text before the connector ("a 55 × 40 mm lid
-    # that fits a 60 mm wide box") is NOT clause-local here (the clause
-    # splitter does not split on connectors), so this guard does not fire
-    # for the before-side; the triple/pair path handles that case.
+    # Mating-connector suppression (issue #314): a clause entirely in the
+    # mating part's zone (no text before its first connector) produces no
+    # ABSOLUTE cue; relative/global cues are KEPT. The before-side (text
+    # before the connector) is NOT clause-local — the splitter does not
+    # split on connectors, so the triple/pair path handles that case.
     if cue_words:
         first_axis_word = min(
             _word_re(w).search(clause).start() for w in cue_words if _word_re(w).search(clause)
@@ -492,21 +463,16 @@ def _classify_clause(
             # entirely in the mating part's zone. No absolute cue.
             return ({}, relative, global_, cue_words)
 
-    # Feature-noun clauses (issue #261): "a 5 mm deep groove" / "a hole
-    # 10 mm deep" / "12 mm high feet" state nothing about the part's
-    # axes — the number is the feature's size, not the part's dimension.
-    # The clause still contributes its relative/global cues and cue words
-    # ("make the hole deeper" releases D — a release only stops
-    # enforcement, so keeping releases in feature clauses is the
-    # conservative choice); the mm number falls out into
-    # unmapped_mm_numbers via the normal unmapped scan below.
+    # Feature-noun clause (issue #261): the number is a feature size,
+    # not a part dimension. Relative/global cues and cue words are KEPT
+    # (a release only stops enforcement); the mm number falls into
+    # unmapped_mm_numbers via the normal scan below.
+    # See ``d33d.feature_clause``.
     if FEATURE_NOUN_RE.search(clause):
         return ({}, relative, global_, cue_words)
 
-    # Feature-verb cross-clause suppression (issue #398) — see
-    # ``d33d.feature_clause.feature_clause_suppresses`` for the full
-    # rationale. Relative/global cues are KEPT (same conservative choice
-    # as the feature-noun guard: a release only stops enforcement).
+    # Feature-clause suppression (issue #398) — see ``d33d.feature_clause``.
+    # Relative/global cues are KEPT (a release only stops enforcement).
     if feature_clause.feature_clause_suppresses(
         clause,
         cue_words,
@@ -600,25 +566,15 @@ def classify(message: str) -> Cues:
     global flag, cue words, and unmapped mm numbers.
 
     A relative/global cue is also emitted when the message carries NO
-    absolute axis word at all and holds no number (a pure direction
-    request like "increase the height" or "make it 20% taller" — the
-    operator decision "no cm/in conversion" left such phrasings outside
-    the closed word sets, which left the gate enforcing the carried old
-    axis against a user who asked to change it — issue #261 round 2).
-    The emitted cue releases the axis in ``effective_stated_dims`` and
-    feeds the tier-1 offer, without setting any axis value. A message
-    that DOES carry an absolute axis word (or a number, which the
-    number-mapping needs) keeps the strict behavior: "increase the
-    height to 30 mm" sets H=30 without releasing it.
+    absolute axis word and holds no number (a pure direction request like
+    "increase the height" — issue #261 round 2). The cue releases the
+    axis in ``effective_stated_dims`` without setting any value. A
+    message with an absolute axis word or number keeps the strict
+    behavior: "increase the height to 30 mm" sets H=30 without
+    releasing it.
 
-    Feature-verb clauses (issue #398): a clause introduced by a feature
-    verb (add, cut, drill, bore, engrave, emboss) that contains an axis
-    word + number is describing a FEATURE's size, not the part's
-    envelope, when the message has another clause with a feature noun.
-    "add a 3 mm wide, 2 mm deep groove" → nothing stated (the 3 is the
-    groove's width); "make it 40 mm wide with a 5 mm hole" → W=40
-    ("make" is not a feature verb, and the hole's 5 is caught by the
-    feature-noun guard within the clause).
+    Feature-clause suppression (issue #398) — see
+    ``d33d.feature_clause``.
     """
     clauses = split_clauses(message)
 
