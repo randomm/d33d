@@ -1020,6 +1020,20 @@ class TestNewestWinsPerAxis:
         axes = stated_axes_from_message("H: 20", ["H: 12"])
         assert axes == {"H": 20.0}
 
+    def test_explicit_stated_dims_are_never_released_by_relative_history(
+        self,
+    ):
+        """The caller's explicit ``stated_dims`` (step 1) are NOT history:
+        the release pass only touches axes whose ``stated_at`` was
+        recorded by the chat-text scan, so a relative word in history
+        ("make it taller") can never release an explicit H."""
+        c = require_dimensions_confirmed(
+            ["a 40mm wide box, 12mm tall", "make it taller"],
+            {"W": 50.0, "D": 30.0, "H": 12.0, "fit_type": "no_fit"},
+        )
+        assert c.confirmed is True
+        assert c.stated_dims == (50.0, 30.0, 12.0)
+
     def test_same_message_explicit_beats_relative(self):
         """'H: 20, make it taller' → H=20 (explicit axis-letter wins over
         the relative word in the same message)."""
@@ -1257,6 +1271,79 @@ class TestAnchoredDeltaNewestWins:
             "make it 5 mm taller", ["a 40mm wide box, 12mm tall"]
         )
         assert "H" not in axes
+
+class TestLiteralNumberTextMatching:
+    """Issue #369 round 3: the number→clause lookup matches the USER'S
+    LITERAL token text (``float(token) == number``), never the lossy
+    ``f"{number:g}"`` re-render — a re-render can miss the literal in
+    both directions (``20.50`` → ``20.5``, ``10000000`` → ``1e+07``),
+    and a missed token makes the delta marker look unanchored (a release
+    that should restate, or a restate that should release)."""
+
+    def test_delta_with_scientific_delta_and_plain_absolute(self):
+        """"make it taller by 1e-05 mm, 30 mm" → H=30: the user's literal
+        ``1e-05`` only re-renders the same by luck, but the 30 token must
+        still be found by literal match and restated."""
+        axes = stated_axes_from_message(
+            "make it taller by 1e-05 mm, 30 mm",
+            ["a 40mm wide box, 12mm tall"],
+        )
+        assert axes["H"] == 30.0
+
+    def test_scientific_delta_releases(self):
+        """"taller by 1e-05 mm" → H released: the delta marker anchors on
+        the literal scientific-notation token, and the large literal form
+        (``10000000`` mm) does the same — both would be missed by a
+        ``:g`` re-render of the parsed float."""
+        for msg in ("taller by 1e-05 mm", "taller by 10000000 mm"):
+            axes = stated_axes_from_message(msg, ["a 40mm wide box, 12mm tall"])
+            assert "H" not in axes, (
+                f"{msg!r} is a relative delta — H must be released, got {axes}"
+            )
+
+    def test_trailing_zero_literal_restates(self):
+        """"make it taller, 20.50 mm" → H=20.5: the user's trailing-zero
+        literal (``:g`` re-renders ``20.50`` as ``20.5``) is still found,
+        so the number restates the released axis."""
+        axes = stated_axes_from_message(
+            "make it taller, 20.50 mm", ["a 40mm wide box, 12mm tall"]
+        )
+        assert axes["H"] == 20.5
+
+class TestExplicitNotReleasedByHistory:
+    """Issue #369 round 3, pinned behaviour (a): the caller's explicit
+    ``stated_dims`` (step 1) are NOT history — a relative word in chat
+    history never releases them (the release pass only touches axes with
+    a ``stated_at`` recorded by step 2's chat-text scan)."""
+
+    def test_explicit_stated_dims_never_released_by_relative_history(self):
+        """Explicit {W, D, H} + a later chat "make it taller" → the full
+        triple is still confirmed; H survives (a relative word in history
+        cannot release the caller's explicit ground truth)."""
+        c = require_dimensions_confirmed(
+            ["make it taller"],
+            {"W": 40.0, "D": 30.0, "H": 12.0, "fit_type": "no_fit"},
+        )
+        assert c.confirmed is True
+        assert c.stated_dims == (40.0, 30.0, 12.0)
+
+class TestOutOfWindowStatementNeverReleased:
+    """Issue #369 round 3, pinned behaviour (b): a statement OLDER than
+    the window never enters ``out`` in step 2 (no ``stated_at`` entry),
+    so there is nothing for the release pass to release — releasing the
+    carried set is the CURRENT message's cues' job via
+    ``effective_stated_dims``, not the release pass' job. Pinned to the
+    actual behaviour: an out-of-window "H: 40" with a newer "make it
+    taller" yields H ABSENT — not released-then-restated, simply never
+    extracted."""
+
+    def test_out_of_window_statement_absent_not_released(self):
+        from d33d.dimension_protocol import QUOTED_UNMAPPED_MAX_MESSAGES
+
+        filler = [f"filler {i}" for i in range(QUOTED_UNMAPPED_MAX_MESSAGES + 10)]
+        filler[0] = "H: 40"
+        axes = stated_axes_from_message("make it taller", filler)
+        assert "H" not in axes  # never in `out` → nothing to release
 
 
 class TestResolveStatedCues:

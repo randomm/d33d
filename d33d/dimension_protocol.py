@@ -54,6 +54,20 @@ from d33d.axis_lexicon import (
     classify,
     split_clauses,
 )
+
+#: The lexicon's explicit-mm number token, anchored for span matching:
+#: one mm number (``12``, ``20.50``, ``1e-05``) followed by the lexicon's
+#: mm unit alternative (glued/spaced ``mm`` or spelled-out
+#: millimetre(s)/millimeter(s)). The number is captured as the USER'S
+#: LITERAL TEXT — matching a parsed float back to its clause by
+#: re-rendering it with ``:g`` can miss the literal (``1e-05`` → ``1e-05``
+#: happens to render the same, but ``20.50`` → ``20.5``, ``10000000`` →
+#: ``1e+07``), so every number→clause lookup matches the token text
+#: directly and compares ``float(text) == number``.
+_MM_NUMBER_SPAN_RE = re.compile(
+    r"(?<![-\d.])" r"(\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)(?:" + MM_UNIT_ALTERNATION + r")\b",
+    re.IGNORECASE,
+)
 from d33d.triple_extraction import (
     QUOTED_UNMAPPED_MAX_MESSAGES,
     _extract_triple,
@@ -196,29 +210,44 @@ class DimensionClarification:
         return "\n".join(lines)
 
 
-def _delta_marker_for(number: float) -> re.Pattern[str]:
-    """A RELATIVE-delta matcher ANCHORED to ``number``'s own occurrence
-    (issue #369 round 2): the preposition "by" immediately before the
-    number ("taller by 5 mm") or an axis word (absolute or relative)
-    immediately after the number + "mm" ("5 mm taller") — so only "by
+def _mm_number_occurrences(clause: str) -> list[re.Match[str]]:
+    """The clause's explicit-mm number tokens (``_MM_NUMBER_SPAN_RE``
+    matches), as raw matches — the caller compares
+    ``float(m.group(1)) == number`` against the parsed value it holds.
+    Matching the literal token text (never ``f"{number:g}"``) is what
+    keeps ``1e-05`` / ``10000000`` / ``20.50``-style user text findable:
+    re-rendering a parsed float with ``:g`` is lossy in both directions
+    (``20.50`` → ``20.5``, ``10000000`` → ``1e+07``) and the user's
+    literal is the only thing the delta-marker anchoring may anchor on."""
+    return list(_MM_NUMBER_SPAN_RE.finditer(clause))
+
+
+def _delta_marker_at(number: float, clause: str) -> bool:
+    """Whether ``clause`` carries a RELATIVE-delta marker ANCHORED to
+    ``number``'s own occurrence (issue #369 round 2, literal-text
+    matching): the preposition "by" immediately before the number's
+    token ("taller by 5 mm") or an axis word (absolute or relative)
+    immediately after the number's unit ("5 mm taller") — so only "by
     <this number>" or "<this number> mm <axis word>" counts as a delta.
-    The number position is baked into the pattern (anchored, never a
-    message-wide search), so a delta marker on a DIFFERENT number in the
-    same clause ("make it taller by 5 mm, 30 mm") never suppresses THIS
-    number's absolute statement. A delta RELEASES the axis (the new value
-    is unknown — the gate asks), never enforces it as an absolute ("taller
-    by 5 mm" on a 12 mm part must not set H=5.0 — a physically shorter
-    target). Compiled per call: the argument is a user-derived float with
-    no closed bound, so a ``cache`` keyed on it would grow without limit
-    over the process lifetime."""
+    The anchor is the matched token's own span (the "by" right before
+    the token, or the relative word right after the token's unit), never
+    a message-wide pattern, so a delta marker on a DIFFERENT number in
+    the same clause ("make it taller by 5 mm, 30 mm") never suppresses
+    THIS number's absolute statement. A delta RELEASES the axis (the new
+    value is unknown — the gate asks), never enforces it as an absolute
+    ("taller by 5 mm" on a 12 mm part must not set H=5.0 — a physically
+    shorter target)."""
     words = sorted(set(ABSOLUTE_WORDS) | set(RELATIVE_WORDS), key=len, reverse=True)
-    return re.compile(
-        r"\bby\s+" + re.escape(f"{number:g}") + r"\s*mm\b"
-        r"|" + re.escape(f"{number:g}") + r"\s*mm\s+(?:"
-        + "|".join(words)
-        + r")\b",
-        re.IGNORECASE,
-    )
+    for m in _mm_number_occurrences(clause):
+        if float(m.group(1)) != number:
+            continue
+        before = clause[: m.start()]
+        if re.search(r"\bby\s+$", before, re.IGNORECASE):
+            return True
+        after = clause[m.end() :]
+        if re.search(r"\s+(?:" + "|".join(words) + r")\b", after, re.IGNORECASE):
+            return True
+    return False
 
 
 @cache
@@ -271,11 +300,21 @@ def _extract_stated(
     turn_cues: dict[int, Cues] = {}
 
     # 1. Explicit stated_dims (highest priority — the caller parsed these).
+    # Deliberate (issue #369 round 3): the caller's explicit set is NOT
+    # history and is never touched by the release pass (step 4) — a
+    # relative word in the CHAT ("make it taller") may release a value
+    # the user typed in chat text, but it can never release a value the
+    # caller passed in explicitly (an explicit statement is ground truth
+    # for the merge, never a carried guess). The release pass only pops
+    # axes whose ``stated_at`` was recorded by step 2 (chat text); this
+    # step writes no ``stated_at`` entry on purpose.
     if stated_dims:
         for axis in DIMENSION_AXES:
             v = _coerce(stated_dims.get(axis))
             if v is not None:
                 out[axis] = v
+                # NOTE: ``stated_at`` is deliberately NOT set here — see
+                # the "not history, never released" note above.
 
     # 2. Chat-text dimensions like "W: 42", "D is 30mm", "H = 20 mm",
     # plus a W×D×H triple ("60 × 45 × 80 mm" — issue #275 task-a), plus
@@ -397,7 +436,12 @@ def _extract_stated(
     #    word for an axis in a newer message releases that axis when the
     #    axis's LATEST explicit
     #    statement (``stated_at``, recorded in step 2) is OLDER than the
-    #    releasing turn — an explicit value in the releasing turn itself
+    #    releasing turn — a statement OUTSIDE the window (older than
+    #    ``window_start``) never enters ``out`` in step 2 and never gets
+    #    a ``stated_at`` entry, so there is nothing for this pass to
+    #    release (the carried set's release job belongs to the current
+    #    message's cues via ``effective_stated_dims``, not to history)
+    #    — an explicit value in the releasing turn itself
     #    (same-message ABSOLUTE cue, or a single unmapped mm number with no
     #    feature noun in its clause and no anchored delta marker) beats the
     #    relative word and sets instead of releases. An axis the LEXICON'S
@@ -466,7 +510,7 @@ def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
     about), never enforced as the absolute 5.0 (a "taller by 5 mm" on a
     12 mm part must not yield a physically shorter H=5.0). The delta
     check is anchored to the specific unmapped number's occurrence
-    (``_delta_marker_for``): a delta marker on a DIFFERENT number in the
+    (``_delta_marker_at``): a delta marker on a DIFFERENT number in the
     same clause ("make it taller by 5 mm, 30 mm" — "by" binds to 5, not
     30) never suppresses THIS number's absolute statement. An unmapped
     number that IS an anchored delta ("by 5 mm" / "5 mm taller") is
@@ -482,16 +526,25 @@ def _unmapped_value_for_axis(cues: Cues, clauses: list[str]) -> float | None:
     # count toward the ambiguity check. The number→clause mapping is
     # built once here and reused by the feature-noun check below (a
     # single clause walk).
+    # The number→clause lookup matches the USER'S LITERAL TOKEN (issue
+    # #369 round 3): each clause is scanned with the single
+    # ``_MM_NUMBER_SPAN_RE`` and the token's text is compared to the
+    # parsed value with ``float(text) == number`` — never the lossy
+    # ``f"{number:g}"`` re-render, which would miss ``20.50`` / ``1e-05``
+    # / ``10000000``-style user text.
     number_to_clause: dict[float, str] = {}
     non_delta_numbers: list[float] = []
     for number in all_numbers:
-        pattern = r"(?<![-\d.])" + re.escape(f"{number:g}") + r"\s*mm\b"
         for clause in clauses:
-            if re.search(pattern, clause, re.IGNORECASE):
-                if not _delta_marker_for(number).search(clause):
-                    non_delta_numbers.append(number)
-                    number_to_clause[number] = clause
-                break
+            for m in _mm_number_occurrences(clause):
+                if float(m.group(1)) == number:
+                    if not _delta_marker_at(number, clause):
+                        non_delta_numbers.append(number)
+                        number_to_clause[number] = clause
+                    break
+            else:
+                continue
+            break
     if len(non_delta_numbers) != 1:
         return None
     number = non_delta_numbers[0]
@@ -781,7 +834,11 @@ def _classify_axis_cues(text: str) -> dict[str, float]:
     here too (the lexicon's own mate-zone guard), and the triple path
     wins on conflicts (the explicit cue, per the ticket's precedence:
     "axis letter cues > triple > cube shorthand > lexicon"), so this
-    only fills axes the triple left empty.
+    only fills axes the triple left empty. Note the classify call also
+    feeds the RELEASE pass (``_extract_stated`` step 4 reuses the same
+    ``Cues``' relative cues to decide which carried axis a newer message
+    releases) — this wrapper only surfaces the absolute half; treat the
+    underlying ``classify`` result as the seam, not the half.
     """
     return dict(classify(text).absolute)
 
