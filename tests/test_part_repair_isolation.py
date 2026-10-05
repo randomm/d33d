@@ -24,6 +24,7 @@ Regression tests for the four #395 defects:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,8 @@ from d33d.part_repair import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures" / "stl"
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -138,11 +141,12 @@ def test_real_repair_timeout_kills_worker_and_next_repair_succeeds(
     import multiprocessing
 
     import d33d.part_repair as part_repair_mod
+    from tests._repair_stubs import _slow_spin_repair
 
     monkeypatch.setattr(
         part_repair_mod,
         "_REPAIR_WORKER",
-        "d33d.part_repair_stubs._slow_spin_repair",
+        _slow_spin_repair,
     )
 
     mesh = _box_mesh()
@@ -183,11 +187,12 @@ def test_two_concurrent_repairs_stuck_and_real_both_behave(
     import threading
 
     import d33d.part_repair as part_repair_mod
+    from tests._repair_stubs import _slow_spin_repair
 
     monkeypatch.setattr(
         part_repair_mod,
         "_REPAIR_WORKER",
-        "d33d.part_repair_stubs._slow_spin_repair",
+        _slow_spin_repair,
     )
 
     box = _box_mesh()
@@ -203,7 +208,8 @@ def test_two_concurrent_repairs_stuck_and_real_both_behave(
         except RepairTimeoutError as e:
             stuck_result["status"] = "timeout"
             stuck_result["msg"] = str(e)
-        except Exception as e:  # noqa: BLE001 — record any failure shape
+        except Exception as e:  # record any failure shape (test harness)
+            logger.exception("stuck call failed unexpectedly")
             stuck_result["status"] = f"error: {type(e).__name__}: {e}"
 
     def _real_call():
@@ -211,7 +217,8 @@ def test_two_concurrent_repairs_stuck_and_real_both_behave(
             m = repair_with_pmf(holey)
             real_result["status"] = "ok"
             real_result["faces"] = len(m.faces)
-        except Exception as e:  # noqa: BLE001 — record any failure shape
+        except Exception as e:  # record any failure shape (test harness)
+            logger.exception("real call failed unexpectedly")
             real_result["status"] = f"error: {type(e).__name__}: {e}"
 
     t_stuck = threading.Thread(target=_stuck_call)
@@ -244,7 +251,7 @@ def test_repair_seam_gil_holding_stub_does_not_starve_event_loop(
     HOLDS THE GIL and runs it INSIDE the repair seam that is now
     process-isolated.
 
-    The stub (``d33d.part_repair_stubs._busy_repair``) runs
+    The stub (``tests._repair_stubs._busy_repair``) runs
     ``sum(range(200_000_000))`` — a C-level busy loop that does NOT
     release the GIL for its full duration (a pure-Python ``for`` loop
     would — CPython's eval loop switches threads every ~5 ms, so a
@@ -267,13 +274,15 @@ def test_repair_seam_gil_holding_stub_does_not_starve_event_loop(
     releases the GIL, so the event loop cannot tick).
     """
     import d33d.part_repair as part_repair_mod
+    from tests._repair_stubs import _busy_repair
 
     # Point the repair seam at the GIL-holding stub (resolved in the
-    # parent; the spawn child looks it up by dotted qualname).
+    # parent and pickled by reference — the child receives the function
+    # object, never a dotted string).
     monkeypatch.setattr(
         part_repair_mod,
         "_REPAIR_WORKER",
-        "d33d.part_repair_stubs._busy_repair",
+        _busy_repair,
     )
 
     # Use holey.stl (NOT clean → repair is attempted → the seam is hit).

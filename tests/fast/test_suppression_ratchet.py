@@ -46,7 +46,7 @@ SUPPRESSION_RE = re.compile(
 # as suppressions). Ratchet: lower this as suppressions are removed
 # opportunistically; never raise it without re-measuring and an explicit
 # operator decision.
-BASELINE = 55
+BASELINE = 52
 
 SELF = Path(__file__).resolve()
 

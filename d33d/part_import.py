@@ -32,23 +32,13 @@ Security (untrusted input, in the backend process only): trimesh parses in
 process — no shell, and the user's filename is never a path component (the
 bytes are parsed in memory and, on success, written only to the fixed
 in-repo name ``versions/{v1_id}/part.stl`` / ``part.3mf`` — there is no
-temp file). The pymeshfix repair runs in a subprocess (ProcessPoolExecutor)
-with a timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``); no shell
-commands are executed. Parse cost is bounded by the named
-``MAX_PART_FACES`` cap (checked after ``trimesh.load``, before repair).
-3MF (a ZIP) is guarded against zip bombs from the central directory BEFORE
-extraction (entry count and declared-uncompressed total). Non-finite
-vertices are rejected both before any extent math and again after
-pymeshfix (which can emit NaN).
-
-The import facts live on the PROJECT (one part per project — a re-upload
-is a 409 ``part_exists``): ``part_filename`` / ``part_format`` /
-``part_unit`` / ``part_unit_status`` / ``part_scale`` / ``part_report`` /
-``part_options``. The v1 version row records ``source_kind = "import"``
-and its own mm bbox (``versions.source_kind``); the design-state route
-surfaces the facts via its ``"part"`` envelope key and passes the v1 mm
-bbox as the measurement once settled, so W/D/H render ``measured``
-(``d33d.design_state`` untouched — the signature stays).
+temp file). The pymeshfix repair runs in a separate per-call process with a
+timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``); no shell commands are
+executed. Parse cost is bounded by the named ``MAX_PART_FACES`` cap (checked
+after ``trimesh.load``, before repair). 3MF (a ZIP) is guarded against zip
+bombs from the central directory BEFORE extraction (entry count and
+declared-uncompressed total). Non-finite vertices are rejected both before
+any extent math and again after pymeshfix (which can emit NaN).
 """
 
 from __future__ import annotations
@@ -131,10 +121,31 @@ def _scaled_stl_sync(raw: bytes, fmt: str, scale: float | None) -> bytes:
     except Exception as e:
         raise PartUploadError(f"stl export failed: {e}") from e
 
-
 # ---------------------------------------------------------------------------
 # Router factory
 # ---------------------------------------------------------------------------
+
+
+def _run_parse_and_repair(
+    content: bytes, part_format: str
+) -> tuple[dict[str, Any], str | None]:
+    """The upload's decode gate (run OFF the event loop by the route's
+    ``asyncio.to_thread``): ``parse_and_repair`` mapped to its 422 contract.
+
+    A ``RepairTimeoutError`` (checked by TYPE, not by message — the mesh
+    isn't broken, just slow) gets the distinct ``REPAIR_TIMEOUT_DETAIL``;
+    every other ``PartUploadError`` gets the unparseable detail.
+    """
+    try:
+        _mesh, report, file_unit = parse_and_repair(content, part_format)
+    except PartUploadError as e:
+        detail = (
+            REPAIR_TIMEOUT_DETAIL
+            if isinstance(e, RepairTimeoutError)
+            else PART_UPLOAD_UNPARSEABLE_DETAIL
+        )
+        raise HTTPException(status_code=422, detail=detail) from e
+    return report, file_unit
 
 
 def create_part_router() -> APIRouter:
@@ -148,12 +159,10 @@ def create_part_router() -> APIRouter:
         """Multipart part upload (STL or 3MF, ≤ 50 MB).
 
         Gate order (the operator decision — 413 BEFORE 400/422): the body
-        is streamed from ``request.stream()`` and accumulated up to
-        ``MAX_PART_UPLOAD_BYTES`` + the 1 MiB multipart allowance, then
-        refused with a 413 (an oversize body is never parsed); then 400
-        for an unsupported content type / extension
-        (``partUpload.unsupported``); then 422 unparseable
-        (``partUpload.unparseable``). The decode (parse/repair/measure,
+        is streamed and accumulated up to ``MAX_PART_UPLOAD_BYTES`` + the
+        1 MiB multipart allowance, then refused with a 413 (an oversize
+        body is never parsed); then 400 for an unsupported content type /
+        extension; then 422 unparseable. The decode (parse/repair/measure,
         including the zip-bomb check) runs off the event loop
         (``asyncio.to_thread``). On any error nothing is persisted.
         """
@@ -228,30 +237,17 @@ def create_part_router() -> APIRouter:
             del buf, body, file
 
         # 422: the decode gate — parse/repair/measure, run OFF the event
-        # loop (``asyncio.to_thread`` — the mesh parse is CPU-bound and
-        # must not stall the app's other requests; the zip-bomb check runs
-        # inside the same thread). The bytes are parsed in memory — there
-        # is no temp file, and the user's filename never touches a path.
-        try:
-            _mesh, report, file_unit = await asyncio.to_thread(
-                parse_and_repair, content, part_format
-            )
-        except PartUploadError as e:
-            # A repair timeout gets its own 422 detail (checked by TYPE,
-            # ``RepairTimeoutError`` — the mesh isn't broken, just slow).
-            detail = (
-                REPAIR_TIMEOUT_DETAIL
-                if isinstance(e, RepairTimeoutError)
-                else PART_UPLOAD_UNPARSEABLE_DETAIL
-            )
-            raise HTTPException(status_code=422, detail=detail)
+        # loop (``asyncio.to_thread`` — CPU-bound; zip-bomb check in the
+        # same thread). Parsed in memory — no temp file.
+        report, file_unit = await asyncio.to_thread(
+            _run_parse_and_repair, content, part_format
+        )
 
         # Unit handling (STL: plausible→assumed / else unsettled options;
         # 3MF: the file's unit, converted to mm — always settled). Only an
         # ABSENT unit (``None``) is the 3MF default (mm); a non-string or
-        # unconvertible unit 422s here (the decode returns the declared
-        # unit string and does not validate it — the conversion is the
-        # unit layer's job).
+        # unconvertible unit 422s here (the conversion is the unit
+        # layer's job).
         file_bbox = report["bbox_file_units"]
         if part_format == "3mf":
             try:
@@ -277,13 +273,11 @@ def create_part_router() -> APIRouter:
         # v1: "Imported {filename}" (the filename sanitised for display;
         # stored verbatim as data, never interpreted), recording
         # source_kind "import" + the mm bbox (file bbox × scale). Written
-        # + committed under the shared write lock; the mesh file is
-        # committed in the SAME commit as v1's params.json. The part
-        # columns are written in the SAME transaction as the version row
-        # (see ``_run_import_create``) — any failure (git commit, sqlite)
-        # rolls back the version row, the part columns, the files, and the
-        # newly created ``versions/`` dirs together, and the retry upload
-        # succeeds (no stuck 409).
+        # + committed under the shared write lock in the SAME transaction
+        # as the version row (see ``_run_import_create``) — any failure
+        # (git commit, sqlite) rolls back the version row, the part
+        # columns, the files, and the ``versions/`` dirs together (no
+        # stuck 409 on retry).
         svc = getattr(request.app.state, "versions", None)
         if svc is None:  # pragma: no cover - the app lifespan always wires it
             raise HTTPException(status_code=500, detail="version service not wired")
@@ -295,8 +289,8 @@ def create_part_router() -> APIRouter:
         async def _commit_import() -> int:
             # No project lock is held across the ``to_thread`` call above
             # (the decode finished before the lock was acquired); this
-            # write-lock region covers only the version row + files +
-            # part columns, all in one transaction.
+            # write-lock region covers only the version row + files + part
+            # columns, in one transaction.
             return svc._run_import_create(
                 project_id,
                 version_name=v1_name,
@@ -323,13 +317,10 @@ def create_part_router() -> APIRouter:
         try:
             v1_id = await svc._with_project_lock(project_id, _commit_import)
         except ImportCommitFailed as e:
-            # Nothing persisted: no project part columns, no version row,
-            # no committed file, no leftover versions/ dir (the
-            # _run_import_create rollback rolled back the row + the part
-            # columns + the files in one transaction). The detail is a
-            # FIXED sentence (copy.ts partUpload.commitFailed) — the
-            # exception text (paths, git output) stays in the server log
-            # only.
+            # Nothing persisted (the rollback rolled back the row + the
+            # part columns + the files in one transaction). The detail is
+            # a FIXED sentence (copy.ts partUpload.commitFailed) — the
+            # exception text (paths, git output) stays in the log.
             logger.error(
                 "part upload import commit failed (project_id=%s): %s",
                 project_id,
@@ -358,10 +349,10 @@ def create_part_router() -> APIRouter:
     async def settle_units(request: Request, project_id: int) -> dict[str, Any]:
         """Settle the part's units. Body: ``{"unit": "mm"|"cm"|"inch"}``
         (scale 1 / 10 / 25.4) or ``{"axis": "W"|"D"|"H", "mm": <positive
-        float>}`` (one measurement derives the scale, unit ``"custom"``).
-        A body matching neither shape is a 422. Settling UPDATES the
+        float>}`` (one measurement derives the scale, unit ``"custom"``);
+        a body matching neither shape is a 422. Settling UPDATES the
         project row and the v1's mm bbox in place in ONE transaction under
-        the shared write lock (never a new version) and is idempotent on an
+        the shared write lock (never a new version), idempotent on an
         already-settled part."""
         conn: db_mod.Connection = request.app.state.conn
         row = conn.get_project(project_id)
@@ -390,9 +381,9 @@ def create_part_router() -> APIRouter:
         else:
             axis = body["axis"]
             mm = body["mm"]
-            # The mm positivity check lives in ``_settle_body`` (it owns
-            # the body's shape + value validation); only the axis key is
-            # checked here — the body is already validated.
+            # The mm positivity check lives in ``_settle_body`` (it owns the
+            # body's shape + value validation); only the axis key is
+            # checked here.
             if axis not in axis_idx:
                 raise HTTPException(
                     status_code=422, detail=PART_UPLOAD_SETTLE_INVALID_DETAIL
@@ -413,11 +404,9 @@ def create_part_router() -> APIRouter:
 
         def _settle_sync() -> None:
             # Update the project row's part facts AND the v1's mm bbox in
-            # ONE transaction (under the shared write lock — the same lock
-            # the version writes hold, so a concurrent create never races
-            # the settle's row update). On any exception the transaction
-            # rolls back and the error re-raises — the project and the v1
-            # row are both left unchanged, never half-settled.
+            # ONE transaction (under the shared write lock the version
+            # writes hold). On any exception the transaction rolls back and
+            # the error re-raises — neither row is left half-settled.
             try:
                 conn.raw.execute("BEGIN")
                 conn.raw.execute(

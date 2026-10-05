@@ -273,12 +273,29 @@ def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     """Decimate the mesh to approximately ``target_faces`` faces.
 
     Ticket #3: decimate BEFORE repair. Uses trimesh's quadric decimation
-    (``simplify_quadric_decimation``). If the mesh is already at or below
-    the target, returns the mesh unchanged (no work).
+    (``simplify_quadric_decimation`` — needs ``fast_simplification``). If
+    the mesh is already at or below the target, returns the mesh unchanged
+    (no work). If ``fast_simplification`` is NOT installed (or trimesh's
+    decimation fails), decimation degrades to a logged no-op — the mesh
+    proceeds to repair at its full size (the repair process's timeout,
+    not a missing optional dependency, is the failure boundary for an
+    oversized mesh; decimation is a cost optimisation, not a correctness
+    gate).
     """
     if len(mesh.faces) <= target_faces:
         return mesh
-    return mesh.simplify_quadric_decimation(target_faces)
+    try:
+        return mesh.simplify_quadric_decimation(target_faces)
+    except (ImportError, ArithmeticError, ValueError):
+        logger.warning(
+            "parse_and_repair: quadric decimation unavailable or failed "
+            "(fast_simplification missing?) — proceeding at %d faces "
+            "above the %d-face budget",
+            len(mesh.faces),
+            target_faces,
+            exc_info=True,
+        )
+        return mesh
 
 
 def parse_and_repair(
