@@ -39,7 +39,10 @@ class MeshTopology(TypedDict):
     - ``watertight_bodies`` (int): the number of watertight components.
     - ``winding_consistent`` (bool): True when the merged mesh's winding
       is globally consistent — the precondition for treating a watertight
-      mesh as repair-free.
+      mesh as repair-free. For an OPEN mesh (``boundary_loops != 0``) it
+      is False WITHOUT being measured (the mesh is open, so winding
+      consistency cannot hold); the value then means "not measured; the
+      mesh is open", not a measurement result.
     - ``genus`` (int): total genus across watertight components (closed
       through-holes). 0 for a plain box; 1 for a ring/annulus.
     """
@@ -65,7 +68,13 @@ def mesh_topology(
     is caught and logged, and the affected field degrades to a safe
     default: boundary_loops → ``-1`` (UNKNOWN — the mesh is NOT clean,
     so repair is taken; the hole count treats the gaps as 0), genus → 0,
-    winding_consistent → False. The measurement never raises.
+    winding_consistent → False. For an open mesh (``boundary_loops != 0``
+    — including the ``-1`` UNKNOWN count) ``is_winding_consistent`` is NOT
+    evaluated at all: the mesh cannot be clean, and trimesh's check can
+    raise or hang on such meshes, so the field is set to False with the
+    meaning "not measured; the mesh is open".
+
+    The measurement never raises.
     """
     # Boundary loops: guarded (any failure → -1, UNKNOWN — the mesh is NOT
     # clean, so repair is taken; treating it as 0 would wrongly skip it).
@@ -80,15 +89,24 @@ def mesh_topology(
 
     watertight_bodies = [c for c in components if c.is_watertight]
 
-    # Winding consistency: trimesh's check returns a bool. Any failure
-    # degrades to False (the mesh is NOT clean — repair is taken).
-    try:
-        winding_consistent = bool(merged.is_winding_consistent)
-    except Exception:
-        logger.warning(
-            "winding consistency check failed, degrading to False", exc_info=True,
-        )
+    # Winding consistency: skipped entirely for an OPEN mesh (boundary
+    # loops != 0, including the -1 UNKNOWN count): the mesh cannot be
+    # clean, so ``_is_clean`` is False either way, and trimesh's check is
+    # unreliable (it can raise or hang) on open meshes. ``False`` here
+    # means "not measured; the mesh is open", not a measurement result.
+    # For a watertight mesh the check runs; any failure degrades to False
+    # (the mesh is NOT clean — repair is taken).
+    if boundary_loops != 0:
         winding_consistent = False
+    else:
+        try:
+            winding_consistent = bool(merged.is_winding_consistent)
+        except Exception:
+            logger.warning(
+                "winding consistency check failed, degrading to False",
+                exc_info=True,
+            )
+            winding_consistent = False
 
     # Genus: reuse the existing watertight_genus, wrapped. Any exception
     # falls back to 0 (the count degrades, never crashes — issue #351).

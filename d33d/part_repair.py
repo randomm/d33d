@@ -240,7 +240,7 @@ class _RepairWorkerProcess(multiprocessing.Process):
 
 def _run_in_worker(
     mode: str, payload: Any, timeout: float, label: str
-) -> Any:
+) -> tuple[np.ndarray, np.ndarray] | list[tuple[np.ndarray, np.ndarray]]:
     """The single worker-process lifecycle, shared by the single-body and
     batched repair paths (issue #395 lens round 3: the two call sites used
     to duplicate the spawn / send / poll / recv / cleanup logic — now
@@ -343,7 +343,10 @@ def _run_in_worker(
         # The full payload is logged in the parent (the child's message can
         # carry arbitrary text — it must not leak into the 422 response).
         if name == "PartUploadError":
-            raise PartUploadError(payload_result)
+            # Same 500-char bound as the non-PartUploadError branch: the
+            # child's message can be arbitrary text and must be bounded
+            # before it reaches the 422 response.
+            raise PartUploadError(str(payload_result)[:500])
         # The child's own message (payload_result, bounded — the child's
         # message can be arbitrary text, never the INPUT payload) is what
         # gets logged: the parent's wrapped 422 carries only the type name.

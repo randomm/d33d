@@ -3542,6 +3542,48 @@ def test_mesh_topology_helper_box():
     assert topo["genus"] == 0
 
 
+def test_mesh_topology_open_mesh_skips_winding_check(monkeypatch):
+    """Issue #395 lens round 3: for an OPEN mesh (boundary_loops != 0) the
+    ``mesh_topology`` helper sets ``winding_consistent = False`` WITHOUT
+    evaluating ``is_winding_consistent`` — an open mesh cannot be clean,
+    and trimesh's check is unreliable (can raise or hang) on open meshes.
+    The property spy on ``trimesh.Trimesh`` proves the attribute is never
+    read (the value here means "not measured; the mesh is open")."""
+    import trimesh
+
+    from d33d.part_mesh_topology import mesh_topology
+
+    # A 25-face open mesh: 3 far-apart boxes with 11 faces removed
+    # (open edges → boundary loops > 0).
+    box_a = trimesh.creation.box(extents=[10, 10, 10])
+    box_b = trimesh.creation.box(extents=[10, 10, 10])
+    box_c = trimesh.creation.box(extents=[10, 10, 10])
+    box_b.apply_translation([10000.0, 0.0, 0.0])
+    box_c.apply_translation([20000.0, 0.0, 0.0])
+    combined = trimesh.util.concatenate([box_a, box_b, box_c])
+    open_mesh = trimesh.Trimesh(
+        combined.vertices, combined.faces[:-11], process=False
+    )
+    open_mesh.merge_vertices()
+    open_mesh.update_faces(open_mesh.nondegenerate_faces())
+    components = open_mesh.split(only_watertight=False)
+
+    # Spy: reading ``is_winding_consistent`` on a Trimesh raises — so the
+    # helper must not touch it for this open mesh.
+    def _boom(self):
+        raise AssertionError(
+            "is_winding_consistent was evaluated on an open mesh"
+        )
+
+    monkeypatch.setattr(
+        trimesh.Trimesh, "is_winding_consistent", property(_boom)
+    )
+
+    topo = mesh_topology(open_mesh, components)
+    assert topo["boundary_loops"] != 0
+    assert topo["winding_consistent"] is False
+
+
 def test_mesh_topology_helper_holey():
     """Issue #395: the shared ``mesh_topology`` helper on holey.stl:
     4 boundary loops, not all bodies watertight, genus 0 (the holes are

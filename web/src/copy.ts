@@ -1037,9 +1037,6 @@ export const partUpload = {
    *  output) never reaches the client; it stays in the server log only. */
   commitFailed:
     "The part couldn't be saved. Nothing was changed.",
-  /** The upload-in-flight status line (the label swaps to it while the
-   *  part upload is in flight). */
-  uploading: "Uploading…",
   /** The in-flight status line while the upload AND the server-side parse
    *  are in flight (issue #395): a big mesh can take a long time to read
    *  and repair, so the card shows "Reading your file… Ns" with the

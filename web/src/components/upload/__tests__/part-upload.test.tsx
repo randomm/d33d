@@ -242,9 +242,9 @@ describe("PartUpload (issue #334, D5)", () => {
       ),
     );
     // The old static "Uploading…" label is gone while in flight.
-    expect(screen.getByTestId("part-upload-status").textContent).not.toBe(
-      copy.partUpload.uploading,
-    );
+    expect(
+      screen.getByTestId("part-upload-status").textContent,
+    ).not.toBe("Uploading…");
     // Settles to success once the POST completes: the status line is gone.
     release();
     await waitFor(() => expect(onUploaded).toHaveBeenCalledWith(7));

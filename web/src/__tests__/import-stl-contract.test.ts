@@ -44,10 +44,6 @@ describe("copy.ts Screen 1 strings", () => {
     expect(copy.partUpload.photoAttachLine).toBe("Attach reference photo");
   });
 
-  it("partUpload.uploading is verbatim (the in-flight status line)", () => {
-    expect(copy.partUpload.uploading).toBe("Uploading…");
-  });
-
   it("partUpload.reading is verbatim with the elapsed-seconds interpolation (issue #395)", () => {
     // The in-flight card shows "Reading your file… Ns" — the client-side
     // elapsed seconds while the upload AND the server-side parse are in
