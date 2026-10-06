@@ -253,13 +253,11 @@ def _run_in_worker(
         # full budget even if the child died at t=0.2 s, because macOS does
         # not always signal pipe EOF through ``poll``).
         #
-        # The deadline is honoured EXACTLY: it is checked BEFORE every
-        # poll slice, and each slice is ``min(slice, remaining)`` — the
-        # loop can never overshoot the budget by a full slice. A reply
-        # that arrives after the deadline (already in the pipe when the
-        # deadline passes) is treated as a timeout: the budget is the
-        # contract, and a reply whose wall clock has spent it is no
-        # better than no reply (the child is killed and the 422 sent).
+        # The deadline contract: a reply readable by the last poll that
+        # STARTED before the deadline is accepted; otherwise
+        # ``RepairTimeoutError``. The deadline is checked BEFORE every
+        # poll slice and each slice is ``min(0.1, remaining)``, so the
+        # wait never overshoots the budget by more than one ``poll(0)``
         import time as _time
 
         _POLL_INTERVAL = 0.1  # 100 ms — responsive dead-child detection
