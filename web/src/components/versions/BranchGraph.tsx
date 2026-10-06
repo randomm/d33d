@@ -27,6 +27,7 @@
 
 import type { VersionTimelineEntry } from "../../lib/api";
 import copy from "../../copy";
+import { versionOrdinals } from "../../lib/versionOrdinals";
 
 interface BranchGraphProps {
   /** The version timeline entries (oldest first). */
@@ -46,6 +47,11 @@ export function BranchGraph({ versions }: BranchGraphProps) {
     const idx = versions.findIndex((v) => v.id === id);
     return (idx + 1) * ROW_H - ROW_H / 2 + 4;
   };
+  // The id → ordinal map (issue #387): the user-facing "vN" in every node
+  // label is the timeline ordinal — the 1-based list position — never the DB
+  // row id. The shared helper is the same map the Filmstrip uses, so the
+  // sheet and the strip cannot drift.
+  const ordinalById = versionOrdinals(versions);
 
   return (
     <section
@@ -109,7 +115,7 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                 fontFamily="var(--font-mono)"
                 fill="var(--color-fg)"
               >
-                v{v.id} · {v.name}
+                {`v${ordinalById.get(v.id)} · ${v.name}`}
               </text>
               {/* The pin mark + the why (the version's own message). */}
               {v.pinned && (
@@ -120,7 +126,7 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                   fontSize={10}
                   fill="var(--color-muted)"
                 >
-                  {copy.history.pinnedMark(`v${v.id}`)} — {v.created_by_message}
+                  {copy.history.pinnedMark(`v${ordinalById.get(v.id)}`)} — {v.created_by_message}
                 </text>
               )}
             </g>

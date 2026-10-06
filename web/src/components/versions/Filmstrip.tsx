@@ -25,6 +25,7 @@
 
 import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
 import copy from "../../copy";
+import { versionOrdinals } from "../../lib/versionOrdinals";
 import { importedVersionLabel } from "./importedLabel";
 
 interface FilmstripProps {
@@ -124,16 +125,10 @@ export function Filmstrip({
   const siblings = siblingCounts(versions);
   // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
   // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
-  // for a long timeline.
-  const ordinalById = new Map<number, number>();
-  versions.forEach((v, i) => {
-    // The first occurrence wins (identical to findIndex): a duplicate id
-    // (DB-unique in practice — auto-increment rows) would otherwise be
-    // overridden by its later slot.
-    if (!ordinalById.has(v.id)) {
-      ordinalById.set(v.id, i + 1);
-    }
-  });
+  // for a long timeline. The shared helper (issue #387) is what every other
+  // label site (PassCard, BranchGraph, the export fallbacks) uses, so the
+  // strip's ordinals and theirs cannot drift.
+  const ordinalById = versionOrdinals(versions);
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;
   const latestId = versions.length > 0 ? versions[versions.length - 1].id : null;
