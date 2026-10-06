@@ -15,8 +15,27 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Export3MF } from "../Export3MF";
 import { ApiClient, ApiError } from "../../../lib/api";
-import type { PartReportInfo } from "../../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../../lib/api";
 import { copy } from "../../../copy";
+
+function entry(id: number, name: string): VersionTimelineEntry {
+  return {
+    id,
+    name,
+    params: {},
+    created_by_message: "",
+    parent: null,
+    restored_from: null,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-01T00:00:00Z",
+    diff_count: 0,
+    exported_at: null,
+    source_kind: null,
+  } as VersionTimelineEntry;
+}
 
 /** An injected ApiClient whose downloadModel3MF returns a 3MF Blob. */
 function makeClient(): ApiClient {
@@ -195,13 +214,10 @@ describe("Export3MF", () => {
     });
   });
 
-  it("uses the ordinal-based versionName the parent supplies (issue #387: v1, not v64)", async () => {
-    // The parent (App) computes the filename from the timeline ordinal via
-    // the shared versionOrdinals helper and passes it as `versionName`. The
-    // component must use that name verbatim — never derive `v${id}` itself
-    // when a name is provided. The divergence (id 64 at position 1 → "v1")
-    // is pinned here: versionId={64}, versionName="v1" → the download name
-    // carries "v1", not "v64".
+  it("the filename fallback is the timeline ordinal, not the DB id (issue #387)", async () => {
+    // App never passes versionName, so the fallback is the ACTIVE code path:
+    // id 64 at timeline position 1 must yield v1.3mf, never v64.3mf — the
+    // same divergence the QA 2026-10-04 review found.
     const blob = new Blob(["x"], { type: "model/3mf" });
     const client = new ApiClient();
     vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
@@ -216,9 +232,9 @@ describe("Export3MF", () => {
     render(
       <Export3MF
         projectId={projectId}
-        projectName="Curtain rod bracket"
+        projectName="curtain rod bracket"
         versionId={64}
-        versionName="v1"
+        versions={[entry(64, "v1"), entry(65, "v2")]}
         client={client}
       />,
     );
@@ -229,14 +245,9 @@ describe("Export3MF", () => {
     });
   });
 
-  it("a stale versionId (nameless, not in the timeline) yields 'current' in the filename — never the raw id (issue #387)", async () => {
-    // The parent computes the suffix from the shared versionOrdinals helper:
-    // an id not in the loaded list yields NO number, so the parent passes no
-    // versionName. The component then falls back to "current" — the
-    // filename-only exception to the "no number" rule: a download is a
-    // concrete artifact that needs SOME name (the same vocabulary the app
-    // uses elsewhere for a version without an ordinal), and it is NEVER the
-    // raw DB id (the QA 2026-10-04 drift).
+  it("the filename fallback shows no number when the id is not in the loaded timeline (issue #387)", async () => {
+    // A stale id (refetch not landed): the fallback must be "current" —
+    // no number, never the raw DB id.
     const blob = new Blob(["x"], { type: "model/3mf" });
     const client = new ApiClient();
     vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
@@ -251,8 +262,9 @@ describe("Export3MF", () => {
     render(
       <Export3MF
         projectId={projectId}
-        projectName="Curtain rod bracket"
+        projectName="curtain rod bracket"
         versionId={64}
+        versions={[entry(1, "v1")]}
         client={client}
       />,
     );

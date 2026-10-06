@@ -15,11 +15,10 @@
  * - No auto-generated slider/parameter panel — input is text + photo only.
  */
 
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import type { RenderImage } from "../../lib/renderImage";
-import type { RegionEditViewId } from "../../lib/api";
-import type { VersionTimelineEntry } from "../../lib/api";
 import { versionOrdinals } from "../../lib/versionOrdinals";
+import type { RegionEditViewId, VersionTimelineEntry } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
 import { Composer } from "./Composer";
 import { PassCard } from "./PassCard";
@@ -128,19 +127,7 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const messagesRef = useRef<HTMLDivElement>(null);
-  // Issue #387: the id → timeline-ordinal map, shared with the Filmstrip
-  // (the same helper, so the pass card and the strip render the SAME
-  // number for the same version). Recomputed only when the timeline list
-  // changes — the map is O(n) over the list, built in one pass.
-  const ordinalById = versionOrdinals(versions ?? []);
-  // The user-facing "vN" for a message's version id: the timeline ordinal,
-  // never the DB row id. An id not in the loaded list (stale) yields null
-  // — the card then shows NO number at all.
-  const versionLabelFor = (id: number | null | undefined): string | null => {
-    if (id === null || id === undefined) return null;
-    const ordinal = ordinalById.get(id);
-    return ordinal !== undefined ? `v${ordinal}` : null;
-  };
+  const ordinalById = useMemo(() => versionOrdinals(versions ?? []), [versions]);
 
   // The transcript is the DELIVERED sole scroll container (issue #220,
   // adversarial round 1): the ticket's text names the pane, but the pane's
@@ -207,7 +194,11 @@ export function ChatPanel({
               ) : isPass ? (
                 <PassCard
                   versionId={msg.versionId ?? null}
-                  versionLabel={versionLabelFor(msg.versionId)}
+                  versionOrdinal={
+                    msg.versionId !== null && msg.versionId !== undefined
+                      ? ordinalById.get(msg.versionId) ?? null
+                      : null
+                  }
                   views={msg.views ?? []}
                   summary={msg.content}
                   source={msg.source}

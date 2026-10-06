@@ -123,11 +123,10 @@ export function Filmstrip({
   }
 
   const siblings = siblingCounts(versions);
-  // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
-  // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
-  // for a long timeline. The shared helper (issue #387) is what every other
-  // label site (PassCard, BranchGraph, the export fallbacks) uses, so the
-  // strip's ordinals and theirs cannot drift.
+  // The id → ordinal map — the shared helper (issue #387): one pass, O(n),
+  // 1-based, first occurrence wins. Shared with every other "vN" label site
+  // (PassCard, BranchGraph, the export fallbacks) so the ordinals cannot
+  // drift from each other.
   const ordinalById = versionOrdinals(versions);
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;

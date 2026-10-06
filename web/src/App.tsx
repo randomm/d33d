@@ -63,6 +63,7 @@ import {
 } from "./lib/api";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
+import { versionOrdinals } from "./lib/versionOrdinals";
 import { Brief } from "./components/brief/Brief";
 import { PassCard } from "./components/chat/PassCard";
 import { Composer } from "./components/chat/Composer";
@@ -76,7 +77,6 @@ import {
 import { FailureCard } from "./components/failure/FailureCard";
 void FailureCard;
 import { Filmstrip } from "./components/versions/Filmstrip";
-import { versionOrdinals } from "./lib/versionOrdinals";
 import { ImportReport } from "./components/import/ImportReport";
 import { usePartUpload } from "./components/upload/PartUpload";
 import { usePartStl } from "./hooks/usePartStl";
@@ -1586,17 +1586,14 @@ export default function App({ client }: AppProps) {
       // suffix the Export3MF download used, so the turn and the file on disk
       // agree — the turn is never silently dropped.
       const ordinal = versionOrdinals(versions).get(versionId);
-      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : null);
-      const filename = copy.shell.exportFilename(projectName, versionLabel ?? "current");
+      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : "");
+      const filename = copy.shell.exportFilename(projectName, versionLabel);
       setMessages((prev) => [
         ...prev,
         {
           id: nextMsgId("export-done"),
           role: "assistant",
-          content:
-            versionLabel === null
-              ? copy.shell.exportDoneNameless(filename)
-              : copy.shell.exportDone(filename),
+          content: copy.shell.exportDone(filename),
         },
       ]);
       try {
@@ -2112,18 +2109,7 @@ export default function App({ client }: AppProps) {
             projectId={projectId}
             projectName={projectName}
             versionId={versions.length > 0 ? versions[versions.length - 1].id : undefined}
-            versionName={
-              versions.length > 0
-                ? (() => {
-                    const latest = versions[versions.length - 1];
-                    // Issue #387 (operator decision 1): the export filename's
-                    // version suffix is the same timeline ordinal every other
-                    // label uses (the shared helper), never the DB row id.
-                    const ordinal = versionOrdinals(versions).get(latest.id);
-                    return latest.name || (ordinal !== undefined ? `v${ordinal}` : undefined);
-                  })()
-                : undefined
-            }
+            versions={versions}
             inFlight={designLoopInFlight}
             part={designStatePart}
             client={apiClient}

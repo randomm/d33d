@@ -31,7 +31,7 @@ const SCAD = "cube([20, 20, 20]);\n// a comment line\ntranslate([0, 0, 20]) cube
 
 describe("PassCard", () => {
   it("renders six view thumbnails when the frame carries six views", () => {
-    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box, per your ask." />);
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box, per your ask." />);
     for (const label of copy.passCard.viewLabels) {
       expect(screen.getByText(label), `caption ${label}`).toBeTruthy();
     }
@@ -39,7 +39,7 @@ describe("PassCard", () => {
   });
 
   it("renders the views that arrived when fewer than six did, and says how many", () => {
-    render(<PassCard versionId={2} views={SIX_VIEWS.slice(0, 4)} summary="A box." />);
+    render(<PassCard versionId={2} versionOrdinal={2} views={SIX_VIEWS.slice(0, 4)} summary="A box." />);
     expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(4);
     expect(screen.getByTestId("pass-card-partial").textContent).toBe(
       copy.passCard.partialViews(4, 6),
@@ -47,7 +47,7 @@ describe("PassCard", () => {
   });
 
   it("renders no partial-views line when all six arrived", () => {
-    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box." />);
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." />);
     expect(screen.queryByTestId("pass-card-partial")).toBeNull();
   });
 
@@ -55,7 +55,7 @@ describe("PassCard", () => {
     // Regression lock: the pass card's summary line is the copy.ts string,
     // not an ad-hoc literal. Both sides bind to the same export — a rename of
     // either side or a string drift breaks this test.
-    render(<PassCard versionId={4} views={SIX_VIEWS} summary={copy.passCard.summary} />);
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary={copy.passCard.summary} />);
     expect(screen.getByTestId("pass-card-summary").textContent).toBe(copy.passCard.summary);
     // The rendered node is present and non-empty — PassCard renders the
     // summary span only when truthy, so a missing/empty export would leave
@@ -72,7 +72,7 @@ describe("PassCard", () => {
     // The offer is a sentence in the conversation, not a form.
     const offer = copy.confirmOffer.offer("3.0\u202Fmm", "Wall thickness");
     render(
-      <PassCard versionId={4} views={SIX_VIEWS} summary={copy.passCard.summary} />,
+      <PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary={copy.passCard.summary} />,
     );
     expect(screen.getByTestId("pass-card-summary").textContent).toBe(copy.passCard.summary);
     expect(screen.getByTestId("pass-card-summary").textContent).not.toContain(offer);
@@ -91,7 +91,7 @@ describe("PassCard", () => {
     render(
       <PassCard
         versionId={64}
-        versionLabel={"v1"}
+        versionOrdinal={1}
         views={SIX_VIEWS}
       />,
     );
@@ -105,7 +105,7 @@ describe("PassCard", () => {
     // A branched timeline: id 7 sits at list position 4 — the card shows
     // the ordinal "v4", the same number the Filmstrip's position span shows.
     render(
-      <PassCard versionId={7} versionLabel={"v4"} views={SIX_VIEWS} />,
+      <PassCard versionId={7} versionOrdinal={4} views={SIX_VIEWS} />,
     );
     expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");
   });
@@ -113,9 +113,9 @@ describe("PassCard", () => {
   it("renders NO version label when the id is not in the loaded timeline (stale id — issue #387)", () => {
     // The version-created frame can arrive before the timeline refetch lands:
     // the id is not in the loaded list yet. The label must show NO number at
-    // all (never the raw id, never a dash) — the parent passes no label.
+    // all (never the raw id, never a dash) — the parent passes no ordinal.
     render(
-      <PassCard versionId={64} versionLabel={null} views={SIX_VIEWS} />,
+      <PassCard versionId={64} versionOrdinal={null} views={SIX_VIEWS} />,
     );
     expect(screen.queryByTestId("pass-card-version")).toBeNull();
     // The card itself still renders (the id is known, the number is not
@@ -124,12 +124,12 @@ describe("PassCard", () => {
   });
 
   it("renders no version label when no version exists yet", () => {
-    render(<PassCard versionId={null} versionLabel={null} views={SIX_VIEWS} />);
+    render(<PassCard versionId={null} versionOrdinal={null} views={SIX_VIEWS} />);
     expect(screen.queryByTestId("pass-card-version")).toBeNull();
   });
 
   it("renders no view images and no grid when none arrived", () => {
-    render(<PassCard versionId={1} views={[]} summary="A box." />);
+    render(<PassCard versionId={1} versionOrdinal={1} views={[]} summary="A box." />);
     expect(screen.queryAllByTestId(/^pass-card-view-/)).toHaveLength(0);
     expect(screen.queryByTestId("pass-card-views")).toBeNull();
     // Zero views is not a "partial" pass — nothing rendered at all.
@@ -137,7 +137,7 @@ describe("PassCard", () => {
   });
 
   it("keeps the source collapsed by default and reports its line count", () => {
-    render(<PassCard versionId={4} views={SIX_VIEWS} summary="A box." source={SCAD} />);
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." source={SCAD} />);
     const lines = SCAD.split("\n").length;
     expect(screen.getByTestId("pass-card-source-toggle").textContent).toBe(
       copy.passCard.sourceDisclosure(lines),
@@ -147,7 +147,7 @@ describe("PassCard", () => {
   });
 
   it("expands the source disclosure on demand", () => {
-    render(<PassCard versionId={4} views={SIX_VIEWS} source={SCAD} />);
+    render(<PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} source={SCAD} />);
     fireEvent.click(screen.getByTestId("pass-card-source-toggle"));
     expect(screen.getByTestId("pass-card-source").textContent).toBe(SCAD);
   });
@@ -155,7 +155,7 @@ describe("PassCard", () => {
   it("opens a thumbnail enlarged with the Beside-the-photo action", () => {
     const onBesidePhoto = vi.fn();
     render(
-      <PassCard versionId={4} views={SIX_VIEWS} summary="A box." onBesidePhoto={onBesidePhoto} />,
+      <PassCard versionId={4} versionOrdinal={4} views={SIX_VIEWS} summary="A box." onBesidePhoto={onBesidePhoto} />,
     );
     expect(screen.queryByTestId("pass-card-enlarged")).toBeNull();
     fireEvent.click(screen.getByTestId("pass-card-view-view_00_front.png"));

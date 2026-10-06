@@ -25,9 +25,10 @@
  * Presentational: the parent (HistorySheet) owns the version list.
  */
 
+import { useMemo } from "react";
 import type { VersionTimelineEntry } from "../../lib/api";
-import copy from "../../copy";
 import { versionOrdinals } from "../../lib/versionOrdinals";
+import copy from "../../copy";
 
 interface BranchGraphProps {
   /** The version timeline entries (oldest first). */
@@ -47,11 +48,10 @@ export function BranchGraph({ versions }: BranchGraphProps) {
     const idx = versions.findIndex((v) => v.id === id);
     return (idx + 1) * ROW_H - ROW_H / 2 + 4;
   };
-  // The id → ordinal map (issue #387): the user-facing "vN" in every node
-  // label is the timeline ordinal — the 1-based list position — never the DB
-  // row id. The shared helper is the same map the Filmstrip uses, so the
-  // sheet and the strip cannot drift.
-  const ordinalById = versionOrdinals(versions);
+  // The shared id → ordinal map (issue #387): the node label and the pin
+  // mark render the timeline ordinal, never the DB row id (which diverges
+  // once branches/restores make ids non-sequential).
+  const ordinalById = useMemo(() => versionOrdinals(versions), [versions]);
 
   return (
     <section
@@ -115,7 +115,9 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                 fontFamily="var(--font-mono)"
                 fill="var(--color-fg)"
               >
-                {`v${ordinalById.get(v.id)} · ${v.name}`}
+                {ordinalById.get(v.id) !== undefined
+                  ? `v${ordinalById.get(v.id)}`
+                  : null}{" · "}{v.name}
               </text>
               {/* The pin mark + the why (the version's own message). */}
               {v.pinned && (

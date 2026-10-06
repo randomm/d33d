@@ -74,8 +74,22 @@ describe("ChatPanel", () => {
       const messages: ChatMessage[] = [
         { id: "m1", role: "assistant", content: "A box, per your ask.", versionId: 4, views },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      // The timeline carries id 4 at position 4 — the ordinal matches the id.
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
       expect(screen.getByTestId("pass-card")).toBeTruthy();
+      // The label is the timeline ordinal (4), not the raw DB id.
+      expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");
       // The views live on the pass card, not as the old chat-renders block.
       expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(2);
       expect(screen.queryByTestId("chat-renders")).toBeNull();
@@ -131,7 +145,18 @@ describe("ChatPanel", () => {
           source,
         },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
       // Collapsed by default: the source is not visible in the DOM.
       expect(screen.queryByTestId("pass-card-source")).toBeNull();
       // ...and the source string does not appear anywhere in the message.
@@ -203,7 +228,18 @@ describe("ChatPanel", () => {
         { id: "m2", role: "assistant", content: "pass summary", versionId: 4, views },
         { id: "m3", role: "assistant", content: offerText },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
 
       // The offer text renders verbatim as a plain assistant message
       // (the NNBSP in "3.0 mm" is the deck's `mm` formatter, so the

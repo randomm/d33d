@@ -315,6 +315,21 @@ describe("HistorySheet (the branch riser graph)", () => {
     expect(mark.textContent).not.toContain("v7 ·");
   });
 
+  it("the pinned mark uses the ordinal from the shared map — a pinned id 64 at position 1 reads 'v1', never 'v64' (issue #387)", () => {
+    // The consumer-a fixture: id 64 pinned at position 1. The mark reads
+    // the ordinal from the versionOrdinals map — "v1" — never "v64".
+    const divergent: VersionTimelineEntry[] = [
+      { ...SHEET_VERSIONS[0], id: 64, parent: null, restored_from: null, pinned: true },
+      { ...SHEET_VERSIONS[1], id: 65, parent: 64, pinned: false },
+    ];
+    render(<HistorySheet {...sheetProps({ versions: divergent })} />);
+    const mark = screen.getByTestId("branch-pinned-64");
+    expect(mark.textContent).toContain("v1");
+    expect(mark.textContent).toContain("pinned");
+    // The raw id 64 must not appear as the label's number.
+    expect(mark.textContent).not.toContain("v64");
+  });
+
   it("the graph's legend names both edge kinds", () => {
     render(<HistorySheet {...sheetProps()} />);
     expect(screen.getByTestId("branch-legend-parent")).toBeTruthy();

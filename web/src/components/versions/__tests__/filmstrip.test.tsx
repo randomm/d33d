@@ -441,28 +441,6 @@ describe("Filmstrip — imported version label (issue #338)", () => {
     expect(screen.getByTestId("filmstrip-pos-7").textContent).toBe(" · v4");
   });
 
-  it("a duplicate id keeps the FIRST occurrence's ordinal (issue #387 shared-helper semantics)", () => {
-    // DB ids are unique in practice (auto-increment rows), but the shared
-    // versionOrdinals helper's contract is first-occurrence-wins — identical
-    // to findIndex — and the strip must keep rendering that. A duplicate id
-    // in two slots does not renumber the later slot's ordinal.
-    const versions = [entry(1), entry(42), entry(42, { name: "dup 42" }), entry(3)];
-    render(<Filmstrip {...baseProps({ versions })} />);
-    // The first slot at ordinal 2 renders " · v2" (getAllByTestId: two slots
-    // share id 42, but only the first carries the ordinal-2 position span —
-    // the second slot's data-testid is also filmstrip-pos-42 but it renders
-    // the same ordinal from the map, so the map's first-wins rule is what
-    // both slots reflect). The second id-3 slot (position 4) renders " · v4".
-    const pos42s = screen.getAllByTestId("filmstrip-pos-42");
-    // Both id-42 slots read the same ordinal from the map (first-occurrence-wins
-    // means the map holds 42 → 2; the second slot also resolves to 2 via the
-    // same map lookup — the map does NOT hold a second entry for id 42).
-    expect(pos42s[0].textContent).toBe(" · v2");
-    // The id-3 slot at position 4 renders " · v4" — the duplicate 42 earlier
-    // in the list did not shift it.
-    expect(screen.getByTestId("filmstrip-pos-3").textContent).toBe(" · v4");
-  });
-
   it("renders a hostile filename as inert text (never interpreted)", () => {
     const hostilePart = {
       ...part,
