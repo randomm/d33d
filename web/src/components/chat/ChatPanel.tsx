@@ -231,11 +231,15 @@ export function ChatPanel({
                       type="button"
                       data-testid="fill-recut-offer-yes"
                       className="fill-recut-offer-btn fill-recut-offer-btn--yes"
-                      disabled={!msg.fillRecutOffer.pending}
+                      disabled={!msg.fillRecutOffer.pending || inFlight === true}
                       onClick={() => onSend(copy.fillRecut.offerYes)}
                       style={{
-                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
-                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                        cursor:
+                          msg.fillRecutOffer.pending && inFlight !== true
+                            ? "pointer"
+                            : "not-allowed",
+                        opacity:
+                          msg.fillRecutOffer.pending && inFlight !== true ? 1 : 0.5,
                       }}
                     >
                       {copy.fillRecut.offerYes}
@@ -244,11 +248,15 @@ export function ChatPanel({
                       type="button"
                       data-testid="fill-recut-offer-no"
                       className="fill-recut-offer-btn fill-recut-offer-btn--no"
-                      disabled={!msg.fillRecutOffer.pending}
+                      disabled={!msg.fillRecutOffer.pending || inFlight === true}
                       onClick={() => onSend(copy.fillRecut.offerNo)}
                       style={{
-                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
-                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                        cursor:
+                          msg.fillRecutOffer.pending && inFlight !== true
+                            ? "pointer"
+                            : "not-allowed",
+                        opacity:
+                          msg.fillRecutOffer.pending && inFlight !== true ? 1 : 0.5,
                       }}
                     >
                       {copy.fillRecut.offerNo}

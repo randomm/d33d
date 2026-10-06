@@ -79,6 +79,7 @@ import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
 import { usePartUpload } from "./components/upload/PartUpload";
 import { usePartStl } from "./hooks/usePartStl";
+import { useQueuedSend } from "./hooks/useQueuedSend";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
@@ -997,6 +998,15 @@ export default function App({ client }: AppProps) {
     };
   }, [projectId, apiClient, compareIds]);
 
+  // Issue #388 — the composer queue (single slot, per project + session)
+  // lives in its own hook (declared below, after `continueSend`): it owns
+  // the queued text, the queued turn in the transcript, replace, cancel,
+  // the run-end flush (exactly once per queued message) and the
+  // pending-selection guard (the belt path reuses
+  // handleCancelPendingSelection above). The run's .finally reaches the
+  // hook's `signalRunEnd` through the `signalRunEndRef` mirror declared
+  // below (a direct capture would be a TDZ use).
+
   // The actual send body (issue #192): extracted so the message fires only
   // once the project id is settled. `projectIdOverride` carries the id the
   // lazy creation just resolved — the closure's `projectId` is stale (the
@@ -1510,11 +1520,10 @@ export default function App({ client }: AppProps) {
           // button (issue #82: also tear down the elapsed-seconds timer —
           // no leaked interval, no stage indicator after the run).
           setDesignLoopInFlight(false);
-          sendInFlightRef.current = false;
-          // Issue #388: bump the run counter — the flush effect keys on it,
-          // so a queued message registered AFTER the terminal frame (the
-          // .finally) still gets a flush-effect re-run to pick it up.
-          setRunEndCount((c) => c + 1);
+          // Issue #388: close the pre-first-frame window — the latch
+          // release plus the flush-effect re-key are one call (the hook,
+          // reached through the ref to avoid a TDZ capture — see above).
+          signalRunEndRef.current();
           designLoopStartRef.current = null;
           setDesignLoopStep(null);
           setViewProgress(INITIAL_VIEW_PROGRESS);
@@ -1529,7 +1538,8 @@ export default function App({ client }: AppProps) {
   // (the FailureCard via streamError) — never a component-local "upload
   // failed" for a failure that is not about the upload. A creation failure
   // during photo upload releases the latch, so a later send can retry
-  // (handled by ensureProject itself).
+  // (handled by ensureProject itself). Declared before the queue hook
+  // below because the hook's queue-creation-failure path calls it.
   const handleProjectCreationFailure = useCallback((e: unknown) => {
     setStreamError({
       message: copy.shell.projectCreationFailed(
@@ -1540,160 +1550,25 @@ export default function App({ client }: AppProps) {
     });
   }, []);
 
-  // Issue #388 — the composer queue (single slot, per project + session).
-  // `queuedText` holds the queued message text.
-  // `flushedRef` makes the flush idempotent: exactly one POST per
-  // queued message, no matter which terminal signal fires.
-  // `sendInFlightRef` tracks the pre-first-frame window: set when a
-  // direct send is initiated, cleared by the flush. While true, all
-  // composer sends queue (operator decision 1).
-  const [queuedText, setQueuedText] = useState<string | null>(null);
-  const flushedRef = useRef(false);
-  const sendInFlightRef = useRef(false);
-  // Ref mirror of continueSend: the flush effect fires from a terminal
-  // signal that can arrive before React has re-rendered with the run's
-  // assistant reply (the pre-first-frame window — the .finally bumps
-  // runEndCount but designLoopInFlight never transitioned, so no
-  // render-in-flight callback is fresher than the effect's). A callback
-  // built before the reply landed has a stale `messages` closure (the
-  // flush would build chat_history from the pre-run transcript). The ref
-  // always points at the newest callback (current messages).
-  const continueSendRef = useRef<
-    (text: string, projectIdOverride?: number, internal?: boolean) => void
-  >(() => {});
-  useEffect(() => {
-    continueSendRef.current = continueSend;
-  }, [continueSend]);
-  // Ref mirror of pendingSelection, read by the flush effect (e689ec9's
-  // stale-selection guard, folded in below): a selection drawn while a
-  // run was in flight was disabled, not queued — the flushed POST must
-  // never re-attach it.
-  const pendingSelectionRef = useRef(pendingSelection);
-  useEffect(() => {
-    pendingSelectionRef.current = pendingSelection;
-  }, [pendingSelection]);
-  // Issue #388: the flush effect needs a state key that changes when the
-  // .finally clears sendInFlightRef (the pre-frame window closes). Since
-  // refs don't trigger effects, we use a counter that is incremented by
-  // the .finally (via setRunEndCount) and keyed by the flush effect.
-  const [runEndCount, setRunEndCount] = useState(0);
-  // Issue #388: the queued turn's id lives in a ref (not the queuedText
-  // state) so a re-queue can update the existing queued turn's text in
-  // place WITHOUT changing its id. React's reconciliation would drop the
-  // turn's DOM node on an id change (the queued caption would vanish on
-  // the replace), and the flush's setMessages filter (by id) would miss
-  // the replaced turn. The ref is written when the queued turn is
-  // appended (new id) and kept across replaces.
-  const queuedTurnIdRef = useRef<string | null>(null);
-
-  // The send entry point (issue #192 + #388): creates the project
-  // lazily on the first explicit send (single-flight) and routes the
-  // message through `continueSend` — OR fills the single composer queue
-  // slot when a run is in flight (issue #388, operator decision 1:
-  // click-to-terminal-frame, every composer send queues). Programmatic
-  // sends (Brief, fill-recut offer buttons) and region-edit sends do NOT
-  // go through this path (operator decisions 2 and 3).
-  const handleSendMessage = useCallback(
-    (text: string) => {
-      const trimmed = text.trim();
-      if (!trimmed) return;
-
-      // Issue #388: queue while a run is in flight or in the
-      // pre-first-frame window. A second queue operation REPLACES the
-      // slot's text (the caption is unchanged); the queued turn's id is
-      // stable across replaces (the flush's setMessages filter removes
-      // it by id, and React's reconciliation keeps the same DOM node —
-      // the caption never vanishes on the replace).
-      if (designLoopInFlight || sendInFlightRef.current) {
-        flushedRef.current = false;
-        setQueuedText(trimmed);
-        setMessages((prev) => {
-          const existing = prev.find((m) => m.queued);
-          if (existing) {
-            return prev.map((m) => (m.queued ? { ...m, content: trimmed } : m));
-          }
-          const qid = nextMsgId("queued");
-          queuedTurnIdRef.current = qid;
-          return [
-            ...prev,
-            { id: qid, role: "user" as const, content: trimmed, queued: true },
-          ];
-        });
-        return;
-      }
-
-      // No run in flight: direct send.
-      sendInFlightRef.current = true;
-      if (projectId !== null) {
-        continueSend(text);
-        return;
-      }
-      void ensureProject()
-        .then((id) => continueSend(text, id))
-        .catch((e) => {
-          // Issue #388: a failed project creation releases the
-          // pre-first-frame latch so the next send retries (the
-          // original #192 single-flight latch semantics).
-          sendInFlightRef.current = false;
-          handleProjectCreationFailure(e);
-        });
-    },
-    [projectId, continueSend, ensureProject, handleProjectCreationFailure, designLoopInFlight, nextMsgId],
-  );
-
-  // Issue #388 — the queue flush effect: when a run ends (the terminal
-  // frame clears designLoopInFlight, or the stream's .finally closes the
-  // pre-first-frame window), flush the queued message. The effect keys on
-  // designLoopInFlight (the authoritative in-flight signal), runEndCount
-  // (bumped by the .finally, so a message registered AFTER the terminal
-  // frame still triggers a re-run), and queuedText (the queue itself).
-  // The flushedRef flag keeps the flush idempotent: exactly one POST per
-  // queued message, no matter how many terminal signals fire.
-  //
-  // The flush re-enters the send path through continueSendRef.current —
-  // the ref always points at the NEWEST continueSend callback (one whose
-  // closure holds the current `messages`, so the flushed POST's
-  // chat_history includes the run's reply). The pre-first-frame flush
-  // (queued before the first design-loop frame, flushed by the .finally)
-  // is the case where the effect's own `continueSend` dependency is
-  // stale: the terminal signal re-keys the effect via runEndCount, but
-  // the effect runs with the last-rendered callback (built before the
-  // run's reply landed) because the .finally's state updates batch with
-  // no intervening render. The ref resolves both the stale-closure case
-  // and the in-run case (where the designLoopInFlight transition
-  // re-keys the effect with a fresh callback anyway).
-  //
-  // Stale-selection guard (e689ec9): a pending region selection blocks
-  // the flush — a queued message must never POST with a selection the
-  // user drew for a different message attached. The RegionEditBar's
-  // disabled Submit (primary gate) makes this state unreachable from
-  // normal interaction; the belt check keeps it safe under a regression
-  // in that gate — the queued turn simply stays visible until the user
-  // resolves the selection.
-  useEffect(() => {
-    if (designLoopInFlight || sendInFlightRef.current) return; // run still in flight
-    if (pendingSelectionRef.current !== null) return; // stale-selection guard
-    if (!queuedText || flushedRef.current) return;
-    flushedRef.current = true;
-    const idToRemove = queuedTurnIdRef.current;
-    setQueuedText(null);
-    setMessages((prev) => prev.filter((m) => !m.queued && m.id !== idToRemove));
-    continueSendRef.current(queuedText, undefined, true);
-  }, [designLoopInFlight, runEndCount, queuedText]);
-
-  // Issue #388 (operator decision 2026-10-05): the queued message can be
-  // cancelled. The cancel control drops the queued turn from the transcript
-  // and clears the queue slot WITHOUT sending — when the run's terminal
-  // frame arrives, the flush effect sees an empty queue and posts nothing.
-  // A fresh queue slot (a new turn, a new id) is the next composer send.
-  const cancelQueuedMessage = useCallback(() => {
-    if (queuedText === null) return;
-    flushedRef.current = false;
-    setQueuedText(null);
-    const idToRemove = queuedTurnIdRef.current;
-    queuedTurnIdRef.current = null;
-    setMessages((prev) => prev.filter((m) => !m.queued && m.id !== idToRemove));
-  }, [queuedText]);
+  // The queue hook (declared after `continueSend` — its flush re-enters
+  // through a ref mirror of it). The run's .finally reaches the hook's
+  // `signalRunEnd` through `signalRunEndRef` (assigned every render — the
+  // hook's signalRunEnd is a stable useCallback, so this is one write with
+  // the same value for the component's lifetime).
+  const queuedSend = useQueuedSend({
+    designLoopInFlight,
+    projectId,
+    setMessages,
+    continueSend,
+    nextMsgId,
+    ensureProject,
+    handleProjectCreationFailure,
+    pendingSelection,
+    clearPendingSelection: handleCancelPendingSelection,
+  });
+  const { handleSendMessage, cancelQueuedMessage } = queuedSend;
+  const signalRunEndRef = useRef<() => void>(() => {});
+  signalRunEndRef.current = queuedSend.signalRunEnd;
 
   // The inline bar's submit path — routes the typed instruction through the
   // SAME handleSendMessage the chat panel uses, so the pending selection is
