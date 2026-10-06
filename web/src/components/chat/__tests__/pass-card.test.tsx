@@ -84,13 +84,47 @@ describe("PassCard", () => {
     expect(screen.queryByRole("form")).toBeNull();
   });
 
-  it("renders the version label when a version id is present", () => {
-    render(<PassCard versionId={4} views={SIX_VIEWS} />);
+  it("renders the timeline ordinal as the version label — id 64 at position 1 shows 'v1', not 'v64' (issue #387)", () => {
+    // The label is the timeline ordinal (the 1-based list position), never
+    // the DB row id. The QA 2026-10-04 symptom fixture: id 64 at position 1
+    // → the card shows "v1" (what the Filmstrip shows), not "v64".
+    render(
+      <PassCard
+        versionId={64}
+        versionLabel={"v1"}
+        views={SIX_VIEWS}
+      />,
+    );
+    expect(screen.getByTestId("pass-card-version").textContent).toBe("v1");
+    // The internal id (data-version) keeps the real DB id — only the
+    // user-facing label text changed.
+    expect(screen.getByTestId("pass-card").getAttribute("data-version")).toBe("64");
+  });
+
+  it("renders a divergent ordinal for a later position (id 7 at position 4 shows 'v4') (issue #387)", () => {
+    // A branched timeline: id 7 sits at list position 4 — the card shows
+    // the ordinal "v4", the same number the Filmstrip's position span shows.
+    render(
+      <PassCard versionId={7} versionLabel={"v4"} views={SIX_VIEWS} />,
+    );
     expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");
   });
 
+  it("renders NO version label when the id is not in the loaded timeline (stale id — issue #387)", () => {
+    // The version-created frame can arrive before the timeline refetch lands:
+    // the id is not in the loaded list yet. The label must show NO number at
+    // all (never the raw id, never a dash) — the parent passes no label.
+    render(
+      <PassCard versionId={64} versionLabel={null} views={SIX_VIEWS} />,
+    );
+    expect(screen.queryByTestId("pass-card-version")).toBeNull();
+    // The card itself still renders (the id is known, the number is not
+    // established).
+    expect(screen.getByTestId("pass-card")).toBeTruthy();
+  });
+
   it("renders no version label when no version exists yet", () => {
-    render(<PassCard versionId={null} views={SIX_VIEWS} />);
+    render(<PassCard versionId={null} versionLabel={null} views={SIX_VIEWS} />);
     expect(screen.queryByTestId("pass-card-version")).toBeNull();
   });
 

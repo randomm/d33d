@@ -95,10 +95,14 @@ export function Export3MF({
     }
   }, [versionId, state]);
   // The filename is the deck's slug contract. `vN` — the version's ordinal,
-  // which is its name (`v${id}`) by the timeline's own labelling.
+  // supplied by the parent (which derives it from the shared versionOrdinals
+  // helper, issue #387). When no name is available (the version is nameless
+  // and not in the loaded timeline list — a stale id) the suffix is
+  // "current" — NEVER the raw DB id (the drift the QA 2026-10-04 review
+  // found).
   const downloadName = copy.shell.exportFilename(
     projectName,
-    versionName ?? (versionId !== undefined ? `v${versionId}` : "current"),
+    versionName ?? "current",
   );
 
   // Issue #334 (D8) / issue #350: only an UNSETTLED imported part blocks
