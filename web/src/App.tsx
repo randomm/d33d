@@ -2100,6 +2100,7 @@ export default function App({ client }: AppProps) {
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
           onChange={(label) => handleSendMessage(`${copy.brief.rowActions.change}: ${label}`)}
+          sendInFlight={designLoopInFlight}
         />
       )}
 
@@ -2181,6 +2182,7 @@ export default function App({ client }: AppProps) {
           onCancel={handleCancelPendingSelection}
           orbitingPin={orbitingPin}
           orbitClearedPin={orbitClearedPin}
+          inFlight={designLoopInFlight}
         />
       )}
 
