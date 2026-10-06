@@ -1550,10 +1550,13 @@ export default function App({ client }: AppProps) {
   const [queuedText, setQueuedText] = useState<string | null>(null);
   const flushedRef = useRef(false);
   const sendInFlightRef = useRef(false);
-  // Ref mirror of continueSend: the flush effect captures the callback
-  // as of the render in which it last ran — a callback built before
-  // the queued text existed has a stale `messages` closure (the flush
-  // would build chat_history from the pre-run transcript). The ref
+  // Ref mirror of continueSend: the flush effect fires from a terminal
+  // signal that can arrive before React has re-rendered with the run's
+  // assistant reply (the pre-first-frame window — the .finally bumps
+  // runEndCount but designLoopInFlight never transitioned, so no
+  // render-in-flight callback is fresher than the effect's). A callback
+  // built before the reply landed has a stale `messages` closure (the
+  // flush would build chat_history from the pre-run transcript). The ref
   // always points at the newest callback (current messages).
   const continueSendRef = useRef<
     (text: string, projectIdOverride?: number, internal?: boolean) => void
@@ -1566,6 +1569,14 @@ export default function App({ client }: AppProps) {
   // refs don't trigger effects, we use a counter that is incremented by
   // the .finally (via setRunEndCount) and keyed by the flush effect.
   const [runEndCount, setRunEndCount] = useState(0);
+  // Issue #388: the queued turn's id lives in a ref (not the queuedText
+  // state) so a re-queue can update the existing queued turn's text in
+  // place WITHOUT changing its id. React's reconciliation would drop the
+  // turn's DOM node on an id change (the queued caption would vanish on
+  // the replace), and the flush's setMessages filter (by id) would miss
+  // the replaced turn. The ref is written when the queued turn is
+  // appended (new id) and kept across replaces.
+  const queuedTurnIdRef = useRef<string | null>(null);
 
   // The send entry point (issue #192 + #388): creates the project
   // lazily on the first explicit send (single-flight) and routes the
@@ -1580,16 +1591,21 @@ export default function App({ client }: AppProps) {
       if (!trimmed) return;
 
       // Issue #388: queue while a run is in flight or in the
-      // pre-first-frame window.
+      // pre-first-frame window. A second queue operation REPLACES the
+      // slot's text (the caption is unchanged); the queued turn's id is
+      // stable across replaces (the flush's setMessages filter removes
+      // it by id, and React's reconciliation keeps the same DOM node —
+      // the caption never vanishes on the replace).
       if (designLoopInFlight || sendInFlightRef.current) {
-        const qid = nextMsgId("queued");
         flushedRef.current = false;
         setQueuedText(trimmed);
         setMessages((prev) => {
-          const hasQueued = prev.some((m) => m.queued);
-          if (hasQueued) {
-            return prev.map((m) => (m.queued ? { ...m, content: trimmed, id: qid } : m));
+          const existing = prev.find((m) => m.queued);
+          if (existing) {
+            return prev.map((m) => (m.queued ? { ...m, content: trimmed } : m));
           }
+          const qid = nextMsgId("queued");
+          queuedTurnIdRef.current = qid;
           return [
             ...prev,
             { id: qid, role: "user" as const, content: trimmed, queued: true },
@@ -1625,14 +1641,28 @@ export default function App({ client }: AppProps) {
   // frame still triggers a re-run), and queuedText (the queue itself).
   // The flushedRef flag keeps the flush idempotent: exactly one POST per
   // queued message, no matter how many terminal signals fire.
+  //
+  // The flush re-enters the send path through continueSendRef.current —
+  // the ref always points at the NEWEST continueSend callback (one whose
+  // closure holds the current `messages`, so the flushed POST's
+  // chat_history includes the run's reply). The pre-first-frame flush
+  // (queued before the first design-loop frame, flushed by the .finally)
+  // is the case where the effect's own `continueSend` dependency is
+  // stale: the terminal signal re-keys the effect via runEndCount, but
+  // the effect runs with the last-rendered callback (built before the
+  // run's reply landed) because the .finally's state updates batch with
+  // no intervening render. The ref resolves both the stale-closure case
+  // and the in-run case (where the designLoopInFlight transition
+  // re-keys the effect with a fresh callback anyway).
   useEffect(() => {
     if (designLoopInFlight || sendInFlightRef.current) return; // run still in flight
     if (!queuedText || flushedRef.current) return;
     flushedRef.current = true;
+    const idToRemove = queuedTurnIdRef.current;
     setQueuedText(null);
-    setMessages((prev) => prev.filter((m) => !m.queued));
-    continueSend(queuedText, undefined, true);
-  }, [designLoopInFlight, runEndCount, queuedText, continueSend]);
+    setMessages((prev) => prev.filter((m) => !m.queued && m.id !== idToRemove));
+    continueSendRef.current(queuedText, undefined, true);
+  }, [designLoopInFlight, runEndCount, queuedText]);
 
   // The inline bar's submit path — routes the typed instruction through the
   // SAME handleSendMessage the chat panel uses, so the pending selection is
@@ -1709,9 +1739,17 @@ export default function App({ client }: AppProps) {
   const handleRegionBarSubmit = useCallback(() => {
     const text = regionBarText;
     if (text.trim().length === 0) return;
+    // Issue #388 (operator decision 3): a region-edit submit during a
+    // run is DISABLED at the UI (the Apply button is disabled while
+    // designLoopInFlight), NOT queued — it would attach a selection to a
+    // message that flushes later, racing the in-flight run. The button
+    // gate is the primary guard; this check is the belt (the path is
+    // unreachable while the button is disabled, but a regression in the
+    // button's disabled attribute must not silently queue a region edit).
+    if (designLoopInFlight) return;
     setRegionBarText("");
     handleSendMessage(text);
-  }, [regionBarText, handleSendMessage]);
+  }, [regionBarText, handleSendMessage, designLoopInFlight]);
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
     // Photo upload success — the photo path is now stored server-side.

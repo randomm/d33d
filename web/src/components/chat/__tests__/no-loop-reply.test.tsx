@@ -374,7 +374,7 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(flushCall[1].message).toBe("make it 40 mm tall");
   });
 
-  it("a double click before the first frame → the second send queues, not POSTs", async () => {
+  it("a double click before the first frame → the second send queues, not POSTs, and flushes once after the answer", async () => {
     render(<App client={client} />);
     sendFirstComposerMessage("make me a 30 mm plate");
     const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
@@ -397,7 +397,9 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     // postChat was called exactly once (the original send only).
     expect(client.postChat).toHaveBeenCalledTimes(1);
 
-    // The run ends (done frame — the terminal frame for this send).
+    // The run ends with a no-loop answer (the terminal frame for this
+    // send — no design-loop-start frame was ever emitted, so this is
+    // the pre-first-frame flush window: the .finally closes it).
     act(() => {
       handlers.onDone?.({
         kind: "answer",
@@ -408,6 +410,23 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
       resolveStream();
       await Promise.resolve();
     });
+
+    // The queued message is flushed exactly once after the answer — one
+    // POST total beyond the original (total: 2). This is the acceptance
+    // case the pre-first-frame window exercises (a no-loop reply
+    // followed by a queued message): the flush re-enters the send path
+    // with the CURRENT transcript (the answer is in messages by then),
+    // and the flushed turn is a real user message (no queued caption).
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    const flushedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it 40 mm"));
+    expect(flushedTurn).toBeTruthy();
   });
 
   it("a queued message survives an error frame and is then sent", async () => {
@@ -432,40 +451,25 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
       expect(screen.getByTestId("queued-caption")).toBeTruthy();
     });
 
-    // The run ends with an ERROR frame, then the stream closes (the
-    // .finally clears designLoopInFlight and bumps runEndCount, which
-    // triggers the flush). We resolve the streamEvents promise so the
-    // .finally actually runs.
+    // The run ends with an ERROR frame — the error-only terminal path:
+    // the server emits `error` and the stream closes (no done frame).
+    // Resolving the streamEvents promise fires the .finally, which
+    // clears designLoopInFlight and bumps runEndCount — the flush
+    // effect's keys, which re-runs it with the CURRENT callback.
     act(() => {
       handlers.onError?.({
         message: "Design loop exhausted: error_class_not_ok",
         reason: "error_class_not_ok",
       });
     });
-    // Resolve the hanging streamEvents promise so the .finally fires.
-    (client.streamEvents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
-      undefined,
-    );
-    // The original streamEvents call already returned a hanging promise —
-    // mockResolvedValue only affects FUTURE calls. We need to trigger the
-    // .finally on the ORIGINAL promise. Since we can't, we simulate the
-    // stream ending by calling onDone (which clears designLoopInFlight)
-    // — the .finally will fire when the resolved promise settles, but
-    // for the test, clearing the flag via onDone is sufficient to
-    // trigger the flush effect (which keys on designLoopInFlight).
-    // Note: in production, the .finally ALWAYS runs after the stream
-    // closes, so designLoopInFlight is always cleared. The test
-    // simulates this by calling onDone (the terminal frame).
-    act(() => {
-      handlers.onDone?.({ message: "Design loop passed validation" });
-    });
     await act(async () => {
       resolveStream();
       await Promise.resolve();
     });
 
-    // The error frame cleared the run (via onDone in the test), which
-    // triggers the flush. The queued message is POSTed.
+    // The error frame ended the run; the queued message is flushed
+    // exactly once after it (the .finally is the terminal signal —
+    // faithful to production, where the stream closes after `error`).
     const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
     expect(postChatMock).toHaveBeenCalledTimes(2);
     expect(postChatMock.mock.calls[1][1].message).toBe("make it taller");

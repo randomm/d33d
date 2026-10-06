@@ -279,8 +279,6 @@ export const queued = {
   /** The pending caption under a queued user turn. One slot, one message: a
    *  second send REPLACES the queued text, this caption is unchanged. */
   caption: "I'll send this when the design finishes.",
-  /** The queue's own label, for the pending turn's accessible context. */
-  label: "Queued message",
 } as const;
 
 export const progress = {
