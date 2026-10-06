@@ -336,3 +336,33 @@ describe("HistorySheet (the branch riser graph)", () => {
     expect(screen.getByTestId("branch-legend-restored")).toBeTruthy();
   });
 });
+
+describe("BranchGraph (undefined-safe ordinal labels)", () => {
+  it("a pinned version whose id is missing from the ordinal map renders no 'undefined' (issue #387)", async () => {
+    // Mock versionOrdinals to return an empty map — simulating the
+    // theoretical case where the ordinal lookup yields undefined. The
+    // component must never render "vundefined"; the pinned mark and
+    // node label both omit the number gracefully. This test fails on
+    // the original code (which renders "vundefined · pinned") and
+    // passes with the labelFor fix.
+    vi.doMock("../../../lib/versionOrdinals", () => ({
+      versionOrdinals: () => new Map<number, number>(),
+    }));
+    vi.resetModules();
+    const { BranchGraph } = await import("../BranchGraph");
+    const versions: VersionTimelineEntry[] = [
+      entry(64, { name: "first box", pinned: true, created_by_message: "pinned it" }),
+    ];
+    const { unmount } = render(<BranchGraph versions={versions} />);
+    const graph = screen.getByTestId("branch-graph");
+    // No "undefined" anywhere in the rendered output.
+    expect(graph.textContent).not.toContain("undefined");
+    // The pinned mark is present but carries no number (never
+    // "vundefined").
+    const mark = screen.getByTestId("branch-pinned-64");
+    expect(mark.textContent).not.toContain("vundefined");
+    expect(mark.textContent).toContain("pinned");
+    unmount();
+    vi.doUnmock("../../../lib/versionOrdinals");
+  });
+});

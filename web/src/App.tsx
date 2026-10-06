@@ -1586,7 +1586,7 @@ export default function App({ client }: AppProps) {
       // suffix the Export3MF download used, so the turn and the file on disk
       // agree — the turn is never silently dropped.
       const ordinal = versionOrdinals(versions).get(versionId);
-      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : "");
+      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : "current");
       const filename = copy.shell.exportFilename(projectName, versionLabel);
       setMessages((prev) => [
         ...prev,

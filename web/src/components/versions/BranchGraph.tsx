@@ -50,8 +50,13 @@ export function BranchGraph({ versions }: BranchGraphProps) {
   };
   // The shared id → ordinal map (issue #387): the node label and the pin
   // mark render the timeline ordinal, never the DB row id (which diverges
-  // once branches/restores make ids non-sequential).
+  // once branches/restores make ids non-sequential). `labelFor` is
+  // undefined-safe: returns `v${n}` or null (never "vundefined").
   const ordinalById = useMemo(() => versionOrdinals(versions), [versions]);
+  const labelFor = (id: number): string | null => {
+    const n = ordinalById.get(id);
+    return n !== undefined ? `v${n}` : null;
+  };
 
   return (
     <section
@@ -115,9 +120,10 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                 fontFamily="var(--font-mono)"
                 fill="var(--color-fg)"
               >
-                {ordinalById.get(v.id) !== undefined
-                  ? `v${ordinalById.get(v.id)}`
-                  : null}{" · "}{v.name}
+                {(() => {
+                  const label = labelFor(v.id);
+                  return label !== null ? `${label} · ` : "";
+                })()}{v.name}
               </text>
               {/* The pin mark + the why (the version's own message). */}
               {v.pinned && (
@@ -128,7 +134,10 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                   fontSize={10}
                   fill="var(--color-muted)"
                 >
-                  {copy.history.pinnedMark(`v${ordinalById.get(v.id)}`)} — {v.created_by_message}
+                  {(() => {
+                    const label = labelFor(v.id);
+                    return label !== null ? copy.history.pinnedMark(label) : null;
+                  })()} — {v.created_by_message}
                 </text>
               )}
             </g>
