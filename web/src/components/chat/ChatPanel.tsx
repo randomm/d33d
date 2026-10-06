@@ -175,6 +175,7 @@ export function ChatPanel({
           // everything else (user turns, clarifying questions, the
           // in-flight streaming turn) stays a plain sentence in the flow.
           const isPass = msg.role === "assistant" && msg.versionId !== undefined;
+          const vid = msg.versionId ?? null;
           const isFailure = msg.failure !== undefined;
           return (
             <div
@@ -193,12 +194,8 @@ export function ChatPanel({
                 />
               ) : isPass ? (
                 <PassCard
-                  versionId={msg.versionId ?? null}
-                  versionOrdinal={
-                    msg.versionId !== null && msg.versionId !== undefined
-                      ? ordinalById.get(msg.versionId) ?? null
-                      : null
-                  }
+                  versionId={vid}
+                  versionOrdinal={vid === null ? null : ordinalById.get(vid) ?? null}
                   views={msg.views ?? []}
                   summary={msg.content}
                   source={msg.source}

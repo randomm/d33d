@@ -190,7 +190,10 @@ export function Filmstrip({
           // (importedVersionLabel) and renders NO position span: the two
           // numbers ("v1 … · v40") were the same version's ordinal and DB id
           // side by side.
-          const ordinal = ordinalById.get(v.id) ?? 0;
+          // A missing ordinal (an id absent from the loaded list) renders NO
+          // number — the `?? 0` fallback invented a "v0" that no other label
+          // site shows (issue #387).
+          const ordinal = ordinalById.get(v.id) ?? null;
           const isImport = v.source_kind === "import";
           return (
             <span
@@ -238,9 +241,9 @@ export function Filmstrip({
                 >
                   {importedVersionLabel(v, part)}
                 </span>
-                {!isImport && (
+                {!isImport && (ordinal !== null || diff !== null) && (
                   <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                    {` · v${ordinal}`}
+                    {ordinal !== null ? ` · v${ordinal}` : ""}
                     {diff !== null ? ` · ${diff}` : ""}
                   </span>
                 )}

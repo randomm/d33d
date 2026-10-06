@@ -1580,10 +1580,10 @@ export default function App({ client }: AppProps) {
       if (projectId === null || versionId === undefined) return;
       // Issue #387 (operator decision 1): the completion turn names the file
       // from the same timeline ordinal every other label uses — the shared
-      // helper's map, never the DB row id. A stale nameless id (not in the
-      // loaded list, or an empty name) names the file with the same "current"
-      // suffix the Export3MF download used, so the turn and the file on disk
-      // agree — the turn is never silently dropped.
+      // helper's map, never the DB row id. A stale id (not in the loaded list)
+      // names the file "current"; a nameless id that is in the list gets its
+      // ordinal — so the turn and the file on disk agree, and the turn is
+      // never silently dropped.
       const version = versions.find((v) => v.id === versionId);
       const versionLabel = exportLabel(versions, versionId, version?.name);
       const filename = copy.shell.exportFilename(projectName, versionLabel);

@@ -75,6 +75,7 @@ export function BranchGraph({ versions }: BranchGraphProps) {
       >
         {versions.map((v) => {
           const y = yOf(v.id);
+          const label = labelFor(v.id);
           return (
             <g key={v.id} data-testid={`branch-node-${v.id}`}>
               {/* The main-line riser up to this node (from its parent). */}
@@ -120,10 +121,7 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                 fontFamily="var(--font-mono)"
                 fill="var(--color-fg)"
               >
-                {(() => {
-                  const label = labelFor(v.id);
-                  return label !== null ? `${label} · ` : "";
-                })()}{v.name}
+                {label !== null ? `${label} · ` : ""}{v.name}
               </text>
               {/* The pin mark + the why (the version's own message). */}
               {v.pinned && (
@@ -134,10 +132,7 @@ export function BranchGraph({ versions }: BranchGraphProps) {
                   fontSize={10}
                   fill="var(--color-muted)"
                 >
-                  {(() => {
-                    const label = labelFor(v.id);
-                    return label !== null ? copy.history.pinnedMark(label) : null;
-                  })()} — {v.created_by_message}
+                  {label !== null ? copy.history.pinnedMark(label) : null} — {v.created_by_message}
                 </text>
               )}
             </g>

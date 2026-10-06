@@ -39,7 +39,7 @@ export function versionOrdinals(versions: VersionTimelineEntry[]): Map<number, n
 export function exportLabel(
   versions: VersionTimelineEntry[],
   versionId: number,
-  name?: string,
+  name?: string | null,
 ): string {
   if (name) return name;
   const ordinal = versionOrdinals(versions).get(versionId);

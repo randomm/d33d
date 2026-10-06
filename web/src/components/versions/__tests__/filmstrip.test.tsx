@@ -441,6 +441,26 @@ describe("Filmstrip — imported version label (issue #338)", () => {
     expect(screen.getByTestId("filmstrip-pos-7").textContent).toBe(" · v4");
   });
 
+  it("a slot whose id is missing from the ordinal map renders no number (issue #387)", async () => {
+    // Mock versionOrdinals to an empty map (the way history-sheet.test does):
+    // a slot must not invent a "v0" from a failed lookup — consistent with
+    // the other ordinal label sites, the number is simply absent.
+    vi.doMock("../../../lib/versionOrdinals", () => ({
+      versionOrdinals: () => new Map<number, number>(),
+    }));
+    vi.resetModules();
+    const { Filmstrip: UnmockedFilmstrip } = await import("../Filmstrip");
+    const { unmount } = render(
+      <UnmockedFilmstrip {...baseProps({ versions: [entry(1)] })} />,
+    );
+    const pos = screen.queryByTestId("filmstrip-pos-1");
+    // No "v0": the missing ordinal renders as no number at all.
+    expect((pos?.textContent ?? "")).not.toContain("v0");
+    expect((pos?.textContent ?? "")).not.toMatch(/v\d/);
+    unmount();
+    vi.doUnmock("../../../lib/versionOrdinals");
+  });
+
   it("renders a hostile filename as inert text (never interpreted)", () => {
     const hostilePart = {
       ...part,

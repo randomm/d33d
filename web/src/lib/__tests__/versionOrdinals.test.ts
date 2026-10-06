@@ -88,6 +88,11 @@ describe("exportLabel (lib/versionOrdinals.ts)", () => {
     expect(exportLabel(versions, 8, "")).toBe("v2");
   });
 
+  it("a null name → v{n} (a version in the list with no stored name)", () => {
+    const versions = [entry(4, "a"), entry(8, "")];
+    expect(exportLabel(versions, 8, null)).toBe("v2");
+  });
+
   it("a stale id (absent from the timeline) → 'current'", () => {
     const versions = [entry(1, "a"), entry(2, "b")];
     expect(exportLabel(versions, 64, undefined)).toBe("current");
