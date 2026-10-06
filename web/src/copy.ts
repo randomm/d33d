@@ -269,6 +269,20 @@ export const firstPass = {
   heroCaption: "a real render, not a preview — the turnable model arrives last",
 } as const;
 
+/**
+ * Queued-message copy (issue #388). While a design run is in flight, a
+ * composer send fills the single queue slot instead of POSTing — the queued
+ * turn renders in the transcript with this caption. The string lives here
+ * (the copy deck), never inline in a component.
+ */
+export const queued = {
+  /** The pending caption under a queued user turn. One slot, one message: a
+   *  second send REPLACES the queued text, this caption is unchanged. */
+  caption: "I'll send this when the design finishes.",
+  /** The queue's own label, for the pending turn's accessible context. */
+  label: "Queued message",
+} as const;
+
 export const progress = {
   /** The dimmed previous model is captioned, so nobody thinks it is the new one. */
   stillShowing: (current: string, pending: string): string =>
@@ -1190,6 +1204,7 @@ export const copy = {
   partReport,
   fillRecut,
   partUnitsUnsettled,
+  queued,
 } as const;
 
 export default copy;

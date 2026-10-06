@@ -1004,7 +1004,7 @@ export default function App({ client }: AppProps) {
   // authoritative when present. The request calls close over the settled id
   // in every case, never a stale `null`.
   const continueSend = useCallback(
-    (text: string, projectIdOverride?: number) => {
+    (text: string, projectIdOverride?: number, internal?: boolean) => {
       const effectiveProjectId = projectIdOverride ?? projectId;
       if (effectiveProjectId === null) return;
 
@@ -1015,7 +1015,10 @@ export default function App({ client }: AppProps) {
       const trimmed = text.trim();
 
       // Remember the last plain chat message for the Retry control (issue #82).
-      lastUserMessageRef.current = text;
+      // A flush re-entering continueSend must NOT overwrite this — the Retry
+      // button retries the IN-FLIGHT run's message, not the queued one
+      // (operator decision 4).
+      if (!internal) lastUserMessageRef.current = text;
 
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
@@ -1507,6 +1510,11 @@ export default function App({ client }: AppProps) {
           // button (issue #82: also tear down the elapsed-seconds timer —
           // no leaked interval, no stage indicator after the run).
           setDesignLoopInFlight(false);
+          sendInFlightRef.current = false;
+          // Issue #388: bump the run counter — the flush effect keys on it,
+          // so a queued message registered AFTER the terminal frame (the
+          // .finally) still gets a flush-effect re-run to pick it up.
+          setRunEndCount((c) => c + 1);
           designLoopStartRef.current = null;
           setDesignLoopStep(null);
           setViewProgress(INITIAL_VIEW_PROGRESS);
@@ -1532,27 +1540,99 @@ export default function App({ client }: AppProps) {
     });
   }, []);
 
-  // The send entry point (issue #192): creates the project lazily on the
-  // first explicit send (single-flight — a concurrent trigger shares the
-  // in-flight POST) and routes the message through `continueSend` only once
-  // the project id is settled. The resolved id is passed as an override
-  // because `continueSend`'s closure captures the STALE `projectId` (the
-  // state update from the creation has not landed when the .then fires).
-  // A creation failure is surfaced via the app-level error card and nothing
-  // is appended — a message must never render as sent when the request that
-  // would justify it can never fire.
+  // Issue #388 — the composer queue (single slot, per project + session).
+  // `queuedText` holds the queued message text.
+  // `flushedRef` makes the flush idempotent: exactly one POST per
+  // queued message, no matter which terminal signal fires.
+  // `sendInFlightRef` tracks the pre-first-frame window: set when a
+  // direct send is initiated, cleared by the flush. While true, all
+  // composer sends queue (operator decision 1).
+  const [queuedText, setQueuedText] = useState<string | null>(null);
+  const flushedRef = useRef(false);
+  const sendInFlightRef = useRef(false);
+  // Ref mirror of continueSend: the flush effect captures the callback
+  // as of the render in which it last ran — a callback built before
+  // the queued text existed has a stale `messages` closure (the flush
+  // would build chat_history from the pre-run transcript). The ref
+  // always points at the newest callback (current messages).
+  const continueSendRef = useRef<
+    (text: string, projectIdOverride?: number, internal?: boolean) => void
+  >(() => {});
+  useEffect(() => {
+    continueSendRef.current = continueSend;
+  }, [continueSend]);
+  // Issue #388: the flush effect needs a state key that changes when the
+  // .finally clears sendInFlightRef (the pre-frame window closes). Since
+  // refs don't trigger effects, we use a counter that is incremented by
+  // the .finally (via setRunEndCount) and keyed by the flush effect.
+  const [runEndCount, setRunEndCount] = useState(0);
+
+  // The send entry point (issue #192 + #388): creates the project
+  // lazily on the first explicit send (single-flight) and routes the
+  // message through `continueSend` — OR fills the single composer queue
+  // slot when a run is in flight (issue #388, operator decision 1:
+  // click-to-terminal-frame, every composer send queues). Programmatic
+  // sends (Brief, fill-recut offer buttons) and region-edit sends do NOT
+  // go through this path (operator decisions 2 and 3).
   const handleSendMessage = useCallback(
     (text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      // Issue #388: queue while a run is in flight or in the
+      // pre-first-frame window.
+      if (designLoopInFlight || sendInFlightRef.current) {
+        const qid = nextMsgId("queued");
+        flushedRef.current = false;
+        setQueuedText(trimmed);
+        setMessages((prev) => {
+          const hasQueued = prev.some((m) => m.queued);
+          if (hasQueued) {
+            return prev.map((m) => (m.queued ? { ...m, content: trimmed, id: qid } : m));
+          }
+          return [
+            ...prev,
+            { id: qid, role: "user" as const, content: trimmed, queued: true },
+          ];
+        });
+        return;
+      }
+
+      // No run in flight: direct send.
+      sendInFlightRef.current = true;
       if (projectId !== null) {
         continueSend(text);
         return;
       }
       void ensureProject()
         .then((id) => continueSend(text, id))
-        .catch((e) => handleProjectCreationFailure(e));
+        .catch((e) => {
+          // Issue #388: a failed project creation releases the
+          // pre-first-frame latch so the next send retries (the
+          // original #192 single-flight latch semantics).
+          sendInFlightRef.current = false;
+          handleProjectCreationFailure(e);
+        });
     },
-    [projectId, continueSend, ensureProject, handleProjectCreationFailure],
+    [projectId, continueSend, ensureProject, handleProjectCreationFailure, designLoopInFlight, nextMsgId],
   );
+
+  // Issue #388 — the queue flush effect: when a run ends (the terminal
+  // frame clears designLoopInFlight, or the stream's .finally closes the
+  // pre-first-frame window), flush the queued message. The effect keys on
+  // designLoopInFlight (the authoritative in-flight signal), runEndCount
+  // (bumped by the .finally, so a message registered AFTER the terminal
+  // frame still triggers a re-run), and queuedText (the queue itself).
+  // The flushedRef flag keeps the flush idempotent: exactly one POST per
+  // queued message, no matter how many terminal signals fire.
+  useEffect(() => {
+    if (designLoopInFlight || sendInFlightRef.current) return; // run still in flight
+    if (!queuedText || flushedRef.current) return;
+    flushedRef.current = true;
+    setQueuedText(null);
+    setMessages((prev) => prev.filter((m) => !m.queued));
+    continueSend(queuedText, undefined, true);
+  }, [designLoopInFlight, runEndCount, queuedText, continueSend]);
 
   // The inline bar's submit path — routes the typed instruction through the
   // SAME handleSendMessage the chat panel uses, so the pending selection is

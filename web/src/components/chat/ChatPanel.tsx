@@ -79,6 +79,13 @@ export interface ChatMessage {
    *  pending offer (buttons enabled); false after either button is pressed
    *  or the offer is no longer pending (buttons disabled). */
   fillRecutOffer?: { pending: boolean };
+  /** Issue #388: true on a QUEUED user turn — the message the composer sent
+   *  while a design run was in flight (or in the pre-first-frame window).
+   *  It is NOT a real user message yet: it sits in the transcript with a
+   *  caption and is POSTed once, by the flush, when the run's terminal
+   *  frame arrives. At most one such turn exists at a time (a second
+   *  composer send REPLACES its text, not appends a second slot). */
+  queued?: boolean;
 }
 
 interface ChatPanelProps {
@@ -246,6 +253,14 @@ export function ChatPanel({
                 </span>
               ) : (
                 <span className="chat-msg-content">{msg.content}</span>
+              )}
+              {msg.queued && (
+                <span
+                  className="chat-msg-queued-caption"
+                  data-testid="queued-caption"
+                >
+                  {copy.queued.caption}
+                </span>
               )}
               {msg.selection && (
                 <img
