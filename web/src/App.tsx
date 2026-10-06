@@ -1581,18 +1581,22 @@ export default function App({ client }: AppProps) {
       const version = versions.find((v) => v.id === versionId);
       // Issue #387 (operator decision 1): the completion turn names the file
       // from the same timeline ordinal every other label uses — the shared
-      // helper's map, never the DB row id. An id not in the loaded list
-      // (stale) or a nameless version renders no number at all.
+      // helper's map, never the DB row id. A stale nameless id (not in the
+      // loaded list, or an empty name) names the file with the same "current"
+      // suffix the Export3MF download used, so the turn and the file on disk
+      // agree — the turn is never silently dropped.
       const ordinal = versionOrdinals(versions).get(versionId);
-      const versionLabel = version?.name ?? (ordinal !== undefined ? `v${ordinal}` : null);
-      if (versionLabel === null) return;
-      const filename = copy.shell.exportFilename(projectName, versionLabel);
+      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : null);
+      const filename = copy.shell.exportFilename(projectName, versionLabel ?? "current");
       setMessages((prev) => [
         ...prev,
         {
           id: nextMsgId("export-done"),
           role: "assistant",
-          content: copy.shell.exportDone(filename),
+          content:
+            versionLabel === null
+              ? copy.shell.exportDoneNameless(filename)
+              : copy.shell.exportDone(filename),
         },
       ]);
       try {
@@ -2116,7 +2120,7 @@ export default function App({ client }: AppProps) {
                     // version suffix is the same timeline ordinal every other
                     // label uses (the shared helper), never the DB row id.
                     const ordinal = versionOrdinals(versions).get(latest.id);
-                    return latest.name ?? (ordinal !== undefined ? `v${ordinal}` : null);
+                    return latest.name || (ordinal !== undefined ? `v${ordinal}` : undefined);
                   })()
                 : undefined
             }

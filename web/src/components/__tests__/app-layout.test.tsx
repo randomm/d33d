@@ -571,6 +571,53 @@ describe("App layout", () => {
     expect(client.recordExport).toHaveBeenCalledWith(7, 1);
   });
 
+  it("a nameless version in the timeline uses the ordinal in the export filename — never the raw id (issue #387)", async () => {
+    // The latest version has an empty name (the backend didn't assign one).
+    // The completion turn must use the timeline ordinal ("v1") — the same
+    // number the Filmstrip shows — never the raw DB id ("v64").
+    const versionEntry = {
+      id: 64,
+      name: "",
+      params: {},
+      created_by_message: "",
+      parent: null,
+      restored_from: null,
+      forked_from: null,
+      pinned: false,
+      archived: false,
+      thumbnail: null,
+      created_at: "2026-01-01T00:00:00Z",
+      diff_count: 0,
+      exported_at: null,
+      source_kind: null,
+    } as unknown as VersionTimelineEntry;
+    vi.spyOn(client, "listVersions").mockResolvedValue([versionEntry]);
+    const blob = new Blob(["fake 3mf"], { type: "model/3mf" });
+    vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    vi.spyOn(client, "recordExport").mockResolvedValue({
+      ...versionEntry,
+      exported_at: "2026-01-02T00:00:00Z",
+    });
+    const listVersions = vi
+      .spyOn(client, "listVersions")
+      .mockResolvedValue([versionEntry]);
+
+    render(<App client={client} />);
+    sendFirstComposerMessage("make a box");
+    await waitFor(() => expect(client.createProject).toHaveBeenCalled());
+    await waitFor(() => expect(listVersions).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    // The completion turn names the file with the ordinal "v1" (id 64 at
+    // position 1) — never the raw id "v64".
+    const done = await screen.findByText(/untitled-project-v1\.3mf/);
+    expect(done.textContent).toContain("untitled-project-v1.3mf");
+    expect(done.textContent).not.toContain("v64");
+    expect(client.recordExport).toHaveBeenCalledWith(7, 64);
+  });
+
   it("a failed export appends no completion turn and records no mark (issue #126)", async () => {
     vi.spyOn(client, "listVersions").mockResolvedValue([
       {

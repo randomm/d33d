@@ -232,9 +232,11 @@ describe("Export3MF", () => {
   it("a stale versionId (nameless, not in the timeline) yields 'current' in the filename — never the raw id (issue #387)", async () => {
     // The parent computes the suffix from the shared versionOrdinals helper:
     // an id not in the loaded list yields NO number, so the parent passes no
-    // versionName. The component must then fall back to "current" — it must
-    // not invent `v${versionId}` on its own (the QA 2026-10-04 drift: raw id
-    // in the filename while the strip shows the ordinal).
+    // versionName. The component then falls back to "current" — the
+    // filename-only exception to the "no number" rule: a download is a
+    // concrete artifact that needs SOME name (the same vocabulary the app
+    // uses elsewhere for a version without an ordinal), and it is NEVER the
+    // raw DB id (the QA 2026-10-04 drift).
     const blob = new Blob(["x"], { type: "model/3mf" });
     const client = new ApiClient();
     vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);

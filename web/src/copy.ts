@@ -874,6 +874,11 @@ export const shell = {
    *  at geometry; Orca takes it from here. */
   exportDone: (filename: string): string =>
     `${filename}. Open it in Orca — it's already in millimetres and oriented flat.`,
+  /** The nameless stale-id export (issue #387): the file has no timeline
+   *  number to name it by, so the turn says so plainly — it never invents
+   *  a number, and it is never silent (the user downloaded a file). */
+  exportDoneNameless: (filename: string): string =>
+    `${filename} (no version number yet — it isn't in the list we have loaded). Open it in Orca — it's already in millimetres and oriented flat.`,
   exportFilename: (project: string, version: string): string =>
     `${project.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${version}.3mf`,
 

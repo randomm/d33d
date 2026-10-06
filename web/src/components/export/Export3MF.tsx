@@ -96,10 +96,12 @@ export function Export3MF({
   }, [versionId, state]);
   // The filename is the deck's slug contract. `vN` — the version's ordinal,
   // supplied by the parent (which derives it from the shared versionOrdinals
-  // helper, issue #387). When no name is available (the version is nameless
-  // and not in the loaded timeline list — a stale id) the suffix is
-  // "current" — NEVER the raw DB id (the drift the QA 2026-10-04 review
-  // found).
+  // helper, issue #387). The "current" fallback is the deliberate
+  // filename-only exception to the "no number" rule (operator decision 1):
+  // a download is a concrete artifact that needs SOME name, and "current"
+  // is the app's existing vocabulary for a version without an ordinal
+  // (copy.shell/history.current). It is never the raw DB id (the drift the
+  // QA 2026-10-04 review found).
   const downloadName = copy.shell.exportFilename(
     projectName,
     versionName ?? "current",
