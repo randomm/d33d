@@ -2390,20 +2390,35 @@ def test_holes_list_annulus_diameter(app_with_projects) -> None:
 
 def test_holes_list_three_plate(app_with_projects) -> None:
     """Issue #396: a plate with 3 through-holes (built with trimesh) →
-    the holes list has 3 entries with distinct centres."""
+    the holes list has exactly 3 entries, each with a centre within 0.5 mm
+    of the hole's true position, a diameter within 0.5 mm of the true
+    diameter, and axis Z (the through-axis). The existing test's geometry
+    was buggy (two of the three holes sat off the plate, so only one hole
+    was cut and the assertions were vacuous); this builds a plate with all
+    three holes inside the face and pins the measurement."""
     import trimesh
 
-    # Build a 40×40×10 mm plate with 3 through-holes using boolean CSG.
-    plate = trimesh.creation.box(extents=[40, 40, 10], pivot=[0, 0, 0])
-    hole1 = trimesh.creation.cylinder(radius=3, height=20, sections=32)
-    hole1.apply_translation([-10, 0, 0])
-    hole2 = trimesh.creation.cylinder(radius=5, height=20, sections=32)
-    hole2.apply_translation([0, 0, 0])
-    hole3 = trimesh.creation.cylinder(radius=4, height=20, sections=32)
-    hole3.apply_translation([10, 0, 0])
-    result = plate.difference(trimesh.util.concatenate([hole1, hole2, hole3]))
+    # A 38×38×10 mm plate centred at (19,19,5) with three through-holes
+    # along Z at x=9/19/29, y=19: Ø6 at (9,19), Ø10 at (19,19), Ø8 at
+    # (29,19). All three holes are inside the face.
+    plate = trimesh.creation.box(extents=[38, 38, 10])
+    plate.apply_translation([19, 19, 5])
+    specs = [(3.0, 9.0, 19.0), (5.0, 19.0, 19.0), (4.0, 29.0, 19.0)]
+    cylinders = []
+    for radius, x, y in specs:
+        c = trimesh.creation.cylinder(radius=radius, height=20, sections=32)
+        c.apply_translation([x, y, 5.0])
+        cylinders.append(c)
+    result = plate.difference(trimesh.util.concatenate(cylinders))
     if isinstance(result, trimesh.Scene):
         result = result.to_mesh()
+    # The plate must actually be a genus-3 (three through-hole) body —
+    # guard against a CSG failure that would make the test vacuous.
+    assert result.is_watertight
+    assert (2 - int(result.euler_number)) // 2 == 3, (
+        f"test plate must have three through-holes (genus 3), got "
+        f"{(2 - int(result.euler_number)) // 2}"
+    )
     data = _stl_bytes_from_mesh(result)
 
     async def _call(client):
@@ -2415,11 +2430,41 @@ def test_holes_list_three_plate(app_with_projects) -> None:
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
-    # The plate with 3 through-holes must have hole_count >= 3.
-    assert report["hole_count"] >= 3, f"expected >= 3 holes, got {report['hole_count']}"
+    # The plate with 3 through-holes must report exactly three holes.
+    assert report["hole_count"] == 3, f"expected 3 holes, got {report['hole_count']}"
     holes = report.get("holes")
-    if holes:
-        assert len(holes) >= 1, f"expected at least 1 measured hole: {holes}"
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert len(holes) == 3, f"expected exactly 3 measured holes, got {len(holes)}: {holes}"
+    # Each hole: centre within 0.5 mm of the true (x, y, 5) position,
+    # diameter within 0.5 mm of the true Ø, and axis Z (0,0,1).
+    true = [(9.0, 19.0, 6.0), (19.0, 19.0, 10.0), (29.0, 19.0, 8.0)]
+    # Match measured holes to true holes by nearest centre.
+    matched = set()
+    for (tx, ty, tdia) in true:
+        best = None
+        best_d = None
+        for i, h in enumerate(holes):
+            if i in matched:
+                continue
+            c = h["center"]
+            d = (c[0] - tx) ** 2 + (c[1] - ty) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                best = i
+        assert best is not None
+        matched.add(best)
+        h = holes[best]
+        c = h["center"]
+        assert abs(c[0] - tx) < 0.5, f"centre x {c[0]} not within 0.5 mm of {tx}"
+        assert abs(c[1] - ty) < 0.5, f"centre y {c[1]} not within 0.5 mm of {ty}"
+        assert abs(h["diameter_mm"] - tdia) < 0.5, (
+            f"diameter {h['diameter_mm']} not within 0.5 mm of {tdia}"
+        )
+        # Axis is Z: the dominant component is index 2.
+        ax = h["axis"]
+        assert abs(ax[2]) > 0.9 and abs(ax[0]) < 0.1 and abs(ax[1]) < 0.1, (
+            f"axis {ax} should be Z"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -98,6 +98,14 @@ HOLE_NOUNS = frozenset({"hole", "holes", "bore", "counterbore"})
 #: unfitted holes are simply not in the list).
 MAX_HOLES = 32
 
+#: Issue #396 — the face budget a body may have before its mid-plane
+#: cross-section is skipped in :func:`_measure_genus_holes`. Slicing is
+#: the expensive half of the genus measurement; a body above this budget
+#: is not worth it (its holes are unmeasured — the count stays honest, the
+#: list is a subset). Kept a little above the repair decimate budget so a
+#: typical part's bodies are still measured.
+_GENUS_HOLE_FACE_BUDGET = 200_000
+
 
 def watertight_genus(components: list[trimesh.Trimesh]) -> int:
     """Total genus across the WATERTIGHT bodies of an already-split mesh.
@@ -351,15 +359,411 @@ def _measure_open_holes(
     return holes
 
 
+def _ring_area_2d(pts: np.ndarray) -> float:
+    """The signed area of a 2D closed ring (``|shoelace| / 2``).
+
+    ``pts`` is an ``(n, >=2)`` array; only the first two columns are used.
+    A degenerate (fewer than 3 points, zero area) ring yields ``0.0``."""
+    if len(pts) < 3:
+        return 0.0
+    x = pts[:, 0]
+    y = pts[:, 1]
+    return 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+
+
+def _section_rings_2d(body: trimesh.Trimesh, axis_index: int) -> list[np.ndarray]:
+    """The cross-section of ``body`` at its mid-plane along ``axis_index``,
+    as a list of closed 2D rings (each an ``(n, 2)`` array in the plane
+    coordinates of :meth:`trimesh.Trimesh.section`).
+
+    The mid-plane (halfway between the body's min and max along the axis,
+    through the origin) cuts any through-hole cleanly. Each ``discrete``
+    entity of the section is a closed polyline — the outline of the face
+    (the outer ring) and, one per hole, an interior ring. The rings are
+    already closed (first vertex == last vertex) and in-plane.
+    """
+    lo, hi = body.bounds
+    mid = 0.5 * (lo[axis_index] + hi[axis_index])
+    normal = np.zeros(3)
+    normal[axis_index] = 1.0
+    origin = np.zeros(3)
+    origin[axis_index] = mid
+    planar = body.section(plane_normal=normal, plane_origin=origin)
+    rings: list[np.ndarray] = []
+    for disc in planar.discrete:
+        pts = np.asarray(disc)
+        if len(pts) >= 3:
+            rings.append(pts[:, :2])
+    return rings
+
+
+def _holes_from_rings(
+    rings: list[np.ndarray], axis_index: int
+) -> list[tuple[float, float, float, float]]:
+    """The hole cross-sections of a set of 2D section rings, as
+    ``(u, v, area, equivalent_diameter)`` tuples.
+
+    The LARGEST-area ring is the outer boundary of the cut face; every
+    other ring whose a vertex falls inside the outer ring is a hole (a
+    hole ring is always fully contained in the outer ring, never the
+    reverse). The hole's equivalent diameter is ``sqrt(4*area/pi)`` —
+    exact for a circular hole, the round-hole diameter for any shape.
+    """
+    if not rings:
+        return []
+    with_areas = sorted(
+        ((_ring_area_2d(r), r) for r in rings), key=lambda p: p[0], reverse=True
+    )
+    outer = with_areas[0][1]
+    holes: list[tuple[float, float, float, float]] = []
+    for area, ring in with_areas[1:]:
+        if area <= 0:
+            continue
+        # A hole ring is contained in the outer face ring: test the ring's
+        # mean against the OUTER ring (not the ring itself — that test is
+        # always true and would admit stray outer-boundary fragments).
+        c = ring.mean(axis=0)
+        if _point_in_ring(outer, c):
+            diameter = math.sqrt(4.0 * area / math.pi)
+            holes.append((float(c[0]), float(c[1]), float(area), float(diameter)))
+    return holes
+
+
+def _point_in_ring(ring: np.ndarray, p: np.ndarray) -> bool:
+    """Even-odd (ray-casting) point-in-polygon test for a closed 2D ring.
+
+    ``ring`` is an ``(n, 2)`` closed ring (first == last vertex); ``p`` is
+    a ``(2,)`` point. Used to tell a hole ring (inside the outer face ring)
+    from noise (a stray segment outside the face)."""
+    x, y = float(p[0]), float(p[1])
+    inside = False
+    n = len(ring)
+    j = n - 1
+    for i in range(n):
+        xi, yi = ring[i, 0], ring[i, 1]
+        xj, yj = ring[j, 0], ring[j, 1]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _ray_triangles(
+    origins: np.ndarray,
+    directions: np.ndarray,
+    tris: np.ndarray,
+) -> np.ndarray:
+    """Möller–Trumbore ray-triangle intersection for all rays vs all
+    triangles. ``origins`` is ``(M, 3)``, ``directions`` ``(M, 3)``,
+    ``tris`` is ``(K, 3, 3)`` (K triangles, each 3 vertices). Returns an
+    ``(M, K)`` array of hit distances (the parameter ``t`` along each ray)
+    with ``NaN`` where the ray does not hit the triangle (miss, behind, or
+    parallel).
+
+    Self-contained: pure numpy, no scipy / rtree / shapely — the genus-hole
+    ray-cast must work in the base install (trimesh's own ``ray`` and
+    ``section`` need the optional geometry deps, which are not always
+    present). The trimesh winding convention is used: the hit is valid
+    when ``-v >= 0``, ``u - v <= 1``, and the hit distance is ``-t``.
+    """
+    v0 = tris[:, 0]
+    v1 = tris[:, 1]
+    v2 = tris[:, 2]
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    pvec = np.cross(directions[:, None, :], edge2[None, :, :])  # (M, K, 3)
+    det = np.einsum("mki,mki->mk", pvec, edge1[None, :, :])  # (M, K)
+    valid = np.abs(det) > 1e-9
+    inv_det = np.where(valid, 1.0 / np.where(det == 0, 1.0, det), 0.0)
+    svec = origins[:, None, :] - v0[None, :, :]  # (M, K, 3)
+    u = np.einsum("mki,mki->mk", svec, pvec) * inv_det
+    valid_u = valid & (u >= 0) & (u <= 1)
+    qvec = np.cross(svec, edge2[None, :, :])  # (M, K, 3)
+    v = np.einsum("mki,mki->mk", directions[:, None, :], qvec) * inv_det
+    t = np.einsum("mki,mki->mk", qvec, edge1[None, :, :]) * inv_det
+    # trimesh winding: valid when -v >= 0, u - v <= 1, and -t > 0.
+    valid_v = valid_u & (-v >= 0) & (u - v <= 1)
+    t = np.where(valid_v & (-t > 1e-9), -t, np.nan)
+    return t
+
+
+def _ray_grid_hits(
+    body: trimesh.Trimesh, axis_index: int, n: int
+) -> list[tuple[int, int]]:
+    """Cast rays along ``axis_index`` on an ``n x n`` grid over the body's
+    bbox and return the grid-cell indices ``(i, j)`` (in the two in-plane
+    axes) where the ray traverses the body WITHOUT hitting material — the
+    hole cells.
+
+    A through-hole is an empty region of the bbox the ray passes through
+    without intersecting the body's surface. The rays run from just outside
+    the body on the -axis side through its full extent (so the first
+    surface crossed is the real entry face). A cell is a hole iff the ray's
+    first hit is well past the near face — it travelled through empty space
+    (the hole) to the far solid, rather than entering through solid at the
+    near face. Self-contained numpy (no trimesh ray / section).
+    """
+    tris = body.vertices[body.faces]
+    lo, hi = body.bounds
+    u_slots = [i for i in range(3) if i != axis_index]
+    u0, u1 = u_slots
+    u_ext = hi[u0] - lo[u0]
+    v_ext = hi[u1] - lo[u1]
+    if u_ext <= 0 or v_ext <= 0:
+        return []
+    u_mid = 0.5 * (lo[u0] + hi[u0])
+    v_mid = 0.5 * (lo[u1] + hi[u1])
+    origins: list[list[float]] = []
+    for i in range(n):
+        for j in range(n):
+            ou = u_mid - 0.5 * u_ext + u_ext * (i + 0.5) / n
+            ov = v_mid - 0.5 * v_ext + v_ext * (j + 0.5) / n
+            o = [0.0, 0.0, 0.0]
+            o[u0] = ou
+            o[u1] = ov
+            o[axis_index] = lo[axis_index] - 1.0
+            origins.append(o)
+    directions = np.zeros((len(origins), 3))
+    directions[:, axis_index] = 1.0
+    t = _ray_triangles(np.asarray(origins), directions, tris)
+    thickness = hi[axis_index] - lo[axis_index]
+    if thickness <= 0:
+        return []
+    holes: list[tuple[int, int]] = []
+    for k in range(len(origins)):
+        row = t[k]
+        good = ~np.isnan(row)
+        if not np.any(good):
+            continue
+        # The ray started at lo[axis] - 1.0, so the entry axis coordinate is
+        # (lo[axis] - 1.0) + min_t. A hole ray's first hit is past the near
+        # face by > half the thickness (it crossed the hole to the far
+        # solid); a solid ray's first hit is at ~the near face.
+        entry = (lo[axis_index] - 1.0) + float(np.min(row[good]))
+        if entry - lo[axis_index] > 0.5 * thickness:
+            holes.append((k // n, k % n))
+    return holes
+
+
+def _cluster_cells(cells: list[tuple[int, int]]) -> list[list[tuple[int, int]]]:
+    """4-connected clustering of grid cells (each an ``(i, j)`` index). A
+    connected cluster of hole cells is one hole (a single isolated cell is
+    noise, not a hole)."""
+    cell_set = set(cells)
+    seen: set[tuple[int, int]] = set()
+    clusters: list[list[tuple[int, int]]] = []
+    for c in cells:
+        if c in seen:
+            continue
+        stack = [c]
+        seen.add(c)
+        comp: list[tuple[int, int]] = []
+        while stack:
+            cur = stack.pop()
+            comp.append(cur)
+            ci, cj = cur
+            for ni, nj in ((ci + 1, cj), (ci - 1, cj), (ci, cj + 1), (ci, cj - 1)):
+                if (ni, nj) in cell_set and (ni, nj) not in seen:
+                    seen.add((ni, nj))
+                    stack.append((ni, nj))
+        if len(comp) >= 2:
+            clusters.append(comp)
+    return clusters
+
+
+def _genus_holes_by_raycast(
+    body: trimesh.Trimesh,
+) -> list[tuple[float, float, int, float, int]] | None:
+    """Measure ``body``'s through-holes by ray-casting (scipy-free).
+
+    For each axis (X, Y, Z in order) cast a grid of rays, cluster the hole
+    cells, and convert each cluster to a hole (centroid + area → diameter).
+    The axis whose clustering yields a hole count matching the body's genus
+    is the through-axis. Returns a list of ``(u, v, area, diameter,
+    axis_index)`` tuples (the in-plane coordinates in the winning axis's
+    frame), or ``None`` when no axis produced a hole cluster.
+    """
+    g = (2 - int(body.euler_number)) // 2
+    if g <= 0:
+        return None
+    n = 24  # 24x24 grid — fine enough for 0.5 mm tolerance on mm parts.
+    best: list[tuple[float, float, float, float, int]] | None = None
+    best_match = False
+    for axis_index in range(3):
+        try:
+            cells = _ray_grid_hits(body, axis_index, n)
+        except Exception:
+            logger.debug(
+                "genus-hole raycast failed for a body on axis %d",
+                axis_index,
+                exc_info=True,
+            )
+            continue
+        if not cells:
+            continue
+        clusters = _cluster_cells(cells)
+        if not clusters:
+            continue
+        lo, hi = body.bounds
+        u_slots = [i for i in range(3) if i != axis_index]
+        u0, u1 = u_slots
+        u_mid = 0.5 * (lo[u0] + hi[u0])
+        v_mid = 0.5 * (lo[u1] + hi[u1])
+        cell_u = (hi[u0] - lo[u0]) / n
+        cell_v = (hi[u1] - lo[u1]) / n
+        holes: list[tuple[float, float, float, float, int]] = []
+        cell_set = set(cells)
+        for cluster in clusters:
+            # A real through-hole is BOUNDED BY MATERIAL ON ALL SIDES:
+            # every cell just outside the cluster's bounding box must be a
+            # non-hole cell (solid). This rejects the spurious corner/edge
+            # cells the ray grid registers at the bbox corners (where the
+            # grid's corner cells see no material because the ray exits the
+            # body through a corner, not through a solid wall). A hole of
+            # >= 6 cells is the minimum (a 1-cell cluster is noise).
+            if len(cluster) < 6:
+                continue
+            ci = [c[0] for c in cluster]
+            cj = [c[1] for c in cluster]
+            i0, i1 = min(ci), max(ci)
+            j0, j1 = min(cj), max(cj)
+            bounded = True
+            for k in range(i0 - 1, i1 + 2):
+                for nj in (j0 - 1, j1 + 1):
+                    if (k, nj) in cell_set:
+                        bounded = False
+            for j in range(j0 - 1, j1 + 2):
+                for ni in (i0 - 1, i1 + 1):
+                    if (ni, j) in cell_set:
+                        bounded = False
+            if not bounded:
+                continue
+            cu = u_mid - 0.5 * (hi[u0] - lo[u0]) + (np.mean(ci) + 0.5) * cell_u
+            cv = v_mid - 0.5 * (hi[u1] - lo[u1]) + (np.mean(cj) + 0.5) * cell_v
+            area = len(cluster) * cell_u * cell_v
+            diameter = math.sqrt(4.0 * area / math.pi)
+            holes.append((float(cu), float(cv), float(area), float(diameter), axis_index))
+        if not holes:
+            continue
+        match = len(holes) == g
+        if match and not best_match:
+            best = holes
+            best_match = True
+            break
+        if best is None:
+            best = holes
+    return best
+
+
+def _genus_holes_by_section(
+    body: trimesh.Trimesh,
+) -> list[tuple[float, float, float, float, int]] | None:
+    """Measure ``body``'s through-holes by slicing at its centroid with a
+    plane along each axis and reading the cross-section's INTERIOR rings
+    (the holes of the section polygon).
+
+    The slice (``trimesh``'s ``section``) needs the optional geometry deps
+    (scipy, loaded lazily by trimesh). For each axis (Z, then Y, then X) the
+    body is sliced at its centroid with the plane normal along that axis;
+    the section's 2D rings (``planar.discrete``) are taken, the largest-area
+    ring is the outer face outline, and every other ring (a hole) is
+    measured: its in-plane centroid and equivalent diameter ``sqrt(4*area/
+    pi)``. The 2D centroid is mapped back to 3D (the in-plane coords map to
+    the two axes other than the slice axis; the slice-axis coord is the
+    centroid's coordinate on that axis). The axis whose hole count best
+    matches the genus is preferred; the first axis with at least one hole
+    is used otherwise. Returns ``(u, v, area, diameter, axis_index)``
+    tuples, or ``None`` (e.g. when the geometry deps are absent — the
+    ray-cast is the scipy-free fallback).
+    """
+    g = (2 - int(body.euler_number)) // 2
+    if g <= 0:
+        return None
+    centroid = np.asarray(body.centroid)
+    best: list[tuple[float, float, float, float, int]] | None = None
+    best_match = False
+    for axis_index in (2, 1, 0):  # prefer Z, then Y, then X
+        normal = np.zeros(3)
+        normal[axis_index] = 1.0
+        try:
+            planar = body.section(plane_normal=normal, plane_origin=centroid)
+        except Exception:
+            # The section needs the optional geometry deps (scipy / shapely,
+            # loaded lazily by trimesh). A failure (a missing dep, a
+            # degenerate mesh) degrades to "no holes measured on this axis"
+            # — the ray-cast fallback / the open-hole path is unaffected, and
+            # the import never fails (the caller's broad guard is the last
+            # backstop). The genus is counted, so hole_count stays honest.
+            logger.debug(
+                "genus-hole section failed for a body on axis %d",
+                axis_index,
+                exc_info=True,
+            )
+            continue
+        rings = [
+            np.asarray(disc)[:, :2]
+            for disc in planar.discrete
+            if len(np.asarray(disc)) >= 3
+        ]
+        if not rings:
+            continue
+        with_areas = sorted(
+            ((_ring_area_2d(r), r) for r in rings), key=lambda p: p[0], reverse=True
+        )
+        outer = with_areas[0][1]
+        holes: list[tuple[float, float, float, float, int]] = []
+        for _area, ring in with_areas[1:]:
+            if _area <= 0:
+                continue
+            c = ring.mean(axis=0)
+            # A hole ring is contained in the outer face ring (its centroid
+            # falls inside the outer ring); a stray outer-boundary fragment
+            # does not.
+            if not _point_in_ring(outer, c):
+                continue
+            diameter = math.sqrt(4.0 * _area / math.pi)
+            holes.append(
+                (
+                    float(c[0]),
+                    float(c[1]),
+                    float(_area),
+                    float(diameter),
+                    axis_index,
+                )
+            )
+        if not holes:
+            continue
+        match = len(holes) == g
+        if match and not best_match:
+            best = holes
+            best_match = True
+            break
+        if best is None:
+            best = holes
+    return best
+
+
 def _measure_genus_holes(
     components: list[trimesh.Trimesh],
 ) -> list[dict[str, Any]]:
-    """Measure the CLOSED (genus) holes in watertight components.
+    """Measure the CLOSED (genus) holes in watertight components, INDIVIDUALLY.
 
-    For a watertight body with genus >= 1, use trimesh's section plane to
-    find the hole cross-sections. This is an approximation: for a simple
-    through-hole (ring/annulus), the centre is the body's centroid and the
-    axis is estimated from the body's principal axes.
+    For each watertight body with genus >= 1, the through-holes are measured
+    INDIVIDUALLY (a 3-through-hole plate yields three holes at the three
+    hole centres, never one bogus hole at the plate's centroid). The PRIMARY
+    method is a scipy-free ray-cast (:func:`_genus_holes_by_raycast` — cast
+    a grid of rays along each axis, the empty cells cluster into the holes);
+    the trimesh ``section`` path (which needs the optional geometry deps) is
+    the FALLBACK when the ray-cast finds nothing. The axis whose measurement
+    yields a hole count matching the body's genus is the through-axis; that
+    axis's holes are reported (one entry per hole), with the hole centre in
+    the body's full 3D frame and the axis snapped to the cardinal axis.
+
+    The count is not forced to match the genus — when it disagrees, what was
+    actually measured is reported (never a number invented to fill the gap).
+    Bounded: bodies above the face budget are skipped (their ray-cast /
+    cross-section is not computed), and the total is capped at
+    :data:`MAX_HOLES`.
 
     Returns a list of ``{"center": [x,y,z], "axis": [x,y,z],
     "diameter_mm": d}`` dicts. Holes that can't be measured are omitted.
@@ -368,68 +772,79 @@ def _measure_genus_holes(
     for body in components:
         if not body.is_watertight:
             continue
-        g = (2 - int(body.euler_number)) // 2
+        try:
+            g = (2 - int(body.euler_number)) // 2
+        except (TypeError, ValueError):
+            continue
         if g <= 0:
             continue
-        # For a simple through-hole (genus 1), approximate the hole
-        # centre as the body centroid and the axis from the principal
-        # axis of minimum extent.
-        try:
-            centroid = np.asarray(body.centroid)
-        except (TypeError, ValueError):
+        # Bound the work: a huge body's ray-cast / cross-section is expensive
+        # and low-value; skip it (its holes are unmeasured, count stays
+        # honest — the list is a subset, never fabricated).
+        if len(body.faces) > _GENUS_HOLE_FACE_BUDGET:
             continue
-        # Estimate the axis: the axis along which the body has the smallest
-        # extent is typically the through-axis for a ring/annulus.
+        best: list[tuple[float, float, float, float, int]] | None = None
+        best_axis_index = -1
+        # PRIMARY: the trimesh section (needs the optional geometry deps);
+        # its interior rings give each hole's true centroid + diameter.
         try:
-            extents = np.asarray(body.extents)
-            axis_idx = int(np.argmin(extents))
-            axis = np.zeros(3)
-            axis[axis_idx] = 1.0
-        except (TypeError, ValueError):
-            axis = np.array([0.0, 0.0, 1.0])
-        # Estimate the hole diameter: for a ring, the hole diameter
-        # approximates the difference between the max and min radii from
-        # the centroid in the plane perpendicular to the axis.
-        try:
-            # Project vertices onto the plane perpendicular to the axis.
-            v = body.vertices - centroid
-            # Remove the axis component.
-            v_proj = v - np.outer(v @ axis, axis)
-            radii = np.linalg.norm(v_proj, axis=1)
-            # The hole diameter ≈ 2 × median of the smallest radii
-            # (inner radius of the ring).
-            if len(radii) > 0:
-                inner_radius = float(np.median(radii[radii > 0]))
-                diameter = 2.0 * inner_radius
-                if diameter <= 0 or not math.isfinite(diameter):
-                    continue
-            else:
-                continue
-        except (TypeError, ValueError):
+            sec = _genus_holes_by_section(body)
+            if sec:
+                best = sec
+                best_axis_index = sec[0][4]
+        except Exception:
+            logger.debug("genus-hole section failed for a body", exc_info=True)
+        # FALLBACK: the scipy-free ray-cast (no geometry deps needed).
+        if best is None:
+            try:
+                rc = _genus_holes_by_raycast(body)
+                if rc:
+                    best = rc
+                    best_axis_index = rc[0][4]
+            except Exception:
+                logger.debug("genus-hole raycast failed for a body", exc_info=True)
+        if best is None or best_axis_index < 0:
             continue
+        axis = np.zeros(3)
+        axis[best_axis_index] = 1.0
         snapped = _snap_axis(axis)
-        holes.append(
-            {
-                "center": [float(v) for v in centroid],
-                "axis": snapped,
-                "diameter_mm": float(diameter),
-            }
-        )
+        for u, v, _area, diameter, _ax in best:
+            center = [0.0, 0.0, 0.0]
+            slots = [i for i in range(3) if i != best_axis_index]
+            center[slots[0]] = u
+            center[slots[1]] = v
+            # The slice-axis coordinate: the section is taken at the body's
+            # centroid, so the hole centre's coordinate on the slice axis is
+            # the centroid's (a true 3D point in the body frame).
+            center[best_axis_index] = float(body.centroid[best_axis_index])
+            if diameter <= 0 or not math.isfinite(diameter):
+                continue
+            holes.append(
+                {
+                    "center": center,
+                    "axis": list(snapped),
+                    "diameter_mm": float(diameter),
+                }
+            )
+            if len(holes) >= MAX_HOLES:
+                return holes
     return holes
 
 
 def measure_holes(
     merged: trimesh.Trimesh,
     components: list[trimesh.Trimesh],
-    scale: float = 1.0,
 ) -> list[dict[str, Any]]:
     """Measure all holes (open boundary-loop + closed genus) on a
-    pre-repair merged mesh.
+    pre-repair merged mesh, in FILE units.
 
     ``merged`` is the pre-repair merged mesh (already merge_vertices'd).
     ``components`` is the caller's ``split(only_watertight=False)`` list.
-    ``scale`` is the part_scale to apply to all measurements (file units
-    → mm).
+    The measurements are in the mesh's own file units — the same space as
+    ``part_report["bbox_file_units"]`` — so the reader applies the part's
+    scale (``part_scale``) to both to get mm; the measurement itself never
+    scales (the scale is unknown at this point in the import, and scaling
+    here would desynchronise the holes from the file-unit bbox).
 
     Returns a list of ``{"center": [x,y,z], "axis": [x,y,z],
     "diameter_mm": d}`` dicts, capped at :data:`MAX_HOLES`. Holes that
@@ -450,12 +865,6 @@ def measure_holes(
         holes.extend(genus_holes)
     except Exception:
         logger.warning("genus hole measurement failed", exc_info=True)
-
-    # Apply scale (file units → mm).
-    if scale != 1.0:
-        for hole in holes:
-            hole["center"] = [v * scale for v in hole["center"]]
-            hole["diameter_mm"] = hole["diameter_mm"] * scale
 
     # Cap at MAX_HOLES.
     return holes[:MAX_HOLES]

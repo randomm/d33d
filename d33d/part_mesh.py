@@ -409,16 +409,27 @@ def parse_and_repair(
         report["bodies_before"] = bodies_before
 
     # Issue #396: measure per-hole geometry (centre, axis, diameter) on
-    # the PRE-REPAIR merged mesh, in file units (the caller applies
-    # part_scale at import time — the stored values are in file units, the
-    # same space as bbox_file_units). Unfittable holes are omitted
-    # (omit-not-null: hole_count stays honest, the holes list is a subset).
+    # the PRE-REPAIR merged mesh. The measurement is in FILE units — the
+    # same space as ``bbox_file_units`` — and is applied the part's scale
+    # is NOT, so the stored ``holes`` and the stored ``bbox_file_units``
+    # are directly comparable (the reader multiplies both by the same
+    # ``part_scale`` to get mm). Unfittable holes are omitted (omit-not-
+    # null: hole_count stays honest, the holes list is a subset). The
+    # BROAD ``except Exception`` is deliberate and required: hole
+    # measurement is an optional enrichment, and the import must never
+    # fail because a hole was hard to measure (the ``never fail the
+    # import`` contract). Any exception class — ``RuntimeError`` from a
+    # trimesh/numpy C path, ``ImportError`` when the optional geometry
+    # deps are absent, ``MemoryError`` on a huge body — is logged with a
+    # full traceback and the holes list is simply omitted (a bare narrow
+    # except would let the other classes propagate out of
+    # ``parse_and_repair`` and fail the upload).
     try:
-        measured_holes = measure_holes(merged, components, scale=1.0)
+        measured_holes = measure_holes(merged, components)
         if measured_holes:
             report["holes"] = measured_holes
-    except (TypeError, ValueError, AttributeError):
-        logger.warning("hole measurement failed, omitting holes list")
+    except Exception:
+        logger.exception("hole measurement failed, omitting holes list")
 
     return repaired, report, file_unit
 
