@@ -95,15 +95,15 @@ def genus_from_stl(path: str) -> int | None:
     except Exception:
         logger.warning("genus measurement failed for %r", path, exc_info=True)
         return None
-    watertight_bodies = sum(1 for c in components if c.is_watertight)
-    if watertight_bodies == 0:
-        logger.info("genus abstained: no watertight components in %r", path)
-        return None
     try:
-        return mesh_topology(merged=components[0], components=components)["genus"]
+        topo = mesh_topology(merged=components[0], components=components)
     except Exception:
         logger.warning("genus measurement failed for %r", path, exc_info=True)
         return None
+    if topo["watertight_bodies"] == 0:
+        logger.info("genus abstained: no watertight components in %r", path)
+        return None
+    return topo["genus"]
 
 
 def mesh_topology(

@@ -1454,27 +1454,18 @@ def _version_render_artifact_dir(result: Any) -> str | None:
 def _stored_part_mesh_path(row: dict[str, Any], conn: Any) -> Path | None:
     """Issue #386 (final): the stored, REPAIRED part mesh path the design
     loop's render imports — ``{repo}/versions/{v1}/part.stl`` (STL
-    imports) or ``part.3mf`` (3MF imports; this helper returns ``None``
-    for 3MF because there is no STL to measure).
+    imports). 3MF imports are filtered by the CALLER (there is no STL to
+    measure); this helper only resolves the committed part file.
 
-    ``None`` for a missing v1 row, missing repo path, a 3MF import (no
-    STL to measure), or a missing file on disk. The file is NOT read
-    here — the caller measures it off the event loop.
+    ``None`` for a missing v1 row, missing repo path, no part, or a
+    missing file on disk. The file is NOT read here — the caller measures
+    it off the event loop.
     """
-    from d33d.part_http import _v1_for_part, _v1_part_path
+    from d33d.part_http import resolve_v1_part_path
 
-    if row is None or not row.get("part_filename"):
+    path, _repo_dir = resolve_v1_part_path(row, conn)
+    if path is None:
         return None
-    if row.get("part_format") == "3mf":
-        return None
-    if conn is None:
-        return None
-    if not row.get("git_repo_path"):
-        return None
-    v1 = _v1_for_part(conn, row.get("id"))
-    if v1 is None:
-        return None
-    path = _v1_part_path(Path(row["git_repo_path"]), v1, row)
     if not path.is_file():
         return None
     return path
