@@ -352,7 +352,7 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
     expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
     expect(btn).toHaveAttribute("aria-describedby", "region-edit-apply-disabled-reason");
     // The visually-associated hint is rendered and carries the same text.
-    const hint = screen.getByTestId("region-edit-disabled-reason");
+    const hint = screen.getByTestId("region-edit-apply-disabled-reason");
     expect(hint).toHaveTextContent(copy.shell.disabledReason);
   });
 
@@ -369,7 +369,7 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
         orbitClearedPin={false}
       />,
     );
-    expect(screen.queryByTestId("region-edit-disabled-reason")).toBeNull();
+    expect(screen.queryByTestId("region-edit-apply-disabled-reason")).toBeNull();
     const btn = screen.getByTestId("region-edit-apply-btn");
     expect(btn).not.toHaveAttribute("title");
     expect(btn).not.toHaveAttribute("aria-describedby");

@@ -284,6 +284,12 @@ export const queued = {
    *  drops the queued turn from the transcript; when the run ends, nothing
    *  is sent for it. */
   cancel: "Cancel this message",
+  /** The failed-flush reason under a queued turn whose send rejected
+   *  (the message is restored as a failed turn — it never vanishes; the
+   *  resend action below goes through the normal send path). */
+  flushFailed: "Couldn't send your queued message. Send it again?",
+  /** The resend control on a queued turn whose flush failed. */
+  resend: "Send it again",
 } as const;
 
 export const progress = {

@@ -25,7 +25,8 @@ function makeArgs(overrides?: Partial<Args>): Args {
     designLoopInFlight: false,
     projectId: 1,
     setMessages: vi.fn(),
-    continueSend: vi.fn(),
+    continueSend: vi.fn(() => Promise.resolve()),
+    rememberUserMessage: vi.fn(),
     nextMsgId: vi.fn().mockImplementation((suffix?: string) => `msg-test-${suffix ?? ""}`),
     ensureProject: vi.fn().mockResolvedValue(1),
     handleProjectCreationFailure: vi.fn(),
@@ -152,7 +153,7 @@ describe("useQueuedSend", () => {
       expect(args.continueSend).toHaveBeenCalledTimes(1);
     });
 
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, true);
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });
@@ -180,7 +181,7 @@ describe("useQueuedSend", () => {
       expect(args.continueSend).toHaveBeenCalledTimes(1);
     });
 
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, true);
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });
@@ -237,8 +238,8 @@ describe("useQueuedSend", () => {
     // The stale selection was cleared (the belt path).
     expect(args.clearPendingSelection).toHaveBeenCalledTimes(1);
     // The queued message was STILL flushed (not silently dropped) — as a
-    // plain chat message (internal=true, no selection attached).
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, true);
+    // plain chat message (no selection attached).
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });
@@ -255,8 +256,70 @@ describe("useQueuedSend", () => {
     // The message was sent immediately (not queued).
     expect(args.continueSend).toHaveBeenCalledTimes(1);
     expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
+    // The normal send path records the user message (the Retry control
+    // keeps the in-flight run's message — the hook calls the narrow
+    // callback only on non-flush sends).
+    expect(args.rememberUserMessage).toHaveBeenCalledTimes(1);
+    expect(args.rememberUserMessage).toHaveBeenCalledWith("make it 40 mm");
     // Nothing in the queue.
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
+  });
+
+  it("a queued send does NOT record the user message (a flush re-send must not clobber the in-flight run's message for Retry)", () => {
+    const { setMessages } = setMessagesSpy([]);
+    const args = makeArgs({ designLoopInFlight: true, setMessages });
+    const { result } = renderHook(() => useQueuedSend(args));
+
+    act(() => {
+      result.current.handleSendMessage("make it taller");
+    });
+
+    expect(args.continueSend).not.toHaveBeenCalled();
+    expect(args.rememberUserMessage).not.toHaveBeenCalled();
+  });
+
+  it("failed flush: the queued message is restored as a failed turn with a reason and a resend action (the message never vanishes); a later terminal signal does not auto-retry — the user resends", async () => {
+    const { setMessages, messages } = setMessagesSpy([]);
+    const args = makeArgs({
+      setMessages,
+      // The flushed send REJECTS (e.g. a 409, a network error).
+      continueSend: vi.fn(() => Promise.reject(new Error("409 Conflict"))),
+    });
+    const { result } = renderHook(() => useTestHook(args));
+
+    act(() => {
+      result.current.handleSendMessage("make it 40 mm");
+    });
+    expect(result.current.queuedText).toBe("make it 40 mm");
+
+    // The run ends — the flush fires and the send rejects.
+    act(() => {
+      result.current.setInFlight(false);
+    });
+    act(() => {
+      result.current.signalRunEnd();
+    });
+    await waitFor(() => {
+      expect(args.continueSend).toHaveBeenCalledTimes(1);
+    });
+
+    // The queued message is NOT lost: it is visible again as a FAILED
+    // queued turn (the queued flag keeps the caption slot) with the
+    // reason and a resend action.
+    const msgs = messages();
+    const restored = msgs.filter((m) => m.queued);
+    expect(restored).toHaveLength(1);
+    expect(restored[0].content).toBe("make it 40 mm");
+    expect(restored[0].failure).toBeTruthy();
+    expect(restored[0].failure?.message).toBeTruthy();
+
+    // The slot is cleared — no auto-retry on a later terminal signal
+    // (the retry is the user's, via the resend action).
+    act(() => {
+      result.current.signalRunEnd();
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(args.continueSend).toHaveBeenCalledTimes(1);
   });
 });

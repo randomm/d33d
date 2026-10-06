@@ -999,13 +999,11 @@ export default function App({ client }: AppProps) {
   }, [projectId, apiClient, compareIds]);
 
   // Issue #388 — the composer queue (single slot, per project + session)
-  // lives in its own hook (declared below, after `continueSend`): it owns
-  // the queued text, the queued turn in the transcript, replace, cancel,
-  // the run-end flush (exactly once per queued message) and the
-  // pending-selection guard (the belt path reuses
-  // handleCancelPendingSelection above). The run's .finally reaches the
-  // hook's `signalRunEnd` through the `signalRunEndRef` mirror declared
-  // below (a direct capture would be a TDZ use).
+  // lives in its own hook (declared below, after `continueSend`): queued
+  // text, the queued turn, replace, cancel, the run-end flush (exactly
+  // once per queued message), the pending-selection guard. The run's
+  // .finally reaches the hook's `signalRunEnd` via `signalRunEndRef`
+  // (a direct capture would be a TDZ use).
 
   // The actual send body (issue #192): extracted so the message fires only
   // once the project id is settled. `projectIdOverride` carries the id the
@@ -1014,7 +1012,7 @@ export default function App({ client }: AppProps) {
   // authoritative when present. The request calls close over the settled id
   // in every case, never a stale `null`.
   const continueSend = useCallback(
-    (text: string, projectIdOverride?: number, internal?: boolean) => {
+    async (text: string, projectIdOverride?: number) => {
       const effectiveProjectId = projectIdOverride ?? projectId;
       if (effectiveProjectId === null) return;
 
@@ -1023,12 +1021,6 @@ export default function App({ client }: AppProps) {
       // an all-whitespace string would pass a naive truthiness check but
       // still be meaningless as an edit instruction.
       const trimmed = text.trim();
-
-      // Remember the last plain chat message for the Retry control (issue #82).
-      // A flush re-entering continueSend must NOT overwrite this — the Retry
-      // button retries the IN-FLIGHT run's message, not the queued one
-      // (operator decision 4).
-      if (!internal) lastUserMessageRef.current = text;
 
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
@@ -1185,20 +1177,13 @@ export default function App({ client }: AppProps) {
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
 
-      // Issue #349: the in-flight indicator is DEFERRED until the first
-      // design-loop progress frame (the `design-loop-start` step) — a
-      // no-loop reply (a no-version question, a bare affirmation with no
-      // pending offer) resolves through a `kind: "answer"` done frame with
-      // no progress frame at all, so the flag stays false for those: no
-      // "Generating design…" stage and no pending filmstrip slot ever
-      // render. The race guard this comment used to justify is preserved:
-      // the stream is opened only inside the postChat `.then`, and
+      // The stream is opened only inside the postChat `.then`, and
       // `streamEvents` returns without resolving until the stream drains,
       // so the `finally` flag release (and the flag set below) happen
       // after the previous stream has finished — a second send cannot
       // race the first.
 
-      // Collect the last 10 user messages for chat_history (the SPA
+      // The last 10 user messages for chat_history (the SPA
       // in-memory state — the transcripts table is NOT populated by this
       // ticket; that is a future seam).
       const chatHistory = messages
@@ -1206,7 +1191,11 @@ export default function App({ client }: AppProps) {
         .slice(-10)
         .map((m) => m.content);
 
-      void apiClient
+      // Return the promise chain so the caller (the queue hook's flush)
+      // can await it and catch a postChat rejection (a failed flush must
+      // not lose the queued message — issue #388, lens finding 1). The
+      // region-edit path (above) is fire-and-forget; this is the chat path.
+      return apiClient
         .postChat(effectiveProjectId, {
           message: trimmed,
           chat_history: chatHistory,
@@ -1512,6 +1501,12 @@ export default function App({ client }: AppProps) {
                 } },
             ];
           });
+          // Re-throw so the caller (the queue hook's flush) can catch the
+          // rejection and restore the queued message as a failed turn
+          // (issue #388, lens finding 1: a failed flush must not lose the
+          // message). The UI is already handled above — the re-throw is
+          // a signal, not a new error.
+          throw e;
         })
         .finally(() => {
           // Release the in-flight flag on ALL exit paths (pass, exhausted,
@@ -1551,15 +1546,19 @@ export default function App({ client }: AppProps) {
   }, []);
 
   // The queue hook (declared after `continueSend` — its flush re-enters
-  // through a ref mirror of it). The run's .finally reaches the hook's
-  // `signalRunEnd` through `signalRunEndRef` (assigned every render — the
-  // hook's signalRunEnd is a stable useCallback, so this is one write with
-  // the same value for the component's lifetime).
+  // through a ref mirror; the run's .finally reaches the hook's
+  // `signalRunEnd` through `signalRunEndRef`).
   const queuedSend = useQueuedSend({
     designLoopInFlight,
     projectId,
     setMessages,
     continueSend,
+    // The narrow Retry-memory seam (issue #388, lens finding 3): the
+    // hook calls this only on NON-FLUSH sends — a flush re-send must
+    // not overwrite the in-flight run's message (operator decision 4).
+    rememberUserMessage: (text) => {
+      lastUserMessageRef.current = text;
+    },
     nextMsgId,
     ensureProject,
     handleProjectCreationFailure,
