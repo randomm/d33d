@@ -981,14 +981,13 @@ def _baseline_genus(
     """The parent version's baseline genus for the through-hole check
     (issue #386, operator decision 2026-10-05): the explicit seam value
     when the caller carries one (the imported part's own measured hole
-    count for v1 on an import — the route resolves it from the part's
-    stored report), else the stored ``hole_count`` read off the
-    design-state block the loop already carries, else ``0`` for a new
-    design.
+    count for v1 on an import — the ``design_loop_events`` chat seam
+    resolves it from the part's stored ``part_report.hole_count``),
+    else ``0`` for a new design.
 
-    ``None`` (the check abstains) when the resolved baseline is corrupt
-    or missing — a fabricated baseline would make the gate lie. A
-    negative count (a corrupt value) abstains the same way
+    ``None`` (the check abstains) when the explicit seam value is corrupt
+    — a fabricated baseline would make the gate lie. A non-integer or
+    negative count abstains the same way
     :func:`d33d.part_holes.part_has_hole_evidence` degrades it.
     """
     if through_baseline_genus is not None:
@@ -999,14 +998,14 @@ def _baseline_genus(
         if through_baseline_genus < 0:
             return None
         return through_baseline_genus
-    if not isinstance(state_bbox, dict):
-        return 0
-    count = state_bbox.get("hole_count")
-    if isinstance(count, bool) or not isinstance(count, int):
-        return None
-    if count < 0:
-        return None
-    return count
+    # No explicit seam value: ``0`` (a new design — a baseline-less
+    # candidate, never an abstain). ``state_bbox`` is the latest
+    # version's persisted MEASURED bbox (the ``{"x", "y", "z"}`` triple
+    # ``bbox_from_render`` persists) and carries no hole data, so it is
+    # not consulted here. A future path that persists a baseline in the
+    # design state would thread it through ``through_baseline_genus`` —
+    # the seam the ``design_loop_events`` chat route already uses.
+    return 0
 
 
 def _undersize_screw_hole(
@@ -2014,7 +2013,12 @@ async def run_design_loop_async(
             and not _screw_repair_fired
         ):
             _baseline = _baseline_genus(state_bbox, through_baseline_genus)
-            _through_det = await _call(
+            # Off the event loop: ``trimesh.load`` + ``merge_vertices``
+            # + ``split`` is real disk I/O on the rendered STL (the same
+            # reason the bbox path runs ``bbox_from_render`` off-thread
+            # — a stall here would hold the loop's single worker thread
+            # and every other SSE stream on it).
+            _through_det = await asyncio.to_thread(
                 _through_hole_det, request, render.stl, _baseline
             )
             if _through_det is not None:

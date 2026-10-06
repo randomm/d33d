@@ -63,9 +63,13 @@ def is_through_request(request: str) -> bool:
     lower = request.lower()
     for token in _HYPHENATED_TOKENS:
         if token in lower:
-            # Whole-word: the character before the token (if any) must
-            # not be a word character (``a-through-hole`` is not a word
-            # boundary hit — ``through-hole`` is).
+            # Whole-word: the character immediately BEFORE the token (if
+            # any) must not be ALPHANUMERIC — ``x-through-hole`` is a
+            # different (non-through-hole) word, ``3-through-hole`` a
+            # dimension, and a plain hyphenated compound (``a
+            # through-hole``) fires like the bare token. The token's own
+            # internal hyphen is not a boundary: it is part of the
+            # token, not a separator between words.
             idx = lower.find(token)
             if idx == 0 or not lower[idx - 1].isalnum():
                 return True
@@ -75,14 +79,15 @@ def is_through_request(request: str) -> bool:
     return any(noun in words for noun in HOLE_NOUNS)
 
 
-def _load_and_split(stl: str) -> list[Any] | None:
+def _load_and_split(stl: str) -> list[Any]:
     """Load ``stl`` and split it ONCE (``only_watertight=False``).
 
     ``merge_vertices()`` is MANDATORY before the split — production
     OpenSCAD STLs are face-disconnected and an unmerged split yields
     ZERO components (the established contract, see
-    ``d33d.design_loop_events.bbox_from_render``). Returns ``None`` on
-    any load or split failure (the caller abstains).
+    ``d33d.design_loop_events.bbox_from_render``). Load or split
+    failures RAISE — the caller (``_rendered_genus``) wraps the call in
+    its own ``try/except`` and abstains there (it is the sole caller).
     """
     import trimesh
 
@@ -121,21 +126,15 @@ def _rendered_genus(stl: str) -> int | None:
                 stl,
             )
             return None
-        return mesh_topology(merged=_first_component(components, stl), components=components)["genus"]
+        # ``mesh_topology`` consults the ``merged`` argument only for the
+        # boundary-loop count and winding consistency (both degrade
+        # safely on an open mesh); the genus it returns comes straight
+        # from ``components``, so any component is a valid merged-mesh
+        # stand-in (the split pieces share the merged mesh's vertices).
+        return mesh_topology(merged=components[0], components=components)["genus"]
     except Exception:
         logger.info("through-hole check abstained: topology measurement failed for %r", stl)
         return None
-
-
-def _first_component(components: list[Any], stl: str) -> Any:
-    """The first component as the ``mesh_topology`` merged-mesh stand-in.
-
-    ``mesh_topology`` only consults the merged mesh for the boundary-loop
-    count and winding consistency (both degrade safely on an open mesh)
-    and the genus comes straight from the ``components`` list the caller
-    passes — so any component is a valid stand-in for the merged mesh.
-    """
-    return components[0]
 
 
 def through_hole_check(

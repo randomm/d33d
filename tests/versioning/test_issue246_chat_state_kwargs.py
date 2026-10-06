@@ -136,6 +136,66 @@ def test_chat_adapter_passes_state_kwargs_for_project_with_version(app_with_vers
     }
 
 
+def test_chat_adapter_passes_through_baseline_genus_for_import(app_with_versions):
+    """Issue #386: a project with a settled part whose stored
+    ``part_report`` carries ``hole_count`` — the loop kwargs the CHAT
+    adapter builds carry ``through_baseline_genus`` equal to that count.
+    A project with no part omits the kwarg (the loop defaults to 0). A
+    part whose ``part_report`` is corrupt (unparseable JSON) omits the
+    kwarg too — never a fabricated baseline."""
+    captured: dict[str, Any] = {}
+
+    def _make_call(set_part_report: bool | None):
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            conn = app_with_versions.state.conn
+            if set_part_report is not None:
+                if set_part_report:
+                    conn.execute(
+                        "UPDATE projects SET part_filename=?, part_format=?, "
+                        "part_unit_status=?, part_scale=?, part_report=? "
+                        "WHERE id=?",
+                        (
+                            "part.stl", "stl", "settled", 1.0,
+                            '{"hole_count": 2}', pid,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE projects SET part_filename=?, part_format=?, "
+                        "part_unit_status=?, part_scale=? WHERE id=?",
+                        ("part.stl", "stl", "settled", 1.0, pid),
+                    )
+                conn.commit()
+            await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+        return _call
+
+    # Import project with part_report.hole_count = 2 → kwarg == 2.
+    captured.clear()
+    run_async(app_with_versions, _make_call(True))
+    assert captured.get("through_baseline_genus") == 2, (
+        f"expected through_baseline_genus==2 from the part report, "
+        f"got {captured.get('through_baseline_genus')!r}"
+    )
+
+    # Part project with NO part_report (the hole count is unknown) → the
+    # kwarg is absent (the loop's zero default — a baseline-less
+    # candidate, never a fabricated baseline).
+    captured.clear()
+    run_async(app_with_versions, _make_call(False))
+    assert "through_baseline_genus" not in captured, (
+        f"a part with no part_report must not carry a fabricated "
+        f"through_baseline_genus, got {captured.get('through_baseline_genus')!r}"
+    )
+
+    # No-part project (the fresh-project baseline) → kwarg absent.
+    captured.clear()
+    run_async(app_with_versions, _make_call(None))
+    assert "through_baseline_genus" not in captured
+
+
 def test_chat_adapter_passes_none_state_kwargs_for_fresh_project(app_with_versions):
     """A fresh project (no version yet): the loop kwargs carry
     ``state_params`` / ``state_bbox`` / ``state_stated`` all ``None`` —

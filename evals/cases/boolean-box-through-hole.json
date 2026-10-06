@@ -1,0 +1,23 @@
+{
+  "case_id": "boolean-box-through-hole",
+  "kind": "boolean_topology",
+  "prompt": {
+    "prompt_version": "v1",
+    "path": "evals/prompts/boolean_topology_v1.md",
+    "sha256": "a19ff63c4279ae8f5253909ab6d752fcb61b83c137e93ae2899b24b54d8ead52"
+  },
+  "request": "A 20 × 20 × 20 mm box with one 6 mm diameter through-hole drilled through the centre from top to bottom.",
+  "expected_dims": {
+    "x": 20,
+    "y": 20,
+    "z": 20
+  },
+  "gate_expectations": [
+    "compile",
+    "stl_export",
+    "watertight_winding",
+    "bbox_dims",
+    "volume_faces",
+    "slice_dry_run"
+  ]
+}
