@@ -293,7 +293,7 @@ describe("RegionEditBar", () => {
   });
 
   it("dims the bar while the pin is orbiting", () => {
-    render(
+    const { unmount } = render(
       <RegionEditBar
         selection={makeSelection()}
         viewportSize={VIEWPORT}
@@ -307,6 +307,69 @@ describe("RegionEditBar", () => {
     );
     const bar = screen.getByTestId("region-edit-bar");
     expect(bar.style.opacity).toBe("0.5");
+    unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #388 (operator decision 3) — the region-edit submit during a run
+// ---------------------------------------------------------------------------
+
+describe("RegionEditBar — submit disabled while a run is in flight (issue #388)", () => {
+  it("disables the Apply button while a run is in flight", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        submitDisabled
+      />,
+    );
+    expect(screen.getByTestId("region-edit-apply-btn")).toBeDisabled();
+  });
+
+  it("a form submit (Enter) is a no-op while a run is in flight — the selection is kept, nothing is queued (issue #388, operator decision 3)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="open the top"
+        onTextChange={vi.fn()}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        submitDisabled
+      />,
+    );
+    const input = screen.getByTestId("region-edit-input");
+    fireEvent.submit(input.closest("form")!);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("submit still works when not in flight (no submitDisabled)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="open the top"
+        onTextChange={vi.fn()}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-apply-btn")).not.toBeDisabled();
+    fireEvent.submit(screen.getByTestId("region-edit-input").closest("form")!);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -47,11 +47,11 @@ interface RegionEditBarProps {
   orbitingPin: boolean;
   /** The pin is cleared (pose crossed the threshold). */
   orbitClearedPin: boolean;
-  /** Issue #388: true while a design run is in flight — the Apply button is
-   *  disabled (a region-edit submit is NOT queued, decision 3: it is
-   *  disabled, not queued; the drawn selection is kept so the user can
-   *  re-apply it once the run ends). The input stays typeable — the text
-   *  the user is composing is not lost. */
+  /** Issue #388: true while a design run is in flight — the Apply button
+   *  is disabled AND the form cannot submit (a region-edit submit is NOT
+   *  queued, decision 3: it is disabled, not queued; the drawn selection
+   *  is kept so the user can re-apply it once the run ends). The input
+   *  stays typeable — the text the user is composing is not lost. */
   inFlight?: boolean;
 }
 
@@ -168,6 +168,10 @@ export function RegionEditBar({
         }}
         onSubmit={(e) => {
           e.preventDefault();
+          // Issue #388 (operator decision 3): a region-edit submit during a
+          // run is DISABLED, not queued — the form cannot submit, so the
+          // drawn selection stays (the user cancels or waits for the run).
+          if (inFlight === true) return;
           onSubmit();
         }}
       >

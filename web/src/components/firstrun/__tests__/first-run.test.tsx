@@ -123,6 +123,22 @@ describe("FirstRun", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
+  it("a second send during the pre-frame window is routed to the same onSend — App queues it, the screen never drops it (issue #388, operator decision 1)", () => {
+    // During the pre-first-frame window the deferred in-flight indicator
+    // stays off (inFlight=false — issue #349's deferral must be preserved),
+    // so the Start button is enabled. A fast second send therefore reaches
+    // onSend — it is neither blocked at this layer nor dropped: App's
+    // handleSendMessage routes it to the single queue slot (the end-to-end
+    // "queues, not POSTs" assertion lives in no-loop-reply.test.tsx).
+    const onSend = vi.fn();
+    render(<FirstRun {...baseProps({ onSend })} />);
+    const input = screen.getByTestId("first-run-input");
+    fireEvent.change(input, { target: { value: "a 40 mm plate" } });
+    fireEvent.click(screen.getByTestId("first-run-start-btn"));
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("a 40 mm plate");
+  });
+
   it("the starter buttons are disabled while a design loop is in flight", () => {
     render(<FirstRun {...baseProps({ inFlight: true })} />);
     screen.getAllByTestId("first-run-starter").forEach((btn) => {

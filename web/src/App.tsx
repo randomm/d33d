@@ -1564,6 +1564,14 @@ export default function App({ client }: AppProps) {
   useEffect(() => {
     continueSendRef.current = continueSend;
   }, [continueSend]);
+  // Ref mirror of pendingSelection, read by the flush effect (e689ec9's
+  // stale-selection guard, folded in below): a selection drawn while a
+  // run was in flight was disabled, not queued — the flushed POST must
+  // never re-attach it.
+  const pendingSelectionRef = useRef(pendingSelection);
+  useEffect(() => {
+    pendingSelectionRef.current = pendingSelection;
+  }, [pendingSelection]);
   // Issue #388: the flush effect needs a state key that changes when the
   // .finally clears sendInFlightRef (the pre-frame window closes). Since
   // refs don't trigger effects, we use a counter that is incremented by
@@ -1654,8 +1662,17 @@ export default function App({ client }: AppProps) {
   // no intervening render. The ref resolves both the stale-closure case
   // and the in-run case (where the designLoopInFlight transition
   // re-keys the effect with a fresh callback anyway).
+  //
+  // Stale-selection guard (e689ec9): a pending region selection blocks
+  // the flush — a queued message must never POST with a selection the
+  // user drew for a different message attached. The RegionEditBar's
+  // disabled Submit (primary gate) makes this state unreachable from
+  // normal interaction; the belt check keeps it safe under a regression
+  // in that gate — the queued turn simply stays visible until the user
+  // resolves the selection.
   useEffect(() => {
     if (designLoopInFlight || sendInFlightRef.current) return; // run still in flight
+    if (pendingSelectionRef.current !== null) return; // stale-selection guard
     if (!queuedText || flushedRef.current) return;
     flushedRef.current = true;
     const idToRemove = queuedTurnIdRef.current;
@@ -2179,10 +2196,10 @@ export default function App({ client }: AppProps) {
           text={regionBarText}
           onTextChange={setRegionBarText}
           onSubmit={handleRegionBarSubmit}
+          inFlight={designLoopInFlight}
           onCancel={handleCancelPendingSelection}
           orbitingPin={orbitingPin}
           orbitClearedPin={orbitClearedPin}
-          inFlight={designLoopInFlight}
         />
       )}
 

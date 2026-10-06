@@ -475,4 +475,49 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(postChatMock.mock.calls[1][1].message).toBe("make it taller");
     expect(screen.queryByTestId("queued-caption")).toBeNull();
   });
+
+  it("an error-only terminal (no done frame) still flushes the queued message exactly once", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // The run ends with an ERROR frame ONLY — no done frame follows. In
+    // production the stream then closes and the .finally is the terminal
+    // (it clears designLoopInFlight and bumps runEndCount, which re-keys
+    // the flush effect); onDone never runs on this path.
+    act(() => {
+      handlers.onError?.({
+        message: "Design loop exhausted: error_class_not_ok",
+        reason: "error_class_not_ok",
+      });
+    });
+    // The stream closes — the .finally fires.
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message was flushed exactly once (original + flush = 2).
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
+  });
 });
