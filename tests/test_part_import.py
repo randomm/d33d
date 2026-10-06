@@ -3568,18 +3568,22 @@ def test_mesh_topology_open_mesh_skips_winding_check(monkeypatch):
     open_mesh.update_faces(open_mesh.nondegenerate_faces())
     components = open_mesh.split(only_watertight=False)
 
-    # Spy: reading ``is_winding_consistent`` on a Trimesh raises — so the
-    # helper must not touch it for this open mesh.
-    def _boom(self):
-        raise AssertionError(
-            "is_winding_consistent was evaluated on an open mesh"
-        )
+    # Recording spy: if ``mesh_topology`` reads ``is_winding_consistent``
+    # for this open mesh, the read is appended to ``reads`` and the final
+    # assertion catches it. (A raising spy would not discriminate — the
+    # helper's degradation swallows the raise and still yields False.)
+    reads: list[object] = []
+
+    def _record(self):
+        reads.append(self)
+        return True
 
     monkeypatch.setattr(
-        trimesh.Trimesh, "is_winding_consistent", property(_boom)
+        trimesh.Trimesh, "is_winding_consistent", property(_record)
     )
 
     topo = mesh_topology(open_mesh, components)
+    assert reads == []
     assert topo["boundary_loops"] != 0
     assert topo["winding_consistent"] is False
 
