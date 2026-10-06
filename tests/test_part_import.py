@@ -2432,22 +2432,21 @@ def test_holes_list_three_plate(app_with_projects) -> None:
     of the true diameter, and axis Z (the through-axis). This is the
     acceptance test for the section-based measurement — the first #396
     pass's ray-cast fallback (5 phantom holes on this plate) is deleted;
-    the section must measure the 3 real holes."""
+    the section must measure the 3 real holes.
+
+    The plate is a committed fixture (``three_hole_plate.stl``), generated
+    ONCE via ``trimesh`` boolean subtraction (Blender backend) — CI has no
+    boolean backend (no manifold3d, no Blender), so the boolean must not run
+    in the test itself. A non-boolean build (``extrude_polygon``) was
+    rejected: it needs a triangulation engine (triangle/mapbox_earcut) that
+    is not in the locked dependencies."""
     import trimesh
 
     # A 120×80×6 mm plate centred at (60, 40, 3) with three through-holes
     # along Z at y=40: Ø6 at (30, 40), Ø10 at (60, 40), Ø8 at (90, 40).
-    plate = trimesh.creation.box(extents=[120, 80, 6])
-    plate.apply_translation([60, 40, 3])
-    specs = [(3.0, 30.0, 40.0), (5.0, 60.0, 40.0), (4.0, 90.0, 40.0)]
-    cylinders = []
-    for radius, x, y in specs:
-        c = trimesh.creation.cylinder(radius=radius, height=20, sections=32)
-        c.apply_translation([x, y, 3.0])
-        cylinders.append(c)
-    result = plate.difference(trimesh.util.concatenate(cylinders))
-    if isinstance(result, trimesh.Scene):
-        result = result.to_mesh()
+    # Fixture: watertight, genus 3 (euler −4), 800 faces, 40 KB — the
+    # assertions below re-verify these so a corrupt fixture is not vacuous.
+    result = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
     # The plate must actually be a genus-3 (three through-hole) body —
     # guard against a CSG failure that would make the test vacuous.
     assert result.is_watertight
