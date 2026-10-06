@@ -1820,6 +1820,29 @@ async def run_design_loop_with_events(
             if part_env.get("bbox_mm") is not None:
                 kwargs["part_bbox_mm"] = part_env["bbox_mm"]
 
+    # Issue #386 (operator decision 2026-10-05) — the through-hole
+    # check's BASELINE: the imported part's own measured hole count
+    # (the stored ``part_report.hole_count`` — computed once at import,
+    # the same stored fact the #351 evidence gate reads). The rendered
+    # mesh's genus must EXCEED this baseline (0 for a new design —
+    # omitted here, the loop defaults to 0). A corrupt or missing
+    # report value abstains the check (``None``), never fabricates a
+    # baseline. Only settled/assumed parts carry it (the unsettled
+    # pre-route has already stopped the loop before this seam runs).
+    if row is not None and row.get("part_filename"):
+        from d33d.part_http import part_public
+
+        _public = part_public(row)
+        _report = _public.get("report") if _public is not None else None
+        if isinstance(_report, dict):
+            _hole_count = _report.get("hole_count")
+            if (
+                isinstance(_hole_count, int)
+                and not isinstance(_hole_count, bool)
+                and _hole_count >= 0
+            ):
+                kwargs["through_baseline_genus"] = _hole_count
+
     # Issue #295 — the lost-photo notice (the post_chat caller's photo
     # state, carried into the stream): when the project's stored photo
     # was LOST out-of-band (path set, file gone — never a photo-LESS

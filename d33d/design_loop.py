@@ -942,6 +942,73 @@ PART_IMPORT_INSTRUCTION_FIX = (
 )
 
 
+#: The through-hole post-check's (issue #386, operator decision
+#: 2026-10-05) repair instruction: the hole the user asked for does not
+#: pass — the rendered mesh's genus did not rise above the baseline — so
+#: the next iteration must cut it through the full thickness.
+THROUGH_HOLE_INSTRUCTION = (
+    "the hole does not pass all the way through the part — it must cut "
+    "through the full thickness (a blind pocket or partial depth does "
+    "not satisfy a through request; verify the cutting solid extends "
+    "beyond both faces of the part)."
+)
+
+
+def _through_hole_det(
+    request: str,
+    stl: str | None,
+    baseline_genus: int | None,
+) -> tuple[int, int] | None:
+    """Issue #386: the through-hole genus post-check.
+
+    See :func:`d33d.through_hole_check.through_hole_check` for the full
+    contract.  Returns the DETECTION tuple ``(baseline_genus, genus)``
+    (or ``None`` when the check abstains).  The caller (the design
+    loop) folds this into the repair dict and routes it through
+    ``route_repair``.  This wrapper defers the import to break the
+    circular import chain (design_loop → through_hole_check →
+    part_mesh_topology → part_holes, and the loop's own import cycle
+    through design_prompts, as for :func:`_undersize_screw_hole`)."""
+    from d33d.through_hole_check import through_hole_check
+
+    return through_hole_check(request, stl, baseline_genus)
+
+
+def _baseline_genus(
+    state_bbox: dict[str, float] | None,
+    through_baseline_genus: int | None,
+) -> int | None:
+    """The parent version's baseline genus for the through-hole check
+    (issue #386, operator decision 2026-10-05): the explicit seam value
+    when the caller carries one (the imported part's own measured hole
+    count for v1 on an import — the route resolves it from the part's
+    stored report), else the stored ``hole_count`` read off the
+    design-state block the loop already carries, else ``0`` for a new
+    design.
+
+    ``None`` (the check abstains) when the resolved baseline is corrupt
+    or missing — a fabricated baseline would make the gate lie. A
+    negative count (a corrupt value) abstains the same way
+    :func:`d33d.part_holes.part_has_hole_evidence` degrades it.
+    """
+    if through_baseline_genus is not None:
+        if isinstance(through_baseline_genus, bool) or not isinstance(
+            through_baseline_genus, int
+        ):
+            return None
+        if through_baseline_genus < 0:
+            return None
+        return through_baseline_genus
+    if not isinstance(state_bbox, dict):
+        return 0
+    count = state_bbox.get("hole_count")
+    if isinstance(count, bool) or not isinstance(count, int):
+        return None
+    if count < 0:
+        return None
+    return count
+
+
 def _undersize_screw_hole(
     request: str,
     params: dict[str, float],
@@ -1563,6 +1630,7 @@ async def run_design_loop_async(
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
+    through_baseline_genus: int | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
@@ -1924,6 +1992,56 @@ async def run_design_loop_async(
                     }
                     _screw_repair_fired = True
 
+        # Issue #386 (operator decision 2026-10-05): an ok render whose
+        # gates are green can still carry a BLIND pocket where the user
+        # asked for a through-hole (a pocket is invisible to all five
+        # gate bits — the QA repro). The check runs BEFORE the pass
+        # return; the rendered mesh's total genus (the #395 shared
+        # ``mesh_topology`` helper) must EXCEED the parent version's
+        # baseline genus (0 for a new design, the imported part's stored
+        # hole count for v1 on an import) — a baseline comparison, not a
+        # bare "genus ≥ 1", so a pocket over a part that already has a
+        # hole cannot pass. A gate-driven repair already routed this
+        # iteration wins (the gate evidence is more specific); a fired
+        # screw-hole repair suppresses the check (two post-repairs never
+        # fire on one iteration). Rides the EXISTING
+        # ``geometrically_wrong`` class — no new class, no new
+        # error_class — routed through the same ``route_repair`` path.
+        _through_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and not _screw_repair_fired
+        ):
+            _baseline = _baseline_genus(state_bbox, through_baseline_genus)
+            _through_det = await _call(
+                _through_hole_det, request, render.stl, _baseline
+            )
+            if _through_det is not None:
+                _base_g, _genus = _through_det
+                _evidence = (
+                    f"rendered mesh genus {_genus} does not exceed the "
+                    f"baseline genus {_base_g} — the hole did not pass "
+                    f"through"
+                )
+                _ax_classified = ClassifiedFailure(
+                    failure_class="geometrically_wrong",
+                    evidence=_evidence,
+                    repairable=True,
+                )
+                directive = route_repair(
+                    classified=_ax_classified, scad_source=scad_source
+                )
+                if directive is not None:
+                    failure_class = "geometrically_wrong"
+                    next_repair = {
+                        "failure_class": "geometrically_wrong",
+                        "instruction": THROUGH_HOLE_INSTRUCTION,
+                        "scad_source": scad_source,
+                        "evidence": _evidence,
+                    }
+                    _through_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -1940,7 +2058,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect and not _screw_repair_fired:
+        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,
@@ -2213,6 +2331,7 @@ def run_design_loop(
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
+    through_baseline_genus: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
@@ -2242,6 +2361,7 @@ def run_design_loop(
             design_source=design_source,
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,
+            through_baseline_genus=through_baseline_genus,
             renderer_check=renderer_check,
             image_check=image_check,
         )

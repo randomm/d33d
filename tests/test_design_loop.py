@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import trimesh
 
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
@@ -2752,6 +2753,253 @@ def test_screw_clearance_direct_check_contract():
     assert _undersize_screw_hole(request, {"W": 60.0, "D": 45.0}, {}) is None
     # Empty request → abstain.
     assert _undersize_screw_hole("", {"hole_d": 4.0}, meta) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #386: through-hole genus post-check (the rendered mesh's genus
+# must EXCEED the parent version's baseline — 0 for a new design, the
+# imported part's own stored hole count for v1 on an import — operator
+# decision 2026-10-05). Real tiny STLs built with trimesh in tmp_path
+# (the ``_render`` stub's fake ``model.stl`` path means no existing test
+# loads a real mesh through the loop).
+# ---------------------------------------------------------------------------
+
+
+def _through_box_llm(scad: str, params: list[dict] | None = None) -> LLMResult:
+    """A T1-shaped design response for a 20 × 20 × 20 box SCAD (the
+    through-hole post-check's candidate) whose tool call carries a
+    ``parameters`` metadata array."""
+    args: dict[str, Any] = {"scad": scad}
+    if params is not None:
+        args["parameters"] = params
+    return LLMResult(
+        content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+        tool_calls=(
+            {"name": "emit_design", "arguments": args},
+        ),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def _through_box_scad_source() -> str:
+    """A 20 × 20 × 20 box — every literal a named declaration (the
+    named-params gate passes), bbox matches the stated triple exactly.
+    (The SCAD is a stand-in: the loop's test render carries the REAL
+    mesh's STL path, so the mesh — not the SCAD — is what the check
+    measures.)"""
+    return "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);\n"
+
+
+def _render_with_stl(stl_path: str) -> RenderResult:
+    """An ok render whose ``stl`` points at a REAL file on disk (the
+    through-hole check's trimesh.load seam) — the ``_render`` stub's
+    fake ``model.stl`` is non-existent, so the check would abstain on
+    it; this helper carries the real path."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=10,
+        error_class="ok",
+        stderr="",
+        stl=stl_path,
+        csg="model.csg",
+        views=VIEWS_OK,
+        render_log="",
+    )
+
+
+def _box_minus_cylinder(blind: bool) -> trimesh.Trimesh:
+    """A 20 × 20 × 20 box with a 6 mm-diameter cylindrical cut at the
+    centre: ``blind`` — the cylinder goes 10 mm into the box (a
+    pocket, genus 0); ``not blind`` — the cylinder pierces both faces
+    (a through-hole, genus 1)."""
+    box = trimesh.creation.box(extents=(20, 20, 20))
+    height = 12 if blind else 44
+    z0 = 0 if blind else -12
+    cyl = trimesh.creation.cylinder(radius=3.0, height=height)
+    cyl.apply_translation([0, 0, z0])
+    out = box.difference(cyl)
+    if isinstance(out, trimesh.Scene):
+        out = out.to_mesh()
+    return out
+
+
+def _run_through_loop(
+    stl_path: str | None,
+    request: str,
+    *,
+    through_baseline_genus: int | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+) -> DesignResult:
+    """Run the loop over an ok-render 20×20×20 box (all five gate bits
+    green) whose render carries the given real STL path (``None`` →
+    the ``_render`` stub's non-existent ``model.stl`` — the abstain
+    case)."""
+    render = _render_with_stl(stl_path) if stl_path else _render()
+    llm = _through_box_llm(_through_box_scad_source())
+
+    def llm_fn(role, messages, system):
+        return llm
+
+    def render_fn(scad, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 20.0, 8000.0),
+        request=request,
+        max_iterations=max_iterations,
+        through_baseline_genus=through_baseline_genus,
+    )
+
+
+def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
+    """Issue #386 (must fail on main): a through request ("drill a 6 mm
+    hole through the middle") with a POCKET mesh (a box minus a blind
+    cylinder — euler 2, genus 0) over a zero baseline → iteration 1 is
+    ``geometrically_wrong`` (NOT a pass), and the repair instruction
+    says the hole must cut through the full thickness. The scripted
+    model repeats the pocket to the cap (the within-cap pass is pinned
+    by the next test)."""
+    stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(stl)
+    result = _run_through_loop(
+        stl, "drill a 6 mm hole through the middle of the top face"
+    )
+    # The all-green candidate does NOT pass: the post-check routes the
+    # repair and the loop takes the repair iterations within the cap.
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    first = result.iterations[0]
+    # All five gate bits green (genus is not a gate bit) yet the
+    # structured repair fired.
+    assert first.score.perfect is True
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    assert "full thickness" in first.repair["instruction"]
+    assert "does not pass" in first.repair["instruction"]
+
+
+def test_through_hole_through_mesh_passes(tmp_path):
+    """Issue #386: a through request with a true through-hole mesh
+    (genus 1) over a zero baseline → the loop returns "pass" on
+    iteration 1 (the check passes — the hole did pass), mirroring
+    ``test_screw_clearance_post_check_passes_at_clearance``."""
+    stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=False).export(stl)
+    result = _run_through_loop(
+        stl, "drill a 6 mm hole through the middle of the top face"
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_through_hole_blind_request_no_trigger(tmp_path):
+    """Issue #386: a BLIND-hole request (no ``through``) with a pocket
+    mesh → a pass (no trigger), mirroring
+    ``test_screw_clearance_post_check_no_screw_named_does_nothing``."""
+    stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(stl)
+    for request in (
+        "drill a 5 mm hole 3 mm deep in the top face",
+        "a counterbore 5 mm deep for the screw",
+        "a pocket 2 mm deep in the centre",
+    ):
+        result = _run_through_loop(stl, request)
+        assert result.status == "pass", request
+        assert result.iterations_used == 1, request
+        assert result.iterations[0].repair is None, request
+
+
+def test_through_hole_unreadable_stl_abstains(tmp_path):
+    """Issue #386: a through request whose ``render.stl`` path does not
+    exist (or the file is unreadable) → the check abstains (one log
+    line) and the loop PASSES, mirroring the direct-check contract's
+    abstain style."""
+    # A non-existent path (the render carries a path that is not a file).
+    missing = str(tmp_path / "does-not-exist.stl")
+    result = _run_through_loop(
+        missing, "drill a 6 mm hole through the middle"
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_through_hole_repair_then_through_mesh_passes_within_cap(tmp_path):
+    """Issue #386: the model fixes the hole on the repair iteration —
+    the pocket triggers, the through mesh passes, all within the
+    3-iteration cap and the no-improvement limit (the through-hole
+    repair counts as a normal repair iteration)."""
+    pocket_stl = str(tmp_path / "pocket.stl")
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    _box_minus_cylinder(blind=False).export(through_stl)
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        if "REPAIR directive" in text:
+            return _through_box_llm(_through_box_scad_source())
+        return _through_box_llm(_through_box_scad_source())
+
+    calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        calls["n"] += 1
+        stl = pocket_stl if calls["n"] == 1 else through_stl
+        return _render_with_stl(stl)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 20.0, 8000.0),
+        request="drill a 6 mm hole through the middle",
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None
+
+
+def test_through_hole_baseline_comparison(tmp_path):
+    """Issue #386 (operator decision 2026-10-05): the baseline
+    comparison — a part whose stored hole count is 1 (baseline 1): a
+    pocket render (genus 0) does not exceed it (fires, geometrically_
+    wrong); a through render (genus 1) does NOT exceed it either
+    (EXCEED is strict — a single hole on a one-hole part still fires).
+    The baseline comes from the explicit ``through_baseline_genus``
+    seam (the route's part-report reader, not re-parsed here)."""
+    pocket_stl = str(tmp_path / "pocket.stl")
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    _box_minus_cylinder(blind=False).export(through_stl)
+    req = "drill a 6 mm hole through the middle"
+    # baseline 1, pocket genus 0 → 0 < 1, fires.
+    result = _run_through_loop(pocket_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    # baseline 1, through genus 1 → 1 does NOT exceed 1, fires.
+    result = _run_through_loop(through_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    # baseline 0, through genus 1 → 1 exceeds 0, passes.
+    result = _run_through_loop(through_stl, req, through_baseline_genus=0)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
 
 
 # ---------------------------------------------------------------------------
