@@ -322,7 +322,7 @@ def parse_and_repair(
     # ONE split serves both the bodies count and the genus.
     merged.merge_vertices()
     merged.update_faces(merged.nondegenerate_faces())
-    components = merged.split(only_watertight=False)
+    components = merged.split(only_watertight=False, repair=False)
     watertight_bodies = [c for c in components if c.is_watertight]
     bodies_before = len(watertight_bodies)
     if len(merged.faces) == 0:
@@ -392,7 +392,7 @@ def parse_and_repair(
     # Recount bodies on the stored (post-repair) mesh.
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
-    comps = repaired.split(only_watertight=False)
+    comps = repaired.split(only_watertight=False, repair=False)
     watertight = [c for c in comps if c.is_watertight]
     bodies = len(watertight)
     gaps_after = _boundary_loops(repaired)
