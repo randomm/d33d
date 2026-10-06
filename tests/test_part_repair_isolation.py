@@ -480,17 +480,17 @@ def test_dead_child_exits_without_reply_maps_quickly(monkeypatch):
     mapped to ``PartUploadError`` FAST — in under 5 s, NOT after the full
     ``timeout`` budget.
 
-    This is the ``is_alive()`` / recv-EOF early-exit in ``_run_in_worker``:
-    when ``poll(timeout)`` returns False but the child is already dead, the
-    drained pipe's ``recv`` returns EOF immediately (an ``EOFError``) and is
-    surfaced as the 422 ``PartUploadError`` — the parent does NOT wait for
-    the (arbitrarily large) timeout to expire first.
+    This is the ``is_alive()`` early-exit in ``_run_in_worker``: a dead
+    child (the stub calls ``os._exit(1)``) is detected within ~100 ms by
+    the short-interval poll loop, and the parent raises ``PartUploadError``
+    immediately — it does NOT wait for the (arbitrarily large) timeout to
+    expire first.
 
     The test points the real repair seam at a no-op worker AND overrides the
-    process with ``_DeadWorkerProcess`` (which exits without sending). The
-    30 s ``timeout`` budget is intentionally large: if the fast path were
-    broken, the call would hang until the budget expired. The < 5 s
-    assertion proves the fast path fired.
+    process with ``_DeadWorkerProcess`` (which calls ``os._exit(1)``
+    without sending a reply). The ``timeout=120`` budget is the production
+    default: if the fast path were broken, the call would wait out the full
+    120 s budget. The < 5 s assertion proves the fast path fired.
     """
     import d33d.part_repair as part_repair_mod
     from d33d.part_errors import PartUploadError
@@ -509,16 +509,24 @@ def test_dead_child_exits_without_reply_maps_quickly(monkeypatch):
     box = _box_mesh()
     t0 = time.monotonic()
     with pytest.raises(PartUploadError) as excinfo:
-        repair_with_pmf(box, timeout=30)  # 30 s budget; must NOT be waited out
+        # timeout=120 is the production default (REPAIR_TIMEOUT_SECONDS).
+        # If the dead-child fast path were broken, this call would wait out
+        # the full 120 s budget — the < 5 s assertion proves the fast path
+        # fired instead.
+        repair_with_pmf(box, timeout=120)
     elapsed = time.monotonic() - t0
 
-    # Fast: the dead child is detected without waiting the 30 s budget.
+    # Fast: the dead child is detected without waiting the 120 s budget.
     assert elapsed < 5.0, (
         f"dead child was not detected quickly: {elapsed:.2f}s elapsed "
-        f"(expected < 5s via the is_alive()/recv-EOF early-exit)"
+        f"(expected < 5s via the is_alive() early-exit)"
     )
     # Mapped to PartUploadError (the 422 signal), not a raw crash or timeout.
     assert isinstance(excinfo.value, PartUploadError)
+    # The error message identifies the dead child, not a generic failure.
+    assert "exited without" in str(excinfo.value).lower(), (
+        f"error message does not name the dead child: {excinfo.value}"
+    )
     # The child was cleaned up (no zombie/orphan left behind).
     import multiprocessing as _mp
 
