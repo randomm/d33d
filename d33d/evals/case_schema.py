@@ -379,11 +379,11 @@ def seed_mix_actual(cases: dict[str, GoldenCase]) -> dict[str, int]:
 
 
 def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> list[str]:
-    from d33d.evals.fixtures import check_fixture_containment
     """Check the seed against :data:`SEED_MIX`; return a list of violations.
 
-    Empty list means the seed is valid: the on-disk total is exactly 23 (the
-    20-case seed plus the 3 imported-part cases of issue #340),
+    Empty list means the seed is valid: the on-disk total is exactly 24 (the
+    20-case seed plus the 3 imported-part cases of issue #340 plus the
+    box+through-hole case of issue #386),
     exactly the pinned count per kind, every red-region edit has a
     baseline + selection polygons (gate 7 denominator), every adversarial
     case scores against an outcome class, every imported-part case pins a
@@ -393,9 +393,11 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
 
     The baseline (``is_baseline``) is the 6th primitive within the
     20-case seed — part of the set, not a 21st case. The per-kind mix is
-    therefore counted over the full set, and ``SEED_MIX`` sums to 23
-    (the 20-case seed plus the 3 imported-part cases of issue #340).
+    therefore counted over the full set, and ``SEED_MIX`` sums to 24
+    (the 20-case seed plus the 3 imported-part cases of issue #340 plus
+    the box+through-hole case of issue #386).
     """
+    from d33d.evals.fixtures import check_fixture_containment
     violations: list[str] = []
 
     mix = seed_mix_actual(cases)

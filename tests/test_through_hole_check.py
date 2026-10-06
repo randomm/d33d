@@ -14,10 +14,8 @@ real tiny STLs built with trimesh in ``tmp_path``).
 from __future__ import annotations
 
 import trimesh
-import pytest
 
 from d33d.through_hole_check import is_through_request, through_hole_check
-
 
 # ---------------------------------------------------------------------------
 # The trigger word set

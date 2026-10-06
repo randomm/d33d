@@ -112,7 +112,7 @@ def _rendered_genus(stl: str) -> int | None:
         return None
     try:
         components = _load_and_split(stl)
-    except Exception:
+    except (OSError, ValueError, RuntimeError):
         logger.info("through-hole check abstained: STL %r unreadable", stl)
         return None
     if not components:
@@ -132,7 +132,7 @@ def _rendered_genus(stl: str) -> int | None:
         # from ``components``, so any component is a valid merged-mesh
         # stand-in (the split pieces share the merged mesh's vertices).
         return mesh_topology(merged=components[0], components=components)["genus"]
-    except Exception:
+    except (OSError, ValueError, RuntimeError):
         logger.info("through-hole check abstained: topology measurement failed for %r", stl)
         return None
 
