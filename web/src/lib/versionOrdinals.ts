@@ -41,7 +41,8 @@ export function exportLabel(
   versionId: number,
   name?: string | null,
 ): string {
-  if (name) return name;
+  const trimmed = name?.trim();
+  if (trimmed) return trimmed;
   const ordinal = versionOrdinals(versions).get(versionId);
   return ordinal !== undefined ? `v${ordinal}` : "current";
 }

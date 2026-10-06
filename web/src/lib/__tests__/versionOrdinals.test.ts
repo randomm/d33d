@@ -88,6 +88,11 @@ describe("exportLabel (lib/versionOrdinals.ts)", () => {
     expect(exportLabel(versions, 8, "")).toBe("v2");
   });
 
+  it("a whitespace-only name → v{n} (whitespace is not a name)", () => {
+    const versions = [entry(4, "a"), entry(8, "   ")];
+    expect(exportLabel(versions, 8, "   ")).toBe("v2");
+  });
+
   it("a null name → v{n} (a version in the list with no stored name)", () => {
     const versions = [entry(4, "a"), entry(8, "")];
     expect(exportLabel(versions, 8, null)).toBe("v2");

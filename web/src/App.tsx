@@ -1578,12 +1578,7 @@ export default function App({ client }: AppProps) {
   const handleExported = useCallback(
     async (versionId: number | undefined) => {
       if (projectId === null || versionId === undefined) return;
-      // Issue #387 (operator decision 1): the completion turn names the file
-      // from the same timeline ordinal every other label uses — the shared
-      // helper's map, never the DB row id. A stale id (not in the loaded list)
-      // names the file "current"; a nameless id that is in the list gets its
-      // ordinal — so the turn and the file on disk agree, and the turn is
-      // never silently dropped.
+      // Issue #387: name the file via the shared timeline-ordinal helper, never the DB id.
       const version = versions.find((v) => v.id === versionId);
       const versionLabel = exportLabel(versions, versionId, version?.name);
       const filename = copy.shell.exportFilename(projectName, versionLabel);
