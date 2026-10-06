@@ -35,27 +35,6 @@ import trimesh
 logger = logging.getLogger(__name__)
 
 
-def _snap_axis(axis: np.ndarray, tol_deg: float = 5.0) -> list[float]:
-    """Snap a unit axis vector to the nearest of X, Y, or Z if within
-    ``tol_deg`` degrees; otherwise return the raw unit vector.
-
-    Returns the axis as a list of 3 floats (unit length). Local to this
-    module (the section measurement is the only user — the open-hole
-    path keeps its own copy in :mod:`d33d.part_holes`).
-    """
-    axis = np.asarray(axis, dtype=float)
-    norm = np.linalg.norm(axis)
-    if norm < 1e-10:
-        return [1.0, 0.0, 0.0]
-    axis = axis / norm
-    for cardinal in ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]):
-        dot = abs(float(np.dot(axis, cardinal)))
-        if dot >= math.cos(math.radians(tol_deg)):
-            sign = 1.0 if dot > 0 else -1.0
-            return [sign * c if c != 0 else 0.0 for c in cardinal]
-    return [float(v) for v in axis]
-
-
 def _section_interior_rings(
     body: trimesh.Trimesh,
     axis_index: int,
@@ -96,7 +75,12 @@ def _section_interior_rings(
     origin = centroid.copy()
     origin[axis_index] = mid
     planar = body.section(plane_normal=normal, plane_origin=origin)
-    flat, _transform = planar.to_2D()
+    if planar is None:
+        # A degenerate mesh (a section trimesh cannot build) is a
+        # geometric failure — yield an empty list (no holes on this
+        # axis), never a crash.
+        return []
+    flat, tf = planar.to_2D()
     polygons = [p for p in flat.polygons_closed if abs(p.area) > 1e-12]
     if not polygons:
         return []
@@ -107,9 +91,9 @@ def _section_interior_rings(
     # the 3D point ``origin + u * col0 + v * col1`` (the two in-plane
     # components are the body-frame coordinates on the two non-slice
     # axes).
-    _transform = np.asarray(_transform, dtype=float)
-    col0 = _transform[:3, 0]
-    col1 = _transform[:3, 1]
+    tf = np.asarray(tf, dtype=float)
+    col0 = tf[:3, 0]
+    col1 = tf[:3, 1]
     or3 = np.asarray(origin, dtype=float)
     slots = [i for i in range(3) if i != axis_index]
     # The largest-area contour is the outer face outline; every other
@@ -145,6 +129,11 @@ def measure_genus_holes(
     section) degrade per-axis to "no holes on this axis" — the body
     simply yields no measured holes.
     """
+    # DRY: ``_snap_axis`` is defined in ``d33d.part_holes`` (the
+    # open-hole path uses it too). The import is local to avoid a
+    # circular import (``part_holes`` imports ``measure_genus_holes``
+    # from this module at the module level).
+    from d33d.part_holes import _snap_axis as _snap_axis_fn
     try:
         genus = (2 - int(body.euler_number)) // 2
     except (TypeError, ValueError):
@@ -198,7 +187,7 @@ def measure_genus_holes(
         holes.append(
             {
                 "center": center,
-                "axis": _snap_axis(axis),
+                "axis": _snap_axis_fn(axis),
                 "diameter_mm": float(diameter),
             }
         )

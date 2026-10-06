@@ -1351,3 +1351,112 @@ def test_design_loop_deadline_row_carries_last_scad_from_frames(
     # frame carrying ``scad_source`` — the row's ``output_scad`` is
     # the honest absence (""), never a fabricated placeholder.
     assert ev.output_scad == ""
+
+
+def test_design_loop_deadline_archive_sees_asyncio_wait_frames(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #396 lens fix: a frame carrying ``scad_source`` that arrives
+    through the ``asyncio.wait`` branch (queued while the render task was
+    still running, consumed via the await rather than the
+    ``get_nowait`` path) MUST reach the deadline archive.
+
+    The old implementation only recorded frames taken from the
+    ``get_nowait`` branch into ``_emitted_frames`` — a frame delivered
+    through the ``asyncio.wait`` path was yielded to the client but never
+    recorded, so the archive's ``output_scad`` could hold stale or empty
+    SCAD. The fix tracks the LAST ``scad_source`` across BOTH paths."""
+    import asyncio as _asyncio
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 1.0
+    )
+
+    SCAD = "W = 40; cube([W, 40, 20]);\n"
+
+    # Capture the adapter's internal _frame_queue instance by wrapping
+    # asyncio.Queue in the design_loop_events module namespace.
+    _captured_queues: list[_asyncio.Queue] = []
+    _original_queue_cls = _asyncio.Queue
+
+    class _SpyQueue(_original_queue_cls):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            _captured_queues.append(self)
+
+    monkeypatch.setattr("d33d.design_loop_events.asyncio.Queue", _SpyQueue)
+
+    class _StallLoop:
+        """A stall that enqueues a progress frame carrying
+        ``scad_source`` shortly after start. The frame is injected
+        directly on the captured queue AFTER the adapter's first
+        ``get_nowait`` has drained (it will be empty on the first
+        iteration), so the frame is consumed through the
+        ``asyncio.wait`` path — the exact path the bug affected."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                kwargs["model"] = "model-x"
+                # Sleep long enough for the adapter to have started its
+                # wait loop and taken an empty ``get_nowait``.
+                await _asyncio.sleep(0.3)
+                # The adapter is now in ``asyncio.wait``; inject the
+                # frame directly on the queue. Because it arrives while
+                # ``asyncio.wait`` is parked, it is yielded via that
+                # path (not ``get_nowait``).
+                if _captured_queues:
+                    _captured_queues[-1].put_nowait(
+                        ("progress", {"step": "scad-ready", "scad_source": SCAD})
+                    )
+                await _asyncio.sleep(10)
+
+            return _stall()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "test project"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        app.state.run_design_loop = _StallLoop()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = _drive_stream(app, _call)
+    assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    assert frames[-1][1].get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+    # The scad frame must have been yielded to the client too.
+    scad_frames = [d for e, d in frames if d.get("scad_source") == SCAD]
+    assert scad_frames, "scad_source frame was never yielded to the client"
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    # The frame arrived through the ``asyncio.wait`` path and must be in
+    # the archive row — this is the bug the lens fix addresses.
+    assert ev.output_scad == SCAD, (
+        f"expected the asyncio.wait-path scad_source in the archive row, "
+        f"got {ev.output_scad!r}"
+    )

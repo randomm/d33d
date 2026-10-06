@@ -72,24 +72,35 @@ def select_measured_hole(
     )
 
     # Rule 2: "center hole" — nearest to the XY bbox centre (mm).
-    if has_center_qualifier and bbox_mm is not None and len(bbox_mm) >= 2:
-        cx = float(bbox_mm[0]) / 2.0
-        cy = float(bbox_mm[1]) / 2.0
-        dists: list[tuple[float, dict[str, Any]]] = []
-        for h in holes:
-            c = h.get("center")
-            if not c or len(c) < 2:
-                continue
-            d = math.hypot(float(c[0]) - cx, float(c[1]) - cy)
-            dists.append((d, h))
-        if dists:
-            dists.sort(key=lambda x: x[0])
-            # Two nearest candidates within the ambiguity band → the
-            # pick is not defensible; fall back to point-at.
-            if len(dists) > 1 and dists[1][0] - dists[0][0] < _AMBIGUITY_MM:
-                return None
-            return dists[0][1]
-        # No hole had a usable centre → fall through (point-at).
+    # When a center qualifier is present, the center rule is the ONLY
+    # rule that applies: if it cannot run (no usable bbox, or no hole
+    # has a usable centre), the result is ``None`` (the point-at
+    # fallback) — it must NOT silently switch to diameter matching
+    # (a center qualifier that falls through to diameter matching
+    # would pick a hole the user did not ask for).
+    if has_center_qualifier:
+        if bbox_mm is not None and len(bbox_mm) >= 2:
+            cx = float(bbox_mm[0]) / 2.0
+            cy = float(bbox_mm[1]) / 2.0
+            dists: list[tuple[float, dict[str, Any]]] = []
+            for h in holes:
+                c = h.get("center")
+                if not c or len(c) < 2:
+                    continue
+                d = math.hypot(float(c[0]) - cx, float(c[1]) - cy)
+                dists.append((d, h))
+            if dists:
+                dists.sort(key=lambda x: x[0])
+                # Two nearest candidates within the ambiguity band → the
+                # pick is not defensible; fall back to point-at.
+                if len(dists) > 1 and dists[1][0] - dists[0][0] < _AMBIGUITY_MM:
+                    return None
+                return dists[0][1]
+        # No usable bbox or no hole had a usable centre → the center
+        # rule cannot run; return None (point-at fallback), NOT the
+        # diameter branch (the user asked for "the center hole",
+        # not "the hole of this diameter").
+        return None
 
     # Rule 3: no centre qualifier but a stated diameter — the CLOSEST
     # diameter (a unique minimum within the ambiguity band).
@@ -187,14 +198,14 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
     ``report`` is the stored part report (``None`` / no ``holes`` key /
     a malformed entry → the hole is simply omitted — omit-not-null,
     mirroring the import). ``scale`` is the part's ``part_scale``
-    (``None`` or non-positive → the list is returned UNCONVERTED —
-    callers treat that as "no measured holes" the same way they treat
-    an empty list; the import always stores a positive scale for a
-    usable part, so this only fires for corrupt rows).
+    (``None`` / non-numeric / ``<= 0`` → ``[]`` — no measured holes,
+    never file units: a missing or corrupt scale means the holes are in
+    unknown units, and reporting them as mm would be a lie).
 
     Returns a NEW list of ``{"center": [x, y, z], "axis": [x, y, z],
     "diameter_mm": d}`` dicts in mm (the axis is unit — unchanged by
-    the scale).
+    the scale). ``[]`` when the scale is missing, non-numeric, or
+    non-positive (never file units).
     """
     holes: list[dict[str, Any]] = []
     if not isinstance(report, dict):
@@ -207,7 +218,10 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
     except (TypeError, ValueError):
         factor = 0.0
     if factor <= 0:
-        factor = 1.0
+        # A missing, non-numeric, or non-positive scale means the holes
+        # are in unknown units — returning them unscaled would report
+        # file-unit values as mm (a lie). No measured holes instead.
+        return holes
     for entry in stored:
         if not isinstance(entry, dict):
             continue

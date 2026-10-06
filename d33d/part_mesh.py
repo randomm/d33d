@@ -419,15 +419,33 @@ def parse_and_repair(
     # measurement is an optional enrichment, and the import must never
     # fail because a hole was hard to measure (the ``never fail the
     # import`` contract). Any exception class — ``RuntimeError`` from a
-    # trimesh/numpy C path, ``ImportError`` when the optional geometry
-    # deps are absent, ``MemoryError`` on a huge body — is logged with a
-    # full traceback and the holes list is simply omitted (a bare narrow
-    # except would let the other classes propagate out of
+    # trimesh/numpy C path, ``MemoryError`` on a huge body — is logged
+    # with a full traceback and the holes list is simply omitted (a bare
+    # narrow except would let the other classes propagate out of
     # ``parse_and_repair`` and fail the upload).
+    #
+    # Issue #396 lens fix: a missing ``scipy`` or ``shapely`` (the hard
+    # runtime dependencies for ``trimesh.Trimesh.section``) is a
+    # DEPLOYMENT ERROR, not a geometric failure — it must FAIL LOUDLY
+    # (propagate the ``ImportError`` out of ``parse_and_repair``), not
+    # silently omit the holes list. The ``except ImportError: raise``
+    # BEFORE the broad ``except Exception`` ensures a missing dependency
+    # is never swallowed; the broad guard still catches every other
+    # exception class so the import never fails for a geometric reason.
+    # (A missing scipy/shapely means the section cannot run at all —
+    # the upload fails loudly with an ``ImportError`` rather than
+    # silently omitting the holes list, which would mask the broken
+    # environment.)
     try:
         measured_holes = measure_holes(merged, components)
         if measured_holes:
             report["holes"] = measured_holes
+    except ImportError:
+        # A missing scipy or shapely is a deployment error, not a
+        # geometric failure — propagate loudly (the upload fails with
+        # an ``ImportError``; the operator sees the missing dependency
+        # rather than a silently-omitted holes list).
+        raise
     except Exception:
         logger.exception("hole measurement failed, omitting holes list")
 

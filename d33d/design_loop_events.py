@@ -2018,17 +2018,16 @@ async def run_design_loop_with_events(
                     # progress frame carrying ``scad_source``) — the
                     # stall has no result, so the best available
                     # candidate text is ``""`` when nothing rendered.
-                    output_scad = ""
-                    for _ev, _data in reversed(_emitted_frames):
-                        # Only ``scad_source`` counts (issue #396, round 2):
-                        # a token frame's ``text`` is PROSE (the LLM's
-                        # answer narration), not SCAD — archiving it as
-                        # ``output_scad`` would store a sentence where the
-                        # archive expects a source.
-                        _scad = _data.get("scad_source")
-                        if isinstance(_scad, str) and _scad:
-                            output_scad = _scad
-                            break
+                    # Issue #396 lens fix: track a single
+                    # ``_last_scad_source`` variable updated wherever
+                    # ANY frame with a truthy ``scad_source`` is
+                    # yielded — on BOTH the ``get_nowait`` and
+                    # ``asyncio.wait`` paths — replacing the unbounded
+                    # ``_emitted_frames`` list that only recorded the
+                    # ``get_nowait`` branch (frames from the
+                    # ``asyncio.wait`` branch were never recorded, so
+                    # the archive could hold stale or empty SCAD).
+                    output_scad = _last_scad_source
                     record_production_failure(
                         design_result=_DeadlinedLoopResult(scad=output_scad),
                         photo=photo,
@@ -2046,7 +2045,7 @@ async def run_design_loop_with_events(
                         project_id,
                     )
 
-            _emitted_frames: list[tuple[str, dict[str, Any]]] = []
+            _last_scad_source: str = ""
             _deadline = _loop.time() + DESIGN_LOOP_TIMEOUT_SECONDS
             while True:
                 if render_task.done():
@@ -2056,7 +2055,9 @@ async def run_design_loop_with_events(
                 except asyncio.QueueEmpty:
                     _f = None
                 if _f is not None:
-                    _emitted_frames.append(_f)
+                    _scad = _f[1].get("scad_source")
+                    if isinstance(_scad, str) and _scad:
+                        _last_scad_source = _scad
                     yield _f
                     continue
                 _remaining = _deadline - _loop.time()
@@ -2127,6 +2128,9 @@ async def run_design_loop_with_events(
                         # Sentinel: the render finished (the drain thread
                         # enqueued the ``None`` before the loop exited).
                         break
+                    _scad = _f[1].get("scad_source")
+                    if isinstance(_scad, str) and _scad:
+                        _last_scad_source = _scad
                     yield _f
                     continue
                 _get_task.cancel()
@@ -2147,6 +2151,9 @@ async def run_design_loop_with_events(
                 if _f is None:
                     # Sentinel: stop the drain, take the result.
                     break
+                _scad = _f[1].get("scad_source")
+                if isinstance(_scad, str) and _scad:
+                    _last_scad_source = _scad
                 yield _f
             result = render_task.result()
         else:

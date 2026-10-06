@@ -2997,3 +2997,129 @@ def test_offer_cm_part_selects_center_hole_and_reports_mm(app_with_projects) -> 
     assert offer.get("diameter_mm") == 30.0, (
         f"diameter must be 30.0 mm (3.0 file units × scale 10), got {offer.get('diameter_mm')}"
     )
+
+
+def test_fill_recut_turn_corrupt_scale_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a non-numeric ``part_scale`` in the stored
+    row must not 500 the fill-recut turn. The scale guard in
+    ``fill_recut_turn`` treats non-numeric values as unavailable (``bbox_mm
+    = None``), and the chat route's pre-fetch guard catches any exception
+    from ``part_public`` / ``holes_in_mm`` and degrades to ``holes=None``."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CorruptScale"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # Set a non-numeric scale (stored as a string in the column).
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale='abc', "
+            "part_report=? WHERE id=?",
+            (
+                json.dumps({
+                    "hole_count": 1,
+                    "holes": [
+                        {"center": [1.0, 2.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                    ],
+                    "bbox_file_units": [10.0, 5.0, 2.0],
+                }),
+                pid,
+            ),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 30 mm"}
+        )
+        return r2.status_code
+
+    status = _run_async(app_with_projects, _call)
+    # The route must NOT 500 — a corrupt scale degrades to no holes.
+    assert status != 500, (
+        f"a corrupt part_scale must not 500 the chat route; got {status}"
+    )
+
+
+def test_chat_route_corrupt_part_report_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a corrupt ``part_report`` blob (invalid JSON
+    that somehow bypassed the ``_loads_or_none`` guard, or an unexpected
+    ``part_public`` exception) must not 500 the chat route. The pre-fetch
+    guard in ``d33d.chat_loop`` wraps the ``part_public`` / ``holes_in_mm``
+    call in a broad ``except Exception`` that degrades to ``holes=None``."""
+    import d33d.hole_select as hole_select_mod
+
+    original_holes_in_mm = hole_select_mod.holes_in_mm
+
+    def _boom_holes(report, scale):
+        raise RuntimeError("simulated holes_in_mm failure")
+
+    hole_select_mod.holes_in_mm = _boom_holes
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "CorruptReport"})
+            pid = r.json()["id"]
+            conn = app_with_projects.state.conn
+            conn.raw.execute(
+                "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+                "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+                "part_report=? WHERE id=?",
+                (json.dumps({"hole_count": 1}), pid),
+            )
+            conn.commit()
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "what size is the hole?"}
+            )
+            return r2.status_code
+
+        status = _run_async(app_with_projects, _call)
+    finally:
+        hole_select_mod.holes_in_mm = original_holes_in_mm
+
+    # The route must NOT 500 — the pre-fetch guard catches the exception.
+    assert status != 500, (
+        f"a corrupt part_report must not 500 the chat route; got {status}"
+    )
+
+
+def test_import_omits_holes_when_scipy_import_error(app_with_projects):
+    """Issue #396 lens fix: a missing ``scipy`` or ``shapely`` dependency
+    must FAIL LOUDLY (propagate ``ImportError`` out of ``parse_and_repair``),
+    NOT silently omit the holes list. The ``except ImportError: raise``
+    before the broad ``except Exception`` in ``part_mesh.parse_and_repair``
+    ensures a deployment error is never swallowed.
+
+    The upload must return an error (500 or 422) — NOT 201 with a
+    silently-omitted holes list."""
+    from pathlib import Path
+
+    import d33d.part_mesh as part_mesh_mod
+
+    fixture = Path(__file__).parent / "fixtures" / "stl" / "holey.stl"
+    data = fixture.read_bytes()
+
+    original = part_mesh_mod.measure_holes
+
+    def _import_error(merged, components):
+        raise ImportError("No module named 'scipy'")
+
+    part_mesh_mod.measure_holes = _import_error
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "ImportErrorTest"})
+            pid = r.json()["id"]
+            files = {"file": ("holey.stl", data, "model/stl")}
+            return await client.post(f"/api/projects/{pid}/part", files=files)
+
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.measure_holes = original
+
+    # A missing scipy/shapely must NOT silently omit the holes list —
+    # the upload must fail loudly (422 or 500) rather than return 201
+    # with a silently-omitted holes list. The route maps unexpected
+    # decode errors to 422 (``PartUploadError`` is 422; an unexpected
+    # ``ImportError`` is caught by the broad handler and mapped to 422
+    # with a generic message — the key point is it does NOT return 201).
+    assert r.status_code in (422, 500), (
+        f"a missing scipy/shapely must fail loudly (422 or 500), not "
+        f"silently omit the holes list (201); got {r.status_code}: {r.text}"
+    )

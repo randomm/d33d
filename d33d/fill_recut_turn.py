@@ -154,13 +154,26 @@ def fill_recut_turn(
                     bbox_mm: list[float] | None = None
                     if isinstance(report, dict):
                         bbox_fu = report.get("bbox_file_units")
+                        # Guard the scale and bbox arithmetic against
+                        # non-numeric stored values (issue #396 lens
+                        # fix): treat them as unavailable rather than
+                        # letting a corrupt row 500 the chat route.
+                        try:
+                            scale_f = float(scale) if scale is not None else 0.0
+                        except (TypeError, ValueError):
+                            scale_f = 0.0
                         if (
                             isinstance(bbox_fu, (list, tuple))
                             and len(bbox_fu) >= 2
-                            and scale is not None
-                            and scale > 0
+                            and scale_f > 0
                         ):
-                            bbox_mm = [float(v) * float(scale) for v in bbox_fu[:2]]
+                            try:
+                                bbox_mm = [
+                                    float(bbox_fu[0]) * scale_f,
+                                    float(bbox_fu[1]) * scale_f,
+                                ]
+                            except (TypeError, ValueError):
+                                bbox_mm = None
                     if holes:
                         selected = select_measured_hole(
                             holes, message, bbox_mm,
