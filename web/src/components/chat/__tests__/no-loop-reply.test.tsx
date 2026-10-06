@@ -676,10 +676,26 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(screen.getByTestId("queued-resend-btn")).toBeTruthy();
     // The queued text is still in the transcript (the message did NOT
     // vanish).
-    const failedTurn = screen
-      .getAllByTestId("chat-msg-user")
-      .find((el) => el.textContent?.includes("make it taller"));
-    expect(failedTurn).toBeTruthy();
+    expect(
+      screen
+        .getAllByTestId("chat-msg-user")
+        .some((el) => el.textContent?.includes("make it taller")),
+    ).toBe(true);
+
+    // Lens round 1 — exactly ONE failure affordance for the FLUSH failure:
+    // App's own postChat-failure UI (the "Error: …" bubble + the generic
+    // "The request could not be sent" failure turn) is suppressed for a
+    // flush send — the failed queued turn IS the single failure surface
+    // for the flush. (The in-flight run's own failure card from the
+    // stream's error frame is a separate, pre-existing failure — it
+    // renders "Try again" for the in-flight message, which is correct.)
+    // What must NOT appear for a flush failure: the raw "Error: 409
+    // Conflict" bubble (App's placeholder rewrite) and the generic
+    // "The request could not be sent" card (App's non-flush failure turn).
+    expect(screen.queryByText("Error: 409 Conflict")).toBeNull();
+    expect(
+      screen.queryByText("The request could not be sent. The design did not start — you can retry."),
+    ).toBeNull();
 
     // Clicking resend posts the message once through the normal send
     // path (the failed turn is removed, the message re-enters the queue

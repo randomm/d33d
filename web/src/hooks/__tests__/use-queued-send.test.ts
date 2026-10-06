@@ -153,7 +153,7 @@ describe("useQueuedSend", () => {
       expect(args.continueSend).toHaveBeenCalledTimes(1);
     });
 
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, { isFlush: true });
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });
@@ -181,7 +181,7 @@ describe("useQueuedSend", () => {
       expect(args.continueSend).toHaveBeenCalledTimes(1);
     });
 
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, { isFlush: true });
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });
@@ -239,7 +239,7 @@ describe("useQueuedSend", () => {
     expect(args.clearPendingSelection).toHaveBeenCalledTimes(1);
     // The queued message was STILL flushed (not silently dropped) — as a
     // plain chat message (no selection attached).
-    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm");
+    expect(args.continueSend).toHaveBeenCalledWith("make it 40 mm", undefined, { isFlush: true });
     expect(result.current.queuedText).toBeNull();
     expect(messages().filter((m) => m.queued)).toHaveLength(0);
   });

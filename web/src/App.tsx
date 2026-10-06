@@ -1012,7 +1012,7 @@ export default function App({ client }: AppProps) {
   // authoritative when present. The request calls close over the settled id
   // in every case, never a stale `null`.
   const continueSend = useCallback(
-    async (text: string, projectIdOverride?: number) => {
+    async (text: string, projectIdOverride?: number, options?: { isFlush?: boolean }) => {
       const effectiveProjectId = projectIdOverride ?? projectId;
       if (effectiveProjectId === null) return;
 
@@ -1478,9 +1478,15 @@ export default function App({ client }: AppProps) {
         })
         .catch((e) => {
           // postChat failed (404, 409, 422, network error) — the design
-          // loop did not start. Show the error and re-enable the send
-          // button.
+          // loop did not start.
           const detail = e instanceof Error ? e.message : "unknown error";
+          // Issue #388 (lens round 1): a flush's rejection renders no
+          // App-side failure UI — the hook's failed queued turn is the
+          // single affordance. Remove the placeholder; re-throw for the hook.
+          if (options?.isFlush) {
+            setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+            throw e;
+          }
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantId ? { ...m, streaming: false, content: `Error: ${detail}` } : m,
@@ -1501,11 +1507,8 @@ export default function App({ client }: AppProps) {
                 } },
             ];
           });
-          // Re-throw so the caller (the queue hook's flush) can catch the
-          // rejection and restore the queued message as a failed turn
-          // (issue #388, lens finding 1: a failed flush must not lose the
-          // message). The UI is already handled above — the re-throw is
-          // a signal, not a new error.
+          // Re-throw so the hook's flush can catch the rejection and
+          // restore the queued message (lens finding 1); the UI is handled.
           throw e;
         })
         .finally(() => {

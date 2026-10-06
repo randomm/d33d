@@ -55,7 +55,7 @@ export interface UseQueuedSendArgs {
    *  network error) — the hook's flush catches that rejection and
    *  restores the queued message as a failed turn (issue #388, lens
    *  finding 1: a failed flush must not lose the message). */
-  continueSend: (text: string, projectIdOverride?: number) => Promise<void>;
+  continueSend: (text: string, projectIdOverride?: number, options?: { isFlush?: boolean }) => Promise<void>;
   /** The narrow Retry-memory seam (issue #388): the hook calls this ONLY
    *  on non-flush sends — a flush re-send must not clobber the in-flight
    *  run's message (the Retry control retries the in-flight run's
@@ -200,17 +200,15 @@ export function useQueuedSend({
     queuedTurnIdRef.current = null;
     setQueuedText(null);
     setMessages((prev) => removeQueuedTurn(prev, idToRemove));
-    // The flush re-enters the send path; continueSend returns a promise
-    // (the postChat chain) or void (fire-and-forget). The flush catches a
-    // rejection (a 409, a network error) to restore the queued message as
-    // a failed turn (issue #388, lens finding 1: a failed flush must not
-    // lose the message).
-    const result = continueSendRef.current(queuedText);
-    void result.catch((e: unknown) => {
-      // The flushed send REJECTED (module doc §5): restore the message
-      // as a failed queued turn — reason + resend action (the resend
-      // goes through the normal send path, never a re-flush). The slot
-      // is NOT re-armed: no auto-retry on a later terminal signal.
+    // `isFlush` marks the call so App's .catch handles the failure UI
+    // (removes the placeholder, no failure turn — the hook's failed
+    // queued turn is the single failure affordance; lens round 1).
+    // The hook's .catch below restores the queued message as a failed
+    // turn (lens finding 1: a failed flush must not lose the message).
+    void continueSendRef.current(queuedText, undefined, { isFlush: true }).catch((e: unknown) => {
+      // The flushed send REJECTED: restore the message as a failed
+      // queued turn — reason + resend (normal send path, never a
+      // re-flush). No auto-retry on a later terminal signal.
       const detail = e instanceof Error ? e.message : "unknown error";
       const qid = nextMsgId("queued");
       queuedTurnIdRef.current = qid;
@@ -229,9 +227,6 @@ export function useQueuedSend({
             retryable: true,
           },
           onResendQueued: () => {
-            // Resend = a NORMAL send of the same text (clears the failed
-            // flag, remembers the message for Retry, goes through the
-            // queue-or-direct routing like any composer send).
             setMessages((p) => removeQueuedTurn(p, queuedTurnIdRef.current));
             queuedTurnIdRef.current = null;
             setQueuedText(null);
