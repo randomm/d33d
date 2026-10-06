@@ -48,6 +48,9 @@ interface ConversationPaneProps {
   /** The chat transcript. */
   messages: ChatMessage[];
   onSend: (text: string) => void;
+  /** Issue #388 (operator decision 2026-10-05): drop the queued turn
+   *  without sending it (routed to the queued turn's cancel control). */
+  onCancelQueued?: () => void;
   inFlight: boolean;
   onBesidePhoto: () => void;
   /** The build envelope for the failure turn's measured number. */
@@ -115,6 +118,7 @@ export function ConversationPane({
   projectId,
   messages,
   onSend,
+  onCancelQueued,
   inFlight,
   onBesidePhoto,
   envelope,
@@ -268,6 +272,7 @@ export function ConversationPane({
             <ChatPanel
               messages={messages}
               onSend={onSend}
+              onCancelQueued={onCancelQueued}
               inFlight={inFlight}
               onBesidePhoto={onBesidePhoto}
               envelope={envelope}

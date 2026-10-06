@@ -327,7 +327,7 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
         onCancel={vi.fn()}
         orbitingPin={false}
         orbitClearedPin={false}
-        submitDisabled
+        inFlight={true}
       />,
     );
     expect(screen.getByTestId("region-edit-apply-btn")).toBeDisabled();
@@ -345,7 +345,7 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
         onCancel={vi.fn()}
         orbitingPin={false}
         orbitClearedPin={false}
-        submitDisabled
+        inFlight={true}
       />,
     );
     const input = screen.getByTestId("region-edit-input");
@@ -353,7 +353,7 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("submit still works when not in flight (no submitDisabled)", () => {
+  it("submit still works when not in flight (no inFlight)", () => {
     const onSubmit = vi.fn();
     render(
       <RegionEditBar

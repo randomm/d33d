@@ -279,6 +279,11 @@ export const queued = {
   /** The pending caption under a queued user turn. One slot, one message: a
    *  second send REPLACES the queued text, this caption is unchanged. */
   caption: "I'll send this when the design finishes.",
+  /** The cancel control beside a queued user turn (issue #388, operator
+   *  decision 2026-10-05: the queued message can be cancelled). Cancelling
+   *  drops the queued turn from the transcript; when the run ends, nothing
+   *  is sent for it. */
+  cancel: "Cancel this message",
 } as const;
 
 export const progress = {

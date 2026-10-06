@@ -1681,6 +1681,20 @@ export default function App({ client }: AppProps) {
     continueSendRef.current(queuedText, undefined, true);
   }, [designLoopInFlight, runEndCount, queuedText]);
 
+  // Issue #388 (operator decision 2026-10-05): the queued message can be
+  // cancelled. The cancel control drops the queued turn from the transcript
+  // and clears the queue slot WITHOUT sending — when the run's terminal
+  // frame arrives, the flush effect sees an empty queue and posts nothing.
+  // A fresh queue slot (a new turn, a new id) is the next composer send.
+  const cancelQueuedMessage = useCallback(() => {
+    if (queuedText === null) return;
+    flushedRef.current = false;
+    setQueuedText(null);
+    const idToRemove = queuedTurnIdRef.current;
+    queuedTurnIdRef.current = null;
+    setMessages((prev) => prev.filter((m) => !m.queued && m.id !== idToRemove));
+  }, [queuedText]);
+
   // The inline bar's submit path — routes the typed instruction through the
   // SAME handleSendMessage the chat panel uses, so the pending selection is
   // attached and createRegionEdit fires exactly once, with the same
@@ -2069,6 +2083,7 @@ export default function App({ client }: AppProps) {
           projectId={projectId}
           messages={messages}
           onSend={handleSendMessage}
+          onCancelQueued={cancelQueuedMessage}
           inFlight={designLoopInFlight}
           onBesidePhoto={handleBesidePhoto}
           envelope={envelope}

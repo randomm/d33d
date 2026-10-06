@@ -91,6 +91,9 @@ export interface ChatMessage {
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSend: (text: string) => void;
+  /** Issue #388 (operator decision 2026-10-05): drop the queued turn
+   *  without sending it. Absent (or a no-op) when nothing is queued. */
+  onCancelQueued?: () => void;
   /** True while a design loop is in flight — disables the send button. */
   inFlight?: boolean;
   /** The PassCard's enlarged-view close action (issue #125). */
@@ -116,6 +119,7 @@ interface ChatPanelProps {
 export function ChatPanel({
   messages,
   onSend,
+  onCancelQueued,
   inFlight,
   onBesidePhoto,
   envelope,
@@ -255,11 +259,32 @@ export function ChatPanel({
                 <span className="chat-msg-content">{msg.content}</span>
               )}
               {msg.queued && (
-                <span
-                  className="chat-msg-queued-caption"
-                  data-testid="queued-caption"
-                >
-                  {copy.queued.caption}
+                <span className="chat-msg-queued-actions">
+                  <span
+                    className="chat-msg-queued-caption"
+                    data-testid="queued-caption"
+                  >
+                    {copy.queued.caption}
+                  </span>
+                  <button
+                    type="button"
+                    className="chat-msg-queued-cancel"
+                    data-testid="queued-cancel-btn"
+                    aria-label={copy.queued.cancel}
+                    onClick={onCancelQueued}
+                    style={{
+                      marginLeft: 8,
+                      padding: "2px 8px",
+                      border: "1px solid var(--color-hairline)",
+                      borderRadius: 4,
+                      background: "transparent",
+                      color: "var(--color-fg-2)",
+                      cursor: "pointer",
+                      fontSize: 11,
+                    }}
+                  >
+                    {copy.queued.cancel}
+                  </button>
                 </span>
               )}
               {msg.selection && (

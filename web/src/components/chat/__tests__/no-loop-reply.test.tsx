@@ -520,4 +520,109 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
     expect(screen.queryByTestId("queued-caption")).toBeNull();
   });
+
+  it("a queued 'yes' after a run that replaced the pending offer is a plain fresh chat message — no offer id or token (issue #388, operator decision 2026-10-05: the queued message is routed fresh when the run ends)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // The run produced an offer (the offer the queued "yes" was meant for).
+    act(() => {
+      handlers.onProgress("offer", { step: "offer", message: "Should I use 12 mm wall thickness?" });
+    });
+
+    // Queue "yes" while the run is still in flight (offer A pending).
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "yes" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // The run ends — it replaced offer A (a newer version superseded it).
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued "yes" is flushed as a PLAIN fresh chat message: the POST
+    // body carries only `message` + `chat_history` — no offer id, token,
+    // or confirm field. The backend's own offer check (pending offers in
+    // versions / fill_recut / confirm_offer) decides whether it is an
+    // acceptance; the frontend does not pin it to the old offer.
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    const flushedBody = postChatMock.mock.calls[1][1];
+    expect(flushedBody.message).toBe("yes");
+    expect(flushedBody.offer_id).toBeUndefined();
+    expect(flushedBody.offer_token).toBeUndefined();
+    expect(flushedBody.confirm).toBeUndefined();
+    // It is a real user turn in the transcript (no queued caption).
+    const flushedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("yes"));
+    expect(flushedTurn).toBeTruthy();
+  });
+
+  it("a queued message can be cancelled — nothing is sent when the run ends (issue #388, operator decision 2026-10-05)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Cancel the queued message.
+    act(() => {
+      fireEvent.click(screen.getByTestId("queued-cancel-btn"));
+    });
+    // The queued turn (caption + text) is gone from the transcript.
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const queuedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it 40 mm"));
+    expect(queuedTurn).toBeUndefined();
+
+    // The run ends — the cancelled message is NOT sent (no flush POST).
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(1);
+  });
 });
