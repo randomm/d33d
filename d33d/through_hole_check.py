@@ -161,16 +161,19 @@ def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
     * ``0`` — no explicit seam value: a NEW design (a baseline-less
       candidate; the ``design_loop_events`` chat seam omits the kwarg
       when the project has no part).
-    * the explicit seam value — the PARENT VERSION's rendered genus,
-      resolved by the caller: the imported part's own stored hole count
-      for v1 on an import (the seam reads ``part_report.hole_count``),
-      or the measured genus of the parent version's rendered mesh for
-      v2+ edits (the seam measures the version's rendered STL when the
-      row has no stored count).
+    * the explicit seam value — the PARENT's baseline genus, resolved by
+      the caller: for a v1 on an import the GENUS OF THE STORED, REPAIRED
+      PART MESH (``{repo}/versions/{v1}/part.stl`` — the mesh the render
+      imports, never the report's ``hole_count``, which overstates the
+      baseline whenever the import had open gaps), or the measured genus
+      of the parent version's rendered mesh for v2+ edits (the seam
+      measures the version's rendered STL). A missing/unreadable mesh is
+      passed as ``-1`` (the unknown sentinel).
     * ``None`` (the check abstains) when the explicit value is corrupt —
       a fabricated baseline would make the gate lie. A non-integer (or
-      bool) or negative count abstains the same way
-      :func:`d33d.part_holes.part_has_hole_evidence` degrades it.
+      bool) or negative count (the ``-1`` unknown sentinel) abstains the
+      same way :func:`d33d.part_holes.part_has_hole_evidence` degrades
+      it.
     """
     if through_baseline_genus is None:
         return 0

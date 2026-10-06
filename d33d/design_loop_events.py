@@ -1451,6 +1451,65 @@ def _version_render_artifact_dir(result: Any) -> str | None:
     return artifact_path
 
 
+def _stored_part_mesh_path(row: dict[str, Any], conn: Any) -> Path | None:
+    """Issue #386 (final): the stored, REPAIRED part mesh path the design
+    loop's render imports — ``{repo}/versions/{v1}/part.stl`` (STL
+    imports) or ``part.3mf`` (3MF imports; this helper returns ``None``
+    for 3MF because there is no STL to measure).
+
+    ``None`` for a missing v1 row, missing repo path, a 3MF import (no
+    STL to measure), or a missing file on disk. The file is NOT read
+    here — the caller measures it off the event loop.
+    """
+    from d33d.part_http import _v1_for_part, _v1_part_path
+
+    if row is None or not row.get("part_filename"):
+        return None
+    if row.get("part_format") == "3mf":
+        return None
+    if conn is None:
+        return None
+    if not row.get("git_repo_path"):
+        return None
+    v1 = _v1_for_part(conn, row.get("id"))
+    if v1 is None:
+        return None
+    path = _v1_part_path(Path(row["git_repo_path"]), v1, row)
+    if not path.is_file():
+        return None
+    return path
+
+
+def _measured_genus_for_file(stl_path: str) -> int | None:
+    """Issue #386 (final): measure a stored part mesh's genus (the
+    ``model.stl``-twin of :func:`_measured_genus_for_dir` for a part
+    path).
+
+    Returns ``None`` (the check abstains) when the file is missing,
+    the load/split fails, or there are zero watertight components — a
+    fabricated baseline would make the gate lie.
+    """
+    path = Path(stl_path)
+    if not path.is_file():
+        return None
+    try:
+        from d33d.part_mesh_topology import mesh_topology
+        from d33d.through_hole_check import _load_and_split
+
+        components = _load_and_split(str(path))
+        watertight_bodies = sum(1 for c in components if c.is_watertight)
+        if watertight_bodies == 0:
+            return None
+        return mesh_topology(merged=components[0], components=components)["genus"]
+    except Exception:
+        logger.warning(
+            "through-hole baseline: could not measure genus for %r",
+            stl_path,
+            exc_info=True,
+        )
+        return None
+
+
 def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
     """Issue #386 (v2+ baseline): measure the parent version's rendered
     genus from its ``render_artifact_dir`` (the ``model.stl`` inside).
@@ -1849,43 +1908,33 @@ async def run_design_loop_with_events(
             if part_env.get("bbox_mm") is not None:
                 kwargs["part_bbox_mm"] = part_env["bbox_mm"]
 
-    # Issue #386 (operator decision 2026-10-05) — the through-hole
-    # check's BASELINE. Three cases (end to end: design_loop_events →
-    # design_loop):
+    # Issue #386 (final, 2026-10-05) — the through-hole check's BASELINE.
+    # Three cases (end to end: design_loop_events → design_loop):
     #
     # 1. NEW DESIGN (no part, no version): kwarg omitted → the loop
     #    defaults to 0.
-    # 2. V1 ON AN IMPORT (part, no version yet): the imported part's own
-    #    measured hole count (``part_report.hole_count`` — computed once
-    #    at import, the same stored fact the #351 evidence gate reads).
-    # 3. V2+ EDIT (version exists): the PARENT VERSION's rendered genus.
-    #    When the version's ``render_artifact_dir`` carries a ``model.stl``
-    #    the seam measures it (off-thread is not needed here — the seam
-    #    runs on the event loop but the file read is a single small STL;
-    #    the check itself runs off-thread in the loop). When the version
-    #    was never rendered (no ``render_artifact_dir``), the baseline
-    #    ABSTAINS (``None`` is passed → the loop abstains) — a fabricated
-    #    baseline would make the gate lie.
-    #
-    # A corrupt or missing report value abstains the check (``None``),
-    # never fabricates a baseline.
+    # 2. V1 ON AN IMPORT: the GENUS OF THE STORED, REPAIRED PART MESH
+    #    (``{repo}/versions/{v1}/part.stl`` — the exact mesh the render
+    #    imports). Measured with the same ``mesh_topology`` helper the
+    #    v2+ path uses, OFF the event loop. Never ``part_report.
+    #    hole_count``: that value is ``gaps_before + genus`` on the
+    #    PRE-repair mesh, and the stored mesh's gaps are already closed
+    #    by the import-time pymeshfix pass — so ``hole_count`` OVERSTATES
+    #    the baseline whenever the import had open gaps (a holey.stl
+    #    import's report says 4 while its stored genus is 0; a correct
+    #    rendered through-hole of genus 1 does not exceed 4 and would be
+    #    wrongly failed as geometrically_wrong). A missing or unreadable
+    #    part mesh (or a 3MF import, which stores no STL) passes the
+    #    ``-1`` unknown sentinel (the check ABSTAINS); it never falls
+    #    back to ``hole_count``.
+    # 3. V2+ EDIT (a version has rendered): the PARENT VERSION's rendered
+    #    genus. When the version's ``render_artifact_dir`` carries a
+    #    ``model.stl`` the seam measures it (OFF the event loop — the
+    #    load/split is real disk I/O). When the version was never
+    #    rendered (no ``render_artifact_dir``), the baseline ABSTAINS
+    #    (``-1`` is passed → the loop abstains) — a fabricated baseline
+    #    would make the gate lie.
     if row is not None and row.get("part_filename"):
-        from d33d.part_http import part_public
-
-        _public = part_public(row)
-        _report = _public.get("report") if _public is not None else None
-        _hole_count: int | None = None
-        if isinstance(_report, dict):
-            _hc = _report.get("hole_count")
-            if (
-                isinstance(_hc, int)
-                and not isinstance(_hc, bool)
-                and _hc >= 0
-            ):
-                _hole_count = _hc
-
-        # Determine the baseline: v2+ → parent version's rendered genus;
-        # v1 on import → part report's hole_count; new design → 0 (omit).
         _latest_ver = (
             app.state.versions.latest_version(project_id)
             if app.state.versions is not None
@@ -1894,23 +1943,36 @@ async def run_design_loop_with_events(
         if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
             # V2+: measure the parent version's rendered genus.
             _render_dir = _latest_ver["render_artifact_dir"]
-            _parent_genus = _measured_genus_for_dir(_render_dir)
+            _parent_genus = await asyncio.to_thread(
+                _measured_genus_for_dir, _render_dir
+            )
             if _parent_genus is not None:
                 kwargs["through_baseline_genus"] = _parent_genus
-            # else: abstain (no kwarg → the loop uses 0 for new designs,
-            # but for v2+ we want to ABSTAIN, not default to 0.
-            # Pass None explicitly to signal "abstain" to the loop.)
             else:
-                # Signal abstain: pass a value that resolve_baseline_genus
-                # maps to None. We use the raw value — the loop's
-                # resolve_baseline_genus maps None → 0, so we need a
-                # different signal. Instead: pass a sentinel that the loop
-                # maps to None. The simplest: pass -1 (negative → None).
+                # Abstain: the -1 unknown sentinel (the loop's
+                # resolve_baseline_genus maps it to None). A missing
+                # parent render is never a fabricated baseline.
                 kwargs["through_baseline_genus"] = -1
-        elif _hole_count is not None:
-            # V1 on import: the part report's hole count.
-            kwargs["through_baseline_genus"] = _hole_count
-        # else: new design → omit (the loop defaults to 0).
+        else:
+            # V1 on import: the stored part mesh's genus (the mesh the
+            # render imports). A 3MF import stores no STL (the render
+            # re-exports it — no baseline is available) → abstain.
+            _stored_genus: int | None = None
+            if row.get("part_format") != "3mf":
+                _stored_path = _stored_part_mesh_path(row, app.state.conn)
+                if _stored_path is not None and _stored_path.is_file():
+                    _stored_genus = await asyncio.to_thread(
+                        _measured_genus_for_file, str(_stored_path)
+                    )
+            if _stored_genus is not None:
+                kwargs["through_baseline_genus"] = _stored_genus
+            else:
+                # Missing / unreadable part mesh (or a 3MF import): the
+                # check ABSTAINS. The -1 unknown sentinel is passed (the
+                # loop's resolve_baseline_genus maps it to None). NEVER
+                # a fallback to the report's ``hole_count`` — a
+                # fabricated baseline would make the gate lie.
+                kwargs["through_baseline_genus"] = -1
 
     # Issue #295 — the lost-photo notice (the post_chat caller's photo
     # state, carried into the stream): when the project's stored photo
