@@ -43,5 +43,19 @@ REPAIR_TIMEOUT_DETAIL = (
     "The file is too complex to repair in time. Try simplifying the mesh."
 )
 
+#: The 422 detail for an UNEXPECTED server-side decode failure (a
+#: non-PartUploadError — MemoryError, a trimesh-internal failure — issue
+#: #395). Distinct from the unparseable detail: the file is presumed fine;
+#: the decode itself broke. The copy.ts key partUpload.decodeFailed must
+#: match this string exactly (parity pinned in the import-stl-contract test).
+PART_UPLOAD_DECODE_FAILED_DETAIL = (
+    "Something went wrong reading this file. Try again."
+)
 
-__all__ = ["REPAIR_TIMEOUT_DETAIL", "PartUploadError", "RepairTimeoutError"]
+
+__all__ = [
+    "PART_UPLOAD_DECODE_FAILED_DETAIL",
+    "REPAIR_TIMEOUT_DETAIL",
+    "PartUploadError",
+    "RepairTimeoutError",
+]

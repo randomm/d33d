@@ -2615,7 +2615,7 @@ def test_part_upload_decode_failed_detail_equals_copy_ts():
     import pathlib
     import re
 
-    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+    from d33d.part_errors import PART_UPLOAD_DECODE_FAILED_DETAIL
 
     copy_ts = (
         pathlib.Path(__file__).parent.parent / "web" / "src" / "copy.ts"
@@ -3504,8 +3504,7 @@ def test_decode_failed_detail_is_distinct_from_unparseable():
     the unparseable detail — a MemoryError / trimesh-internal failure must
     not imply the mesh is broken (the file is presumed fine; the decode
     itself failed)."""
-    from d33d.part_errors import REPAIR_TIMEOUT_DETAIL
-    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+    from d33d.part_errors import PART_UPLOAD_DECODE_FAILED_DETAIL, REPAIR_TIMEOUT_DETAIL
 
     assert PART_UPLOAD_DECODE_FAILED_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
     assert PART_UPLOAD_DECODE_FAILED_DETAIL != REPAIR_TIMEOUT_DETAIL
@@ -3701,7 +3700,7 @@ def test_decode_memory_error_becomes_422(app_with_projects, monkeypatch):
 
     upload_r, pid = _run_async(app_with_projects, _call)
 
-    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+    from d33d.part_errors import PART_UPLOAD_DECODE_FAILED_DETAIL
 
     # The 422 must carry the DISTINCT decode-failed detail (NOT a 500, NOT
     # a MemoryError, and NOT the unparseable detail — the file is presumed

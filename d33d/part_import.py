@@ -11,9 +11,8 @@ upload bounds, and the multipart handling.
   ``MAX_PART_UPLOAD_BYTES`` + a 1 MiB multipart allowance, then refused),
   then **400** (content type / extension), then **422** (unparseable,
   empty, non-finite, over the face cap, zip-bomb, unconvertible 3MF unit).
-  The decode runs OFF the event loop (``asyncio.to_thread``). On ANY error
-  nothing is persisted (the commit-failure rollback deletes the row and
-  the mesh file in the SAME transaction).
+  The decode runs OFF the event loop (``asyncio.to_thread``); on ANY error
+  nothing is persisted (the rollback deletes row + mesh in ONE transaction).
 - ``POST /api/projects/{id}/part/units`` — settle the part's units:
   ``{"unit": "mm"|"cm"|"inch"}`` (fixed scale 1 / 10 / 25.4) or
   ``{"axis": "W"|"D"|"H", "mm": <positive float>}`` (one measurement
@@ -25,9 +24,9 @@ upload bounds, and the multipart handling.
 Security: trimesh parses in-process (no shell, no temp file); the user's
 filename is never a path component. The pymeshfix repair runs in a separate
 per-call process with a timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``).
-Parse cost is bounded by ``MAX_PART_FACES``. 3MF (a ZIP) is guarded against
-zip bombs from the central directory BEFORE extraction. Non-finite vertices
-are rejected before any extent math and again after pymeshfix.
+3MF (a ZIP) is guarded against zip bombs from the central directory BEFORE
+extraction. Non-finite vertices are rejected before any extent math and again
+after pymeshfix.
 """
 
 from __future__ import annotations
@@ -42,7 +41,11 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from d33d import db as db_mod
-from d33d.part_errors import REPAIR_TIMEOUT_DETAIL, RepairTimeoutError
+from d33d.part_errors import (
+    PART_UPLOAD_DECODE_FAILED_DETAIL,
+    REPAIR_TIMEOUT_DETAIL,
+    RepairTimeoutError,
+)
 from d33d.part_http import (
     _PART_MULTIPART_ALLOWANCE,
     MAX_PART_UPLOAD_BYTES,
@@ -50,7 +53,6 @@ from d33d.part_http import (
     PART_EXISTS_DETAIL,
     PART_FILENAME,
     PART_UPLOAD_COMMIT_FAILED_DETAIL,
-    PART_UPLOAD_DECODE_FAILED_DETAIL,
     PART_UPLOAD_SETTLE_INVALID_DETAIL,
     PART_UPLOAD_UNPARSEABLE_DETAIL,
     PART_UPLOAD_UNSUPPORTED_DETAIL,
@@ -94,7 +96,6 @@ logger = logging.getLogger(__name__)
 def _scaled_stl_sync(raw: bytes, fmt: str, scale: float | None) -> bytes:
     """Load the committed part bytes (shared guard: face-cap, zip-bomb),
     optionally scale by ``part_scale``, and re-export as binary STL.
-
     ``trimesh.Mesh.export(file_type="stl")`` returns ``bytes`` — never
     ``str`` — so the result goes straight into the response body. An
     export-stage failure re-raises as ``PartUploadError`` (the endpoint's
@@ -127,8 +128,7 @@ def _run_parse_and_repair(
     ``PART_UPLOAD_DECODE_FAILED_DETAIL`` (the mesh is presumed fine; the
     decode itself broke), logged with the stable prefix ``part decode
     failed unexpectedly``. The contract is total: a decode that cannot
-    complete is a 422, never a raw 500. Nothing is persisted.
-    """
+    complete is a 422, never a raw 500."""
     try:
         _mesh, report, file_unit = parse_and_repair(content, part_format)
     except PartUploadError as e:
@@ -666,7 +666,6 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_UPLOAD_BYTES",
     "PART_UPLOAD_COMMIT_FAILED_DETAIL",
-    "PART_UPLOAD_DECODE_FAILED_DETAIL",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
     "PART_UPLOAD_UNSUPPORTED_DETAIL",
