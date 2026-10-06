@@ -1437,7 +1437,7 @@ class TestDeterministicHoleFeatureStage:
     production; here the route's ``holes`` argument is the same seam).
     """
 
-    _HOLE = {
+    _HOLE: ClassVar[dict] = {
         "center": (60.0, 40.0, 5.0),
         "axis": (0.0, 0.0, 1.0),
         "diameter_mm": 30.0,

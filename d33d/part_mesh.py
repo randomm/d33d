@@ -417,7 +417,7 @@ def parse_and_repair(
         measured_holes = measure_holes(merged, components, scale=1.0)
         if measured_holes:
             report["holes"] = measured_holes
-    except Exception:
+    except (TypeError, ValueError, AttributeError):
         logger.warning("hole measurement failed, omitting holes list")
 
     return repaired, report, file_unit

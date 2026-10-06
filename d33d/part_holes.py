@@ -218,7 +218,7 @@ def _boundary_loop_vertices(
             continue
         # The ring's vertices: start vertex of the first edge, then the
         # "far" end of each edge in the chain.
-        a0, b0 = open_edges[chain[0]]
+        a0, _ = open_edges[chain[0]]
         ring: list[np.ndarray] = [mesh.vertices[int(a0)]]
         # Track the current vertex to determine which end of each edge to
         # add.
@@ -269,7 +269,6 @@ def _loop_normal(vertices: np.ndarray) -> np.ndarray | None:
     if len(vertices) < 3:
         return None
     # Use the first 3 points to estimate the normal, then refine.
-    v0 = vertices[0]
     normals = []
     for i in range(1, len(vertices) - 1):
         e1 = vertices[i] - vertices[i - 1]
@@ -377,7 +376,7 @@ def _measure_genus_holes(
         # axis of minimum extent.
         try:
             centroid = np.asarray(body.centroid)
-        except Exception:
+        except (TypeError, ValueError):
             continue
         # Estimate the axis: the axis along which the body has the smallest
         # extent is typically the through-axis for a ring/annulus.
@@ -386,7 +385,7 @@ def _measure_genus_holes(
             axis_idx = int(np.argmin(extents))
             axis = np.zeros(3)
             axis[axis_idx] = 1.0
-        except Exception:
+        except (TypeError, ValueError):
             axis = np.array([0.0, 0.0, 1.0])
         # Estimate the hole diameter: for a ring, the hole diameter
         # approximates the difference between the max and min radii from
@@ -406,7 +405,7 @@ def _measure_genus_holes(
                     continue
             else:
                 continue
-        except Exception:
+        except (TypeError, ValueError):
             continue
         snapped = _snap_axis(axis)
         holes.append(

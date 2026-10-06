@@ -24,13 +24,12 @@ from there — the region-edit seam and the tests import from
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Any
 
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.versions import valid_axis
-
-import math
 
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
 # of the copy.ts sentence — the parity test in

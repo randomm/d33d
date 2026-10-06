@@ -2392,7 +2392,6 @@ def test_holes_list_three_plate(app_with_projects) -> None:
     """Issue #396: a plate with 3 through-holes (built with trimesh) →
     the holes list has 3 entries with distinct centres."""
     import trimesh
-    import numpy as np
 
     # Build a 40×40×10 mm plate with 3 through-holes using boolean CSG.
     plate = trimesh.creation.box(extents=[40, 40, 10], pivot=[0, 0, 0])

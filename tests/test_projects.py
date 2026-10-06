@@ -2773,7 +2773,7 @@ def test_offer_with_measured_hole_carries_center_and_axis(app_with_projects) -> 
         svc = app_with_projects.state.versions
         return r2.status_code, pid, frames, svc.get_pending_offer(pid)
 
-    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    status, _pid, frames, offer = _run_async(app_with_projects, _call)
     assert status == 202, status
     done = [d for e, d in frames if e == "done"]
     assert done, f"no done frame: {frames}"
@@ -2830,7 +2830,7 @@ def test_offer_no_holes_uses_default_boundary_sentence(app_with_projects) -> Non
         svc = app_with_projects.state.versions
         return r2.status_code, pid, frames, svc.get_pending_offer(pid)
 
-    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    status, _pid, _frames, offer = _run_async(app_with_projects, _call)
     assert status == 202, status
     assert offer is not None
     assert offer["kind"] == "fill_recut"
@@ -2874,7 +2874,7 @@ def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
         svc = app_with_projects.state.versions
         return r2.status_code, pid, frames, svc.get_pending_offer(pid)
 
-    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    status, _pid, frames, offer = _run_async(app_with_projects, _call)
     assert status == 202, status
     done = [d for e, d in frames if e == "done"]
     assert done, f"no done frame: {frames}"
