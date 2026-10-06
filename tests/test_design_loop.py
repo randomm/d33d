@@ -740,6 +740,82 @@ def test_axis_params_mismatch_feeds_repair_into_next_iteration():
     assert result.iterations[0].repair["failure_class"] == "axis_params_mismatch"
 
 
+def test_axis_params_mismatch_ignores_position_offset_params():
+    """Issue #385 (operator decision 2026-10-05): the import gate
+    (``axis_params_mismatch``) ignores parameters whose names or labels
+    mark them as positions or offsets (from / offset / distance /
+    position / spacing / margin / inset / pitch), so a mistagged position
+    can't fail an import edit.
+
+    Test: an imported plate edit whose SCAD tags
+    ``hole_distance_from_left_edge = 15`` as axis W, with a measured
+    width of 120, does NOT fail ``axis_params_mismatch``."""
+    s = score(
+        _render(),
+        (120.0, 40.0, 6.0),
+        bbox=BboxInfo(120.0, 40.0, 6.0, 28800.0),
+        scad_source=(
+            "hole_distance_from_left_edge = 15;\n"
+            "W = 120;\nD = 40;\nH = 6;\n"
+            "cube([W, D, H]);\n"
+        ),
+        param_meta={
+            "W": {"label": "Plate width", "unit": "mm", "axis": "W"},
+            "D": {"label": "Plate depth", "unit": "mm", "axis": "D"},
+            "H": {"label": "Plate height", "unit": "mm", "axis": "H"},
+            "hole_distance_from_left_edge": {
+                "label": "Hole offset from left edge",
+                "unit": "mm",
+                "axis": "W",
+            },
+        },
+        named_params={
+            "W": 120.0,
+            "D": 40.0,
+            "H": 6.0,
+            "hole_distance_from_left_edge": 15.0,
+        },
+    )
+    # The W param matches (120 vs 120) → no mismatch.
+    # The hole_distance param is ignored (position/offset keyword).
+    # All bits should pass (no axis_params_mismatch).
+    assert s.bits[4] is True
+    assert s.axis_params_match is True
+
+
+def test_axis_param_mismatches_ignores_position_param_directly():
+    """Issue #385: ``_axis_param_mismatches`` directly — a param named
+    ``hole_distance_from_left_edge`` tagged as axis W with value 15
+    against a measured width of 120 is ignored (position/offset keyword).
+    A genuine W param (value 20 vs measured 120) still fires."""
+    from d33d.design_loop import _axis_param_mismatches
+
+    bbox = BboxInfo(120.0, 40.0, 6.0, 28800.0)
+    # Only the position param is mistagged → no mismatches.
+    mismatches = _axis_param_mismatches(
+        bbox,
+        {"hole_distance_from_left_edge": 15.0},
+        {
+            "hole_distance_from_left_edge": {
+                "label": "Hole offset from left edge",
+                "axis": "W",
+            }
+        },
+    )
+    assert mismatches == []
+    # A genuine W param (value 20 vs measured 120) still fires.
+    mismatches2 = _axis_param_mismatches(
+        bbox,
+        {"W": 20.0},
+        {"W": {"label": "Plate width", "axis": "W"}},
+    )
+    assert len(mismatches2) == 1
+    assert mismatches2[0][0] == "Plate width"
+    assert mismatches2[0][1] == 20.0
+    assert mismatches2[0][2] == 120.0
+    assert mismatches2[0][3] == "W"
+
+
 def test_oom_mid_loop_is_not_repair_and_does_not_crash():
     # Iteration 1: oom (non-repairable, rank 0, no repair fed back).
     # Iteration 2: good (rank 4) → pass.
@@ -1358,7 +1434,18 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
                                     "name": {"type": "string"},
                                     "label": {"type": "string"},
                                     "unit": {"type": "string"},
-                                    "axis": {"type": "string"},
+                                    "axis": {
+                                        "type": "string",
+                                        "description": (
+                                            "The overall axis this parameter realises "
+                                            "(W, D, or H). Declare ONLY when the parameter "
+                                            "IS the part's own overall W, D or H extent. "
+                                            "A mating part's size, a rim drop, a skirt or "
+                                            "any other feature size is NOT the part's W, D "
+                                            "or H. A position, offset or distance (e.g. "
+                                            "hole_distance_from_left_edge) is never an axis."
+                                        ),
+                                    },
                                     "reason": {"type": "string"},
                                 },
                                 "required": ["name", "label"],
@@ -1431,7 +1518,18 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
                         "name": {"type": "string"},
                         "label": {"type": "string"},
                         "unit": {"type": "string"},
-                        "axis": {"type": "string"},
+                        "axis": {
+                            "type": "string",
+                            "description": (
+                                "The overall axis this parameter realises "
+                                "(W, D, or H). Declare ONLY when the parameter "
+                                "IS the part's own overall W, D or H extent. "
+                                "A mating part's size, a rim drop, a skirt or "
+                                "any other feature size is NOT the part's W, D "
+                                "or H. A position, offset or distance (e.g. "
+                                "hole_distance_from_left_edge) is never an axis."
+                            ),
+                        },
                         "reason": {"type": "string"},
                     },
                     "required": ["name", "label"],
@@ -2998,6 +3096,65 @@ def test_through_hole_baseline_comparison(tmp_path):
     assert result.iterations[0].failure_class == "geometrically_wrong"
     # baseline 0, through genus 1 → 1 exceeds 0, passes.
     result = _run_through_loop(through_stl, req, through_baseline_genus=0)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+
+
+def _box_with_n_through_holes(n: int) -> trimesh.Trimesh:
+    """A 20 × 20 × 20 box with ``n`` 6 mm-diameter through-holes
+    (genus ``n``). The holes are spaced along the x-axis."""
+    box = trimesh.creation.box(extents=(20, 20, 20))
+    for i in range(n):
+        x = -8.0 + i * (16.0 / max(n, 1))
+        cyl = trimesh.creation.cylinder(radius=1.5, height=44)
+        cyl.apply_translation([x, 0, 0])
+        box = box.difference(cyl)
+    if isinstance(box, trimesh.Scene):
+        box = box.to_mesh()
+    return box
+
+
+def test_through_hole_plate_genus_3_pocket_fails_through_passes(tmp_path):
+    """Issue #386 (operator decision 2026-10-05, case ii): an imported
+    plate with genus 3 (three existing through-holes). A pocket render
+    (genus 3 — the pocket did not add a hole) must FAIL (3 does not
+    exceed 3). A through-hole render (genus 4 — one new hole added) must
+    PASS (4 exceeds 3)."""
+    req = "drill a 6 mm hole through the plate"
+    genus3_stl = str(tmp_path / "genus3.stl")
+    _box_with_n_through_holes(3).export(genus3_stl)
+    result = _run_through_loop(genus3_stl, req, through_baseline_genus=3)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    genus4_stl = str(tmp_path / "genus4.stl")
+    _box_with_n_through_holes(4).export(genus4_stl)
+    result = _run_through_loop(genus4_stl, req, through_baseline_genus=3)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_through_hole_v2_edit_existing_hole(tmp_path):
+    """Issue #386 (operator decision 2026-10-05, case iii): a v2 edit
+    on a design whose v1 already has one hole (baseline 1). A pocket
+    render (genus 0) must FAIL. A through render (genus 1) does NOT
+    exceed the baseline — must also FAIL (EXCEED is strict). A render
+    with genus 2 (two through-holes) exceeds the baseline — PASSES."""
+    req = "drill another 6 mm hole through the middle"
+    pocket_stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    result = _run_through_loop(pocket_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=False).export(through_stl)
+    result = _run_through_loop(through_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    genus2_stl = str(tmp_path / "genus2.stl")
+    _box_with_n_through_holes(2).export(genus2_stl)
+    result = _run_through_loop(genus2_stl, req, through_baseline_genus=1)
     assert result.status == "pass"
     assert result.iterations_used == 1
 

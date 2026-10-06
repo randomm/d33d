@@ -792,13 +792,33 @@ def _axis_param_mismatches(
         axis = meta.get("axis")
         if axis not in extents:
             continue
+        # Issue #385 (operator decision 2026-10-05): the import gate ignores
+        # parameters whose names or labels mark them as positions or offsets
+        # (a mistagged position can't fail an import edit).
+        raw_label = meta.get("label")
+        label = raw_label if isinstance(raw_label, str) and raw_label else name
+        _lower_name = name.lower()
+        _lower_label = label.lower()
+        _is_position_param = any(
+            kw in _lower_name or kw in _lower_label
+            for kw in (
+                "from",
+                "offset",
+                "distance",
+                "position",
+                "spacing",
+                "margin",
+                "inset",
+                "pitch",
+            )
+        )
+        if _is_position_param:
+            continue
         tol = max(
             DISAGREES_MAJOR_THRESHOLD_REL * value,
             DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         )
         if abs(extents[axis] - value) > tol:
-            raw_label = meta.get("label")
-            label = raw_label if isinstance(raw_label, str) and raw_label else name
             out.append((label, float(value), float(extents[axis]), axis))
     return out
 
@@ -1349,7 +1369,12 @@ def _design_messages(
         'fillet_size_top to "Top fillet size"), the "unit" is the unit '
         '("mm" for millimetres), the "axis" is "W" or "D" or "H" ONLY '
         "when the parameter realises that overall dimension of the part "
-        '(omit it otherwise - never guess an axis), and the "reason" is '
+        '(omit it otherwise - never guess an axis. Declare an axis ONLY '
+        "when the parameter IS the part's own overall W, D or H extent — "
+        "a mating part's size (such as a box's inside), a rim drop, a skirt or "
+        "any other feature size is NOT the part's W, D or H. "
+        "`hole_distance_from_left_edge` is NOT an axis parameter — a position, "
+        'offset or distance is never an axis), and the "reason" is '
         "one short clause saying why you picked that value, for values the user did "
         "not give. In the SAME reply, optionally offer to confirm ONE of your own "
         'assumed values (one the design state block marks "assumed") that most '
