@@ -63,6 +63,7 @@ import {
 } from "./lib/api";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
+import { exportLabel } from "./lib/versionOrdinals";
 import { Brief } from "./components/brief/Brief";
 import { PassCard } from "./components/chat/PassCard";
 import { Composer } from "./components/chat/Composer";
@@ -1577,8 +1578,9 @@ export default function App({ client }: AppProps) {
   const handleExported = useCallback(
     async (versionId: number | undefined) => {
       if (projectId === null || versionId === undefined) return;
+      // Issue #387: name the file via the shared timeline-ordinal helper, never the DB id.
       const version = versions.find((v) => v.id === versionId);
-      const versionLabel = version?.name ?? `v${versionId}`;
+      const versionLabel = exportLabel(versions, versionId, version?.name);
       const filename = copy.shell.exportFilename(projectName, versionLabel);
       setMessages((prev) => [
         ...prev,
@@ -2101,6 +2103,7 @@ export default function App({ client }: AppProps) {
             projectId={projectId}
             projectName={projectName}
             versionId={versions.length > 0 ? versions[versions.length - 1].id : undefined}
+            versions={versions}
             inFlight={designLoopInFlight}
             part={designStatePart}
             client={apiClient}

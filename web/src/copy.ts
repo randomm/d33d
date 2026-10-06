@@ -874,8 +874,16 @@ export const shell = {
    *  at geometry; Orca takes it from here. */
   exportDone: (filename: string): string =>
     `${filename}. Open it in Orca — it's already in millimetres and oriented flat.`,
+  /** The filename slugs BOTH parts the same way (issue #387): lowercase,
+   *  non-alphanumerics → `-`, trimmed — so "Lid v2" lands as lid-v2, never
+   *  a raw space in the name. */
   exportFilename: (project: string, version: string): string =>
-    `${project.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}-${version}.3mf`,
+    [
+      project.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+      version.toLowerCase().replace(/[^a-z0-9]+/g, "-"),
+    ]
+      .map((s) => s.replace(/^-|-$/g, ""))
+      .join("-") + ".3mf",
 
   /** Chat collapsed to its rail keeps the last summary legible. */
   conversationCollapsed: (messages: number): string => `${messages} messages`,

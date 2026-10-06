@@ -15,8 +15,27 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { Export3MF } from "../Export3MF";
 import { ApiClient, ApiError } from "../../../lib/api";
-import type { PartReportInfo } from "../../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../../lib/api";
 import { copy } from "../../../copy";
+
+function entry(id: number, name: string): VersionTimelineEntry {
+  return {
+    id,
+    name,
+    params: {},
+    created_by_message: "",
+    parent: null,
+    restored_from: null,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-01T00:00:00Z",
+    diff_count: 0,
+    exported_at: null,
+    source_kind: null,
+  } as VersionTimelineEntry;
+}
 
 /** An injected ApiClient whose downloadModel3MF returns a 3MF Blob. */
 function makeClient(): ApiClient {
@@ -192,6 +211,67 @@ describe("Export3MF", () => {
 
     await waitFor(() => {
       expect(capturedName).toBe("curtain-rod-bracket-v4.3mf");
+    });
+  });
+
+  it("the filename fallback is the timeline ordinal, not the DB id (issue #387)", async () => {
+    // App never passes versionName, so the fallback is the ACTIVE code path:
+    // id 64 at timeline position 1 must yield v1.3mf, never v64.3mf — the
+    // same divergence the QA 2026-10-04 review found.
+    const blob = new Blob(["x"], { type: "model/3mf" });
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+
+    let capturedName = "";
+    vi.spyOn(HTMLAnchorElement.prototype, "download", "set").mockImplementation(
+      function (this: HTMLAnchorElement, value: string) {
+        capturedName = value;
+      },
+    );
+
+    render(
+      <Export3MF
+        projectId={projectId}
+        projectName="curtain rod bracket"
+        versionId={64}
+        versions={[entry(64, "v1"), entry(65, "v2")]}
+        client={client}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(capturedName).toBe("curtain-rod-bracket-v1.3mf");
+    });
+  });
+
+  it("the filename fallback shows no number when the id is not in the loaded timeline (issue #387)", async () => {
+    // A stale id (refetch not landed): the fallback must be "current" —
+    // no number, never the raw DB id.
+    const blob = new Blob(["x"], { type: "model/3mf" });
+    const client = new ApiClient();
+    vi.spyOn(client, "downloadModel3MF").mockResolvedValue(blob);
+
+    let capturedName = "";
+    vi.spyOn(HTMLAnchorElement.prototype, "download", "set").mockImplementation(
+      function (this: HTMLAnchorElement, value: string) {
+        capturedName = value;
+      },
+    );
+
+    render(
+      <Export3MF
+        projectId={projectId}
+        projectName="curtain rod bracket"
+        versionId={64}
+        versions={[entry(1, "v1")]}
+        client={client}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("export-3mf-button"));
+
+    await waitFor(() => {
+      expect(capturedName).toBe("curtain-rod-bracket-current.3mf");
     });
   });
 

@@ -19,7 +19,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ApiClient } from "../../lib/api";
-import type { PartReportInfo } from "../../lib/api";
+import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
+import { exportLabel } from "../../lib/versionOrdinals";
 import { displayExportError } from "../../lib/exportErrorCopy";
 import { copy } from "../../copy";
 
@@ -34,6 +35,11 @@ interface Export3MFProps {
   versionId?: number;
   /** The version's display name (the filename's suffix, `vN`). */
   versionName?: string;
+  /** Issue #387: the loaded timeline — the filename fallback derives the
+   *  timeline ordinal (never the raw DB id) from this via the shared
+   *  `versionOrdinals` helper. When the id isn't in the list the fallback
+   *  is "current" (no number, not the raw id). */
+  versions?: VersionTimelineEntry[];
   /** True while a design loop is in flight — the backend would 409 a
    *  download mid-loop (the version being created is not yet exportable),
    *  so the button is disabled until the loop completes. */
@@ -59,6 +65,7 @@ export function Export3MF({
   projectName = "",
   versionId,
   versionName,
+  versions = [],
   inFlight = false,
   part,
   client,
@@ -94,11 +101,14 @@ export function Export3MF({
       }
     }
   }, [versionId, state]);
-  // The filename is the deck's slug contract. `vN` — the version's ordinal,
-  // which is its name (`v${id}`) by the timeline's own labelling.
+  // The filename is the deck's slug contract. The `vN` suffix is the
+  // version's ORDINAL — its name when present, else the timeline ordinal via
+  // the shared helper (issue #387: never the DB row id, which diverges once
+  // branches/restores make ids non-sequential). An id missing from the
+  // loaded timeline is "current": no number, never the raw id.
   const downloadName = copy.shell.exportFilename(
     projectName,
-    versionName ?? (versionId !== undefined ? `v${versionId}` : "current"),
+    versionId !== undefined ? exportLabel(versions, versionId, versionName) : (versionName ?? "current"),
   );
 
   // Issue #334 (D8) / issue #350: only an UNSETTLED imported part blocks

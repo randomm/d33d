@@ -995,6 +995,22 @@ describe("design contract", () => {
     expect(copy.shell.exportDone(name)).toMatch(/millimetres/i);
   });
 
+  it("exportFilename slugs the version the same way as the project name (issue #387)", () => {
+    // "Lid v2" must not leave a space in the filename — it slugs to lid-v2,
+    // just like the project name does.
+    expect(copy.shell.exportFilename("Curtain rod bracket", "Lid v2")).toBe(
+      "curtain-rod-bracket-lid-v2.3mf",
+    );
+    // A bare ordinal already slugs to itself.
+    expect(copy.shell.exportFilename("Curtain rod bracket", "v12")).toBe(
+      "curtain-rod-bracket-v12.3mf",
+    );
+    // "current" (the stale-id fallback) slugs to itself.
+    expect(copy.shell.exportFilename("Curtain rod bracket", "current")).toBe(
+      "curtain-rod-bracket-current.3mf",
+    );
+  });
+
   it("failure copy names both the measured value and the limit", () => {
     const body = copy.failure.envelope.body(380, 320);
     expect(body).toContain("380.0");

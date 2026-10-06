@@ -25,6 +25,7 @@
 
 import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
 import copy from "../../copy";
+import { versionOrdinals } from "../../lib/versionOrdinals";
 import { importedVersionLabel } from "./importedLabel";
 
 interface FilmstripProps {
@@ -122,18 +123,11 @@ export function Filmstrip({
   }
 
   const siblings = siblingCounts(versions);
-  // The id → ordinal map (issue #352 tidy): ONE pass, O(n) — the per-slot
-  // ordinal lookup (`versions.findIndex` inside the map callback) was O(n²)
-  // for a long timeline.
-  const ordinalById = new Map<number, number>();
-  versions.forEach((v, i) => {
-    // The first occurrence wins (identical to findIndex): a duplicate id
-    // (DB-unique in practice — auto-increment rows) would otherwise be
-    // overridden by its later slot.
-    if (!ordinalById.has(v.id)) {
-      ordinalById.set(v.id, i + 1);
-    }
-  });
+  // The id → ordinal map — the shared helper (issue #387): one pass, O(n),
+  // 1-based, first occurrence wins. Shared with every other "vN" label site
+  // (PassCard, BranchGraph, the export fallbacks) so the ordinals cannot
+  // drift from each other.
+  const ordinalById = versionOrdinals(versions);
   const visible = versions.slice(-SLOTS);
   const earlierCount = versions.length - visible.length;
   const latestId = versions.length > 0 ? versions[versions.length - 1].id : null;
@@ -196,7 +190,10 @@ export function Filmstrip({
           // (importedVersionLabel) and renders NO position span: the two
           // numbers ("v1 … · v40") were the same version's ordinal and DB id
           // side by side.
-          const ordinal = ordinalById.get(v.id) ?? 0;
+          // A missing ordinal (an id absent from the loaded list) renders NO
+          // number — the `?? 0` fallback invented a "v0" that no other label
+          // site shows (issue #387).
+          const ordinal = ordinalById.get(v.id) ?? null;
           const isImport = v.source_kind === "import";
           return (
             <span
@@ -244,9 +241,9 @@ export function Filmstrip({
                 >
                   {importedVersionLabel(v, part)}
                 </span>
-                {!isImport && (
+                {!isImport && (ordinal !== null || diff !== null) && (
                   <span className="filmstrip-pos" data-testid={`filmstrip-pos-${v.id}`}>
-                    {` · v${ordinal}`}
+                    {ordinal !== null ? ` · v${ordinal}` : ""}
                     {diff !== null ? ` · ${diff}` : ""}
                   </span>
                 )}

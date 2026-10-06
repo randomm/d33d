@@ -15,9 +15,10 @@
  * - No auto-generated slider/parameter panel — input is text + photo only.
  */
 
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useState, useMemo } from "react";
 import type { RenderImage } from "../../lib/renderImage";
-import type { RegionEditViewId } from "../../lib/api";
+import { versionOrdinals } from "../../lib/versionOrdinals";
+import type { RegionEditViewId, VersionTimelineEntry } from "../../lib/api";
 import { MARKER_COLOR } from "../../lib/marker";
 import { Composer } from "./Composer";
 import { PassCard } from "./PassCard";
@@ -88,6 +89,13 @@ interface ChatPanelProps {
   inFlight?: boolean;
   /** The PassCard's enlarged-view close action (issue #125). */
   onBesidePhoto?: () => void;
+  /** Issue #387: the version timeline (oldest first). The panel derives
+   *  each PassCard's user-facing label ("vN", the timeline ordinal) from
+   *  this list via the shared `versionOrdinals` helper — the same map the
+   *  Filmstrip uses, so the card and the strip cannot drift. An id not in
+   *  the list (stale — the version-created frame arrived before the
+   *  timeline refetch landed) yields no number, never the raw id. */
+  versions?: VersionTimelineEntry[];
   /** The build envelope (API-reported) for the failure turn's measured
    *  number (issue #124). Absent → no bars, no numbers. */
   envelope?: { x: number; y: number; z: number } | null;
@@ -111,6 +119,7 @@ export function ChatPanel({
   onSend,
   inFlight,
   onBesidePhoto,
+  versions,
   envelope,
   keptVersion,
   exportable,
@@ -118,6 +127,7 @@ export function ChatPanel({
 }: ChatPanelProps) {
   const [input, setInput] = useState("");
   const messagesRef = useRef<HTMLDivElement>(null);
+  const ordinalById = useMemo(() => versionOrdinals(versions ?? []), [versions]);
 
   // The transcript is the DELIVERED sole scroll container (issue #220,
   // adversarial round 1): the ticket's text names the pane, but the pane's
@@ -165,6 +175,7 @@ export function ChatPanel({
           // everything else (user turns, clarifying questions, the
           // in-flight streaming turn) stays a plain sentence in the flow.
           const isPass = msg.role === "assistant" && msg.versionId !== undefined;
+          const vid = msg.versionId ?? null;
           const isFailure = msg.failure !== undefined;
           return (
             <div
@@ -183,7 +194,8 @@ export function ChatPanel({
                 />
               ) : isPass ? (
                 <PassCard
-                  versionId={msg.versionId ?? null}
+                  versionId={vid}
+                  versionOrdinal={vid === null ? null : ordinalById.get(vid) ?? null}
                   views={msg.views ?? []}
                   summary={msg.content}
                   source={msg.source}

@@ -7,6 +7,7 @@ import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ChatPanel, type ChatMessage, MARKER_COLOR } from "../ChatPanel";
 import type { RenderImage } from "../../../lib/renderImage";
+import type { VersionTimelineEntry } from "../../../lib/api";
 
 describe("ChatPanel", () => {
   it("hides the composer when hideComposer is true (issue #193 — the first-run screen carries it)", () => {
@@ -73,11 +74,63 @@ describe("ChatPanel", () => {
       const messages: ChatMessage[] = [
         { id: "m1", role: "assistant", content: "A box, per your ask.", versionId: 4, views },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      // The timeline carries id 4 at position 4 — the ordinal matches the id.
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
       expect(screen.getByTestId("pass-card")).toBeTruthy();
+      // The label is the timeline ordinal (4), not the raw DB id.
+      expect(screen.getByTestId("pass-card-version").textContent).toBe("v4");
       // The views live on the pass card, not as the old chat-renders block.
       expect(screen.getAllByTestId(/^pass-card-view-/)).toHaveLength(2);
       expect(screen.queryByTestId("chat-renders")).toBeNull();
+    });
+
+    it("the PassCard's label is the timeline ordinal, not the DB row id (issue #387 wiring)", () => {
+      // The App→ConversationPane→ChatPanel→PassCard wiring: the panel
+      // derives the label from the `versions` prop via the shared
+      // versionOrdinals helper. A timeline where id 64 sits at position 1
+      // (the QA 2026-10-04 symptom fixture) must render "v1" — the same
+      // number the Filmstrip shows — never "v64".
+      const timeline = [
+        { id: 64, name: "first box", source_kind: null } as unknown as VersionTimelineEntry,
+        { id: 65, name: "wider box", source_kind: null } as unknown as VersionTimelineEntry,
+      ];
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: "A box, per your ask.", versionId: 64, views },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} versions={timeline} />);
+      expect(screen.getByTestId("pass-card")).toBeTruthy();
+      // The label is the ordinal "v1" (id 64 at position 1), not the raw id.
+      expect(screen.getByTestId("pass-card-version").textContent).toBe("v1");
+      // The internal id keeps the real DB id (the card's data-version).
+      expect(screen.getByTestId("pass-card").getAttribute("data-version")).toBe("64");
+    });
+
+    it("a stale versionId (not in the loaded timeline) renders NO number, never the raw id (issue #387)", () => {
+      // The version-created frame arrived before the timeline refetch: the
+      // id is not in the loaded list. The panel must not invent a number —
+      // no label element at all (never "v64").
+      const timeline = [
+        { id: 1, name: "only version", source_kind: null } as unknown as VersionTimelineEntry,
+      ];
+      const messages: ChatMessage[] = [
+        { id: "m1", role: "assistant", content: "A box.", versionId: 64, views },
+      ];
+      render(<ChatPanel messages={messages} onSend={vi.fn()} versions={timeline} />);
+      expect(screen.getByTestId("pass-card")).toBeTruthy();
+      // No number: the label element is absent (not an empty span, not the
+      // raw id).
+      expect(screen.queryByTestId("pass-card-version")).toBeNull();
     });
 
     it("keeps the source in the disclosure, never as chat message text", () => {
@@ -92,7 +145,18 @@ describe("ChatPanel", () => {
           source,
         },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
       // Collapsed by default: the source is not visible in the DOM.
       expect(screen.queryByTestId("pass-card-source")).toBeNull();
       // ...and the source string does not appear anywhere in the message.
@@ -164,7 +228,18 @@ describe("ChatPanel", () => {
         { id: "m2", role: "assistant", content: "pass summary", versionId: 4, views },
         { id: "m3", role: "assistant", content: offerText },
       ];
-      render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+      render(
+        <ChatPanel
+          messages={messages}
+          onSend={vi.fn()}
+          versions={[
+            { id: 1, name: "v1", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 2, name: "v2", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 3, name: "v3", source_kind: null } as unknown as VersionTimelineEntry,
+            { id: 4, name: "v4", source_kind: null } as unknown as VersionTimelineEntry,
+          ]}
+        />,
+      );
 
       // The offer text renders verbatim as a plain assistant message
       // (the NNBSP in "3.0 mm" is the deck's `mm` formatter, so the

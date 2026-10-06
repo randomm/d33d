@@ -46,8 +46,16 @@ function viewLabel(filename: string): string {
 }
 
 interface PassCardProps {
-  /** The version id this pass produced (null until it exists). */
+  /** The version id this pass produced (null until it exists).
+   *  Used ONLY for the card's data-version attribute (the internal id —
+   *  the real DB id, never the ordinal); the visible label is the
+   *  `versionOrdinal` prop. */
   versionId: number | null;
+  /** The version's timeline ordinal (the 1-based list position, issue #387).
+   *  The user-facing "vN" label renders this, never the raw DB id. `null`
+   *  (id not in the loaded timeline) → no number element at all (the
+   *  operator decision for a stale/unknown id). */
+  versionOrdinal: number | null;
   /** The render view images that arrived on this pass (up to six). */
   views: RenderImage[];
   /** The pass's summary prose (UI face, no dimensions). */
@@ -64,6 +72,7 @@ const TOTAL_VIEWS = copy.passCard.viewLabels.length;
 
 export function PassCard({
   versionId,
+  versionOrdinal,
   views,
   summary,
   source,
@@ -81,9 +90,9 @@ export function PassCard({
       data-views={views.length}
       data-version={versionId}
     >
-      {versionId !== null && (
+      {versionId !== null && versionOrdinal !== null && (
         <span className="pass-card-version" data-testid="pass-card-version">
-          {`v${versionId}`}
+          {`v${versionOrdinal}`}
         </span>
       )}
       {summary && (

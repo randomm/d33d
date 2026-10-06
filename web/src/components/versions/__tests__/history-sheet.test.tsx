@@ -97,6 +97,39 @@ const SHEET_COMPARE: VersionCompare = {
   shared_rotation: { units: "mm", axis_convention: "z-up", identical_convention: true },
 };
 
+function entry(
+  id: number,
+  overrides: Partial<VersionTimelineEntry> = {},
+): VersionTimelineEntry {
+  return {
+    id,
+    name: `v${id}`,
+    params: {},
+    created_by_message: "",
+    parent: null,
+    restored_from: null,
+    forked_from: null,
+    pinned: false,
+    archived: false,
+    thumbnail: null,
+    created_at: "2026-01-01T00:00:00Z",
+    diff_count: 0,
+    exported_at: null,
+    source_kind: null,
+    ...overrides,
+  } as VersionTimelineEntry;
+}
+
+// The QA 2026-10-04 symptom fixture (issue #387): a branched timeline where
+// the DB ids diverge from the ordinals. Id 64 sits at list position 1 (→
+// "v1"), id 7 at position 3 (→ "v3"). Sequential-id fixtures (id == ordinal)
+// cannot catch the drift — this one can, and fails on main.
+const DIVERGENT_VERSIONS: VersionTimelineEntry[] = [
+  entry(64, { name: "first box", parent: null }),
+  entry(65, { name: "wider box", parent: 64 }),
+  entry(7, { name: "branched box", parent: 64, pinned: true, created_by_message: "the one we pinned" }),
+];
+
 function sheetProps(
   overrides: Partial<React.ComponentProps<typeof HistorySheet>> = {},
 ) {
@@ -255,9 +288,81 @@ describe("HistorySheet (the branch riser graph)", () => {
     expect(screen.queryByTestId("branch-pinned-3")).toBeNull();
   });
 
+  it("the node label is the timeline ordinal, not the DB row id (issue #387: id 64 at position 1 shows 'v1')", () => {
+    // The QA 2026-10-04 symptom: the graph must show the SAME number as the
+    // filmstrip for the same version. A branched timeline where id 64 sits
+    // at list position 1 renders "v1" — never "v64".
+    render(<HistorySheet {...sheetProps({ versions: DIVERGENT_VERSIONS })} />);
+    // id 64 at position 1 → "v1" (ordinal), not "v64" (the raw id).
+    expect(screen.getByTestId("branch-node-64").textContent).toContain("v1 · first box");
+    // id 65 at position 2 → "v2".
+    expect(screen.getByTestId("branch-node-65").textContent).toContain("v2 · wider box");
+    // id 7 at position 3 → "v3" — the divergence is the whole point (id 7 ≠
+    // ordinal 3, but the label shows the ordinal).
+    expect(screen.getByTestId("branch-node-7").textContent).toContain("v3 · branched box");
+  });
+
+  it("the pinned mark carries the ordinal, not the DB row id (issue #387)", () => {
+    // The pinned mark (copy.history.pinnedMark) is a second v{id} site in the
+    // same component — the divergence fixture's pinned version (id 7 at
+    // position 3) must show "v3 · pinned", never "v7 · pinned".
+    render(<HistorySheet {...sheetProps({ versions: DIVERGENT_VERSIONS })} />);
+    const mark = screen.getByTestId("branch-pinned-7");
+    expect(mark.textContent).toContain("v3");
+    expect(mark.textContent).toContain("pinned");
+    expect(mark.textContent).toContain("the one we pinned");
+    // The raw id must NOT appear as the label's number.
+    expect(mark.textContent).not.toContain("v7 ·");
+  });
+
+  it("the pinned mark uses the ordinal from the shared map — a pinned id 64 at position 1 reads 'v1', never 'v64' (issue #387)", () => {
+    // The consumer-a fixture: id 64 pinned at position 1. The mark reads
+    // the ordinal from the versionOrdinals map — "v1" — never "v64".
+    const divergent: VersionTimelineEntry[] = [
+      { ...SHEET_VERSIONS[0], id: 64, parent: null, restored_from: null, pinned: true },
+      { ...SHEET_VERSIONS[1], id: 65, parent: 64, pinned: false },
+    ];
+    render(<HistorySheet {...sheetProps({ versions: divergent })} />);
+    const mark = screen.getByTestId("branch-pinned-64");
+    expect(mark.textContent).toContain("v1");
+    expect(mark.textContent).toContain("pinned");
+    // The raw id 64 must not appear as the label's number.
+    expect(mark.textContent).not.toContain("v64");
+  });
+
   it("the graph's legend names both edge kinds", () => {
     render(<HistorySheet {...sheetProps()} />);
     expect(screen.getByTestId("branch-legend-parent")).toBeTruthy();
     expect(screen.getByTestId("branch-legend-restored")).toBeTruthy();
+  });
+});
+
+describe("BranchGraph (undefined-safe ordinal labels)", () => {
+  it("a pinned version whose id is missing from the ordinal map renders no 'undefined' (issue #387)", async () => {
+    // Mock versionOrdinals to return an empty map — simulating the
+    // theoretical case where the ordinal lookup yields undefined. The
+    // component must never render "vundefined"; the pinned mark and
+    // node label both omit the number gracefully. This test fails on
+    // the original code (which renders "vundefined · pinned") and
+    // passes with the labelFor fix.
+    vi.doMock("../../../lib/versionOrdinals", () => ({
+      versionOrdinals: () => new Map<number, number>(),
+    }));
+    vi.resetModules();
+    const { BranchGraph } = await import("../BranchGraph");
+    const versions: VersionTimelineEntry[] = [
+      entry(64, { name: "first box", pinned: true, created_by_message: "pinned it" }),
+    ];
+    const { unmount } = render(<BranchGraph versions={versions} />);
+    const graph = screen.getByTestId("branch-graph");
+    // No "undefined" anywhere in the rendered output.
+    expect(graph.textContent).not.toContain("undefined");
+    // The pinned mark is present but carries no number (never
+    // "vundefined").
+    const mark = screen.getByTestId("branch-pinned-64");
+    expect(mark.textContent).not.toContain("vundefined");
+    expect(mark.textContent).toContain("pinned");
+    unmount();
+    vi.doUnmock("../../../lib/versionOrdinals");
   });
 });
