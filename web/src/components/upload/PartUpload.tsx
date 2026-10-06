@@ -168,6 +168,12 @@ export function PartUpload({
   const [uploadElapsed, setUploadElapsed] = useState(0);
 
   useEffect(() => {
+    // The interval runs ONLY while a read is in flight (the state is
+    // "uploading" AND the start timestamp is set — on settle, the shared
+    // path's `onUploadStateChange(false)` nulls `uploadStart`, so the
+    // cleanup fires and no further state updates happen after the POST
+    // settles; the label swaps to the result state's UI in the same render
+    // batch as the settle).
     if (state !== "uploading" || uploadStart === null) return;
     const tick = () =>
       setUploadElapsed(Math.max(0, Math.floor((Date.now() - uploadStart) / 1000)));

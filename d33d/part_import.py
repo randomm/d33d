@@ -50,6 +50,7 @@ from d33d.part_http import (
     PART_EXISTS_DETAIL,
     PART_FILENAME,
     PART_UPLOAD_COMMIT_FAILED_DETAIL,
+    PART_UPLOAD_DECODE_FAILED_DETAIL,
     PART_UPLOAD_SETTLE_INVALID_DETAIL,
     PART_UPLOAD_UNPARSEABLE_DETAIL,
     PART_UPLOAD_UNSUPPORTED_DETAIL,
@@ -95,11 +96,9 @@ def _scaled_stl_sync(raw: bytes, fmt: str, scale: float | None) -> bytes:
     optionally scale by ``part_scale``, and re-export as binary STL.
 
     ``trimesh.Mesh.export(file_type="stl")`` returns ``bytes`` — never
-    ``str`` — so the result goes straight into the response body. The
-    copy/scale/export live in the same guard as the load: an export-stage
-    failure (a trimesh version drift, a ragged array) re-raises as
-    ``PartUploadError`` so the endpoint's 409 ``source_missing`` contract
-    covers it — never a raw 500 for a committed file."""
+    ``str`` — so the result goes straight into the response body. An
+    export-stage failure re-raises as ``PartUploadError`` (the endpoint's
+    409 ``source_missing`` contract covers it — never a raw 500)."""
     try:
         mesh = load_part_geometry(raw, fmt)
         if scale is not None:
@@ -119,14 +118,16 @@ def _scaled_stl_sync(raw: bytes, fmt: str, scale: float | None) -> bytes:
 def _run_parse_and_repair(
     content: bytes, part_format: str
 ) -> tuple[dict[str, Any], str | None]:
-    """The upload's decode gate (run OFF the event loop by the route's
-    ``asyncio.to_thread``): ``parse_and_repair`` mapped to its 422 contract.
+    """The upload's decode gate (``asyncio.to_thread``): ``parse_and_repair``
+    → its 422 contract.
 
-    A ``RepairTimeoutError`` gets the distinct ``REPAIR_TIMEOUT_DETAIL``;
-    every other ``PartUploadError`` gets the unparseable detail. ANY other
-    exception (a MemoryError, a trimesh-internal failure) also 422s with
-    the unparseable detail — the decode contract is total: a decode that
-    cannot complete is a 422, never a raw 500. Nothing is persisted.
+    ``RepairTimeoutError`` → the distinct ``REPAIR_TIMEOUT_DETAIL``; every
+    other ``PartUploadError`` → the unparseable detail. ANY other exception
+    (a MemoryError, a trimesh-internal failure) → the DISTINCT
+    ``PART_UPLOAD_DECODE_FAILED_DETAIL`` (the mesh is presumed fine; the
+    decode itself broke), logged with the stable prefix ``part decode
+    failed unexpectedly``. The contract is total: a decode that cannot
+    complete is a 422, never a raw 500. Nothing is persisted.
     """
     try:
         _mesh, report, file_unit = parse_and_repair(content, part_format)
@@ -140,9 +141,9 @@ def _run_parse_and_repair(
     except Exception as e:
         # A non-PartUploadError (MemoryError, a trimesh-internal failure)
         # must not leak as a raw 500: the decode contract is total.
-        logger.exception("part decode failed unexpectedly")
+        logger.exception("part decode failed unexpectedly (%s)", type(e).__name__)
         raise HTTPException(
-            status_code=422, detail=PART_UPLOAD_UNPARSEABLE_DETAIL
+            status_code=422, detail=PART_UPLOAD_DECODE_FAILED_DETAIL
         ) from e
     return report, file_unit
 
@@ -180,8 +181,7 @@ def create_part_router() -> APIRouter:
             )
 
         # 413 FIRST: stream the raw body, refusing once the accumulated
-        # total exceeds the cap (the oversize body is never parsed — the
-        # multipart is never built, the mesh is never decoded).
+        # total exceeds the cap (the oversize body is never parsed).
         cap = MAX_PART_UPLOAD_BYTES + _PART_MULTIPART_ALLOWANCE
         buf = bytearray()
         async for chunk in request.stream():
@@ -666,6 +666,7 @@ __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_UPLOAD_BYTES",
     "PART_UPLOAD_COMMIT_FAILED_DETAIL",
+    "PART_UPLOAD_DECODE_FAILED_DETAIL",
     "PART_UPLOAD_SETTLE_INVALID_DETAIL",
     "PART_UPLOAD_UNPARSEABLE_DETAIL",
     "PART_UPLOAD_UNSUPPORTED_DETAIL",

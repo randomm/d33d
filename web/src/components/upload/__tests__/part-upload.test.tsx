@@ -250,4 +250,61 @@ describe("PartUpload (issue #334, D5)", () => {
     await waitFor(() => expect(onUploaded).toHaveBeenCalledWith(7));
     expect(screen.queryByTestId("part-upload-status")).toBeNull();
   });
+
+  it("stops ticking the elapsed seconds once the POST settles (issue #395)", async () => {
+    // The elapsed-seconds interval must not keep updating state after the
+    // POST settles (the effect's cleanup fires when `uploadStart` is
+    // nulled on settle). The in-flight window is gated by a promise; the
+    // settle is simulated by releasing the gate and flushing microtasks
+    // (the POST's own resolution settles the component). With fake
+    // timers, advancing time well past the settle point then causes NO
+    // further state updates if the interval was cleaned up.
+    let release!: () => void;
+    const gate = new Promise<void>((res) => (release = res));
+    const client = makeClient({
+      uploadPart: vi.fn().mockImplementation(async () => {
+        await gate;
+        return { id: 7, version_id: 1, part: partReport };
+      }),
+    });
+    const onUploaded = vi.fn();
+    const file = makeFile("big.stl");
+    render(
+      <PartUpload projectId={7} onUploaded={onUploaded} onError={vi.fn()} client={client} />,
+    );
+    fireEvent.change(screen.getByTestId("part-file-input"), {
+      target: { files: [file] },
+    });
+    // In flight: the interval is armed and ticking (the status line is up).
+    await waitFor(() => {
+      expect(screen.getByTestId("part-upload-status").textContent).toBe(
+        copy.partUpload.reading(0),
+      );
+    });
+    // Settle: release the POST; the success callbacks run and the shared
+    // path's `onUploadStateChange(false)` nulls `uploadStart` (the
+    // interval's cleanup fires from the effect).
+    release();
+    await waitFor(() => expect(onUploaded).toHaveBeenCalledWith(7));
+    expect(screen.queryByTestId("part-upload-status")).toBeNull();
+
+    // Now with FAKE timers: if the interval were still armed (the bug),
+    // advancing time would fire its tick callback and update the
+    // elapsed-seconds state. Spy on the state setter via the rendered
+    // output: the label must stay at the settled (non-reading) text with
+    // no status line reappearing across a long advance.
+    vi.useFakeTimers();
+    try {
+      const label = screen.getByTestId("part-upload-label");
+      const before = label.textContent;
+      // Advance well past many 1 s interval ticks: with the interval
+      // cleaned up, no state update fires and the label is unchanged.
+      vi.advanceTimersByTime(60_000);
+      expect(label.textContent).toBe(before);
+      expect(label.textContent).toBe(copy.partUpload.dropLine);
+      expect(screen.queryByTestId("part-upload-status")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

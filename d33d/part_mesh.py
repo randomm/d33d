@@ -39,7 +39,6 @@ from d33d.part_holes import _boundary_loops
 from d33d.part_mesh_topology import MeshTopology, mesh_topology
 from d33d.part_repair import (
     REPAIR_FACE_BUDGET,
-    REPAIR_TIMEOUT_SECONDS,
     _decimate,
     repair_bodies_with_pmf,
     repair_with_pmf,
@@ -370,17 +369,17 @@ def parse_and_repair(
     else:
         # Multi-body, not clean: repair EACH watertight body separately
         # and concatenate (issue #375). Decimate each body before repair
-        # if above the budget. The whole call is bounded by an aggregate
-        # wall-clock budget of REPAIR_TIMEOUT_SECONDS (the total multi-body
-        # repair must not exceed the same budget as a single body).
-        budget = REPAIR_TIMEOUT_SECONDS
+        # if above the budget. The whole call is bounded by the aggregate
+        # wall-clock budget REPAIR_TIMEOUT_SECONDS (the part_repair
+        # default — the total multi-body repair must not exceed the same
+        # budget as a single body).
         repaired_bodies = []
         for body in watertight_bodies:
             if len(body.faces) > REPAIR_FACE_BUDGET:
                 body = _decimate(body, REPAIR_FACE_BUDGET)
             repaired_bodies.append(body)
         repaired = trimesh.util.concatenate(
-            repair_bodies_with_pmf(repaired_bodies, timeout=budget)
+            repair_bodies_with_pmf(repaired_bodies)
         )
 
     # Finiteness AGAIN after pymeshfix (it can emit NaN from degenerate

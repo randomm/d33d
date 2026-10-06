@@ -67,6 +67,20 @@ describe("copy.ts Screen 1 strings", () => {
     );
   });
 
+  it("partUpload.decodeFailed equals the backend 422 decode-failure detail (issue #395 parity)", () => {
+    // The backend's ``PART_UPLOAD_DECODE_FAILED_DETAIL``
+    // (d33d/part_http.py, re-exported from d33d.part_import) and this copy
+    // key must match EXACTLY — the SPA surfaces the 422 `detail` verbatim,
+    // so the two-way agreement is what keeps the wire and the deck from
+    // drifting (the #299 way; the backend-side half of this pin lives in
+    // tests/test_part_import.py). DISTINCT from the unparseable detail:
+    // the file is presumed fine, the server-side read itself failed.
+    expect(copy.partUpload.decodeFailed).toBe(
+      "Something went wrong reading this file. Try again.",
+    );
+    expect(copy.partUpload.decodeFailed).not.toBe(copy.partUpload.unparseable);
+  });
+
   it("firstRun.fileChooseLine is verbatim", () => {
     expect(copy.firstRun.fileChooseLine).toBe("or choose a file");
   });

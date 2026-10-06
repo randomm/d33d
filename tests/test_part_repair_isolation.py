@@ -803,6 +803,48 @@ def test_child_error_carries_type_name_only(monkeypatch: pytest.MonkeyPatch):
     assert "LEAK_MARKER" not in msg
 
 
+def test_child_error_logs_child_message_not_payload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    """Lens round 3 (bug fix): the parent's log for a child-side failure
+    carries the CHILD's message (``payload_result``), not the INPUT mesh
+    payload. The old code logged ``payload`` — the pickled ``(verts, faces)``
+    input arrays — so a large mesh's array repr landed in the server log
+    while the actual child-side error text was discarded. The log must
+    show the child's message text and no array repr."""
+    import logging
+
+    import d33d.part_repair as part_repair_mod
+    from d33d.part_errors import PartUploadError
+    from tests._repair_stubs import _raise_error_repair
+
+    # A small mesh whose array repr is recognizable: the payload's verts
+    # array repr must NOT appear in the log (the old bug logged the
+    # payload, not the child's message).
+    mesh = _box_mesh()
+
+    monkeypatch.setattr(part_repair_mod, "_REPAIR_WORKER", _raise_error_repair)
+
+    with caplog.at_level(
+        logging.ERROR, logger="d33d.part_repair"
+    ), pytest.raises(PartUploadError):
+        repair_with_pmf(mesh, timeout=10)
+
+    joined = "\n".join(caplog.text.splitlines())
+    # The child's own message text is logged (bounded to 500 chars).
+    assert "LEAK_MARKER" in joined, (
+        f"the child's message must appear in the log, got:\n{joined}"
+    )
+    # The INPUT mesh arrays (the payload) must NOT be logged.
+    verts_repr = str(mesh.vertices)
+    faces_repr = str(mesh.faces)
+    assert verts_repr not in joined, "the input vertices array must not be logged"
+    assert faces_repr not in joined, "the input faces array must not be logged"
+    # The line is bounded: no unbounded array repr (a 500-char cap on the
+    # child message; the payload arrays are gone entirely).
+    assert "array(" not in joined or "LEAK_MARKER" in joined.split("array(")[0]
+
+
 def test_repair_timeout_detail_lives_in_part_errors():
     """Lens round 2: ``REPAIR_TIMEOUT_DETAIL`` is defined in
     ``d33d.part_errors`` (the leaf module) — part_import and the tests

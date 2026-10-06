@@ -1053,6 +1053,14 @@ export const partUpload = {
    *  exactly (parity pinned in import-stl-contract.test.ts). */
   repairTimeout:
     "The file is too complex to repair in time. Try simplifying the mesh.",
+  /** The 422 `detail` body: an UNEXPECTED server-side decode failure
+   *  (a non-PartUploadError — MemoryError, a trimesh-internal failure —
+   *  issue #395 lens). DISTINCT from `unparseable`: the file is presumed
+   *  fine; the read itself failed. Must equal the backend's
+   *  ``PART_UPLOAD_DECODE_FAILED_DETAIL`` exactly (parity pinned in
+   *  import-stl-contract.test.ts). */
+  decodeFailed:
+    "Something went wrong reading this file. Try again.",
 } as const;
 
 /**

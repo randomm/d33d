@@ -2606,6 +2606,25 @@ def test_part_upload_unparseable_detail_equals_copy_ts():
     assert PART_UPLOAD_UNPARSEABLE_DETAIL == m.group(1)
 
 
+def test_part_upload_decode_failed_detail_equals_copy_ts():
+    """``PART_UPLOAD_DECODE_FAILED_DETAIL`` equals ``copy.ts``
+    ``partUpload.decodeFailed`` exactly — the DISTINCT 422 detail for an
+    unexpected server-side decode failure (the file is presumed fine; the
+    decode itself broke), pinned here so the wire and the deck cannot
+    drift (the #299 way, as for unsupported/unparseable)."""
+    import pathlib
+    import re
+
+    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+
+    copy_ts = (
+        pathlib.Path(__file__).parent.parent / "web" / "src" / "copy.ts"
+    ).read_text("utf-8")
+    m = re.search(r"decodeFailed:\s*\n?\s*\"([^\"]+)\"", copy_ts)
+    assert m is not None, "copy.ts must define partUpload.decodeFailed"
+    assert PART_UPLOAD_DECODE_FAILED_DETAIL == m.group(1)
+
+
 def test_part_upload_commit_failed_detail_equals_copy_ts():
     """``PART_UPLOAD_COMMIT_FAILED_DETAIL`` equals ``copy.ts``
     ``partUpload.commitFailed`` exactly — the FIXED 500 detail the
@@ -3480,6 +3499,18 @@ def test_repair_timeout_returns_422(app_with_projects, monkeypatch):
     assert r.json()["detail"] == REPAIR_TIMEOUT_DETAIL
 
 
+def test_decode_failed_detail_is_distinct_from_unparseable():
+    """The unexpected-decode-failure 422 detail is a DIFFERENT string from
+    the unparseable detail — a MemoryError / trimesh-internal failure must
+    not imply the mesh is broken (the file is presumed fine; the decode
+    itself failed)."""
+    from d33d.part_errors import REPAIR_TIMEOUT_DETAIL
+    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+
+    assert PART_UPLOAD_DECODE_FAILED_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
+    assert PART_UPLOAD_DECODE_FAILED_DETAIL != REPAIR_TIMEOUT_DETAIL
+
+
 def test_repair_timeout_detail_is_distinct_from_unparseable():
     """Issue #395: the repair-timeout 422 detail is a DIFFERENT string from
     the unparseable detail — the timeout message must not imply the mesh
@@ -3648,8 +3679,9 @@ def test_clean_mesh_below_budget_not_decimated():
 def test_decode_memory_error_becomes_422(app_with_projects, monkeypatch):
     """A MemoryError (or any non-PartUploadError) raised by
     ``parse_and_repair`` during the upload's decode must surface as a
-    422 with the unparseable detail — never a raw 500. Nothing is
-    persisted (no version row, no part columns)."""
+    422 with the DISTINCT decode-failed detail — never a raw 500, never
+    the unparseable detail (the file is presumed fine; the decode itself
+    broke). Nothing is persisted (no version row, no part columns)."""
     from d33d import part_import as pi
 
     # Force a non-PartUploadError out of the decode.
@@ -3669,11 +3701,16 @@ def test_decode_memory_error_becomes_422(app_with_projects, monkeypatch):
 
     upload_r, pid = _run_async(app_with_projects, _call)
 
-    # The 422 must carry the unparseable detail (NOT a 500, NOT a MemoryError).
+    from d33d.part_http import PART_UPLOAD_DECODE_FAILED_DETAIL
+
+    # The 422 must carry the DISTINCT decode-failed detail (NOT a 500, NOT
+    # a MemoryError, and NOT the unparseable detail — the file is presumed
+    # fine, the server-side read itself failed).
     assert upload_r.status_code == 422, (
         f"decode MemoryError must be a 422, got {upload_r.status_code}: {upload_r.text}"
     )
-    assert upload_r.json()["detail"] == PART_UPLOAD_UNPARSEABLE_DETAIL
+    assert upload_r.json()["detail"] == PART_UPLOAD_DECODE_FAILED_DETAIL
+    assert PART_UPLOAD_DECODE_FAILED_DETAIL != PART_UPLOAD_UNPARSEABLE_DETAIL
 
     # Nothing persisted: the project has no part columns (a fresh connection
     # — the app's conn is closed once the lifespan ends; the DB file is still
@@ -3687,6 +3724,38 @@ def test_decode_memory_error_becomes_422(app_with_projects, monkeypatch):
         ).fetchone()
     assert row is not None, f"project {pid} must exist"
     assert row[0] is None, "no part must be persisted on decode error"
+
+
+def test_decode_failure_logs_stable_prefix(app_with_projects, monkeypatch, caplog):
+    """An unexpected (non-PartUploadError) decode failure is logged with
+    the STABLE prefix ``part decode failed unexpectedly`` (grep-able),
+    naming the exception type — the operator can distinguish a MemoryError
+    from a trimesh-internal failure in the server log."""
+    import logging
+
+    from d33d import part_import as pi
+
+    def _boom(content: bytes, part_format: str):
+        raise MemoryError("decode OOM")
+
+    monkeypatch.setattr(pi, "parse_and_repair", _boom)
+
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "DecodeLog"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    with caplog.at_level(logging.ERROR, logger="d33d.part_import"):
+        upload_r = _run_async(app_with_projects, _call)
+
+    assert upload_r.status_code == 422
+    joined = "\n".join(caplog.text.splitlines())
+    assert "part decode failed unexpectedly (MemoryError)" in joined, (
+        f"the stable prefix must name the exception type, got log:\n{joined}"
+    )
 
 
 def test_boundary_loops_failure_does_not_make_clean(monkeypatch):

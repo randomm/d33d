@@ -76,6 +76,29 @@ REPAIR_TIMEOUT_SECONDS = 120
 REPAIR_FACE_BUDGET = 500_000
 
 
+def _as_arrays(
+    vertices: Any, faces: Any
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(vertices, faces)`` as ``float64`` / ``int32`` numpy arrays — the
+    wire dtype for the process boundary (the pickled payload and the
+    repaired reply both use it).
+
+    A matching dtype (a ``float64`` / ``int32`` ndarray — trimesh's vertex
+    dtype, pymeshfix's output dtype) is returned AS-IS: ``np.asarray`` is
+    a no-op copy for a matching dtype (a ``np.shares_memory`` check
+    confirms it), so the conversion is free. A differing dtype (trimesh's
+    ``int64`` face arrays) copies — which the caller would otherwise do
+    anyway at the Trimesh rebuild, so the copy is moved, not added.
+    """
+    v = np.asarray(vertices)
+    if v.dtype != np.float64:
+        v = v.astype(np.float64)
+    f = np.asarray(faces)
+    if f.dtype != np.int32:
+        f = f.astype(np.int32)
+    return v, f
+
+
 def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
     """Decimate the mesh to approximately ``target_faces`` faces.
 
@@ -122,7 +145,9 @@ def _decimate(mesh: trimesh.Trimesh, target_faces: int) -> trimesh.Trimesh:
         ) from e
 
 
-def _repair_in_process(vertices: np.ndarray, faces: np.ndarray) -> tuple:
+def _repair_in_process(
+    vertices: np.ndarray, faces: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
     """The pymeshfix repair, run in the worker process (top-level → picklable).
 
     Receives raw numpy arrays (picklable — not trimesh objects) and
@@ -142,7 +167,9 @@ def _repair_in_process(vertices: np.ndarray, faces: np.ndarray) -> tuple:
     return repaired.vertices, repaired.faces
 
 
-def _repair_bodies_in_process(bodies: list) -> list:
+def _repair_bodies_in_process(
+    bodies: list[tuple[np.ndarray, np.ndarray]]
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """The batched pymeshfix repair for multi-body imports, run in the
     worker process (top-level → picklable).
 
@@ -317,7 +344,14 @@ def _run_in_worker(
         # carry arbitrary text — it must not leak into the 422 response).
         if name == "PartUploadError":
             raise PartUploadError(payload_result)
-        logger.error("repair worker failed in child: %s: %s", name, payload)
+        # The child's own message (payload_result, bounded — the child's
+        # message can be arbitrary text, never the INPUT payload) is what
+        # gets logged: the parent's wrapped 422 carries only the type name.
+        logger.error(
+            "repair worker failed in child: %s: %s",
+            name,
+            str(payload_result)[:500],
+        )
         raise PartUploadError(f"repair failed: {name}")
     finally:
         # Success / failure / timeout: never leave the child behind.
@@ -330,9 +364,13 @@ def _run_in_worker(
         # Bounded join: never block indefinitely.
         proc.join(timeout=5)
         if proc.is_alive():
-            logger.warning(
-                "repair worker process %d still alive after join(timeout=5); "
-                "leaving it (daemon=True, will be reaped on exit)",
+            # The post-kill still-alive case: a stable-prefix error (the
+            # bounded join could not reap the child — a real, if rare,
+            # failure, not a warning).
+            logger.error(
+                "repair worker orphaned: process %d still alive after "
+                "kill() and join(timeout=5); leaving it (daemon=True, "
+                "will be reaped on exit)",
                 proc.pid,
             )
 
@@ -357,16 +395,12 @@ def repair_with_pmf(
 
     # Prepare arrays (the process boundary pickles numpy arrays, not
     # trimesh objects — simpler and avoids trimesh pickle overhead).
-    payload = (
-        np.asarray(mesh.vertices, dtype=np.float64),
-        np.asarray(mesh.faces, dtype=np.int32),
-    )
+    payload = _as_arrays(mesh.vertices, mesh.faces)
 
     result = _run_in_worker("single", payload, timeout, "single body")
     repaired_verts, repaired_faces = result
     return trimesh.Trimesh(
-        np.asarray(repaired_verts, dtype=np.float64),
-        np.asarray(repaired_faces, dtype=np.int32),
+        *(_as_arrays(repaired_verts, repaired_faces)),
         process=False,
     )
 
@@ -389,19 +423,12 @@ def repair_bodies_with_pmf(
 
     # Prepare arrays (the process boundary pickles numpy arrays, not
     # trimesh objects — simpler and avoids trimesh pickle overhead).
-    payload = [
-        (
-            np.asarray(m.vertices, dtype=np.float64),
-            np.asarray(m.faces, dtype=np.int32),
-        )
-        for m in meshes
-    ]
+    payload = [_as_arrays(m.vertices, m.faces) for m in meshes]
 
     result = _run_in_worker("batch", payload, timeout, f"{len(meshes)} bodies")
     return [
         trimesh.Trimesh(
-            np.asarray(v, dtype=np.float64),
-            np.asarray(f, dtype=np.int32),
+            *(_as_arrays(v, f)),
             process=False,
         )
         for v, f in result
