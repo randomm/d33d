@@ -77,10 +77,10 @@ export interface UseQueuedSendArgs {
 
 /** Drop the single queued turn (by the `queued` flag and the recorded id)
  *  from the transcript. */
-function removeQueuedTurn<T extends { id: string; queued?: boolean }>(
-  prev: T[],
+function removeQueuedTurn(
+  prev: ChatMessage[],
   idToRemove: string | null,
-): T[] {
+): ChatMessage[] {
   return prev.filter((m) => !m.queued && m.id !== idToRemove);
 }
 
@@ -226,16 +226,27 @@ export function useQueuedSend({
             detail,
             retryable: true,
           },
-          onResendQueued: () => {
-            setMessages((p) => removeQueuedTurn(p, queuedTurnIdRef.current));
-            queuedTurnIdRef.current = null;
-            setQueuedText(null);
-            handleSendMessage(queuedText);
-          },
         },
       ]);
     });
-  }, [designLoopInFlight, runEndCount, queuedText, clearPendingSelection, setMessages, nextMsgId, handleSendMessage]);
+  }, [designLoopInFlight, runEndCount, queuedText, clearPendingSelection, setMessages, nextMsgId]);
+
+  // Resend: the failed-flush resend control's action (wired to the
+  // ChatPanel's resend button from App — NOT carried on the message
+  // itself). Removes the failed queued turn (by the recorded id) and
+  // re-enters the NORMAL send path exactly once: the queued text routes
+  // fresh as a plain chat send, never a re-flush.
+  const resendQueued = useCallback(
+    (text: string) => {
+      const idToRemove = queuedTurnIdRef.current;
+      queuedTurnIdRef.current = null;
+      flushedRef.current = false;
+      setQueuedText(null);
+      setMessages((prev) => removeQueuedTurn(prev, idToRemove));
+      handleSendMessage(text);
+    },
+    [handleSendMessage, setMessages],
+  );
 
   // Cancel: drop the queued turn and clear the slot WITHOUT sending.
   const cancelQueuedMessage = useCallback(() => {
@@ -250,6 +261,7 @@ export function useQueuedSend({
   return {
     queuedText,
     handleSendMessage,
+    resendQueued,
     cancelQueuedMessage,
     signalRunEnd,
   };

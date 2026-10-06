@@ -95,10 +95,6 @@ export interface ChatMessage {
    *  `queued.flushFailed` reason and a resend action. The message is never
    *  shown as sent, never lost. */
   queuedFailure?: string;
-  /** Issue #388 (failed flush): the resend control's handler — the queued
-   *  text re-enters the normal send path (a fresh chat send, never a
-   *  re-flush). Present only alongside `queuedFailure`. */
-  onResendQueued?: () => void;
 }
 
 interface ChatPanelProps {
@@ -107,6 +103,11 @@ interface ChatPanelProps {
   /** Issue #388 (operator decision 2026-10-05): drop the queued turn
    *  without sending it. Absent (or a no-op) when nothing is queued. */
   onCancelQueued?: () => void;
+  /** Issue #388 (failed flush): the resend control's handler — the queued
+   *  text re-enters the normal send path (a fresh chat send, never a
+   *  re-flush). Supplied by the shell from the hook's exported
+   *  `resendQueued`; the handler is NOT carried on the message. */
+  onResendQueued?: (text: string) => void;
   /** True while a design loop is in flight — disables the send button. */
   inFlight?: boolean;
   /** The PassCard's enlarged-view close action (issue #125). */
@@ -133,6 +134,7 @@ export function ChatPanel({
   messages,
   onSend,
   onCancelQueued,
+  onResendQueued,
   inFlight,
   onBesidePhoto,
   envelope,
@@ -298,7 +300,7 @@ export function ChatPanel({
                       type="button"
                       className="chat-msg-queued-resend"
                       data-testid="queued-resend-btn"
-                      onClick={msg.onResendQueued}
+                      onClick={() => onResendQueued?.(msg.content)}
                       style={{
                         marginLeft: 8,
                         padding: "2px 8px",

@@ -1568,7 +1568,7 @@ export default function App({ client }: AppProps) {
     pendingSelection,
     clearPendingSelection: handleCancelPendingSelection,
   });
-  const { handleSendMessage, cancelQueuedMessage } = queuedSend;
+  const { handleSendMessage, cancelQueuedMessage, resendQueued } = queuedSend;
   const signalRunEndRef = useRef<() => void>(() => {});
   signalRunEndRef.current = queuedSend.signalRunEnd;
 
@@ -1961,6 +1961,7 @@ export default function App({ client }: AppProps) {
           messages={messages}
           onSend={handleSendMessage}
           onCancelQueued={cancelQueuedMessage}
+          onResendQueued={resendQueued}
           inFlight={designLoopInFlight}
           onBesidePhoto={handleBesidePhoto}
           envelope={envelope}

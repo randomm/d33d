@@ -312,10 +312,11 @@ describe("RegionEditBar", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Issue #388 (operator decision 3) — the region-edit submit during a run
+// Issue #388 (operator decision 3) — the region-edit bar is DISABLED, not
+// queued, while a design run is in flight
 // ---------------------------------------------------------------------------
 
-describe("RegionEditBar — submit disabled while a run is in flight (issue #388)", () => {
+describe("RegionEditBar — in-flight gating (issue #388)", () => {
   it("disables the Apply button while a run is in flight", () => {
     render(
       <RegionEditBar
@@ -375,6 +376,26 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
     expect(btn).not.toHaveAttribute("aria-describedby");
   });
 
+  it("enables the Apply button once the run ends (inFlight is false) and the text is non-empty", () => {
+    // The in-flight gate is the only thing disabling Apply when the text is
+    // non-empty — once the run ends (inFlight is false) the button is
+    // enabled again and the user can re-apply the same instruction.
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={false}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-apply-btn")).not.toBeDisabled();
+  });
+
   it("a form submit (Enter) is a no-op while a run is in flight — the selection is kept, nothing is queued (issue #388, operator decision 3)", () => {
     const onSubmit = vi.fn();
     render(
@@ -393,6 +414,29 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
     const input = screen.getByTestId("region-edit-input");
     fireEvent.submit(input.closest("form")!);
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps the input enabled and the selection visible while inFlight (the drawn selection is kept)", () => {
+    // Decision 3 explicitly says the drawn selection is kept — the bar
+    // does not unmount or hide its content. The thumbnail, the module
+    // chip, and the input all stay rendered while inFlight is true.
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-module-chip")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-input")).not.toBeDisabled();
   });
 
   it("submit still works when not in flight (no inFlight)", () => {
@@ -458,86 +502,4 @@ describe("RegionEditBar — imported-geometry chip + hit point (issue #338)", ()
   });
 });
 
-// ---------------------------------------------------------------------------
-// Issue #388 (operator decision 3) — the region-edit bar is DISABLED, not
-// queued, while a design run is in flight
-// ---------------------------------------------------------------------------
 
-describe("RegionEditBar — in-flight disable (issue #388)", () => {
-  it("disables the Apply button while a run is in flight, and a click on it does NOT fire onSubmit", () => {
-    // Decision 3: a region-edit submit is disabled (not queued) while a
-    // run is in flight. The drawn selection is kept — the input stays
-    // typeable, the text is not lost, and the user can re-apply once the
-    // run ends. The Apply button is the closed path: a click on a disabled
-    // button is a no-op (the browser swallows the click), so onSubmit is
-    // never reached.
-    const onSubmit = vi.fn();
-    render(
-      <RegionEditBar
-        selection={makeSelection()}
-        viewportSize={VIEWPORT}
-        text="widen it"
-        onTextChange={vi.fn()}
-        onSubmit={onSubmit}
-        onCancel={vi.fn()}
-        orbitingPin={false}
-        orbitClearedPin={false}
-        inFlight={true}
-      />,
-    );
-    const apply = screen.getByTestId("region-edit-apply-btn");
-    expect(apply).toBeDisabled();
-    // A click on the disabled button is a no-op — the browser swallows it,
-    // and jsdom's fireEvent.click on a disabled button also does not fire
-    // the handler.
-    fireEvent.click(apply);
-    expect(onSubmit).not.toHaveBeenCalled();
-    // The input is still typeable — the text the user is composing is not
-    // lost (the selection is kept).
-    const input = screen.getByTestId("region-edit-input");
-    expect(input).not.toBeDisabled();
-  });
-
-  it("enables the Apply button once the run ends (inFlight is false) and the text is non-empty", () => {
-    // The in-flight gate is the only thing disabling Apply when the text is
-    // non-empty — once the run ends (inFlight is false) the button is
-    // enabled again and the user can re-apply the same instruction.
-    render(
-      <RegionEditBar
-        selection={makeSelection()}
-        viewportSize={VIEWPORT}
-        text="widen it"
-        onTextChange={vi.fn()}
-        onSubmit={vi.fn()}
-        onCancel={vi.fn()}
-        orbitingPin={false}
-        orbitClearedPin={false}
-        inFlight={false}
-      />,
-    );
-    expect(screen.getByTestId("region-edit-apply-btn")).not.toBeDisabled();
-  });
-
-  it("keeps the input enabled and the selection visible while inFlight (the drawn selection is kept)", () => {
-    // Decision 3 explicitly says the drawn selection is kept — the bar
-    // does not unmount or hide its content. The thumbnail, the module
-    // chip, and the input all stay rendered while inFlight is true.
-    render(
-      <RegionEditBar
-        selection={makeSelection()}
-        viewportSize={VIEWPORT}
-        text=""
-        onTextChange={vi.fn()}
-        onSubmit={vi.fn()}
-        onCancel={vi.fn()}
-        orbitingPin={false}
-        orbitClearedPin={false}
-        inFlight={true}
-      />,
-    );
-    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
-    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
-    expect(screen.getByTestId("region-edit-module-chip")).toBeTruthy();
-    expect(screen.getByTestId("region-edit-input")).not.toBeDisabled();
-  });
-});

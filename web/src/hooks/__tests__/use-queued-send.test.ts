@@ -279,7 +279,7 @@ describe("useQueuedSend", () => {
     expect(args.rememberUserMessage).not.toHaveBeenCalled();
   });
 
-  it("failed flush: the queued message is restored as a failed turn with a reason and a resend action (the message never vanishes); a later terminal signal does not auto-retry — the user resends", async () => {
+  it("failed flush: the queued message is restored as a failed turn with a reason; a later terminal signal does not auto-retry — the user resends via resendQueued", async () => {
     const { setMessages, messages } = setMessagesSpy([]);
     const args = makeArgs({
       setMessages,
@@ -306,7 +306,7 @@ describe("useQueuedSend", () => {
 
     // The queued message is NOT lost: it is visible again as a FAILED
     // queued turn (the queued flag keeps the caption slot) with the
-    // reason and a resend action.
+    // reason.
     const msgs = messages();
     const restored = msgs.filter((m) => m.queued);
     expect(restored).toHaveLength(1);
@@ -321,5 +321,56 @@ describe("useQueuedSend", () => {
     });
     await new Promise((r) => setTimeout(r, 20));
     expect(args.continueSend).toHaveBeenCalledTimes(1);
+  });
+
+  it("resendQueued: removes the failed queued turn (by its id) and re-enters the normal send path exactly once (no re-flush)", async () => {
+    const { setMessages, messages } = setMessagesSpy([]);
+    const args = makeArgs({
+      setMessages,
+      // The FIRST (flush) send rejects; the resend's fresh send succeeds.
+      continueSend: vi
+        .fn()
+        .mockRejectedValueOnce(new Error("409 Conflict"))
+        .mockResolvedValue(undefined),
+    });
+    const { result } = renderHook(() => useTestHook(args));
+
+    act(() => {
+      result.current.handleSendMessage("make it 40 mm");
+    });
+    expect(result.current.queuedText).toBe("make it 40 mm");
+
+    // The run ends — the flush fires and rejects; the failed turn is
+    // restored.
+    act(() => {
+      result.current.setInFlight(false);
+    });
+    act(() => {
+      result.current.signalRunEnd();
+    });
+    await waitFor(() => {
+      expect(args.continueSend).toHaveBeenCalledTimes(1);
+    });
+    const failedTurn = messages().filter((m) => m.queued);
+    expect(failedTurn).toHaveLength(1);
+
+    // The user clicks resend — the shell calls the hook's exported
+    // resendQueued with the message's text.
+    act(() => {
+      result.current.resendQueued(failedTurn[0].content);
+    });
+
+    // The failed turn was removed (by its id) — no failed turn remains.
+    expect(messages().filter((m) => m.queued)).toHaveLength(0);
+    expect(result.current.queuedText).toBeNull();
+    // The text re-entered the NORMAL send path exactly once: the
+    // successful fresh send fired without the isFlush marker (the run
+    // is no longer in flight, so it is a direct send, not a re-flush),
+    // and exactly one new POST happened.
+    await waitFor(() => {
+      expect(args.continueSend).toHaveBeenCalledTimes(2);
+    });
+    expect(args.continueSend).toHaveBeenLastCalledWith("make it 40 mm");
+    expect(args.continueSend).toHaveBeenCalledTimes(2);
   });
 });
