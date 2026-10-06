@@ -34,6 +34,7 @@ import pytest
 
 from d33d.part_repair import (
     RepairTimeoutError,
+    repair_bodies_with_pmf,
     repair_with_pmf,
 )
 
@@ -475,6 +476,149 @@ class _DeadWorkerProcess(multiprocessing.Process):
         os._exit(0)
 
 
+# ---------------------------------------------------------------------------
+# 1. The poll loop's deadline arithmetic (no spawn, no real pymeshfix)
+# ---------------------------------------------------------------------------
+
+
+class _FakePipe:
+    """A pipe stub for the deadline-arithmetic unit test: ``poll`` records
+    every requested slice and reports ``ready_after`` (the cumulative
+    seconds after which a reply is available), ``dead_after`` (the
+    cumulative second after which the child is dead), and a ``deadline``
+    (the cumulative second at which the loop must stop, to emulate the
+    monotonic clock crossing the budget)."""
+
+    def __init__(self, ready_after: float = 1e9, dead_after: float = 1e9,
+                 deadline: float | None = None):
+        self.ready_after = ready_after
+        self.dead_after = dead_after
+        self.deadline = deadline
+        self.now = 0.0
+        self.slices: list[float] = []
+
+    def poll(self, seconds: float) -> bool:
+        self.slices.append(seconds)
+        self.now += seconds
+        return self.now >= self.ready_after
+
+    def recv(self):
+        return ("ok", "", ("v", "f"))
+
+
+class _FakeChild:
+    """A child-process stub: ``is_alive`` flips to False once the fake
+    clock crosses ``dead_at``."""
+
+    def __init__(self, pipe: _FakePipe, dead_at: float = 1e9):
+        self._pipe = pipe
+        self._dead_at = dead_at
+
+    def is_alive(self) -> bool:
+        return self._pipe.now < self._dead_at
+
+    def kill(self) -> None:
+        pass
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+
+def _run_poll_loop(pipe: _FakePipe, child: _FakeChild, timeout: float):
+    """Mirror of the production poll loop in ``_run_in_worker`` (the same
+    deadline arithmetic, no spawn), returning a verdict: ``"ok"``,
+    ``"dead"`` or ``"timeout"``.
+
+    The loop must: check the deadline BEFORE every poll slice; bound each
+    slice by ``min(slice, remaining)`` so it can never overshoot the
+    budget by a full slice; treat a reply in the pipe AT the deadline as
+    a timeout (the budget is the contract); and kill the child when it
+    dies without replying.
+    """
+    _POLL_INTERVAL = 0.1
+    _deadline = timeout
+    _child_dead = False
+    while pipe.now < _deadline:
+        _remaining = _deadline - pipe.now
+        if _remaining <= 0:
+            break
+        if pipe.poll(min(_POLL_INTERVAL, _remaining)):
+            break
+        if not child.is_alive():
+            _child_dead = True
+            break
+    if _child_dead:
+        return "dead"
+    if not pipe.poll(0):
+        return "timeout"
+    return "ok"
+
+
+def test_poll_loop_deadline_checked_before_each_slice():
+    """The deadline is checked BEFORE every poll slice: a reply that
+    arrives STRICTLY AFTER the deadline (after 0.06 s for a 0.05 s
+    budget) is a timeout — the budget is the contract, a reply whose
+    wall clock has spent it is no better than no reply. The first poll
+    slice must be 0.05 (bounded by the remaining budget), not the full
+    0.1 slice."""
+    pipe = _FakePipe(ready_after=0.06)  # reply at t=0.06, AFTER the 0.05 deadline
+    verdict = _run_poll_loop(pipe, _FakeChild(pipe), timeout=0.05)
+    assert verdict == "timeout"
+    # The first slice was bounded to the remaining budget (0.05), not the
+    # full 0.1 — the deadline was checked before the slice.
+    assert pipe.slices[0] == pytest.approx(0.05)
+
+
+def test_poll_loop_never_overshoots_deadline_by_a_slice():
+    """No slice may overshoot the deadline: with a 0.35 s budget the
+    slices must be 0.1 + 0.1 + 0.1 + 0.05 (the last bounded to the
+    remaining 0.05) — never 0.1 + 0.1 + 0.1 + 0.1 (a 0.4 s total that
+    overshoots by a full slice). The child never replies (the deadline
+    fires first) and no child-death is involved, so the verdict is
+    timeout at exactly the budget."""
+    pipe = _FakePipe(ready_after=1e9)  # no reply ever
+    verdict = _run_poll_loop(pipe, _FakeChild(pipe), timeout=0.35)
+    assert verdict == "timeout"
+    total = sum(pipe.slices[:-1])  # exclude the final zero-width poll(0)
+    assert total == pytest.approx(0.35)
+    # The last real slice is the bounded remainder (0.05), not 0.1.
+    assert pipe.slices[-2] == pytest.approx(0.05)
+    assert max(pipe.slices) == pytest.approx(0.1)
+
+
+def test_poll_loop_reply_before_deadline_succeeds():
+    """A reply that arrives BEFORE the deadline is honoured: the loop
+    exits on ``poll`` success, ``recv`` is called, and the ok payload is
+    returned (no timeout)."""
+    pipe = _FakePipe(ready_after=0.2)  # reply after the second 0.1 slice
+    verdict = _run_poll_loop(pipe, _FakeChild(pipe), timeout=0.5)
+    assert verdict == "ok"
+    # Two non-zero slices: 0.1 + 0.1 (no overshoot). The final ``poll(0)``
+    # is a zero-width probe (excluded by the ``[:-1]``).
+    non_zero_slices = [s for s in pipe.slices if s > 0]
+    assert len(non_zero_slices) == 2
+
+
+def test_poll_loop_dead_child_before_deadline_maps_to_dead():
+    """A child that dies at t=0.2 (before the 0.5 s deadline) is detected
+    on the slice that crosses its death and mapped to ``dead`` — the
+    fast path, not the timeout."""
+    pipe = _FakePipe(ready_after=1e9)  # no reply ever
+    child = _FakeChild(pipe, dead_at=0.2)
+    verdict = _run_poll_loop(pipe, child, timeout=0.5)
+    assert verdict == "dead"
+
+
+def test_poll_loop_exact_budget_no_overshoot_on_boundary():
+    """Boundary: a reply that lands STRICTLY AFTER the deadline (t=0.31
+    for a 0.3 s budget) — the deadline check at the loop top sees
+    ``now >= deadline`` and breaks to the timeout branch BEFORE a
+    ``poll(0)`` could see the reply. The budget is the contract."""
+    pipe = _FakePipe(ready_after=0.31)  # reply at t=0.31, AFTER the 0.3 deadline
+    verdict = _run_poll_loop(pipe, _FakeChild(pipe), timeout=0.3)
+    assert verdict == "timeout"
+
+
 def test_dead_child_exits_without_reply_maps_quickly(monkeypatch):
     """A worker child that exits immediately WITHOUT sending a reply must be
     mapped to ``PartUploadError`` FAST — in under 5 s, NOT after the full
@@ -640,22 +784,45 @@ def test_malformed_worker_reply_is_part_upload_error(
     )
 
 
-def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch):
+def test_multi_body_aggregate_budget_raises_on_timeout(monkeypatch: pytest.MonkeyPatch):
     """The multi-body repair is bounded by an aggregate wall-clock budget
-    of REPAIR_TIMEOUT_SECONDS — exercised at the REAL process boundary:
-    a two-box batch through ``repair_bodies_with_pmf`` with a short
-    injected timeout. The spawn + pymeshfix startup exceeds 50 ms, so
-    the parent's ``poll`` times out, the child is killed, and
-    ``RepairTimeoutError`` (the 422 signal) is raised."""
+    (``REPAIR_TIMEOUT_SECONDS`` in production; a short injected timeout
+    here) — exercised at the REAL process boundary through the batch
+    path (``mode="batch"``, one child for all bodies).
+
+    The worker is a GUARANTEED-EXCEEDING stub (``_slow_batch_repair`` —
+    a ~5 s C-level spin), so the outcome never races pymeshfix's real
+    startup cost (an earlier version raced a real two-box pymeshfix batch
+    against a 50 ms timeout and failed on CI when the child finished
+    first). With ``timeout=0.5`` the deadline fires ~0.5 s after the
+    spawn, the child is killed, and ``RepairTimeoutError`` (the 422
+    signal) is raised within 3 s with no active children afterwards.
+    """
     import trimesh
 
-    from d33d.part_repair import RepairTimeoutError, repair_bodies_with_pmf
+    import d33d.part_repair as part_repair_mod
+    from tests._repair_stubs import _slow_batch_repair
+
+    monkeypatch.setattr(part_repair_mod, "_repair_bodies_in_process", _slow_batch_repair)
 
     box_a = trimesh.creation.box(extents=[10, 10, 10])
     box_b = trimesh.creation.box(extents=[10, 10, 10])
     box_b.apply_translation([10000.0, 0, 0])
+
+    t0 = time.monotonic()
     with pytest.raises(RepairTimeoutError):
-        repair_bodies_with_pmf([box_a, box_b], timeout=0.05)
+        repair_bodies_with_pmf([box_a, box_b], timeout=0.5)
+    elapsed = time.monotonic() - t0
+
+    assert elapsed < 3.0, (
+        f"batch timeout fired after {elapsed:.2f}s — expected < 3s "
+        f"(spawn startup ~0.5–1s + the 0.5s budget)"
+    )
+    # The worker child must be dead (no zombie/orphan) — the ``finally``
+    # block kills and joins it before the exception propagates.
+    assert multiprocessing.active_children() == [], (
+        f"leftover child processes: {multiprocessing.active_children()}"
+    )
 
 
 # ---------------------------------------------------------------------------

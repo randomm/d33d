@@ -251,23 +251,29 @@ def _run_in_worker(
         # detects a dead child within ~100 ms of its exit, not after the
         # full ``timeout`` budget (a ``poll(timeout)`` would block for the
         # full budget even if the child died at t=0.2 s, because macOS does
-        # not always signal pipe EOF through ``poll``). The loop exits when
-        # EITHER the pipe has data (a reply is ready) OR the child has died
-        # (no reply will ever come) OR the timeout budget is spent (a
-        # genuinely slow repair).
+        # not always signal pipe EOF through ``poll``).
+        #
+        # The deadline is honoured EXACTLY: it is checked BEFORE every
+        # poll slice, and each slice is ``min(slice, remaining)`` — the
+        # loop can never overshoot the budget by a full slice. A reply
+        # that arrives after the deadline (already in the pipe when the
+        # deadline passes) is treated as a timeout: the budget is the
+        # contract, and a reply whose wall clock has spent it is no
+        # better than no reply (the child is killed and the 422 sent).
         import time as _time
 
         _POLL_INTERVAL = 0.1  # 100 ms — responsive dead-child detection
         _deadline = _time.monotonic() + timeout
         _child_dead = False
-        while True:
-            if pipe_parent.poll(_POLL_INTERVAL):
+        while _time.monotonic() < _deadline:
+            _remaining = _deadline - _time.monotonic()
+            if _remaining <= 0:
+                break  # deadline reached — the budget is spent
+            if pipe_parent.poll(min(_POLL_INTERVAL, _remaining)):
                 break  # data available → a reply is ready
             if not proc.is_alive():
                 _child_dead = True
                 break
-            if _time.monotonic() >= _deadline:
-                break  # timeout budget spent
         if _child_dead:
             # The child died without sending a reply — the 422. A ``recv``
             # on the drained pipe would hang on some platforms (macOS does
@@ -278,9 +284,12 @@ def _run_in_worker(
                 "repair failed: worker child exited without replying"
             )
         if not pipe_parent.poll(0):
-            # The timeout budget is spent and the child is still alive (a
+            # The timeout budget is spent and no reply is in the pipe (a
             # genuinely slow repair) — the 422 timeout; the finally block
-            # kills the child.
+            # kills the child. A reply in the pipe here would mean the
+            # deadline check above was missed; that is unreachable because
+            # the deadline is checked before every poll slice and no slice
+            # can overshoot the deadline by a full slice.
             raise RepairTimeoutError(
                 f"repair timed out: exceeded {timeout:.0f}s ({label})"
             )

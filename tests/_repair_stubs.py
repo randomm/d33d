@@ -97,4 +97,30 @@ def _bodies_worker(bodies):
     return repaired
 
 
-__all__ = ["_bodies_worker", "_busy_repair", "_noop_repair", "_raise_error_repair", "_slow_spin_repair"]
+def _slow_batch_repair(bodies: list) -> list:
+    """A GUARANTEED-EXCEEDING batch-mode stub for the aggregate-budget
+    timeout test.
+
+    Spins ~5 s (a C-level busy loop) — well past any injected test
+    timeout (e.g. ``timeout=0.5``) — so the parent's deadline fires
+    deterministically and the child is killed. The returned list is never
+    reached, but the shape matches the batch-worker contract (a list of
+    ``(vertices, faces)`` pairs), so the same stub could be reused for a
+    non-timeout case.
+
+    The spin runs INSIDE the spawn child (the stub is the worker), so the
+    parent's poll loop never sees a reply — there is no race against
+    pymeshfix's real startup cost.
+    """
+    sum(range(3_000_000_000))  # ~5 s — well past the injected timeout
+    return [b for b in bodies]
+
+
+__all__ = [
+    "_bodies_worker",
+    "_busy_repair",
+    "_noop_repair",
+    "_raise_error_repair",
+    "_slow_batch_repair",
+    "_slow_spin_repair",
+]
