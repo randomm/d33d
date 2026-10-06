@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { VersionTimelineEntry } from "../api";
-import { versionOrdinals } from "../versionOrdinals";
+import { versionOrdinals, exportLabel } from "../versionOrdinals";
 
 function entry(id: number, name: string): VersionTimelineEntry {
   return {
@@ -67,5 +67,30 @@ describe("versionOrdinals (lib/versionOrdinals.ts)", () => {
       entry(2, "v2"),
     ];
     expect(versionOrdinals(versions)).toEqual(new Map([[1, 1], [2, 2]]));
+  });
+});
+
+describe("exportLabel (lib/versionOrdinals.ts)", () => {
+  it("a named version → its name", () => {
+    const versions = [entry(3, "Bracket v2"), entry(7, "Adjust")];
+    expect(exportLabel(versions, 3, "Bracket v2")).toBe("Bracket v2");
+  });
+
+  it("a nameless version → v{n}, using non-sequential ids", () => {
+    const versions = [entry(5, "a"), entry(12, "b"), entry(99, "c")];
+    expect(exportLabel(versions, 12, undefined)).toBe("v2");
+    expect(exportLabel(versions, 99, undefined)).toBe("v3");
+    expect(exportLabel(versions, 5, undefined)).toBe("v1");
+  });
+
+  it("an empty name → v{n} (the empty string is not a name)", () => {
+    const versions = [entry(4, "a"), entry(8, "")];
+    expect(exportLabel(versions, 8, "")).toBe("v2");
+  });
+
+  it("a stale id (absent from the timeline) → 'current'", () => {
+    const versions = [entry(1, "a"), entry(2, "b")];
+    expect(exportLabel(versions, 64, undefined)).toBe("current");
+    expect(exportLabel(versions, 64, "")).toBe("current");
   });
 });

@@ -17,10 +17,10 @@
  * → "curtain-rod-bracket-v4.3mf"), never an invented `model-{id}.3mf`.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ApiClient } from "../../lib/api";
 import type { PartReportInfo, VersionTimelineEntry } from "../../lib/api";
-import { versionOrdinals } from "../../lib/versionOrdinals";
+import { exportLabel } from "../../lib/versionOrdinals";
 import { displayExportError } from "../../lib/exportErrorCopy";
 import { copy } from "../../copy";
 
@@ -106,12 +106,9 @@ export function Export3MF({
   // the shared helper (issue #387: never the DB row id, which diverges once
   // branches/restores make ids non-sequential). An id missing from the
   // loaded timeline is "current": no number, never the raw id.
-  const ordinalById = useMemo(() => versionOrdinals(versions), [versions]);
-  const ordinalSuffix =
-    versionId !== undefined ? ordinalById.get(versionId) : undefined;
   const downloadName = copy.shell.exportFilename(
     projectName,
-    versionName ?? (ordinalSuffix !== undefined ? `v${ordinalSuffix}` : "current"),
+    versionId !== undefined ? exportLabel(versions, versionId, versionName) : (versionName ?? "current"),
   );
 
   // Issue #334 (D8) / issue #350: only an UNSETTLED imported part blocks

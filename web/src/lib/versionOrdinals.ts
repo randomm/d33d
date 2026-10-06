@@ -29,3 +29,19 @@ export function versionOrdinals(versions: VersionTimelineEntry[]): Map<number, n
   });
   return ordinalById;
 }
+
+/**
+ * The version's export label (issue #387): its display name when present,
+ * else `v{ordinal}` from the shared map (never the raw DB id), else
+ * "current" for an id absent from the timeline. One helper for every site
+ * that names an export (App's completion turn, Export3MF's filename).
+ */
+export function exportLabel(
+  versions: VersionTimelineEntry[],
+  versionId: number,
+  name?: string,
+): string {
+  if (name) return name;
+  const ordinal = versionOrdinals(versions).get(versionId);
+  return ordinal !== undefined ? `v${ordinal}` : "current";
+}

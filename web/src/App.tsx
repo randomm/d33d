@@ -63,7 +63,7 @@ import {
 } from "./lib/api";
 import copy from "./copy";
 import type { RenderImage } from "./lib/renderImage";
-import { versionOrdinals } from "./lib/versionOrdinals";
+import { exportLabel } from "./lib/versionOrdinals";
 import { Brief } from "./components/brief/Brief";
 import { PassCard } from "./components/chat/PassCard";
 import { Composer } from "./components/chat/Composer";
@@ -1578,15 +1578,14 @@ export default function App({ client }: AppProps) {
   const handleExported = useCallback(
     async (versionId: number | undefined) => {
       if (projectId === null || versionId === undefined) return;
-      const version = versions.find((v) => v.id === versionId);
       // Issue #387 (operator decision 1): the completion turn names the file
       // from the same timeline ordinal every other label uses — the shared
       // helper's map, never the DB row id. A stale nameless id (not in the
       // loaded list, or an empty name) names the file with the same "current"
       // suffix the Export3MF download used, so the turn and the file on disk
       // agree — the turn is never silently dropped.
-      const ordinal = versionOrdinals(versions).get(versionId);
-      const versionLabel = version?.name || (ordinal !== undefined ? `v${ordinal}` : "current");
+      const version = versions.find((v) => v.id === versionId);
+      const versionLabel = exportLabel(versions, versionId, version?.name);
       const filename = copy.shell.exportFilename(projectName, versionLabel);
       setMessages((prev) => [
         ...prev,
