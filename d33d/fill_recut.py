@@ -30,6 +30,8 @@ from typing import Any
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
 from d33d.versions import valid_axis
 
+import math
+
 # Issue #332 (sub-issue 3) — the unsettled-part chat reply (verbatim copy
 # of the copy.ts sentence — the parity test in
 # ``tests/test_projects.py`` pins the two-way agreement against
@@ -85,6 +87,18 @@ FRILL_NO_DIMENSION_REPLY = (
 )
 #: The quiet decline acknowledgement (a clean "no" on the pending offer).
 FILL_RECUT_DECLINE_REPLY = "Understood — leaving the part as it is."
+
+#: The point-at fallback (issue #396): the measured-hole selection is
+#: ambiguous (two equally-near candidates, or no qualifier matched) —
+#: the offer asks the user to point at the hole on the part. The ``{dim}``
+#: slot is the user's stated target diameter (mono-formatted); when the
+#: user didn't state a size, the template has no Ø clause.
+FRILL_POINT_AT_TEMPLATE = (
+    "Point at the {noun} on the part and I'll fill it and cut a Ø{dim} mm one there."
+)
+FRILL_POINT_AT_NO_DIM_TEMPLATE = (
+    "Point at the {noun} on the part and I'll fill it and cut a new one there."
+)
 
 #: The input bound for :func:`fill_recut_trigger`: an instruction longer
 #: than this many characters is NOT a resize/move request — it bails out
@@ -324,13 +338,87 @@ def is_clean_no(message: str) -> bool:
     )
 
 
+def _select_measured_hole(
+    holes: list[dict[str, Any]],
+    message: str,
+    bbox_mm: list[float] | None,
+    trigger_size: float | None = None,
+) -> dict[str, Any] | None:
+    """Select the hole the user is referring to from the measured list.
+
+    Selection rules (issue #396):
+    1. A single measured hole is picked trivially.
+    2. "the center hole" (or similar) picks the hole nearest the part's
+       XY bbox centre.
+    3. If no qualifier is present and the trigger size matches exactly
+       one hole's existing diameter (within 5%), that hole is picked.
+    4. If the choice is ambiguous (two candidates equally near, or no
+       qualifier and no unique diameter match), return ``None`` (the
+       caller falls back to the point-at copy).
+
+    Returns the hole dict or ``None``.
+    """
+    if not holes:
+        return None
+    if len(holes) == 1:
+        return holes[0]
+
+    msg_lower = message.lower()
+    has_center_qualifier = any(
+        w in msg_lower for w in ("center", "centre", "middle")
+    )
+
+    # "center hole" qualifier: nearest to XY bbox centre.
+    if has_center_qualifier and bbox_mm and len(bbox_mm) >= 2:
+        cx = bbox_mm[0] / 2.0
+        cy = bbox_mm[1] / 2.0
+        dists = []
+        for h in holes:
+            c = h.get("center")
+            if not c or len(c) < 2:
+                continue
+            d = math.hypot(c[0] - cx, c[1] - cy)
+            dists.append((d, h))
+        if dists:
+            dists.sort(key=lambda x: x[0])
+            # If two are within 1% of each other, it's ambiguous.
+            if len(dists) > 1:
+                d_min = dists[0][0]
+                d_max = dists[1][0]
+                if d_min > 0 and d_max / d_min < 1.01:
+                    return None
+            return dists[0][1]
+
+    # No center qualifier: try diameter matching (the trigger size must
+    # match exactly one hole's existing diameter within 5%).
+    if trigger_size is not None and trigger_size > 0:
+        size_matches = []
+        for h in holes:
+            d = h.get("diameter_mm")
+            if d and abs(trigger_size - d) / d <= 0.05:
+                size_matches.append(h)
+        if len(size_matches) == 1:
+            return size_matches[0]
+        # 0 or 2+ matches: ambiguous (or no match) → point-at fallback.
+
+    # No qualifier matched — ambiguous, return None (point-at fallback).
+    return None
+
+
 def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
     """The explicit design-loop instruction an ACCEPTED fill-recut offer
     appends to the request text (the loop's own import-aware prompt
     already teaches the fill-then-cut move — this makes the accepted
     turn's intent explicit). The noun and size come from the
     SERVER-SIDE offer (never parsed from the client's chat); the size is
-    mono-formatted, ``None`` → no size clause."""
+    mono-formatted, ``None`` → no size clause.
+
+    Issue #396: when the offer carries a measured hole (``center``,
+    ``axis``, ``diameter_mm``), the instruction names the specific hole
+    with its numbers: "fill the Ø30.0 mm hole at (60.0, 40.0), axis Z,
+    then cut a Ø38.0 mm hole on the same axis". Without a measured hole
+    (legacy/region-route offers with no location), the instruction is
+    byte-identical to the pre-#396 form."""
     from d33d.part_http import PART_FILENAME
 
     noun = str(offer.get("noun") or "feature")
@@ -340,15 +428,47 @@ def fill_and_recut_instruction(offer: dict[str, Any]) -> str:
         if isinstance(size, (int, float)) and size > 0
         else ""
     )
-    # The axis clause (issue #338, operator decision 5): the offer's
-    # axis — the pick's face normal, substituted as unit vector
-    # components — names the same axis the offer text promised. A
-    # chat-route offer has no axis (``None``): the clause is omitted
-    # and the instruction is byte-identical to pre-#338. The axis is
-    # validated with the SAME ``valid_axis`` the reader
-    # (``d33d.versions.get_pending_offer``) uses, so a non-finite or
-    # non-unit axis (a corrupt row read straight from storage) yields
-    # NO axis clause rather than leaking a malformed vector.
+
+    # Issue #396: measured hole location (centre + axis + existing diameter).
+    hole_center = offer.get("center")
+    hole_diameter = offer.get("diameter_mm")
+    hole_axis = offer.get("axis")
+
+    if (
+        isinstance(hole_center, (list, tuple))
+        and len(hole_center) >= 2
+        and all(isinstance(v, (int, float)) and math.isfinite(v) for v in hole_center[:2])
+    ):
+        # The instruction carries the measured hole's numbers.
+        cx, cy = float(hole_center[0]), float(hole_center[1])
+        # Diameter clause for the hole being filled.
+        dia_str = (
+            f"Ø{hole_diameter:g} mm "
+            if isinstance(hole_diameter, (int, float)) and hole_diameter > 0
+            else ""
+        )
+        # Axis clause (validated).
+        axis_clause = ""
+        if hole_axis and valid_axis(hole_axis):
+            ax = [float(v) for v in hole_axis]
+            # Find the dominant axis name.
+            if abs(ax[0]) > 0.9:
+                axis_name = "X"
+            elif abs(ax[1]) > 0.9:
+                axis_name = "Y"
+            elif abs(ax[2]) > 0.9:
+                axis_name = "Z"
+            else:
+                axis_name = f"({ax[0]:g}, {ax[1]:g}, {ax[2]:g})"
+            axis_clause = f", axis {axis_name}"
+        return (
+            f"Fill-and-recut: fill the {dia_str}{noun} at ({cx:g}, {cy:g})"
+            f"{axis_clause}, then cut a {dia_str}{noun}{size_str} "
+            f"on the same axis. Never resize the imported mesh itself — "
+            f"import(\"{PART_FILENAME}\") stays as brought."
+        )
+
+    # Legacy / region-route: no measured centre — the pre-#396 form.
     axis = offer.get("axis")
     if valid_axis(axis):
         axis = [float(v) for v in axis]
@@ -461,14 +581,15 @@ def fill_recut_turn(
                         "run_loop": False,
                         "outcome": "no_feature",
                     }
-                versions.set_pending_offer(
-                    project_id,
-                    {
-                        "kind": "fill_recut",
-                        "noun": trigger["noun"],
-                        "size": trigger["size"],
-                    },
-                )
+
+                # Issue #396: if the part has measured holes, select the
+                # hole the user is referring to and store its geometry in
+                # the offer so the instruction can carry the numbers.
+                offer_dict: dict[str, Any] = {
+                    "kind": "fill_recut",
+                    "noun": trigger["noun"],
+                    "size": trigger["size"],
+                }
                 sentence = boundary_sentence(
                     trigger["noun"],
                     trigger["size"],
@@ -476,6 +597,51 @@ def fill_recut_turn(
                     move_distance_mm=trigger.get("move_distance"),
                     move_direction=trigger.get("direction"),
                 )
+                point_at_fallback = False
+
+                if trigger["noun"] in HOLE_NOUNS:
+                    report = part.get("report") if part else None
+                    holes: list[dict[str, Any]] = []
+                    bbox_mm: list[float] | None = None
+                    if isinstance(report, dict):
+                        holes = report.get("holes") or []
+                        # bbox_mm from the report (file units × scale).
+                        bbox_fu = report.get("bbox_file_units")
+                        scale = part.get("scale")
+                        if (
+                            isinstance(bbox_fu, (list, tuple))
+                            and len(bbox_fu) >= 2
+                            and scale is not None
+                            and scale > 0
+                        ):
+                            bbox_mm = [float(v) * scale for v in bbox_fu]
+                    if holes:
+                        selected = _select_measured_hole(
+                            holes, message, bbox_mm,
+                            trigger_size=trigger["size"],
+                        )
+                        if selected is not None:
+                            offer_dict["center"] = selected.get("center")
+                            offer_dict["axis"] = selected.get("axis")
+                            offer_dict["diameter_mm"] = selected.get("diameter_mm")
+                        else:
+                            # Ambiguous or no qualifier matched: use the
+                            # point-at copy (never an instruction without
+                            # a location).
+                            point_at_fallback = True
+
+                if point_at_fallback:
+                    dim_str = _fmt_size(trigger["size"])
+                    if dim_str:
+                        sentence = FRILL_POINT_AT_TEMPLATE.format(
+                            noun=trigger["noun"], dim=dim_str
+                        )
+                    else:
+                        sentence = FRILL_POINT_AT_NO_DIM_TEMPLATE.format(
+                            noun=trigger["noun"]
+                        )
+
+                versions.set_pending_offer(project_id, offer_dict)
                 return {
                     "kind": "answer",
                     "answer": sentence,
@@ -493,8 +659,11 @@ __all__ = [
     "FRILL_MOVE_REPLY",
     "FRILL_NOUN_DIMENSION_REPLY",
     "FRILL_NO_DIMENSION_REPLY",
+    "FRILL_POINT_AT_NO_DIM_TEMPLATE",
+    "FRILL_POINT_AT_TEMPLATE",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
+    "_select_measured_hole",
     "boundary_sentence",
     "fill_and_recut_instruction",
     "fill_recut_trigger",

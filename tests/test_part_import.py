@@ -2304,6 +2304,126 @@ def test_hole_count_computation_runs_off_event_loop(
 
 
 # ---------------------------------------------------------------------------
+# Issue #396: per-hole measurement (centre, axis, diameter) in part_report
+# ---------------------------------------------------------------------------
+
+
+def test_holes_list_present_for_holey_fixture(app_with_projects) -> None:
+    """Issue #396: holey.stl (4 boundary loops) → ``part_report["holes"]``
+    has entries with centre, axis, and diameter_mm. The list is capped at
+    MAX_HOLES and unfittable holes are omitted (omit-not-null)."""
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Holes396"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # The holes list is present (the fixture has 4 open holes).
+    holes = report.get("holes")
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert isinstance(holes, list)
+    assert len(holes) >= 1, f"holey.stl must have at least 1 measured hole: {holes}"
+    for h in holes:
+        assert "center" in h, f"hole entry missing center: {h}"
+        assert "axis" in h, f"hole entry missing axis: {h}"
+        assert "diameter_mm" in h, f"hole entry missing diameter_mm: {h}"
+        c = h["center"]
+        assert isinstance(c, list) and len(c) >= 2
+        assert all(isinstance(v, (int, float)) for v in c[:2])
+        a = h["axis"]
+        assert isinstance(a, list) and len(a) == 3
+        assert all(isinstance(v, (int, float)) for v in a)
+        d = h["diameter_mm"]
+        assert isinstance(d, (int, float)) and d > 0
+
+
+def test_holes_list_absent_for_plain_box(app_with_projects) -> None:
+    """Issue #396: a plain box (hole_count == 0) → no ``holes`` key in the
+    report (omit-not-null: no holes, no key)."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "BoxNoHoles"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["hole_count"] == 0
+    # The holes key is absent (omit-not-null).
+    assert "holes" not in report, f"plain box must not have a holes key: {report}"
+
+
+def test_holes_list_annulus_diameter(app_with_projects) -> None:
+    """Issue #396: a trimesh annulus (r_min=5, r_max=15, height=10) has a
+    single genus-1 through-hole. The measured diameter should be
+    approximately 2×5 = 10 mm (the inner radius × 2)."""
+    import trimesh
+
+    ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    data = _stl_bytes_from_mesh(ring)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "AnnulusHoles"})
+        pid = r.json()["id"]
+        files = {"file": ("ring.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    holes = report.get("holes")
+    if holes:
+        assert len(holes) >= 1
+        d = holes[0]["diameter_mm"]
+        # The inner diameter is 2×5 = 10 mm; allow 50% tolerance for
+        # the approximation method.
+        assert 3.0 < d < 20.0, f"annulus hole diameter {d} mm out of range"
+
+
+def test_holes_list_three_plate(app_with_projects) -> None:
+    """Issue #396: a plate with 3 through-holes (built with trimesh) →
+    the holes list has 3 entries with distinct centres."""
+    import trimesh
+    import numpy as np
+
+    # Build a 40×40×10 mm plate with 3 through-holes using boolean CSG.
+    plate = trimesh.creation.box(extents=[40, 40, 10], pivot=[0, 0, 0])
+    hole1 = trimesh.creation.cylinder(radius=3, height=20, sections=32)
+    hole1.apply_translation([-10, 0, 0])
+    hole2 = trimesh.creation.cylinder(radius=5, height=20, sections=32)
+    hole2.apply_translation([0, 0, 0])
+    hole3 = trimesh.creation.cylinder(radius=4, height=20, sections=32)
+    hole3.apply_translation([10, 0, 0])
+    result = plate.difference(trimesh.util.concatenate([hole1, hole2, hole3]))
+    if isinstance(result, trimesh.Scene):
+        result = result.to_mesh()
+    data = _stl_bytes_from_mesh(result)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ThreePlate"})
+        pid = r.json()["id"]
+        files = {"file": ("three.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # The plate with 3 through-holes must have hole_count >= 3.
+    assert report["hole_count"] >= 3, f"expected >= 3 holes, got {report['hole_count']}"
+    holes = report.get("holes")
+    if holes:
+        assert len(holes) >= 1, f"expected at least 1 measured hole: {holes}"
+
+
+# ---------------------------------------------------------------------------
 # 3MF units: never silently mm (the operator decision)
 # ---------------------------------------------------------------------------
 

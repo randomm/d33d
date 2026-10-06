@@ -89,6 +89,7 @@ from d33d.design_state import (
     format_design_state_block,
     state_block_for_version,
 )
+from d33d.part_holes import HOLE_NOUNS
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,9 @@ __all__ = [
     "DETERMINISTIC_AXIS_SENTENCES",
     "DETERMINISTIC_COMPARISON_SENTENCES",
     "DETERMINISTIC_DIMENSION_LIST_RE",
+    "FEATURE_SIZE_UNMEASURED_REPLY",
+    "HOLE_FEATURE_SIZE_ANSWER_FORMAT",
+    "HOLE_FEATURE_SIZE_QUESTION_RE",
     "LLM_CALL_TIMEOUT_SECONDS",
     "NOT_ESTABLISHED",
     "NO_OFFER_AFFIRMATION_REPLY",
@@ -230,6 +234,45 @@ NO_OFFER_AFFIRMATION_REPLY = (
 #: way).
 UNSETTLED_SIZE_REPLY = (
     "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real."
+)
+
+#: The honest reply for a single-feature size question on an imported
+#: part whose report carries NO measured holes (issue #396): the
+#: deterministic stage must never let such a question fall to stage 2 —
+#: a failed stage-2 call would answer it with the fixed
+#: ``COULD_NOT_ANSWER`` ("I couldn't answer that just now"), which is
+#: wrong here: the answer is KNOWN, and it is that this build cannot
+#: measure single features yet. Verbatim copy of ``copy.ts
+#: deterministicAnswer.featureSizeUnmeasured`` (pinned the same way).
+FEATURE_SIZE_UNMEASURED_REPLY = (
+    "I can't measure single features in your file yet."
+)
+
+#: The one-hole hole-size answer (issue #396): the ``{diameter}`` slot
+#: is the measured hole's ``diameter_mm``, ``mm()``-formatted the way
+#: ``copy.ts`` renders it (one decimal, U+202F, "mm" — no Ø, per the
+#: ticket's "The center hole is Ø30.0 mm." example read against the
+#: deck's ``mm()`` convention). The sibling ``copy`` workstream pins
+#: the matching ``deterministicAnswer.holeFeatureSize`` deck string in
+#: ``web/src/copy.ts``.
+HOLE_FEATURE_SIZE_ANSWER_FORMAT = "The {qualifier} hole is {diameter}."
+
+#: The deterministic hole-feature size question form (issue #396): an
+#: absolute axis word (wide/wide width/deep/depth/tall/…) followed by an
+#: optional copula and an optional single-word qualifier + a hole-family
+#: noun (``HOLE_NOUNS``). "How wide is the center hole?" → qualifier
+#: "center"; "How wide is the hole?" → no qualifier. The qualifier is
+#: ONE word at most ("the very center hole" is not a form this stage
+#: takes — the honest reply is, either way, the safe floor), and the
+#: noun must be a hole-family noun exactly (a slot, a boss, a post is
+#: not a hole — out of scope for hole measurement, the question keeps
+#: its current fall-through to stage 2).
+HOLE_FEATURE_SIZE_QUESTION_RE = re.compile(
+    r"\b(?:wide|width|deep|depth|tall|high|height)\b"
+    r"(?:\s+(?:is|are|was|were))?(?:\s+(?:the\s+))?"
+    r"(?:([a-z]+)\s+)?"
+    r"(?:" + "|".join(sorted(HOLE_NOUNS)) + r")\b",
+    re.IGNORECASE,
 )
 
 
@@ -1149,6 +1192,77 @@ def _deterministic_axis(message: str, version_name: str | None):
     return None
 
 
+def _deterministic_hole_feature(
+    message: str, latest: dict[str, Any]
+) -> tuple[str, str, str] | None:
+    """The deterministic feature-size stage for HOLE questions (issue
+    #396), or ``None`` (the stage does not take the message — fall
+    through to the rest of :func:`_deterministic_decision`, which then
+    sends it to stage 2 as today).
+
+    The form (``HOLE_FEATURE_SIZE_QUESTION_RE``): ONE absolute axis word
+    + optional copula + optional single-word qualifier + a hole-family
+    noun (``HOLE_NOUNS`` — hole/bore/counterbore). "How wide is the
+    center hole?" matches with qualifier "center"; "How wide is the
+    hole?" with no qualifier. Non-hole feature nouns ("the slot", "the
+    boss", "the post") never match — out of scope for hole measurement,
+    they keep their current stage-2 fall-through (the ticket's edge
+    case, pinned by the #396 test).
+
+    The answer source is the imported part's measured holes
+    (``latest["holes"]`` — the ``part_report["holes"]`` list
+    ``[{center, axis, diameter_mm}]`` the #396 import workstream stores
+    at import time, injected by the chat route the same way
+    ``part_unit_status`` rides today). The decision:
+
+    * ONE measured hole → it is "the" hole, whichever qualifier was
+      used: ``HOLE_FEATURE_SIZE_ANSWER_FORMAT`` with the hole's
+      ``diameter_mm`` (mm()-formatted).
+    * TWO or more measured holes, no qualifier → ambiguous (the message
+      names no single hole): the honest reply
+      (:data:`FEATURE_SIZE_UNMEASURED_REPLY` — never a guess, and never
+      ``COULD_NOT_ANSWER``).
+    * a qualifier and no single hole → the honest reply likewise (the
+      qualifier's spatial semantics — "nearest the bbox centre", "the
+      closest diameter" — belong to the #396 offer-selection workstream;
+      the answer path takes them only when they name exactly one hole,
+      i.e. the one-hole case above).
+    * no measured holes (no key, ``None``, an empty list, or a malformed
+      entry) → the honest reply. This is the ticket's acceptance
+      criterion: "How wide is the center hole?" on an imported part
+      never reaches stage 2, so a failed stage-2 call can never answer
+      it with ``COULD_NOT_ANSWER``.
+
+    Returns ``("hole", class, answer)`` — the provenance class is one of
+    ``measured`` / ``unmeasured`` (the log's closed vocabulary).
+    """
+    m = HOLE_FEATURE_SIZE_QUESTION_RE.search(message)
+    if m is None:
+        return None
+    qualifier = (m.group(1) or "").lower() or None
+    holes = latest.get("holes")
+    if not isinstance(holes, list) or not holes:
+        return "hole", "unmeasured", FEATURE_SIZE_UNMEASURED_REPLY
+    if len(holes) == 1:
+        entry = holes[0]
+        if isinstance(entry, dict):
+            d = entry.get("diameter_mm")
+            if isinstance(d, (int, float)) and not isinstance(d, bool) and d > 0:
+                # "The center hole is …" / "The hole is …" — the
+                # qualifier ("center") when the question carries one,
+                # nothing when it does not ("the hole" is already
+                # complete; a second "the" would break the sentence).
+                answer = (
+                    "The "
+                    + (qualifier + " " if qualifier is not None else "")
+                    + "hole is "
+                    + mm_formatted(d)
+                    + "."
+                )
+                return ("hole", "measured", answer)
+    return "hole", "unmeasured", FEATURE_SIZE_UNMEASURED_REPLY
+
+
 def _axis_value_for(
     axis: str,
     entries: list[dict[str, Any]],
@@ -1234,13 +1348,18 @@ def _deterministic_decision(
     # The unsettled-part gate (issue #352, operator decision 1) —
     # defence in depth (see :data:`UNSETTLED_SIZE_REPLY`): ANY size
     # question (dimension list OR single axis) gets the size-unknown
-    # reply; any other message falls through exactly as today.
+    # reply; any other message falls through exactly as today. The
+    # hole-feature form is a size question too (a digit-free one — the
+    # digit-abstain below would not have taken it), so it gets the same
+    # reply here (a file-unit hole diameter is not an mm measurement).
     if part_unit_status == "unsettled":
         if DETERMINISTIC_DIMENSION_LIST_RE.search(message) is not None:
             return ("list", "unsettled", UNSETTLED_SIZE_REPLY)
         what = _deterministic_axis(message, latest.get("name"))
         if what is not None and what != "list":
             return (what, "unsettled", UNSETTLED_SIZE_REPLY)
+        if _deterministic_hole_feature(message, latest) is not None:
+            return ("hole", "unsettled", UNSETTLED_SIZE_REPLY)
         return None
     # Target-number guard (adversarial finding 1): a message carrying a
     # number ("Can it be 15 mm tall?", "Is it 12 mm tall?") is a
@@ -1251,6 +1370,19 @@ def _deterministic_decision(
     if re.search(r"\d", message) is not None:
         return None
     entries = state_block_for_chat(latest)
+    # The hole-feature size stage (issue #396) — the part's own
+    # measurement first, then the hole's: "how wide is the center hole?"
+    # is a feature question (``_deterministic_axis`` returns None for
+    # the noun "the center hole"), and on an imported part without
+    # measured holes it used to fall to stage 2, where a failed call
+    # answered it with ``COULD_NOT_ANSWER``. The measured-holes answer
+    # is a deterministic fact (one hole is trivially "the" hole), and
+    # the honest reply is a deterministic no-run answer for the
+    # unmeasured case — the design loop is never the fallback for
+    # either.
+    hole = _deterministic_hole_feature(message, latest)
+    if hole is not None:
+        return hole
     what = _deterministic_axis(message, latest.get("name"))
     if what is None:
         return None
@@ -1702,6 +1834,7 @@ async def route_chat_message(
     timeout: float = LLM_CALL_TIMEOUT_SECONDS,
     project_id: str | None = None,
     part_unit_status: str | None = None,
+    holes: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """The pre-route decision for ONE chat message.
 
@@ -1752,6 +1885,16 @@ async def route_chat_message(
     :data:`UNSETTLED_SIZE_REPLY`) and any other message falls through
     as today; any other value routes exactly as before.
 
+    The ``holes`` (issue #396) is the project's imported part's measured
+    holes (the ``part_report["holes"]`` list ``[{center, axis,
+    diameter_mm}]``, ``None`` when the project has no part or the report
+    carries none). It rides ``latest`` into the deterministic stage as
+    ``latest["holes"]`` so :func:`_deterministic_decision` (and the
+    existing ``deterministic_axis_*`` projectors) can answer a
+    one-hole feature-size question from the measurement — the
+    ``part_public`` reader that builds it lives in the route's caller
+    (the chat route), keeping this module free of a DB-row dependency.
+
     The stage-1 short-circuits log at INFO; every stage-2 outcome logs
     at WARNING and (except the ``request`` outcome) at INFO from
     :func:`ask_answer_call` (issues #260 / #313).
@@ -1797,6 +1940,12 @@ async def route_chat_message(
             len(message),
         )
         return None
+    # The measured holes ride the latest version into the deterministic
+    # stage (issue #396): ``_deterministic_hole_feature`` reads
+    # ``latest["holes"]``; ``None`` (no part / no report / no holes) is
+    # the honest-reply case.
+    if holes is not None:
+        latest = {**latest, "holes": holes}
     # The deterministic comparison stage (issue #313): a stage-1
     # candidate that names exactly one axis (absolute or relative word),
     # carries exactly one mm number (or is a relative-word "than the/…

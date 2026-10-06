@@ -113,6 +113,26 @@ def test_accepted_offer_instruction_is_fill_then_recut_never_resize() -> None:
     assert "resize" in instruction.lower()  # "Never resize..."
 
 
+def test_instruction_with_measured_hole_carries_numbers() -> None:
+    """Issue #396: an accepted offer with a measured hole (center, axis,
+    diameter_mm) produces an instruction that includes the hole's
+    centre coordinates, axis name, and existing diameter."""
+    offer = {
+        "noun": "hole",
+        "size": 38.0,
+        "center": [0.0, 0.0, 5.0],
+        "axis": [0.0, 0.0, 1.0],
+        "diameter_mm": 10.0,
+    }
+    instruction = fill_and_recut_instruction(offer)
+    assert "(0, 0)" in instruction, f"centre missing: {instruction}"
+    assert "axis Z" in instruction, f"axis missing: {instruction}"
+    assert "10" in instruction, f"existing diameter missing: {instruction}"
+    assert "38" in instruction, f"new size missing: {instruction}"
+    assert "Fill-and-recut:" in instruction
+    assert "resize" in instruction.lower()
+
+
 def test_add_phrasings_do_not_fire_the_trigger() -> None:
     """Adds are not resizes: 'add a 38 mm hole' / 'drill a hole' go to
     the design loop (rule 4 forbids resizing the imported mesh, not

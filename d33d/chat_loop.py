@@ -108,13 +108,31 @@ async def run_design_loop(
         route_chat_message,
     )
 
+    latest = app.state.versions.latest_version(project_id)
+    # The imported part's measured holes (issue #396) — the
+    # ``part_report["holes"]`` list ``[{center, axis, diameter_mm}]``
+    # stored at import (the #396 import workstream). ``None`` (no part,
+    # legacy report, or no holes measured) keeps the pre-route's
+    # honest-reply path; a list lets the deterministic stage answer a
+    # one-hole size question from the measurement.
+    holes = None
+    if latest is not None:
+        from d33d.part_http import part_public
+
+        public = part_public(row)
+        report = public["report"] if public is not None else None
+        if isinstance(report, dict):
+            stored = report.get("holes")
+            if isinstance(stored, list):
+                holes = stored
     try:
         answer_route = await route_chat_message(
             message,
-            app.state.versions.latest_version(project_id),
+            latest,
             answer_edge=getattr(app.state, "answer_question", None),
             project_id=str(project_id),
             part_unit_status=row.get("part_unit_status"),
+            holes=holes,
         )
     except ModelUnconfiguredError as e:
         # The model pre-flight (issue #303) found the model cannot be

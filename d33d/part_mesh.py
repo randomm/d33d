@@ -35,7 +35,7 @@ import numpy as np
 import trimesh
 
 from d33d.part_errors import PartUploadError  # re-exported for #395 compat
-from d33d.part_holes import _boundary_loops
+from d33d.part_holes import _boundary_loops, measure_holes
 from d33d.part_mesh_topology import MeshTopology, mesh_topology
 from d33d.part_repair import (
     REPAIR_FACE_BUDGET,
@@ -407,6 +407,19 @@ def parse_and_repair(
     }
     if bodies < bodies_before:
         report["bodies_before"] = bodies_before
+
+    # Issue #396: measure per-hole geometry (centre, axis, diameter) on
+    # the PRE-REPAIR merged mesh, in file units (the caller applies
+    # part_scale at import time — the stored values are in file units, the
+    # same space as bbox_file_units). Unfittable holes are omitted
+    # (omit-not-null: hole_count stays honest, the holes list is a subset).
+    try:
+        measured_holes = measure_holes(merged, components, scale=1.0)
+        if measured_holes:
+            report["holes"] = measured_holes
+    except Exception:
+        logger.warning("hole measurement failed, omitting holes list")
+
     return repaired, report, file_unit
 
 

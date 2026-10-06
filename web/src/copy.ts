@@ -846,6 +846,23 @@ export const deterministicAnswer = {
    *  stage's own guard (defence in depth). */
   sizeUnknownWhileUnsettled:
     "I can't give you a size until the part's units are settled — pick mm, cm, or inch (or give one measured axis) and the dimensions will be real.",
+
+  /** The feature-size question's answer (issue #396): "How wide is the
+   *  center hole?" on an imported part whose report measured exactly one
+   *  hole. `qualifier` is "the" (no qualifier was used) or the hole's
+   *  qualifier ("center"), and `diameter` arrives pre-formatted via
+   *  `mm()`. */
+  holeFeatureSize: (qualifier: string, diameter: string): string =>
+    `The ${qualifier} hole is ${diameter}.`,
+
+  /** The honest reply for a single-feature size question on an imported
+   *  part whose report carries NO measured holes (issue #396): the
+   *  deterministic stage never lets the question fall to the LLM (a
+   *  failed stage-2 call would answer it with the "couldn't answer that
+   *  just now" copy), and it never invents a number for a feature it
+   *  did not measure. */
+  featureSizeUnmeasured:
+    "I can't measure single features in your file yet.",
 } as const;
 
 export const shell = {
@@ -990,6 +1007,16 @@ export const fillRecut = {
    *  tests/test_projects.py). */
   noHole: (noun: string): string =>
     `I don't see a ${noun} on the part you brought — want me to drill one?`,
+
+  /** The point-at fallback (issue #396): the measured-hole selection is
+   *  ambiguous (two equally-near candidates, or no qualifier matched) —
+   *  the offer asks the user to point at the hole on the part. `dim` is
+   *  the user's stated target diameter, mono-formatted (absent when the
+   *  user didn't state a size). */
+  pointAt: (dim: string | null): string =>
+    dim
+      ? `Point at the hole on the part and I'll fill it and cut a Ø${dim} mm one there.`
+      : `Point at the hole on the part and I'll fill it and cut a new one there.`,
 
   /** The fill-and-recut offer's acceptance button (issue #338, decision
    *  7): sends the acceptance through the existing chat offer path, which

@@ -24,6 +24,7 @@ import concurrent.futures
 from pathlib import Path
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from pydantic import ValidationError
 
 from d33d.evals.failure_capture import (
@@ -41,6 +42,75 @@ from d33d.evals.failure_capture import (
     read_failure_events,
     record_production_failure,
 )
+
+
+@pytest.fixture
+def _eval_app_paths(tmp_path: Path) -> dict[str, Path]:
+    """Isolated DB + master-key + catalogue paths under ``tmp_path``
+    (the ``app_paths`` fixture from ``tests/versioning/conftest.py`` —
+    redefined locally because a cross-directory fixture import does not
+    re-register its ``app_paths`` dependency in this package's scope).
+    """
+    return {
+        "db": tmp_path / "d33d.sqlite3",
+        "key": tmp_path / "master.key",
+        "cat": tmp_path / "models.yaml",
+    }
+
+
+@pytest.fixture
+def _eval_app_with_versions(_eval_app_paths: dict[str, Path], tmp_path: Path):
+    """A ``create_app`` instance with the default git path pointed at
+    ``tmp_path`` (the ``app_with_versions`` fixture from
+    ``tests/versioning/conftest.py``, redefined locally for the same
+    reason — the ``app_paths`` dependency must resolve in THIS
+    package's fixture scope).
+    """
+    import d33d.db as db_mod
+
+    original_default = db_mod._default_git_path
+
+    def _tmp_default_git_path(name: str) -> str:
+        import uuid
+
+        slug = uuid.uuid4().hex[:12]
+        base = tmp_path / "repos" / slug
+        base.mkdir(parents=True, exist_ok=True)
+        return str(base)
+
+    db_mod._default_git_path = _tmp_default_git_path
+
+    from d33d.app import create_app
+
+    app = create_app(
+        _eval_app_paths["db"],
+        master_key_path=_eval_app_paths["key"],
+        catalogue_path=_eval_app_paths["cat"],
+    )
+    yield app
+    db_mod._default_git_path = original_default
+
+
+async def _create_project(client):
+    """Create a project via the API; returns the full project row."""
+    r = await client.post("/api/projects", json={"name": "test project"})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def _drive_stream(app_with_versions, coro_factory):
+    """Drive an async app under a fresh event loop, running the lifespan."""
+    import asyncio
+
+    async def _run():
+        async with app_with_versions.router.lifespan_context(app_with_versions):
+            client = AsyncClient(
+                transport=ASGITransport(app=app_with_versions), base_url="http://test"
+            )
+            async with client:
+                return await coro_factory(client)
+
+    return asyncio.run(_run())
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -1107,3 +1177,177 @@ def test_app_state_hooked_loop_no_archive_on_pass(tmp_path: Path, monkeypatch):
     assert result.status == "pass"
     events = read_failure_events(app.state.failures_jsonl_path)
     assert events == []
+
+
+# ---------------------------------------------------------------------------
+# (issue #396) — the whole-loop deadline in ``design_loop_events``
+# ---------------------------------------------------------------------------
+
+
+def test_design_loop_deadline_archives_timeout_row(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #396: the ``run_design_loop_with_events`` deadline (the
+    whole-loop timeout — a loop that never returns) appends a
+    failures.jsonl row with the loop-level
+    ``design_loop_timed_out`` class, the request, the app's injected
+    model and the last SCAD the loop's frames surfaced (``""`` when
+    nothing rendered) — the hook at the loop seam never sees a
+    deadline kill (there is no loop result), so without the adapter's
+    own archive the whole-loop timeout would never reach the archive
+    while every other failure class does."""
+    import asyncio as _asyncio
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+    )
+
+    class _StallLoop:
+        """Production-seam-shaped stub (takes ``app``) that never
+        terminates within the deadline — the real production loop can
+        take minutes, so a multi-second stall is realistic. The
+        adapter's deadline archive reads the ``model`` kwarg the
+        production closure would have passed, so the stub re-injects
+        it into ``kwargs`` before the stall (the app's
+        ``_build_production_design_loop`` closure does this in
+        production — the stub mirrors that contract)."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                kwargs["model"] = "model-x"
+                await _asyncio.sleep(10)
+
+            return _stall()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        proj = await _create_project(client)
+        pid = proj["id"]
+        app.state.run_design_loop = _StallLoop()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = _drive_stream(app, _call)
+    assert frames, "no frames emitted at all"
+    events = [f[0] for f in frames]
+    assert events[-1] == "error", f"no terminal error frame: {frames}"
+    assert (
+        frames[-1][1].get("reason") == DESIGN_LOOP_TIMED_OUT_REASON
+    ), f"wrong reason: {frames[-1][1]}"
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1, (
+        f"expected exactly one archive row, got {len(row_events)}"
+    )
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    assert ev.request == "make it a cube"
+    # The model is the app's production closure's injected id (the
+    # ``model`` kwarg the hook pops before the loop runs); the stub
+    # receives it via ``**kwargs`` and the archive reads it back.
+    assert ev.model  # non-empty, the resolved model id
+    assert ev.prompt_version == ""  # honest absence — the loop never ran to a result
+
+
+def test_design_loop_deadline_row_carries_last_scad_from_frames(
+    _eval_app_with_versions, tmp_path: Path, monkeypatch
+):
+    """Issue #396: the deadline archive row's ``output_scad`` is the
+    last SCAD source the loop's frames have surfaced — a token frame's
+    ``text`` on a pass, or a progress frame's ``scad_source`` when the
+    loop was killed mid-run (``""`` only when the loop produced no
+    candidate at all — never a fabricated placeholder)."""
+    import asyncio as _asyncio
+
+    from d33d.design_loop_events import (
+        DESIGN_LOOP_TIMED_OUT_REASON,
+        run_design_loop_with_events,
+    )
+
+    monkeypatch.setattr(
+        "d33d.design_loop_events.DESIGN_LOOP_TIMEOUT_SECONDS", 0.5
+    )
+
+    class _StallLoopWithScad:
+        """A stall that emits a progress frame carrying ``scad_source``
+        before never returning (the ``model`` kwarg is re-injected the
+        same way as in the plain stall — the production closure's
+        contract)."""
+
+        def __call__(self, app=None, **kwargs):
+            async def _stall():
+                kwargs["model"] = "model-x"
+                on_progress = kwargs.get("on_progress")
+                if on_progress is not None:
+                    on_progress(
+                        "view-done",
+                        {"view": "view_01", "iteration": 1},
+                    )
+                # The progress frame the adapter yields for this marker
+                # carries no scad_source — but the loop's own prompt
+                # (not observable from the adapter) does. The adapter
+                # scans yielded frames; a stall that never passes has no
+                # token frame, so output_scad is "" (honest absence).
+                await _asyncio.sleep(10)
+
+            return _stall()
+
+    app = _eval_app_with_versions
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "test project"})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        app.state.run_design_loop = _StallLoopWithScad()
+        app.state.failures_jsonl_path = tmp_path / "failures.jsonl"
+        app.state.model_id = "model-x"
+        source = run_design_loop_with_events(
+            app,
+            pid,
+            user_message="make it a cube",
+            stated_dims=None,
+            chat_history=(),
+            photo="data:image/png;base64,x",
+            request_text="make it a cube",
+        )
+        frames = []
+        async for event, data in source:
+            frames.append((event, data))
+            if event in ("done", "error"):
+                break
+        return frames
+
+    frames = _drive_stream(app, _call)
+    assert frames and frames[-1][0] == "error", f"no terminal error frame: {frames}"
+    out = tmp_path / "failures.jsonl"
+    assert out.exists(), "deadline did not archive a failures.jsonl row"
+    row_events = read_failure_events(out)
+    assert len(row_events) == 1
+    ev = row_events[0]
+    assert ev.failure_class == DESIGN_LOOP_TIMED_OUT_REASON
+    # A stall that never passed has no token frame and no progress
+    # frame carrying ``scad_source`` — the row's ``output_scad`` is
+    # the honest absence (""), never a fabricated placeholder.
+    assert ev.output_scad == ""

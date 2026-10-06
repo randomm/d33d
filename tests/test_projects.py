@@ -2732,3 +2732,156 @@ def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monke
         "noun": "hole",
         "size": 38.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #396: measured-hole offer selection and instruction
+# ---------------------------------------------------------------------------
+
+
+def test_offer_with_measured_hole_carries_center_and_axis(app_with_projects) -> None:
+    """Issue #396: a holey part with measured holes (stored in
+    ``part_report["holes"]``) + "make the center hole 38 mm" → the
+    pending offer carries ``center``, ``axis``, and ``diameter_mm``
+    for the selected hole."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "MeasuredHole"})
+        pid = r.json()["id"]
+        # Set up the part with a measured holes list.
+        conn = app_with_projects.state.conn
+        holes_report = {
+            "hole_count": 3,
+            "holes": [
+                {"center": [0.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+                {"center": [-10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 20.0},
+                {"center": [10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 30.0},
+            ],
+            "bbox_file_units": [40.0, 40.0, 10.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The offer was recorded with the measured hole's geometry.
+    assert offer is not None, "offer must be stored"
+    assert offer["kind"] == "fill_recut"
+    assert offer["noun"] == "hole"
+    assert offer["size"] == 38.0
+    # The center hole (at 0,0) was selected.
+    assert offer.get("center") is not None, f"offer missing center: {offer}"
+    assert offer.get("axis") is not None, f"offer missing axis: {offer}"
+    assert offer["axis"] == [0.0, 0.0, 1.0], offer
+    # The center hole: the one nearest the XY bbox centre (20, 20).
+    # Distances: (0,0)→28.3, (-10,0)→36.1, (10,0)→22.4. The (10,0) hole wins.
+    assert offer.get("diameter_mm") == 30.0, offer
+
+
+def test_offer_instruction_carries_measured_numbers(app_with_projects) -> None:
+    """Issue #396: an accepted offer with a measured hole produces an
+    instruction that includes the hole's centre, axis, and existing
+    diameter."""
+    from d33d.fill_recut import fill_and_recut_instruction
+
+    offer = {
+        "kind": "fill_recut",
+        "noun": "hole",
+        "size": 38.0,
+        "center": [0.0, 0.0, 5.0],
+        "axis": [0.0, 0.0, 1.0],
+        "diameter_mm": 10.0,
+    }
+    instr = fill_and_recut_instruction(offer)
+    assert "(0, 0)" in instr, f"instruction missing centre: {instr}"
+    assert "axis Z" in instr, f"instruction missing axis: {instr}"
+    assert "10" in instr, f"instruction missing existing diameter: {instr}"
+    assert "38" in instr, f"instruction missing new size: {instr}"
+    assert "Fill-and-recut:" in instr
+
+
+def test_offer_no_holes_uses_default_boundary_sentence(app_with_projects) -> None:
+    """Issue #396: a holey part with NO measured holes (legacy row, no
+    ``holes`` key) + "make the hole 38 mm" → the pending offer is the
+    pre-#396 shape (no center/axis/diameter_mm), and the instruction is
+    byte-identical to the pre-#396 form."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "LegacyHole"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled", hole_count=1)
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert offer is not None
+    assert offer["kind"] == "fill_recut"
+    assert offer["noun"] == "hole"
+    assert offer["size"] == 38.0
+    # No measured hole data (legacy row).
+    assert "center" not in offer, f"legacy offer must not carry center: {offer}"
+    assert "diameter_mm" not in offer, f"legacy offer must not carry diameter: {offer}"
+
+
+def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
+    """Issue #396: a part with two holes equidistant from the bbox centre
+    + "make the center hole 38 mm" → ambiguous selection → the point-at
+    fallback copy is used (never an instruction without a location)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "AmbiguousHoles"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # Two holes symmetric about the bbox centre (20, 20):
+        # (10, 20) and (30, 20) — both 10 mm from centre, equidistant.
+        holes_report = {
+            "hole_count": 2,
+            "holes": [
+                {"center": [10.0, 20.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 15.0},
+                {"center": [30.0, 20.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 15.0},
+            ],
+            "bbox_file_units": [40.0, 40.0, 10.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The point-at fallback copy.
+    msg = done[0].get("message", "")
+    assert "Point at the" in msg, f"expected point-at fallback, got: {msg}"
+    # The offer is still stored (with no center/axis/diameter).
+    assert offer is not None
+    assert offer["kind"] == "fill_recut"
+    assert "center" not in offer, f"ambiguous offer must not carry center: {offer}"
