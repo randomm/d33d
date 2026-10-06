@@ -274,3 +274,30 @@ describe("PlateBackdrop", () => {
     expect(stroke).not.toContain("255, 51, 0");
   });
 });
+
+describe("FirstRun — disabled reason while inFlight (issue #388)", () => {
+  it("the disabled Start button exposes the copy.ts reason as tooltip and accessible description", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    const btn = screen.getByTestId("first-run-start-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "first-run-disabled-reason");
+    const hint = screen.getByTestId("first-run-disabled-reason");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("the disabled photo button exposes the copy.ts reason as tooltip and accessible description", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    const btn = screen.getByTestId("first-run-photo-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "first-run-disabled-reason");
+  });
+
+  it("no disabled-reason hint when not inFlight", () => {
+    render(<FirstRun {...baseProps({ inFlight: false })} />);
+    expect(screen.queryByTestId("first-run-disabled-reason")).toBeNull();
+    const btn = screen.getByTestId("first-run-start-btn");
+    expect(btn).not.toHaveAttribute("title");
+  });
+});

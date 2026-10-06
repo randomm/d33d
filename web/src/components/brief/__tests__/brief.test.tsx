@@ -362,4 +362,61 @@ describe("Brief — programmatic send gating (issue #388)", () => {
     fireEvent.click(btn);
     expect(onAsk).not.toHaveBeenCalled();
   });
+
+  it("the disabled unknown-value control exposes the copy.ts reason as tooltip and accessible description (issue #388)", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[unknownEntry]}
+        sendInFlight={true}
+      />,
+    );
+    const btn = screen.getByTestId("brief-unknown-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "brief-disabled-reason-H");
+    // The visually-associated hint is rendered and carries the same text.
+    const hint = screen.getByTestId("brief-disabled-reason-H");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("the disabled 'Change it' action exposes the copy.ts reason as tooltip and accessible description (issue #388)", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[statedEntry]}
+        sendInFlight={true}
+      />,
+    );
+    // Expand the row.
+    const row = screen.getByTestId("brief-row-W");
+    const clickable = row.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const changeBtn = screen.getByTestId("brief-action-change");
+    expect(changeBtn).toBeDisabled();
+    expect(changeBtn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(changeBtn).toHaveAttribute("aria-describedby", "brief-disabled-reason-W");
+    const hint = screen.getByTestId("brief-disabled-reason-W");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("no disabled-reason hint when sendInFlight is false (issue #388)", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[unknownEntry]}
+        sendInFlight={false}
+      />,
+    );
+    expect(screen.queryByTestId("brief-disabled-reason-H")).toBeNull();
+    const btn = screen.getByTestId("brief-unknown-btn");
+    expect(btn).not.toHaveAttribute("title");
+    expect(btn).not.toHaveAttribute("aria-describedby");
+  });
 });

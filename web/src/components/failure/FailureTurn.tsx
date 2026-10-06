@@ -370,12 +370,23 @@ export function FailureTurn({
       {/* Part 3 — what you can do. Concrete actions that prefill the
           composer; they execute nothing by themselves. */}
       <div className="failure-turn-actions" data-testid="failure-turn-actions">
+        {inFlight && (
+          <span
+            id="failure-turn-disabled-reason"
+            data-testid="failure-turn-disabled-reason"
+            style={{ fontSize: 12, color: "var(--color-muted)" }}
+          >
+            {copy.shell.disabledReason}
+          </span>
+        )}
         {isEnvelope ? (
           <>
             <button
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-split"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() => onAction(copy.failure.envelope.actions.split)}
             >
@@ -385,6 +396,8 @@ export function FailureTurn({
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-scale"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() => onAction(copy.failure.envelope.actions.scale)}
             >
@@ -394,6 +407,8 @@ export function FailureTurn({
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-bigger"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() => onAction(copy.failure.envelope.actions.biggerPrinter)}
             >
@@ -420,6 +435,8 @@ export function FailureTurn({
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-lip-part-itself"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() =>
                 onAction(
@@ -436,6 +453,8 @@ export function FailureTurn({
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-lip-overall"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() =>
                 onAction(
@@ -461,6 +480,8 @@ export function FailureTurn({
               type="button"
               className="failure-turn-action"
               data-testid="failure-action-retry"
+              title={inFlight ? copy.shell.disabledReason : undefined}
+              aria-describedby={inFlight ? "failure-turn-disabled-reason" : undefined}
               disabled={inFlight}
               onClick={() => onAction(copy.failure.retryAction)}
             >

@@ -4308,7 +4308,11 @@ describe("App design-loop progress indicator (issue #82)", () => {
       capturedHandlers?.onProgress?.("design-loop-start", { step: "design-loop-start" });
     });
 
-    // The send button is disabled while in flight
+    // The send button is disabled (the chat input is empty — the user
+    // typed in the first-run composer, not the chat composer). Issue #388:
+    // the inFlight flag no longer disables the Send button (it queues
+    // instead), so the only reason the button is disabled here is the
+    // empty input.
     await waitFor(() => {
       expect((screen.getByTestId("chat-send-btn") as HTMLInputElement).disabled).toBe(true);
     });

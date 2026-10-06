@@ -837,4 +837,34 @@ describe("FailureTurn", () => {
     // Size card rows absent.
     expect(container.querySelector("[data-testid='failure-turn-size-rows']")).toBeNull();
   });
+
+  it("disabled action buttons expose the copy.ts reason as tooltip and accessible description while inFlight (issue #388)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.timeout,
+      detail: "timeout",
+      retryable: true,
+      reason: "timeout",
+    };
+    render(<FailureTurn error={error} inFlight={true} onAction={vi.fn()} />);
+    const btn = screen.getByTestId("failure-action-retry");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "failure-turn-disabled-reason");
+    const hint = screen.getByTestId("failure-turn-disabled-reason");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("no disabled-reason hint when not inFlight (issue #388)", () => {
+    const error: DisplayError = {
+      message: copy.failure.reasons.timeout,
+      detail: "timeout",
+      retryable: true,
+      reason: "timeout",
+    };
+    render(<FailureTurn error={error} inFlight={false} onAction={vi.fn()} />);
+    expect(screen.queryByTestId("failure-turn-disabled-reason")).toBeNull();
+    const btn = screen.getByTestId("failure-action-retry");
+    expect(btn).not.toBeDisabled();
+    expect(btn).not.toHaveAttribute("title");
+  });
 });

@@ -60,9 +60,9 @@ describe("Composer", () => {
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("disables the send button when inFlight is true", () => {
+  it("does NOT disable the send button when inFlight is true (issue #388 — the send queues, never a second POST)", () => {
     render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} inFlight />);
-    expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
   });
 
   it("a send while a message is queued still fires onSend with the trimmed text — App routes it to the replace-queue path (issue #388)", () => {
@@ -86,24 +86,18 @@ describe("Composer", () => {
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("does NOT fire onSend when the form is submitted while inFlight is true (issue #388 — the pre-first-frame window queues, never double-POSTs)", () => {
-    // Regression guard for the 409 window (issue #388, operator decision 1):
-    // while a send is in flight — including the gap between the click and the
-    // first design-loop frame — the composer's inFlight gate is the only
-    // thing standing between a fast second click and a second POST (which the
-    // server rejects with 409). The sibling workstream owns the queue logic
-    // in App.tsx (the inFlight value that reaches the Composer); this test
-    // pins the Composer's contract: a disabled Send button is the closed
-    // path. A click on the disabled button is a no-op (the browser swallows
-    // the click), so onSend is never reached.
+  it("fires onSend when the form is submitted while inFlight is true (issue #388 — the send queues in App, the Composer always forwards)", () => {
+    // Issue #388: the composer's Send is NOT disabled during a run — it
+    // queues (the queued caption appears). The queueing logic lives in
+    // App's handleSendMessage (exercised end to end in no-loop-reply.test.tsx).
+    // The Composer always forwards a valid submission; a second send is
+    // never swallowed at this layer.
     const onSend = vi.fn();
     render(<Composer value="second message" onChange={vi.fn()} onSend={onSend} inFlight />);
     const btn = screen.getByTestId("chat-send-btn") as HTMLButtonElement;
-    expect(btn.disabled).toBe(true);
-    // A click on the disabled button is a no-op — the browser swallows it,
-    // and jsdom's fireEvent.click on a disabled button also does not fire
-    // the click handler (the button's disabled state is the closed path).
+    expect(btn.disabled).toBe(false);
     fireEvent.click(btn);
-    expect(onSend).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("second message");
   });
 });

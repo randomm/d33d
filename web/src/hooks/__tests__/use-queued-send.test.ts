@@ -2,7 +2,10 @@
  * useQueuedSend — focused unit tests (issue #388, the extracted hook).
  * Exercises the queue state machine in isolation: queue, replace, cancel,
  * flush-once on done, flush-once on an error-only terminal, no flush when
- * cancelled, and the stale-selection belt path.
+ * cancelled, and the stale-selection belt path (the only test that covers
+ * the App-level stale-selection case — the App's PickLayer seam requires
+ * a real WebGL context that jsdom cannot provide, so the belt path is
+ * tested here instead).
  *
  * The flush is driven by a real state transition (designLoopInFlight
  * false via a state setter + signalRunEnd), which re-keys the flush effect.
@@ -206,7 +209,7 @@ describe("useQueuedSend", () => {
     expect(args.continueSend).not.toHaveBeenCalled();
   });
 
-  it("stale-selection guard: a pending selection at flush time is cleared (belt path); the message still flushes as a plain chat message (never silently dropped)", async () => {
+  it("stale-selection guard (the App-level stale-selection coverage): a pending selection at flush time is cleared (belt path); the message still flushes as a plain chat message, never silently dropped (issue #388 — the App-level test that used to cover this was removed because the PickLayer seam requires WebGL; this hook test exercises the exact same code path)", async () => {
     const { setMessages, messages } = setMessagesSpy([]);
     const staleSelection = { viewId: "front" };
     const args = makeArgs({

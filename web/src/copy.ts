@@ -916,6 +916,13 @@ export const shell = {
   resetView: "Reset view",
   showDimensions: "Show dimensions",
   showPhoto: "Show the reference photo",
+  /** Issue #388: the visible reason on any action control that is
+   *  disabled while a design run is in flight (the region-edit Apply
+   *  button, the Brief's programmatic send buttons, the failure card's
+   *  action buttons). Shown as the control's tooltip and its accessible
+   *  description. The composer's Send is NEVER this — it queues while a
+   *  run is in flight and stays enabled. */
+  disabledReason: "A design is running — this will be available when it finishes.",
 } as const;
 
 /**

@@ -28,9 +28,10 @@
  * primary gate) just before the flush.
  *
  * The stream-disconnect case: if the SSE closes without a terminal frame
- * the .finally never fires, the pre-first-frame window stays open, and a
- * queued message stays visibly queued (the cancel control is still
- * available — it is never silently dropped).
+ * the stream promise still settles (streamEvents resolves on drain), so
+ * the send's .finally fires and the flush effect keys re-run. The queued
+ * message is sent exactly once, as a fresh chat message — it is never
+ * left dangling in the queue.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";

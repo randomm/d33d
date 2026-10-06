@@ -521,6 +521,48 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(screen.queryByTestId("queued-caption")).toBeNull();
   });
 
+  it("a disconnect (stream resolves with no terminal frame) still flushes the queued message exactly once (issue #388: streamEvents always settles, App's .finally fires signalRunEnd, the queued message is sent as a fresh chat message)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Disconnect: the stream promise resolves with NO terminal frame
+    // (no onDone, no onError). In production streamEvents resolves on
+    // drain — the SSE closes without emitting a final frame. App's
+    // .finally still fires (it clears designLoopInFlight and calls
+    // signalRunEnd), which re-keys the flush effect.
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message was flushed exactly once (original + flush = 2).
+    // It is sent as a fresh chat message — the queued caption is gone.
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() => {
+      expect(postChatMock).toHaveBeenCalledTimes(2);
+    });
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
+  });
+
   it("a queued 'yes' after a run that replaced the pending offer is a plain fresh chat message — no offer id or token (issue #388, operator decision 2026-10-05: the queued message is routed fresh when the run ends)", async () => {
     render(<App client={client} />);
     sendFirstComposerMessage("make me a 30 mm plate");
@@ -626,62 +668,14 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(postChatMock).toHaveBeenCalledTimes(1);
   });
 
-  it("a queued message with a stale pending selection at flush time: the selection is dropped, the message is flushed as a plain chat message (never silently dropped) (issue #388, operator decision: the queued message is routed fresh when the run ends)", async () => {
-    render(<App client={client} />);
-    sendFirstComposerMessage("make me a 30 mm plate");
-    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
-
-    // The loop starts.
-    act(() => {
-      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
-    });
-
-    // Queue a message during the run.
-    const chatInput = screen.getByTestId("chat-input");
-    act(() => {
-      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
-    });
-    act(() => {
-      fireEvent.submit(chatInput.closest("form")!);
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId("queued-caption")).toBeTruthy();
-    });
-
-    // A stale pending selection is pending at flush time (the user drew
-    // it for a different message — the region-edit instruction they never
-    // sent, or one sent alongside the queued text). The flush must NOT
-    // re-attach it (the flushed POST must carry only `message` +
-    // `chat_history`), and the queued message must NOT be silently
-    // dropped (the operator decision: "the queued message is routed fresh
-    // when the run ends"). The belt path clears the selection just before
-    // the flush.
-    // Simulate the stale selection by setting pendingSelection in the App.
-    // (In the real UI, the RegionEditBar's disabled Submit is the primary
-    // gate — this is the belt check.)
-    // The hook's belt path clears the selection via clearPendingSelection
-    // (handleCancelPendingSelection in App). We can't directly set
-    // pendingSelection from the test, but we can verify the flush does
-    // NOT attach a selection to the flushed POST (the flushedBody must
-    // have no selection field) and the message is still flushed.
-
-    // The run ends.
-    act(() => {
-      handlers.onDone?.({ message: "Design loop passed validation" });
-    });
-    await act(async () => {
-      resolveStream();
-      await Promise.resolve();
-    });
-
-    // The queued message was flushed exactly once (original + flush = 2).
-    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
-    expect(postChatMock).toHaveBeenCalledTimes(2);
-    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
-    // The flushed POST carries no selection (the stale selection was
-    // dropped, not attached).
-    const flushedBody = postChatMock.mock.calls[1][1];
-    expect(flushedBody.selection).toBeUndefined();
-    expect(screen.queryByTestId("queued-caption")).toBeNull();
-  });
 });
+
+// NOTE (issue #388, stale-selection coverage): the App-level stale-selection
+// test was removed because the App's PickLayer seam requires a real WebGL
+// context (compositeMarkedPng) that jsdom cannot provide. The belt path is
+// covered by the hook-level test in use-queued-send.test.ts
+// ("stale-selection guard: a pending selection at flush time is cleared
+// (belt path); the message still flushes as a plain chat message") which
+// exercises the exact same code path (useQueuedSend's flush effect) with a
+// real pendingSelection value and asserts the selection is cleared and the
+// message is flushed as a plain chat message.

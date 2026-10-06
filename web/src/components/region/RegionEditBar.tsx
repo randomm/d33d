@@ -217,6 +217,13 @@ export function RegionEditBar({
             className="region-edit-apply-btn"
             data-testid="region-edit-apply-btn"
             aria-label={copy.region.apply}
+            // Issue #388: a visible reason on the disabled control — the
+            // tooltip AND an accessible description (the copy.ts string is
+            // the single source, contract-pinned).
+            title={inFlight === true ? copy.shell.disabledReason : undefined}
+            aria-describedby={
+              inFlight === true ? "region-edit-apply-disabled-reason" : undefined
+            }
             disabled={text.trim().length === 0 || inFlight === true}
             style={{
               flex: "0 0 auto",
@@ -318,6 +325,19 @@ export function RegionEditBar({
               }}
             >
               {copy.region.clearedHint}
+            </span>
+          )}
+          {inFlight === true && (
+            <span
+              id="region-edit-apply-disabled-reason"
+              data-testid="region-edit-disabled-reason"
+              style={{
+                fontSize: 11,
+                color: "var(--color-muted)",
+                marginTop: 2,
+              }}
+            >
+              {copy.shell.disabledReason}
             </span>
           )}
         </div>

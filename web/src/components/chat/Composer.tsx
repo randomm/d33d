@@ -26,7 +26,7 @@ interface ComposerProps {
   hidden?: boolean;
 }
 
-export function Composer({ value, onChange, onSend, inFlight, hidden }: ComposerProps) {
+export function Composer({ value, onChange, onSend, inFlight: _inFlight, hidden }: ComposerProps) {
   if (hidden) return null;
 
   const handleSubmit = (e: FormEvent<HTMLFormElement>) => {
@@ -51,7 +51,11 @@ export function Composer({ value, onChange, onSend, inFlight, hidden }: Composer
         type="submit"
         className="chat-send-btn"
         data-testid="chat-send-btn"
-        disabled={!value.trim() || inFlight}
+        // Issue #388: the Send button is NOT disabled while a run is in
+        // flight — it queues (the queued caption appears). The `inFlight`
+        // prop is no longer used for the disabled check; it is retained
+        // for the visual dimming the parent may apply.
+        disabled={!value.trim()}
       >
         Send
       </button>

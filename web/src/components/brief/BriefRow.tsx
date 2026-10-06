@@ -130,6 +130,10 @@ export function BriefRow({
         className="brief-unknown-btn"
         data-testid="brief-unknown-btn"
         onClick={() => onAsk?.(label)}
+        title={unknownDisabled ? copy.shell.disabledReason : undefined}
+        aria-describedby={
+          unknownDisabled ? `brief-disabled-reason-${name}` : undefined
+        }
         disabled={unknownDisabled}
         style={{
           border: "1px dashed var(--color-faint)",
@@ -229,6 +233,10 @@ export function BriefRow({
           type="button"
           data-testid="brief-action-change"
           onClick={() => onChange?.(label)}
+          title={sendInFlight === true ? copy.shell.disabledReason : undefined}
+          aria-describedby={
+            sendInFlight === true ? `brief-disabled-reason-${name}` : undefined
+          }
           disabled={sendInFlight === true}
           style={{
             border: "1px solid var(--color-hairline)",
@@ -338,6 +346,15 @@ export function BriefRow({
       </div>
       {disagreementNode}
       {expandedNode}
+      {sendInFlight === true && (
+        <span
+          id={`brief-disabled-reason-${name}`}
+          data-testid={`brief-disabled-reason-${name}`}
+          style={{ fontSize: 12, color: "var(--color-muted)" }}
+        >
+          {copy.shell.disabledReason}
+        </span>
+      )}
     </div>
   );
 }

@@ -333,6 +333,48 @@ describe("RegionEditBar — submit disabled while a run is in flight (issue #388
     expect(screen.getByTestId("region-edit-apply-btn")).toBeDisabled();
   });
 
+  it("the disabled Apply button exposes the copy.ts reason as tooltip and accessible description (issue #388)", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    const btn = screen.getByTestId("region-edit-apply-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "region-edit-apply-disabled-reason");
+    // The visually-associated hint is rendered and carries the same text.
+    const hint = screen.getByTestId("region-edit-disabled-reason");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("no disabled-reason hint when not in flight", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.queryByTestId("region-edit-disabled-reason")).toBeNull();
+    const btn = screen.getByTestId("region-edit-apply-btn");
+    expect(btn).not.toHaveAttribute("title");
+    expect(btn).not.toHaveAttribute("aria-describedby");
+  });
+
   it("a form submit (Enter) is a no-op while a run is in flight — the selection is kept, nothing is queued (issue #388, operator decision 3)", () => {
     const onSubmit = vi.fn();
     render(

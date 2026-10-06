@@ -224,6 +224,8 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
                   className="first-run-start-btn"
                   data-testid="first-run-start-btn"
                   disabled={inFlight || draft.trim().length === 0}
+                  title={inFlight ? copy.shell.disabledReason : undefined}
+                  aria-describedby={inFlight ? "first-run-disabled-reason" : undefined}
                   style={{
                     padding: "8px 20px",
                     border: "none",
@@ -265,6 +267,8 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
                   data-testid="first-run-starter"
                   onClick={() => onSend(starter)}
                   disabled={inFlight}
+                  title={inFlight ? copy.shell.disabledReason : undefined}
+                  aria-describedby={inFlight ? "first-run-disabled-reason" : undefined}
                   style={{
                     textAlign: "left",
                     padding: "8px 12px",
@@ -361,6 +365,8 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
           data-testid="first-run-photo-btn"
           onClick={onPhotoSelect}
           disabled={inFlight}
+          title={inFlight ? copy.shell.disabledReason : undefined}
+          aria-describedby={inFlight ? "first-run-disabled-reason" : undefined}
           style={{
             alignSelf: "center",
             padding: "8px 16px",
@@ -387,6 +393,21 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
         >
           {copy.firstRun.photoLine}
         </p>
+        {inFlight && (
+          <span
+            id="first-run-start-disabled-reason"
+            data-testid="first-run-disabled-reason"
+            style={{
+              margin: 0,
+              fontSize: "var(--font-size-xs)",
+              color: "var(--color-muted)",
+              textAlign: "center",
+              alignSelf: "center",
+            }}
+          >
+            {copy.shell.disabledReason}
+          </span>
+        )}
       </div>
     </div>
   );
