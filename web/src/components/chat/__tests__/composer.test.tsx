@@ -69,4 +69,25 @@ describe("Composer", () => {
     render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} />);
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it("does NOT fire onSend when the form is submitted while inFlight is true (issue #388 — the pre-first-frame window queues, never double-POSTs)", () => {
+    // Regression guard for the 409 window (issue #388, operator decision 1):
+    // while a send is in flight — including the gap between the click and the
+    // first design-loop frame — the composer's inFlight gate is the only
+    // thing standing between a fast second click and a second POST (which the
+    // server rejects with 409). The sibling workstream owns the queue logic
+    // in App.tsx (the inFlight value that reaches the Composer); this test
+    // pins the Composer's contract: a disabled Send button is the closed
+    // path. A click on the disabled button is a no-op (the browser swallows
+    // the click), so onSend is never reached.
+    const onSend = vi.fn();
+    render(<Composer value="second message" onChange={vi.fn()} onSend={onSend} inFlight />);
+    const btn = screen.getByTestId("chat-send-btn") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    // A click on the disabled button is a no-op — the browser swallows it,
+    // and jsdom's fireEvent.click on a disabled button also does not fire
+    // the click handler (the button's disabled state is the closed path).
+    fireEvent.click(btn);
+    expect(onSend).not.toHaveBeenCalled();
+  });
 });

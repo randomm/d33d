@@ -29,6 +29,7 @@ export function BriefRowList({
   onAsk,
   onChange,
   onShowOnModel,
+  sendInFlight,
 }: {
   entries: DesignStateEntry[];
   expanded: string | null;
@@ -39,6 +40,9 @@ export function BriefRowList({
   onAsk?: (label: string) => void;
   onChange?: (label: string) => void;
   onShowOnModel?: (name: string) => void;
+  /** Issue #388: true while a design run is in flight — the programmatic
+   *  send buttons (unknown-value control, "Change it") are disabled. */
+  sendInFlight?: boolean;
 }) {
   return entries.map((entry) => (
     <BriefRow
@@ -52,6 +56,7 @@ export function BriefRowList({
       onAsk={onAsk}
       onChange={onChange}
       onShowOnModel={onShowOnModel}
+      sendInFlight={sendInFlight}
     />
   ));
 }
@@ -66,6 +71,7 @@ export function BriefRow({
   onAsk,
   onChange,
   onShowOnModel,
+  sendInFlight,
 }: {
   entry: DesignStateEntry;
   expanded: string | null;
@@ -76,6 +82,9 @@ export function BriefRow({
   onAsk?: (label: string) => void;
   onChange?: (label: string) => void;
   onShowOnModel?: (name: string) => void;
+  /** Issue #388: true while a design run is in flight — the programmatic
+   *  send buttons (unknown-value control, "Change it") are disabled. */
+  sendInFlight?: boolean;
 }) {
   const label = rowLabel(entry);
   const name = entry.name;
@@ -112,21 +121,26 @@ export function BriefRow({
       </span>
     );
   } else if (entry.provenance === "unknown") {
+    // Issue #388: disabled while a run is in flight (programmatic sends
+    // are never queued — decision 2).
+    const unknownDisabled = sendInFlight === true;
     valueNode = (
       <button
         type="button"
         className="brief-unknown-btn"
         data-testid="brief-unknown-btn"
         onClick={() => onAsk?.(label)}
+        disabled={unknownDisabled}
         style={{
           border: "1px dashed var(--color-faint)",
           borderRadius: 6,
           background: "transparent",
           color: "var(--color-fg-2)",
-          cursor: "pointer",
+          cursor: unknownDisabled ? "not-allowed" : "pointer",
           padding: "2px 8px",
           fontFamily: "var(--font-ui)",
           fontSize: 13,
+          opacity: unknownDisabled ? 0.5 : 1,
         }}
       >
         {copy.brief.unknownValue}
@@ -215,13 +229,15 @@ export function BriefRow({
           type="button"
           data-testid="brief-action-change"
           onClick={() => onChange?.(label)}
+          disabled={sendInFlight === true}
           style={{
             border: "1px solid var(--color-hairline)",
             borderRadius: 6,
             background: "transparent",
             color: "var(--color-fg)",
-            cursor: "pointer",
+            cursor: sendInFlight === true ? "not-allowed" : "pointer",
             padding: "2px 8px",
+            opacity: sendInFlight === true ? 0.5 : 1,
           }}
         >
           {copy.brief.rowActions.change}

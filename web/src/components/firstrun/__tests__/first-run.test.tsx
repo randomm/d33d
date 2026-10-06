@@ -101,6 +101,35 @@ describe("FirstRun", () => {
     expect(screen.getByTestId("first-run-photo-btn")).toBeDisabled();
   });
 
+  it("the Start button is disabled while a design loop is in flight, and a click on it does NOT fire onSend (issue #388 — the pre-first-frame window queues, never double-POSTs)", () => {
+    // Regression guard for the 409 window (issue #388, operator decision 1):
+    // the FirstRun composer is the active composer while the screen is up
+    // (no version yet), so a fast second send before the first design-loop
+    // frame must not produce a second POST. The inFlight gate disables the
+    // Start button, which is the closed path — the sibling workstream owns
+    // the queue logic in App.tsx (the inFlight value that reaches
+    // FirstRun); this test pins FirstRun's contract: while inFlight, a
+    // click on the disabled Start button is a no-op (the browser swallows
+    // the click on a disabled button), so onSend is never reached.
+    const onSend = vi.fn();
+    render(<FirstRun {...baseProps({ onSend, inFlight: true })} />);
+    const startBtn = screen.getByTestId("first-run-start-btn");
+    expect(startBtn).toBeDisabled();
+    // A click on the disabled button is a no-op — the browser swallows it,
+    // and jsdom's fireEvent.click on a disabled button also does not fire
+    // the handler. This is the observable contract the sibling's queue
+    // logic relies on.
+    fireEvent.click(startBtn);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("the starter buttons are disabled while a design loop is in flight", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    screen.getAllByTestId("first-run-starter").forEach((btn) => {
+      expect(btn).toBeDisabled();
+    });
+  });
+
   it("renders the Start button", () => {
     render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-start-btn")).toBeTruthy();

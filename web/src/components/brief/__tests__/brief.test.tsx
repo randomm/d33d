@@ -267,3 +267,99 @@ describe("Brief — the saved-design-missing banner (issue #316)", () => {
     expect(screen.queryByTestId("brief-saved-missing")).toBeNull();
   });
 });
+
+/** Issue #388 (operator decision 2): programmatic sends (the unknown-value
+ *  "What is the…?" control and the row's "Change it" action) are DISABLED
+ *  while a design run is in flight — they are never queued. */
+describe("Brief — programmatic send gating (issue #388)", () => {
+  const unknownEntry: DesignStateEntry = {
+    name: "H", kind: "param" as const, label: "Height", value: null, unit: null, provenance: "unknown",
+  };
+  const statedEntry: DesignStateEntry = {
+    name: "W", kind: "param" as const, label: "Width", value: 60, unit: "mm", provenance: "stated",
+  };
+
+  it("disables the unknown-value control while sendInFlight is true", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[unknownEntry]}
+        sendInFlight={true}
+      />,
+    );
+    expect(screen.getByTestId("brief-unknown-btn")).toBeDisabled();
+  });
+
+  it("enables the unknown-value control when sendInFlight is false (or absent)", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[unknownEntry]}
+        sendInFlight={false}
+      />,
+    );
+    expect(screen.getByTestId("brief-unknown-btn")).not.toBeDisabled();
+  });
+
+  it("disables the 'Change it' action on an expanded row while sendInFlight is true", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[statedEntry]}
+        sendInFlight={true}
+      />,
+    );
+    // Expand the row (click the row header).
+    const row = screen.getByTestId("brief-row-W");
+    const clickable = row.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    const changeBtn = screen.getByTestId("brief-action-change");
+    expect(changeBtn).toBeDisabled();
+    // The "Show it on the model" (locate) button is NOT a send — it routes
+    // to the pick, not to the assistant. It stays enabled.
+    const locateBtn = screen.getByTestId("brief-action-locate");
+    expect(locateBtn).not.toBeDisabled();
+  });
+
+  it("enables the 'Change it' action when sendInFlight is false", () => {
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[statedEntry]}
+        sendInFlight={false}
+      />,
+    );
+    const row = screen.getByTestId("brief-row-W");
+    const clickable = row.querySelector("div[style*='cursor']");
+    if (clickable) fireEvent.click(clickable);
+    expect(screen.getByTestId("brief-action-change")).not.toBeDisabled();
+  });
+
+  it("does NOT fire onAsk when the unknown-value control is clicked while disabled", () => {
+    // Regression guard: the disabled button is the closed path — a click
+    // on a disabled button is a no-op in both jsdom and the browser.
+    const onAsk = vi.fn();
+    render(
+      <Brief
+        isChip={false}
+        inset={24}
+        conversationCollapsed={false}
+        entries={[unknownEntry]}
+        sendInFlight={true}
+        onAsk={onAsk}
+      />,
+    );
+    const btn = screen.getByTestId("brief-unknown-btn");
+    expect(btn).toBeDisabled();
+    fireEvent.click(btn);
+    expect(onAsk).not.toHaveBeenCalled();
+  });
+});
