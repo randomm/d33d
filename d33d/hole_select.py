@@ -168,5 +168,67 @@ def fill_recut_instruction_with_hole(
 
 __all__ = [
     "fill_recut_instruction_with_hole",
+    "holes_in_mm",
     "select_measured_hole",
 ]
+
+
+def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict[str, Any]]:
+    """The stored ``part_report["holes"]`` list converted to MM (issue
+    #396).
+
+    The holes are stored in FILE units (the same space as
+    ``part_report["bbox_file_units"]`` — the import measures before the
+    part's scale is known). Every reader (the offer selection, the
+    instruction, the question-answer reply) must compare and report in
+    MM — the user's unit — so this is the ONE conversion helper: each
+    hole's centre and diameter are scaled by ``part_scale``.
+
+    ``report`` is the stored part report (``None`` / no ``holes`` key /
+    a malformed entry → the hole is simply omitted — omit-not-null,
+    mirroring the import). ``scale`` is the part's ``part_scale``
+    (``None`` or non-positive → the list is returned UNCONVERTED —
+    callers treat that as "no measured holes" the same way they treat
+    an empty list; the import always stores a positive scale for a
+    usable part, so this only fires for corrupt rows).
+
+    Returns a NEW list of ``{"center": [x, y, z], "axis": [x, y, z],
+    "diameter_mm": d}`` dicts in mm (the axis is unit — unchanged by
+    the scale).
+    """
+    holes: list[dict[str, Any]] = []
+    if not isinstance(report, dict):
+        return holes
+    stored = report.get("holes")
+    if not isinstance(stored, list):
+        return holes
+    try:
+        factor = float(scale) if scale is not None else 0.0
+    except (TypeError, ValueError):
+        factor = 0.0
+    if factor <= 0:
+        factor = 1.0
+    for entry in stored:
+        if not isinstance(entry, dict):
+            continue
+        center = entry.get("center")
+        diameter = entry.get("diameter_mm")
+        if not isinstance(center, (list, tuple)) or len(center) < 2:
+            continue
+        if not (
+            isinstance(diameter, (int, float))
+            and not isinstance(diameter, bool)
+            and diameter > 0
+        ):
+            continue
+        axis = entry.get("axis")
+        holes.append(
+            {
+                "center": [
+                    float(v) * factor for v in center[:3]
+                ],
+                "axis": ([float(v) for v in axis] if isinstance(axis, (list, tuple)) and len(axis) == 3 else [0.0, 0.0, 1.0]),
+                "diameter_mm": float(diameter) * factor,
+            }
+        )
+    return holes

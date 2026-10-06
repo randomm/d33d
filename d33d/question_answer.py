@@ -261,16 +261,22 @@ HOLE_FEATURE_SIZE_ANSWER_FORMAT = "The {qualifier} hole is {diameter}."
 #: absolute axis word (wide/wide width/deep/depth/tall/…) followed by an
 #: optional copula and an optional single-word qualifier + a hole-family
 #: noun (``HOLE_NOUNS``). "How wide is the center hole?" → qualifier
-#: "center"; "How wide is the hole?" → no qualifier. The qualifier is
-#: ONE word at most ("the very center hole" is not a form this stage
-#: takes — the honest reply is, either way, the safe floor), and the
-#: noun must be a hole-family noun exactly (a slot, a boss, a post is
-#: not a hole — out of scope for hole measurement, the question keeps
-#: its current fall-through to stage 2).
+#: "center"; "How wide is the hole?" → no qualifier. The qualifier is a
+#: CLOSED set (center/centre/middle/left/right/top/bottom/front/back/
+#: big/large/small or none — issue #396, round 2: the first pass
+#: accepted ANY word, so "the giant hole" / "the red hole" would have
+#: produced "The giant hole is 30.0 mm."), one word at most ("the very
+#: center hole" is not a form this stage takes — the honest reply is,
+#: either way, the safe floor), and the noun must be a hole-family noun
+#: exactly (a slot, a boss, a post is not a hole — out of scope for hole
+#: measurement, the question keeps its current fall-through to stage 2).
+_QUALIFIER_ALT = (
+    "center|centre|middle|left|right|top|bottom|front|back|big|large|small"
+)
 HOLE_FEATURE_SIZE_QUESTION_RE = re.compile(
     r"\b(?:wide|width|deep|depth|tall|high|height)\b"
     r"(?:\s+(?:is|are|was|were))?(?:\s+(?:the\s+))?"
-    r"(?:([a-z]+)\s+)?"
+    r"(?:(" + _QUALIFIER_ALT + r")\s+)?"
     r"(?:" + "|".join(sorted(HOLE_NOUNS)) + r")\b",
     re.IGNORECASE,
 )

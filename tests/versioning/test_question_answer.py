@@ -1553,6 +1553,36 @@ class TestDeterministicHoleFeatureStage:
         ) is not None
         assert HOLE_FEATURE_SIZE_QUESTION_RE.search("How wide is the slot?") is None
 
+    def test_hole_feature_qualifier_is_closed_set(self) -> None:
+        # Issue #396 (round 2): the qualifier is a CLOSED set (center/
+        # centre/middle/left/right/top/bottom/front/back/big/large/small
+        # or none) — the first pass accepted ANY word, so "the giant
+        # hole" / "the red hole" would have produced "The giant hole is
+        # 30.0 mm.". A qualifier outside the set means the stage does
+        # not take the message (it falls through to stage 2, as before).
+        from d33d.question_answer import HOLE_FEATURE_SIZE_QUESTION_RE
+
+        # In-set qualifiers match (with the qualifier captured).
+        for q in (
+            "center", "centre", "middle", "left", "right", "top",
+            "bottom", "front", "back", "big", "large", "small",
+        ):
+            m = HOLE_FEATURE_SIZE_QUESTION_RE.search(
+                f"How wide is the {q} hole?"
+            )
+            assert m is not None, f"qualifier {q!r} must match"
+            assert (m.group(1) or "") == q, f"qualifier {q!r} not captured"
+        # Out-of-set qualifiers do NOT match (the stage falls through).
+        for q in ("giant", "red", "tiny", "funny", "blue"):
+            m = HOLE_FEATURE_SIZE_QUESTION_RE.search(
+                f"How wide is the {q} hole?"
+            )
+            assert m is None, f"qualifier {q!r} must NOT match (closed set)"
+        # No qualifier still matches ("the hole").
+        assert HOLE_FEATURE_SIZE_QUESTION_RE.search(
+            "How wide is the hole?"
+        ) is not None
+
     def test_route_single_hole_no_edge_no_llm(self) -> None:
         # Integration: the measured one-hole answer rides the route's
         # ``holes`` seam with NO answer edge and NO LLM call (the

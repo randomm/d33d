@@ -17,6 +17,7 @@ from d33d.fill_recut import (
     FILL_RECUT_DECLINE_REPLY,
     FRILL_POINT_AT_NO_DIM_TEMPLATE,
     FRILL_POINT_AT_TEMPLATE,
+    _fmt_size,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
@@ -24,16 +25,8 @@ from d33d.fill_recut import (
     is_clean_yes,
     own_feature_names,
 )
-from d33d.hole_select import select_measured_hole
+from d33d.hole_select import holes_in_mm, select_measured_hole
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
-
-
-def _fmt_size(value: float | None) -> str | None:
-    """The user's number, mono-formatted the way the deck renders it
-    (never invented, never truncated)."""
-    if value is None:
-        return None
-    return f"{value:g}"
 
 
 def fill_recut_turn(
@@ -150,21 +143,24 @@ def fill_recut_turn(
                 point_at_fallback = False
 
                 if trigger["noun"] in HOLE_NOUNS:
+                    # Issue #396 (round 2): the stored holes are in FILE
+                    # units; convert to mm via the part's scale BEFORE
+                    # selection and instruction (the user's numbers are
+                    # in mm — comparing file units against an mm trigger
+                    # size and an mm bbox would pick the wrong hole).
                     report = part.get("report") if part else None
-                    holes: list[dict[str, Any]] = []
+                    scale = part.get("scale")
+                    holes = holes_in_mm(report, scale) if report else []
                     bbox_mm: list[float] | None = None
                     if isinstance(report, dict):
-                        holes = report.get("holes") or []
-                        # bbox_mm from the report (file units × scale).
                         bbox_fu = report.get("bbox_file_units")
-                        scale = part.get("scale")
                         if (
                             isinstance(bbox_fu, (list, tuple))
                             and len(bbox_fu) >= 2
                             and scale is not None
                             and scale > 0
                         ):
-                            bbox_mm = [float(v) * scale for v in bbox_fu]
+                            bbox_mm = [float(v) * float(scale) for v in bbox_fu[:2]]
                     if holes:
                         selected = select_measured_hole(
                             holes, message, bbox_mm,

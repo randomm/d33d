@@ -2020,13 +2020,15 @@ async def run_design_loop_with_events(
                     # candidate text is ``""`` when nothing rendered.
                     output_scad = ""
                     for _ev, _data in reversed(_emitted_frames):
-                        if _ev in ("token", "progress"):
-                            _scad = _data.get("scad_source")
-                            if not isinstance(_scad, str) and _ev == "token":
-                                _scad = _data.get("text")
-                            if isinstance(_scad, str) and _scad:
-                                output_scad = _scad
-                                break
+                        # Only ``scad_source`` counts (issue #396, round 2):
+                        # a token frame's ``text`` is PROSE (the LLM's
+                        # answer narration), not SCAD — archiving it as
+                        # ``output_scad`` would store a sentence where the
+                        # archive expects a source.
+                        _scad = _data.get("scad_source")
+                        if isinstance(_scad, str) and _scad:
+                            output_scad = _scad
+                            break
                     record_production_failure(
                         design_result=_DeadlinedLoopResult(scad=output_scad),
                         photo=photo,

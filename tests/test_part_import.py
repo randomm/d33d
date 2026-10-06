@@ -2308,6 +2308,27 @@ def test_hole_count_computation_runs_off_event_loop(
 # ---------------------------------------------------------------------------
 
 
+def test_scipy_and_shapely_importable() -> None:
+    """Issue #396 (round 2): scipy and shapely are HARD runtime
+    dependencies (``uv add scipy shapely``) — the genus-hole
+    cross-section (``trimesh``'s ``section`` / ``to_planar``) requires
+    them. A missing dep must fail LOUDLY in the test suite (the
+    measurement has NO fallback — the first #396 pass's broken ray-cast
+    is deleted), so the suite cannot go green on a broken install.
+    """
+    import importlib
+
+    for name in ("scipy", "shapely"):
+        try:
+            importlib.import_module(name)
+        except ImportError as e:  # only on a broken install
+            pytest.fail(
+                f"runtime dependency {name!r} is missing — the "
+                "genus-hole cross-section requires scipy + shapely "
+                f"(no fallback exists; install with `uv add {name}`): {e}"
+            )
+
+
 def test_holes_list_present_for_holey_fixture(app_with_projects) -> None:
     """Issue #396: holey.stl (4 boundary loops) → ``part_report["holes"]``
     has entries with centre, axis, and diameter_mm. The list is capped at
@@ -2363,8 +2384,11 @@ def test_holes_list_absent_for_plain_box(app_with_projects) -> None:
 
 def test_holes_list_annulus_diameter(app_with_projects) -> None:
     """Issue #396: a trimesh annulus (r_min=5, r_max=15, height=10) has a
-    single genus-1 through-hole. The measured diameter should be
-    approximately 2×5 = 10 mm (the inner radius × 2)."""
+    single genus-1 through-hole. The measured diameter must be within
+    0.5 mm of 2×5 = 10 mm (the inner radius × 2) and the centre at the
+    ring's centre ((0, 0, 0)) — the section's interior ring is the hole.
+    The previous form was vacuous (a 50% range + an ``if holes`` guard
+    accepted garbage) — it is pinned now."""
     import trimesh
 
     ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
@@ -2379,35 +2403,47 @@ def test_holes_list_annulus_diameter(app_with_projects) -> None:
     r = _run_async(app_with_projects, _call)
     assert r.status_code == 201, r.text
     report = r.json()["part"]["report"]
+    assert report["hole_count"] == 1, (
+        f"annulus must have exactly one closed hole, got {report['hole_count']}"
+    )
     holes = report.get("holes")
-    if holes:
-        assert len(holes) >= 1
-        d = holes[0]["diameter_mm"]
-        # The inner diameter is 2×5 = 10 mm; allow 50% tolerance for
-        # the approximation method.
-        assert 3.0 < d < 20.0, f"annulus hole diameter {d} mm out of range"
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert len(holes) == 1, f"expected exactly 1 measured hole, got {holes}"
+    h = holes[0]
+    # The inner diameter is 2×5 = 10 mm (the section ring is the 32-gon
+    # of the hole wall — within 0.5 mm of the true circle).
+    assert abs(h["diameter_mm"] - 10.0) < 0.5, (
+        f"annulus hole diameter {h['diameter_mm']} mm not within 0.5 mm of 10 mm"
+    )
+    # The centre is the ring's centre (0, 0, 0).
+    c = h["center"]
+    assert abs(c[0]) < 0.5 and abs(c[1]) < 0.5, (
+        f"annulus hole centre {c[:2]} not within 0.5 mm of the ring centre"
+    )
+    # Axis is Z (the through-axis of the annulus).
+    ax = h["axis"]
+    assert abs(ax[2]) > 0.9, f"axis {ax} should be Z"
 
 
 def test_holes_list_three_plate(app_with_projects) -> None:
-    """Issue #396: a plate with 3 through-holes (built with trimesh) →
-    the holes list has exactly 3 entries, each with a centre within 0.5 mm
-    of the hole's true position, a diameter within 0.5 mm of the true
-    diameter, and axis Z (the through-axis). The existing test's geometry
-    was buggy (two of the three holes sat off the plate, so only one hole
-    was cut and the assertions were vacuous); this builds a plate with all
-    three holes inside the face and pins the measurement."""
+    """Issue #396: a 120×80×6 plate with 3 through-holes (built with
+    trimesh) → the holes list has exactly 3 entries, each with a centre
+    within 0.5 mm of the hole's true position, a diameter within 0.5 mm
+    of the true diameter, and axis Z (the through-axis). This is the
+    acceptance test for the section-based measurement — the first #396
+    pass's ray-cast fallback (5 phantom holes on this plate) is deleted;
+    the section must measure the 3 real holes."""
     import trimesh
 
-    # A 38×38×10 mm plate centred at (19,19,5) with three through-holes
-    # along Z at x=9/19/29, y=19: Ø6 at (9,19), Ø10 at (19,19), Ø8 at
-    # (29,19). All three holes are inside the face.
-    plate = trimesh.creation.box(extents=[38, 38, 10])
-    plate.apply_translation([19, 19, 5])
-    specs = [(3.0, 9.0, 19.0), (5.0, 19.0, 19.0), (4.0, 29.0, 19.0)]
+    # A 120×80×6 mm plate centred at (60, 40, 3) with three through-holes
+    # along Z at y=40: Ø6 at (30, 40), Ø10 at (60, 40), Ø8 at (90, 40).
+    plate = trimesh.creation.box(extents=[120, 80, 6])
+    plate.apply_translation([60, 40, 3])
+    specs = [(3.0, 30.0, 40.0), (5.0, 60.0, 40.0), (4.0, 90.0, 40.0)]
     cylinders = []
     for radius, x, y in specs:
         c = trimesh.creation.cylinder(radius=radius, height=20, sections=32)
-        c.apply_translation([x, y, 5.0])
+        c.apply_translation([x, y, 3.0])
         cylinders.append(c)
     result = plate.difference(trimesh.util.concatenate(cylinders))
     if isinstance(result, trimesh.Scene):
@@ -2435,9 +2471,9 @@ def test_holes_list_three_plate(app_with_projects) -> None:
     holes = report.get("holes")
     assert holes is not None, f"holes list missing from report: {report}"
     assert len(holes) == 3, f"expected exactly 3 measured holes, got {len(holes)}: {holes}"
-    # Each hole: centre within 0.5 mm of the true (x, y, 5) position,
+    # Each hole: centre within 0.5 mm of the true (x, y, 3) position,
     # diameter within 0.5 mm of the true Ø, and axis Z (0,0,1).
-    true = [(9.0, 19.0, 6.0), (19.0, 19.0, 10.0), (29.0, 19.0, 8.0)]
+    true = [(30.0, 40.0, 6.0), (60.0, 40.0, 10.0), (90.0, 40.0, 8.0)]
     # Match measured holes to true holes by nearest centre.
     matched = set()
     for (tx, ty, tdia) in true:

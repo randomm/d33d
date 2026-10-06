@@ -2885,3 +2885,115 @@ def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
     assert offer is not None
     assert offer["kind"] == "fill_recut"
     assert "center" not in offer, f"ambiguous offer must not carry center: {offer}"
+
+
+def test_import_succeeds_when_measure_holes_raises(app_with_projects) -> None:
+    """Issue #396 (round 2): the import must NEVER fail because hole
+    measurement is hard to measure. Monkeypatch
+    ``d33d.part_mesh.measure_holes`` (the name ``part_mesh`` calls) to
+    raise ``RuntimeError`` — the upload succeeds (201) and the report
+    has no ``holes`` key (the broad ``except Exception`` in
+    ``parse_and_repair`` omits the list; ``hole_count`` stays honest).
+    This pins the never-fail-import contract: a future "cleanup" that
+    narrows the except (e.g. to a specific trimesh exception) would let
+    the ``RuntimeError`` propagate and break the upload — this test
+    catches that.
+    """
+    from pathlib import Path
+
+    import d33d.part_mesh as part_mesh_mod
+
+    fixture = Path(__file__).parent / "fixtures" / "stl" / "holey.stl"
+    data = fixture.read_bytes()
+
+    original = part_mesh_mod.measure_holes
+
+    def _boom(merged, components):
+        raise RuntimeError("simulated hole-measurement failure")
+
+    part_mesh_mod.measure_holes = _boom
+    try:
+
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "ImportNeverFails"})
+            pid = r.json()["id"]
+            files = {"file": ("holey.stl", data, "model/stl")}
+            return await client.post(f"/api/projects/{pid}/part", files=files)
+
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.measure_holes = original
+
+    assert r.status_code == 201, (
+        f"the import must succeed even when measure_holes raises; "
+        f"got {r.status_code}: {r.text}"
+    )
+    report = r.json()["part"]["report"]
+    # The holes list is omitted (the broad guard swallowed the error).
+    assert "holes" not in report, (
+        f"the holes key must be omitted when measurement fails: {report}"
+    )
+    # The hole count stays honest (computed before the measurement).
+    assert isinstance(report.get("hole_count"), int), (
+        f"hole_count must still be present and honest: {report}"
+    )
+
+
+def test_offer_cm_part_selects_center_hole_and_reports_mm(app_with_projects) -> None:
+    """Issue #396 (round 2): a part stored in cm (``part_scale=10``) has
+    holes in FILE units. The selection and the instruction must use MM
+    (the user's unit): a hole stored as Ø3.0 file units is Ø30.0 mm.
+    "The center hole" picks the hole nearest the mm bbox centre (the
+    file-unit bbox × scale), and the offer carries the mm-converted
+    centre + diameter."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CmHoles"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # A 4.0 × 2.0 cm part (scale 10 → 40 × 20 mm). Two holes at file
+        # (1.5, 1.0) and (3.5, 1.0) = mm (15, 10) and (35, 10), each
+        # Ø3.0 file units = Ø30.0 mm. The mm bbox centre is (20, 10):
+        # (15, 10) is 5 mm away, (35, 10) is 15 mm away → the (1.5, 1.0)
+        # file-unit hole is the center hole (a file-unit comparison would
+        # pick the wrong one).
+        holes_report = {
+            "hole_count": 2,
+            "holes": [
+                {"center": [1.5, 1.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 3.0},
+                {"center": [3.5, 1.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 3.0},
+            ],
+            "bbox_file_units": [4.0, 2.0, 1.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='cm', part_unit_status='settled', part_scale=10.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 30 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, frames, svc.get_pending_offer(pid)
+
+    status, _frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert offer is not None, "offer must be stored"
+    assert offer["kind"] == "fill_recut"
+    # The center hole in MM: the (1.5, 1.0) file-unit hole → (15, 10) mm.
+    center = offer.get("center")
+    assert center is not None, f"offer missing center: {offer}"
+    assert abs(center[0] - 15.0) < 1e-6, (
+        f"center x {center[0]} mm — the (1.5, 1.0) file-unit hole is 5 mm "
+        f"from the mm bbox centre, so it must be selected"
+    )
+    assert abs(center[1] - 10.0) < 1e-6, (
+        f"center y {center[1]} mm — must be 10.0 mm (1.0 file unit × 10)"
+    )
+    # The diameter is the mm-converted value (3.0 file units × 10 = 30 mm).
+    assert offer.get("diameter_mm") == 30.0, (
+        f"diameter must be 30.0 mm (3.0 file units × scale 10), got {offer.get('diameter_mm')}"
+    )

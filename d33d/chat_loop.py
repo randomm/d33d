@@ -109,22 +109,26 @@ async def run_design_loop(
     )
 
     latest = app.state.versions.latest_version(project_id)
-    # The imported part's measured holes (issue #396) — the
+    # The imported part's measured holes in MM (issue #396) — the
     # ``part_report["holes"]`` list ``[{center, axis, diameter_mm}]``
-    # stored at import (the #396 import workstream). ``None`` (no part,
-    # legacy report, or no holes measured) keeps the pre-route's
-    # honest-reply path; a list lets the deterministic stage answer a
-    # one-hole size question from the measurement.
+    # is stored at import in FILE units; :func:`d33d.hole_select.holes_in_mm`
+    # applies the part's scale (the ONE conversion — the deterministic
+    # stage reports in mm, the user's unit). ``None`` (no part, legacy
+    # report, or no holes measured) keeps the pre-route's honest-reply
+    # path; a list lets the deterministic stage answer a one-hole size
+    # question from the measurement.
     holes = None
     if latest is not None:
+        from d33d.hole_select import holes_in_mm
         from d33d.part_http import part_public
 
         public = part_public(row)
-        report = public["report"] if public is not None else None
-        if isinstance(report, dict):
-            stored = report.get("holes")
-            if isinstance(stored, list):
-                holes = stored
+        if public is not None:
+            report = public["report"]
+            if isinstance(report, dict):
+                mm_holes = holes_in_mm(report, public.get("scale"))
+                if mm_holes:
+                    holes = mm_holes
     try:
         answer_route = await route_chat_message(
             message,

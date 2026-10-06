@@ -22,6 +22,8 @@ dependencies = [
     "python-multipart>=0.0.9",
     "pillow>=10",
     "fast-simplification>=0.2.0",
+    "scipy>=1.18.1",
+    "shapely>=2.1.2",
 ]
 
 [project.optional-dependencies]
