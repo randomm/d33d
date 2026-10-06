@@ -2507,6 +2507,91 @@ def test_holes_list_three_plate(app_with_projects) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_genus_holes_z_section_suffices_computes_one_section() -> None:
+    """Issue #396 lens fix: when the Z section's interior-ring count
+    EQUALS the body's genus, no further sections are computed. The old
+    loop always sliced all three axes; the fixed loop stops at the
+    first equals-genus hit — the 3-hole-plate fixture (holes along Z)
+    must measure its 3 holes with EXACTLY ONE ``_section_interior_rings``
+    call (the Z section), never three."""
+    import trimesh
+
+    import d33d.hole_measure as hole_measure_mod
+
+    fixture = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
+    assert (2 - int(fixture.euler_number)) // 2 == 3  # fixture guard
+
+    calls: list[int] = []
+    original = hole_measure_mod._section_interior_rings
+
+    def _spy(body, axis_index):
+        calls.append(axis_index)
+        return original(body, axis_index)
+
+    hole_measure_mod._section_interior_rings = _spy
+    try:
+        holes = hole_measure_mod.measure_genus_holes(fixture)
+    finally:
+        hole_measure_mod._section_interior_rings = original
+
+    assert len(calls) == 1, (
+        f"an equals-genus Z section must stop the scan (1 call), "
+        f"got {len(calls)} sections: {calls}"
+    )
+    assert calls[0] == 2, f"the Z section must be the first (and only) call, got {calls}"
+    assert len(holes) == 3, f"the Z section must measure all 3 holes, got {holes}"
+
+
+def test_genus_holes_no_equals_axis_stops_at_first_nonempty_best() -> None:
+    """Issue #396 lens fix: when NO axis's count equals the genus, the
+    loop keeps the first non-empty section as the best answer and stops
+    computing further sections as soon as it has one (the documented
+    equals-genus preference is kept; the fallback is the first non-empty
+    axis, not the last). Engineered on the 3-hole plate: a wrapper body
+    reporting genus 1 makes the Z section (3 rings) non-equals, so the
+    scan must keep Z (the first non-empty axis) and NOT compute Y or X."""
+    import trimesh
+
+    import d33d.hole_measure as hole_measure_mod
+
+    fixture = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
+
+    class _GenusOneBody:
+        """The real plate, with a forced ``euler_number`` so the genus
+        is 1 — the Z section (3 rings) is non-empty but not equals-genus,
+        which exercises the "keep the first non-empty, stop scanning"
+        branch."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        euler_number = -1  # genus (2 - (-1)) // 2 = 1
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    real_section = hole_measure_mod._section_interior_rings
+    calls: list[int] = []
+
+    def _spy(body, axis_index):
+        calls.append(axis_index)
+        return real_section(body._inner, axis_index)
+
+    hole_measure_mod._section_interior_rings = _spy
+    try:
+        holes = hole_measure_mod.measure_genus_holes(_GenusOneBody(fixture))
+    finally:
+        hole_measure_mod._section_interior_rings = real_section
+
+    # Z (3 rings) != genus (1) — but Z is non-empty, so the scan keeps
+    # Z and must NOT compute Y or X.
+    assert calls == [2], (
+        f"with a non-empty best already found below genus, the scan "
+        f"must stop at the first non-empty axis; got {calls}"
+    )
+    assert len(holes) == 3
+
+
 def test_3mf_inch_settled_at_25_4(app_with_projects):
     """3MF with unit 'inch' → settled at scale 25.4 (the bbox is in mm)."""
     data = _make_3mf("inch")

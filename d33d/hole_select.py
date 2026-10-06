@@ -184,6 +184,27 @@ __all__ = [
 ]
 
 
+def _numeric_vec(values: Any, length: int) -> list[float] | None:
+    """Validate a stored coordinate vector component-by-component.
+
+    ``values`` must be a list/tuple of ``length`` (or more) numeric,
+    non-bool, finite values; anything else (a string, ``None``, a bool,
+    ``nan``/``inf``, the wrong length) returns ``None`` (the caller
+    omits the entry — malformed entries are omitted, never a raise).
+    """
+    if not isinstance(values, (list, tuple)) or len(values) < length:
+        return None
+    out: list[float] = []
+    for v in values[:length]:
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return None
+        f = float(v)
+        if not math.isfinite(f):
+            return None
+        out.append(f)
+    return out
+
+
 def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict[str, Any]]:
     """The stored ``part_report["holes"]`` list converted to MM (issue
     #396).
@@ -227,21 +248,24 @@ def holes_in_mm(report: dict[str, Any] | None, scale: float | None) -> list[dict
             continue
         center = entry.get("center")
         diameter = entry.get("diameter_mm")
-        if not isinstance(center, (list, tuple)) or len(center) < 2:
-            continue
         if not (
             isinstance(diameter, (int, float))
             and not isinstance(diameter, bool)
             and diameter > 0
         ):
             continue
-        axis = entry.get("axis")
+        center_mm = _numeric_vec(center, 2)
+        if center_mm is None:
+            # A corrupt centre (a non-numeric component, a bool, a
+            # non-finite value, or the wrong shape) is a malformed
+            # entry: OMIT it — never a ValueError out of the helper
+            # (the fill-recut call path must not 500 on a corrupt row).
+            continue
+        axis = _numeric_vec(entry.get("axis"), 3)
         holes.append(
             {
-                "center": [
-                    float(v) * factor for v in center[:3]
-                ],
-                "axis": ([float(v) for v in axis] if isinstance(axis, (list, tuple)) and len(axis) == 3 else [0.0, 0.0, 1.0]),
+                "center": [v * factor for v in center_mm],
+                "axis": axis if axis is not None else [0.0, 0.0, 1.0],
                 "diameter_mm": float(diameter) * factor,
             }
         )

@@ -119,30 +119,49 @@ async def run_design_loop(
     # question from the measurement.
     holes = None
     if latest is not None:
-        from d33d.hole_select import holes_in_mm
-        from d33d.part_http import part_public
+        # Issue #396 lens fix: gate the pre-fetch behind a cheap
+        # message check so ``part_public`` / ``holes_in_mm`` run ONLY
+        # when the message could be a hole-size question — the
+        # ``HOLE_FEATURE_SIZE_QUESTION_RE`` stage-1 detector (already
+        # imported from ``d33d.question_answer`` at the top of this
+        # route, no cycle) plus the hole-family noun set (a hole
+        # message without a size word still degrades gracefully
+        # downstream). Everything else ("make it taller") costs
+        # nothing.
+        from d33d.part_holes import HOLE_NOUNS as _HOLE_NOUNS
+        from d33d.question_answer import HOLE_FEATURE_SIZE_QUESTION_RE as _HOLE_Q_RE
 
-        # Issue #396 lens fix: wrap the pre-fetch so any exception
-        # (corrupt ``part_report`` blob, non-numeric scale, or an
-        # unexpected ``part_public`` failure) gives ``holes = None``
-        # with a logged warning — the chat route must never 500 on a
-        # corrupt stored value.
-        try:
-            public = part_public(row)
-            if public is not None:
-                report = public["report"]
-                if isinstance(report, dict):
-                    mm_holes = holes_in_mm(report, public.get("scale"))
-                    if mm_holes:
-                        holes = mm_holes
-        except Exception:
+        msg_lower = message.lower()
+        hole_question = _HOLE_Q_RE.search(message) is not None or any(
+            n in msg_lower for n in _HOLE_NOUNS
+        )
+        if not hole_question:
             holes = None
-            logger.warning(
-                "pre-fetch of part holes failed for project %s "
-                "(degrading to no holes — the chat route must not 500)",
-                project_id,
-                exc_info=True,
-            )
+        else:
+            from d33d.hole_select import holes_in_mm
+            from d33d.part_http import part_public
+
+            # Issue #396 lens fix: wrap the pre-fetch so any exception
+            # (corrupt ``part_report`` blob, non-numeric scale, or an
+            # unexpected ``part_public`` failure) gives ``holes = None``
+            # with a logged warning — the chat route must never 500 on a
+            # corrupt stored value.
+            try:
+                public = part_public(row)
+                if public is not None:
+                    report = public["report"]
+                    if isinstance(report, dict):
+                        mm_holes = holes_in_mm(report, public.get("scale"))
+                        if mm_holes:
+                            holes = mm_holes
+            except Exception:
+                holes = None
+                logger.warning(
+                    "pre-fetch of part holes failed for project %s "
+                    "(degrading to no holes — the chat route must not 500)",
+                    project_id,
+                    exc_info=True,
+                )
     try:
         answer_route = await route_chat_message(
             message,

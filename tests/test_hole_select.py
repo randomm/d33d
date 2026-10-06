@@ -54,6 +54,60 @@ def test_holes_in_mm_positive_scale_converts_to_mm():
     assert abs(result[0]["diameter_mm"] - 50.0) < 1e-6
 
 
+def test_holes_in_mm_non_numeric_center_component_omitted_not_raised():
+    """A hole entry whose ``center`` has a non-numeric component is
+    OMITTED (the contract: malformed entries are omitted), never a
+    ValueError that would 500 the fill-recut call path."""
+    report = {
+        "holes": [
+            {
+                "center": ["a", 1.0, 2.0],
+                "axis": [0.0, 0.0, 1.0],
+                "diameter_mm": 5.0,
+            },
+            {
+                "center": [1.0, 2.0, 0.5],
+                "axis": [0.0, 0.0, 1.0],
+                "diameter_mm": 5.0,
+            },
+        ]
+    }
+    result = holes_in_mm(report, 10.0)
+    # The corrupt entry is omitted; the good entry is converted.
+    assert len(result) == 1
+    assert abs(result[0]["center"][0] - 10.0) < 1e-6
+
+
+def test_holes_in_mm_only_corrupt_center_returns_empty():
+    """A report whose only entry has a corrupt center → ``[]`` (never
+    a raise, never a partial value)."""
+    report = {
+        "holes": [
+            {"center": ["a", 1, 2], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+        ]
+    }
+    assert holes_in_mm(report, 1.0) == []
+
+
+def test_holes_in_mm_non_numeric_axis_degrades_to_default():
+    """A hole entry whose ``axis`` has a non-numeric component degrades
+    to the default ``[0, 0, 1]`` axis (the axis is unit — a corrupt
+    axis is no evidence, not a malformed entry). The entry is NOT
+    omitted — the center and diameter are still valid."""
+    report = {
+        "holes": [
+            {
+                "center": [1.0, 2.0, 0.5],
+                "axis": ["x", "y", "z"],
+                "diameter_mm": 5.0,
+            },
+        ]
+    }
+    result = holes_in_mm(report, 10.0)
+    assert len(result) == 1
+    assert result[0]["axis"] == [0.0, 0.0, 1.0]
+
+
 # ---------------------------------------------------------------------------
 # select_measured_hole — center qualifier with no usable bbox (item 3)
 # ---------------------------------------------------------------------------

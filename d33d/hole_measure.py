@@ -164,7 +164,15 @@ def measure_genus_holes(
             continue
         if best is None or (len(rings) == genus and len(best) != genus):
             best = [(u, v, d, axis_index) for (u, v, d) in rings]
-        if len(best) == genus:
+        # Issue #396 lens fix: stop at the first axis whose count is
+        # >= the genus — this covers both the equals-genus preference
+        # (the documented first choice) and the first-non-empty fallback
+        # (when no axis matches the genus, the first non-empty section
+        # with count >= genus is kept and no further section is
+        # computed; a later axis cannot improve on an already-sufficient
+        # count). A count of 0 is never >= genus (genus >= 1), so
+        # empty sections never trigger the break.
+        if len(best) >= genus:
             break
     if not best:
         return []

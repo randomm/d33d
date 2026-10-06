@@ -2018,15 +2018,11 @@ async def run_design_loop_with_events(
                     # progress frame carrying ``scad_source``) — the
                     # stall has no result, so the best available
                     # candidate text is ``""`` when nothing rendered.
-                    # Issue #396 lens fix: track a single
-                    # ``_last_scad_source`` variable updated wherever
-                    # ANY frame with a truthy ``scad_source`` is
-                    # yielded — on BOTH the ``get_nowait`` and
-                    # ``asyncio.wait`` paths — replacing the unbounded
-                    # ``_emitted_frames`` list that only recorded the
-                    # ``get_nowait`` branch (frames from the
-                    # ``asyncio.wait`` branch were never recorded, so
-                    # the archive could hold stale or empty SCAD).
+                    # Invariant: ``_last_scad_source`` is updated on
+                    # every yielded frame carrying a truthy
+                    # ``scad_source``, on both the ``get_nowait`` and
+                    # ``asyncio.wait`` paths; ``output_scad`` reads it
+                    # at deadline time.
                     output_scad = _last_scad_source
                     record_production_failure(
                         design_result=_DeadlinedLoopResult(scad=output_scad),

@@ -3039,6 +3039,101 @@ def test_fill_recut_turn_corrupt_scale_does_not_500(app_with_projects):
     )
 
 
+def test_chat_hole_prefetch_skipped_for_nonhole_message(app_with_projects):
+    """Issue #396 lens fix: the hole pre-fetch (``part_public`` /
+    ``holes_in_mm``) must NOT run on every chat turn — only when the
+    message could be a hole-size question (the
+    ``HOLE_FEATURE_SIZE_QUESTION_RE`` gate). A non-hole message like
+    "make it taller" never calls ``holes_in_mm``."""
+    import d33d.hole_select as hole_select_mod
+
+    calls = []
+    original_holes_in_mm = hole_select_mod.holes_in_mm
+
+    def _spy_holes(report, scale):
+        calls.append(True)
+        return original_holes_in_mm(report, scale)
+
+    hole_select_mod.holes_in_mm = _spy_holes
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "NoHoleMsg"})
+            pid = r.json()["id"]
+            conn = app_with_projects.state.conn
+            conn.raw.execute(
+                "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+                "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+                "part_report=? WHERE id=?",
+                (
+                    json.dumps({
+                        "hole_count": 1,
+                        "holes": [
+                            {"center": [1.0, 2.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                        ],
+                        "bbox_file_units": [10.0, 5.0, 2.0],
+                    }),
+                    pid,
+                ),
+            )
+            conn.commit()
+            # A non-hole message: the pre-fetch gate must skip it.
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make it taller"}
+            )
+            return r2.status_code, calls
+
+        status, _calls = _run_async(app_with_projects, _call)
+    finally:
+        hole_select_mod.holes_in_mm = original_holes_in_mm
+
+    # The gate must have skipped the pre-fetch for a non-hole message.
+    assert calls == [], (
+        f"a non-hole message must not trigger the hole pre-fetch; "
+        f"holes_in_mm was called {len(calls)} times"
+    )
+    assert status != 500
+
+
+def test_fill_recut_turn_corrupt_hole_center_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a stored hole entry whose ``center`` (or
+    ``axis``) carries a non-numeric component must not 500 the
+    fill-recut call path. The contract: malformed entries are OMITTED
+    by ``holes_in_mm`` — the old code let ``float("a")`` raise out of
+    the helper, and the fill-recut turn has no per-entry guard."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CorruptCenter"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+            "part_report=? WHERE id=?",
+            (
+                json.dumps({
+                    "hole_count": 1,
+                    "holes": [
+                        {"center": ["a", 1, 2], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                    ],
+                    "bbox_file_units": [10.0, 5.0, 2.0],
+                }),
+                pid,
+            ),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 30 mm"}
+        )
+        return r2.status_code
+
+    status = _run_async(app_with_projects, _call)
+    # The route must NOT 500 — the malformed entry is omitted, and the
+    # turn degrades to the no-hole-measured path (offer or point-at).
+    assert status != 500, (
+        f"a corrupt hole center must not 500 the chat route; got {status}"
+    )
+
+
 def test_chat_route_corrupt_part_report_does_not_500(app_with_projects):
     """Issue #396 lens fix: a corrupt ``part_report`` blob (invalid JSON
     that somehow bypassed the ``_loads_or_none`` guard, or an unexpected
