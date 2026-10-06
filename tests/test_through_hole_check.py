@@ -214,6 +214,53 @@ def test_check_zero_watertight_components_abstains(tmp_path):
     assert through_hole_check("drill a 6 mm hole through the box", stl, 0) is None
 
 
+# ---------------------------------------------------------------------------
+# genus_from_stl — the single public genus measurement
+# ---------------------------------------------------------------------------
+
+
+def test_genus_from_stl_box_is_zero():
+    """A watertight box (genus 0) measures 0."""
+    from d33d.part_mesh_topology import genus_from_stl
+
+    assert genus_from_stl(str(_FIXTURE_DIR / "box_20mm.stl")) == 0
+
+
+def test_genus_from_stl_through_hole_is_one():
+    """The one-through-hole fixture measures 1."""
+    from d33d.part_mesh_topology import genus_from_stl
+
+    assert genus_from_stl(str(_FIXTURE_DIR / "through_hole_genus1.stl")) == 1
+
+
+def test_genus_from_stl_three_hole_plate_is_three():
+    """The three-through-hole plate fixture measures 3."""
+    from d33d.part_mesh_topology import genus_from_stl
+
+    assert genus_from_stl(str(_FIXTURE_DIR / "through_hole_genus3.stl")) == 3
+
+
+def test_genus_from_stl_missing_path_is_none(tmp_path):
+    """A missing path → ``None`` (abstain, no exception)."""
+    from d33d.part_mesh_topology import genus_from_stl
+
+    assert genus_from_stl(str(tmp_path / "does-not-exist.stl")) is None
+
+
+def test_genus_from_stl_garbage_bytes_is_none(tmp_path):
+    """Garbage bytes → ``None`` (load failure logged, abstain)."""
+    from d33d.part_mesh_topology import genus_from_stl
+
+    bad = tmp_path / "garbage.stl"
+    bad.write_bytes(b"this is not an stl file at all")
+    assert genus_from_stl(str(bad)) is None
+
+
+# ---------------------------------------------------------------------------
+# The check contract (baseline comparison, abstain cases)
+# ---------------------------------------------------------------------------
+
+
 def test_check_unexpected_exception_abstains(tmp_path, monkeypatch):
     """Issue #386 (adversarial round 1): an UNEXPECTED exception from
     ``mesh_topology`` (e.g. ``RuntimeError``) must make the check ABSTAIN

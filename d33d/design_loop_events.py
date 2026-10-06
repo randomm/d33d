@@ -1489,25 +1489,9 @@ def _measured_genus_for_file(stl_path: str) -> int | None:
     the load/split fails, or there are zero watertight components — a
     fabricated baseline would make the gate lie.
     """
-    path = Path(stl_path)
-    if not path.is_file():
-        return None
-    try:
-        from d33d.part_mesh_topology import mesh_topology
-        from d33d.through_hole_check import _load_and_split
+    from d33d.part_mesh_topology import genus_from_stl
 
-        components = _load_and_split(str(path))
-        watertight_bodies = sum(1 for c in components if c.is_watertight)
-        if watertight_bodies == 0:
-            return None
-        return mesh_topology(merged=components[0], components=components)["genus"]
-    except Exception:
-        logger.warning(
-            "through-hole baseline: could not measure genus for %r",
-            stl_path,
-            exc_info=True,
-        )
-        return None
+    return genus_from_stl(stl_path)
 
 
 def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
@@ -1518,25 +1502,12 @@ def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
     ``model.stl`` is missing, the load/split fails, or there are zero
     watertight components — a fabricated baseline would make the gate lie.
     """
+    from d33d.part_mesh_topology import genus_from_stl
+
     stl_path = Path(render_artifact_dir) / "model.stl"
     if not stl_path.is_file():
         return None
-    try:
-        from d33d.part_mesh_topology import mesh_topology
-        from d33d.through_hole_check import _load_and_split
-
-        components = _load_and_split(str(stl_path))
-        watertight_bodies = sum(1 for c in components if c.is_watertight)
-        if watertight_bodies == 0:
-            return None
-        return mesh_topology(merged=components[0], components=components)["genus"]
-    except Exception:
-        logger.warning(
-            "v2+ through-hole baseline: could not measure genus for %r",
-            render_artifact_dir,
-            exc_info=True,
-        )
-        return None
+    return genus_from_stl(str(stl_path))
 
 
 async def _resolve_version_create(

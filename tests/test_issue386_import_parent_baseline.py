@@ -16,8 +16,7 @@ would treat as a real baseline — it never fabricates one from
 All fast (stub loop, no LLM, no Docker). Real fixtures: ``holey.stl``
 (4 open gaps, repaired genus 0), ``through_hole_genus1.stl`` (genus 1),
 ``through_hole_genus3.stl`` (genus 3, the "3-hole plate" stand-in),
-``through_hole_genus4.stl`` (genus 4), ``box_20mm.stl`` (watertight,
-genus 0 — a rendered pocket).
+``through_hole_genus4.stl`` (genus 4).
 """
 
 from __future__ import annotations

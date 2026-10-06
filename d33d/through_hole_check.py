@@ -8,9 +8,11 @@ and checked"), so without this check a pocket passes silently.
 
 Operator decision 2026-10-05 (binding): the rendered mesh's total genus
 must EXCEED the parent version's baseline genus — ``0`` for a new
-design, the imported part's own stored hole count for v1 on an import.
-This REPLACES "genus ≥ 1", which would let a pocket pass on any part
-that already has a hole (the plate has genus 3, the knob 1).
+design, the GENUS OF THE STORED, REPAIRED PART MESH for v1 on an
+import (never ``part_report.hole_count``, which overstates the
+baseline whenever the import had open gaps). This REPLACES "genus ≥
+1", which would let a pocket pass on any part that already has a hole
+(the plate has genus 3, the knob 1).
 
 The module is deliberately separate from ``d33d.design_loop`` (the loop
 orchestrates; this module owns the check's logic), mirroring
@@ -30,8 +32,6 @@ contains no "through", so no stripping is needed).
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from typing import Any
 
 from d33d.part_holes import HOLE_NOUNS
 
@@ -85,61 +85,22 @@ def is_through_request(request: str) -> bool:
     return any(noun in words for noun in HOLE_NOUNS)
 
 
-def _load_and_split(stl: str) -> list[Any]:
-    """Load ``stl`` and split it ONCE (``only_watertight=False``).
-
-    ``merge_vertices()`` is MANDATORY before the split — production
-    OpenSCAD STLs are face-disconnected and an unmerged split yields
-    ZERO components (the established contract, see
-    ``d33d.design_loop_events.bbox_from_render``). Load or split
-    failures RAISE — the caller (``_rendered_genus``) wraps the call in
-    its own ``try/except`` and abstains there (it is the sole caller).
-    """
-    import trimesh
-
-    mesh = trimesh.load(stl, process=False)
-    merged = mesh.to_mesh() if isinstance(mesh, trimesh.Scene) else mesh
-    merged.merge_vertices()
-    merged.update_faces(merged.nondegenerate_faces())
-    return merged.split(only_watertight=False)
-
-
 def _rendered_genus(stl: str) -> int | None:
-    """The rendered mesh's total genus, via the #395 shared helper.
+    """The rendered mesh's total genus, via the shared
+    :func:`d33d.part_mesh_topology.genus_from_stl` helper.
 
     ``None`` on a missing/unreadable STL, a split failure, or a split
-    with zero watertight components (the abstain cases — the caller
-    logs the single line and the candidate proceeds).
+    with zero watertight components (the abstain cases — the helper
+    logs a line and the candidate proceeds).
 
-    ``except Exception`` (adversarial round 1, 2026-10-05): ANY
-    unexpected exception (``TypeError`` / ``IndexError`` / ``MemoryError``
-    from a malformed mesh) makes the check ABSTAIN — the design loop
-    must never crash on a mesh the render worker already accepted.
+    ANY unexpected exception (``TypeError`` / ``IndexError`` /
+    ``MemoryError`` from a malformed mesh) makes the check ABSTAIN —
+    the design loop must never crash on a mesh the render worker
+    already accepted.
     """
-    from d33d.part_mesh_topology import mesh_topology
+    from d33d.part_mesh_topology import genus_from_stl
 
-    path = Path(stl)
-    if not path.is_file():
-        return None
-    try:
-        components = _load_and_split(stl)
-        watertight_bodies = sum(1 for c in components if c.is_watertight)
-        if watertight_bodies == 0:
-            logger.info("through-hole check abstained: no watertight components in %r", stl)
-            return None
-        # ``mesh_topology`` consults the ``merged`` argument only for the
-        # boundary-loop count and winding consistency (both degrade
-        # safely on an open mesh); the genus it returns comes straight
-        # from ``components``, so any component is a valid merged-mesh
-        # stand-in (the split pieces share the merged mesh's vertices).
-        return mesh_topology(merged=components[0], components=components)["genus"]
-    except Exception:
-        logger.warning(
-            "through-hole check abstained: STL %r could not be measured",
-            stl,
-            exc_info=True,
-        )
-        return None
+    return genus_from_stl(stl)
 
 
 #: The through-hole post-check's (issue #386, operator decision
@@ -224,6 +185,12 @@ def route_through_hole_repair(
     )
     directive = route_repair(classified=classified, scad_source=scad_source)
     if directive is None:
+        logger.warning(
+            "through-hole check detected (baseline genus %d, rendered genus %d) "
+            "but route_repair returned no directive — no repair routed",
+            base_g,
+            genus,
+        )
         return None
     return (evidence, THROUGH_HOLE_INSTRUCTION)
 
