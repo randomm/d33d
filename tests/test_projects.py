@@ -3082,13 +3082,18 @@ def test_chat_route_corrupt_part_report_does_not_500(app_with_projects):
 
 def test_import_omits_holes_when_scipy_import_error(app_with_projects):
     """Issue #396 lens fix: a missing ``scipy`` or ``shapely`` dependency
-    must FAIL LOUDLY (propagate ``ImportError`` out of ``parse_and_repair``),
-    NOT silently omit the holes list. The ``except ImportError: raise``
-    before the broad ``except Exception`` in ``part_mesh.parse_and_repair``
-    ensures a deployment error is never swallowed.
+    must FAIL LOUDLY as a 500 (a deployment error, not a client error),
+    NOT silently omit the holes list (201) or masquerade as a 422 with
+    a misleading "decode failed / try again" message.
 
-    The upload must return an error (500 or 422) — NOT 201 with a
-    silently-omitted holes list."""
+    The call chain: ``parse_and_repair`` → ``measure_holes`` →
+    ``_measure_genus_holes`` → ``measure_genus_holes`` → ``trimesh.
+    Trimesh.section`` (which imports scipy). Each level re-raises
+    ``ImportError`` (``except ImportError: raise`` before the broad
+    ``except Exception``) so it reaches ``_run_parse_and_repair``,
+    where it is likewise excluded from the broad 422-mapping handler
+    and propagates as a 500 — a broken deployment is visibly a server
+    error, not a client error the user can "fix" by retrying."""
     from pathlib import Path
 
     import d33d.part_mesh as part_mesh_mod
@@ -3113,13 +3118,12 @@ def test_import_omits_holes_when_scipy_import_error(app_with_projects):
     finally:
         part_mesh_mod.measure_holes = original
 
-    # A missing scipy/shapely must NOT silently omit the holes list —
-    # the upload must fail loudly (422 or 500) rather than return 201
-    # with a silently-omitted holes list. The route maps unexpected
-    # decode errors to 422 (``PartUploadError`` is 422; an unexpected
-    # ``ImportError`` is caught by the broad handler and mapped to 422
-    # with a generic message — the key point is it does NOT return 201).
-    assert r.status_code in (422, 500), (
-        f"a missing scipy/shapely must fail loudly (422 or 500), not "
-        f"silently omit the holes list (201); got {r.status_code}: {r.text}"
+    # A missing scipy/shapely is a DEPLOYMENT error, not a client error.
+    # The 500 (not 422) tells the operator the server is broken, not
+    # that the file needs to be retried. 201 (silent omission) and 422
+    # (misleading "try again") are both wrong.
+    assert r.status_code == 500, (
+        f"a missing scipy/shapely must fail loudly with 500 (a deployment "
+        f"error), not 201 (silent omission) or 422 (misleading client "
+        f"error); got {r.status_code}: {r.text}"
     )

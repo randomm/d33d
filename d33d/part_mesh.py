@@ -428,14 +428,12 @@ def parse_and_repair(
     # runtime dependencies for ``trimesh.Trimesh.section``) is a
     # DEPLOYMENT ERROR, not a geometric failure — it must FAIL LOUDLY
     # (propagate the ``ImportError`` out of ``parse_and_repair``), not
-    # silently omit the holes list. The ``except ImportError: raise``
-    # BEFORE the broad ``except Exception`` ensures a missing dependency
-    # is never swallowed; the broad guard still catches every other
-    # exception class so the import never fails for a geometric reason.
-    # (A missing scipy/shapely means the section cannot run at all —
-    # the upload fails loudly with an ``ImportError`` rather than
-    # silently omitting the holes list, which would mask the broken
-    # environment.)
+    # silently omit the holes list. ``measure_holes`` itself re-raises
+    # ``ImportError`` from the genus path (issue #396 lens fix — the
+    # broad ``except Exception`` in ``measure_holes`` would swallow it,
+    # making this ``except ImportError: raise`` dead code); the broad
+    # guard here still catches every other exception class so the import
+    # never fails for a geometric reason.
     try:
         measured_holes = measure_holes(merged, components)
         if measured_holes:

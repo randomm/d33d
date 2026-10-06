@@ -457,6 +457,13 @@ def measure_holes(
     try:
         genus_holes = _measure_genus_holes(components)
         holes.extend(genus_holes)
+    except ImportError:
+        # A missing scipy / shapely is a deployment error, not a
+        # geometric failure — propagate it so the upload fails loudly
+        # (issue #396 lens fix: the broad ``except Exception`` would
+        # swallow it, making the ``except ImportError: raise`` in
+        # ``parse_and_repair`` dead code in the real call chain).
+        raise
     except Exception:
         logger.warning("genus hole measurement failed", exc_info=True)
 
