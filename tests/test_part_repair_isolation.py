@@ -535,101 +535,108 @@ def test_dead_child_exits_without_reply_maps_quickly(monkeypatch):
     )
 
 
-def _noop_worker(vertices, faces):
-    """A no-op worker (the spawn child imports this by reference)."""
-    return vertices, faces
-
-
 class _MalformedReplyProcess(multiprocessing.Process):
-    """A top-level ``Process`` subclass whose ``run()`` sends a 2-tuple
-    (not the 3-tuple the parent expects) over the pipe, then exits.
+    """A top-level ``Process`` subclass whose ``run()`` sends a MALFORMED
+    reply (not the 3-tuple ``(kind, name, payload)`` the parent expects)
+    over the real pipe, then exits.
 
-    Used by the test to exercise the parent's reply validation. The
-    instance's ``_send_conn`` attribute (set by ``__init__``) is used to
-    send the malformed reply. This class is a top-level definition in an
-    importable module (the spawn child inherits the parent's ``sys.path``),
-    so the child can resolve it by its import path."""
+    Two malformed shapes (parametrised):
+    - ``"short"``  → a 2-tuple ``("ok", None)`` (wrong length); the parent
+      must reject it as malformed (not a 3-tuple).
+    - ``"kind"``   → a 3-tuple ``("weird", "x", "y")`` (wrong kind); the
+      parent must reject it as malformed (kind not in {"ok", "err"}).
 
-    def __init__(self, send_conn, worker, mode, payload):
+    This drives the REAL ``_run_in_worker`` validation (no monkeypatch of
+    the function under test) — the only thing injected is the process
+    class (the same seam ``_DeadWorkerProcess`` uses). The instance is
+    pickled to the spawn child (carrying the reply), and the child's
+    ``run()`` sends it over the real pipe. Top-level in an importable
+    module (the spawn child inherits the parent's ``sys.path``), so the
+    child can resolve the class by its import path."""
+
+    def __init__(
+        self, send_conn, worker, mode, payload, malformed_kind: str = "short"
+    ):
         super().__init__(daemon=True)
         self._send_conn = send_conn
-        self._worker = worker
-        self._mode = mode
-        self._payload = payload
+        self._malformed_kind = malformed_kind
 
     def run(self) -> None:
         import sys
 
         try:
-            self._send_conn.send(("ok", "not-a-3-tuple"))
-        except OSError:
+            if self._malformed_kind == "short":
+                self._send_conn.send(("ok", None))
+            else:  # "kind"
+                self._send_conn.send(("weird", "x", "y"))
+        except (OSError, BrokenPipeError):
             # The send can fail (pipe closed, child killed); the process
-            # exits regardless (the finally block runs sys.exit(0)).
+            # exits regardless.
             pass
         finally:
             sys.exit(0)
 
 
-def test_malformed_worker_reply_is_part_upload_error(monkeypatch):
-    """A malformed reply (not a 3-tuple, or with a kind not in
-    {"ok","err"}) must become ``PartUploadError("repair failed: malformed
-    worker reply")`` — never a crash or a 500.
+@pytest.mark.parametrize("malformed_kind", ["short", "kind"])
+def test_malformed_worker_reply_is_part_upload_error(
+    monkeypatch, malformed_kind: str
+) -> None:
+    """A malformed reply (wrong length, or a kind not in {"ok","err"}) must
+    become ``PartUploadError("repair failed: malformed worker reply")`` —
+    never a crash or a 500.
 
-    The test patches ``_run_in_worker`` to use a process whose ``run()``
-    sends a 2-tuple over the pipe. The parent's ``recv`` gets the 2-tuple,
-    validates it (it's not a 3-tuple with kind in {"ok","err"}), and must
-    raise ``PartUploadError("repair failed: malformed worker reply")``.
+    The test exercises the REAL ``_run_in_worker`` reply-shape validation
+    (no monkeypatch of the function under test — the earlier version
+    patched ``_run_in_worker`` itself, which made the test tautological).
+    It injects only the process class (``_MalformedReplyProcess``, the same
+    seam ``_DeadWorkerProcess`` uses), whose ``run()`` sends a malformed
+    reply over the real pipe; ``repair_with_pmf`` then drives the real
+    ``_run_in_worker``, which must reject it.
+
+    Parametrised over two malformed shapes: a wrong length (2-tuple
+    ``("ok", None)``) and an unknown kind (3-tuple ``("weird", "x", "y")``).
     """
-    import trimesh
-
     import d33d.part_repair as part_repair_mod
     from d33d.part_errors import PartUploadError
+    from tests._repair_stubs import _noop_repair
 
-    box = trimesh.creation.box(extents=[5, 5, 5])
-    box.merge_vertices()
-    box.update_faces(box.nondegenerate_faces())
+    # Point the seam at a no-op worker (the stub is pickled to the child
+    # but never runs — the process is overridden below).
+    monkeypatch.setattr(part_repair_mod, "_REPAIR_WORKER", _noop_repair)
 
-    def _patched_run_in_worker(mode, p, timeout, label):
-        ctx = multiprocessing.get_context("spawn")
-        pipe_parent, pipe_child = ctx.Pipe(duplex=False)
-        proc = _MalformedReplyProcess(pipe_child, _noop_worker, mode, p)
-        proc.start()
-        try:
-            if not pipe_parent.poll(timeout):
-                raise part_repair_mod.RepairTimeoutError(f"timed out ({label})")
-            reply = pipe_parent.recv()
-            if (
-                not isinstance(reply, tuple)
-                or len(reply) != 3
-                or reply[0] not in ("ok", "err")
-            ):
-                raise PartUploadError("repair failed: malformed worker reply")
-            _kind, name, payload_result = reply
-            if _kind == "ok":
-                return payload_result
-            if name == "PartUploadError":
-                raise PartUploadError(payload_result)
-            raise PartUploadError(f"repair failed: {name}")
-        finally:
-            try:
-                pipe_parent.close()
-            except (BrokenPipeError, OSError):
-                # The pipe can be in a broken state (child died, killed);
-                # the close failure is not actionable — the child is
-                # killed/joined below regardless.
-                pass
-            if proc.is_alive():
-                proc.kill()
-            proc.join(timeout=5)
+    # Override the process class with the malformed-reply stub (the same
+    # seam the dead-child test uses). The payload carries the box's arrays
+    # — the stub ignores them and sends the malformed reply instead.
+    def _malformed_factory(pipe_child, worker, mode, payload):
+        return _MalformedReplyProcess(
+            pipe_child, worker, mode, payload, malformed_kind
+        )
 
-    monkeypatch.setattr(part_repair_mod, "_run_in_worker", _patched_run_in_worker)
+    monkeypatch.setattr(
+        part_repair_mod, "_RepairWorkerProcess", _malformed_factory
+    )
 
+    box = _box_mesh()
+    t0 = time.monotonic()
     with pytest.raises(PartUploadError) as excinfo:
-        part_repair_mod.repair_with_pmf(box, timeout=10)
+        repair_with_pmf(box, timeout=120)
+    elapsed = time.monotonic() - t0
 
-    assert "malformed worker reply" in str(excinfo.value), (
-        f"malformed reply must map to PartUploadError with that message, "
+    # The malformed reply is detected quickly (the real reply-shape
+    # validation in _run_in_worker), not after the full 120 s budget.
+    assert elapsed < 5.0, (
+        f"malformed reply not rejected quickly: {elapsed:.2f}s elapsed "
+        f"(expected < 5s via the real _run_in_worker validation)"
+    )
+    # Mapped to PartUploadError (the 422 signal), never a raw crash.
+    assert isinstance(excinfo.value, PartUploadError)
+    assert "malformed" in str(excinfo.value), (
+        f"malformed reply must map to PartUploadError naming it, "
         f"got: {excinfo.value!r}"
+    )
+    # The child was cleaned up (no zombie/orphan left behind).
+    assert multiprocessing.active_children() == [], (
+        f"leftover child processes: {multiprocessing.active_children()}"
     )
 
 

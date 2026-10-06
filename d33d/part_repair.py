@@ -29,9 +29,11 @@ importable module — a fresh spawn interpreter re-imports ``d33d``
 normally, so the pickled reference resolves there). The parent executes
 NO dotted-string input: only a parent-settable, module-level callable is
 ever run in the child, and the pickled reference pins it to the function
-resolved at call time. Tests point the hook at a test stub (a top-level
-function in ``tests._repair_stubs`` — importable by the child because the
-spawn child inherits the parent's ``sys.path``) via
+resolved at call time. The reply is carried back over a one-way pipe and
+VALIDATED in the parent before use (a 3-tuple with kind in ``{"ok", "err"}``;
+a malformed reply is a 422, never a 500). Tests point the hook at a test
+stub (a top-level function in ``tests._repair_stubs`` — importable by the
+child because the spawn child inherits the parent's ``sys.path``) via
 ``monkeypatch.setattr("d33d.part_repair._REPAIR_WORKER", <callable>)``.
 
 Spawn startup costs about 0.5–1 s, which is acceptable: repair runs only
@@ -51,7 +53,6 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
-from multiprocessing import SimpleQueue
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -177,41 +178,6 @@ def _repair_bodies_in_process(bodies: list) -> list:
 _REPAIR_WORKER = _repair_in_process
 
 
-def _child_main(
-    queue: SimpleQueue, send_conn: Any, worker: Any, mode: str = "single"
-) -> None:
-    """The spawn child's entry point (top-level → picklable).
-
-    ``worker`` is the parent-resolved callable (pickled by reference with
-    this call's arguments — never a string the child parses). The child
-    pulls the input off the queue, runs the worker, and ships
-    ``(kind, exception-name, payload)`` back over the pipe (the exception's
-    TYPE name is sent so the parent classifies by type, not by message
-    text).
-
-    ``mode`` is the EXPLICIT dispatch signal the parent sends (never
-    introspected from the worker's identity — the pickled reference could
-    be a stub with the batched signature):
-    - ``"single"``: the input is ``(vertices, faces)`` arrays and the
-      worker takes two args.
-    - ``"batch"``: the input is a list of ``(vertices, faces)`` pairs and
-      the worker takes one arg (a list of pairs) and returns a list.
-    """
-    data = queue.get()
-    try:
-        if mode == "batch":
-            result = worker(data)
-        else:
-            verts, faces = data
-            result = worker(verts, faces)
-        send_conn.send(("ok", "", result))
-    except Exception as e:
-        # Log the full traceback in the child and ship the type name
-        # back so the parent classifies by type, not by message text.
-        logging.getLogger(__name__).exception("repair worker failed")
-        send_conn.send(("err", type(e).__name__, str(e)))
-
-
 class _RepairWorkerProcess(multiprocessing.Process):
     """A ``Process`` subclass that calls the parent-resolved worker in
     ``run()`` (overriding the default ``target/args`` dispatch). The
@@ -220,7 +186,7 @@ class _RepairWorkerProcess(multiprocessing.Process):
     directly — no re-import of the module attribute, so a test
     monkeypatch of ``_REPAIR_WORKER`` is visible to the child.
 
-    The ``mode`` dispatch is the same as ``_child_main``: ``"single"``
+    The ``mode`` dispatch: ``"single"``
     unpacks the payload as ``(verts, faces)``; ``"batch"`` passes the
     list as one arg. The reply is ``(kind, name, payload)`` over the
     pipe."""
