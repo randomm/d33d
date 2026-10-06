@@ -196,6 +196,88 @@ def test_chat_adapter_passes_through_baseline_genus_for_import(app_with_versions
     assert "through_baseline_genus" not in captured
 
 
+def test_chat_adapter_v2_baseline_uses_parent_version_render(app_with_versions, tmp_path):
+    """Issue #386 (v2+ edit case): a project with a part and an existing
+    version whose ``render_artifact_dir`` carries a ``model.stl`` with a
+    known genus — the loop kwargs the CHAT adapter builds carry
+    ``through_baseline_genus`` equal to the PARENT VERSION's rendered
+    genus (not the part report's hole_count). When the version has no
+    ``render_artifact_dir`` (never measured), the kwarg falls back to the
+    part report's hole_count."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        # Set up the part (hole_count=2 in the report).
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, '{"hole_count": 2}', pid),
+        )
+        conn.commit()
+
+        # Create a version via the service.
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid, {"W": 20.0}, name="v1", bbox=(20.0, 20.0, 20.0),
+        )
+        # Set up a render artifact dir with the genus-1 fixture as model.stl.
+        from pathlib import Path as _Path
+        fixture_dir = _Path(__file__).parent.parent / "fixtures" / "stl"
+        render_dir = tmp_path / "render_v1"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        import shutil
+        shutil.copy2(fixture_dir / "through_hole_genus1.stl", render_dir / "model.stl")
+        latest = svc.latest_version(pid)
+        assert latest is not None
+        conn.execute(
+            "UPDATE versions SET render_artifact_dir=? WHERE id=?",
+            (str(render_dir), latest["id"]),
+        )
+        conn.commit()
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # The v2+ baseline: the parent version's rendered genus (1 from the
+    # fixture), NOT the part report's hole_count (2).
+    assert captured.get("through_baseline_genus") == 1, (
+        f"v2+ baseline should be the parent version's rendered genus "
+        f"(1), got {captured.get('through_baseline_genus')!r}"
+    )
+
+
+def test_chat_adapter_v2_baseline_falls_back_to_part_report(app_with_versions):
+    """Issue #386 (v2+ edit, parent never measured): a project with a part
+    (hole_count=2) and a version that has NO ``render_artifact_dir``
+    (never rendered — a version created via the API without a render) →
+    the loop kwargs carry ``through_baseline_genus`` equal to the part
+    report's hole_count (the only available baseline)."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, '{"hole_count": 2}', pid),
+        )
+        conn.commit()
+        # Create a version WITHOUT render_artifact_dir.
+        await create_version(client, pid, {"W": 20.0})
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # No render_artifact_dir → fall back to part report's hole_count.
+    assert captured.get("through_baseline_genus") == 2, (
+        f"v2+ baseline with no rendered parent should fall back to "
+        f"part report hole_count (2), got {captured.get('through_baseline_genus')!r}"
+    )
+
+
 def test_chat_adapter_passes_none_state_kwargs_for_fresh_project(app_with_versions):
     """A fresh project (no version yet): the loop kwargs carry
     ``state_params`` / ``state_bbox`` / ``state_stated`` all ``None`` —

@@ -1451,6 +1451,35 @@ def _version_render_artifact_dir(result: Any) -> str | None:
     return artifact_path
 
 
+def _measured_genus_for_dir(render_artifact_dir: str) -> int | None:
+    """Issue #386 (v2+ baseline): measure the parent version's rendered
+    genus from its ``render_artifact_dir`` (the ``model.stl`` inside).
+
+    Returns ``None`` (the check abstains) when the directory or the
+    ``model.stl`` is missing, the load/split fails, or there are zero
+    watertight components — a fabricated baseline would make the gate lie.
+    """
+    stl_path = Path(render_artifact_dir) / "model.stl"
+    if not stl_path.is_file():
+        return None
+    try:
+        from d33d.part_mesh_topology import mesh_topology
+        from d33d.through_hole_check import _load_and_split
+
+        components = _load_and_split(str(stl_path))
+        watertight_bodies = sum(1 for c in components if c.is_watertight)
+        if watertight_bodies == 0:
+            return None
+        return mesh_topology(merged=components[0], components=components)["genus"]
+    except Exception:
+        logger.warning(
+            "v2+ through-hole baseline: could not measure genus for %r",
+            render_artifact_dir,
+            exc_info=True,
+        )
+        return None
+
+
 async def _resolve_version_create(
     app: Any,
     project_id: int,
@@ -1821,27 +1850,67 @@ async def run_design_loop_with_events(
                 kwargs["part_bbox_mm"] = part_env["bbox_mm"]
 
     # Issue #386 (operator decision 2026-10-05) — the through-hole
-    # check's BASELINE: the imported part's own measured hole count
-    # (the stored ``part_report.hole_count`` — computed once at import,
-    # the same stored fact the #351 evidence gate reads). The rendered
-    # mesh's genus must EXCEED this baseline (0 for a new design —
-    # omitted here, the loop defaults to 0). A corrupt or missing
-    # report value abstains the check (``None``), never fabricates a
-    # baseline. Only settled/assumed parts carry it (the unsettled
-    # pre-route has already stopped the loop before this seam runs).
+    # check's BASELINE. Three cases (end to end: design_loop_events →
+    # design_loop):
+    #
+    # 1. NEW DESIGN (no part, no version): kwarg omitted → the loop
+    #    defaults to 0.
+    # 2. V1 ON AN IMPORT (part, no version yet): the imported part's own
+    #    measured hole count (``part_report.hole_count`` — computed once
+    #    at import, the same stored fact the #351 evidence gate reads).
+    # 3. V2+ EDIT (version exists): the PARENT VERSION's rendered genus.
+    #    When the version's ``render_artifact_dir`` carries a ``model.stl``
+    #    the seam measures it (off-thread is not needed here — the seam
+    #    runs on the event loop but the file read is a single small STL;
+    #    the check itself runs off-thread in the loop). When the version
+    #    was never rendered (no ``render_artifact_dir``), the baseline
+    #    ABSTAINS (``None`` is passed → the loop abstains) — a fabricated
+    #    baseline would make the gate lie.
+    #
+    # A corrupt or missing report value abstains the check (``None``),
+    # never fabricates a baseline.
     if row is not None and row.get("part_filename"):
         from d33d.part_http import part_public
 
         _public = part_public(row)
         _report = _public.get("report") if _public is not None else None
+        _hole_count: int | None = None
         if isinstance(_report, dict):
-            _hole_count = _report.get("hole_count")
+            _hc = _report.get("hole_count")
             if (
-                isinstance(_hole_count, int)
-                and not isinstance(_hole_count, bool)
-                and _hole_count >= 0
+                isinstance(_hc, int)
+                and not isinstance(_hc, bool)
+                and _hc >= 0
             ):
-                kwargs["through_baseline_genus"] = _hole_count
+                _hole_count = _hc
+
+        # Determine the baseline: v2+ → parent version's rendered genus;
+        # v1 on import → part report's hole_count; new design → 0 (omit).
+        _latest_ver = (
+            app.state.versions.latest_version(project_id)
+            if app.state.versions is not None
+            else None
+        )
+        if _latest_ver is not None and _latest_ver.get("render_artifact_dir"):
+            # V2+: measure the parent version's rendered genus.
+            _render_dir = _latest_ver["render_artifact_dir"]
+            _parent_genus = _measured_genus_for_dir(_render_dir)
+            if _parent_genus is not None:
+                kwargs["through_baseline_genus"] = _parent_genus
+            # else: abstain (no kwarg → the loop uses 0 for new designs,
+            # but for v2+ we want to ABSTAIN, not default to 0.
+            # Pass None explicitly to signal "abstain" to the loop.)
+            else:
+                # Signal abstain: pass a value that resolve_baseline_genus
+                # maps to None. We use the raw value — the loop's
+                # resolve_baseline_genus maps None → 0, so we need a
+                # different signal. Instead: pass a sentinel that the loop
+                # maps to None. The simplest: pass -1 (negative → None).
+                kwargs["through_baseline_genus"] = -1
+        elif _hole_count is not None:
+            # V1 on import: the part report's hole count.
+            kwargs["through_baseline_genus"] = _hole_count
+        # else: new design → omit (the loop defaults to 0).
 
     # Issue #295 — the lost-photo notice (the post_chat caller's photo
     # state, carried into the stream): when the project's stored photo

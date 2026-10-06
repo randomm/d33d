@@ -37,7 +37,13 @@ from d33d.part_holes import HOLE_NOUNS
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["is_through_request", "through_hole_check"]
+__all__ = [
+    "THROUGH_HOLE_INSTRUCTION",
+    "is_through_request",
+    "resolve_baseline_genus",
+    "route_through_hole_repair",
+    "through_hole_check",
+]
 
 #: The hyphenated through-hole tokens that fire on their own (no hole
 #: noun required) — whole-word, case-insensitive.
@@ -104,6 +110,11 @@ def _rendered_genus(stl: str) -> int | None:
     ``None`` on a missing/unreadable STL, a split failure, or a split
     with zero watertight components (the abstain cases — the caller
     logs the single line and the candidate proceeds).
+
+    ``except Exception`` (adversarial round 1, 2026-10-05): ANY
+    unexpected exception (``TypeError`` / ``IndexError`` / ``MemoryError``
+    from a malformed mesh) makes the check ABSTAIN — the design loop
+    must never crash on a mesh the render worker already accepted.
     """
     from d33d.part_mesh_topology import mesh_topology
 
@@ -112,19 +123,9 @@ def _rendered_genus(stl: str) -> int | None:
         return None
     try:
         components = _load_and_split(stl)
-    except (OSError, ValueError, RuntimeError):
-        logger.info("through-hole check abstained: STL %r unreadable", stl)
-        return None
-    if not components:
-        logger.info("through-hole check abstained: no watertight components in %r", stl)
-        return None
-    try:
         watertight_bodies = sum(1 for c in components if c.is_watertight)
         if watertight_bodies == 0:
-            logger.info(
-                "through-hole check abstained: zero watertight components in %r",
-                stl,
-            )
+            logger.info("through-hole check abstained: no watertight components in %r", stl)
             return None
         # ``mesh_topology`` consults the ``merged`` argument only for the
         # boundary-loop count and winding consistency (both degrade
@@ -132,9 +133,96 @@ def _rendered_genus(stl: str) -> int | None:
         # from ``components``, so any component is a valid merged-mesh
         # stand-in (the split pieces share the merged mesh's vertices).
         return mesh_topology(merged=components[0], components=components)["genus"]
-    except (OSError, ValueError, RuntimeError):
-        logger.info("through-hole check abstained: topology measurement failed for %r", stl)
+    except Exception:
+        logger.warning(
+            "through-hole check abstained: STL %r could not be measured",
+            stl,
+            exc_info=True,
+        )
         return None
+
+
+#: The through-hole post-check's (issue #386, operator decision
+#: 2026-10-05) repair instruction: the hole the user asked for does not
+#: pass — the rendered mesh's genus did not rise above the baseline — so
+#: the next iteration must cut it through the full thickness.
+THROUGH_HOLE_INSTRUCTION = (
+    "the hole does not pass all the way through the part — it must cut "
+    "through the full thickness (a blind pocket or partial depth does "
+    "not satisfy a through request; verify the cutting solid extends "
+    "beyond both faces of the part)."
+)
+
+
+def resolve_baseline_genus(through_baseline_genus: int | None) -> int | None:
+    """The baseline genus for the through-hole check (issue #386, operator
+    decision 2026-10-05).
+
+    * ``0`` — no explicit seam value: a NEW design (a baseline-less
+      candidate; the ``design_loop_events`` chat seam omits the kwarg
+      when the project has no part).
+    * the explicit seam value — the PARENT VERSION's rendered genus,
+      resolved by the caller: the imported part's own stored hole count
+      for v1 on an import (the seam reads ``part_report.hole_count``),
+      or the measured genus of the parent version's rendered mesh for
+      v2+ edits (the seam measures the version's rendered STL when the
+      row has no stored count).
+    * ``None`` (the check abstains) when the explicit value is corrupt —
+      a fabricated baseline would make the gate lie. A non-integer (or
+      bool) or negative count abstains the same way
+      :func:`d33d.part_holes.part_has_hole_evidence` degrades it.
+    """
+    if through_baseline_genus is None:
+        return 0
+    if isinstance(through_baseline_genus, bool) or not isinstance(
+        through_baseline_genus, int
+    ):
+        return None
+    if through_baseline_genus < 0:
+        return None
+    return through_baseline_genus
+
+
+def route_through_hole_repair(
+    request: str,
+    stl: str | None,
+    through_baseline_genus: int | None,
+    scad_source: str,
+) -> tuple[str, str] | None:
+    """Run the through-hole post-check and, on a miss, route the repair.
+
+    The ok-render-branch seam the design loop calls (off the event loop):
+    resolves the baseline, runs :func:`through_hole_check`, and on a
+    detection tuple ``(baseline, genus)`` routes the EXISTING
+    ``geometrically_wrong`` class through ``route_repair`` (no new class,
+    no new error_class) — the #317 screw-hole pattern. Returns
+    ``(evidence, directive.instruction)`` on a routed repair, ``None``
+    when the check abstains or the hole passed (the candidate proceeds).
+
+    A ``route_repair`` directive of ``None`` (unrepairable — the class is
+    repairable by contract, so only a routing failure) also yields
+    ``None``: the candidate proceeds rather than crashing the loop.
+    """
+    from d33d.failure_classes import ClassifiedFailure, route_repair
+
+    baseline = resolve_baseline_genus(through_baseline_genus)
+    det = through_hole_check(request, stl, baseline)
+    if det is None:
+        return None
+    base_g, genus = det
+    evidence = (
+        f"rendered mesh genus {genus} does not exceed the "
+        f"baseline genus {base_g} — the hole did not pass through"
+    )
+    classified = ClassifiedFailure(
+        failure_class="geometrically_wrong",
+        evidence=evidence,
+        repairable=True,
+    )
+    directive = route_repair(classified=classified, scad_source=scad_source)
+    if directive is None:
+        return None
+    return (evidence, THROUGH_HOLE_INSTRUCTION)
 
 
 def through_hole_check(
@@ -145,7 +233,9 @@ def through_hole_check(
     """The through-hole post-check (issue #386, operator decision 2026-10-05).
 
     Runs on the ok-render branch of the loop, BEFORE the ``score.perfect``
-    pass return. Returns ``None`` (abstain — nothing is fed to the next
+    pass return (the loop calls :func:`route_through_hole_repair` — the
+    thin wrapper that resolves the baseline and routes the repair).
+    Returns ``None`` (abstain — nothing is fed to the next
     iteration) unless ALL of the following hold:
 
     * the ``request`` (the current user message, exactly as the loop

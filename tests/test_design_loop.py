@@ -2910,19 +2910,19 @@ def _render_with_stl(stl_path: str) -> RenderResult:
 
 
 def _box_minus_cylinder(blind: bool) -> trimesh.Trimesh:
-    """A 20 × 20 × 20 box with a 6 mm-diameter cylindrical cut at the
-    centre: ``blind`` — the cylinder goes 10 mm into the box (a
-    pocket, genus 0); ``not blind`` — the cylinder pierces both faces
-    (a through-hole, genus 1)."""
-    box = trimesh.creation.box(extents=(20, 20, 20))
-    height = 12 if blind else 44
-    z0 = 0 if blind else -12
-    cyl = trimesh.creation.cylinder(radius=3.0, height=height)
-    cyl.apply_translation([0, 0, z0])
-    out = box.difference(cyl)
-    if isinstance(out, trimesh.Scene):
-        out = out.to_mesh()
-    return out
+    """Load a committed STL fixture (CI-safe: no boolean ops — CI has no
+    trimesh boolean backend). ``blind`` → pocket (genus 0); ``not blind``
+    → through-hole (genus 1)."""
+    from pathlib import Path
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    name = "through_hole_pocket.stl" if blind else "through_hole_genus1.stl"
+    mesh = trimesh.load(str(fixture_dir / name), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_mesh()
+    mesh.merge_vertices()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    return mesh
 
 
 def _run_through_loop(
@@ -3101,17 +3101,18 @@ def test_through_hole_baseline_comparison(tmp_path):
 
 
 def _box_with_n_through_holes(n: int) -> trimesh.Trimesh:
-    """A 20 × 20 × 20 box with ``n`` 6 mm-diameter through-holes
-    (genus ``n``). The holes are spaced along the x-axis."""
-    box = trimesh.creation.box(extents=(20, 20, 20))
-    for i in range(n):
-        x = -8.0 + i * (16.0 / max(n, 1))
-        cyl = trimesh.creation.cylinder(radius=1.5, height=44)
-        cyl.apply_translation([x, 0, 0])
-        box = box.difference(cyl)
-    if isinstance(box, trimesh.Scene):
-        box = box.to_mesh()
-    return box
+    """Load a committed STL fixture with ``n`` through-holes (genus
+    ``n``) (CI-safe: no boolean ops)."""
+    from pathlib import Path
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    name = f"through_hole_genus{n}.stl"
+    mesh = trimesh.load(str(fixture_dir / name), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_mesh()
+    mesh.merge_vertices()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    return mesh
 
 
 def test_through_hole_plate_genus_3_pocket_fails_through_passes(tmp_path):
