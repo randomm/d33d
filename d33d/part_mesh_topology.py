@@ -73,7 +73,7 @@ def load_and_split(path: str) -> list[trimesh.Trimesh]:
     return merged.split(only_watertight=False)
 
 
-def genus_from_stl(path: str) -> int | None:
+def genus_from_stl(path: str | None) -> int | None:
     """The total genus of the STL at ``path``, via :func:`mesh_topology`.
 
     The single public genus measurement: the through-hole post-check
@@ -82,12 +82,14 @@ def genus_from_stl(path: str) -> int | None:
     helper.
 
     Returns ``None`` (the caller abstains — never a fabricated genus)
-    when the file is missing/unreadable, the load/split fails with any
-    exception (logged with ``exc_info``), or the split yields zero
-    watertight components. Otherwise returns
+    when ``path`` is ``None``, the file is missing/unreadable, the
+    load/split fails with any exception (logged with ``exc_info``), or
+    the split yields zero watertight components. Otherwise returns
     ``mesh_topology(...)['genus']`` — the semantics of
     :func:`mesh_topology` are unchanged.
     """
+    if path is None:
+        return None
     if not Path(path).is_file():
         return None
     try:

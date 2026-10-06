@@ -743,9 +743,9 @@ def test_axis_params_mismatch_feeds_repair_into_next_iteration():
 def test_axis_params_mismatch_ignores_position_offset_params():
     """Issue #385 (operator decision 2026-10-05): the import gate
     (``axis_params_mismatch``) ignores parameters whose names or labels
-    mark them as positions or offsets (from / offset / distance /
-    position / spacing / margin / inset / pitch), so a mistagged position
-    can't fail an import edit.
+    mark them as positions or offsets (any of
+    ``_POSITION_PARAM_KEYWORDS``), so a mistagged position can't fail an
+    import edit.
 
     Test: an imported plate edit whose SCAD tags
     ``hole_distance_from_left_edge = 15`` as axis W, with a measured
@@ -788,8 +788,10 @@ def test_axis_param_mismatches_ignores_position_param_directly():
     ``hole_distance_from_left_edge`` tagged as axis W with value 15
     against a measured width of 120 is ignored (position/offset keyword).
     A genuine W param (value 20 vs measured 120) still fires."""
-    from d33d.design_loop import _axis_param_mismatches
+    from d33d.design_loop import _POSITION_PARAM_KEYWORDS, _axis_param_mismatches
 
+    # Sanity: the predicate under test is the hoisted keyword table.
+    assert "distance" in _POSITION_PARAM_KEYWORDS
     bbox = BboxInfo(120.0, 40.0, 6.0, 28800.0)
     # Only the position param is mistagged → no mismatches.
     mismatches = _axis_param_mismatches(

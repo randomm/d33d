@@ -743,6 +743,29 @@ def _named_params_present(
     return bool(extract_named_params(scad_source))
 
 
+#: The keywords (issue #385, operator decision 2026-10-05) marking a
+#: parameter's name or label as a POSITION or OFFSET — the import gate
+#: ignores such params (a mistagged position can't fail an import edit).
+_POSITION_PARAM_KEYWORDS: tuple[str, ...] = (
+    "from", "offset", "distance", "position", "spacing", "margin", "inset", "pitch",
+)
+
+
+def _param_label(meta: dict[str, Any], name: str) -> str:
+    """The param's human label, falling back to its name (the gate's
+    keyword check scans name and label, so an unlabeled param is checked
+    by name)."""
+    raw_label = meta.get("label")
+    return raw_label if isinstance(raw_label, str) and raw_label else name
+
+
+def _is_position_param(name: str, label: str) -> bool:
+    """True iff the param's name or (lowercased once) label carries a
+    :data:`_POSITION_PARAM_KEYWORDS` marker (issue #385)."""
+    lower = label.lower()
+    return any(kw in name.lower() or kw in lower for kw in _POSITION_PARAM_KEYWORDS)
+
+
 def _axis_param_mismatches(
     bbox: BboxInfo | None,
     named_params: dict[str, float],
@@ -795,24 +818,8 @@ def _axis_param_mismatches(
         # Issue #385 (operator decision 2026-10-05): the import gate ignores
         # parameters whose names or labels mark them as positions or offsets
         # (a mistagged position can't fail an import edit).
-        raw_label = meta.get("label")
-        label = raw_label if isinstance(raw_label, str) and raw_label else name
-        _lower_name = name.lower()
-        _lower_label = label.lower()
-        _is_position_param = any(
-            kw in _lower_name or kw in _lower_label
-            for kw in (
-                "from",
-                "offset",
-                "distance",
-                "position",
-                "spacing",
-                "margin",
-                "inset",
-                "pitch",
-            )
-        )
-        if _is_position_param:
+        label = _param_label(meta, name)
+        if _is_position_param(name, label):
             continue
         tol = max(
             DISAGREES_MAJOR_THRESHOLD_REL * value,

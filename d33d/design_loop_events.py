@@ -1454,17 +1454,23 @@ def _version_render_artifact_dir(result: Any) -> str | None:
 def _stored_part_mesh_path(row: dict[str, Any], conn: Any) -> Path | None:
     """Issue #386 (final): the stored, REPAIRED part mesh path the design
     loop's render imports — ``{repo}/versions/{v1}/part.stl`` (STL
-    imports). 3MF imports are filtered by the CALLER (there is no STL to
-    measure); this helper only resolves the committed part file.
+    imports).
 
-    ``None`` for a missing v1 row, missing repo path, no part, or a
-    missing file on disk. The file is NOT read here — the caller measures
-    it off the event loop.
+    The "3MF has no STL to measure" knowledge lives here (issue #386
+    final cleanup): ``None`` is returned whenever the resolved path's
+    suffix is not ``.stl`` — a 3MF import is filtered at the source,
+    so the caller needs no format string compare.
+
+    ``None`` for a missing v1 row, missing repo path, no part, a
+    non-STL part (a 3MF import), or a missing file on disk. The file
+    is NOT read here — the caller measures it off the event loop.
     """
     from d33d.part_http import resolve_v1_part_path
 
     path, _repo_dir = resolve_v1_part_path(row, conn)
     if path is None:
+        return None
+    if path.suffix != ".stl":
         return None
     if not path.is_file():
         return None
@@ -1918,14 +1924,15 @@ async def run_design_loop_with_events(
         else:
             # V1 on import: the stored part mesh's genus (the mesh the
             # render imports). A 3MF import stores no STL (the render
-            # re-exports it — no baseline is available) → abstain.
+            # re-exports it — no baseline is available) → abstain;
+            # ``_stored_part_mesh_path`` filters the non-STL suffix,
+            # so no format string compare is needed here.
             _stored_genus: int | None = None
-            if row.get("part_format") != "3mf":
-                _stored_path = _stored_part_mesh_path(row, app.state.conn)
-                if _stored_path is not None and _stored_path.is_file():
-                    _stored_genus = await asyncio.to_thread(
-                        _measured_genus_for_file, str(_stored_path)
-                    )
+            _stored_path = _stored_part_mesh_path(row, app.state.conn)
+            if _stored_path is not None:
+                _stored_genus = await asyncio.to_thread(
+                    _measured_genus_for_file, str(_stored_path)
+                )
             if _stored_genus is not None:
                 kwargs["through_baseline_genus"] = _stored_genus
             else:

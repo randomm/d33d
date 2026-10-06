@@ -85,19 +85,22 @@ def is_through_request(request: str) -> bool:
     return any(noun in words for noun in HOLE_NOUNS)
 
 
-def _rendered_genus(stl: str) -> int | None:
+def _rendered_genus(stl: str | None) -> int | None:
     """The rendered mesh's total genus, via the shared
     :func:`d33d.part_mesh_topology.genus_from_stl` helper.
 
-    ``None`` on a missing/unreadable STL, a split failure, or a split
-    with zero watertight components (the abstain cases — the helper
-    logs a line and the candidate proceeds).
+    ``None`` on a missing/unreadable STL (or no STL at all — ``stl`` is
+    ``None``), a split failure, or a split with zero watertight
+    components (the abstain cases — the helper logs a line and the
+    candidate proceeds).
 
     ANY unexpected exception (``TypeError`` / ``IndexError`` /
     ``MemoryError`` from a malformed mesh) makes the check ABSTAIN —
     the design loop must never crash on a mesh the render worker
     already accepted.
     """
+    if stl is None:
+        return None
     from d33d.part_mesh_topology import genus_from_stl
 
     return genus_from_stl(stl)
