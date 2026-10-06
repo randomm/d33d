@@ -707,6 +707,12 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     await waitFor(() => {
       expect(screen.queryByTestId("queued-flush-failed-reason")).toBeNull();
     });
+    // The resend posted the message exactly once through the normal send
+    // path — the total postChat count is the original send (1) + the
+    // flushed attempt (1) + the resend (1).
+    const postChatCalls = (client.postChat as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls.length;
+    expect(postChatCalls).toBe(3);
   });
 
   it("a queued message can be cancelled — nothing is sent when the run ends (issue #388, operator decision 2026-10-05)", async () => {

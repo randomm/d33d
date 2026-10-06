@@ -317,21 +317,32 @@ describe("RegionEditBar", () => {
 // ---------------------------------------------------------------------------
 
 describe("RegionEditBar — in-flight gating (issue #388)", () => {
-  it("disables the Apply button while a run is in flight", () => {
+  it("disables the Apply button while a run is in flight, and a click on it does NOT fire onSubmit", () => {
+    // Decision 3: a region-edit submit is disabled (not queued) while a
+    // run is in flight. The Apply button is the closed path: a click on a
+    // disabled button is a no-op (the browser swallows the click), so
+    // onSubmit is never reached.
+    const onSubmit = vi.fn();
     render(
       <RegionEditBar
         selection={makeSelection()}
         viewportSize={VIEWPORT}
         text="widen it"
         onTextChange={vi.fn()}
-        onSubmit={vi.fn()}
+        onSubmit={onSubmit}
         onCancel={vi.fn()}
         orbitingPin={false}
         orbitClearedPin={false}
         inFlight={true}
       />,
     );
-    expect(screen.getByTestId("region-edit-apply-btn")).toBeDisabled();
+    const apply = screen.getByTestId("region-edit-apply-btn");
+    expect(apply).toBeDisabled();
+    // A click on the disabled button is a no-op — the browser swallows it,
+    // and jsdom's fireEvent.click on a disabled button also does not fire
+    // the handler.
+    fireEvent.click(apply);
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("the disabled Apply button exposes the copy.ts reason as tooltip and accessible description (issue #388)", () => {
