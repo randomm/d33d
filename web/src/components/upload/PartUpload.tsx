@@ -23,7 +23,7 @@
  * All strings come from copy — nothing is inlined.
  */
 
-import { useState, useRef, useCallback, type ChangeEvent, type DragEvent } from "react";
+import { useState, useRef, useCallback, useEffect, type ChangeEvent, type DragEvent } from "react";
 import { ApiClient, ApiError } from "../../lib/api";
 import copy from "../../copy";
 
@@ -90,6 +90,10 @@ interface UsePartUploadOptions {
   onError: (message: string, detail?: string) => void;
   /** Called with the verbatim copy on a project-creation failure. */
   onProjectCreationFailure?: (e: unknown) => void;
+  /** Called when the upload POST starts and when it settles (issue #395
+   *  elapsed-seconds state: the label needs a live start timestamp while
+   *  the request is in flight). */
+  onUploadStateChange?: (inFlight: boolean) => void;
 }
 
 /** The shared guard + upload + error reduction (see the module doc). */
@@ -100,6 +104,7 @@ export function usePartUpload({
   onSuccess,
   onError,
   onProjectCreationFailure,
+  onUploadStateChange,
 }: UsePartUploadOptions): (file: File) => Promise<PartFileResult> {
   return useCallback(
     async (file: File) => {
@@ -112,6 +117,7 @@ export function usePartUpload({
         return "unsupported";
       }
       const doUpload = async (pid: number) => {
+        onUploadStateChange?.(true);
         try {
           await client.uploadPart(pid, file);
           onSuccess(pid);
@@ -122,6 +128,8 @@ export function usePartUpload({
           const detail = detailText(e);
           onError(detail, detail);
           return "failed" as const;
+        } finally {
+          onUploadStateChange?.(false);
         }
       };
       if (projectId !== null) {
@@ -135,7 +143,7 @@ export function usePartUpload({
         return "failed";
       }
     },
-    [projectId, ensureProject, client, onSuccess, onError, onProjectCreationFailure],
+    [projectId, ensureProject, client, onSuccess, onError, onProjectCreationFailure, onUploadStateChange],
   );
 }
 
@@ -151,6 +159,28 @@ export function PartUpload({
   const [state, setState] = useState<UploadState>("idle");
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // Issue #395: the upload/parse in-flight window — a big mesh can take a
+  // long time to read and repair, so the label ticks "Reading your file…
+  // Ns" with the client-side elapsed seconds (spec: client-side elapsed
+  // time is acceptable, no server streaming). `uploadStart` is the timestamp
+  // the count measures from; `uploadElapsed` is the rendered second count.
+  const [uploadStart, setUploadStart] = useState<number | null>(null);
+  const [uploadElapsed, setUploadElapsed] = useState(0);
+
+  useEffect(() => {
+    // The interval runs ONLY while a read is in flight (the state is
+    // "uploading" AND the start timestamp is set — on settle, the shared
+    // path's `onUploadStateChange(false)` nulls `uploadStart`, so the
+    // cleanup fires and no further state updates happen after the POST
+    // settles; the label swaps to the result state's UI in the same render
+    // batch as the settle).
+    if (state !== "uploading" || uploadStart === null) return;
+    const tick = () =>
+      setUploadElapsed(Math.max(0, Math.floor((Date.now() - uploadStart) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [state, uploadStart]);
   const clientRef = useRef<ApiClient | null>(client ?? null);
   clientRef.current = client ?? null;
 
@@ -184,6 +214,20 @@ export function PartUpload({
       );
       setErrorDetail(msg);
       onError?.(msg, msg);
+    },
+    onUploadStateChange: (inFlight) => {
+      // The shared path marks the in-flight window — the component owns
+      // the timer state (it knows the label to render for it). On settle
+      // the result (success/error) was already applied by the shared
+      // path's own callbacks, which run before this notice; the interval
+      // cleanup fires from the effect when the state leaves "uploading".
+      if (inFlight) {
+        setState("uploading");
+        setUploadStart(Date.now());
+        setUploadElapsed(0);
+      } else {
+        setUploadStart(null);
+      }
     },
   });
 
@@ -227,7 +271,9 @@ export function PartUpload({
         data-testid="part-upload-label"
       >
         {state === "uploading" ? (
-          <span data-testid="part-upload-status">{copy.partUpload.uploading}</span>
+          <span data-testid="part-upload-status">
+            {copy.partUpload.reading(uploadElapsed)}
+          </span>
         ) : (
           <span>{copy.partUpload.dropLine}</span>
         )}

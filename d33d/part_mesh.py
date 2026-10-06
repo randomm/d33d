@@ -1,10 +1,18 @@
 """Part mesh decode: parse / repair / measure for imported STL/3MF (issue #325).
 
 The CPU-bound half of the part import: ``parse_and_repair`` loads the
-uploaded bytes in-process with trimesh (no shell, no subprocess — the bytes
-are never written to a path carrying the user's filename), applies the
+uploaded bytes in-process with trimesh (no shell — the bytes are never
+written to a path carrying the user's filename), applies the
 face-cap and finiteness gates, runs the repair chain (merge_vertices +
-pymeshfix + fix_normals — NO decimation of the user's part), and measures.
+pymeshfix + fix_normals — NO decimation of the user's part below the
+budget), and measures.
+
+Issue #395: the repair chain now skips pymeshfix entirely when the mesh is
+topologically clean (0 boundary loops, all bodies watertight, winding
+consistent) — the stored mesh and report come from the merged mesh directly.
+Above ``REPAIR_FACE_BUDGET`` the mesh is decimated BEFORE repair (ticket #3:
+decimate before, fix_normals after). The repair itself runs in a separate
+process with a timeout (see ``part_repair.REPAIR_TIMEOUT_SECONDS``).
 
 The 3MF (a ZIP) zip-bomb guard runs from the central directory BEFORE
 extraction (a bomb checked after extraction has already decompressed).
@@ -26,8 +34,15 @@ from typing import Any
 import numpy as np
 import trimesh
 
-from d33d.part_holes import _boundary_loops, watertight_genus
-from d33d.part_repair import repair_with_pmf
+from d33d.part_errors import PartUploadError  # re-exported for #395 compat
+from d33d.part_holes import _boundary_loops
+from d33d.part_mesh_topology import MeshTopology, mesh_topology
+from d33d.part_repair import (
+    REPAIR_FACE_BUDGET,
+    _decimate,
+    repair_bodies_with_pmf,
+    repair_with_pmf,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +52,7 @@ logger = logging.getLogger(__name__)
 #: bound). Checked right after ``trimesh.load``, on the total across ALL
 #: geometries of the loaded scene, before repair.
 MAX_PART_FACES = 2_000_000
+
 
 #: 3MF zip-bomb guards (checked from the ZIP central directory BEFORE any
 #: extraction — a bomb checked after extraction has already decompressed).
@@ -79,8 +95,6 @@ def validate_part_path(part_path, repo_dir) -> str | None:
     except OSError as e:
         return f"part path does not exist or is inaccessible: {e}"
     if not stat.S_ISREG(st.st_mode):
-        # Covers symlink (S_IFLNK), directory, and special files in one
-        # check — a symlink lstat never reports REG.
         if stat.S_ISLNK(st.st_mode):
             return f"part path is a symlink: {part_path.name}"
         return f"part path is not a regular file: {part_path.name}"
@@ -95,16 +109,12 @@ def validate_part_path(part_path, repo_dir) -> str | None:
         return "part path is outside the project repo directory"
 
     # Symlink component check: walk each path component of part_path BELOW
-    # repo_dir on the RAW (unresolved) path; any symlink whose target
-    # resolves outside repo_dir is rejected (a symlinked parent escaping
-    # the containment boundary); components at/above repo_depth are the
-    # caller's filesystem prefix (on macOS /var → /private/var sits there)
-    # — out of boundary.
+    # repo_dir on the RAW (unresolved) path.
     repo_depth = len(repo_dir.parts)
     raw = part_path if part_path.is_absolute() else repo_dir / part_path
     for i in range(1, len(raw.parts)):
         if i < repo_depth and raw.is_absolute():
-            continue  # strictly above the repo's own depth — out of boundary
+            continue
         component = raw.joinpath(*raw.parts[:i])
         try:
             if component.is_symlink():
@@ -118,14 +128,6 @@ def validate_part_path(part_path, repo_dir) -> str | None:
             return f"path component {component.name} is inaccessible"
 
     return None
-
-
-class PartUploadError(ValueError):
-    """A part upload failed the decode gate (unparseable, empty,
-    non-finite, over the face cap, zip-bomb, or an unconvertible 3MF
-    unit). The route maps it to the 422 with the verbatim
-    ``partUpload.unparseable`` detail — nothing is persisted on the way
-    out."""
 
 
 class PartFileTooLargeError(OSError):
@@ -150,8 +152,7 @@ def _total_faces(loaded: Any) -> int:
 
 def _check_zip_bomb(data: bytes) -> None:
     """The 3MF zip-bomb guard: entry count + declared-uncompressed total
-    from the ZIP central directory, BEFORE any extraction (a bomb checked
-    after extraction has already decompressed). Raises
+    from the ZIP central directory, BEFORE any extraction. Raises
     ``PartUploadError`` (the 422) on a violation or a non-zip."""
     try:
         zf = zipfile.ZipFile(io.BytesIO(data))
@@ -165,10 +166,6 @@ def _check_zip_bomb(data: bytes) -> None:
             )
         total = 0
         for info in infos:
-            # ``file_size`` is the declared uncompressed size (the bomb
-            # signal — a stored/deflated entry both declare it). ``None``/
-            # 0 on a streaming entry falls back to the compressed size
-            # (never an underestimate of the extraction cost).
             declared = info.file_size or info.compress_size
             total += declared
             if total > MAX_PART_ZIP_UNCOMPRESSED:
@@ -202,10 +199,7 @@ def mesh_units(mesh: Any) -> str | None:
 
 def _assert_face_cap(loaded: Any) -> None:
     """The ``MAX_PART_FACES`` gate, shared by the upload's
-    ``parse_and_repair`` and the render's ``load_part_geometry``: the total
-    face count across ALL geometries of the loaded result, checked right
-    after ``trimesh.load`` and before any flatten/repair (it bounds parse
-    cost, so both paths must refuse an oversized load)."""
+    ``parse_and_repair`` and the render's ``load_part_geometry``."""
     total_faces = _total_faces(loaded)
     if total_faces > MAX_PART_FACES:
         raise PartUploadError(
@@ -214,17 +208,7 @@ def _assert_face_cap(loaded: Any) -> None:
 
 
 def load_part_geometry(data: bytes, part_format: str) -> trimesh.Trimesh:
-    """Guarded load + flatten for the RENDER staging path (issue #330).
-
-    The render worker's 3MF→STL staging needs only the guarded load
-    (zip-bomb guard for 3MF, explicit file_type loader), the ``MAX_PART_FACES``
-    cap (the same shared check the upload's ``parse_and_repair`` applies),
-    and the Scene→``to_mesh`` flatten — NOT the upload's full repair chain
-    (``parse_and_repair`` runs merge/pymeshfix/fix_normals and the unit
-    validation, which is the upload route's concern, not the worker's).
-    ``PartUploadError`` is the closed failure type: the staging caller maps
-    it to an ``artifact_error`` RenderResult.
-    """
+    """Guarded load + flatten for the RENDER staging path (issue #330)."""
     try:
         if part_format == "3mf":
             _check_zip_bomb(data)
@@ -236,13 +220,8 @@ def load_part_geometry(data: bytes, part_format: str) -> trimesh.Trimesh:
     except Exception as e:
         raise PartUploadError(f"unparseable {part_format}: {e}") from e
 
-    # Face cap: the SAME shared gate as the upload path (issue #330 — a
-    # hand-committed oversized part is refused at render time, not just at
-    # upload time).
     _assert_face_cap(loaded)
 
-    # Flatten to a single mesh (a Scene is a multi-body import —
-    # ``to_mesh`` concatenates; the worker never seeds or emits a 3MF).
     if isinstance(loaded, trimesh.Scene):
         if not loaded.geometry:
             raise PartUploadError("3MF has no geometry")
@@ -251,17 +230,7 @@ def load_part_geometry(data: bytes, part_format: str) -> trimesh.Trimesh:
 
 
 def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
-    """Read the validated committed part file via an O_NOFOLLOW fd.
-
-    The atomic half of the shared containment standard (the lstat-based
-    :func:`validate_part_path` is the pre-open check; THIS is what makes it
-    mean something under a concurrent swap): the file is opened with
-    ``O_RDONLY | O_NOFOLLOW`` and the size cap is checked against
-    ``os.fstat(fd)`` — the actually-opened file, not the path — so a symlink
-    swapped in between validation and the read cannot redirect it to a file
-    outside the repo. ``OSError`` (vanished path, or a symlink that slipped
-    in — the O_NOFOLLOW refusal) propagates to the caller, which maps it to
-    its own error contract."""
+    """Read the validated committed part file via an O_NOFOLLOW fd."""
     fd = os.open(str(part_path), os.O_RDONLY | os.O_NOFOLLOW)
     try:
         st = os.fstat(fd)
@@ -269,7 +238,7 @@ def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
             raise OSError(f"part is not a regular file at read time: {part_path.name}")
         if st.st_size > max_bytes:
             raise PartFileTooLargeError(
-                28,  # EDQUOT — file too large
+                28,
                 f"part file is {st.st_size} bytes; max {max_bytes}",
                 str(part_path),
             )
@@ -278,68 +247,52 @@ def read_part_file_atomic(part_path, max_bytes: int) -> bytes:
         os.close(fd)
 
 
+def _is_clean(topo: MeshTopology) -> bool:
+    """The clean-mesh predicate: 0 boundary loops, all bodies watertight,
+    winding consistent. A genus ≥ 1 mesh (ring, torus) is ALSO clean —
+    holes are the part's intent, not defects. A non-watertight debris
+    shell makes the mesh NOT clean (bodies > watertight_bodies). A UNKNOWN
+    boundary-loop count (``-1``) makes the mesh NOT clean — a failed count
+    must never be treated as 0 (which would wrongly skip repair)."""
+    return (
+        topo["boundary_loops"] == 0
+        and topo["watertight_bodies"] == topo["bodies"]
+        and topo["winding_consistent"]
+    )
+
+
+
 def parse_and_repair(
     data: bytes, part_format: str
 ) -> tuple[trimesh.Trimesh, dict[str, Any], str | None]:
     """Parse ``data`` (STL or 3MF), apply the face cap + finiteness gates,
-    run the repair chain (merge_vertices + pymeshfix + fix_normals — NO
-    decimation of the user's part), and measure.
+    run the repair chain (merge_vertices + pymeshfix + fix_normals —
+    decimation BEFORE repair when above ``REPAIR_FACE_BUDGET``), and
+    measure.
+
+    Issue #395: if the merged mesh is topologically clean (0 boundary loops,
+    all bodies watertight, winding consistent) repair is SKIPPED entirely —
+    the stored mesh and report come from the merged mesh directly. Above
+    ``REPAIR_FACE_BUDGET`` the mesh is decimated first (ticket #3).
 
     Returns ``(mesh, report, file_unit)`` where ``mesh`` is the repaired
-    mesh in FILE units (the bbox is measured in file units BEFORE any unit
-    conversion), ``report`` is the repair report
-    (``{triangles, bodies, watertight, gaps_closed, bbox_file_units,
-    hole_count}``, plus the OPTIONAL ``bodies_before`` — present ONLY when
-    repair still dropped a body, i.e. post-repair bodies < pre-repair
-    bodies, so the import report can state "2 bodies → 1 body after repair"),
-    and ``file_unit`` is the 3MF's declared unit string read
-    from the ORIGINAL (pre-repair) loaded geometry (``None`` for STL —
-    unitless, or a 3MF with no ``unit`` attribute — the 3MF default is
-    millimeters).
+    (or, for a clean mesh, the merged) mesh in FILE units, ``report`` is
+    the repair report (``{triangles, bodies, watertight, gaps_closed,
+    bbox_file_units, hole_count}``, plus the OPTIONAL ``bodies_before``),
+    and ``file_unit`` is the 3MF's declared unit string.
 
     Repair is per-body for multi-body imports: ``bodies`` counts the
-    pre-repair watertight components, and a single-body import takes the
-    unchanged one-call pymeshfix path (byte-for-byte identical to the
-    historical behaviour). A multi-body import repairs EACH watertight
-    component separately and concatenates, so the stored mesh keeps all
-    N watertight bodies (issue #375 — the one-call repair on the merged
-    mesh kept only one component). ``report["bodies"]`` is recomputed
-    from the STORED (post-repair) mesh. Non-watertight debris shells are
-    excluded from the stored mesh in BOTH the single-body and multi-body
-    branches, as on main where the single ``MeshFix(merged).repair()`` keeps
-    only the largest component (verified: a watertight box plus a far open
-    shell loses the open shell under main's one-call repair) — this debris
-    exclusion is unchanged. The multi-body branch's per-body loop therefore
-    repairs only the watertight components; the debris is not resurrected,
-    not double-counted, and not rejected on new grounds.
+    pre-repair watertight components. A multi-body import repairs EACH
+    watertight component separately and concatenates (issue #375). The
+    clean-skip predicate applies per-body in the multi-body branch.
 
-    ``hole_count`` is the number of holes the part actually has, computed
-    ONCE here and stored, as ``gaps_before + genus``:
+    ``hole_count`` is ``gaps_before + genus`` — the PRE-REPAIR merged mesh's
+    boundary loops plus the closed-body genus. Computed on the merged mesh
+    BEFORE any repair or decimation.
 
-    - ``gaps_before`` — the PRE-REPAIR merged mesh's boundary loops
-      (``_boundary_loops``), one per OPEN hole opening. The pre-repair mesh
-      is the right surface: the repair chain (``pymeshfix``) CLOSES those
-      loops before the stored mesh exists, so a post-repair count would
-      read 0 for a holey part (the loops are the signal, not a bug to fix).
-    - ``genus`` — the total closed-body genus (``watertight_genus``) of the
-      same split's watertight components, one per closed through-hole. A
-      CAD part with a real drilled bore is WATERTIGHT (0 boundary loops but
-      genus 1); gaps alone would count it 0 and the fill-recut gate would
-      refuse the very part it exists for, so closed holes are counted too.
-
-    A plain watertight box has neither → ``0``; a watertight ring has genus
-    1 → ``1``. The genus computation is wrapped so any exception falls back
-    to ``gaps_before`` alone — the count degrades, never crashes, never
-    ``None``.
-
-    Raises ``PartUploadError`` (the 422) on any failure: unparseable,
-    empty, over the face cap, non-finite (pre- or post-repair), or a 3MF
-    unit that is not a string (or a string outside the mm/cm/inch synonym
-    sets).
+    Raises ``PartUploadError`` (the 422) on any failure.
     """
-    # Load via a file object with an EXPLICIT loader (``file_type``) — the
-    # bytes are never written to a path carrying the user's filename, and
-    # the loader is chosen by the DETECTED format, not a filename suffix.
+    # Load via a file object with an EXPLICIT loader.
     try:
         if part_format == "3mf":
             _check_zip_bomb(data)
@@ -351,12 +304,9 @@ def parse_and_repair(
     except Exception as e:
         raise PartUploadError(f"unparseable {part_format}: {e}") from e
 
-    # Face cap: the SAME shared gate as the render path (issue #330).
     _assert_face_cap(loaded)
 
-    # Flatten to a single mesh (a Scene is a multi-body import — the v1
-    # contract is single-part, but the code must not crash or silently drop
-    # bodies; ``to_mesh`` concatenates).
+    # Flatten to a single mesh.
     if isinstance(loaded, trimesh.Scene):
         if not loaded.geometry:
             raise PartUploadError("3MF has no geometry")
@@ -366,16 +316,10 @@ def parse_and_repair(
     if len(merged.faces) == 0:
         raise PartUploadError("mesh is empty")
 
-    # Finiteness BEFORE any extent math (NaN/Inf poison the bbox and the
-    # JSON report).
     if not _is_finite(merged):
         raise PartUploadError("mesh has non-finite vertices")
 
-    # ONE split serves both the bodies count and the genus: the bodies
-    # are the watertight components (== ``len(split(only_watertight=True))``,
-    # pinned by a fixture test), and the genus reads the SAME subset.
-    # ``merge_vertices`` is kept — the component split needs merged
-    # vertices and the euler count reads the merged topology.
+    # ONE split serves both the bodies count and the genus.
     merged.merge_vertices()
     merged.update_faces(merged.nondegenerate_faces())
     components = merged.split(only_watertight=False)
@@ -384,17 +328,12 @@ def parse_and_repair(
     if len(merged.faces) == 0:
         raise PartUploadError("mesh is empty after cleanup")
 
-    # The bbox in FILE units, BEFORE repair (the unit conversion multiplies
-    # this; pymeshfix preserves the bounding box for a gapped mesh).
+    # The bbox in FILE units, BEFORE repair.
     file_bbox = tuple(float(e) for e in merged.extents)
     if not all(math.isfinite(e) for e in file_bbox) or max(file_bbox) <= 0:
         raise PartUploadError("mesh has invalid extents")
 
-    # The 3MF's declared unit, read from the ORIGINAL (pre-repair)
-    # geometry — the only place the ``unit`` attribute is guaranteed
-    # present. Only an ABSENT unit (``None``) means the 3MF default
-    # (millimeters); a non-string unit, or a string outside the mm/cm/inch
-    # synonym sets, is a 422 — never a silent mm assumption.
+    # The 3MF's declared unit.
     file_unit: str | None = None
     if part_format == "3mf":
         file_unit = mesh_units(
@@ -403,53 +342,54 @@ def parse_and_repair(
             else loaded
         )
 
-    # The repair chain (print_validation's steps, minus decimation — the
-    # render pipeline decimates for its own gates; the user's part is
-    # preserved): merge → pymeshfix.repair → fix_normals.
-    gaps_before = _boundary_loops(merged)
+    # Measure topology on the merged (pre-repair) mesh.
+    topo = mesh_topology(merged, components)
+    # A UNKNOWN boundary-loop count (``-1``) degrades to 0 gaps for the
+    # hole count (as the genus fallback does) — never negative, never a crash.
+    gaps_before = max(topo["boundary_loops"], 0)
 
-    # Genus over the SAME split (measured pre-repair — see docstring); a
-    # failure degrades to the boundary-loop signal alone, never a 422.
-    try:
-        holes = gaps_before + watertight_genus(watertight_bodies)
-    except (ArithmeticError, ValueError, TypeError, RuntimeError):
-        logger.warning(
-            "parse_and_repair: watertight_genus failed on the pre-repair "
-            "merged mesh — falling back to the boundary-loop count alone",
-            exc_info=True,
-        )
-        holes = gaps_before
+    # hole_count: gaps_before + genus (both from the pre-repair mesh).
+    holes = gaps_before + topo["genus"]
 
-    if bodies_before <= 1:
-        # Single body (or zero — a debris-only import repairs the merged
-        # mesh as it always has; non-watertight debris is excluded from the
-        # bodies count, never resurrected or double-counted): the unchanged
-        # one-call pymeshfix path — byte-for-byte identical to the
-        # historical repair (issue #375 operator decision 1).
-        repaired = repair_with_pmf(merged)
+    # The clean-skip predicate: if the mesh is clean, skip repair entirely.
+    if _is_clean(topo):
+        # Clean mesh: skip repair. Decimate only if above the budget
+        # (render safety — a clean mesh below the budget is stored as-is).
+        if len(merged.faces) > REPAIR_FACE_BUDGET:
+            repaired = _decimate(merged, REPAIR_FACE_BUDGET)
+        else:
+            repaired = merged
+    elif bodies_before <= 1:
+        # Single body, not clean: the unchanged one-call pymeshfix path,
+        # with decimation BEFORE repair if above the budget (ticket #3).
+        repair_input = merged
+        if len(merged.faces) > REPAIR_FACE_BUDGET:
+            repair_input = _decimate(merged, REPAIR_FACE_BUDGET)
+        repaired = repair_with_pmf(repair_input)
     else:
-        # Multi-body: repair EACH watertight body separately and
-        # concatenate — one ``MeshFix`` per body, no cap beyond the
-        # MAX_PART_FACES gate already applied above (issue #375). A
-        # one-call repair on the merged mesh keeps only one component and
-        # silently drops the rest.
+        # Multi-body, not clean: repair EACH watertight body separately
+        # and concatenate (issue #375). Decimate each body before repair
+        # if above the budget. The whole call is bounded by the aggregate
+        # wall-clock budget REPAIR_TIMEOUT_SECONDS (the part_repair
+        # default — the total multi-body repair must not exceed the same
+        # budget as a single body).
+        repaired_bodies = []
+        for body in watertight_bodies:
+            if len(body.faces) > REPAIR_FACE_BUDGET:
+                body = _decimate(body, REPAIR_FACE_BUDGET)
+            repaired_bodies.append(body)
         repaired = trimesh.util.concatenate(
-            [repair_with_pmf(body) for body in watertight_bodies]
+            repair_bodies_with_pmf(repaired_bodies)
         )
 
     # Finiteness AGAIN after pymeshfix (it can emit NaN from degenerate
-    # input) — the same 422, nothing persisted.
+    # input).
     if not _is_finite(repaired):
         raise PartUploadError("mesh has non-finite vertices after repair")
     if len(repaired.faces) == 0:
         raise PartUploadError("mesh is empty after repair")
-    # ``bodies`` is the number of WATERTIGHT components in the STORED
-    # (post-repair) mesh — recomputed, never the pre-repair count, so the
-    # report describes what was actually kept (issue #375). A
-    # non-watertight component in the stored mesh is NOT a rejection
-    # ground (issue #375 adds no new rejections): the stored mesh is kept
-    # as-is and ``report["watertight"]`` reports the STORED mesh honestly
-    # (False when any component is non-watertight), as on main.
+
+    # Recount bodies on the stored (post-repair) mesh.
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
     comps = repaired.split(only_watertight=False)
@@ -457,11 +397,6 @@ def parse_and_repair(
     bodies = len(watertight)
     gaps_after = _boundary_loops(repaired)
 
-    # ``hole_count``: open-mesh gaps + closed through-holes, both measured
-    # on the PRE-REPAIR merged mesh (``gaps_before + genus`` — the pre-repair
-    # mesh is the signal for both terms; see docstring). Computed above,
-    # before the repair call; the fill-recut gate at chat time only reads
-    # this stored fact, never re-parsing the mesh.
     report: dict[str, Any] = {
         "triangles": len(repaired.faces),
         "bodies": bodies,
@@ -470,23 +405,19 @@ def parse_and_repair(
         "hole_count": int(holes),
         "bbox_file_units": file_bbox,
     }
-    # OPTIONAL field (issue #375 operator decision 1): present ONLY when
-    # repair still dropped a body, so the import report can state
-    # "2 bodies → 1 body after repair". Absent on every input where repair
-    # kept all bodies — including single-body imports.
     if bodies < bodies_before:
         report["bodies_before"] = bodies_before
     return repaired, report, file_unit
-
-
 
 
 __all__ = [
     "MAX_PART_FACES",
     "MAX_PART_ZIP_ENTRIES",
     "MAX_PART_ZIP_UNCOMPRESSED",
+    "REPAIR_FACE_BUDGET",
     "PartFileTooLargeError",
     "PartUploadError",
+    "_decimate",
     "load_part_geometry",
     "mesh_units",
     "parse_and_repair",

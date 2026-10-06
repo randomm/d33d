@@ -44,8 +44,37 @@ describe("copy.ts Screen 1 strings", () => {
     expect(copy.partUpload.photoAttachLine).toBe("Attach reference photo");
   });
 
-  it("partUpload.uploading is verbatim (the in-flight status line)", () => {
-    expect(copy.partUpload.uploading).toBe("Uploading…");
+  it("partUpload.reading is verbatim with the elapsed-seconds interpolation (issue #395)", () => {
+    // The in-flight card shows "Reading your file… Ns" — the client-side
+    // elapsed seconds while the upload AND the server-side parse are in
+    // flight, instead of a static label for 80 s.
+    expect(copy.partUpload.reading(0)).toBe("Reading your file… 0s");
+    expect(copy.partUpload.reading(42)).toBe("Reading your file… 42s");
+  });
+
+  it("partUpload.repairTimeout equals the backend 422 repair-timeout detail (issue #395 parity)", () => {
+    // The backend's ``PART_UPLOAD_REPAIR_TIMEOUT_DETAIL`` (d33d/part_import.py)
+    // and this copy key must match EXACTLY — the SPA surfaces the 422
+    // `detail` verbatim, so the two-way agreement is what keeps the wire
+    // and the deck from drifting (the #299 way; the backend-side half of
+    // this pin lives in tests/test_part_import.py).
+    expect(copy.partUpload.repairTimeout).toBe(
+      "The file is too complex to repair in time. Try simplifying the mesh.",
+    );
+  });
+
+  it("partUpload.decodeFailed equals the backend 422 decode-failure detail (issue #395 parity)", () => {
+    // The backend's ``PART_UPLOAD_DECODE_FAILED_DETAIL``
+    // (d33d/part_http.py, re-exported from d33d.part_import) and this copy
+    // key must match EXACTLY — the SPA surfaces the 422 `detail` verbatim,
+    // so the two-way agreement is what keeps the wire and the deck from
+    // drifting (the #299 way; the backend-side half of this pin lives in
+    // tests/test_part_import.py). DISTINCT from the unparseable detail:
+    // the file is presumed fine, the server-side read itself failed.
+    expect(copy.partUpload.decodeFailed).toBe(
+      "Something went wrong reading this file. Try again.",
+    );
+    expect(copy.partUpload.decodeFailed).not.toBe(copy.partUpload.unparseable);
   });
 
   it("firstRun.fileChooseLine is verbatim", () => {
