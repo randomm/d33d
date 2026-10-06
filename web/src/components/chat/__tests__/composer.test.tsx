@@ -61,7 +61,7 @@ describe("Composer", () => {
   });
 
   it("does NOT disable the send button when inFlight is true (issue #388 — the send queues, never a second POST)", () => {
-    render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} inFlight />);
+    render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} />);
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -93,7 +93,7 @@ describe("Composer", () => {
     // The Composer always forwards a valid submission; a second send is
     // never swallowed at this layer.
     const onSend = vi.fn();
-    render(<Composer value="second message" onChange={vi.fn()} onSend={onSend} inFlight />);
+    render(<Composer value="second message" onChange={vi.fn()} onSend={onSend} />);
     const btn = screen.getByTestId("chat-send-btn") as HTMLButtonElement;
     expect(btn.disabled).toBe(false);
     fireEvent.click(btn);

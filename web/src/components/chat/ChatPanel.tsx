@@ -319,7 +319,6 @@ export function ChatPanel({
         value={input}
         onChange={setInput}
         onSend={handleSubmit}
-        inFlight={inFlight}
         hidden={hideComposer}
       />
     </section>
