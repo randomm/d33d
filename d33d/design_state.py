@@ -266,21 +266,12 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-#: The name tokens that mark an angle parameter (issue #390):
-#: ``token == "angle"`` or ``token.endswith("_angle")`` — "tangle"/"triangle"
-#: end in "angle" but are not angle names (they fall through to mm).
+#: Matched per snake/camel token; fused names (e.g. 'flareangle') are out of
+#: scope — the design prompt asks for snake_case. Words that end in "angle"
+#: yet name a shape ("tangle"/"triangle") fall through to mm simply because
+#: they are not in this set (issue #390).
 _ANGLE_TOKENS: frozenset[str] = frozenset(
     ("angle", "deg", "degree", "degrees", "tilt", "draft")
-)
-
-# Words that end in "angle" yet name a shape, not an angle (issue #390).
-# The tighter suffix rule above (`token == "angle" or endswith("_angle")`)
-# already sends "tangle"/"triangle"/"rectangle" to mm — this set exists so
-# a future loosening of that rule (back to bare `endswith("angle")`) can
-# be restored without re-deriving the operator's negative examples.
-# "tangle" → mm is asserted by ``test_length_word_last_token_never_deg``.
-_NOT_ANGLE_WORDS: frozenset[str] = frozenset(
-    ("tangle", "triangle", "rectangle", "quadrangle")
 )
 
 #: The last tokens that mark a LENGTH parameter — a name ending in one
@@ -344,16 +335,8 @@ def _split_name_tokens(name: str) -> list[str]:
 
 
 def _is_angle_token(token: str) -> bool:
-    """True when ``token`` marks an angle: an ``_ANGLE_TOKENS`` word, or
-    a bare ``"angle"``/``*_angle`` suffix — minus ``_NOT_ANGLE_WORDS``
-    (shape names that merely end in "angle")."""
-    if token in _NOT_ANGLE_WORDS:
-        return False
-    return (
-        token in _ANGLE_TOKENS
-        or token == "angle"
-        or token.endswith("_angle")
-    )
+    """True when ``token`` marks an angle: a word in ``_ANGLE_TOKENS``."""
+    return token in _ANGLE_TOKENS
 
 
 def _infer_unit(name: str) -> str | None:
