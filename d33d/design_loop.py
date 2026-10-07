@@ -743,6 +743,29 @@ def _named_params_present(
     return bool(extract_named_params(scad_source))
 
 
+#: The keywords (issue #385, operator decision 2026-10-05) marking a
+#: parameter's name or label as a POSITION or OFFSET — the import gate
+#: ignores such params (a mistagged position can't fail an import edit).
+_POSITION_PARAM_KEYWORDS: tuple[str, ...] = (
+    "from", "offset", "distance", "position", "spacing", "margin", "inset", "pitch",
+)
+
+
+def _param_label(meta: dict[str, Any], name: str) -> str:
+    """The param's human label, falling back to its name (the gate's
+    keyword check scans name and label, so an unlabeled param is checked
+    by name)."""
+    raw_label = meta.get("label")
+    return raw_label if isinstance(raw_label, str) and raw_label else name
+
+
+def _is_position_param(name: str, label: str) -> bool:
+    """True iff the param's name or (lowercased once) label carries a
+    :data:`_POSITION_PARAM_KEYWORDS` marker (issue #385)."""
+    lower = label.lower()
+    return any(kw in name.lower() or kw in lower for kw in _POSITION_PARAM_KEYWORDS)
+
+
 def _axis_param_mismatches(
     bbox: BboxInfo | None,
     named_params: dict[str, float],
@@ -792,13 +815,17 @@ def _axis_param_mismatches(
         axis = meta.get("axis")
         if axis not in extents:
             continue
+        # Issue #385 (operator decision 2026-10-05): the import gate ignores
+        # parameters whose names or labels mark them as positions or offsets
+        # (a mistagged position can't fail an import edit).
+        label = _param_label(meta, name)
+        if _is_position_param(name, label):
+            continue
         tol = max(
             DISAGREES_MAJOR_THRESHOLD_REL * value,
             DISAGREES_MAJOR_THRESHOLD_MIN_MM,
         )
         if abs(extents[axis] - value) > tol:
-            raw_label = meta.get("label")
-            label = raw_label if isinstance(raw_label, str) and raw_label else name
             out.append((label, float(value), float(extents[axis]), axis))
     return out
 
@@ -940,6 +967,27 @@ PART_IMPORT_INSTRUCTION_FIX = (
     "on top of it — never rebuild, re-model, resize, or scale the imported "
     "mesh any other way."
 )
+
+
+def _through_hole_post_check(
+    request: str,
+    stl: str | None,
+    through_baseline_genus: int | None,
+    scad_source: str,
+) -> tuple[str, str] | None:
+    """Issue #386: the through-hole genus post-check (deferred-import
+    wrapper, the #317 pattern).
+
+    Delegates to :func:`d33d.through_hole_check.route_through_hole_repair`
+    which resolves the baseline, runs the check, and routes the repair
+    through ``route_repair``. Returns ``(evidence, instruction)`` on a
+    fired repair, ``None`` when the check abstains or the hole passed.
+    """
+    from d33d.through_hole_check import route_through_hole_repair
+
+    return route_through_hole_repair(
+        request, stl, through_baseline_genus, scad_source
+    )
 
 
 def _undersize_screw_hole(
@@ -1283,7 +1331,12 @@ def _design_messages(
         'fillet_size_top to "Top fillet size"), the "unit" is the unit '
         '("mm" for millimetres), the "axis" is "W" or "D" or "H" ONLY '
         "when the parameter realises that overall dimension of the part "
-        '(omit it otherwise - never guess an axis), and the "reason" is '
+        '(omit it otherwise - never guess an axis. Declare an axis ONLY '
+        "when the parameter IS the part's own overall W, D or H extent — "
+        "a mating part's size (such as a box's inside), a rim drop, a skirt or "
+        "any other feature size is NOT the part's W, D or H. "
+        "`hole_distance_from_left_edge` is NOT an axis parameter — a position, "
+        'offset or distance is never an axis), and the "reason" is '
         "one short clause saying why you picked that value, for values the user did "
         "not give. In the SAME reply, optionally offer to confirm ONE of your own "
         'assumed values (one the design state block marks "assumed") that most '
@@ -1563,6 +1616,7 @@ async def run_design_loop_async(
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
+    through_baseline_genus: int | None = None,
     on_progress_iteration: Any = "_current",
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
@@ -1924,6 +1978,40 @@ async def run_design_loop_async(
                     }
                     _screw_repair_fired = True
 
+        # Issue #386 (operator decision 2026-10-05): an ok render whose
+        # gates are green can still carry a BLIND pocket where the user
+        # asked for a through-hole (a pocket is invisible to all five
+        # gate bits — the QA repro). The check runs BEFORE the pass
+        # return (off the event loop — the STL load is real disk I/O).
+        # Rides the EXISTING ``geometrically_wrong`` class — no new
+        # class, no new error_class — routed through the same
+        # ``route_repair`` path. A gate-driven repair already routed
+        # this iteration wins; a fired screw-hole repair suppresses the
+        # check (two post-repairs never fire on one iteration).
+        _through_repair_fired = False
+        if (
+            render.error_class == "ok"
+            and next_repair is None
+            and not _screw_repair_fired
+        ):
+            _through_routed = await asyncio.to_thread(
+                _through_hole_post_check,
+                request,
+                render.stl,
+                through_baseline_genus,
+                scad_source,
+            )
+            if _through_routed is not None:
+                _evidence, _instruction = _through_routed
+                failure_class = "geometrically_wrong"
+                next_repair = {
+                    "failure_class": "geometrically_wrong",
+                    "instruction": _instruction,
+                    "scad_source": scad_source,
+                    "evidence": _evidence,
+                }
+                _through_repair_fired = True
+
         record = IterationRecord(
             iteration=iteration,
             scad_source=scad_source,
@@ -1940,7 +2028,7 @@ async def run_design_loop_async(
         )
         iterations.append(record)
 
-        if candidate_score.perfect and not _screw_repair_fired:
+        if candidate_score.perfect and not _screw_repair_fired and not _through_repair_fired:
             return DesignResult(
                 status="pass",
                 best=record,
@@ -2213,6 +2301,7 @@ def run_design_loop(
     design_source: str | None = None,
     part_scale: float | None = None,
     part_bbox_mm: tuple[float, float, float] | None = None,
+    through_baseline_genus: int | None = None,
     renderer_check: Callable[[], bool] | None = None,
     image_check: Callable[[], dict[str, str] | None] | None = None,
 ) -> DesignResult:
@@ -2242,6 +2331,7 @@ def run_design_loop(
             design_source=design_source,
             part_scale=part_scale,
             part_bbox_mm=part_bbox_mm,
+            through_baseline_genus=through_baseline_genus,
             renderer_check=renderer_check,
             image_check=image_check,
         )

@@ -75,6 +75,25 @@ def test_design_prompt_instructs_readable_names_and_labels() -> None:
     assert '"parameters"' in user_text
     # The axis constraint (W/D/H only when the param realises it).
     assert '"W" or "D" or "H"' in user_text
+    # Issue #385: the axis-tag rule (only for the part's own extents).
+    assert (
+        "Declare an axis ONLY "
+        "when the parameter IS the part's own overall W, D or H extent"
+    ) in user_text
+    assert "hole_distance_from_left_edge" in user_text
+    assert "is NOT an axis parameter" in user_text
+
+
+def test_design_prompt_axis_schema_description() -> None:
+    """Issue #385: the emit_design tool schema's axis field carries the
+    axis-tag rule as a description (for T0 native-tool-calling models)."""
+    from d33d.design_llm import ROLE_TOOL_SCHEMAS
+
+    schema = ROLE_TOOL_SCHEMAS["emit_design"]
+    props = schema["function"]["parameters"]["properties"]["parameters"]["items"]["properties"]
+    axis_desc = props["axis"]["description"]
+    assert "part's own overall W, D or H extent" in axis_desc
+    assert "hole_distance_from_left_edge" in axis_desc
 
 
 def _catalogue():

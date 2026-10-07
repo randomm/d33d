@@ -60,11 +60,11 @@ def test_seed_mix_is_exactly_pinned() -> None:
         assert mix.get(kind, 0) == expected, (
             f"kind {kind!r}: expected {expected}, got {mix.get(kind, 0)}"
         )
-    # the mix must sum to the pinned total (23: the 20-case seed plus the
+    # the mix must sum to the pinned total (24: the 21-case seed plus the
     # 3 imported-part cases of issue #340) — "floor 20" is then testable
     mix_total = sum(mix[k] for k in SEED_MIX)
-    assert mix_total == sum(SEED_MIX.values()) == 23
-    assert len(cases) == mix_total == 23
+    assert mix_total == sum(SEED_MIX.values()) == 24
+    assert len(cases) == mix_total == 24
 
 
 def test_verify_seed_reports_no_violations() -> None:
@@ -337,8 +337,8 @@ def test_prompt_file_hash_matches_case_pin() -> None:
         assert actual == c.prompt.sha256, f"{cid}: pin drift"
 
 
-def test_seed_mix_constant_sums_to_23() -> None:
-    assert sum(SEED_MIX.values()) == 23
+def test_seed_mix_constant_sums_to_24() -> None:
+    assert sum(SEED_MIX.values()) == 24
 
 
 def test_gates_constant_is_the_seven_in_order() -> None:

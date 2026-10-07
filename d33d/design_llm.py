@@ -128,7 +128,18 @@ ROLE_TOOL_SCHEMAS: dict[str, dict[str, Any]] = {
                                 "name": {"type": "string"},
                                 "label": {"type": "string"},
                                 "unit": {"type": "string"},
-                                "axis": {"type": "string"},
+                                "axis": {
+                                    "type": "string",
+                                    "description": (
+                                        "The overall axis this parameter realises "
+                                        "(W, D, or H). Declare ONLY when the parameter "
+                                        "IS the part's own overall W, D or H extent. "
+                                        "A mating part's size, a rim drop, a skirt or "
+                                        "any other feature size is NOT the part's W, D "
+                                        "or H. A position, offset or distance (e.g. "
+                                        "hole_distance_from_left_edge) is never an axis."
+                                    ),
+                                },
                                 "reason": {"type": "string"},
                             },
                             "required": ["name", "label"],

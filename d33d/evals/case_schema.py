@@ -5,9 +5,9 @@ case. This module is the single source of truth for:
 
 * the **case schema** (:class:`GoldenCase`) — the fields every case file
   must carry so the harness can score it unattended,
-* the **seed mix** — the 23-case on-disk composition (the 20-case seed:
+* the **seed mix** — the 24-case on-disk composition (the 21-case seed:
   6 primitives including the Qwen smoke baseline / 5 red-marked region
-  edits / 3 boolean-topology / 3 photo recreations / 3 adversarial, plus
+  edits / 4 boolean-topology / 3 photo recreations / 3 adversarial, plus
   the 3 imported-part cases from issue #340),
 * **prompt hash-pinning** — every case references its prompt file by
   SHA-256 of the file content, so a prompt edit without a re-pin fails
@@ -16,15 +16,15 @@ case. This module is the single source of truth for:
 
 Case-file fields, and where each comes from:
 
-The on-disk set is the 23-case composition :data:`SEED_MIX` pins: 6
+The on-disk set is the 24-case composition :data:`SEED_MIX` pins: 6
 primitives (5 seed primitives + the Qwen smoke baseline, marked
 ``is_baseline`` — a reference, not a gate), 5 red-marked region edits,
-3 boolean-topology, 3 photo recreations, 3 adversarial (6 + 5 + 3 + 3 +
-3 = 20-case seed), plus the 3 imported-part cases issue #340 added
-(6 + 5 + 3 + 3 + 3 + 3 = 23). Every case's ``kind`` matches the
+4 boolean-topology, 3 photo recreations, 3 adversarial (6 + 5 + 4 + 3 +
+3 = 21-case seed), plus the 3 imported-part cases issue #340 added
+(6 + 5 + 4 + 3 + 3 + 3 = 24). Every case's ``kind`` matches the
 composition; the baseline is additionally flagged ``is_baseline`` so the
 report shows it as the reference. :data:`SEED_MIX` is this full on-disk
-composition, so ``sum(SEED_MIX.values()) == 23`` is directly testable.
+composition, so ``sum(SEED_MIX.values()) == 24`` is directly testable.
 
 * ``case_id`` / ``kind`` — stable identity across prompt versions and the
   seed-mix classifier.
@@ -132,7 +132,7 @@ GATE_NA_MARKERS: dict[str, str] = {
 SEED_MIX: dict[str, int] = {
     "primitive": 6,
     "red_region_edit": 5,
-    "boolean_topology": 3,
+    "boolean_topology": 4,
     "photo_recreation": 3,
     "adversarial": 3,
     "imported_part": 3,
@@ -379,11 +379,11 @@ def seed_mix_actual(cases: dict[str, GoldenCase]) -> dict[str, int]:
 
 
 def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> list[str]:
-    from d33d.evals.fixtures import check_fixture_containment
     """Check the seed against :data:`SEED_MIX`; return a list of violations.
 
-    Empty list means the seed is valid: the on-disk total is exactly 23 (the
-    20-case seed plus the 3 imported-part cases of issue #340),
+    Empty list means the seed is valid: the on-disk total is exactly 24 (the
+    20-case seed plus the 3 imported-part cases of issue #340 plus the
+    box+through-hole case of issue #386),
     exactly the pinned count per kind, every red-region edit has a
     baseline + selection polygons (gate 7 denominator), every adversarial
     case scores against an outcome class, every imported-part case pins a
@@ -393,9 +393,11 @@ def verify_seed(cases: dict[str, GoldenCase], repo_root: Path | None = None) -> 
 
     The baseline (``is_baseline``) is the 6th primitive within the
     20-case seed — part of the set, not a 21st case. The per-kind mix is
-    therefore counted over the full set, and ``SEED_MIX`` sums to 23
-    (the 20-case seed plus the 3 imported-part cases of issue #340).
+    therefore counted over the full set, and ``SEED_MIX`` sums to 24
+    (the 20-case seed plus the 3 imported-part cases of issue #340 plus
+    the box+through-hole case of issue #386).
     """
+    from d33d.evals.fixtures import check_fixture_containment
     violations: list[str] = []
 
     mix = seed_mix_actual(cases)

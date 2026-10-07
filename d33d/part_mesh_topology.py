@@ -18,6 +18,7 @@ The helper returns a :class:`MeshTopology` — the caller owns interpretation.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import TypedDict
 
 import trimesh
@@ -52,6 +53,59 @@ class MeshTopology(TypedDict):
     watertight_bodies: int
     winding_consistent: bool
     genus: int
+
+
+def load_and_split(path: str) -> list[trimesh.Trimesh]:
+    """Load the STL at ``path`` and split it ONCE
+    (``only_watertight=False``).
+
+    ``merge_vertices()`` is MANDATORY before the split — production
+    OpenSCAD STLs are face-disconnected and an unmerged split yields
+    ZERO components (the established contract, see
+    ``d33d.design_loop_events.bbox_from_render``). Load or split
+    failures RAISE — the callers of :func:`genus_from_stl` (and the
+    ``mesh_topology`` callers) decide how to degrade.
+    """
+    mesh = trimesh.load(path, process=False)
+    merged = mesh.to_mesh() if isinstance(mesh, trimesh.Scene) else mesh
+    merged.merge_vertices()
+    merged.update_faces(merged.nondegenerate_faces())
+    return merged.split(only_watertight=False)
+
+
+def genus_from_stl(path: str | None) -> int | None:
+    """The total genus of the STL at ``path``, via :func:`mesh_topology`.
+
+    The single public genus measurement: the through-hole post-check
+    (``d33d.through_hole_check``) and the design-loop baseline seams
+    (``d33d.design_loop_events``) all read their genus through this
+    helper.
+
+    Returns ``None`` (the caller abstains — never a fabricated genus)
+    when ``path`` is ``None``, the file is missing/unreadable, the
+    load/split fails with any exception (logged with ``exc_info``), or
+    the split yields zero watertight components. Otherwise returns
+    ``mesh_topology(...)['genus']`` — the semantics of
+    :func:`mesh_topology` are unchanged.
+    """
+    if path is None:
+        return None
+    if not Path(path).is_file():
+        return None
+    try:
+        components = load_and_split(path)
+    except Exception:
+        logger.warning("genus measurement failed for %r", path, exc_info=True)
+        return None
+    try:
+        topo = mesh_topology(merged=components[0], components=components)
+    except Exception:
+        logger.warning("genus measurement failed for %r", path, exc_info=True)
+        return None
+    if topo["watertight_bodies"] == 0:
+        logger.info("genus abstained: no watertight components in %r", path)
+        return None
+    return topo["genus"]
 
 
 def mesh_topology(
@@ -128,4 +182,9 @@ def mesh_topology(
     )
 
 
-__all__ = ["MeshTopology", "mesh_topology"]
+__all__ = [
+    "MeshTopology",
+    "genus_from_stl",
+    "load_and_split",
+    "mesh_topology",
+]

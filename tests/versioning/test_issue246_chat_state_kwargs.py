@@ -17,6 +17,8 @@ All fast (stub loop, no LLM, no Docker).
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Any
 
 from tests.versioning.helpers import (
@@ -134,6 +136,175 @@ def test_chat_adapter_passes_state_kwargs_for_project_with_version(app_with_vers
         "W": 30.0,
         "D": 25.0,
     }
+
+
+def test_chat_adapter_passes_through_baseline_genus_for_import(app_with_versions, tmp_path):
+    """Issue #386 (final): the import-parent baseline is the STORED, REPAIRED
+    part mesh's GENUS (``{repo}/versions/{v1}/part.stl``) — never the
+    report's ``hole_count`` (``gaps_before + genus``, which overstates
+    the baseline whenever the import had open gaps). A project with no
+    part omits the kwarg (the loop defaults to 0). A part whose stored
+    mesh is missing/unreadable carries the ``-1`` unknown sentinel (the
+    check abstains) — never a fabricated baseline from ``hole_count``.
+    """
+    captured: dict[str, Any] = {}
+    fixture_dir = Path(__file__).parent.parent / "fixtures" / "stl"
+
+    def _write_stored_part(pid: int, stl_fixture: str):
+        """Write the stored part mesh the import path does, plus a v1 row."""
+        from tests.versioning.helpers import repo_path_for
+
+        repo = repo_path_for(app_with_versions, pid)
+        conn = app_with_versions.state.conn
+        v1 = conn.raw.execute(
+            "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        assert v1 is not None
+        part_dir = repo / "versions" / str(v1[0])
+        part_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / stl_fixture, part_dir / "part.stl")
+
+    def _make_call(set_part_report: bool | None):
+        async def _call(client):
+            proj = await create_project(client)
+            pid = proj["id"]
+            if set_part_report is None:
+                # No-part project: no part columns, no version, no file.
+                await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+                return
+            conn = app_with_versions.state.conn
+            conn.execute(
+                "UPDATE projects SET part_filename=?, part_format=?, "
+                "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+                (
+                    "part.stl", "stl", "settled", 1.0,
+                    '{"hole_count": 2}', pid,
+                ),
+            )
+            conn.commit()
+            # Create the v1 row + write the stored (repaired) part mesh
+            # (genus 0 — a watertight box; the report's hole_count is 2,
+            # deliberately different, to prove the baseline is the stored
+            # mesh's genus, not the report's count).
+            await create_version(client, pid, {})
+            _write_stored_part(pid, "box_20mm.stl")
+            await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+        return _call
+
+    # Import project with a stored part (genus 0, hole_count 2 in the
+    # report) → the kwarg is the STORED mesh's genus (0), not 2.
+    captured.clear()
+    run_async(app_with_versions, _make_call(True))
+    assert captured.get("through_baseline_genus") == 0, (
+        f"expected through_baseline_genus==0 from the stored part's genus "
+        f"(the report's hole_count is 2 — never used), got "
+        f"{captured.get('through_baseline_genus')!r}"
+    )
+
+    # No-part project (the fresh-project baseline) → kwarg absent.
+    captured.clear()
+    run_async(app_with_versions, _make_call(None))
+    assert "through_baseline_genus" not in captured
+
+
+def test_chat_adapter_v2_baseline_uses_parent_version_render(app_with_versions, tmp_path):
+    """Issue #386 (v2+ edit case): a project with a part and an existing
+    version whose ``render_artifact_dir`` carries a ``model.stl`` with a
+    known genus — the loop kwargs the CHAT adapter builds carry
+    ``through_baseline_genus`` equal to the PARENT VERSION's rendered
+    genus (not the part report's hole_count). When the version has no
+    ``render_artifact_dir`` (never measured), the kwarg falls back to the
+    part report's hole_count."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        # Set up the part (hole_count=2 in the report).
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, '{"hole_count": 2}', pid),
+        )
+        conn.commit()
+
+        # Create a version via the service.
+        svc = app_with_versions.state.versions
+        await svc.create_version(
+            pid, {"W": 20.0}, name="v1", bbox=(20.0, 20.0, 20.0),
+        )
+        # Set up a render artifact dir with the genus-1 fixture as model.stl.
+        from pathlib import Path as _Path
+        fixture_dir = _Path(__file__).parent.parent / "fixtures" / "stl"
+        render_dir = tmp_path / "render_v1"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / "through_hole_genus1.stl", render_dir / "model.stl")
+        latest = svc.latest_version(pid)
+        assert latest is not None
+        conn.execute(
+            "UPDATE versions SET render_artifact_dir=? WHERE id=?",
+            (str(render_dir), latest["id"]),
+        )
+        conn.commit()
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # The v2+ baseline: the parent version's rendered genus (1 from the
+    # fixture), NOT the part report's hole_count (2).
+    assert captured.get("through_baseline_genus") == 1, (
+        f"v2+ baseline should be the parent version's rendered genus "
+        f"(1), got {captured.get('through_baseline_genus')!r}"
+    )
+
+
+def test_chat_adapter_v2_baseline_falls_back_to_stored_part_genus(app_with_versions, tmp_path):
+    """Issue #386 (final, v2+ edit, parent never rendered): a project with
+    a part and a version that has NO ``render_artifact_dir`` (never
+    rendered). The baseline is the STORED part mesh's genus — NOT the
+    report's ``hole_count`` (which overstates the baseline whenever the
+    import had open gaps). The stored mesh here is a genus-1 fixture
+    (``through_hole_genus1.stl``) while the report says ``hole_count`` 2:
+    the kwarg must be 1."""
+    captured: dict[str, Any] = {}
+    fixture_dir = Path(__file__).parent.parent / "fixtures" / "stl"
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        conn = app_with_versions.state.conn
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=?, part_report=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, '{"hole_count": 2}', pid),
+        )
+        conn.commit()
+        # Create the v1 row (NO render_artifact_dir — never rendered).
+        await create_version(client, pid, {"W": 20.0})
+        # Write the stored part mesh (genus 1 — the report says 2).
+        from tests.versioning.helpers import repo_path_for
+
+        repo = repo_path_for(app_with_versions, pid)
+        v1 = conn.raw.execute(
+            "SELECT id FROM versions WHERE project_id = ? ORDER BY id ASC LIMIT 1",
+            (pid,),
+        ).fetchone()
+        assert v1 is not None
+        part_dir = repo / "versions" / str(v1[0])
+        part_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / "through_hole_genus1.stl", part_dir / "part.stl")
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # No render_artifact_dir → the stored part mesh's genus (1), NOT the
+    # report's hole_count (2).
+    assert captured.get("through_baseline_genus") == 1, (
+        f"v2+ baseline with no rendered parent should be the stored "
+        f"part's genus (1), not the report's hole_count (2), got "
+        f"{captured.get('through_baseline_genus')!r}"
+    )
 
 
 def test_chat_adapter_passes_none_state_kwargs_for_fresh_project(app_with_versions):

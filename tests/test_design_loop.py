@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import trimesh
 
 from d33d.config.catalogue import load_catalogue
 from d33d.config.probes import CapabilityResult
@@ -739,6 +740,84 @@ def test_axis_params_mismatch_feeds_repair_into_next_iteration():
     assert result.iterations[0].repair["failure_class"] == "axis_params_mismatch"
 
 
+def test_axis_params_mismatch_ignores_position_offset_params():
+    """Issue #385 (operator decision 2026-10-05): the import gate
+    (``axis_params_mismatch``) ignores parameters whose names or labels
+    mark them as positions or offsets (any of
+    ``_POSITION_PARAM_KEYWORDS``), so a mistagged position can't fail an
+    import edit.
+
+    Test: an imported plate edit whose SCAD tags
+    ``hole_distance_from_left_edge = 15`` as axis W, with a measured
+    width of 120, does NOT fail ``axis_params_mismatch``."""
+    s = score(
+        _render(),
+        (120.0, 40.0, 6.0),
+        bbox=BboxInfo(120.0, 40.0, 6.0, 28800.0),
+        scad_source=(
+            "hole_distance_from_left_edge = 15;\n"
+            "W = 120;\nD = 40;\nH = 6;\n"
+            "cube([W, D, H]);\n"
+        ),
+        param_meta={
+            "W": {"label": "Plate width", "unit": "mm", "axis": "W"},
+            "D": {"label": "Plate depth", "unit": "mm", "axis": "D"},
+            "H": {"label": "Plate height", "unit": "mm", "axis": "H"},
+            "hole_distance_from_left_edge": {
+                "label": "Hole offset from left edge",
+                "unit": "mm",
+                "axis": "W",
+            },
+        },
+        named_params={
+            "W": 120.0,
+            "D": 40.0,
+            "H": 6.0,
+            "hole_distance_from_left_edge": 15.0,
+        },
+    )
+    # The W param matches (120 vs 120) → no mismatch.
+    # The hole_distance param is ignored (position/offset keyword).
+    # All bits should pass (no axis_params_mismatch).
+    assert s.bits[4] is True
+    assert s.axis_params_match is True
+
+
+def test_axis_param_mismatches_ignores_position_param_directly():
+    """Issue #385: ``_axis_param_mismatches`` directly — a param named
+    ``hole_distance_from_left_edge`` tagged as axis W with value 15
+    against a measured width of 120 is ignored (position/offset keyword).
+    A genuine W param (value 20 vs measured 120) still fires."""
+    from d33d.design_loop import _POSITION_PARAM_KEYWORDS, _axis_param_mismatches
+
+    # Sanity: the predicate under test is the hoisted keyword table.
+    assert "distance" in _POSITION_PARAM_KEYWORDS
+    bbox = BboxInfo(120.0, 40.0, 6.0, 28800.0)
+    # Only the position param is mistagged → no mismatches.
+    mismatches = _axis_param_mismatches(
+        bbox,
+        {"hole_distance_from_left_edge": 15.0},
+        {
+            "hole_distance_from_left_edge": {
+                "label": "Hole offset from left edge",
+                "axis": "W",
+            }
+        },
+    )
+    assert mismatches == []
+    # A genuine W param (value 20 vs measured 120) still fires.
+    mismatches2 = _axis_param_mismatches(
+        bbox,
+        {"W": 20.0},
+        {"W": {"label": "Plate width", "axis": "W"}},
+    )
+    assert len(mismatches2) == 1
+    assert mismatches2[0][0] == "Plate width"
+    assert mismatches2[0][1] == 20.0
+    assert mismatches2[0][2] == 120.0
+    assert mismatches2[0][3] == "W"
+
+
 def test_oom_mid_loop_is_not_repair_and_does_not_crash():
     # Iteration 1: oom (non-repairable, rank 0, no repair fed back).
     # Iteration 2: good (rank 4) → pass.
@@ -1357,7 +1436,18 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
                                     "name": {"type": "string"},
                                     "label": {"type": "string"},
                                     "unit": {"type": "string"},
-                                    "axis": {"type": "string"},
+                                    "axis": {
+                                        "type": "string",
+                                        "description": (
+                                            "The overall axis this parameter realises "
+                                            "(W, D, or H). Declare ONLY when the parameter "
+                                            "IS the part's own overall W, D or H extent. "
+                                            "A mating part's size, a rim drop, a skirt or "
+                                            "any other feature size is NOT the part's W, D "
+                                            "or H. A position, offset or distance (e.g. "
+                                            "hole_distance_from_left_edge) is never an axis."
+                                        ),
+                                    },
                                     "reason": {"type": "string"},
                                 },
                                 "required": ["name", "label"],
@@ -1430,7 +1520,18 @@ def test_make_llm_fn_t0_body_carries_emit_design_tool_schema():
                         "name": {"type": "string"},
                         "label": {"type": "string"},
                         "unit": {"type": "string"},
-                        "axis": {"type": "string"},
+                        "axis": {
+                            "type": "string",
+                            "description": (
+                                "The overall axis this parameter realises "
+                                "(W, D, or H). Declare ONLY when the parameter "
+                                "IS the part's own overall W, D or H extent. "
+                                "A mating part's size, a rim drop, a skirt or "
+                                "any other feature size is NOT the part's W, D "
+                                "or H. A position, offset or distance (e.g. "
+                                "hole_distance_from_left_edge) is never an axis."
+                            ),
+                        },
                         "reason": {"type": "string"},
                     },
                     "required": ["name", "label"],
@@ -2752,6 +2853,313 @@ def test_screw_clearance_direct_check_contract():
     assert _undersize_screw_hole(request, {"W": 60.0, "D": 45.0}, {}) is None
     # Empty request → abstain.
     assert _undersize_screw_hole("", {"hole_d": 4.0}, meta) is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #386: through-hole genus post-check (the rendered mesh's genus
+# must EXCEED the parent version's baseline — 0 for a new design, the
+# imported part's own stored hole count for v1 on an import — operator
+# decision 2026-10-05). Real tiny STLs built with trimesh in tmp_path
+# (the ``_render`` stub's fake ``model.stl`` path means no existing test
+# loads a real mesh through the loop).
+# ---------------------------------------------------------------------------
+
+
+def _through_box_llm(scad: str, params: list[dict] | None = None) -> LLMResult:
+    """A T1-shaped design response for a 20 × 20 × 20 box SCAD (the
+    through-hole post-check's candidate) whose tool call carries a
+    ``parameters`` metadata array."""
+    args: dict[str, Any] = {"scad": scad}
+    if params is not None:
+        args["parameters"] = params
+    return LLMResult(
+        content=f"```json\n{json.dumps({'tool': 'emit_design', 'arguments': args})}\n```",
+        tool_calls=(
+            {"name": "emit_design", "arguments": args},
+        ),
+        prompt_hash="h" * 64,
+        tier="T1",
+        status="ok",
+        request_body={},
+    )
+
+
+def _through_box_scad_source() -> str:
+    """A 20 × 20 × 20 box — every literal a named declaration (the
+    named-params gate passes), bbox matches the stated triple exactly.
+    (The SCAD is a stand-in: the loop's test render carries the REAL
+    mesh's STL path, so the mesh — not the SCAD — is what the check
+    measures.)"""
+    return "W = 20;\nD = 20;\nH = 20;\ncube([W, D, H]);\n"
+
+
+def _render_with_stl(stl_path: str) -> RenderResult:
+    """An ok render whose ``stl`` points at a REAL file on disk (the
+    through-hole check's trimesh.load seam) — the ``_render`` stub's
+    fake ``model.stl`` is non-existent, so the check would abstain on
+    it; this helper carries the real path."""
+    return RenderResult(
+        ok=True,
+        exit_code=0,
+        duration_ms=10,
+        error_class="ok",
+        stderr="",
+        stl=stl_path,
+        csg="model.csg",
+        views=VIEWS_OK,
+        render_log="",
+    )
+
+
+def _box_minus_cylinder(blind: bool) -> trimesh.Trimesh:
+    """Load a committed STL fixture (CI-safe: no boolean ops — CI has no
+    trimesh boolean backend). ``blind`` → pocket (genus 0); ``not blind``
+    → through-hole (genus 1)."""
+    from pathlib import Path
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    name = "through_hole_pocket.stl" if blind else "through_hole_genus1.stl"
+    mesh = trimesh.load(str(fixture_dir / name), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_mesh()
+    mesh.merge_vertices()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    return mesh
+
+
+def _run_through_loop(
+    stl_path: str | None,
+    request: str,
+    *,
+    through_baseline_genus: int | None = None,
+    max_iterations: int = MAX_ITERATIONS,
+) -> DesignResult:
+    """Run the loop over an ok-render 20×20×20 box (all five gate bits
+    green) whose render carries the given real STL path (``None`` →
+    the ``_render`` stub's non-existent ``model.stl`` — the abstain
+    case)."""
+    render = _render_with_stl(stl_path) if stl_path else _render()
+    llm = _through_box_llm(_through_box_scad_source())
+
+    def llm_fn(role, messages, system):
+        return llm
+
+    def render_fn(scad, defines):
+        return render
+
+    return run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 20.0, 8000.0),
+        request=request,
+        max_iterations=max_iterations,
+        through_baseline_genus=through_baseline_genus,
+    )
+
+
+def test_through_hole_pocket_request_fails_geometrically_wrong(tmp_path):
+    """Issue #386 (must fail on main): a through request ("drill a 6 mm
+    hole through the middle") with a POCKET mesh (a box minus a blind
+    cylinder — euler 2, genus 0) over a zero baseline → iteration 1 is
+    ``geometrically_wrong`` (NOT a pass), and the repair instruction
+    says the hole must cut through the full thickness. The scripted
+    model repeats the pocket to the cap (the within-cap pass is pinned
+    by the next test)."""
+    stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(stl)
+    result = _run_through_loop(
+        stl, "drill a 6 mm hole through the middle of the top face"
+    )
+    # The all-green candidate does NOT pass: the post-check routes the
+    # repair and the loop takes the repair iterations within the cap.
+    assert result.status == "exhausted"
+    assert result.iterations_used == MAX_ITERATIONS == 3
+    first = result.iterations[0]
+    # All five gate bits green (genus is not a gate bit) yet the
+    # structured repair fired.
+    assert first.score.perfect is True
+    assert first.failure_class == "geometrically_wrong"
+    assert first.repair is not None
+    assert first.repair["failure_class"] == "geometrically_wrong"
+    assert "full thickness" in first.repair["instruction"]
+    assert "does not pass" in first.repair["instruction"]
+
+
+def test_through_hole_through_mesh_passes(tmp_path):
+    """Issue #386: a through request with a true through-hole mesh
+    (genus 1) over a zero baseline → the loop returns "pass" on
+    iteration 1 (the check passes — the hole did pass), mirroring
+    ``test_screw_clearance_post_check_passes_at_clearance``."""
+    stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=False).export(stl)
+    result = _run_through_loop(
+        stl, "drill a 6 mm hole through the middle of the top face"
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+    assert result.iterations[0].failure_class is None
+
+
+def test_through_hole_blind_request_no_trigger(tmp_path):
+    """Issue #386: a BLIND-hole request (no ``through``) with a pocket
+    mesh → a pass (no trigger), mirroring
+    ``test_screw_clearance_post_check_no_screw_named_does_nothing``."""
+    stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(stl)
+    for request in (
+        "drill a 5 mm hole 3 mm deep in the top face",
+        "a counterbore 5 mm deep for the screw",
+        "a pocket 2 mm deep in the centre",
+    ):
+        result = _run_through_loop(stl, request)
+        assert result.status == "pass", request
+        assert result.iterations_used == 1, request
+        assert result.iterations[0].repair is None, request
+
+
+def test_through_hole_unreadable_stl_abstains(tmp_path):
+    """Issue #386: a through request whose ``render.stl`` path does not
+    exist (or the file is unreadable) → the check abstains (one log
+    line) and the loop PASSES, mirroring the direct-check contract's
+    abstain style."""
+    # A non-existent path (the render carries a path that is not a file).
+    missing = str(tmp_path / "does-not-exist.stl")
+    result = _run_through_loop(
+        missing, "drill a 6 mm hole through the middle"
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_through_hole_repair_then_through_mesh_passes_within_cap(tmp_path):
+    """Issue #386: the model fixes the hole on the repair iteration —
+    the pocket triggers, the through mesh passes, all within the
+    3-iteration cap and the no-improvement limit (the through-hole
+    repair counts as a normal repair iteration)."""
+    pocket_stl = str(tmp_path / "pocket.stl")
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    _box_minus_cylinder(blind=False).export(through_stl)
+
+    def llm_fn(role, messages, system):
+        text = messages[0]["content"][0]["text"]
+        if "REPAIR directive" in text:
+            return _through_box_llm(_through_box_scad_source())
+        return _through_box_llm(_through_box_scad_source())
+
+    calls = {"n": 0}
+
+    def render_fn(scad, defines):
+        calls["n"] += 1
+        stl = pocket_stl if calls["n"] == 1 else through_stl
+        return _render_with_stl(stl)
+
+    result = run_design_loop(
+        photo=PHOTO,
+        stated_dims=(20.0, 20.0, 20.0),
+        render_fn=render_fn,
+        llm_fn=llm_fn,
+        bbox_fn=lambda r: BboxInfo(20.0, 20.0, 20.0, 8000.0),
+        request="drill a 6 mm hole through the middle",
+    )
+    assert result.status == "pass"
+    assert result.iterations_used == 2
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    assert result.iterations[1].failure_class is None
+    assert result.iterations[1].repair is None
+
+
+def test_through_hole_baseline_comparison(tmp_path):
+    """Issue #386 (operator decision 2026-10-05): the baseline
+    comparison — a part whose stored hole count is 1 (baseline 1): a
+    pocket render (genus 0) does not exceed it (fires, geometrically_
+    wrong); a through render (genus 1) does NOT exceed it either
+    (EXCEED is strict — a single hole on a one-hole part still fires).
+    The baseline comes from the explicit ``through_baseline_genus``
+    seam (the route's part-report reader, not re-parsed here)."""
+    pocket_stl = str(tmp_path / "pocket.stl")
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    _box_minus_cylinder(blind=False).export(through_stl)
+    req = "drill a 6 mm hole through the middle"
+    # baseline 1, pocket genus 0 → 0 < 1, fires.
+    result = _run_through_loop(pocket_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    # baseline 1, through genus 1 → 1 does NOT exceed 1, fires.
+    result = _run_through_loop(through_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    # baseline 0, through genus 1 → 1 exceeds 0, passes.
+    result = _run_through_loop(through_stl, req, through_baseline_genus=0)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+
+
+def _box_with_n_through_holes(n: int) -> trimesh.Trimesh:
+    """Load a committed STL fixture with ``n`` through-holes (genus
+    ``n``) (CI-safe: no boolean ops)."""
+    from pathlib import Path
+
+    fixture_dir = Path(__file__).parent / "fixtures" / "stl"
+    name = f"through_hole_genus{n}.stl"
+    mesh = trimesh.load(str(fixture_dir / name), process=False)
+    if isinstance(mesh, trimesh.Scene):
+        mesh = mesh.to_mesh()
+    mesh.merge_vertices()
+    mesh.update_faces(mesh.nondegenerate_faces())
+    return mesh
+
+
+def test_through_hole_plate_genus_3_pocket_fails_through_passes(tmp_path):
+    """Issue #386 (operator decision 2026-10-05, case ii): an imported
+    plate with genus 3 (three existing through-holes). A pocket render
+    (genus 3 — the pocket did not add a hole) must FAIL (3 does not
+    exceed 3). A through-hole render (genus 4 — one new hole added) must
+    PASS (4 exceeds 3)."""
+    req = "drill a 6 mm hole through the plate"
+    genus3_stl = str(tmp_path / "genus3.stl")
+    _box_with_n_through_holes(3).export(genus3_stl)
+    result = _run_through_loop(genus3_stl, req, through_baseline_genus=3)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    assert result.iterations[0].repair is not None
+    genus4_stl = str(tmp_path / "genus4.stl")
+    _box_with_n_through_holes(4).export(genus4_stl)
+    result = _run_through_loop(genus4_stl, req, through_baseline_genus=3)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
+    assert result.iterations[0].repair is None
+
+
+def test_through_hole_v2_edit_existing_hole(tmp_path):
+    """Issue #386 (operator decision 2026-10-05, case iii): a v2 edit
+    on a design whose v1 already has one hole (baseline 1). A pocket
+    render (genus 0) must FAIL. A through render (genus 1) does NOT
+    exceed the baseline — must also FAIL (EXCEED is strict). A render
+    with genus 2 (two through-holes) exceeds the baseline — PASSES."""
+    req = "drill another 6 mm hole through the middle"
+    pocket_stl = str(tmp_path / "pocket.stl")
+    _box_minus_cylinder(blind=True).export(pocket_stl)
+    result = _run_through_loop(pocket_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    through_stl = str(tmp_path / "through.stl")
+    _box_minus_cylinder(blind=False).export(through_stl)
+    result = _run_through_loop(through_stl, req, through_baseline_genus=1)
+    assert result.status == "exhausted"
+    assert result.iterations[0].failure_class == "geometrically_wrong"
+    genus2_stl = str(tmp_path / "genus2.stl")
+    _box_with_n_through_holes(2).export(genus2_stl)
+    result = _run_through_loop(genus2_stl, req, through_baseline_genus=1)
+    assert result.status == "pass"
+    assert result.iterations_used == 1
 
 
 # ---------------------------------------------------------------------------
