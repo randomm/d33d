@@ -430,6 +430,41 @@ def test_design_state_block_numeric_value_carries_mm_unit() -> None:
     assert entries[0]["unit"] == "mm"
 
 
+def test_angle_param_name_carries_deg_unit() -> None:
+    """A numeric param whose name contains 'angle' carries ``unit: "deg"``
+    (issue #390, item d — angles show °, not mm). The unit is inferred from
+    the parameter name: 'lip_angle' → deg."""
+    entries = state_block_from_params({"lip_angle": 20.0})
+    assert entries[0]["unit"] == "deg"
+
+
+def test_deg_suffix_param_name_carries_deg_unit() -> None:
+    """A numeric param whose name contains 'deg' (but not 'degree') carries
+    ``unit: "deg"`` (issue #390, item d). 'tilt_deg' → deg."""
+    entries = state_block_from_params({"tilt_deg": 15.0})
+    assert entries[0]["unit"] == "deg"
+
+
+def test_unitless_param_name_carries_no_unit() -> None:
+    """A numeric param whose name is a unitless count (e.g. 'bolt_count')
+    carries ``unit: "mm"`` by default (the numeric default) — the 'no unit'
+    case is for non-numeric values (string/bool). Unitless NUMERIC params
+    still get "mm" (the safe default); the 'no unit' rule applies to the
+    rendering side (null unit → no suffix), not the inference.
+    (issue #390, item d)"""
+    entries = state_block_from_params({"bolt_count": 4.0})
+    # bolt_count is numeric → "mm" (the default). The 'unitless' case
+    # (no unit suffix) is for non-numeric values (string/bool → null).
+    assert entries[0]["unit"] == "mm"
+
+
+def test_non_numeric_param_carries_no_unit() -> None:
+    """A non-numeric param (string) carries ``unit: None`` — no unit is
+    rendered (issue #390, item d: unitless parameters get no unit)."""
+    entries = state_block_from_params({"finish": "rough"})
+    assert entries[0]["unit"] is None
+
+
 # ---------------------------------------------------------------------------
 # Label rule: label == parameter name (no invented prose)
 # ---------------------------------------------------------------------------

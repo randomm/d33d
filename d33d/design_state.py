@@ -275,13 +275,27 @@ def _entry(
     label_is_identifier: bool = True,
 ) -> dict[str, Any]:
     """One entry from a (name, value) pair (provenance supplied)."""
+    # Issue #390 (item d): angle parameters (name contains 'angle' or
+    # '_deg') carry ``unit: "deg"`` (rendered as ° in the SPA), not the
+    # default "mm". Unitless / non-numeric params carry ``unit: None``
+    # (no suffix rendered). The inference is name-based: the model's own
+    # identifier is the only metadata available at this point (the
+    # param_meta join happens later and can override).
+    if _is_number(value):
+        lower_name = name.lower()
+        if "angle" in lower_name or "_deg" in lower_name:
+            unit = "deg"
+        else:
+            unit = "mm"
+    else:
+        unit = None
     out: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
         "label_is_identifier": label_is_identifier,
         "value": value,
-        "unit": "mm" if _is_number(value) else None,
+        "unit": unit,
         "provenance": provenance,
     }
     if provenance == "disagrees":

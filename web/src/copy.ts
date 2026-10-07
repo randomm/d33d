@@ -25,6 +25,10 @@ export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
 
+/** One decimal, always, with the degree symbol — for angle parameters
+ *  (issue #390, item d: angles show °, not mm). */
+export const deg = (value: number): string => `${value.toFixed(1)}${NB}°`;
+
 /** W/D/H axis → the adjective that belongs in a "how …?" slot ("wide",
  *  "deep", "tall"). The carried-axis sentence and the size-mismatch
  *  follow-up must read "how wide it should be", not "how width it should

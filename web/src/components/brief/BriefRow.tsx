@@ -161,7 +161,7 @@ export function BriefRow({
       typeof entry.value === "number"
         ? copy.brief.disagreesInline(entry.stated_value, entry.value)
         : null;
-    const formatted = disagreesInline ?? formatValue(primaryValue(entry));
+    const formatted = disagreesInline ?? formatValue(primaryValue(entry), entry.unit);
     // `null` must never reach the number cell — the unknown branch above
     // is the only path that produces it, and a `?? 0` here would
     // re-introduce issue #91's null→0 defect (the W9 contract assertion
@@ -217,17 +217,17 @@ export function BriefRow({
   // for the value (the reason is the model's own words, never invented).
   const expandedSentence =
     entry.provenance === "stated"
-      ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.stated}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
+      ? `${formatValue(entry.value, entry.unit) ?? copy.brief.unknownValue} — ${copy.brief.legend.stated}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
       : entry.provenance === "measured"
-        ? `${formatValue(entry.value) ?? copy.brief.unknownValue} — ${copy.brief.legend.measured}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
+        ? `${formatValue(entry.value, entry.unit) ?? copy.brief.unknownValue} — ${copy.brief.legend.measured}. ${copy.brief.provenanceNoMeasurement(String(entry.value))}`
         : entry.provenance === "assumed"
           ? entry.reason
             ? copy.brief.provenanceAssumedWithReason(
-                formatValue(entry.value) ?? copy.brief.unknownValue,
+                formatValue(entry.value, entry.unit) ?? copy.brief.unknownValue,
                 entry.reason,
               )
             : copy.brief.provenanceAssumed(
-                formatValue(entry.value) ?? copy.brief.unknownValue,
+                formatValue(entry.value, entry.unit) ?? copy.brief.unknownValue,
               )
           : entry.provenance === "unknown"
             ? copy.brief.legend.unknown

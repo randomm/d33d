@@ -282,7 +282,7 @@ export function Brief({
             <span className="brief-chip-resolved" data-testid="brief-chip-resolved">
               {resolved
                 .map((e) => {
-                  const v = formatValue(primaryValue(e));
+                  const v = formatValue(primaryValue(e), e.unit);
                   return v === null ? null : `${rowLabel(e)} · ${v}`;
                 })
                 .filter(Boolean)
