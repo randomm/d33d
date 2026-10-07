@@ -445,17 +445,90 @@ def test_deg_suffix_param_name_carries_deg_unit() -> None:
     assert entries[0]["unit"] == "deg"
 
 
-def test_unitless_param_name_carries_no_unit() -> None:
-    """A numeric param whose name is a unitless count (e.g. 'bolt_count')
-    carries ``unit: "mm"`` by default (the numeric default) — the 'no unit'
-    case is for non-numeric values (string/bool). Unitless NUMERIC params
-    still get "mm" (the safe default); the 'no unit' rule applies to the
-    rendering side (null unit → no suffix), not the inference.
-    (issue #390, item d)"""
+def test_unitless_count_param_carries_no_unit() -> None:
+    """A numeric count param (last token in the count set, e.g.
+    'bolt_count') carries ``unit: None`` — a count is unitless (issue
+    #390: counts render as bare numbers, no suffix, no 'mm')."""
     entries = state_block_from_params({"bolt_count": 4.0})
-    # bolt_count is numeric → "mm" (the default). The 'unitless' case
-    # (no unit suffix) is for non-numeric values (string/bool → null).
+    assert entries[0]["unit"] is None
+
+
+def test_angle_token_params_carry_deg_unit() -> None:
+    """Token-based angle detection (issue #390): a numeric param whose
+    tokens include an angle word ('lip_angle'), a 'deg'/'degrees' token
+    ('tilt_deg'), or a camelCase 'Angle' suffix ('draftAngle') carries
+    ``unit: "deg"``."""
+    for name in ("lip_angle", "tilt_deg", "draftAngle"):
+        entries = state_block_from_params({name: 20.0})
+        assert entries[0]["unit"] == "deg", name
+
+
+def test_length_word_last_token_never_deg() -> None:
+    """A name that CONTAINS an angle token but whose LAST token is a
+    length word stays 'mm' (issue #390): 'angled_wall_thickness',
+    'rectangle_width', 'triangle_side', 'degas_depth' are all mm.
+    'tangle' (no token match at all) is mm too."""
+    for name in (
+        "angled_wall_thickness",
+        "rectangle_width",
+        "triangle_side",
+        "degas_depth",
+        "tangle",
+    ):
+        entries = state_block_from_params({name: 20.0})
+        assert entries[0]["unit"] == "mm", name
+
+
+def test_count_prefix_names_carry_no_unit() -> None:
+    """A numeric param whose name starts with 'n_' or 'num_' is a count
+    (unitless → ``unit: None``), as is one whose last token is a count
+    word ('segments', 'holes', 'teeth', 'n', 'number')."""
+    for name in ("n_holes", "num_ribs", "segments", "holes", "teeth", "n"):
+        entries = state_block_from_params({name: 4.0})
+        assert entries[0]["unit"] is None, name
+
+
+def test_axis_rows_always_carry_mm_unit() -> None:
+    """A W/D/H axis row always stays ``unit: "mm"`` — the axis-name
+    inference never yields deg or None (issue #390 item 4)."""
+    entries = state_block_for_version(
+        {"W": 60.0, "D": 40.0, "H": 30.0},
+        measurement={"x": 60.0, "y": 40.0, "z": 30.0},
+    )
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert len(axis_rows) == 3
+    for row in axis_rows:
+        assert row["unit"] == "mm", row["name"]
+
+
+def test_param_meta_unit_overrides_inference_for_angle() -> None:
+    """An explicit param_meta unit wins over the name-based inference, even
+    for an angle name (issue #390 item 3): meta 'mm' on 'lip_angle' → mm."""
+    entries = state_block_from_params(
+        {"lip_angle": 20.0},
+        param_meta={"lip_angle": {"unit": "mm"}},
+    )
     assert entries[0]["unit"] == "mm"
+
+
+def test_param_meta_unit_overrides_inference_for_count() -> None:
+    """An explicit param_meta unit also wins for a count name (issue #390
+    item 3): meta 'mm' on 'bolt_count' → mm (the override is total)."""
+    entries = state_block_from_params(
+        {"bolt_count": 4.0},
+        param_meta={"bolt_count": {"unit": "mm"}},
+    )
+    assert entries[0]["unit"] == "mm"
+
+
+def test_param_meta_unit_overrides_inference_for_mm_default() -> None:
+    """An explicit param_meta unit wins over the default mm inference too:
+    'rod_bore' with meta 'cm' → 'cm' (issue #390 item 3)."""
+    entries = state_block_from_params(
+        {"rod_bore": 6.0},
+        param_meta={"rod_bore": {"unit": "cm"}},
+    )
+    assert entries[0]["unit"] == "cm"
 
 
 def test_non_numeric_param_carries_no_unit() -> None:

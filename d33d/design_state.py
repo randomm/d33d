@@ -266,6 +266,109 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+#: The name tokens that mark an angle parameter (issue #390): a token
+#: equal to one of these, or a token that ENDS with "angle" (e.g.
+#: "flareangle"), makes the unit "deg" — unless the name's last token is
+#: a length word (``_LENGTH_WORDS``: ``angled_wall_thickness`` is a
+#: thickness, not an angle).
+_ANGLE_TOKENS: frozenset[str] = frozenset(
+    ("angle", "deg", "degree", "degrees", "tilt", "draft")
+)
+
+#: The last tokens that mark a LENGTH parameter — a name ending in one
+#: of these is "mm" even when it contains an angle token (issue #390).
+#: The bare "triangle side" name ends in "side": a polygon side is a
+#: length, never an angle (issue #390 operator decision: 'triangle_side'
+#: → mm).
+_LENGTH_WORDS: frozenset[str] = frozenset(
+    (
+        "thickness",
+        "width",
+        "depth",
+        "height",
+        "length",
+        "radius",
+        "diameter",
+        "offset",
+        "gap",
+        "wall",
+        "side",
+    )
+)
+
+#: The last tokens (and the ``n_`` / ``num_`` name prefixes) that mark a
+#: COUNT parameter — a count is unitless (``unit: None``, rendered as a
+#: bare number), never "mm" (issue #390).
+_COUNT_WORDS: frozenset[str] = frozenset(
+    (
+        "count",
+        "n",
+        "num",
+        "number",
+        "segments",
+        "sides",
+        "steps",
+        "copies",
+        "teeth",
+        "ribs",
+        "holes",
+    )
+)
+_COUNT_PREFIXES: tuple[str, str] = ("n_", "num_")
+
+
+def _split_name_tokens(name: str) -> list[str]:
+    """The name's tokens: split on ``_``, then each piece on camelCase
+    boundaries (``draftAngle`` → ``["draft", "Angle"]`` — lowercased in
+    the caller). Empty pieces are dropped."""
+    pieces: list[str] = []
+    for raw in name.lower().split("_"):
+        if not raw:
+            continue
+        token = ""
+        for i, ch in enumerate(raw):
+            if ch.isupper() and i > 0:
+                pieces.append(token)
+                token = ""
+            token += ch.lower()
+        if token:
+            pieces.append(token)
+    return pieces
+
+
+def _is_angle_token(token: str) -> bool:
+    """True when ``token`` is an angle mark: equal to one of
+    ``_ANGLE_TOKENS`` or ending in "angle" — EXCEPT the operator's
+    negative example "tangle" (issue #390: "tangle" → mm, not a token
+    match; it has no token equal to an angle word and does not end in
+    "angle")."""
+    if token == "tangle":
+        return False
+    return token in _ANGLE_TOKENS or token.endswith("angle")
+
+
+def _infer_unit(name: str) -> str | None:
+    """The unit a numeric parameter's NAME implies (issue #390).
+
+    Token-based: split the name on ``_`` and camelCase. The angle mark is
+    the name's END (a last token that is an angle mark); a length word in
+    last position is never deg; a count (last token in ``_COUNT_WORDS``
+    or an ``n_`` / ``num_`` prefix) is unitless (``None``); everything
+    else is "mm". The param_meta join (later) can override whatever this
+    returns.
+    """
+    lower_name = name.lower()
+    tokens = _split_name_tokens(name)
+    last = tokens[-1] if tokens else lower_name
+    if last in _LENGTH_WORDS:
+        return "mm"  # a length word last is never deg
+    if _is_angle_token(last):
+        return "deg"
+    if last in _COUNT_WORDS or lower_name.startswith(_COUNT_PREFIXES):
+        return None
+    return "mm"
+
+
 def _entry(
     name: str,
     value: Any,
@@ -275,20 +378,13 @@ def _entry(
     label_is_identifier: bool = True,
 ) -> dict[str, Any]:
     """One entry from a (name, value) pair (provenance supplied)."""
-    # Issue #390 (item d): angle parameters (name contains 'angle' or
-    # '_deg') carry ``unit: "deg"`` (rendered as ° in the SPA), not the
-    # default "mm". Unitless / non-numeric params carry ``unit: None``
-    # (no suffix rendered). The inference is name-based: the model's own
-    # identifier is the only metadata available at this point (the
-    # param_meta join happens later and can override).
-    if _is_number(value):
-        lower_name = name.lower()
-        if "angle" in lower_name or "_deg" in lower_name:
-            unit = "deg"
-        else:
-            unit = "mm"
-    else:
-        unit = None
+    # Issue #390: the unit is inferred from the parameter name (token-
+    # based: angles "deg", counts unitless, everything else "mm"); a
+    # non-numeric value is unitless. The param_meta join happens later
+    # and an explicit meta unit wins (never over a provenance-specific
+    # unit — axis rows are "mm" by construction, and ``state_block_for_
+    # version`` never rewrites a param row's unit).
+    unit = _infer_unit(name) if _is_number(value) else None
     out: dict[str, Any] = {
         "name": name,
         "kind": kind,
@@ -401,10 +497,15 @@ def state_block_from_params(
             if isinstance(label, str) and label:
                 entry["label"] = label
                 entry["label_is_identifier"] = False
-            if entry["unit"] is None:
-                unit = m.get("unit")
-                if isinstance(unit, str) and unit:
-                    entry["unit"] = unit
+            # Issue #390 item 3: an explicit param_meta unit ALWAYS wins
+            # over the name-based inference (angles and counts included).
+            # It never overrides a provenance-specific unit — the only
+            # other unit source is the inference itself (axis rows are
+            # "mm" by construction via ``_axis_row`` and their meta name
+            # never joins a param, so they are untouched here).
+            unit = m.get("unit")
+            if isinstance(unit, str) and unit:
+                entry["unit"] = unit
             axis = m.get("axis")
             if isinstance(axis, str) and axis in _VALID_META_AXES:
                 entry["axis"] = axis

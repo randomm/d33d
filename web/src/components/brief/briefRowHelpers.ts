@@ -89,7 +89,9 @@ export function formatValue(
   if (typeof value === "number") {
     if (unit === "deg") return deg(value);
     if (unit === "mm") return mm(value);
-    return value.toFixed(1); // unitless numeric: no suffix
+    // Unitless numeric: bare number, no suffix (issue #390). An integer
+    // renders without a decimal ("6", not "6.0"); a non-integer as-is.
+    return String(value);
   }
   return String(value);
 }
