@@ -489,9 +489,9 @@ def test_shape_names_ending_in_angle_are_mm_not_special_case() -> None:
         entries = state_block_from_params({name: 20.0})
         assert entries[0]["unit"] == "mm", name
     # A real angle token is still a bare set lookup, not a suffix match:
-    assert ds._is_angle_token("angle") is True
+    assert ds._infer_unit("angle") == "deg"
     # And a shape name ending in "angle" stays non-angle:
-    assert ds._is_angle_token("triangle") is False
+    assert ds._infer_unit("triangle") == "mm"
 
 
 def test_count_prefix_names_carry_no_unit() -> None:

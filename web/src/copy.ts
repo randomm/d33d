@@ -53,14 +53,8 @@ export const SIZE_AXIS_WORDS = {
   H: "height",
 } as const;
 
-/** The settled-unit wire token (mm / cm / inch from d33d/part_units.py's
- *  `_CANDIDATE_UNITS`) → the user-facing plural noun for the part-zone note
- *  (issue #390, item 2). The note must read "in millimetres", "in
- *  centimetres", or "in inches" — the bare wire token ("inch") reads "in
- *  inch", a grammar slip. Unknown tokens fall through to the raw value
- *  (the escape hatch, e.g. "custom", is rendered by a DIFFERENT key and
- *  never reaches this map; the fallback is a guard, not an expected path). */
-const UNIT_WORDS: Record<string, string> = {
+/** Unit wire token → user-facing plural noun for the part-zone note (issue #390, item 2). */
+const UNIT_WORDS: Record<"mm" | "cm" | "inch", string> = {
   mm: "millimetres",
   cm: "centimetres",
   inch: "inches",
@@ -224,7 +218,7 @@ export const brief = {
    *  centimetres", or "in inches" (never the bare wire token — issue #390,
    *  item 2). The escape-hatch "custom" and the 3MF / assumed siblings are
    *  separate keys and untouched by this map. */
-  partBroughtNote: (units: string): string =>
+  partBroughtNote: (units: "mm" | "cm" | "inch"): string =>
     `Measured, in ${UNIT_WORDS[units] ?? units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
   /** The part-zone note for an ASSUMED part (issue #350, operator decision
    *  3): the mm reading is assumed, not confirmed — the W/D/H rows carry

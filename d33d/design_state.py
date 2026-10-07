@@ -334,11 +334,6 @@ def _split_name_tokens(name: str) -> list[str]:
     return pieces
 
 
-def _is_angle_token(token: str) -> bool:
-    """True when ``token`` marks an angle: a word in ``_ANGLE_TOKENS``."""
-    return token in _ANGLE_TOKENS
-
-
 def _infer_unit(name: str) -> str | None:
     """The unit a numeric parameter's NAME implies (issue #390).
 
@@ -354,7 +349,7 @@ def _infer_unit(name: str) -> str | None:
     last = tokens[-1] if tokens else lower_name
     if last in _LENGTH_WORDS:
         return "mm"  # a length word last is never deg
-    if _is_angle_token(last):
+    if last in _ANGLE_TOKENS:
         return "deg"
     if last in _COUNT_WORDS or lower_name.startswith(_COUNT_PREFIXES):
         return None

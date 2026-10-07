@@ -317,13 +317,8 @@ def create_projects_router() -> APIRouter:
         repo_path = Path(row["git_repo_path"])
         # Initialise the git repo on disk (the init primitive also creates
         # the slug directory — the DB layer no longer does, issue #390).
-        # On ANY failure (git init's RuntimeError, an OSError from the
-        # directory creation, a subprocess.TimeoutExpired from
-        # ``git init`` timing out, ...) remove BOTH the DB row and the
-        # on-disk directory: leaving the slug dir without a row is exactly
-        # the orphan-dir bug this route used to leave on a failed create.
-        # The detail is FIXED (no ``{e}`` interpolation) so a failure can
-        # never leak a server filesystem path to the client.
+        # On ANY init failure, remove the DB row and the slug dir (no
+        # orphan on disk); the detail is fixed so no filesystem path leaks.
         try:
             init_git_repo(repo_path)
         except Exception:
