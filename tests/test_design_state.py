@@ -479,6 +479,24 @@ def test_length_word_last_token_never_deg() -> None:
         assert entries[0]["unit"] == "mm", name
 
 
+def test_tangle_is_mm_via_not_angle_words_not_special_case() -> None:
+    """'tangle' → mm is carried by the named ``_NOT_ANGLE_WORDS`` set, not
+    by a tangle-only branch in the predicate (issue #390): removing the
+    set (and the ``_ANGLE_TOKENS``-only rule) leaves 'tangle' deg — proof
+    the set is the operative mechanism."""
+    import d33d.design_state as ds
+
+    entries = state_block_from_params({"tangle": 20.0})
+    assert entries[0]["unit"] == "mm"
+    # The set, not a hard-coded token check, is what keeps it mm:
+    assert "tangle" in ds._NOT_ANGLE_WORDS
+    # The suffix rule is the default path: a ``*_angle`` token NOT in the
+    # set is an angle (no tangle-specific branch needed).
+    assert ds._is_angle_token("mould_angle") is True
+    # And a set member ending in "angle" stays non-angle:
+    assert ds._is_angle_token("triangle") is False
+
+
 def test_count_prefix_names_carry_no_unit() -> None:
     """A numeric param whose name starts with 'n_' or 'num_' is a count
     (unitless → ``unit: None``), as is one whose last token is a count

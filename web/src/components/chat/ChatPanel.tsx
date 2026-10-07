@@ -134,14 +134,6 @@ interface ChatPanelProps {
   /** The build envelope (API-reported) for the failure turn's measured
    *  number (issue #124). Absent → no bars, no numbers. */
   envelope?: { x: number; y: number; z: number } | null;
-  /** The version label the failure turn says survived — FROZEN AT CARD
-   *  WRITE TIME (issue #390, operator decision 2026-10-05): each failure
-   *  message carries its own `keptVersion` (the label the shell computed
-   *  when the card was appended), so this panel-level prop is NOT used
-   *  by the failure turn. Retained in the interface so the
-   *  ConversationPane wiring compiles unchanged; the value is ignored —
-   *  the freeze lives on the message, never on the panel. */
-  keptVersion?: string | null;
   /** Issue #352 (operator decision 4): false when the export button is
    *  actually disabled (the part's units are unsettled or a design pass
    *  is in flight) — the failure turn's survived line then omits the
@@ -163,12 +155,9 @@ export function ChatPanel({
   onBesidePhoto,
   versions,
   envelope,
-  // Issue #390: the panel-level `keptVersion` is deliberately NOT
-  // destructured — each failure message carries its own frozen label
-  // (`ChatMessage.keptVersion`), and the live timeline value must not
-  // reach the failure turn. The interface keeps the prop so the
-  // ConversationPane wiring compiles unchanged; it is accepted (and
-  // ignored) here.
+  // Issue #390: there is no panel-level `keptVersion` — each failure
+  // message carries its own frozen label (`ChatMessage.keptVersion`),
+  // and the live timeline value must not reach the failure turn.
   exportable,
   hideComposer,
 }: ChatPanelProps) {

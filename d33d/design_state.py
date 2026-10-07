@@ -266,13 +266,21 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-#: The name tokens that mark an angle parameter (issue #390): a token
-#: equal to one of these, or a token that ENDS with "angle" (e.g.
-#: "flareangle"), makes the unit "deg" — unless the name's last token is
-#: a length word (``_LENGTH_WORDS``: ``angled_wall_thickness`` is a
-#: thickness, not an angle).
+#: The name tokens that mark an angle parameter (issue #390):
+#: ``token == "angle"`` or ``token.endswith("_angle")`` — "tangle"/"triangle"
+#: end in "angle" but are not angle names (they fall through to mm).
 _ANGLE_TOKENS: frozenset[str] = frozenset(
     ("angle", "deg", "degree", "degrees", "tilt", "draft")
+)
+
+# Words that end in "angle" yet name a shape, not an angle (issue #390).
+# The tighter suffix rule above (`token == "angle" or endswith("_angle")`)
+# already sends "tangle"/"triangle"/"rectangle" to mm — this set exists so
+# a future loosening of that rule (back to bare `endswith("angle")`) can
+# be restored without re-deriving the operator's negative examples.
+# "tangle" → mm is asserted by ``test_length_word_last_token_never_deg``.
+_NOT_ANGLE_WORDS: frozenset[str] = frozenset(
+    ("tangle", "triangle", "rectangle", "quadrangle")
 )
 
 #: The last tokens that mark a LENGTH parameter — a name ending in one
@@ -318,33 +326,34 @@ _COUNT_PREFIXES: tuple[str, str] = ("n_", "num_")
 
 
 def _split_name_tokens(name: str) -> list[str]:
-    """The name's tokens: split on ``_``, then each piece on camelCase
-    boundaries (``draftAngle`` → ``["draft", "Angle"]`` — lowercased in
-    the caller). Empty pieces are dropped."""
+    """The name's tokens: split on ``_``, each piece on camelCase
+    boundaries (``draftAngle`` → ``["draft", "angle"]``). Empty dropped."""
     pieces: list[str] = []
-    for raw in name.lower().split("_"):
+    for raw in name.split("_"):
         if not raw:
             continue
         token = ""
         for i, ch in enumerate(raw):
             if ch.isupper() and i > 0:
-                pieces.append(token)
+                pieces.append(token.lower())
                 token = ""
-            token += ch.lower()
+            token += ch
         if token:
-            pieces.append(token)
+            pieces.append(token.lower())
     return pieces
 
 
 def _is_angle_token(token: str) -> bool:
-    """True when ``token`` is an angle mark: equal to one of
-    ``_ANGLE_TOKENS`` or ending in "angle" — EXCEPT the operator's
-    negative example "tangle" (issue #390: "tangle" → mm, not a token
-    match; it has no token equal to an angle word and does not end in
-    "angle")."""
-    if token == "tangle":
+    """True when ``token`` marks an angle: an ``_ANGLE_TOKENS`` word, or
+    a bare ``"angle"``/``*_angle`` suffix — minus ``_NOT_ANGLE_WORDS``
+    (shape names that merely end in "angle")."""
+    if token in _NOT_ANGLE_WORDS:
         return False
-    return token in _ANGLE_TOKENS or token.endswith("angle")
+    return (
+        token in _ANGLE_TOKENS
+        or token == "angle"
+        or token.endswith("_angle")
+    )
 
 
 def _infer_unit(name: str) -> str | None:

@@ -275,6 +275,46 @@ def test_create_failure_git_init_oserror_leaves_no_orphan_dir(
     assert leftover == [], f"orphan slug dir(s) after failed create: {leftover}"
 
 
+def test_create_failure_git_init_timeout_expired_leaves_no_orphan_dir(
+    app_with_projects, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """A failed create where git init times out (subprocess.TimeoutExpired)
+    leaves no DB row, no slug directory, and the error detail leaks NO
+    filesystem path (issue #390: the broad rollback)."""
+    import d33d.projects as projects_mod
+
+    def _boom(repo_dir: Path) -> None:
+        raise subprocess.TimeoutExpired("git", 30)
+
+    monkeypatch.setattr(projects_mod, "init_git_repo", _boom)
+
+    async def _call(client):
+        r = await client.post(
+            "/api/projects", json={"name": "Timeout project"}
+        )
+        return r
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 500
+    detail = r.json()["detail"]
+    # No server path disclosure in the fixed detail.
+    assert "repos" not in detail
+    assert str(tmp_path) not in detail
+    assert "/" not in detail
+
+    async def _db_check(client):
+        return app_with_projects.state.conn.list_projects()
+
+    assert _run_async(app_with_projects, _db_check) == []
+    repos_base = tmp_path / "repos"
+    leftover = (
+        [p for p in repos_base.iterdir() if p.is_dir()]
+        if repos_base.is_dir()
+        else []
+    )
+    assert leftover == [], f"orphan slug dir(s) after failed create: {leftover}"
+
+
 def test_default_git_path_does_not_create_the_slug_dir(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

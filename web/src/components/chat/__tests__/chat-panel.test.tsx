@@ -207,7 +207,6 @@ describe("ChatPanel", () => {
           messages={[cardWrittenBeforeAnyVersion]}
           onSend={vi.fn()}
           versions={[v1, v2]}
-          keptVersion="v2"
         />,
       );
       // No survivor line at all — the panel must not fall back to the
@@ -216,14 +215,13 @@ describe("ChatPanel", () => {
       view.unmount();
 
       // The card that was written when v1 was the latest names v1 — even
-      // though v2 now sits at the head of the live timeline and the
-      // panel's keptVersion prop says v2.
+      // though v2 now sits at the head of the live timeline (the survivor
+      // label is frozen on the message, never derived from the timeline).
       view = render(
         <ChatPanel
           messages={[cardWrittenWhenV1WasLatest]}
           onSend={vi.fn()}
           versions={[v1, v2]}
-          keptVersion="v2"
         />,
       );
       const line = view.getByTestId("failure-turn-survived");

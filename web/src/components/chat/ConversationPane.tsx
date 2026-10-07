@@ -283,9 +283,6 @@ export function ConversationPane({
               onBesidePhoto={onBesidePhoto}
               versions={versions}
               envelope={envelope}
-              keptVersion={
-                versions.length > 0 ? versions[versions.length - 1].name : null
-              }
               exportable={!partUnsettled && !inFlight}
               hideComposer={hideComposer}
             />
