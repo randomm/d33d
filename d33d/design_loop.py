@@ -455,7 +455,6 @@ def best_match_component(
 
 def _bbox_target(
     stated: tuple[float, float, float],
-    bbox: BboxInfo | None,
     part_bbox_mm: tuple[float, float, float] | None,
 ) -> tuple[float, float, float]:
     """The bbox gate's per-axis target for the run (issue #332 sub-issue 3,
@@ -476,14 +475,7 @@ def _bbox_target(
       the shrink direction is the one the floor constrains);
     - no part (``part_bbox_mm is None``) → the stated triple, unchanged —
       the no-part regression anchor, byte-identical gate semantics.
-
-    ``bbox`` is no longer consulted: the old "candidate already matches
-    the part" precondition is subsumed by the per-axis rule (a matching
-    candidate measures itself against the part exactly as before; a
-    divergent, LARGER candidate now measures against the part on the
-    unconfirmed axes instead of falling back to an abstaining (0,0,0) —
-    which is a strict tightening of exactly the bug class #383 fixes,
-    and a no-op for the confirmed axes). """
+    """
     if part_bbox_mm is None:
         return stated
     target: list[float] = []
@@ -535,6 +527,38 @@ def gate_comparison_extents(
         # confirmed axes against the whole-mesh extents.
         extents = (bbox.x, bbox.y, bbox.z)
     return extents
+
+
+def _gate_selection_extents(
+    bbox: BboxInfo,
+    user_triple: tuple[float, ...],
+    target: tuple[float, ...],
+) -> tuple[float, float, float] | None:
+    """The comparison extents the bbox gate ACTUALLY measures (issue #389,
+    extracted from :func:`_bbox_within_tolerance` and
+    ``d33d.design_loop_events._measured_axes`` — the two call sites used
+to each duplicate this selection with slightly different branches).
+
+    - a user-confirmed axis exists → the gate's OWN selection decides the
+      shape (``gate_comparison_extents`` — a full confirmed triple with a
+      component breakdown ranks the best-matching component, issue #100;
+      a partial set compares the whole mesh);
+    - no user-confirmed axis but a FLOOR target is resolved (issue #383
+      part-baseline) → the whole-mesh extents (the gate compared the part's
+      overall extents — a component match is never a well-defined target
+      when the user confirmed nothing);
+    - neither → ``None`` (the gate abstains entirely — no axis confirmed,
+      no floor; the caller records the abstention distinctly).
+
+    ``user_triple`` — the user's OWN confirmed set (zero-filled for
+    unconfirmed axes). ``target`` — the resolved gate target after
+    :func:`_bbox_target` (the part-baseline floor fills unconfirmed axes).
+    """
+    if any(t > 0 for t in user_triple):
+        return gate_comparison_extents(bbox, user_triple)
+    if any(t > 0 for t in target):
+        return (bbox.x, bbox.y, bbox.z)
+    return None
 
 
 def _bbox_within_tolerance(
@@ -601,23 +625,11 @@ def _bbox_within_tolerance(
     # comparison (the floor compares the OVERALL extents, not a
     # per-component match).
     user = tuple(stated) if user_stated is None else tuple(user_stated)
-    if any(t > 0 for t in user):
-        # A user-confirmed axis exists: the gate's own selection decides
-        # the comparison shape (issue #247/#367 — a full confirmed triple
-        # with a component breakdown ranks the best-matching component,
-        # a partial set compares the whole mesh).
-        extents = gate_comparison_extents(bbox, user)
-    else:
-        # No user-confirmed axis (issue #383): the resolved ``stated``
-        # triple is entirely the part-baseline floor — the gate compares
-        # the WHOLE-MESH extents against the part's overall extents (the
-        # user confirmed nothing, so a component match is never a
-        # well-defined target).
-        extents = (bbox.x, bbox.y, bbox.z)
+    extents = _gate_selection_extents(bbox, user, stated)
     if extents is None:
-        # No axis confirmed: the gate abstains (True) — an unmeasurable
-        # gate must not hard-fail every candidate (ticket #91). The
-        # abstention is recorded DISTINCTLY by :func:`score`'s
+        # No axis confirmed AND no floor: the gate abstains (True) — an
+        # unmeasurable gate must not hard-fail every candidate (ticket #91).
+        # The abstention is recorded DISTINCTLY by :func:`score`'s
         # ``bbox_abstained`` field, never a vacuous unmarked pass.
         return True
     for extent, target, user_target in zip(extents, stated, user):
@@ -898,7 +910,7 @@ def score(
     # part's measured extent fills every UNCONFIRMED axis of an import
     # project (the part-baseline floor), else the stated triple (see
     # :func:`_bbox_target`).
-    _bbox_stated = _bbox_target(stated_dims, bbox, part_bbox_mm)
+    _bbox_stated = _bbox_target(stated_dims, part_bbox_mm)
     bits = (
         render.error_class == "ok",
         _views_non_blank(render),

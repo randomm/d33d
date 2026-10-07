@@ -72,6 +72,7 @@ from d33d.design_loop_events import (
 )
 from d33d.design_state import state_block_for_version
 from d33d.part_import import part_public
+from d33d.part_units import USABLE_UNIT_STATUSES
 from d33d.project_git import repo_present
 
 logger = logging.getLogger(__name__)
@@ -449,10 +450,7 @@ def create_versions_router() -> APIRouter:
         # W/D/H axis rows render ``measured``; the mesh is the ground
         # truth, stronger than stated).
         _has_part = project_row.get("part_filename") is not None
-        _part_unsettled = _has_part and project_row.get("part_unit_status") not in (
-            "assumed",
-            "settled",
-        )
+        _part_unsettled = _has_part and project_row.get("part_unit_status") not in USABLE_UNIT_STATUSES
         measurement = latest["bbox"] if latest is not None else None
         if _part_unsettled:
             measurement = None

@@ -36,6 +36,7 @@ from d33d.chat_loop import run_design_loop as chat_loop_run_design_loop
 from d33d.design_frames import PHOTO_MISSING_NOTICE, SAVED_DESIGN_MISSING_REPLY
 from d33d.design_loop_events import photo_storage_signal
 from d33d.dimension_protocol import _is_clean_affirmation
+from d33d.part_units import USABLE_UNIT_STATUSES
 from d33d.photo_upload import photo_upload_route
 from d33d.project_git import (
     init_git_repo,
@@ -469,10 +470,7 @@ def create_projects_router() -> APIRouter:
 
             _part = part_public(row) if row.get("part_filename") else None
             _fill_recut_instruction: str | None = None
-            if _part is not None and _part.get("unit_status") not in (
-                "assumed",
-                "settled",
-            ):
+            if _part is not None and _part.get("unit_status") not in USABLE_UNIT_STATUSES:
                 logger.warning(
                     "chat for project %s: the part's units are unsettled — "
                     "replying with the settle-first notice, no design run",

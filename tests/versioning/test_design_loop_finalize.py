@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging as _logging
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -7830,3 +7831,105 @@ def test_finalize_loop_kwargs_include_part_scale_and_bbox(
     conn.close()
     assert kwargs.get("part_scale") == 1.0
     assert tuple(kwargs.get("part_bbox_mm")) == (20.0, 20.0, 20.0)
+
+
+def test_chat_adapter_warns_when_part_envelope_unavailable(
+    app_with_versions, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Issue #389 (item 4): the chat adapter's part-less degrade is no
+    longer silent — a project that HAS a part (``part_filename`` set,
+    units assumed/settled) whose ``part_envelope_with_bbox`` read degrades
+    to ``None`` (missing v1 row / corrupt v1 bbox) logs exactly ONE
+    warning naming the project id (and never a path), so the operator can
+    see the loop ran part-less. A part-less project (no ``part_filename``)
+    must stay silent — the warning is a degrade, not a normal state."""
+    import d33d.db as db_mod
+    from tests.versioning.helpers import create_project as _create_project
+
+    def _run(pid: int) -> list:
+        async def _call(client):
+            app_with_versions.state.run_design_loop = lambda **_kw: _StubResult(
+                "pass", {"W": 10}
+            )
+            source = run_design_loop_with_events(
+                app_with_versions,
+                pid,
+                user_message="hi",
+                stated_dims=None,
+                chat_history=(),
+                photo="data:image/png;base64,x",
+                request_text="hi",
+            )
+            frames = []
+            async for event, data in source:
+                frames.append((event, data))
+                if event in ("done", "error"):
+                    break
+            return frames
+
+        return run_async(app_with_versions, _call)
+
+    def _part_warnings() -> list:
+        return [
+            r
+            for r in caplog.records
+            if r.levelno >= _logging.WARNING
+            and "v1 bbox could not be read" in r.getMessage()
+        ]
+
+    # --- part present (assumed) but the v1 row missing -> ONE warning ---
+    with caplog.at_level("WARNING"):
+        proj = run_async(app_with_versions, _create_project)
+        pid = proj["id"]
+        conn = db_mod.connect(app_with_versions.state.db_path)
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=? WHERE id=?",
+            ("part.stl", "stl", "assumed", 1.0, pid),
+        )
+        conn.commit()
+        conn.close()
+        frames = _run(pid)
+        assert "done" in [f[0] for f in frames], frames
+        warns = _part_warnings()
+        assert len(warns) == 1, (
+            f"expected exactly one part-envelope warning, got "
+            f"{[r.getMessage() for r in warns]}"
+        )
+        assert str(pid) in warns[0].getMessage()
+        # the message names the project id, never a filesystem path
+        assert "part.stl" not in warns[0].getMessage()
+
+    # --- part present (settled) but the v1 row missing -> ONE warning ---
+    # (The "corrupt v1 bbox" case requires task-c's corrupt-JSON degrade fix
+    # in versions.py; we can only trigger the missing-v1-row case here.)
+    with caplog.at_level("WARNING"):
+        proj = run_async(app_with_versions, _create_project)
+        pid = proj["id"]
+        conn = db_mod.connect(app_with_versions.state.db_path)
+        conn.execute(
+            "UPDATE projects SET part_filename=?, part_format=?, "
+            "part_unit_status=?, part_scale=? WHERE id=?",
+            ("part.stl", "stl", "settled", 1.0, pid),
+        )
+        conn.commit()
+        conn.close()
+        # clear records from the prior block so we only see THIS block's warns
+        caplog.records.clear()
+        frames = _run(pid)
+        assert "done" in [f[0] for f in frames], frames
+        warns = _part_warnings()
+        assert len(warns) == 1, (
+            f"expected exactly one part-envelope warning, got "
+            f"{[r.getMessage() for r in warns]}"
+        )
+        assert str(pid) in warns[0].getMessage()
+
+    # --- part-less project -> NO warning (a normal state, not a degrade) ---
+    with caplog.at_level("WARNING"):
+        proj = run_async(app_with_versions, _create_project)
+        pid = proj["id"]
+        caplog.records.clear()
+        frames = _run(pid)
+        assert "done" in [f[0] for f in frames], frames
+        assert _part_warnings() == [], "part-less project must not warn"
