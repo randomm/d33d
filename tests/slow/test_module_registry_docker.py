@@ -1,5 +1,6 @@
 """Slow-layer test: the full named-module registry orchestrator against
-the REAL pinned OpenSCAD image (``docker.io/openscad/openscad:trixie``).
+the REAL pinned OpenSCAD image (digest-pinned, see
+``d33d.module_registry.OPENSCAD_IMAGE_DIGEST``).
 
 Drives ``build_registry_glb`` end to end: parses a 3-module ``.scad``
 fixture, runs three ``!``-masked ``openscad`` invocations via the SAME
