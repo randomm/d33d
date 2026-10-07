@@ -11,7 +11,7 @@ failures.
 This test file pins:
 
 * the superset is a proper superset of #5's ``FAILURE_CLASSES`` (the
-  17 entries), plus exactly the two outcome classes
+  19 entries), plus exactly the two outcome classes
 * ``map_to_design_classes`` projects the superset back to #5's
   vocabulary (the two outcome classes collapse to
   ``unclassified_syntax_error``; everything else maps to itself)
@@ -57,7 +57,7 @@ E5 = {
 
 #: The 19 entries of ``failure_classes.FAILURE_CLASSES`` (13 + 5 + 1
 #: fallback). Issue #383 added ``unknown_variable``.
-E17 = E11 | E5 | {"unclassified_syntax_error", "axis_params_mismatch", "unknown_variable"}  # 13 + 5 + 1 = 19
+E19 = E11 | E5 | {"unclassified_syntax_error", "axis_params_mismatch", "unknown_variable"}  # 13 + 5 + 1 = 19
 
 #: The two eval outcome classes.
 OUTCOMES = {"graceful_refusal", "clearance_applied"}
@@ -69,7 +69,7 @@ OUTCOMES = {"graceful_refusal", "clearance_applied"}
 
 
 def test_superset_contains_all_19_failure_classes():
-    assert E17.issubset(eg.EVAL_FAILURE_CLASSES)
+    assert E19.issubset(eg.EVAL_FAILURE_CLASSES)
 
 
 def test_superset_contains_both_outcome_classes():
@@ -79,12 +79,12 @@ def test_superset_contains_both_outcome_classes():
 def test_superset_is_exactly_21_classes():
     """19 (failure_classes) + 2 (outcomes) = 21. No extras, no forks."""
     assert len(eg.EVAL_FAILURE_CLASSES) == 21
-    assert eg.EVAL_FAILURE_CLASSES == E17 | OUTCOMES
+    assert eg.EVAL_FAILURE_CLASSES == E19 | OUTCOMES
 
 
 def test_design_loop_classes_are_the_19():
-    """``DESIGN_LOOP_CLASSES`` is the #5 vocabulary — the 18 entries of
-    ``failure_classes.FAILURE_CLASSES`` (the 12 named LLM classes +
+    """``DESIGN_LOOP_CLASSES`` is the #5 vocabulary — the 19 entries of
+    ``failure_classes.FAILURE_CLASSES`` (the 13 named LLM classes +
     5 non-repairable + 1 fallback)."""
     assert eg.DESIGN_LOOP_CLASSES == fc.FAILURE_CLASSES
     assert len(eg.DESIGN_LOOP_CLASSES) == 19
@@ -106,9 +106,9 @@ def test_outcome_classes_disjoint_from_design_loop():
 # ---------------------------------------------------------------------------
 
 
-def test_map_is_identity_for_all_17():
-    mapping = eg.map_to_design_classes(set(E17))
-    for c in E17:
+def test_map_is_identity_for_all_19():
+    mapping = eg.map_to_design_classes(set(E19))
+    for c in E19:
         assert mapping[c] == c
 
 
@@ -148,7 +148,7 @@ def test_gate1_tags_all_19_except_geometrically_wrong():
     "compiles cleanly but geometrically wrong" outcome)."""
     taggable = eg.GATE_TAGGABLE_CLASSES["compile"]
     assert "geometrically_wrong" not in taggable
-    assert (E17 - {"geometrically_wrong"}).issubset(taggable)
+    assert (E19 - {"geometrically_wrong"}).issubset(taggable)
     assert len(taggable) == 18
 
 
@@ -156,7 +156,7 @@ def test_gates_2_3_5_tag_all_19_except_geometrically_wrong():
     for gate in ("stl_export", "watertight", "volume"):
         taggable = eg.GATE_TAGGABLE_CLASSES[gate]
         assert "geometrically_wrong" not in taggable
-        assert (E17 - {"geometrically_wrong"}).issubset(taggable)
+        assert (E19 - {"geometrically_wrong"}).issubset(taggable)
         assert len(taggable) == 18
 
 
@@ -166,7 +166,7 @@ def test_gate4_tags_geometrically_wrong():
     proxy for the vision-only class."""
     taggable = eg.GATE_TAGGABLE_CLASSES["bbox"]
     assert "geometrically_wrong" in taggable
-    assert (E17 - {"geometrically_wrong"}).issubset(taggable)
+    assert (E19 - {"geometrically_wrong"}).issubset(taggable)
     assert len(taggable) == 19
 
 

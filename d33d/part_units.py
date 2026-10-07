@@ -40,6 +40,13 @@ _CANDIDATE_UNITS = ("inch", "cm", "mm")
 #: Axis lexicon → bbox component index (W→x, D→y, H→z).
 _AXIS_TO_INDEX = {"W": 0, "D": 1, "H": 2}
 
+#: The unit statuses under which a part's scale is usable (the mm-scale /
+#: measurement / export paths): ``assumed`` (a plausible STL read) and
+#: ``settled`` (a user-settled unit or mm axis). Everything else
+#: (``unsettled``) means the file-unit values are NOT mm — any consumer
+#: that needs mm must refuse or withhold until the units are settled.
+USABLE_UNIT_STATUSES: frozenset[str] = frozenset({"assumed", "settled"})
+
 
 def mm_factor_for_unit(unit: Any) -> float:
     """The file-units→mm factor for a declared unit.
@@ -139,6 +146,7 @@ def classify_stl_units(
 
 
 __all__ = [
+    "USABLE_UNIT_STATUSES",
     "axis_to_index",
     "classify_stl_units",
     "mm_factor_for_unit",

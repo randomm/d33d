@@ -109,6 +109,7 @@ from d33d.module_registry import (
     TooManyCallSitesError,
     build_registry_glb,
 )
+from d33d.part_units import USABLE_UNIT_STATUSES
 from d33d.projects import create_projects_router
 from d33d.render_worker import RENDER_WORKER_IMAGE, render_for_design_loop
 from d33d.security import credentials as cred
@@ -1163,8 +1164,9 @@ def create_app(
         # ``error_class`` to a sentence — ``units_unsettled`` is a new
         # class with its own copy entry). A settled import with no render
         # keeps today's render-missing 409 until sub-issue 2.
-        if row.get("part_filename") and row.get("part_unit_status") not in (
-            "assumed", "settled"
+        if (
+            row.get("part_filename")
+            and row.get("part_unit_status") not in USABLE_UNIT_STATUSES
         ):
             return JSONResponse(
                 status_code=409,

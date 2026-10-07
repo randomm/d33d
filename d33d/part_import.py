@@ -74,6 +74,7 @@ from d33d.part_mesh import (
     validate_part_path,
 )
 from d33d.part_units import (
+    USABLE_UNIT_STATUSES,
     axis_to_index,
     classify_stl_units,
     mm_factor_for_unit,
@@ -543,7 +544,7 @@ def create_part_router() -> APIRouter:
         # alone — no parse / scale / export / hash of the payload.
         part_format = row.get("part_format") or "stl"
         scale: float | None = None
-        if row.get("part_unit_status") in ("assumed", "settled"):
+        if row.get("part_unit_status") in USABLE_UNIT_STATUSES:
             candidate = row.get("part_scale")
             if isinstance(candidate, (int, float)) and not isinstance(candidate, bool) and candidate > 0:
                 scale = float(candidate)

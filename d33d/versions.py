@@ -61,6 +61,32 @@ from d33d.project_git import sanitize_commit_message as _sanitize_commit_message
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# JSON column helpers
+# ---------------------------------------------------------------------------
+
+
+def _loads_json(blob: str | None, column: str, default: Any) -> Any:
+    """Decode a stored JSON column, degrading a CORRUPT (unparseable) blob
+    to ``default`` instead of raising (issue #389): a corrupt column is no
+    evidence — the row degrades to the honest absent value (never a 500),
+    and the log line names the column (the blob itself is never logged).
+    ``None``/empty stays ``default`` (a NULL is the honest absent value,
+    not a decode failure)."""
+    if not blob:
+        return default
+    try:
+        return json.loads(blob)
+    except (ValueError, TypeError) as e:
+        logger.warning(
+            "versions column %r failed to decode (degrades to %r): %s",
+            column,
+            default,
+            e,
+        )
+        return default
+
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
@@ -1564,35 +1590,42 @@ class VersionService:
     @staticmethod
     def _row_to_version(row) -> dict[str, Any]:
         out = dict(row)
-        out["params"] = json.loads(out.get("params") or "{}")
-        fork = out.get("forked_from")
-        out["forked_from"] = tuple(json.loads(fork)) if fork else None
+        # ``params``: NULL/empty degrades to ``{}`` (an absent snapshot is
+        # an empty snapshot, never a 500 — issue #389: a corrupt blob also
+        # degrades to ``{}`` with a warning, never a 500).
+        out["params"] = _loads_json(out.get("params"), "params", {})
+        # ``forked_from``: NULL/empty stays ``None`` (no fork provenance);
+        # a corrupt blob degrades to ``None`` with a warning.
+        forked = _loads_json(out.get("forked_from"), "forked_from", None)
+        out["forked_from"] = tuple(forked) if forked else None
         out["pinned"] = bool(out.get("pinned"))
         out["archived"] = bool(out.get("archived"))
         # ``bbox``: NULL (no measurement — pre-change rows, or a version
         # whose measurement was not obtainable) maps to ``None``, NEVER
         # to a zero triple (issue #91: a fabricated (0,0,0) once made a
-        # gate unsatisfiable — an absent measurement abstains).
-        raw_bbox = out.get("bbox")
-        out["bbox"] = json.loads(raw_bbox) if raw_bbox else None
+        # gate unsatisfiable — an absent measurement abstains). A corrupt
+        # blob degrades to ``None`` with a warning (issue #389).
+        out["bbox"] = _loads_json(out.get("bbox"), "bbox", None)
         # ``stated_dims`` (issue #246): NULL (pre-change rows, or a run
         # where the user stated no axes) maps to ``None`` — never a
         # fabricated ``{}`` that a consumer could misread (an absent
-        # statement abstains).
-        raw_stated = out.get("stated_dims")
-        out["stated_dims"] = json.loads(raw_stated) if raw_stated else None
+        # statement abstains). A corrupt blob degrades to ``None`` with
+        # a warning (issue #389).
+        out["stated_dims"] = _loads_json(out.get("stated_dims"), "stated_dims", None)
         # ``param_meta`` (issue #248): NULL (legacy rows, or a model that
         # emitted no parameters array) maps to ``None`` — never a
         # fabricated ``{}`` (an absent metadata set degrades the design
         # state block to identifier labels for every entry, honestly).
-        raw_meta = out.get("param_meta")
-        out["param_meta"] = json.loads(raw_meta) if raw_meta else None
+        # A corrupt blob degrades to ``None`` with a warning (issue #389).
+        out["param_meta"] = _loads_json(out.get("param_meta"), "param_meta", None)
         # ``confirmed_params`` (issue #250): NULL (no confirmed params —
         # every pre-change row) maps to ``None``, never a fabricated ``{}``
         # (an absent set means "nothing was confirmed" — the design-state
-        # block reads that as: no rule (b) evidence).
-        raw_confirmed = out.get("confirmed_params")
-        out["confirmed_params"] = json.loads(raw_confirmed) if raw_confirmed else None
+        # block reads that as: no rule (b) evidence). A corrupt blob
+        # degrades to ``None`` with a warning (issue #389).
+        out["confirmed_params"] = _loads_json(
+            out.get("confirmed_params"), "confirmed_params", None
+        )
         # ``render_artifact_dir``: NULL (pre-#163 rows, or a version
         # created without a recorded render) maps to ``None``, NEVER to a
         # sentinel or empty string (issue #163: an absent render record

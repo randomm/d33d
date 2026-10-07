@@ -37,6 +37,7 @@ from d33d.fill_recut import (
     own_feature_names,
 )
 from d33d.part_holes import HOLE_NOUNS, no_hole_reply, part_has_hole_evidence
+from d33d.part_units import USABLE_UNIT_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +178,7 @@ def fill_recut_region_edit(
         from d33d.part_http import part_public
 
         part = part_public(row) if row.get("part_filename") else None
-    if part is None or part.get("unit_status") not in ("assumed", "settled"):
+    if part is None or part.get("unit_status") not in USABLE_UNIT_STATUSES:
         return None
 
     versions = app.state.versions

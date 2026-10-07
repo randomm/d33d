@@ -47,7 +47,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from d33d.render_diagnostics import UNKNOWN_VARIABLE_RE as _RE_UNKNOWN_VARIABLE
+from d33d.render_diagnostics import unknown_variables as _unknown_variables
 
 # ---------------------------------------------------------------------------
 # Failure class enum
@@ -392,7 +392,7 @@ def _classify_syntax_error(stderr: str) -> OpenSCADFailureClass:
     #     silently sized geometry to nothing. Distinct named class so the
     #     repair instruction can name the variable(s) directly (the
     #     generic fallback cannot).
-    if _RE_UNKNOWN_VARIABLE.search(stderr):
+    if _unknown_variables(stderr):
         return "unknown_variable"
     # 11. Fallback
     return "unclassified_syntax_error"

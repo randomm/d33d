@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import Request
 
 from d33d import db as db_mod
+from d33d.part_units import USABLE_UNIT_STATUSES
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +101,7 @@ def part_envelope(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None or not row.get("part_filename"):
         return None
     status = row.get("part_unit_status")
-    if status not in ("assumed", "settled"):
+    if status not in USABLE_UNIT_STATUSES:
         return None
     scale = row.get("part_scale")
     if not isinstance(scale, (int, float)) or isinstance(scale, bool) or scale <= 0:
@@ -148,10 +149,7 @@ def part_envelope_with_bbox(
     if raw is None:
         return env
     if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except ValueError:
-            return env
+        raw = _loads_or_none(raw, "bbox")
     if not isinstance(raw, dict):
         return env
     axes = [raw.get(name) for name in ("x", "y", "z")]
@@ -184,7 +182,7 @@ def part_bbox_mm(
     """
     if row is None or conn is None or not row.get("part_filename"):
         return None
-    if row.get("part_unit_status") not in ("assumed", "settled"):
+    if row.get("part_unit_status") not in USABLE_UNIT_STATUSES:
         return None
     env = part_envelope_with_bbox(row, conn)
     if env is None or env["bbox_mm"] is None:
@@ -375,7 +373,7 @@ def resolve_part_paths(
         row is None
         or conn is None
         or not row.get("part_filename")
-        or row.get("part_unit_status") not in ("assumed", "settled")
+        or row.get("part_unit_status") not in USABLE_UNIT_STATUSES
         or not row.get("git_repo_path")
     ):
         return None, repo_dir

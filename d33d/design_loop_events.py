@@ -45,7 +45,7 @@ from d33d.design_loop import (
     RENDERER_IMAGE_STALE,
     BboxInfo,
     _bbox_target,
-    gate_comparison_extents,
+    _gate_selection_extents,
 )
 from d33d.render_worker import VIEWS, RenderResult
 
@@ -811,17 +811,14 @@ def _measured_axes(
     card), or ``None`` when the field is omitted (omit-not-null, the
     frame policy).
 
-    Mirrors the gate's OWN selection: the gate compares against
-    ``_bbox_target`` — the user's confirmed triple, which for an import
-    project (issue #332) switches to the part's own extent
-    (``part_bbox_mm``) only when the candidate's bbox matches the part
-    within tolerance — and in that case the gate PASSES, so this field
-    never runs. This field routes the resolved target THROUGH
-    ``d33d.design_loop.gate_comparison_extents`` — the single selection
-    definition the gate itself calls — so the gate and this frame can
-    never disagree: a FULL positive (W, D, H) target with a component
-    breakdown → the BEST-MATCHING component's extents (issue #100);
-    a PARTIAL target (or no breakdown) → the whole-mesh extents.
+    Mirrors the gate's OWN selection (issue #389: the selection is now
+    shared with the gate via :func:`d33d.design_loop._gate_selection_` ``extents``):
+    a user-confirmed axis → the gate's own shape (a FULL positive
+    (W, D, H) target with a component breakdown → the BEST-MATCHING
+    component's extents, issue #100; a PARTIAL target → the whole-mesh
+    extents); a floor-only target (issue #383 part-baseline, no user
+    axis confirmed) → the whole-mesh extents; neither → ``None`` (the
+    gate abstained — this field is omitted).
 
     Omitted (``None``) when: the failing gate is not the bbox gate; the
     best candidate carries no ``BboxInfo`` (the pre-flight placeholder);
@@ -868,24 +865,13 @@ def _measured_axes(
             else (0.0, 0.0, 0.0)
         ),
     )[0]
-    target = _bbox_target(triple, bbox, part_bbox_mm)
-    # The gate's own selection, verbatim: route the resolved target
-    # through :func:`gate_comparison_extents` — the same call the gate
-    # makes (``_bbox_within_tolerance``), the single definition of the
-    # component vs whole-mesh decision (issue #367 lens review). Issue
-    # #383: the USER's OWN confirmed triple (``triple``) selects the
-    # comparison shape (a user-confirmed full triple ranks components;
-    # the floor-filled pure-import case keeps the whole-mesh extents).
-    # When no user axis is confirmed but a floor target IS resolved
-    # (the part-baseline floor, issue #383), the gate compared the
-    # whole-mesh extents — emit them (the gate genuinely measured
-    # something; omitting the field would hide the comparison).
-    if any(t > 0 for t in triple):
-        extents = gate_comparison_extents(bbox, triple)
-    elif any(t > 0 for t in target):
-        extents = (bbox.x, bbox.y, bbox.z)
-    else:
-        extents = None
+    target = _bbox_target(triple, part_bbox_mm)
+    # The gate's own selection, via the shared helper (issue #389):
+    # a user-confirmed axis → the gate's own shape (component vs whole
+    # mesh); a floor-only target (issue #383) → the whole-mesh extents;
+    # neither → None (the gate abstained — omit, never emit a vacuous
+    # measurement).
+    extents = _gate_selection_extents(bbox, triple, target)
     if extents is None:
         # No axis confirmed AND no floor (the gate abstained — it cannot
         # fail here either): omit, never emit a vacuous measurement.
@@ -1905,6 +1891,26 @@ async def run_design_loop_with_events(
             kwargs["part_scale"] = part_env["scale"]
             if part_env.get("bbox_mm") is not None:
                 kwargs["part_bbox_mm"] = part_env["bbox_mm"]
+            elif row.get("part_filename"):
+                # Issue #389 (item 4) — the part-less DEGRADE is no longer
+                # silent: the project HAS a part (``part_filename`` set,
+                # units assumed/settled — ``part_envelope`` filters the
+                # unsettled), but the v1 row's bbox could not be resolved
+                # (a missing v1 row or a corrupt v1 bbox) and the loop
+                # runs WITHOUT the part-baseline bbox. The existing #356
+                # photo-missing warning below is the model: one WARNING
+                # naming the project id (never a path — never the part's
+                # or the project's file paths), so the operator can see
+                # the import project's gate ran without the part baseline.
+                # A part-LESS project (``part_filename`` NULL) stays
+                # silent — that is a normal state, not a degrade.
+                logger.warning(
+                    "design loop for project %s: the part's v1 bbox could "
+                    "not be read (missing v1 row or corrupt v1 bbox) — "
+                    "the design loop runs without the part-baseline bbox "
+                    "(no part_bbox_mm)",
+                    project_id,
+                )
 
     # Issue #386 (final, 2026-10-05) — the through-hole check's BASELINE.
     # Three cases (end to end: design_loop_events → design_loop):
