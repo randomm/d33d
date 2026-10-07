@@ -116,6 +116,15 @@ export const brief = {
     return `You asked for ${mm(statedMm)}. What came out measures ${mm(measuredMm)} — ${mm(delta)} ${direction}, which is outside tolerance. The measured number is the one shown, because it is the one that will print.`;
   },
 
+  /** The COLLAPSED cell for a `disagrees` row (issue #385): both numbers
+   *  visible at a glance — the stated one first (what the user or model
+   *  asked for), then the measured one (what the model actually is). The
+   *  expanded sentence (`disagreement` / `disagreementModel`) is separate
+   *  and stays as-is. Only called when BOTH numbers are established — a
+   *  row missing either falls back to its single established number. */
+  disagreesInline: (statedMm: number, measuredMm: number): string =>
+    `${mm(statedMm)} · measures ${mm(measuredMm)}`,
+
   /** Shown on a `disagrees` row the MODEL caused (issue #264):
    *  `disagrees_source === "model"` — the value nobody stated, the model
    *  picked it, and the measurement contradicts it. Never "you asked

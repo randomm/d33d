@@ -150,7 +150,18 @@ export function BriefRow({
       </button>
     );
   } else {
-    const formatted = formatValue(primaryValue(entry));
+    // A `disagrees` row shows BOTH numbers collapsed (issue #385):
+    // stated first, then measured, via `copy.brief.disagreesInline` —
+    // the stated value is never relegated to the expanded sentence.
+    // Only when BOTH numbers are established; a missing one falls back
+    // to the single established number (never an invented 0).
+    const disagreesInline =
+      entry.provenance === "disagrees" &&
+      typeof entry.stated_value === "number" &&
+      typeof entry.value === "number"
+        ? copy.brief.disagreesInline(entry.stated_value, entry.value)
+        : null;
+    const formatted = disagreesInline ?? formatValue(primaryValue(entry));
     // `null` must never reach the number cell — the unknown branch above
     // is the only path that produces it, and a `?? 0` here would
     // re-introduce issue #91's null→0 defect (the W9 contract assertion

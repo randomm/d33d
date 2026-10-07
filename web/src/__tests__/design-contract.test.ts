@@ -1545,6 +1545,24 @@ describe("design contract", () => {
 
   /* --------------------------------------------------------------- W264 */
 
+  it("the collapsed disagrees cell copy lives in the deck: stated first, then measured (issue #385)", () => {
+    // One new key — `copy.brief.disagreesInline(stated, measured)` —
+    // renders "{stated} · measures {measured}", both numbers through the
+    // mm() narrow-no-break formator. The expanded sentences
+    // (`disagreement` / `disagreementModel`) stay as-is; this key is
+    // the collapsed-cell surface only.
+    expect(copy.brief.disagreesInline(38, 37.8)).toBe(
+      "38.0\u202Fmm \u00B7 measures 37.8\u202Fmm",
+    );
+    expect(copy.brief.disagreesInline(40, 43.8)).toBe(
+      "40.0\u202Fmm \u00B7 measures 43.8\u202Fmm",
+    );
+    // The stated number is never the second one — the order is pinned,
+    // not just the presence of both numbers.
+    const statedFirst = copy.brief.disagreesInline(40, 43.8);
+    expect(statedFirst.indexOf("40.0")).toBeLessThan(statedFirst.indexOf("43.8"));
+  });
+
   it("the model-source disagreement copy lives in the deck and never names the user as the source (issue #264)", () => {
     // Issue #264: a `disagrees` row caused by the MODEL (an assumed param
     // the measurement contradicts) uses a distinct sentence from the
@@ -1597,10 +1615,14 @@ describe("design contract", () => {
     );
     const row = container.querySelector("[data-testid='brief-row-spacer_width']");
     expect(row, "the model-source disagrees row must be present").not.toBeNull();
-    // The measured number is the primary value cell.
+    // Both numbers in the collapsed cell — stated (the model's 40) first,
+    // then measured (43.8), in the mono face (issue #385). Neither number
+    // is hidden behind the expand.
     const valueCell = row?.querySelector("[data-testid='brief-value']");
-    expect(valueCell?.textContent).toBe("43.8\u202Fmm");
-    expect(valueCell?.textContent).not.toContain("40.0");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(40, 43.8));
+    expect(valueCell?.textContent).toContain("40.0");
+    expect(valueCell?.textContent).toContain("43.8");
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
     // The mark is the blocked token — ochre, never the marker colour.
     const markStyle = (row?.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
     expect(markStyle).toContain("--color-blocked");
@@ -1621,7 +1643,9 @@ describe("design contract", () => {
   it('the user-source disagrees row keeps today\u2019s copy when disagrees_source is absent or "user" (issue #264)', () => {
     // Backward compatibility: legacy entries carry no `disagrees_source`,
     // and the user-stated case carries "user" — both must render the
-    // existing `disagreement` sentence unchanged.
+    // existing `disagreement` sentence unchanged. The collapsed cell
+    // shows BOTH numbers, stated first (issue #385), regardless of the
+    // `disagrees_source` field.
     const legacy: import("../lib/api").DesignStateEntry = {
       name: "wall_gap",
       kind: "param",
@@ -1639,6 +1663,13 @@ describe("design contract", () => {
         entries: [legacy],
       }),
     );
+    // Both numbers collapsed — stated 38 first, measured 37.8 second.
+    const valueCell = container
+      .querySelector("[data-testid='brief-row-wall_gap']")
+      ?.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(38, 37.8));
+    expect(valueCell?.textContent).toContain("38.0");
+    expect(valueCell?.textContent).toContain("37.8");
     const inner = container
       .querySelector("[data-testid='brief-row-wall_gap']")
       ?.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;

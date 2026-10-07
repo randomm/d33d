@@ -129,7 +129,7 @@ describe("Brief — provenance states", () => {
     expect(onAsk).toHaveBeenCalledWith("wall_gap");
   });
 
-  it("a disagreeing parameter renders the measured value and names the stated one", () => {
+  it("a disagreeing parameter renders BOTH numbers collapsed — stated first, then measured (issue #385)", () => {
     render(
       <Brief
         {...baseProps}
@@ -137,11 +137,14 @@ describe("Brief — provenance states", () => {
       />,
     );
     const row = screen.getByTestId("brief-row-wall_gap");
-    // The measured value is the PRIMARY (the value cell).
+    // The collapsed cell shows stated first, then measured (issue #385),
+    // both in the mono face — the stated number is no longer relegated
+    // to the expanded sentence only.
     const valueCell = row.querySelector("[data-testid='brief-value']");
-    expect(valueCell?.textContent).toBe("37.8\u202Fmm");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(38.0, 37.8));
+    expect(valueCell?.textContent).toContain("38.0");
     expect(valueCell?.textContent).toContain("37.8");
-    expect(valueCell?.textContent).not.toContain("38.0");
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
     // The stated one appears in the disagreement sentence (expanded row).
     expect(screen.queryByTestId("brief-disagreement")).toBeNull();
     // The expand handler sits on the row's inner flex div (label + mark +
@@ -154,7 +157,7 @@ describe("Brief — provenance states", () => {
     expect(sentence.textContent).toContain(copy.brief.disagreement(38.0, 37.8));
   });
 
-  it("a model-source disagreeing parameter renders the measured value and the model sentence, never 'You asked for' (issue #264)", () => {
+  it("a model-source disagreeing parameter renders BOTH numbers collapsed and the model sentence, never 'You asked for' (issue #264)", () => {
     // Issue #264: an assumed axis param the measurement contradicts renders
     // the MODEL-source copy — the label named, the model's value first, the
     // measured one second, and never the user-source phrasing (the user
@@ -168,11 +171,12 @@ describe("Brief — provenance states", () => {
       />,
     );
     const row = screen.getByTestId("brief-row-spacer_width");
-    // The measured value is the PRIMARY (the value cell); the model's 40
-    // never appears as if it were the printed size.
+    // The collapsed cell shows BOTH numbers — the model's 40 first (stated
+    // position), the measured 43.8 second (issue #385).
     const valueCell = row.querySelector("[data-testid='brief-value']");
-    expect(valueCell?.textContent).toBe("43.8\u202Fmm");
-    expect(valueCell?.textContent).not.toContain("40.0");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(40, 43.8));
+    expect(valueCell?.textContent).toContain("40.0");
+    expect(valueCell?.textContent).toContain("43.8");
     // The mark: the blocked token, never the #FF3300 marker colour.
     const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
     expect(markStyle).toContain("--color-blocked");
@@ -198,9 +202,11 @@ describe("Brief — provenance states", () => {
       <Brief {...baseProps} entries={[disagreesUser("spacer_width", "Spacer width", 40, 43.8)]} />,
     );
     const row = screen.getByTestId("brief-row-spacer_width");
-    // The measured value is the PRIMARY (the number that will print).
+    // The collapsed cell shows BOTH numbers — stated 40 first, measured
+    // 43.8 second (issue #385), in the mono face.
     const valueCell = row.querySelector("[data-testid='brief-value']");
-    expect(valueCell?.textContent).toBe("43.8\u202fmm");
+    expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(40, 43.8));
+    expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
     // The sentence is hidden until expanded.
     expect(screen.queryByTestId("brief-disagreement")).toBeNull();
     const inner = row.querySelector("[data-testid='brief-value']")?.parentElement as HTMLElement;
@@ -213,6 +219,54 @@ describe("Brief — provenance states", () => {
     // Never the model phrasing (the user DID give the value here).
     expect(sentence.textContent).not.toContain("I set");
     expect(sentence.textContent).toContain("You asked for");
+  });
+
+  it("the D-lid four disagreeing rows (QA 2026-10-04) render stated-first with both numbers collapsed, both in mono, marks per source (issue #385)", () => {
+    // The lid regression fixture from QA 2026-10-04 (REVIEW.md §5):
+    // four rows, all provenance "disagrees", that read as plain measured
+    // values when the stated number is hidden. The box rows are
+    // user-source (the user stated the box's inside dimensions); rim_drop
+    // and skirt_height are model-source WITHOUT disagrees_major (small,
+    // model-only differences — the quiet mark, per QA 2026-10-05). Every
+    // collapsed cell shows stated first, then measured, both in the mono
+    // face.
+    const entries: DesignStateEntry[] = [
+      { ...disagreesUser("box_inner_width", "Box inner width", 60, 55) },
+      { ...disagreesUser("box_inner_depth", "Box inner depth", 45, 40) },
+      disagreesModel("rim_drop", "Rim drop", 2, 4),
+      disagreesModel("skirt_height", "Skirt height", 5, 4),
+    ];
+    render(<Brief {...baseProps} entries={entries} />);
+    const checks: Array<[string, number, number]> = [
+      ["brief-row-box_inner_width", 60, 55],
+      ["brief-row-box_inner_depth", 45, 40],
+      ["brief-row-rim_drop", 2, 4],
+      ["brief-row-skirt_height", 5, 4],
+    ];
+    for (const [testId, statedMm, measuredMm] of checks) {
+      const row = screen.getByTestId(testId);
+      // Both numbers, stated first then measured — e.g. "60.0 mm · measures 55.0 mm".
+      const valueCell = row.querySelector("[data-testid='brief-value']");
+      expect(valueCell?.textContent).toBe(copy.brief.disagreesInline(statedMm, measuredMm));
+      expect(valueCell?.textContent).toContain(`${statedMm.toFixed(1)}`);
+      expect(valueCell?.textContent).toContain(`${measuredMm.toFixed(1)}`);
+      // Both numbers in the mono face.
+      expect((valueCell as HTMLElement)?.style.fontFamily).toBe("var(--font-mono)");
+      // Never the marker colour, even where ochre appears.
+      const markStyle = (row.querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+      expect(markStyle).not.toContain("#ff3300");
+      expect(markStyle).not.toContain("255, 51, 0");
+    }
+    // Mark per source: user-source rows are ochre (--color-blocked);
+    // model-source rows without disagrees_major are the quiet tier
+    // (issue #274, kept per QA 2026-10-05) — the neutral measured mark.
+    const userMark = (screen.getByTestId("brief-row-box_inner_width").querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+    expect(userMark).toContain("--color-blocked");
+    for (const id of ["brief-row-rim_drop", "brief-row-skirt_height"]) {
+      const quietMark = (screen.getByTestId(id).querySelector("[data-testid='brief-mark']")?.getAttribute("style") ?? "").toLowerCase();
+      expect(quietMark).toContain("--color-faint");
+      expect(quietMark).not.toContain("--color-blocked");
+    }
   });
 
   it("an assumed parameter with a declared axis stays assumed within tolerance (issue #264)", () => {
@@ -509,10 +563,13 @@ describe("Brief — the list that does not grow", () => {
     );
   });
 
-  it("a model-source 30 → 31 mm disagreement renders the quiet measured mark (issue #274)", () => {
+  it("a model-source 30 → 31 mm disagreement renders the quiet mark and BOTH numbers collapsed (issues #274, #385)", () => {
     // |30 − 31| = 1 mm ≤ max(20% of 30, 5) → the backend omits
     // `disagrees_major`; the SPA renders the quiet MARKS.measured ring,
-    // never the ochre blocked token.
+    // never the ochre blocked token. Issue #385 (QA 2026-10-05):
+    // the quiet tier is KEPT, but the collapsed cell still shows BOTH
+    // numbers (stated first) — a small model-only difference is never
+    // ochre, but the stated number is no longer hidden either.
     render(
       <Brief
         {...baseProps}
