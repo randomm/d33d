@@ -105,6 +105,11 @@ an OpenGL offscreen context) is broken. The last render with real PNGs was
 2026-09-23, which used the 2026-01-19 trixie build — the same build now
 pinned by digest above.
 
+The module registry (`d33d/module_registry.py`, `build_registry_glb`) runs
+its per-module isolated renders against the same digest-pinned stock image:
+`DEFAULT_OPENSCAD_IMAGE` is `OPENSCAD_IMAGE_DIGEST` (defined once in
+`d33d/render_worker.py`), never the rolling tag.
+
 Pinning by digest (not by tag) guarantees that a future Docker Hub re-roll
 or re-tag of `trixie` cannot silently inject a different OpenSCAD build into
 the image; the build always uses the exact same content-addressable blob.

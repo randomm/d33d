@@ -381,6 +381,18 @@ NAME_PATTERN_RE = re.compile(r"^render-[0-9a-f]{8}$")
 #: as uid 1000). Override in tests via monkeypatch on this module attribute.
 RENDER_WORKER_IMAGE = "d33d/render-worker:local"
 
+#: The stock upstream OpenSCAD base image, pinned by immutable digest
+#: (issue #392, following #348). This is the single source of truth for
+#: the digest in Python source — the Dockerfile's FROM line pins the same
+#: digest independently (a Dockerfile cannot import a Python constant) and
+#: ``tests/fast/test_module_registry_pinning_guard.py`` asserts the two stay
+#: equal. Never reference the rolling ``openscad/openscad:trixie`` tag:
+#: its 2026-09-28 roll broke headless PNG export (issue #348).
+OPENSCAD_IMAGE_DIGEST = (
+    "docker.io/openscad/openscad@"
+    "sha256:0af06bc2aa7a45d18b01a23cfb9dae6dddcd9542611e7be50edea6beb3b52fa7"
+)
+
 #: The image label the canonical build command stamps with the working
 #: tree's :func:`build_hash` (issue #236). The pre-render staleness check
 #: compares :func:`build_hash` against ``docker image inspect``'s value for

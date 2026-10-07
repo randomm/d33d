@@ -56,6 +56,7 @@ if TYPE_CHECKING:
 
 from d33d.render_worker import (
     DEFAULT_TIMEOUT_S,
+    OPENSCAD_IMAGE_DIGEST,
     ErrorClass,
     _cleanup_container,
     build_docker_argv,
@@ -365,11 +366,12 @@ def isolate_call_site(source: str, site: CallSite) -> str:
 # Orchestration: N isolated renders -> named GLB
 # ---------------------------------------------------------------------------
 
-#: The pinned OpenSCAD image (matches ``render_worker``'s docstring-pinned
-#: image; the render worker itself takes ``image`` as a caller-supplied
-#: parameter rather than a module constant, and this orchestrator follows
-#: the same convention).
-DEFAULT_OPENSCAD_IMAGE = "docker.io/openscad/openscad:trixie"
+#: The pinned OpenSCAD image (issue #392): the stock upstream base image
+#: by immutable digest, same as the Dockerfile's pinned FROM — never the
+#: rolling ``openscad/openscad:trixie`` tag. The render worker itself
+#: takes ``image`` as a caller-supplied parameter rather than a module
+#: constant, and this orchestrator follows the same convention.
+DEFAULT_OPENSCAD_IMAGE = OPENSCAD_IMAGE_DIGEST
 
 #: Hard cap on the number of call-sites one ``build_registry_glb`` call
 #: will orchestrate. Each call-site spawns a real sequential Docker
@@ -447,7 +449,9 @@ class RegistryBuildResult:
     failures: tuple[ModuleRenderFailure, ...]
 
 
-def _classify_isolated_render(proc_returncode: int, stl_bytes: bytes | None) -> ErrorClass:
+def _classify_isolated_render(
+    proc_returncode: int, stl_bytes: bytes | None
+) -> ErrorClass:
     """Minimal classification for one isolated-module render: reuses the
     render worker's ``ErrorClass`` values it is meaningful to reach here
     (``ok`` / ``container_error`` / ``empty_model``). ``timeout``/``oom``
@@ -532,7 +536,9 @@ def _write_file_into_volume(
         _cleanup_container(name)
     if proc is not None and proc.returncode != 0:
         stderr = proc.stderr.decode("utf-8", errors="replace")
-        raise RuntimeError(f"failed to populate {filename} into volume {volume}: {stderr}")
+        raise RuntimeError(
+            f"failed to populate {filename} into volume {volume}: {stderr}"
+        )
     if proc is None:
         raise RuntimeError(f"failed to populate {filename} into volume {volume}")
 
@@ -672,9 +678,7 @@ def build_registry_glb(
                 )
             except HelperTimeoutError as e:
                 failures.append(
-                    ModuleRenderFailure(
-                        site=site, error_class="timeout", stderr=str(e)
-                    )
+                    ModuleRenderFailure(site=site, error_class="timeout", stderr=str(e))
                 )
                 continue
             except RuntimeError as e:
