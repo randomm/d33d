@@ -107,26 +107,23 @@ function sendFirstComposerMessage(text: string): void {
 }
 
 /** Capture the stream handlers App passes to streamEvents. */
-async function captureStreamHandlers(client: ApiClient) {
+async function captureStreamHandlers(client: ApiClient): Promise<{
+  handlers: Parameters<ApiClient["streamEvents"]>[1];
+  resolve: () => void;
+}> {
   let handlers: Parameters<ApiClient["streamEvents"]>[1] | null = null;
+  let resolve: (() => void) | null = null;
   vi.spyOn(client, "streamEvents").mockImplementation((_id, h) => {
     handlers = h;
-    return new Promise(() => {});
+    return new Promise<void>((r) => {
+      resolve = r;
+    });
   });
   await waitFor(() => expect(handlers).not.toBeNull());
-  return handlers!;
+  return { handlers: handlers!, resolve: () => resolve?.() };
 }
 
-async function drainStream(client: ApiClient) {
-  // Swap the hanging streamEvents promise for a resolved one and flush
-  // microtasks, so the `.finally` (the post-stream flag release) runs.
-  (client.streamEvents as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(
-    undefined,
-  );
-  await act(async () => {
-    await Promise.resolve();
-  });
-}
+
 
 describe("App — no-loop replies never show the design indicator (issue #349)", () => {
   let client: ApiClient;
@@ -138,7 +135,7 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
   it("a no-version question: a kind=\"answer\" done frame produces no \"Generating design…\" stage and no pending history slot", async () => {
     render(<App client={client} />);
     sendFirstComposerMessage("How deep is it?");
-    const handlers = await captureStreamHandlers(client);
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
 
     // The whole no-loop exchange: the done frame, no progress frames at all.
     act(() => {
@@ -169,7 +166,10 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
 
     // Let the stream drain (the finally path) and re-assert: the reply is
     // still plain text and no indicator or pending slot appeared.
-    await drainStream(client);
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
     expect(screen.queryByTestId("design-loop-progress")).toBeNull();
     expect(screen.queryByTestId("filmstrip-pending")).toBeNull();
     expect(
@@ -182,7 +182,7 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
   it("a bare affirmation with no pending offer: same — no stage, no pending slot", async () => {
     render(<App client={client} />);
     sendFirstComposerMessage("yes");
-    const handlers = await captureStreamHandlers(client);
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
 
     act(() => {
       handlers.onDone?.({
@@ -200,7 +200,10 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
     expect(screen.queryByTestId("design-loop-progress")).toBeNull();
     expect(screen.queryByTestId("filmstrip-pending")).toBeNull();
 
-    await drainStream(client);
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
     expect(screen.queryByTestId("design-loop-progress")).toBeNull();
     expect(screen.queryByTestId("filmstrip-pending")).toBeNull();
   });
@@ -208,7 +211,7 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
   it("a real design run still shows the stage and the pending slot (unchanged behaviour)", async () => {
     render(<App client={client} />);
     sendFirstComposerMessage("make me a 30 mm plate");
-    const handlers = await captureStreamHandlers(client);
+    const { handlers } = await captureStreamHandlers(client);
 
     // The loop starts — this is the FIRST progress frame; the indicator
     // and pending slot may appear from here.
@@ -231,4 +234,542 @@ describe("App — no-loop replies never show the design indicator (issue #349)",
       "make me a 30 mm plate",
     );
   });
+
+  // ----------------------------------------------------------------
+  // Issue #388 — the composer queue
+  // ----------------------------------------------------------------
+
+  it("a no-loop reply followed by a queued message → one POST after the answer", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // While the run is in flight, type and submit a second message.
+    // The form's onSubmit handler is on the form element, so submitting
+    // the form directly (as Enter would) still routes through
+    // handleSendMessage, which detects the in-flight state and queues the
+    // message (operator decision 1: click-to-terminal-frame, every
+    // composer send queues).
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it taller" } });
+    });
+    const form = chatInput.closest("form");
+    act(() => {
+      fireEvent.submit(form!);
+    });
+
+    // The queued message should appear in the transcript with the caption
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+    expect(screen.getByTestId("queued-caption").textContent).toBe(
+      copy.queued.caption,
+    );
+
+    // The queued message text is in the transcript
+    const queuedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it taller"));
+    expect(queuedTurn).toBeTruthy();
+
+    // Now the run ends (done frame).
+    act(() => {
+      handlers.onDone?.({
+        message: "Design loop passed validation",
+      });
+    });
+
+    // Let the stream drain (the .finally increments runEndCount, which
+    // re-keys the flush effect with the CURRENT queued text — the
+    // onDone-triggered effect run saw a stale closure, so the
+    // .finally drain is the reliable flush trigger).
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message should be flushed (one POST).
+    // The flush re-enters continueSend, which calls postChat.
+    // The postChat mock is already set up to resolve.
+    // After the flush, the queued caption should be gone.
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+
+    // The flush should have called postChat once more (total: 2 —
+    // the original send + the flush).
+    expect(client.postChat).toHaveBeenCalledTimes(2);
+
+    // The flushed message should be a real user turn (no queued caption).
+    const flushedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it taller"));
+    expect(flushedTurn).toBeTruthy();
+  });
+
+  it("two sends during a run → one POST carrying the second text", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Send message A (queued).
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it taller" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Send message B (replaces A in the queue slot).
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm tall" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+
+    // The queue now shows B's text (A was replaced, not appended).
+    await waitFor(() => {
+      const queuedTurns = screen
+        .getAllByTestId("chat-msg-user")
+        .filter((el) => el.querySelector('[data-testid="queued-caption"]'));
+      expect(queuedTurns).toHaveLength(1);
+      expect(queuedTurns[0].textContent).toContain("make it 40 mm tall");
+      expect(queuedTurns[0].textContent).not.toContain("make it taller\n");
+    });
+
+    // The run ends.
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The flush re-enters the send path with the CURRENT transcript (the
+    // run's reply is in messages by then), and the flushed POST's body
+    // is the declared postChat input — a subset of the keys it declares.
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    const flushCall = postChatMock.mock.calls[1];
+    expect((flushCall[1] as { message: string }).message).toBe("make it 40 mm tall");
+    expect(Object.keys(flushCall[1]).every((k) =>
+      ["message", "stated_dims", "chat_history"].includes(k),
+    )).toBe(true);
+  });
+
+  it("a double click before the first frame → the second send queues, not POSTs, and flushes once after the answer", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // No design-loop-start frame yet — we are in the pre-first-frame
+    // window (sendInFlightRef is true, designLoopInFlight is false).
+    // A second composer send in this window must QUEUE, not POST.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+
+    // The second message is queued (caption visible), not POSTed.
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+    // postChat was called exactly once (the original send only).
+    expect(client.postChat).toHaveBeenCalledTimes(1);
+
+    // The run ends with a no-loop answer (the terminal frame for this
+    // send — no design-loop-start frame was ever emitted, so this is
+    // the pre-first-frame flush window: the .finally closes it).
+    act(() => {
+      handlers.onDone?.({
+        kind: "answer",
+        message: "It is 30.0 mm wide.",
+      });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message is flushed exactly once after the answer — one
+    // POST total beyond the original (total: 2). This is the acceptance
+    // case the pre-first-frame window exercises (a no-loop reply
+    // followed by a queued message): the flush re-enters the send path
+    // with the CURRENT transcript (the answer is in messages by then),
+    // and the flushed turn is a real user message (no queued caption).
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    const flushedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it 40 mm"));
+    expect(flushedTurn).toBeTruthy();
+  });
+
+  it("a queued message survives an error frame and is then sent", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it taller" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // The run ends with an ERROR frame — the error-only terminal path:
+    // the server emits `error` and the stream closes (no done frame).
+    // Resolving the streamEvents promise fires the .finally, which
+    // clears designLoopInFlight and bumps runEndCount — the flush
+    // effect's keys, which re-runs it with the CURRENT callback.
+    act(() => {
+      handlers.onError?.({
+        message: "Design loop exhausted: error_class_not_ok",
+        reason: "error_class_not_ok",
+      });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The error frame ended the run; the queued message is flushed
+    // exactly once after it (the .finally is the terminal signal —
+    // faithful to production, where the stream closes after `error`).
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it taller");
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
+  });
+
+  it("an error-only terminal (no done frame) still flushes the queued message exactly once", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // The run ends with an ERROR frame ONLY — no done frame follows. In
+    // production the stream then closes and the .finally is the terminal
+    // (it clears designLoopInFlight and bumps runEndCount, which re-keys
+    // the flush effect); onDone never runs on this path.
+    act(() => {
+      handlers.onError?.({
+        message: "Design loop exhausted: error_class_not_ok",
+        reason: "error_class_not_ok",
+      });
+    });
+    // The stream closes — the .finally fires.
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message was flushed exactly once (original + flush = 2).
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
+  });
+
+  it("a disconnect (stream resolves with no terminal frame) still flushes the queued message exactly once (issue #388: streamEvents always settles, App's .finally fires signalRunEnd, the queued message is sent as a fresh chat message)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Disconnect: the stream promise resolves with NO terminal frame
+    // (no onDone, no onError). In production streamEvents resolves on
+    // drain — the SSE closes without emitting a final frame. App's
+    // .finally still fires (it clears designLoopInFlight and calls
+    // signalRunEnd), which re-keys the flush effect.
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message was flushed exactly once (original + flush = 2).
+    // It is sent as a fresh chat message — the queued caption is gone.
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    await waitFor(() => {
+      expect(postChatMock).toHaveBeenCalledTimes(2);
+    });
+    expect(postChatMock.mock.calls[1][1].message).toBe("make it 40 mm");
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
+  });
+
+  it("a queued 'yes' after a run that replaced the pending offer is a plain fresh chat message — no offer id or token (issue #388, operator decision 2026-10-05: the queued message is routed fresh when the run ends)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // The run produced an offer (the offer the queued "yes" was meant for).
+    act(() => {
+      handlers.onProgress("offer", { step: "offer", message: "Should I use 12 mm wall thickness?" });
+    });
+
+    // Queue "yes" while the run is still in flight (offer A pending).
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "yes" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // The run ends — it replaced offer A (a newer version superseded it).
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued "yes" is flushed as a PLAIN fresh chat message: the POST
+    // body carries only `message` + `chat_history` — no offer id, token,
+    // or confirm field. The backend's own offer check (pending offers in
+    // versions / fill_recut / confirm_offer) decides whether it is an
+    // acceptance; the frontend does not pin it to the old offer.
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(2);
+    const flushedBody = postChatMock.mock.calls[1][1] as {
+      message: string;
+      chat_history?: unknown;
+    };
+    expect(flushedBody.message).toBe("yes");
+    // No offer id / token / confirm: the flushed body's keys are a
+    // SUBSET of the declared postChat input — a stronger statement of
+    // "no offer id" than per-field undefined checks (the backend's own
+    // offer check decides whether it is an acceptance).
+    expect(Object.keys(flushedBody).every((k) =>
+      ["message", "stated_dims", "chat_history"].includes(k),
+    )).toBe(true);
+    // It is a real user turn in the transcript (no queued caption).
+    const flushedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("yes"));
+    expect(flushedTurn).toBeTruthy();
+  });
+
+  it("a failed flush keeps the queued message — the flushed postChat rejects with 409, the queued text is restored with the flushFailed reason and a resend button that posts once (issue #388, lens finding 1)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it taller" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Make the NEXT postChat call (the flush) reject with a 409. The
+    // first call (the original send) already resolved.
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    postChatMock.mockRejectedValueOnce(new Error("409 Conflict"));
+
+    // The run ends — the flush fires and its postChat rejects with 409.
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+
+    // The queued message is restored as a failed queued turn — the
+    // flushFailed reason is visible, and the resend button is present.
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-flush-failed-reason")).toBeTruthy();
+    });
+    expect(screen.getByTestId("queued-flush-failed-reason").textContent).toBe(
+      copy.queued.flushFailed,
+    );
+    // The resend button is present.
+    expect(screen.getByTestId("queued-resend-btn")).toBeTruthy();
+    // The queued text is still in the transcript (the message did NOT
+    // vanish).
+    expect(
+      screen
+        .getAllByTestId("chat-msg-user")
+        .some((el) => el.textContent?.includes("make it taller")),
+    ).toBe(true);
+
+    // Lens round 1 — exactly ONE failure affordance for the FLUSH failure:
+    // App's own postChat-failure UI (the "Error: …" bubble + the generic
+    // "The request could not be sent" failure turn) is suppressed for a
+    // flush send — the failed queued turn IS the single failure surface
+    // for the flush. (The in-flight run's own failure card from the
+    // stream's error frame is a separate, pre-existing failure — it
+    // renders "Try again" for the in-flight message, which is correct.)
+    // What must NOT appear for a flush failure: the raw "Error: 409
+    // Conflict" bubble (App's placeholder rewrite) and the generic
+    // "The request could not be sent" card (App's non-flush failure turn).
+    expect(screen.queryByText("Error: 409 Conflict")).toBeNull();
+    expect(
+      screen.queryByText("The request could not be sent. The design did not start — you can retry."),
+    ).toBeNull();
+
+    // Clicking resend posts the message once through the normal send
+    // path (the failed turn is removed, the message re-enters the queue
+    // or direct-send path).
+    act(() => {
+      fireEvent.click(screen.getByTestId("queued-resend-btn"));
+    });
+    // The failed turn is removed (the resend cleared it).
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-flush-failed-reason")).toBeNull();
+    });
+    // The resend posted the message exactly once through the normal send
+    // path — the total postChat count is the original send (1) + the
+    // flushed attempt (1) + the resend (1).
+    const postChatCalls = (client.postChat as unknown as ReturnType<typeof vi.fn>)
+      .mock.calls.length;
+    expect(postChatCalls).toBe(3);
+  });
+
+  it("a queued message can be cancelled — nothing is sent when the run ends (issue #388, operator decision 2026-10-05)", async () => {
+    render(<App client={client} />);
+    sendFirstComposerMessage("make me a 30 mm plate");
+    const { handlers, resolve: resolveStream } = await captureStreamHandlers(client);
+
+    // The loop starts.
+    act(() => {
+      handlers.onProgress("design-loop-start", { step: "design-loop-start" });
+    });
+
+    // Queue a message during the run.
+    const chatInput = screen.getByTestId("chat-input");
+    act(() => {
+      fireEvent.change(chatInput, { target: { value: "make it 40 mm" } });
+    });
+    act(() => {
+      fireEvent.submit(chatInput.closest("form")!);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("queued-caption")).toBeTruthy();
+    });
+
+    // Cancel the queued message.
+    act(() => {
+      fireEvent.click(screen.getByTestId("queued-cancel-btn"));
+    });
+    // The queued turn (caption + text) is gone from the transcript.
+    await waitFor(() => {
+      expect(screen.queryByTestId("queued-caption")).toBeNull();
+    });
+    const queuedTurn = screen
+      .getAllByTestId("chat-msg-user")
+      .find((el) => el.textContent?.includes("make it 40 mm"));
+    expect(queuedTurn).toBeUndefined();
+
+    // The run ends — the cancelled message is NOT sent (no flush POST).
+    act(() => {
+      handlers.onDone?.({ message: "Design loop passed validation" });
+    });
+    await act(async () => {
+      resolveStream();
+      await Promise.resolve();
+    });
+    const postChatMock = client.postChat as unknown as ReturnType<typeof vi.fn>;
+    expect(postChatMock).toHaveBeenCalledTimes(1);
+  });
+
 });
+
+// NOTE (issue #388, stale-selection coverage): the App-level stale-selection
+// test was removed because the App's PickLayer seam requires a real WebGL
+// context (compositeMarkedPng) that jsdom cannot provide. The belt path is
+// covered by the hook-level test in use-queued-send.test.ts
+// ("stale-selection guard: a pending selection at flush time is cleared
+// (belt path); the message still flushes as a plain chat message") which
+// exercises the exact same code path (useQueuedSend's flush effect) with a
+// real pendingSelection value and asserts the selection is cleared and the
+// message is flushed as a plain chat message.

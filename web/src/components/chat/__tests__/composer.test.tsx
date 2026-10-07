@@ -60,13 +60,44 @@ describe("Composer", () => {
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("disables the send button when inFlight is true", () => {
-    render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} inFlight />);
-    expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(true);
+  it("does NOT disable the send button when inFlight is true (issue #388 — the send queues, never a second POST)", () => {
+    render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} />);
+    expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("a send while a message is queued still fires onSend with the trimmed text — App routes it to the replace-queue path (issue #388)", () => {
+    // The Composer (and the ChatPanel's composer) always forwards a valid
+    // submission — the single-slot REPLACE semantics live in App's
+    // handleSendMessage, which is exercised end to end in
+    // no-loop-reply.test.tsx ("two sends during a run → one POST carrying
+    // the second text"). This guard pins that the component itself does not
+    // swallow a second send while a queued message exists: the form's
+    // onSubmit fires onSend exactly once with the trimmed text, so the
+    // second send is never dropped at this layer.
+    const onSend = vi.fn();
+    render(<Composer value="  make it 40 mm tall  " onChange={vi.fn()} onSend={onSend} />);
+    fireEvent.submit(screen.getByTestId("chat-input").closest("form")!);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("make it 40 mm tall");
   });
 
   it("enables the send button when there is text and not in flight", () => {
     render(<Composer value="hi" onChange={vi.fn()} onSend={vi.fn()} />);
     expect((screen.getByTestId("chat-send-btn") as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("fires onSend when the form is submitted while inFlight is true (issue #388 — the send queues in App, the Composer always forwards)", () => {
+    // Issue #388: the composer's Send is NOT disabled during a run — it
+    // queues (the queued caption appears). The queueing logic lives in
+    // App's handleSendMessage (exercised end to end in no-loop-reply.test.tsx).
+    // The Composer always forwards a valid submission; a second send is
+    // never swallowed at this layer.
+    const onSend = vi.fn();
+    render(<Composer value="second message" onChange={vi.fn()} onSend={onSend} />);
+    const btn = screen.getByTestId("chat-send-btn") as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+    fireEvent.click(btn);
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("second message");
   });
 });

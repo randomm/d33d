@@ -107,6 +107,14 @@ interface BriefProps {
   onChange?: (label: string) => void;
   /** The expanded row's "Show it on the model" — routed to the pick. */
   onShowOnModel?: (name: string) => void;
+  /** Issue #388: true while a design run is in flight — the programmatic
+   *  send buttons (the unknown-value "What is the…?" control and the
+   *  row's "Change it" action) are disabled, because they are NOT
+   *  composer sends (decision 2): they are never queued, and a fast click
+   *  during a run would race the in-flight POST (409). The drawn selection
+   *  and any in-progress text are kept — the controls simply close while
+   *  the run is in flight. */
+  sendInFlight?: boolean;
 }
 
 export function Brief({
@@ -126,6 +134,7 @@ export function Brief({
   onAsk,
   onChange,
   onShowOnModel,
+  sendInFlight,
 }: BriefProps) {
   const [expanded, setExpanded] = useState<string | null>(null);
   // Issue #274: the collapsed-params group is hidden behind a disclosure
@@ -186,6 +195,7 @@ export function Brief({
       onAsk={onAsk}
       onChange={onChange}
       onShowOnModel={onShowOnModel}
+      sendInFlight={sendInFlight}
     />
   );
 
@@ -312,6 +322,7 @@ export function Brief({
                 onAsk={onAsk}
                 onChange={onChange}
                 onShowOnModel={onShowOnModel}
+                sendInFlight={sendInFlight}
               />
             </div>
           )}

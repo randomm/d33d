@@ -80,11 +80,35 @@ export interface ChatMessage {
    *  pending offer (buttons enabled); false after either button is pressed
    *  or the offer is no longer pending (buttons disabled). */
   fillRecutOffer?: { pending: boolean };
+  /** Issue #388: true on a QUEUED user turn — the message the composer sent
+   *  while a design run was in flight (or in the pre-first-frame window).
+   *  It is NOT a real user message yet: it sits in the transcript with a
+   *  caption and is POSTed once, by the flush, when the run's terminal
+   *  frame arrives. At most one such turn exists at a time (a second
+   *  composer send REPLACES its text, not appends a second slot). When the
+   *  flush's send REJECTS (a 409, a network error) the turn is restored
+   *  with `queuedFailure` set — it renders as a failed queued turn (reason
+   *  + resend), never as a sent message (issue #388: the queued message
+   *  must not vanish). */
+  queued?: boolean;
+  /** Issue #388 (failed flush): the reason the queued turn's flush send
+   *  rejected. Present only on a restored queued turn — it renders the
+   *  `queued.flushFailed` reason and a resend action. The message is never
+   *  shown as sent, never lost. */
+  queuedFailure?: string;
 }
 
 interface ChatPanelProps {
   messages: ChatMessage[];
   onSend: (text: string) => void;
+  /** Issue #388 (operator decision 2026-10-05): drop the queued turn
+   *  without sending it. Absent (or a no-op) when nothing is queued. */
+  onCancelQueued?: () => void;
+  /** Issue #388 (failed flush): the resend control's handler — the queued
+   *  text re-enters the normal send path (a fresh chat send, never a
+   *  re-flush). Supplied by the shell from the hook's exported
+   *  `resendQueued`; the handler is NOT carried on the message. */
+  onResendQueued?: (text: string) => void;
   /** True while a design loop is in flight — disables the send button. */
   inFlight?: boolean;
   /** The PassCard's enlarged-view close action (issue #125). */
@@ -117,6 +141,8 @@ interface ChatPanelProps {
 export function ChatPanel({
   messages,
   onSend,
+  onCancelQueued,
+  onResendQueued,
   inFlight,
   onBesidePhoto,
   versions,
@@ -232,11 +258,15 @@ export function ChatPanel({
                       type="button"
                       data-testid="fill-recut-offer-yes"
                       className="fill-recut-offer-btn fill-recut-offer-btn--yes"
-                      disabled={!msg.fillRecutOffer.pending}
+                      disabled={!msg.fillRecutOffer.pending || inFlight === true}
                       onClick={() => onSend(copy.fillRecut.offerYes)}
                       style={{
-                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
-                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                        cursor:
+                          msg.fillRecutOffer.pending && inFlight !== true
+                            ? "pointer"
+                            : "not-allowed",
+                        opacity:
+                          msg.fillRecutOffer.pending && inFlight !== true ? 1 : 0.5,
                       }}
                     >
                       {copy.fillRecut.offerYes}
@@ -245,11 +275,15 @@ export function ChatPanel({
                       type="button"
                       data-testid="fill-recut-offer-no"
                       className="fill-recut-offer-btn fill-recut-offer-btn--no"
-                      disabled={!msg.fillRecutOffer.pending}
+                      disabled={!msg.fillRecutOffer.pending || inFlight === true}
                       onClick={() => onSend(copy.fillRecut.offerNo)}
                       style={{
-                        cursor: msg.fillRecutOffer.pending ? "pointer" : "not-allowed",
-                        opacity: msg.fillRecutOffer.pending ? 1 : 0.5,
+                        cursor:
+                          msg.fillRecutOffer.pending && inFlight !== true
+                            ? "pointer"
+                            : "not-allowed",
+                        opacity:
+                          msg.fillRecutOffer.pending && inFlight !== true ? 1 : 0.5,
                       }}
                     >
                       {copy.fillRecut.offerNo}
@@ -258,6 +292,62 @@ export function ChatPanel({
                 </span>
               ) : (
                 <span className="chat-msg-content">{msg.content}</span>
+              )}
+              {msg.queued && (
+                <span className="chat-msg-queued-actions">
+                  <span
+                    className="chat-msg-queued-caption"
+                    data-testid={
+                      msg.queuedFailure ? "queued-flush-failed-reason" : "queued-caption"
+                    }
+                  >
+                    {msg.queuedFailure ? copy.queued.flushFailed : copy.queued.caption}
+                  </span>
+                  {msg.queuedFailure ? (
+                    // The flush's send rejected: the message is restored, not
+                    // lost. Resend goes through the NORMAL send path (a fresh
+                    // chat send — never a re-flush); the hook removes the
+                    // failed flag when the message leaves the failed state.
+                    <button
+                      type="button"
+                      className="chat-msg-queued-resend"
+                      data-testid="queued-resend-btn"
+                      onClick={() => onResendQueued?.(msg.content)}
+                      style={{
+                        marginLeft: 8,
+                        padding: "2px 8px",
+                        border: "1px solid var(--color-blocked)",
+                        borderRadius: 4,
+                        background: "transparent",
+                        color: "var(--color-blocked)",
+                        cursor: "pointer",
+                        fontSize: 11,
+                      }}
+                    >
+                      {copy.queued.resend}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="chat-msg-queued-cancel"
+                      data-testid="queued-cancel-btn"
+                      aria-label={copy.queued.cancel}
+                      onClick={onCancelQueued}
+                      style={{
+                        marginLeft: 8,
+                        padding: "2px 8px",
+                        border: "1px solid var(--color-hairline)",
+                        borderRadius: 4,
+                        background: "transparent",
+                        color: "var(--color-fg-2)",
+                        cursor: "pointer",
+                        fontSize: 11,
+                      }}
+                    >
+                      {copy.queued.cancel}
+                    </button>
+                  )}
+                </span>
               )}
               {msg.selection && (
                 <img
@@ -283,7 +373,6 @@ export function ChatPanel({
         value={input}
         onChange={setInput}
         onSend={handleSubmit}
-        inFlight={inFlight}
         hidden={hideComposer}
       />
     </section>

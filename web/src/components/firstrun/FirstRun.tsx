@@ -13,6 +13,7 @@
 
 import { useState, useRef, useEffect, type FormEvent, type DragEvent } from "react";
 import copy from "../../copy";
+import { disabledReasonProps, DisabledReasonHint } from "../shell/DisabledReason";
 
 interface FirstRunProps {
   /** Called with the trimmed text when the form submits (Start, or a
@@ -224,6 +225,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
                   className="first-run-start-btn"
                   data-testid="first-run-start-btn"
                   disabled={inFlight || draft.trim().length === 0}
+                  {...disabledReasonProps("first-run-disabled-reason", inFlight === true)}
                   style={{
                     padding: "8px 20px",
                     border: "none",
@@ -265,6 +267,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
                   data-testid="first-run-starter"
                   onClick={() => onSend(starter)}
                   disabled={inFlight}
+                  {...disabledReasonProps("first-run-disabled-reason", inFlight === true)}
                   style={{
                     textAlign: "left",
                     padding: "8px 12px",
@@ -361,6 +364,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
           data-testid="first-run-photo-btn"
           onClick={onPhotoSelect}
           disabled={inFlight}
+          {...disabledReasonProps("first-run-disabled-reason", inFlight === true)}
           style={{
             alignSelf: "center",
             padding: "8px 16px",
@@ -387,6 +391,7 @@ export function FirstRun({ onSend, onPhotoSelect, inFlight, onPartFile }: FirstR
         >
           {copy.firstRun.photoLine}
         </p>
+        <DisabledReasonHint id="first-run-disabled-reason" visible={inFlight === true} />
       </div>
     </div>
   );

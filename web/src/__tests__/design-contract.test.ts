@@ -147,6 +147,7 @@ describe("design contract", () => {
       "passCard",
       "photoUpload",
       "progress",
+      "queued",
       "region",
       "shell",
     ]);

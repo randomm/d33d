@@ -101,6 +101,51 @@ describe("FirstRun", () => {
     expect(screen.getByTestId("first-run-photo-btn")).toBeDisabled();
   });
 
+  it("the Start button is disabled while a design loop is in flight, and a click on it does NOT fire onSend (issue #388 — the pre-first-frame window queues, never double-POSTs)", () => {
+    // Regression guard for the 409 window (issue #388, operator decision 1):
+    // the FirstRun composer is the active composer while the screen is up
+    // (no version yet), so a fast second send before the first design-loop
+    // frame must not produce a second POST. The inFlight gate disables the
+    // Start button, which is the closed path — the sibling workstream owns
+    // the queue logic in App.tsx (the inFlight value that reaches
+    // FirstRun); this test pins FirstRun's contract: while inFlight, a
+    // click on the disabled Start button is a no-op (the browser swallows
+    // the click on a disabled button), so onSend is never reached.
+    const onSend = vi.fn();
+    render(<FirstRun {...baseProps({ onSend, inFlight: true })} />);
+    const startBtn = screen.getByTestId("first-run-start-btn");
+    expect(startBtn).toBeDisabled();
+    // A click on the disabled button is a no-op — the browser swallows it,
+    // and jsdom's fireEvent.click on a disabled button also does not fire
+    // the handler. This is the observable contract the sibling's queue
+    // logic relies on.
+    fireEvent.click(startBtn);
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it("a second send during the pre-frame window is routed to the same onSend — App queues it, the screen never drops it (issue #388, operator decision 1)", () => {
+    // During the pre-first-frame window the deferred in-flight indicator
+    // stays off (inFlight=false — issue #349's deferral must be preserved),
+    // so the Start button is enabled. A fast second send therefore reaches
+    // onSend — it is neither blocked at this layer nor dropped: App's
+    // handleSendMessage routes it to the single queue slot (the end-to-end
+    // "queues, not POSTs" assertion lives in no-loop-reply.test.tsx).
+    const onSend = vi.fn();
+    render(<FirstRun {...baseProps({ onSend })} />);
+    const input = screen.getByTestId("first-run-input");
+    fireEvent.change(input, { target: { value: "a 40 mm plate" } });
+    fireEvent.click(screen.getByTestId("first-run-start-btn"));
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend).toHaveBeenCalledWith("a 40 mm plate");
+  });
+
+  it("the starter buttons are disabled while a design loop is in flight", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    screen.getAllByTestId("first-run-starter").forEach((btn) => {
+      expect(btn).toBeDisabled();
+    });
+  });
+
   it("renders the Start button", () => {
     render(<FirstRun {...baseProps()} />);
     expect(screen.getByTestId("first-run-start-btn")).toBeTruthy();
@@ -227,5 +272,32 @@ describe("PlateBackdrop", () => {
     const stroke = rect!.getAttribute("stroke") ?? "";
     expect(stroke).not.toContain("FF3300");
     expect(stroke).not.toContain("255, 51, 0");
+  });
+});
+
+describe("FirstRun — disabled reason while inFlight (issue #388)", () => {
+  it("the disabled Start button exposes the copy.ts reason as tooltip and accessible description", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    const btn = screen.getByTestId("first-run-start-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "first-run-disabled-reason");
+    const hint = screen.getByTestId("first-run-disabled-reason");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("the disabled photo button exposes the copy.ts reason as tooltip and accessible description", () => {
+    render(<FirstRun {...baseProps({ inFlight: true })} />);
+    const btn = screen.getByTestId("first-run-photo-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "first-run-disabled-reason");
+  });
+
+  it("no disabled-reason hint when not inFlight", () => {
+    render(<FirstRun {...baseProps({ inFlight: false })} />);
+    expect(screen.queryByTestId("first-run-disabled-reason")).toBeNull();
+    const btn = screen.getByTestId("first-run-start-btn");
+    expect(btn).not.toHaveAttribute("title");
   });
 });

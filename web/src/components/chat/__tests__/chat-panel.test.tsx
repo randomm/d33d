@@ -6,6 +6,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ChatPanel, type ChatMessage, MARKER_COLOR } from "../ChatPanel";
+import copy from "../../../copy";
 import type { RenderImage } from "../../../lib/renderImage";
 import type { VersionTimelineEntry } from "../../../lib/api";
 
@@ -305,6 +306,28 @@ describe("ChatPanel", () => {
   it("disables send button when input is empty", () => {
     render(<ChatPanel messages={[{ id: "seed", role: "user", content: "seed" }]} onSend={vi.fn()} />);
     expect(screen.getByTestId("chat-send-btn")).toBeDisabled();
+  });
+
+  it("a queued user turn renders the copy.ts pending caption alongside its text (issue #388)", () => {
+    const messages: ChatMessage[] = [
+      { id: "q1", role: "user", content: "make it taller", queued: true },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    // The caption string comes from copy.ts (no inline prose).
+    expect(screen.getByTestId("queued-caption")).toHaveTextContent(copy.queued.caption);
+    expect(screen.getByTestId("queued-caption").textContent).toBe(
+      "I'll send this when the design finishes.",
+    );
+    // The queued text itself still renders in the same turn.
+    expect(screen.getByTestId("chat-msg-user")).toHaveTextContent("make it taller");
+  });
+
+  it("an ordinary user turn renders no queued caption (issue #388)", () => {
+    const messages: ChatMessage[] = [
+      { id: "u1", role: "user", content: "make a box" },
+    ];
+    render(<ChatPanel messages={messages} onSend={vi.fn()} />);
+    expect(screen.queryByTestId("queued-caption")).toBeNull();
   });
 
   describe("selection thumbnail persistence", () => {

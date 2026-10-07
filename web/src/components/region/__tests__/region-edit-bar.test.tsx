@@ -293,7 +293,7 @@ describe("RegionEditBar", () => {
   });
 
   it("dims the bar while the pin is orbiting", () => {
-    render(
+    const { unmount } = render(
       <RegionEditBar
         selection={makeSelection()}
         viewportSize={VIEWPORT}
@@ -307,6 +307,166 @@ describe("RegionEditBar", () => {
     );
     const bar = screen.getByTestId("region-edit-bar");
     expect(bar.style.opacity).toBe("0.5");
+    unmount();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #388 (operator decision 3) — the region-edit bar is DISABLED, not
+// queued, while a design run is in flight
+// ---------------------------------------------------------------------------
+
+describe("RegionEditBar — in-flight gating (issue #388)", () => {
+  it("disables the Apply button while a run is in flight, and a click on it does NOT fire onSubmit", () => {
+    // Decision 3: a region-edit submit is disabled (not queued) while a
+    // run is in flight. The Apply button is the closed path: a click on a
+    // disabled button is a no-op (the browser swallows the click), so
+    // onSubmit is never reached.
+    const onSubmit = vi.fn();
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    const apply = screen.getByTestId("region-edit-apply-btn");
+    expect(apply).toBeDisabled();
+    // A click on the disabled button is a no-op — the browser swallows it,
+    // and jsdom's fireEvent.click on a disabled button also does not fire
+    // the handler.
+    fireEvent.click(apply);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("the disabled Apply button exposes the copy.ts reason as tooltip and accessible description (issue #388)", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    const btn = screen.getByTestId("region-edit-apply-btn");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("title", copy.shell.disabledReason);
+    expect(btn).toHaveAttribute("aria-describedby", "region-edit-apply-disabled-reason");
+    // The visually-associated hint is rendered and carries the same text.
+    const hint = screen.getByTestId("region-edit-apply-disabled-reason");
+    expect(hint).toHaveTextContent(copy.shell.disabledReason);
+  });
+
+  it("no disabled-reason hint when not in flight", () => {
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.queryByTestId("region-edit-apply-disabled-reason")).toBeNull();
+    const btn = screen.getByTestId("region-edit-apply-btn");
+    expect(btn).not.toHaveAttribute("title");
+    expect(btn).not.toHaveAttribute("aria-describedby");
+  });
+
+  it("enables the Apply button once the run ends (inFlight is false) and the text is non-empty", () => {
+    // The in-flight gate is the only thing disabling Apply when the text is
+    // non-empty — once the run ends (inFlight is false) the button is
+    // enabled again and the user can re-apply the same instruction.
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="widen it"
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={false}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-apply-btn")).not.toBeDisabled();
+  });
+
+  it("a form submit (Enter) is a no-op while a run is in flight — the selection is kept, nothing is queued (issue #388, operator decision 3)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="open the top"
+        onTextChange={vi.fn()}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    const input = screen.getByTestId("region-edit-input");
+    fireEvent.submit(input.closest("form")!);
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("keeps the input enabled and the selection visible while inFlight (the drawn selection is kept)", () => {
+    // Decision 3 explicitly says the drawn selection is kept — the bar
+    // does not unmount or hide its content. The thumbnail, the module
+    // chip, and the input all stay rendered while inFlight is true.
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text=""
+        onTextChange={vi.fn()}
+        onSubmit={vi.fn()}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+        inFlight={true}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-bar")).toBeTruthy();
+    expect(screen.getByTestId("pending-selection-thumbnail")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-module-chip")).toBeTruthy();
+    expect(screen.getByTestId("region-edit-input")).not.toBeDisabled();
+  });
+
+  it("submit still works when not in flight (no inFlight)", () => {
+    const onSubmit = vi.fn();
+    render(
+      <RegionEditBar
+        selection={makeSelection()}
+        viewportSize={VIEWPORT}
+        text="open the top"
+        onTextChange={vi.fn()}
+        onSubmit={onSubmit}
+        onCancel={vi.fn()}
+        orbitingPin={false}
+        orbitClearedPin={false}
+      />,
+    );
+    expect(screen.getByTestId("region-edit-apply-btn")).not.toBeDisabled();
+    fireEvent.submit(screen.getByTestId("region-edit-input").closest("form")!);
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -352,3 +512,5 @@ describe("RegionEditBar — imported-geometry chip + hit point (issue #338)", ()
     expect(screen.queryByTestId("region-edit-imported-chip")).toBeNull();
   });
 });
+
+

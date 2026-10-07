@@ -269,6 +269,29 @@ export const firstPass = {
   heroCaption: "a real render, not a preview — the turnable model arrives last",
 } as const;
 
+/**
+ * Queued-message copy (issue #388). While a design run is in flight, a
+ * composer send fills the single queue slot instead of POSTing — the queued
+ * turn renders in the transcript with this caption. The string lives here
+ * (the copy deck), never inline in a component.
+ */
+export const queued = {
+  /** The pending caption under a queued user turn. One slot, one message: a
+   *  second send REPLACES the queued text, this caption is unchanged. */
+  caption: "I'll send this when the design finishes.",
+  /** The cancel control beside a queued user turn (issue #388, operator
+   *  decision 2026-10-05: the queued message can be cancelled). Cancelling
+   *  drops the queued turn from the transcript; when the run ends, nothing
+   *  is sent for it. */
+  cancel: "Cancel this message",
+  /** The failed-flush reason under a queued turn whose send rejected
+   *  (the message is restored as a failed turn — it never vanishes; the
+   *  resend action below goes through the normal send path). */
+  flushFailed: "Couldn't send your queued message. Send it again?",
+  /** The resend control on a queued turn whose flush failed. */
+  resend: "Send it again",
+} as const;
+
 export const progress = {
   /** The dimmed previous model is captioned, so nobody thinks it is the new one. */
   stillShowing: (current: string, pending: string): string =>
@@ -907,6 +930,13 @@ export const shell = {
   resetView: "Reset view",
   showDimensions: "Show dimensions",
   showPhoto: "Show the reference photo",
+  /** Issue #388: the visible reason on any action control that is
+   *  disabled while a design run is in flight (the region-edit Apply
+   *  button, the Brief's programmatic send buttons, the failure card's
+   *  action buttons). Shown as the control's tooltip and its accessible
+   *  description. The composer's Send is NEVER this — it queues while a
+   *  run is in flight and stays enabled. */
+  disabledReason: "A design is running — this will be available when it finishes.",
 } as const;
 
 /**
@@ -1198,6 +1228,7 @@ export const copy = {
   partReport,
   fillRecut,
   partUnitsUnsettled,
+  queued,
 } as const;
 
 export default copy;

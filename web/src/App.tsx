@@ -80,6 +80,7 @@ import { Filmstrip } from "./components/versions/Filmstrip";
 import { ImportReport } from "./components/import/ImportReport";
 import { usePartUpload } from "./components/upload/PartUpload";
 import { usePartStl } from "./hooks/usePartStl";
+import { useQueuedSend } from "./hooks/useQueuedSend";
 import { FirstRun } from "./components/firstrun/FirstRun";
 import { PlateBackdrop } from "./components/firstrun/PlateBackdrop";
 // Composer is rendered via ChatPanel (its form lives there) — App holds
@@ -998,6 +999,13 @@ export default function App({ client }: AppProps) {
     };
   }, [projectId, apiClient, compareIds]);
 
+  // Issue #388 — the composer queue (single slot, per project + session)
+  // lives in its own hook (declared below, after `continueSend`): queued
+  // text, the queued turn, replace, cancel, the run-end flush (exactly
+  // once per queued message), the pending-selection guard. The run's
+  // .finally reaches the hook's `signalRunEnd` via `signalRunEndRef`
+  // (a direct capture would be a TDZ use).
+
   // The actual send body (issue #192): extracted so the message fires only
   // once the project id is settled. `projectIdOverride` carries the id the
   // lazy creation just resolved — the closure's `projectId` is stale (the
@@ -1005,7 +1013,7 @@ export default function App({ client }: AppProps) {
   // authoritative when present. The request calls close over the settled id
   // in every case, never a stale `null`.
   const continueSend = useCallback(
-    (text: string, projectIdOverride?: number) => {
+    async (text: string, projectIdOverride?: number, options?: { isFlush?: boolean }) => {
       const effectiveProjectId = projectIdOverride ?? projectId;
       if (effectiveProjectId === null) return;
 
@@ -1014,9 +1022,6 @@ export default function App({ client }: AppProps) {
       // an all-whitespace string would pass a naive truthiness check but
       // still be meaningless as an edit instruction.
       const trimmed = text.trim();
-
-      // Remember the last plain chat message for the Retry control (issue #82).
-      lastUserMessageRef.current = text;
 
       const selectionToAttach = trimmed.length > 0 ? pendingSelection : null;
 
@@ -1173,20 +1178,13 @@ export default function App({ client }: AppProps) {
         { id: assistantId, role: "assistant", content: "", streaming: true },
       ]);
 
-      // Issue #349: the in-flight indicator is DEFERRED until the first
-      // design-loop progress frame (the `design-loop-start` step) — a
-      // no-loop reply (a no-version question, a bare affirmation with no
-      // pending offer) resolves through a `kind: "answer"` done frame with
-      // no progress frame at all, so the flag stays false for those: no
-      // "Generating design…" stage and no pending filmstrip slot ever
-      // render. The race guard this comment used to justify is preserved:
-      // the stream is opened only inside the postChat `.then`, and
+      // The stream is opened only inside the postChat `.then`, and
       // `streamEvents` returns without resolving until the stream drains,
       // so the `finally` flag release (and the flag set below) happen
       // after the previous stream has finished — a second send cannot
       // race the first.
 
-      // Collect the last 10 user messages for chat_history (the SPA
+      // The last 10 user messages for chat_history (the SPA
       // in-memory state — the transcripts table is NOT populated by this
       // ticket; that is a future seam).
       const chatHistory = messages
@@ -1194,7 +1192,11 @@ export default function App({ client }: AppProps) {
         .slice(-10)
         .map((m) => m.content);
 
-      void apiClient
+      // Return the promise chain so the caller (the queue hook's flush)
+      // can await it and catch a postChat rejection (a failed flush must
+      // not lose the queued message — issue #388, lens finding 1). The
+      // region-edit path (above) is fire-and-forget; this is the chat path.
+      return apiClient
         .postChat(effectiveProjectId, {
           message: trimmed,
           chat_history: chatHistory,
@@ -1477,9 +1479,15 @@ export default function App({ client }: AppProps) {
         })
         .catch((e) => {
           // postChat failed (404, 409, 422, network error) — the design
-          // loop did not start. Show the error and re-enable the send
-          // button.
+          // loop did not start.
           const detail = e instanceof Error ? e.message : "unknown error";
+          // Issue #388 (lens round 1): a flush's rejection renders no
+          // App-side failure UI — the hook's failed queued turn is the
+          // single affordance. Remove the placeholder; re-throw for the hook.
+          if (options?.isFlush) {
+            setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+            throw e;
+          }
           setMessages((prev) =>
             prev.map((m) =>
               m.id === assistantId ? { ...m, streaming: false, content: `Error: ${detail}` } : m,
@@ -1500,6 +1508,9 @@ export default function App({ client }: AppProps) {
                 } },
             ];
           });
+          // Re-throw so the hook's flush can catch the rejection and
+          // restore the queued message (lens finding 1); the UI is handled.
+          throw e;
         })
         .finally(() => {
           // Release the in-flight flag on ALL exit paths (pass, exhausted,
@@ -1508,6 +1519,10 @@ export default function App({ client }: AppProps) {
           // button (issue #82: also tear down the elapsed-seconds timer —
           // no leaked interval, no stage indicator after the run).
           setDesignLoopInFlight(false);
+          // Issue #388: close the pre-first-frame window — the latch
+          // release plus the flush-effect re-key are one call (the hook,
+          // reached through the ref to avoid a TDZ capture — see above).
+          signalRunEndRef.current();
           designLoopStartRef.current = null;
           setDesignLoopStep(null);
           setViewProgress(INITIAL_VIEW_PROGRESS);
@@ -1522,7 +1537,8 @@ export default function App({ client }: AppProps) {
   // (the FailureCard via streamError) — never a component-local "upload
   // failed" for a failure that is not about the upload. A creation failure
   // during photo upload releases the latch, so a later send can retry
-  // (handled by ensureProject itself).
+  // (handled by ensureProject itself). Declared before the queue hook
+  // below because the hook's queue-creation-failure path calls it.
   const handleProjectCreationFailure = useCallback((e: unknown) => {
     setStreamError({
       message: copy.shell.projectCreationFailed(
@@ -1533,27 +1549,29 @@ export default function App({ client }: AppProps) {
     });
   }, []);
 
-  // The send entry point (issue #192): creates the project lazily on the
-  // first explicit send (single-flight — a concurrent trigger shares the
-  // in-flight POST) and routes the message through `continueSend` only once
-  // the project id is settled. The resolved id is passed as an override
-  // because `continueSend`'s closure captures the STALE `projectId` (the
-  // state update from the creation has not landed when the .then fires).
-  // A creation failure is surfaced via the app-level error card and nothing
-  // is appended — a message must never render as sent when the request that
-  // would justify it can never fire.
-  const handleSendMessage = useCallback(
-    (text: string) => {
-      if (projectId !== null) {
-        continueSend(text);
-        return;
-      }
-      void ensureProject()
-        .then((id) => continueSend(text, id))
-        .catch((e) => handleProjectCreationFailure(e));
+  // The queue hook (declared after `continueSend` — its flush re-enters
+  // through a ref mirror; the run's .finally reaches the hook's
+  // `signalRunEnd` through `signalRunEndRef`).
+  const queuedSend = useQueuedSend({
+    designLoopInFlight,
+    projectId,
+    setMessages,
+    continueSend,
+    // The narrow Retry-memory seam (issue #388, lens finding 3): the
+    // hook calls this only on NON-FLUSH sends — a flush re-send must
+    // not overwrite the in-flight run's message (operator decision 4).
+    rememberUserMessage: (text) => {
+      lastUserMessageRef.current = text;
     },
-    [projectId, continueSend, ensureProject, handleProjectCreationFailure],
-  );
+    nextMsgId,
+    ensureProject,
+    handleProjectCreationFailure,
+    pendingSelection,
+    clearPendingSelection: handleCancelPendingSelection,
+  });
+  const { handleSendMessage, cancelQueuedMessage, resendQueued } = queuedSend;
+  const signalRunEndRef = useRef<() => void>(() => {});
+  signalRunEndRef.current = queuedSend.signalRunEnd;
 
   // The inline bar's submit path — routes the typed instruction through the
   // SAME handleSendMessage the chat panel uses, so the pending selection is
@@ -1631,9 +1649,17 @@ export default function App({ client }: AppProps) {
   const handleRegionBarSubmit = useCallback(() => {
     const text = regionBarText;
     if (text.trim().length === 0) return;
+    // Issue #388 (operator decision 3): a region-edit submit during a
+    // run is DISABLED at the UI (the Apply button is disabled while
+    // designLoopInFlight), NOT queued — it would attach a selection to a
+    // message that flushes later, racing the in-flight run. The button
+    // gate is the primary guard; this check is the belt (the path is
+    // unreachable while the button is disabled, but a regression in the
+    // button's disabled attribute must not silently queue a region edit).
+    if (designLoopInFlight) return;
     setRegionBarText("");
     handleSendMessage(text);
-  }, [regionBarText, handleSendMessage]);
+  }, [regionBarText, handleSendMessage, designLoopInFlight]);
 
   const handlePhotoUploaded = useCallback((photoPath: string, width: number, height: number) => {
     // Photo upload success — the photo path is now stored server-side.
@@ -1936,6 +1962,8 @@ export default function App({ client }: AppProps) {
           projectId={projectId}
           messages={messages}
           onSend={handleSendMessage}
+          onCancelQueued={cancelQueuedMessage}
+          onResendQueued={resendQueued}
           inFlight={designLoopInFlight}
           onBesidePhoto={handleBesidePhoto}
           envelope={envelope}
@@ -1984,6 +2012,7 @@ export default function App({ client }: AppProps) {
           highlightModuleId={pendingSelection?.moduleIds[0] ?? null}
           onAsk={(label) => handleSendMessage(copy.brief.askEstablish(label))}
           onChange={(label) => handleSendMessage(`${copy.brief.rowActions.change}: ${label}`)}
+          sendInFlight={designLoopInFlight}
         />
       )}
 
@@ -2062,6 +2091,7 @@ export default function App({ client }: AppProps) {
           text={regionBarText}
           onTextChange={setRegionBarText}
           onSubmit={handleRegionBarSubmit}
+          inFlight={designLoopInFlight}
           onCancel={handleCancelPendingSelection}
           orbitingPin={orbitingPin}
           orbitClearedPin={orbitClearedPin}

@@ -17,6 +17,7 @@ import { MARKER_COLOR } from "../../lib/marker";
 import type { RegionEditViewId } from "../../lib/api";
 import { Z_INDEX } from "../../App";
 import copy from "../../copy";
+import { disabledReasonProps, DisabledReasonHint } from "../shell/DisabledReason";
 
 export interface RegionEditBarSelection {
   thumbnail: string;
@@ -47,6 +48,12 @@ interface RegionEditBarProps {
   orbitingPin: boolean;
   /** The pin is cleared (pose crossed the threshold). */
   orbitClearedPin: boolean;
+  /** Issue #388: true while a design run is in flight — the Apply button
+   *  is disabled AND the form cannot submit (a region-edit submit is NOT
+   *  queued, decision 3: it is disabled, not queued; the drawn selection
+   *  is kept so the user can re-apply it once the run ends). The input
+   *  stays typeable — the text the user is composing is not lost. */
+  inFlight?: boolean;
 }
 
 export function RegionEditBar({
@@ -58,6 +65,7 @@ export function RegionEditBar({
   onCancel,
   orbitingPin,
   orbitClearedPin,
+  inFlight,
 }: RegionEditBarProps) {
   const pin = selection.point;
   const { width: vw, height: vh } = viewportSize;
@@ -161,6 +169,10 @@ export function RegionEditBar({
         }}
         onSubmit={(e) => {
           e.preventDefault();
+          // Issue #388 (operator decision 3): a region-edit submit during a
+          // run is DISABLED, not queued — the form cannot submit, so the
+          // drawn selection stays (the user cancels or waits for the run).
+          if (inFlight === true) return;
           onSubmit();
         }}
       >
@@ -206,7 +218,10 @@ export function RegionEditBar({
             className="region-edit-apply-btn"
             data-testid="region-edit-apply-btn"
             aria-label={copy.region.apply}
-            disabled={text.trim().length === 0}
+            // Issue #388: a visible reason on the disabled control (the
+            // shared helper — the copy.ts string is the single source).
+            {...disabledReasonProps("region-edit-apply-disabled-reason", inFlight === true)}
+            disabled={text.trim().length === 0 || inFlight === true}
             style={{
               flex: "0 0 auto",
               padding: "4px 12px",
@@ -214,8 +229,8 @@ export function RegionEditBar({
               borderRadius: 4,
               backgroundColor: "#0969da",
               color: "#ffffff",
-              cursor: text.trim().length === 0 ? "not-allowed" : "pointer",
-              opacity: text.trim().length === 0 ? 0.5 : 1,
+              cursor: text.trim().length === 0 || inFlight === true ? "not-allowed" : "pointer",
+              opacity: text.trim().length === 0 || inFlight === true ? 0.5 : 1,
             }}
           >
             {copy.region.apply}
@@ -309,6 +324,10 @@ export function RegionEditBar({
               {copy.region.clearedHint}
             </span>
           )}
+          <DisabledReasonHint
+            id="region-edit-apply-disabled-reason"
+            visible={inFlight === true}
+          />
         </div>
       </form>
     </>
