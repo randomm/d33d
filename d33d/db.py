@@ -570,8 +570,14 @@ def _default_git_path(name: str) -> str:
     ``~/.d33d/projects/<slug>/``) so macOS's OS-temp cleanup can never
     delete a project's design source or photo. The slug (a 12-char hex of
     ``uuid4``) makes the path unique per project and keeps it from
-    colliding across tests / worktrees. The caller is expected to
-    ``git init`` this path before any commit.
+    colliding across tests / worktrees.
+
+    The slug directory itself is NOT created here (issue #390): creating
+    it before the ``INSERT`` would leave an orphan slug dir on disk with
+    no DB row whenever the insert — or anything after it, e.g. ``git
+    init`` in the create route — fails. The path is returned uncreated;
+    the shared ``git init`` primitive (``d33d.project_git.init_git_repo``)
+    creates the directory.
 
     The base comes from the module-level :data:`APP_DATA_DIR` when the app
     has set it (issue #294 — the lifespan records the DB path's parent),
@@ -581,9 +587,7 @@ def _default_git_path(name: str) -> str:
     test_projects and issue-163 seams) intercepts it with its exact
     ``(name)`` signature.
     """
-    base = projects_dir(APP_DATA_DIR) / uuid.uuid4().hex[:12]
-    base.mkdir(parents=True, exist_ok=True)
-    return str(base)
+    return str(projects_dir(APP_DATA_DIR) / uuid.uuid4().hex[:12])
 
 
 def migrate_project_repos(

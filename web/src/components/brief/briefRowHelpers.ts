@@ -5,7 +5,7 @@
  * split must not grow Brief.tsx; the row + its helpers live alongside it).
  */
 
-import copy, { mm } from "../../copy";
+import copy, { mm, deg } from "../../copy";
 import type { DesignStateEntry } from "../../lib/api";
 
 /** The provenance mark styles (issue #246 assumed half-dot; #274 measured
@@ -78,10 +78,21 @@ export function rowTestId(entry: DesignStateEntry): string {
 
 /** Format a design-state value for the value cell. `null` must never be
  *  formatted — the unknown cell is the control, and a `?? 0` / `String()`
- *  default here would re-introduce issue #91's null→0 defect. */
-export function formatValue(value: number | string | boolean | null): string | null {
+ *  default here would re-introduce issue #91's null→0 defect. `unit` is
+ *  the entry's unit ("mm" | "deg" | null): "deg" renders ° (issue #390,
+ *  item d), null renders the bare number (unitless). */
+export function formatValue(
+  value: number | string | boolean | null,
+  unit: string | null = "mm",
+): string | null {
   if (value === null) return null;
-  if (typeof value === "number") return mm(value);
+  if (typeof value === "number") {
+    if (unit === "deg") return deg(value);
+    if (unit === "mm") return mm(value);
+    // Unitless numeric: bare number, no suffix (issue #390). An integer
+    // renders without a decimal ("6", not "6.0"); a non-integer as-is.
+    return String(value);
+  }
   return String(value);
 }
 

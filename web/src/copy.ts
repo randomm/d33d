@@ -25,6 +25,10 @@ export const dia = (value: number): string => `Ø${value.toFixed(1)}${NB}mm`;
 /** Seconds, for elapsed time. */
 export const secs = (value: number): string => `${Math.round(value)}${NB}s`;
 
+/** One decimal, always, with the degree symbol — for angle parameters
+ *  (issue #390, item d: angles show °, not mm). */
+export const deg = (value: number): string => `${value.toFixed(1)}${NB}°`;
+
 /** W/D/H axis → the adjective that belongs in a "how …?" slot ("wide",
  *  "deep", "tall"). The carried-axis sentence and the size-mismatch
  *  follow-up must read "how wide it should be", not "how width it should
@@ -48,6 +52,13 @@ export const SIZE_AXIS_WORDS = {
   D: "depth",
   H: "height",
 } as const;
+
+/** Unit wire token → user-facing plural noun for the part-zone note (issue #390, item 2). */
+const UNIT_WORDS: Record<"mm" | "cm" | "inch", string> = {
+  mm: "millimetres",
+  cm: "centimetres",
+  inch: "inches",
+};
 
 export const brief = {
   eyebrow: "What we're building",
@@ -202,9 +213,13 @@ export const brief = {
   yourChangesHeader: "Your changes",
   /** The note under the W/D/H rows of "The part you brought" (issue #338,
    *  operator decision 1). {units} is the settled unit (mm / cm / inch).
-   *  Rendered only for a settled part. */
-  partBroughtNote: (units: string): string =>
-    `Measured, in ${units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
+   *  Rendered only for a settled part. The unit word is pluralised via the
+   *  UNIT_WORDS map so the sentence reads "in millimetres", "in
+   *  centimetres", or "in inches" (never the bare wire token — issue #390,
+   *  item 2). The escape-hatch "custom" and the 3MF / assumed siblings are
+   *  separate keys and untouched by this map. */
+  partBroughtNote: (units: "mm" | "cm" | "inch"): string =>
+    `Measured, in ${UNIT_WORDS[units] ?? units} you confirmed. Its own features are fixed — I can add and cut, not resize.`,
   /** The part-zone note for an ASSUMED part (issue #350, operator decision
    *  3): the mm reading is assumed, not confirmed — the W/D/H rows carry
    *  assumed provenance, and this note says so. Rendered only for an

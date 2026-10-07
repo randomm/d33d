@@ -294,6 +294,36 @@ describe("Brief — provenance states", () => {
     expect(valueCell?.textContent).toContain("mm");
   });
 
+  it("a stated-within-tolerance axis row renders the stated mark (filled ring) with the stated number, not the measured ring (issue #390)", () => {
+    // A stated axis whose measurement confirmed it within tolerance keeps
+    // provenance "stated" (the user's number is displayed) and carries the
+    // measured extent in `measured_value` (issue #390). The SPA must render
+    // the stated mark (filled ring), not the hollow measured ring.
+    const entry: DesignStateEntry = {
+      name: "W",
+      kind: "axis",
+      label: "W",
+      value: 30.0,
+      unit: "mm",
+      provenance: "stated",
+      measured_value: 30.4,
+    };
+    render(<Brief {...baseProps} entries={[entry]} />);
+    const row = screen.getByTestId("brief-row-axis-W");
+    // The provenance is "stated" — the row carries the stated mark.
+    expect(row.getAttribute("data-provenance")).toBe("stated");
+    // The stated number is displayed (30.0), not the measured extent (30.4).
+    const valueCell = row.querySelector("[data-testid='brief-value']");
+    expect(valueCell?.textContent).toContain("30.0");
+    expect(valueCell?.textContent).not.toContain("30.4");
+    // The mark is the filled stated ring (var(--color-live)), NOT the
+    // hollow measured ring (transparent with faint border).
+    const mark = row.querySelector("[data-testid='brief-mark']");
+    const markStyle = (mark?.getAttribute("style") ?? "").toLowerCase();
+    expect(markStyle).toContain("var(--color-live)");
+    expect(markStyle).not.toContain("transparent");
+  });
+
   it("a measured parameter renders its number in the value cell", () => {
     render(<Brief {...baseProps} entries={[measured("wall_gap", 45)]} />);
     const valueCell = screen

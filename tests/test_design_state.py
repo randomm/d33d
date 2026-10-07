@@ -171,22 +171,67 @@ def test_design_state_block_disagrees_carries_both_values() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stated_within_tolerance_yields_measured_not_disagrees() -> None:
+def test_stated_within_tolerance_keeps_stated_with_measured_value() -> None:
     """A stated value WITHIN the named tolerance (``max(1%, 0.5mm)`` —
-    ``BBOX_TOLERANCE_REL`` / ``BBOX_TOLERANCE_MIN_MM``) does NOT yield
-    ``disagrees``: the provenance is ``measured`` and the displayed value
-    is the measured one."""
+    ``BBOX_TOLERANCE_REL`` / ``BBOX_TOLERANCE_MIN_MM``) keeps provenance
+    ``stated`` (the user's number is displayed) and the measured extent
+    rides along in ``measured_value`` (issue #390 — the mesh confirmed
+    the stated number; it does not replace it).
+
+    Issue #316 de-dup: the W/D/H-named params that AGREE with their
+    measured extents collapse into their axis rows (one row per axis).
+    Since no stated evidence is persisted here (only the measurement),
+    the axis rows are ``measured`` (no user stated them — only the model
+    emitted them); the W param row agrees and is DROPPED into the axis
+    row."""
     # Stated W=30, measured 30.4: |30.4-30| = 0.4 <= tol = max(0.3, 0.5) = 0.5.
     entries = state_block_for_version(
         {"W": 30.0, "D": 30.0, "H": 30.0}, {"x": 30.4, "y": 30.0, "z": 30.0}
     )
     by_name = {e["name"]: e for e in entries}
-    assert by_name["W"]["provenance"] == "measured"
-    assert by_name["W"]["value"] == 30.4  # the measured value is displayed
-    assert "stated_value" not in by_name["W"]
-    # D and H are exact matches → measured too.
+    # W: the axis row (no stated evidence — only the measurement) is
+    # ``measured``; the W param (30) agrees with 30.4 → DROPPED (de-dup).
+    # The W param itself would carry provenance "stated" + measured_value,
+    # but it is dropped into the axis row.
+    w_rows = [e for e in entries if e["name"] == "W"]
+    w_axis = next(e for e in w_rows if e["kind"] == "axis")
+    assert w_axis["provenance"] == "measured"
+    assert w_axis["value"] == 30.4
+    # D and H: exact matches → measured too.
     assert by_name["D"]["provenance"] == "measured"
     assert by_name["H"]["provenance"] == "measured"
+
+
+def test_stated_axis_within_tolerance_keeps_stated_provenance_and_rides_measured_value() -> None:
+    """A STATED axis (persisted stated_dims) whose measurement agrees within
+    tolerance keeps provenance ``stated`` (the user's number is displayed)
+    and carries the measured extent in ``measured_value`` (issue #390 —
+    the mesh confirmed the stated value; it rides along as audit evidence,
+    not as the display)."""
+    # Stated W=30, measured 30.4: |30.4-30| = 0.4 <= tol = max(0.3, 0.5) = 0.5.
+    entries = state_block_for_version(
+        {"W": 30.0, "D": 30.0, "H": 30.0},
+        {"x": 30.4, "y": 30.0, "z": 30.0},
+        {"W": 30.0, "D": 30.0, "H": 30.0},
+    )
+    by_name = {e["name"]: e for e in entries}
+    # W: stated axis, measurement agrees → provenance "stated", value is
+    # the stated number (30.0), measured_value carries the extent (30.4).
+    assert by_name["W"]["provenance"] == "stated"
+    assert by_name["W"]["value"] == 30.0  # the stated number is displayed
+    assert by_name["W"]["measured_value"] == 30.4  # the mesh confirmed it
+    # D and H: exact matches → same rule.
+    assert by_name["D"]["provenance"] == "stated"
+    assert by_name["D"]["value"] == 30.0
+    assert by_name["D"]["measured_value"] == 30.0
+    assert by_name["H"]["provenance"] == "stated"
+    assert by_name["H"]["value"] == 30.0
+    assert by_name["H"]["measured_value"] == 30.0
+    # ``stated_value`` is NOT set (reserved for disagrees).
+    assert "stated_value" not in by_name["W"]
+    # One row per axis (the de-dup collapsed the param rows into axis rows).
+    for e in entries:
+        assert e["kind"] == "axis"
 
 
 def test_stated_outside_tolerance_yields_disagrees_with_both_values() -> None:
@@ -383,6 +428,129 @@ def test_design_state_block_numeric_value_carries_mm_unit() -> None:
     """A numeric param carries ``unit: "mm"`` (the ticket's unit field)."""
     entries = state_block_from_params({"W": 20.0})
     assert entries[0]["unit"] == "mm"
+
+
+def test_angle_param_name_carries_deg_unit() -> None:
+    """A numeric param whose name contains 'angle' carries ``unit: "deg"``
+    (issue #390, item d — angles show °, not mm). The unit is inferred from
+    the parameter name: 'lip_angle' → deg."""
+    entries = state_block_from_params({"lip_angle": 20.0})
+    assert entries[0]["unit"] == "deg"
+
+
+def test_deg_suffix_param_name_carries_deg_unit() -> None:
+    """A numeric param whose name contains 'deg' (but not 'degree') carries
+    ``unit: "deg"`` (issue #390, item d). 'tilt_deg' → deg."""
+    entries = state_block_from_params({"tilt_deg": 15.0})
+    assert entries[0]["unit"] == "deg"
+
+
+def test_unitless_count_param_carries_no_unit() -> None:
+    """A numeric count param (last token in the count set, e.g.
+    'bolt_count') carries ``unit: None`` — a count is unitless (issue
+    #390: counts render as bare numbers, no suffix, no 'mm')."""
+    entries = state_block_from_params({"bolt_count": 4.0})
+    assert entries[0]["unit"] is None
+
+
+def test_angle_token_params_carry_deg_unit() -> None:
+    """Token-based angle detection (issue #390): a numeric param whose
+    tokens include an angle word ('lip_angle'), a 'deg'/'degrees' token
+    ('tilt_deg'), or a camelCase 'Angle' suffix ('draftAngle') carries
+    ``unit: "deg"``."""
+    for name in ("lip_angle", "tilt_deg", "draftAngle"):
+        entries = state_block_from_params({name: 20.0})
+        assert entries[0]["unit"] == "deg", name
+
+
+def test_length_word_last_token_never_deg() -> None:
+    """A name that CONTAINS an angle token but whose LAST token is a
+    length word stays 'mm' (issue #390): 'angled_wall_thickness',
+    'rectangle_width', 'triangle_side', 'degas_depth' are all mm.
+    'tangle' (no token match at all) is mm too."""
+    for name in (
+        "angled_wall_thickness",
+        "rectangle_width",
+        "triangle_side",
+        "degas_depth",
+        "tangle",
+    ):
+        entries = state_block_from_params({name: 20.0})
+        assert entries[0]["unit"] == "mm", name
+
+
+def test_shape_names_ending_in_angle_are_mm_not_special_case() -> None:
+    """Words that end in "angle" yet name a shape, not an angle, fall
+    through to mm because they are not in ``_ANGLE_TOKENS`` — no
+    tangle-only branch in the predicate (issue #390)."""
+    import d33d.design_state as ds
+
+    for name in ("tangle", "triangle", "rectangle", "quadrangle"):
+        entries = state_block_from_params({name: 20.0})
+        assert entries[0]["unit"] == "mm", name
+    # A real angle token is still a bare set lookup, not a suffix match:
+    assert ds._infer_unit("angle") == "deg"
+    # And a shape name ending in "angle" stays non-angle:
+    assert ds._infer_unit("triangle") == "mm"
+
+
+def test_count_prefix_names_carry_no_unit() -> None:
+    """A numeric param whose name starts with 'n_' or 'num_' is a count
+    (unitless → ``unit: None``), as is one whose last token is a count
+    word ('segments', 'holes', 'teeth', 'n', 'number')."""
+    for name in ("n_holes", "num_ribs", "segments", "holes", "teeth", "n"):
+        entries = state_block_from_params({name: 4.0})
+        assert entries[0]["unit"] is None, name
+
+
+def test_axis_rows_always_carry_mm_unit() -> None:
+    """A W/D/H axis row always stays ``unit: "mm"`` — the axis-name
+    inference never yields deg or None (issue #390 item 4)."""
+    entries = state_block_for_version(
+        {"W": 60.0, "D": 40.0, "H": 30.0},
+        measurement={"x": 60.0, "y": 40.0, "z": 30.0},
+    )
+    axis_rows = [e for e in entries if e["kind"] == "axis"]
+    assert len(axis_rows) == 3
+    for row in axis_rows:
+        assert row["unit"] == "mm", row["name"]
+
+
+def test_param_meta_unit_overrides_inference_for_angle() -> None:
+    """An explicit param_meta unit wins over the name-based inference, even
+    for an angle name (issue #390 item 3): meta 'mm' on 'lip_angle' → mm."""
+    entries = state_block_from_params(
+        {"lip_angle": 20.0},
+        param_meta={"lip_angle": {"unit": "mm"}},
+    )
+    assert entries[0]["unit"] == "mm"
+
+
+def test_param_meta_unit_overrides_inference_for_count() -> None:
+    """An explicit param_meta unit also wins for a count name (issue #390
+    item 3): meta 'mm' on 'bolt_count' → mm (the override is total)."""
+    entries = state_block_from_params(
+        {"bolt_count": 4.0},
+        param_meta={"bolt_count": {"unit": "mm"}},
+    )
+    assert entries[0]["unit"] == "mm"
+
+
+def test_param_meta_unit_overrides_inference_for_mm_default() -> None:
+    """An explicit param_meta unit wins over the default mm inference too:
+    'rod_bore' with meta 'cm' → 'cm' (issue #390 item 3)."""
+    entries = state_block_from_params(
+        {"rod_bore": 6.0},
+        param_meta={"rod_bore": {"unit": "cm"}},
+    )
+    assert entries[0]["unit"] == "cm"
+
+
+def test_non_numeric_param_carries_no_unit() -> None:
+    """A non-numeric param (string) carries ``unit: None`` — no unit is
+    rendered (issue #390, item d: unitless parameters get no unit)."""
+    entries = state_block_from_params({"finish": "rough"})
+    assert entries[0]["unit"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -698,10 +866,11 @@ def test_partial_stated_axes_still_omit_unstated_unmeasured_axis() -> None:
 
 
 def test_partial_stated_axes_with_measurement_fill_unstated_axis_measured() -> None:
-    """Issue #264: stated {W: 60, H: 80} WITH a persisted bbox → the
-    stated axes keep today's rule (W measured, H measured) and the
-    UNSTATED D axis gets a ``measured`` row with the measured extent —
-    all three rows present, W/D/H order, axis-first."""
+    """Issue #264 + #390: stated {W: 60, H: 80} WITH a persisted bbox →
+    the STATED axes keep ``stated`` provenance (the user's numbers are
+    displayed, confirmed by the mesh — issue #390) and the UNSTATED D
+    axis gets a ``measured`` row with the measured extent — all three
+    rows present, W/D/H order, axis-first."""
     entries = state_block_for_version(
         {"spacer_width": 60.0, "spacer_depth": 45.0, "spacer_height": 80.0},
         {"x": 60.2, "y": 45.0, "z": 80.0},
@@ -709,15 +878,20 @@ def test_partial_stated_axes_with_measurement_fill_unstated_axis_measured() -> N
     )
     axis_rows = [e for e in entries if e["kind"] == "axis"]
     assert [e["name"] for e in axis_rows] == ["W", "D", "H"]
-    assert all(e["provenance"] == "measured" for e in axis_rows)
     by_name = {e["name"]: e for e in axis_rows}
-    # W: within tolerance of stated 60 (|60.2-60| = 0.2 <= 0.6) → measured.
-    assert by_name["W"]["value"] == 60.2
+    # W: stated, within tolerance of stated 60 (|60.2-60| = 0.2 <= 0.6)
+    # → provenance "stated" (the user's number), measured_value 60.2.
+    assert by_name["W"]["provenance"] == "stated"
+    assert by_name["W"]["value"] == 60.0
+    assert by_name["W"]["measured_value"] == 60.2
     # D: NOT stated — the row is the measured extent (45.0), provenance
     # ``measured`` (issue #264 — never a fabricated value).
+    assert by_name["D"]["provenance"] == "measured"
     assert by_name["D"]["value"] == 45.0
-    # H: exact match → measured.
+    # H: stated, exact match → provenance "stated", measured_value 80.0.
+    assert by_name["H"]["provenance"] == "stated"
     assert by_name["H"]["value"] == 80.0
+    assert by_name["H"]["measured_value"] == 80.0
 
 
 def test_axis_named_param_stays_assumed_even_when_value_matches() -> None:
@@ -748,26 +922,28 @@ def test_axis_named_param_stays_assumed_even_when_value_matches() -> None:
     assert len(entries) == 2
     # The matching case with a measurement: the param AGREES (60 vs 60
     # measured) → its row is DROPPED (issue #316 de-dup); the surviving W
-    # row is the axis row (measured — stated 60 vs measured 60, within
-    # tolerance), never a stated param (that would be the forbidden
-    # name-based promotion). Only W is declared, so the W row is the one
-    # under test; the D/H measured axis rows (issue #264 — every axis
-    # with a positive measured extent gets a row) are not the subject.
+    # row is the axis row (stated — stated 60 vs measured 60, within
+    # tolerance, issue #390 keeps the stated provenance), never a stated
+    # param (that would be the forbidden name-based promotion). Only W is
+    # declared, so the W row is the one under test; the D/H measured axis
+    # rows (issue #264 — every axis with a positive measured extent gets
+    # a row) are not the subject.
     entries2 = state_block_for_version(
         {"W": 60.0}, {"x": 60.0, "y": 30.0, "z": 30.0}, {"W": 60.0}
     )
     w2 = next(e for e in entries2 if e["name"] == "W")
     assert w2["kind"] == "axis"
-    assert w2["provenance"] == "measured"
+    assert w2["provenance"] == "stated"
     # And never a stated PARAM row (that would be the forbidden
     # name-based promotion).
     assert ("param", "W") not in {(e["kind"], e["name"]) for e in entries2}
 
 
-def test_stated_axis_plus_bbox_within_tolerance_yields_measured() -> None:
+def test_stated_axis_plus_bbox_within_tolerance_keeps_stated() -> None:
     """A stated axis (persisted {W: 30}) with a persisted bbox within the
-    tolerance → the axis row renders ``measured`` with the MEASURED value
-    displayed (what will print), not the stated one.
+    tolerance → the axis row keeps ``stated`` provenance with the STATED
+    value displayed (the user's number, confirmed by the mesh); the
+    measured extent rides along in ``measured_value`` (issue #390).
 
     Issue #316 de-dup: the W/D/H-named params all AGREE with their
     measured extents (within tolerance) → their param rows are DROPPED
@@ -781,15 +957,18 @@ def test_stated_axis_plus_bbox_within_tolerance_yields_measured() -> None:
     )
     # All three axes agree (within tolerance) → the param rows are
     # DROPPED and only the axis rows remain (issue #316 de-dup): one row
-    # per axis, each ``measured`` with the measured value displayed.
+    # per axis, each ``stated`` with the stated value displayed.
     assert len(entries) == 3
     for e in entries:
         assert e["kind"] == "axis"
-        assert e["provenance"] == "measured"
+        assert e["provenance"] == "stated"
     by_name = {e["name"]: e for e in entries}
-    assert by_name["W"]["value"] == 30.4
+    assert by_name["W"]["value"] == 30.0
+    assert by_name["W"]["measured_value"] == 30.4
     assert by_name["D"]["value"] == 30.0
+    assert by_name["D"]["measured_value"] == 30.0
     assert by_name["H"]["value"] == 30.0
+    assert by_name["H"]["measured_value"] == 30.0
     # Axis rows come FIRST in W/D/H order (issue #264 — the entry list
     # and the Brief order).
     assert [e["name"] for e in entries] == ["W", "D", "H"]
@@ -1241,16 +1420,17 @@ def test_promotion_param_named_w_without_axis_stays_assumed() -> None:
     # name-based promotion).
     assert ("param", "W") not in {(e["kind"], e["name"]) for e in entries}
     # With a measurement: the W param AGREES (60 vs 60) → DROPPED; the
-    # surviving W row is the axis row (measured — stated 60 vs measured 60,
-    # within tolerance). Only W is declared, so the W row is the one under
-    # test; the D/H measured axis rows (issue #264 — every axis with a
-    # positive measured extent gets a row) are not the subject.
+    # surviving W row is the axis row (stated — stated 60 vs measured 60,
+    # within tolerance, issue #390 keeps the stated provenance). Only W is
+    # declared, so the W row is the one under test; the D/H measured axis
+    # rows (issue #264 — every axis with a positive measured extent gets a
+    # row) are not the subject.
     entries2 = state_block_for_version(
         {"W": 60.0}, {"x": 60.0, "y": 30.0, "z": 30.0}, {"W": 60.0}, None
     )
     w2 = next(e for e in entries2 if e["name"] == "W")
     assert w2["kind"] == "axis"
-    assert w2["provenance"] == "measured"
+    assert w2["provenance"] == "stated"
     assert ("param", "W") not in {(e["kind"], e["name"]) for e in entries2}
     # The DISAGREEING case (50 vs 60, no measurement): the param DISAGREES
     # with the axis → both rows render (the #264 disagree display is
@@ -1402,15 +1582,16 @@ drift does not (a real change)."""
     assert entries2[0]["provenance"] == "assumed"
 
 
-def test_confirmed_param_with_matching_measurement_renders_measured() -> None:
+def test_confirmed_param_with_matching_measurement_renders_stated() -> None:
     """A confirmed W-named param whose value the measurement AGREES with
-    (within tolerance) renders ``measured`` with the measured value —
-    the confirmation is evidence for the value, and the measurement
-    confirms it (no ``disagrees``, no fabricated ``stated``).
+    (within tolerance) keeps ``stated`` provenance (the user's confirmed
+    value, issue #390) — the measurement confirms it (no ``disagrees``,
+    no fabricated ``stated`` from the model).
 
-    Issue #316 de-dup: the W param AGREES with its measured axis row (30
-    vs 30) → the param row is DROPPED and only the W axis row remains
-    (measured — one row per axis, no repeat)."""
+    Issue #316 de-dup: the W param (stated via rule (b)) AGREES with its
+    measured axis row (30 vs 30) → the param row is DROPPED and only the
+    W axis row remains (upgraded to ``stated`` by the de-dup's
+    never-downgrade rule — one row per axis, no repeat)."""
     entries = state_block_for_version(
         {"W": 30.0},
         {"x": 30.0, "y": 30.0, "z": 30.0},  # the measurement agrees
@@ -1422,7 +1603,9 @@ def test_confirmed_param_with_matching_measurement_renders_measured() -> None:
     # W axis row carries the number.
     assert ("param", "W") not in {(e["kind"], e["name"]) for e in entries}
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
-    assert w_axis["provenance"] == "measured"
+    # The de-dup upgrades the axis row to ``stated`` (the param's stronger
+    # provenance); the value is the param's stated number (30.0).
+    assert w_axis["provenance"] == "stated"
     assert w_axis["value"] == 30.0
 
 
@@ -1847,14 +2030,15 @@ def test_promoted_rule_a_param_mismatching_measurement_is_user_disagrees() -> No
 def test_promoted_rule_a_param_within_tolerance_stays_stated() -> None:
     """The same promotion with a measured W of 40.2 (within the 0.5 mm
 tolerance) stays ``stated`` — the measurement confirms the user's value
-(no ``disagrees``, no displayed-value swap).
+(no ``disagrees``, no displayed-value swap; issue #390: the stated
+number is displayed, the measured extent rides along in
+``measured_value``).
 
     Issue #316 de-dup: the spacer_width param (40, ``stated`` via rule (a))
     AGREES with the measured W extent (40.2, within tolerance) → the
-    redundant param row is DROPPED; the W axis row carries the same
-    number (``measured`` — 40 vs 40.2 within tolerance). The merged row
-    takes the param's label (``Spacer width``) and its CURRENT provenance
-    (``stated`` — the rule (a) promotion)."""
+    redundant param row is DROPPED; the W axis row keeps ``stated``
+    provenance (the user's number, confirmed by the mesh). The merged row
+    takes the param's label (``Spacer width``)."""
     entries = state_block_for_version(
         {"spacer_width": 40.0},
         {"x": 40.2, "y": 30.0, "z": 30.0},
@@ -1866,14 +2050,14 @@ tolerance) stays ``stated`` — the measurement confirms the user's value
     assert ("param", "spacer_width") not in {
         (e["kind"], e["name"]) for e in entries
     }
-    # The W axis row: ``measured`` (stated 40 vs measured 40.2, within
-    # tolerance), taking the param's label and its CURRENT provenance
-    # (``stated`` — rule (a) promotion). The de-dup takes the param's
-    # provenance (``stated``) and the displayed value stays the measured
-    # extent (40.2 — the axis row's own value).
+    # The W axis row: ``stated`` (stated 40 vs measured 40.2, within
+    # tolerance — issue #390 keeps the stated provenance and displays
+    # the user's number). The measured extent rides along in
+    # ``measured_value``.
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
     assert w_axis["provenance"] == "stated"
-    assert w_axis["value"] == 40.2  # the measured extent (the display)
+    assert w_axis["value"] == 40.0  # the stated number (the display)
+    assert w_axis["measured_value"] == 40.2  # the mesh confirmed it
     assert w_axis["label"] == "Spacer width"  # the param's label
     assert "stated_value" not in w_axis
     assert "disagrees_source" not in w_axis
@@ -2442,8 +2626,8 @@ def test_collapse_stated_axis_plus_assumed_param_keeps_stated() -> None:
     example): the user stated W 40; the model's box_width (declared axis
     W) is 40 and ``assumed``. The collapse drops the param row and the
     surviving W axis row must be ``stated`` — the user's words never lose
-    to the model's matching guess — with the MEASURED extent displayed
-    (40.2 — what will print, never the model's 40 or the stated 40)."""
+    to the model's matching guess — with the STATED number displayed
+    (40.0, confirmed by the mesh at 40.2; issue #390)."""
     entries = state_block_for_version(
         {"box_width": 40.0},
         {"x": 40.2, "y": 30.0, "z": 30.0},
@@ -2456,15 +2640,16 @@ def test_collapse_stated_axis_plus_assumed_param_keeps_stated() -> None:
     w_axis = next(e for e in entries if e["kind"] == "axis" and e["name"] == "W")
     # STRONGER wins: stated (the axis row's own) beats the param's assumed.
     assert w_axis["provenance"] == "stated"
-    # The displayed value is the MEASURED extent (the axis row's own
-    # value — the collapse never swaps it).
-    assert w_axis["value"] == 40.2
+    # The displayed value is the STATED number (issue #390); the measured
+    # extent rides along in ``measured_value``.
+    assert w_axis["value"] == 40.0
+    assert w_axis["measured_value"] == 40.2
     # The param's human label rides the collapsed row.
     assert w_axis["label"] == "Width"
     # And the prompt renders the stated line for W (the collapse must
     # never downgrade the user's statement to an assumption).
     text = format_design_state_block(build_design_state_block(entries))
-    assert "Width (W) = 40.2 (stated by the user)" in text
+    assert "Width (W) = 40 (stated by the user)" in text
 
 
 def test_collapse_measured_axis_plus_stated_param_keeps_stated() -> None:

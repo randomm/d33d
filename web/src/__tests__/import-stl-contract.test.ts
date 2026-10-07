@@ -173,7 +173,7 @@ describe("copy.ts Screen 2 strings", () => {
     expect(copy.brief.partBroughtNoteMeasured).not.toContain("custom");
     // Distinct from the user-settled and the 3MF file-own notes.
     expect(copy.brief.partBroughtNoteMeasured).not.toBe(
-      copy.brief.partBroughtNote("custom"),
+      copy.brief.partBroughtNote("mm"),
     );
     expect(copy.brief.partBroughtNoteMeasured).not.toBe(
       copy.brief.partBroughtNoteFromFile,

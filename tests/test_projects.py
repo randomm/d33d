@@ -204,6 +204,61 @@ def test_create_project_returns_201_and_git_repo(app_with_projects):
     assert name == "d33d"
 
 
+@pytest.mark.parametrize(
+    "init_boom",
+    [
+        lambda: RuntimeError("simulated git init failure"),
+        lambda: OSError("simulated mkdir failure"),
+        lambda: subprocess.TimeoutExpired("git", 30),
+    ],
+)
+def test_create_failure_leaves_no_orphan_dir(
+    app_with_projects,
+    init_boom: object,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+):
+    """A failed create (git init raising any of the init exceptions) leaves
+    NEITHER a DB row NOR a slug directory on disk, and the 500 detail
+    leaks NO filesystem path (issue #390 item 4)."""
+    import d33d.projects as projects_mod
+
+    def _boom(repo_dir: Path) -> None:
+        raise init_boom()
+
+    monkeypatch.setattr(projects_mod, "init_git_repo", _boom)
+
+    async def _call(client):
+        return await client.post(
+            "/api/projects", json={"name": "Failing project"}
+        )
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 500
+
+    detail = r.json()["detail"]
+    # No server path disclosure in the fixed detail.
+    assert "repos" not in detail
+    assert str(tmp_path) not in detail
+    assert "/" not in detail
+
+    # No DB row survived the failure (read inside the lifespan window —
+    # the connection is closed at teardown).
+    async def _db_check(client):
+        return app_with_projects.state.conn.list_projects()
+
+    assert _run_async(app_with_projects, _db_check) == []
+    # No slug directory survives the failure (no orphan dir on disk):
+    # the fixture's git-path seam mkdirs under <tmp_path>/repos.
+    repos_base = tmp_path / "repos"
+    leftover = (
+        [p for p in repos_base.iterdir() if p.is_dir()]
+        if repos_base.is_dir()
+        else []
+    )
+    assert leftover == [], f"orphan slug dir(s) after failed create: {leftover}"
+
+
 def test_create_project_with_tags_and_notes(app_with_projects):
     """POST /api/projects with tags and notes stores them correctly."""
 

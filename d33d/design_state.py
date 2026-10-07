@@ -213,6 +213,10 @@ class StateEntry(TypedDict):
     on a ``stated`` axis row collapsed into by an agreeing param (the
     collapse never strips it), so it is ``NotRequired``: the common
     case carries no ``stated_value`` key at all.
+    ``measured_value`` rides alongside a ``stated`` row whose measurement
+    confirmed the stated value within tolerance (issue #390 — the
+    displayed value is the STATED number; the measured extent rides
+    along as audit evidence).
     """
 
     name: str
@@ -222,6 +226,11 @@ class StateEntry(TypedDict):
     unit: str | None
     provenance: Provenance
     stated_value: NotRequired[float | str | bool | None]
+    #: The measured extent that confirmed a stated value within tolerance
+    #: (issue #390). Present on ``stated`` rows whose value was confirmed
+    #: by a render; the displayed ``value`` is the stated number, and
+    #: this field carries the measurement as the ride-along evidence.
+    measured_value: NotRequired[float | None]
     #: Present ONLY on param rows with ``provenance == "disagrees"``
     #: (mirroring ``stated_value``): ``"user"`` when the stated value is
     #: the user's (the default — absent on the wire for backward
@@ -257,6 +266,96 @@ def _is_number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
+#: Matched per snake/camel token; fused names (e.g. 'flareangle') are out of
+#: scope — the design prompt asks for snake_case. Words that end in "angle"
+#: yet name a shape ("tangle"/"triangle") fall through to mm simply because
+#: they are not in this set (issue #390).
+_ANGLE_TOKENS: frozenset[str] = frozenset(
+    ("angle", "deg", "degree", "degrees", "tilt", "draft")
+)
+
+#: The last tokens that mark a LENGTH parameter — a name ending in one
+#: of these is "mm" even when it contains an angle token (issue #390).
+#: The bare "triangle side" name ends in "side": a polygon side is a
+#: length, never an angle (issue #390 operator decision: 'triangle_side'
+#: → mm).
+_LENGTH_WORDS: frozenset[str] = frozenset(
+    (
+        "thickness",
+        "width",
+        "depth",
+        "height",
+        "length",
+        "radius",
+        "diameter",
+        "offset",
+        "gap",
+        "wall",
+        "side",
+    )
+)
+
+#: The last tokens (and the ``n_`` / ``num_`` name prefixes) that mark a
+#: COUNT parameter — a count is unitless (``unit: None``, rendered as a
+#: bare number), never "mm" (issue #390).
+_COUNT_WORDS: frozenset[str] = frozenset(
+    (
+        "count",
+        "n",
+        "num",
+        "number",
+        "segments",
+        "sides",
+        "steps",
+        "copies",
+        "teeth",
+        "ribs",
+        "holes",
+    )
+)
+_COUNT_PREFIXES: tuple[str, str] = ("n_", "num_")
+
+
+def _split_name_tokens(name: str) -> list[str]:
+    """The name's tokens: split on ``_``, each piece on camelCase
+    boundaries (``draftAngle`` → ``["draft", "angle"]``). Empty dropped."""
+    pieces: list[str] = []
+    for raw in name.split("_"):
+        if not raw:
+            continue
+        token = ""
+        for i, ch in enumerate(raw):
+            if ch.isupper() and i > 0:
+                pieces.append(token.lower())
+                token = ""
+            token += ch
+        if token:
+            pieces.append(token.lower())
+    return pieces
+
+
+def _infer_unit(name: str) -> str | None:
+    """The unit a numeric parameter's NAME implies (issue #390).
+
+    Token-based: split the name on ``_`` and camelCase. The angle mark is
+    the name's END (a last token that is an angle mark); a length word in
+    last position is never deg; a count (last token in ``_COUNT_WORDS``
+    or an ``n_`` / ``num_`` prefix) is unitless (``None``); everything
+    else is "mm". The param_meta join (later) can override whatever this
+    returns.
+    """
+    lower_name = name.lower()
+    tokens = _split_name_tokens(name)
+    last = tokens[-1] if tokens else lower_name
+    if last in _LENGTH_WORDS:
+        return "mm"  # a length word last is never deg
+    if last in _ANGLE_TOKENS:
+        return "deg"
+    if last in _COUNT_WORDS or lower_name.startswith(_COUNT_PREFIXES):
+        return None
+    return "mm"
+
+
 def _entry(
     name: str,
     value: Any,
@@ -266,13 +365,20 @@ def _entry(
     label_is_identifier: bool = True,
 ) -> dict[str, Any]:
     """One entry from a (name, value) pair (provenance supplied)."""
+    # Issue #390: the unit is inferred from the parameter name (token-
+    # based: angles "deg", counts unitless, everything else "mm"); a
+    # non-numeric value is unitless. The param_meta join happens later
+    # and an explicit meta unit wins (never over a provenance-specific
+    # unit — axis rows are "mm" by construction, and ``state_block_for_
+    # version`` never rewrites a param row's unit).
+    unit = _infer_unit(name) if _is_number(value) else None
     out: dict[str, Any] = {
         "name": name,
         "kind": kind,
         "label": name,  # label IS the parameter name (no invented prose)
         "label_is_identifier": label_is_identifier,
         "value": value,
-        "unit": "mm" if _is_number(value) else None,
+        "unit": unit,
         "provenance": provenance,
     }
     if provenance == "disagrees":
@@ -378,10 +484,15 @@ def state_block_from_params(
             if isinstance(label, str) and label:
                 entry["label"] = label
                 entry["label_is_identifier"] = False
-            if entry["unit"] is None:
-                unit = m.get("unit")
-                if isinstance(unit, str) and unit:
-                    entry["unit"] = unit
+            # Issue #390 item 3: an explicit param_meta unit ALWAYS wins
+            # over the name-based inference (angles and counts included).
+            # It never overrides a provenance-specific unit — the only
+            # other unit source is the inference itself (axis rows are
+            # "mm" by construction via ``_axis_row`` and their meta name
+            # never joins a param, so they are untouched here).
+            unit = m.get("unit")
+            if isinstance(unit, str) and unit:
+                entry["unit"] = unit
             axis = m.get("axis")
             if isinstance(axis, str) and axis in _VALID_META_AXES:
                 entry["axis"] = axis
@@ -623,7 +734,13 @@ def state_block_for_version(
             axis_value = evidence[axis]
             tol = max(BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)
             if abs(extent - axis_value) <= tol:
-                out.append(_axis_row(axis, extent, "measured"))
+                # Issue #390: an agreeing stated axis keeps provenance
+                # "stated" (the user's number is displayed); the measured
+                # extent rides along in ``measured_value`` (the render
+                # confirmed it — audit evidence, not the display).
+                row = _axis_row(axis, axis_value, "stated")
+                row["measured_value"] = extent
+                out.append(row)
             else:
                 out.append(_axis_row(axis, extent, "disagrees", axis_value))
         else:
@@ -652,8 +769,19 @@ def state_block_for_version(
                 tol = max(BBOX_TOLERANCE_REL * stated_value, BBOX_TOLERANCE_MIN_MM)
                 e = dict(entry)
                 if abs(extent - stated_value) <= tol:
-                    e["value"] = extent
-                    e["provenance"] = "measured"
+                    if entry["provenance"] == "stated":
+                        # Issue #390: a STATED W/D/H-named param that
+                        # agrees with its measurement keeps provenance
+                        # "stated" (the user's number is displayed);
+                        # the measured extent rides along in
+                        # ``measured_value``.
+                        e["measured_value"] = extent
+                    else:
+                        # Non-stated W/D/H-named param (assumed/unknown)
+                        # that agrees → measured (the #137 path, unchanged
+                        # for non-stated rows).
+                        e["value"] = extent
+                        e["provenance"] = "measured"
                 else:
                     e["value"] = extent
                     e["provenance"] = "disagrees"

@@ -22,6 +22,7 @@ git identity.
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -314,13 +315,21 @@ def create_projects_router() -> APIRouter:
         row = conn.get_project(project_id)
         assert row is not None
         repo_path = Path(row["git_repo_path"])
-        # Initialise the git repo on disk
+        # Initialise the git repo on disk (the init primitive also creates
+        # the slug directory — the DB layer no longer does, issue #390).
+        # On ANY init failure, remove the DB row and the slug dir (no
+        # orphan on disk); the detail is fixed so no filesystem path leaks.
         try:
             init_git_repo(repo_path)
-        except RuntimeError as e:
-            # Rollback: delete the DB row since git init failed
+        except Exception:
+            logger.exception("project creation failed")
             conn.delete_project(project_id)
-            raise HTTPException(status_code=500, detail=f"git init failed: {e}")
+            if repo_path.is_dir():
+                shutil.rmtree(repo_path, ignore_errors=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Project creation failed.",
+            )
         # Git invisibility: the raw on-disk repo path is never exposed.
         return _public_project_row(row)
 

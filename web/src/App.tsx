@@ -1060,6 +1060,18 @@ export default function App({ client }: AppProps) {
       designLoopStartRef.current = Date.now();
       setDesignLoopElapsed(0);
 
+      // Issue #390 (operator decision 2026-10-05): freeze the survivor
+      // label at the moment THIS run is written — the latest version in
+      // the timeline at send time (the timeline is oldest-first, so the
+      // last entry is the newest). The closure value is stable for the
+      // lifetime of this run, so a failure card written by this run names
+      // the version the user had when the pass started — never a version
+      // a LATER turn makes. Null when no version exists yet. Both the
+      // region-edit and the chat-stream failure write-sites in this
+      // closure share it.
+      const survivorLabelAtWrite =
+        versions.length > 0 ? versions[versions.length - 1].name : null;
+
       if (selectionToAttach) {
         // Clear immediately so a slow createRegionEdit response can't race a
         // second send into re-attaching the same pending selection. Snapshot
@@ -1166,6 +1178,10 @@ export default function App({ client }: AppProps) {
                   role: "assistant" as const,
                   content: "",
                   failure: { message: msg, detail, retryable: false },
+                  // Issue #390: frozen at write time (the snapshot captured
+                  // above) — the region-edit failure card must not re-word
+                  // itself when a later turn makes a new version.
+                  keptVersion: survivorLabelAtWrite ?? undefined,
                 },
               ];
             });
@@ -1471,7 +1487,16 @@ export default function App({ client }: AppProps) {
                 const withoutPrevious = prev.filter((m) => m.failure === undefined);
                 return [
                   ...withoutPrevious,
-                  { id: turnId, role: "assistant" as const, content: "", failure },
+                  {
+                    id: turnId,
+                    role: "assistant" as const,
+                    content: "",
+                    failure,
+                    // Issue #390: frozen at write time — the snapshot
+                    // captured at the start of this run's send (never the
+                    // live timeline, which a later turn may have grown).
+                    keptVersion: survivorLabelAtWrite ?? undefined,
+                  },
                 ];
               });
             },
@@ -1501,11 +1526,19 @@ export default function App({ client }: AppProps) {
             const withoutPrevious = prev.filter((m) => m.failure === undefined);
             return [
               ...withoutPrevious,
-              { id: turnId, role: "assistant" as const, content: "", failure: {
+              {
+                id: turnId,
+                role: "assistant" as const,
+                content: "",
+                failure: {
                   message: "The request could not be sent. The design did not start — you can retry.",
                   detail,
                   retryable: true,
-                } },
+                },
+                // Issue #390: frozen at write time (the same snapshot as the
+                // stream's terminal failure path — one run, one label).
+                keptVersion: survivorLabelAtWrite ?? undefined,
+              },
             ];
           });
           // Re-throw so the hook's flush can catch the rejection and
@@ -1528,7 +1561,7 @@ export default function App({ client }: AppProps) {
           setViewProgress(INITIAL_VIEW_PROGRESS);
         });
     },
-    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, refetchVersions, nextMsgId],
+    [projectId, apiClient, pendingSelection, messages, envelope, handleStreamViewerData, refetchDesignState, refetchVersions, nextMsgId, versions],
   );
 
   // The shared project-creation failure path (issue #282): a photo chosen
@@ -1736,19 +1769,20 @@ export default function App({ client }: AppProps) {
   // (an implausible STL) hides the plate and shows the caption.
   const partUnsettled = isScreen2 && designStatePart.unit_status === "unsettled";
 
-  // Issue #352 (operator decision 2) — the collapse predicate, exactly:
-  //   settled → collapsed immediately;
-  //   assumed or unsettled, only the import version (versions.length === 1) → full
-  //     (the full card carries "Change the units" for assumed parts, added in
-  //     #350, and the settle controls for unsettled ones);
-  //   any unit_status once a design version exists (versions.length > 1,
-  //     versions[0]?.source_kind === "import") → collapsed; the full report
-  //     stays reachable from the Brief's "The part you brought" zone.
+  // Issue #352 (operator decision 2) + issue #390 (QA 2026-10-05 §4.4) —
+  // the collapse predicate: the "I read…" card moves out of the viewport
+  // once the conversation has started. Settled → collapsed immediately;
+  // a design version exists after the import → collapsed; the user has
+  // sent a message (messages.length > 0) → collapsed (issue #390). The
+  // full report stays reachable from the Brief's "The part you brought" zone.
+  // An unsettled/assumed part with only the import version and no messages
+  // keeps the full card for the settle controls.
   const importReportCollapsed =
     isScreen2 &&
     designStatePart !== null &&
     (designStatePart.unit_status === "settled" ||
-      (versions.length > 1 && versions[0]?.source_kind === "import"));
+      (versions.length > 1 && versions[0]?.source_kind === "import") ||
+      messages.length > 0);
 
   // The viewport source: Screen 2 (a part exists) shows the imported part
   // (part.stl — D7); otherwise the stream-driven design-loop STL (the

@@ -62,7 +62,7 @@ export function PlateBackdrop({ x, y, z, verified }: PlateBackdropProps) {
           data-testid="plate-backdrop-svg"
           viewBox={`0 0 ${x} ${z}`}
           style={{
-            width: "min(44vh, 46vw)",
+            width: "min(44vh, 44vw)",
             height: "auto",
             display: "block",
           }}
