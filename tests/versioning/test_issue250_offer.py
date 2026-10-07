@@ -2165,6 +2165,59 @@ def test_chat_yes_live_fill_recut_offer_runs_loop(app_with_versions):
     assert row_offer is None, "the accepted fill-recut offer must be consumed"
 
 
+def test_chat_yes_measured_hole_offer_instruction_carries_numbers(app_with_versions):
+    """Issue #396: a bare "yes" on a LIVE fill-recut offer that carries
+    a measured hole (center, axis, diameter_mm) runs the loop with an
+    instruction that includes the hole's numbers (centre, axis, diameter)."""
+    from d33d.fill_recut import fill_and_recut_instruction
+
+    # The instruction is built from the pending offer dict (the same
+    # function the pre-route calls on acceptance).
+    offer_with_hole = {
+        "kind": "fill_recut",
+        "noun": "hole",
+        "size": 38.0,
+        "center": [0.0, 0.0, 5.0],
+        "axis": [0.0, 0.0, 1.0],
+        "diameter_mm": 10.0,
+    }
+    instruction = fill_and_recut_instruction(offer_with_hole)
+    assert "(0, 0)" in instruction, f"instruction missing centre: {instruction}"
+    assert "axis Z" in instruction, f"instruction missing axis: {instruction}"
+    assert "10" in instruction, f"instruction missing diameter: {instruction}"
+    assert "38" in instruction, f"instruction missing new size: {instruction}"
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        loop_called = {"n": 0}
+
+        async def _loop2(app, **kwargs):
+            loop_called["n"] += 1
+            return _OfferStubResult({"wall_thickness": 3.0})
+
+        app_with_versions.state.run_design_loop = _loop2
+        conn = app_with_versions.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0 "
+            "WHERE id=?",
+            (pid,),
+        )
+        conn.commit()
+        svc.set_pending_offer(pid, offer_with_hole)
+        r, _frames = await _drive_chat(
+            app_with_versions, client, pid, {"message": "yes"}
+        )
+        return r.status_code, loop_called["n"], svc.get_pending_offer(pid)
+
+    status, loop_n, row_offer = run_async(app_with_versions, _call)
+    assert status == 202, status
+    assert loop_n == 1, "a bare yes with a LIVE fill-recut offer must run the loop"
+    assert row_offer is None, "the accepted fill-recut offer must be consumed"
+
+
 def test_offer_state_survives_reopen_round_trip(app_with_versions):
     """Persistence: the pending offer (param P on version V) and
     ``confirmed_params`` survive a client-session boundary (a fresh

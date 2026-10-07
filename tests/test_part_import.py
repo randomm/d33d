@@ -2304,8 +2304,292 @@ def test_hole_count_computation_runs_off_event_loop(
 
 
 # ---------------------------------------------------------------------------
+# Issue #396: per-hole measurement (centre, axis, diameter) in part_report
+# ---------------------------------------------------------------------------
+
+
+def test_scipy_and_shapely_importable() -> None:
+    """Issue #396 (round 2): scipy and shapely are HARD runtime
+    dependencies (``uv add scipy shapely``) — the genus-hole
+    cross-section (``trimesh``'s ``section`` / ``to_planar``) requires
+    them. A missing dep must fail LOUDLY in the test suite (the
+    measurement has NO fallback — the first #396 pass's broken ray-cast
+    is deleted), so the suite cannot go green on a broken install.
+    """
+    import importlib
+
+    for name in ("scipy", "shapely"):
+        try:
+            importlib.import_module(name)
+        except ImportError as e:  # only on a broken install
+            pytest.fail(
+                f"runtime dependency {name!r} is missing — the "
+                "genus-hole cross-section requires scipy + shapely "
+                f"(no fallback exists; install with `uv add {name}`): {e}"
+            )
+
+
+def test_holes_list_present_for_holey_fixture(app_with_projects) -> None:
+    """Issue #396: holey.stl (4 boundary loops) → ``part_report["holes"]``
+    has entries with centre, axis, and diameter_mm. The list is capped at
+    MAX_HOLES and unfittable holes are omitted (omit-not-null)."""
+    data = _stl_bytes(FIXTURES / "holey.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "Holes396"})
+        pid = r.json()["id"]
+        files = {"file": ("holey.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # The holes list is present (the fixture has 4 open holes).
+    holes = report.get("holes")
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert isinstance(holes, list)
+    assert len(holes) >= 1, f"holey.stl must have at least 1 measured hole: {holes}"
+    for h in holes:
+        assert "center" in h, f"hole entry missing center: {h}"
+        assert "axis" in h, f"hole entry missing axis: {h}"
+        assert "diameter_mm" in h, f"hole entry missing diameter_mm: {h}"
+        c = h["center"]
+        assert isinstance(c, list) and len(c) >= 2
+        assert all(isinstance(v, (int, float)) for v in c[:2])
+        a = h["axis"]
+        assert isinstance(a, list) and len(a) == 3
+        assert all(isinstance(v, (int, float)) for v in a)
+        d = h["diameter_mm"]
+        assert isinstance(d, (int, float)) and d > 0
+
+
+def test_holes_list_absent_for_plain_box(app_with_projects) -> None:
+    """Issue #396: a plain box (hole_count == 0) → no ``holes`` key in the
+    report (omit-not-null: no holes, no key)."""
+    data = _stl_bytes(FIXTURES / "box_20mm.stl")
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "BoxNoHoles"})
+        pid = r.json()["id"]
+        files = {"file": ("box.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["hole_count"] == 0
+    # The holes key is absent (omit-not-null).
+    assert "holes" not in report, f"plain box must not have a holes key: {report}"
+
+
+def test_holes_list_annulus_diameter(app_with_projects) -> None:
+    """Issue #396: a trimesh annulus (r_min=5, r_max=15, height=10) has a
+    single genus-1 through-hole. The measured diameter must be within
+    0.5 mm of 2×5 = 10 mm (the inner radius × 2) and the centre at the
+    ring's centre ((0, 0, 0)) — the section's interior ring is the hole.
+    The previous form was vacuous (a 50% range + an ``if holes`` guard
+    accepted garbage) — it is pinned now."""
+    import trimesh
+
+    ring = trimesh.creation.annulus(r_min=5, r_max=15, height=10)
+    data = _stl_bytes_from_mesh(ring)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "AnnulusHoles"})
+        pid = r.json()["id"]
+        files = {"file": ("ring.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    assert report["hole_count"] == 1, (
+        f"annulus must have exactly one closed hole, got {report['hole_count']}"
+    )
+    holes = report.get("holes")
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert len(holes) == 1, f"expected exactly 1 measured hole, got {holes}"
+    h = holes[0]
+    # The inner diameter is 2×5 = 10 mm (the section ring is the 32-gon
+    # of the hole wall — within 0.5 mm of the true circle).
+    assert abs(h["diameter_mm"] - 10.0) < 0.5, (
+        f"annulus hole diameter {h['diameter_mm']} mm not within 0.5 mm of 10 mm"
+    )
+    # The centre is the ring's centre (0, 0, 0).
+    c = h["center"]
+    assert abs(c[0]) < 0.5 and abs(c[1]) < 0.5, (
+        f"annulus hole centre {c[:2]} not within 0.5 mm of the ring centre"
+    )
+    # Axis is Z (the through-axis of the annulus).
+    ax = h["axis"]
+    assert abs(ax[2]) > 0.9, f"axis {ax} should be Z"
+
+
+def test_holes_list_three_plate(app_with_projects) -> None:
+    """Issue #396: a 120×80×6 plate with 3 through-holes (built with
+    trimesh) → the holes list has exactly 3 entries, each with a centre
+    within 0.5 mm of the hole's true position, a diameter within 0.5 mm
+    of the true diameter, and axis Z (the through-axis). This is the
+    acceptance test for the section-based measurement — the first #396
+    pass's ray-cast fallback (5 phantom holes on this plate) is deleted;
+    the section must measure the 3 real holes.
+
+    The plate is a committed fixture (``three_hole_plate.stl``), generated
+    ONCE via ``trimesh`` boolean subtraction (Blender backend) — CI has no
+    boolean backend (no manifold3d, no Blender), so the boolean must not run
+    in the test itself. A non-boolean build (``extrude_polygon``) was
+    rejected: it needs a triangulation engine (triangle/mapbox_earcut) that
+    is not in the locked dependencies."""
+    import trimesh
+
+    # A 120×80×6 mm plate centred at (60, 40, 3) with three through-holes
+    # along Z at y=40: Ø6 at (30, 40), Ø10 at (60, 40), Ø8 at (90, 40).
+    # Fixture: watertight, genus 3 (euler −4), 800 faces, 40 KB — the
+    # assertions below re-verify these so a corrupt fixture is not vacuous.
+    result = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
+    # The plate must actually be a genus-3 (three through-hole) body —
+    # guard against a CSG failure that would make the test vacuous.
+    assert result.is_watertight
+    assert (2 - int(result.euler_number)) // 2 == 3, (
+        f"test plate must have three through-holes (genus 3), got "
+        f"{(2 - int(result.euler_number)) // 2}"
+    )
+    data = _stl_bytes_from_mesh(result)
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "ThreePlate"})
+        pid = r.json()["id"]
+        files = {"file": ("three.stl", data, "model/stl")}
+        return await client.post(f"/api/projects/{pid}/part", files=files)
+
+    r = _run_async(app_with_projects, _call)
+    assert r.status_code == 201, r.text
+    report = r.json()["part"]["report"]
+    # The plate with 3 through-holes must report exactly three holes.
+    assert report["hole_count"] == 3, f"expected 3 holes, got {report['hole_count']}"
+    holes = report.get("holes")
+    assert holes is not None, f"holes list missing from report: {report}"
+    assert len(holes) == 3, f"expected exactly 3 measured holes, got {len(holes)}: {holes}"
+    # Each hole: centre within 0.5 mm of the true (x, y, 3) position,
+    # diameter within 0.5 mm of the true Ø, and axis Z (0,0,1).
+    true = [(30.0, 40.0, 6.0), (60.0, 40.0, 10.0), (90.0, 40.0, 8.0)]
+    # Match measured holes to true holes by nearest centre.
+    matched = set()
+    for (tx, ty, tdia) in true:
+        best = None
+        best_d = None
+        for i, h in enumerate(holes):
+            if i in matched:
+                continue
+            c = h["center"]
+            d = (c[0] - tx) ** 2 + (c[1] - ty) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                best = i
+        assert best is not None
+        matched.add(best)
+        h = holes[best]
+        c = h["center"]
+        assert abs(c[0] - tx) < 0.5, f"centre x {c[0]} not within 0.5 mm of {tx}"
+        assert abs(c[1] - ty) < 0.5, f"centre y {c[1]} not within 0.5 mm of {ty}"
+        assert abs(h["diameter_mm"] - tdia) < 0.5, (
+            f"diameter {h['diameter_mm']} not within 0.5 mm of {tdia}"
+        )
+        # Axis is Z: the dominant component is index 2.
+        ax = h["axis"]
+        assert abs(ax[2]) > 0.9 and abs(ax[0]) < 0.1 and abs(ax[1]) < 0.1, (
+            f"axis {ax} should be Z"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 3MF units: never silently mm (the operator decision)
 # ---------------------------------------------------------------------------
+
+
+def test_genus_holes_z_section_suffices_computes_one_section() -> None:
+    """Issue #396 lens fix: when the Z section's interior-ring count
+    EQUALS the body's genus, no further sections are computed. The old
+    loop always sliced all three axes; the fixed loop stops at the
+    first equals-genus hit — the 3-hole-plate fixture (holes along Z)
+    must measure its 3 holes with EXACTLY ONE ``_section_interior_rings``
+    call (the Z section), never three."""
+    import trimesh
+
+    import d33d.hole_measure as hole_measure_mod
+
+    fixture = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
+    assert (2 - int(fixture.euler_number)) // 2 == 3  # fixture guard
+
+    calls: list[int] = []
+    original = hole_measure_mod._section_interior_rings
+
+    def _spy(body, axis_index):
+        calls.append(axis_index)
+        return original(body, axis_index)
+
+    hole_measure_mod._section_interior_rings = _spy
+    try:
+        holes = hole_measure_mod.measure_genus_holes(fixture)
+    finally:
+        hole_measure_mod._section_interior_rings = original
+
+    assert len(calls) == 1, (
+        f"an equals-genus Z section must stop the scan (1 call), "
+        f"got {len(calls)} sections: {calls}"
+    )
+    assert calls[0] == 2, f"the Z section must be the first (and only) call, got {calls}"
+    assert len(holes) == 3, f"the Z section must measure all 3 holes, got {holes}"
+
+
+def test_genus_holes_no_equals_axis_stops_at_first_nonempty_best() -> None:
+    """Issue #396 lens fix: when NO axis's count equals the genus, the
+    loop keeps the first non-empty section as the best answer and stops
+    computing further sections as soon as it has one (the documented
+    equals-genus preference is kept; the fallback is the first non-empty
+    axis, not the last). Engineered on the 3-hole plate: a wrapper body
+    reporting genus 1 makes the Z section (3 rings) non-equals, so the
+    scan must keep Z (the first non-empty axis) and NOT compute Y or X."""
+    import trimesh
+
+    import d33d.hole_measure as hole_measure_mod
+
+    fixture = trimesh.load(str(FIXTURES / "three_hole_plate.stl"))
+
+    class _GenusOneBody:
+        """The real plate, with a forced ``euler_number`` so the genus
+        is 1 — the Z section (3 rings) is non-empty but not equals-genus,
+        which exercises the "keep the first non-empty, stop scanning"
+        branch."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        euler_number = -1  # genus (2 - (-1)) // 2 = 1
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    real_section = hole_measure_mod._section_interior_rings
+    calls: list[int] = []
+
+    def _spy(body, axis_index):
+        calls.append(axis_index)
+        return real_section(body._inner, axis_index)
+
+    hole_measure_mod._section_interior_rings = _spy
+    try:
+        holes = hole_measure_mod.measure_genus_holes(_GenusOneBody(fixture))
+    finally:
+        hole_measure_mod._section_interior_rings = real_section
+
+    # Z (3 rings) != genus (1) — but Z is non-empty, so the scan keeps
+    # Z and must NOT compute Y or X.
+    assert calls == [2], (
+        f"with a non-empty best already found below genus, the scan "
+        f"must stop at the first non-empty axis; got {calls}"
+    )
+    assert len(holes) == 3
 
 
 def test_3mf_inch_settled_at_25_4(app_with_projects):

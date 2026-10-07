@@ -35,7 +35,7 @@ import numpy as np
 import trimesh
 
 from d33d.part_errors import PartUploadError  # re-exported for #395 compat
-from d33d.part_holes import _boundary_loops
+from d33d.part_holes import _boundary_loops, measure_holes
 from d33d.part_mesh_topology import MeshTopology, mesh_topology
 from d33d.part_repair import (
     REPAIR_FACE_BUDGET,
@@ -322,7 +322,7 @@ def parse_and_repair(
     # ONE split serves both the bodies count and the genus.
     merged.merge_vertices()
     merged.update_faces(merged.nondegenerate_faces())
-    components = merged.split(only_watertight=False)
+    components = merged.split(only_watertight=False, repair=False)
     watertight_bodies = [c for c in components if c.is_watertight]
     bodies_before = len(watertight_bodies)
     if len(merged.faces) == 0:
@@ -392,7 +392,7 @@ def parse_and_repair(
     # Recount bodies on the stored (post-repair) mesh.
     repaired.merge_vertices()
     repaired.update_faces(repaired.nondegenerate_faces())
-    comps = repaired.split(only_watertight=False)
+    comps = repaired.split(only_watertight=False, repair=False)
     watertight = [c for c in comps if c.is_watertight]
     bodies = len(watertight)
     gaps_after = _boundary_loops(repaired)
@@ -407,6 +407,46 @@ def parse_and_repair(
     }
     if bodies < bodies_before:
         report["bodies_before"] = bodies_before
+
+    # Issue #396: measure per-hole geometry (centre, axis, diameter) on
+    # the PRE-REPAIR merged mesh. The measurement is in FILE units — the
+    # same space as ``bbox_file_units`` — and is applied the part's scale
+    # is NOT, so the stored ``holes`` and the stored ``bbox_file_units``
+    # are directly comparable (the reader multiplies both by the same
+    # ``part_scale`` to get mm). Unfittable holes are omitted (omit-not-
+    # null: hole_count stays honest, the holes list is a subset). The
+    # BROAD ``except Exception`` is deliberate and required: hole
+    # measurement is an optional enrichment, and the import must never
+    # fail because a hole was hard to measure (the ``never fail the
+    # import`` contract). Any exception class — ``RuntimeError`` from a
+    # trimesh/numpy C path, ``MemoryError`` on a huge body — is logged
+    # with a full traceback and the holes list is simply omitted (a bare
+    # narrow except would let the other classes propagate out of
+    # ``parse_and_repair`` and fail the upload).
+    #
+    # Issue #396 lens fix: a missing ``scipy`` or ``shapely`` (the hard
+    # runtime dependencies for ``trimesh.Trimesh.section``) is a
+    # DEPLOYMENT ERROR, not a geometric failure — it must FAIL LOUDLY
+    # (propagate the ``ImportError`` out of ``parse_and_repair``), not
+    # silently omit the holes list. ``measure_holes`` itself re-raises
+    # ``ImportError`` from the genus path (issue #396 lens fix — the
+    # broad ``except Exception`` in ``measure_holes`` would swallow it,
+    # making this ``except ImportError: raise`` dead code); the broad
+    # guard here still catches every other exception class so the import
+    # never fails for a geometric reason.
+    try:
+        measured_holes = measure_holes(merged, components)
+        if measured_holes:
+            report["holes"] = measured_holes
+    except ImportError:
+        # A missing scipy or shapely is a deployment error, not a
+        # geometric failure — propagate loudly (the upload fails with
+        # an ``ImportError``; the operator sees the missing dependency
+        # rather than a silently-omitted holes list).
+        raise
+    except Exception:
+        logger.exception("hole measurement failed, omitting holes list")
+
     return repaired, report, file_unit
 
 

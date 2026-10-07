@@ -1147,6 +1147,31 @@ class VersionService:
                 axis = doc.get("axis")
                 if valid_axis(axis):
                     offer["axis"] = [float(v) for v in axis]
+                # Issue #396: the measured hole's centre and existing
+                # diameter (stored by the chat-route offer when the part
+                # has measured holes). Validated: centre must be a
+                # list/tuple of ≥ 2 finite numbers; diameter must be a
+                # positive finite number.
+                center = doc.get("center")
+                if (
+                    isinstance(center, (list, tuple))
+                    and len(center) >= 2
+                    and all(
+                        isinstance(v, (int, float))
+                        and not isinstance(v, bool)
+                        and math.isfinite(v)
+                        for v in center[:3]
+                    )
+                ):
+                    offer["center"] = [float(v) for v in center]
+                dia = doc.get("diameter_mm")
+                if (
+                    isinstance(dia, (int, float))
+                    and not isinstance(dia, bool)
+                    and dia > 0
+                    and math.isfinite(dia)
+                ):
+                    offer["diameter_mm"] = float(dia)
                 return offer
         return None
 
@@ -1185,6 +1210,30 @@ class VersionService:
                 ):
                     raise ValueError(
                         f"fill-recut offer's size must be a positive number, got {size!r}"
+                    )
+                # Issue #396: centre and diameter_mm are optional extra
+                # fields for the measured-hole offer — validated but not
+                # required (the region-route offer has neither).
+                center = offer.get("center")
+                if center is not None:
+                    if not isinstance(center, (list, tuple)) or len(center) < 2:
+                        raise ValueError(
+                            f"fill-recut offer's center must be a list of ≥2 numbers, got {center!r}"
+                        )
+                    for v in center:
+                        if not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v):
+                            raise ValueError(
+                                f"fill-recut offer's center components must be finite numbers, got {center!r}"
+                            )
+                dia = offer.get("diameter_mm")
+                if dia is not None and not (
+                    isinstance(dia, (int, float))
+                    and not isinstance(dia, bool)
+                    and dia > 0
+                    and math.isfinite(dia)
+                ):
+                    raise ValueError(
+                        f"fill-recut offer's diameter_mm must be a positive finite number, got {dia!r}"
                     )
             else:
                 version_id = offer.get("version_id")

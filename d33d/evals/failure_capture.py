@@ -70,10 +70,10 @@ from pydantic import BaseModel, Field, ValidationError
 #: classes (``graceful_refusal``, ``clearance_applied`` — the adversarial
 #: cases are scored against these, never as compile failures).
 #:
-#: The 5 render-worker classes (``timeout``, ``oom``, ``container_error``,
-#: ``artifact_error``, ``empty_model``) appear with their exact
-#: ``ErrorClass`` strings — the production hook's tagged class is
-#: render-worker-derived when the render itself failed.
+#: The 6 render-worker classes (``syntax_error``, ``timeout``, ``oom``,
+#: ``container_error``, ``artifact_error``, ``empty_model``) appear with
+#: their exact ``ErrorClass`` strings — the production hook's tagged class
+#: is render-worker-derived when the render itself failed.
 EVAL_FAILURE_CLASSES: frozenset[str] = frozenset(
     {
         # 11 named LLM failure classes (superset, reused not forked)
@@ -91,7 +91,8 @@ EVAL_FAILURE_CLASSES: frozenset[str] = frozenset(
         # 2 eval-context outcome classes
         "graceful_refusal",
         "clearance_applied",
-        # 5 render-worker classes (1:1 with the render ErrorClass strings)
+        # 6 render-worker classes (1:1 with the render ErrorClass strings)
+        "syntax_error",
         "timeout",
         "oom",
         "container_error",
@@ -104,6 +105,7 @@ EVAL_FAILURE_CLASSES: frozenset[str] = frozenset(
 #: into ``EVAL_FAILURE_CLASSES``.
 RENDER_WORKER_CLASSES: frozenset[str] = frozenset(
     {
+        "syntax_error",
         "timeout",
         "oom",
         "container_error",
@@ -136,7 +138,18 @@ GATE_REASON_CLASSES: frozenset[str] = frozenset(
 #: would raise in :func:`_exhausted_loop_event` and the failures.jsonl
 #: archive would log an exception on EVERY such turn.
 LOOP_LEVEL_FAILURE_REASONS: frozenset[str] = frozenset(
-    {"renderer_unavailable", "model_unconfigured", "renderer_image_stale"}
+    {
+        "renderer_unavailable",
+        "model_unconfigured",
+        "renderer_image_stale",
+        # The whole-loop deadline (issue #396 / issue #221): the
+        # ``run_design_loop_with_events`` adapter cuts off a stalled loop
+        # with a terminal ``design_loop_timed_out`` frame that carries NO
+        # DesignResult (the loop never returned), so the hook at the loop
+        # seam never sees it. The adapter archives the stall itself, with
+        # this loop-level class, so the archive set must admit it.
+        "design_loop_timed_out",
+    }
 )
 
 #: Hard cap on ``output_scad`` line length (chars) — an unbounded LLM
@@ -206,7 +219,15 @@ class FailureEvent(BaseModel):
     region_mark: str | None = None
     request: str = Field(min_length=1)
     model: str = Field(min_length=1)
-    prompt_version: str = Field(min_length=1)
+    # ``min_length=0`` (not 1) is deliberate: the deadline-kill archive
+    # (issue #396 — the whole-loop timeout in ``d33d.design_loop_events``
+    # has no loop result and therefore no prompt hash to fold against)
+    # writes a row with an honest ``""``. Every result-based failure
+    # still carries the canonical prompt hash (``min_length`` is a floor,
+    # not a guarantee — the hook's own docstring pins that the value is
+    # the canonical hash of the design-role prompt, which is always
+    # present when the loop actually ran).
+    prompt_version: str = Field(default="")
     output_scad: str = Field(default="")
     failure_class: str = Field(min_length=1)
     exit_code: int | None = None

@@ -2732,3 +2732,493 @@ def test_fill_recut_parity_setup_failure_restores_offer(app_with_projects, monke
         "noun": "hole",
         "size": 38.0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Issue #396: measured-hole offer selection and instruction
+# ---------------------------------------------------------------------------
+
+
+def test_offer_with_measured_hole_carries_center_and_axis(app_with_projects) -> None:
+    """Issue #396: a holey part with measured holes (stored in
+    ``part_report["holes"]``) + "make the center hole 38 mm" → the
+    pending offer carries ``center``, ``axis``, and ``diameter_mm``
+    for the selected hole."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "MeasuredHole"})
+        pid = r.json()["id"]
+        # Set up the part with a measured holes list.
+        conn = app_with_projects.state.conn
+        holes_report = {
+            "hole_count": 3,
+            "holes": [
+                {"center": [0.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 10.0},
+                {"center": [-10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 20.0},
+                {"center": [10.0, 0.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 30.0},
+            ],
+            "bbox_file_units": [40.0, 40.0, 10.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, _pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The offer was recorded with the measured hole's geometry.
+    assert offer is not None, "offer must be stored"
+    assert offer["kind"] == "fill_recut"
+    assert offer["noun"] == "hole"
+    assert offer["size"] == 38.0
+    # The center hole (at 0,0) was selected.
+    assert offer.get("center") is not None, f"offer missing center: {offer}"
+    assert offer.get("axis") is not None, f"offer missing axis: {offer}"
+    assert offer["axis"] == [0.0, 0.0, 1.0], offer
+    # The center hole: the one nearest the XY bbox centre (20, 20).
+    # Distances: (0,0)→28.3, (-10,0)→36.1, (10,0)→22.4. The (10,0) hole wins.
+    assert offer.get("diameter_mm") == 30.0, offer
+
+
+def test_offer_instruction_carries_measured_numbers(app_with_projects) -> None:
+    """Issue #396: an accepted offer with a measured hole produces an
+    instruction that includes the hole's centre, axis, and existing
+    diameter."""
+    from d33d.fill_recut import fill_and_recut_instruction
+
+    offer = {
+        "kind": "fill_recut",
+        "noun": "hole",
+        "size": 38.0,
+        "center": [0.0, 0.0, 5.0],
+        "axis": [0.0, 0.0, 1.0],
+        "diameter_mm": 10.0,
+    }
+    instr = fill_and_recut_instruction(offer)
+    assert "(0, 0)" in instr, f"instruction missing centre: {instr}"
+    assert "axis Z" in instr, f"instruction missing axis: {instr}"
+    assert "10" in instr, f"instruction missing existing diameter: {instr}"
+    assert "38" in instr, f"instruction missing new size: {instr}"
+    assert "Fill-and-recut:" in instr
+
+
+def test_offer_no_holes_uses_default_boundary_sentence(app_with_projects) -> None:
+    """Issue #396: a holey part with NO measured holes (legacy row, no
+    ``holes`` key) + "make the hole 38 mm" → the pending offer is the
+    pre-#396 shape (no center/axis/diameter_mm), and the instruction is
+    byte-identical to the pre-#396 form."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "LegacyHole"})
+        pid = r.json()["id"]
+        _set_part_columns(app_with_projects, pid, unit_status="settled", hole_count=1)
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, _pid, _frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert offer is not None
+    assert offer["kind"] == "fill_recut"
+    assert offer["noun"] == "hole"
+    assert offer["size"] == 38.0
+    # No measured hole data (legacy row).
+    assert "center" not in offer, f"legacy offer must not carry center: {offer}"
+    assert "diameter_mm" not in offer, f"legacy offer must not carry diameter: {offer}"
+
+
+def test_offer_ambiguous_holes_point_at_fallback(app_with_projects) -> None:
+    """Issue #396: a part with two holes equidistant from the bbox centre
+    + "make the center hole 38 mm" → ambiguous selection → the point-at
+    fallback copy is used (never an instruction without a location)."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "AmbiguousHoles"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # Two holes symmetric about the bbox centre (20, 20):
+        # (10, 20) and (30, 20) — both 10 mm from centre, equidistant.
+        holes_report = {
+            "hole_count": 2,
+            "holes": [
+                {"center": [10.0, 20.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 15.0},
+                {"center": [30.0, 20.0, 5.0], "axis": [0.0, 0.0, 1.0], "diameter_mm": 15.0},
+            ],
+            "bbox_file_units": [40.0, 40.0, 10.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 38 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, pid, frames, svc.get_pending_offer(pid)
+
+    status, _pid, frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    done = [d for e, d in frames if e == "done"]
+    assert done, f"no done frame: {frames}"
+    # The point-at fallback copy.
+    msg = done[0].get("message", "")
+    assert "Point at the" in msg, f"expected point-at fallback, got: {msg}"
+    # The offer is still stored (with no center/axis/diameter).
+    assert offer is not None
+    assert offer["kind"] == "fill_recut"
+    assert "center" not in offer, f"ambiguous offer must not carry center: {offer}"
+
+
+def test_import_succeeds_when_measure_holes_raises(app_with_projects) -> None:
+    """Issue #396 (round 2): the import must NEVER fail because hole
+    measurement is hard to measure. Monkeypatch
+    ``d33d.part_mesh.measure_holes`` (the name ``part_mesh`` calls) to
+    raise ``RuntimeError`` — the upload succeeds (201) and the report
+    has no ``holes`` key (the broad ``except Exception`` in
+    ``parse_and_repair`` omits the list; ``hole_count`` stays honest).
+    This pins the never-fail-import contract: a future "cleanup" that
+    narrows the except (e.g. to a specific trimesh exception) would let
+    the ``RuntimeError`` propagate and break the upload — this test
+    catches that.
+    """
+    from pathlib import Path
+
+    import d33d.part_mesh as part_mesh_mod
+
+    fixture = Path(__file__).parent / "fixtures" / "stl" / "holey.stl"
+    data = fixture.read_bytes()
+
+    original = part_mesh_mod.measure_holes
+
+    def _boom(merged, components):
+        raise RuntimeError("simulated hole-measurement failure")
+
+    part_mesh_mod.measure_holes = _boom
+    try:
+
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "ImportNeverFails"})
+            pid = r.json()["id"]
+            files = {"file": ("holey.stl", data, "model/stl")}
+            return await client.post(f"/api/projects/{pid}/part", files=files)
+
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.measure_holes = original
+
+    assert r.status_code == 201, (
+        f"the import must succeed even when measure_holes raises; "
+        f"got {r.status_code}: {r.text}"
+    )
+    report = r.json()["part"]["report"]
+    # The holes list is omitted (the broad guard swallowed the error).
+    assert "holes" not in report, (
+        f"the holes key must be omitted when measurement fails: {report}"
+    )
+    # The hole count stays honest (computed before the measurement).
+    assert isinstance(report.get("hole_count"), int), (
+        f"hole_count must still be present and honest: {report}"
+    )
+
+
+def test_offer_cm_part_selects_center_hole_and_reports_mm(app_with_projects) -> None:
+    """Issue #396 (round 2): a part stored in cm (``part_scale=10``) has
+    holes in FILE units. The selection and the instruction must use MM
+    (the user's unit): a hole stored as Ø3.0 file units is Ø30.0 mm.
+    "The center hole" picks the hole nearest the mm bbox centre (the
+    file-unit bbox × scale), and the offer carries the mm-converted
+    centre + diameter."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CmHoles"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # A 4.0 × 2.0 cm part (scale 10 → 40 × 20 mm). Two holes at file
+        # (1.5, 1.0) and (3.5, 1.0) = mm (15, 10) and (35, 10), each
+        # Ø3.0 file units = Ø30.0 mm. The mm bbox centre is (20, 10):
+        # (15, 10) is 5 mm away, (35, 10) is 15 mm away → the (1.5, 1.0)
+        # file-unit hole is the center hole (a file-unit comparison would
+        # pick the wrong one).
+        holes_report = {
+            "hole_count": 2,
+            "holes": [
+                {"center": [1.5, 1.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 3.0},
+                {"center": [3.5, 1.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 3.0},
+            ],
+            "bbox_file_units": [4.0, 2.0, 1.0],
+        }
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='cm', part_unit_status='settled', part_scale=10.0, part_report=? "
+            "WHERE id=?",
+            (json.dumps(holes_report), pid),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the center hole 30 mm"}
+        )
+        frames = await _drive_event_source(app_with_projects, client, pid)
+        svc = app_with_projects.state.versions
+        return r2.status_code, frames, svc.get_pending_offer(pid)
+
+    status, _frames, offer = _run_async(app_with_projects, _call)
+    assert status == 202, status
+    assert offer is not None, "offer must be stored"
+    assert offer["kind"] == "fill_recut"
+    # The center hole in MM: the (1.5, 1.0) file-unit hole → (15, 10) mm.
+    center = offer.get("center")
+    assert center is not None, f"offer missing center: {offer}"
+    assert abs(center[0] - 15.0) < 1e-6, (
+        f"center x {center[0]} mm — the (1.5, 1.0) file-unit hole is 5 mm "
+        f"from the mm bbox centre, so it must be selected"
+    )
+    assert abs(center[1] - 10.0) < 1e-6, (
+        f"center y {center[1]} mm — must be 10.0 mm (1.0 file unit × 10)"
+    )
+    # The diameter is the mm-converted value (3.0 file units × 10 = 30 mm).
+    assert offer.get("diameter_mm") == 30.0, (
+        f"diameter must be 30.0 mm (3.0 file units × scale 10), got {offer.get('diameter_mm')}"
+    )
+
+
+def test_fill_recut_turn_corrupt_scale_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a non-numeric ``part_scale`` in the stored
+    row must not 500 the fill-recut turn. The scale guard in
+    ``fill_recut_turn`` treats non-numeric values as unavailable (``bbox_mm
+    = None``), and the chat route's pre-fetch guard catches any exception
+    from ``part_public`` / ``holes_in_mm`` and degrades to ``holes=None``."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CorruptScale"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        # Set a non-numeric scale (stored as a string in the column).
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale='abc', "
+            "part_report=? WHERE id=?",
+            (
+                json.dumps({
+                    "hole_count": 1,
+                    "holes": [
+                        {"center": [1.0, 2.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                    ],
+                    "bbox_file_units": [10.0, 5.0, 2.0],
+                }),
+                pid,
+            ),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 30 mm"}
+        )
+        return r2.status_code
+
+    status = _run_async(app_with_projects, _call)
+    # The route must NOT 500 — a corrupt scale degrades to no holes.
+    assert status != 500, (
+        f"a corrupt part_scale must not 500 the chat route; got {status}"
+    )
+
+
+def test_chat_hole_prefetch_skipped_for_nonhole_message(app_with_projects):
+    """Issue #396 lens fix: the hole pre-fetch (``part_public`` /
+    ``holes_in_mm``) must NOT run on every chat turn — only when the
+    message could be a hole-size question (the
+    ``HOLE_FEATURE_SIZE_QUESTION_RE`` gate). A non-hole message like
+    "make it taller" never calls ``holes_in_mm``."""
+    import d33d.hole_select as hole_select_mod
+
+    calls = []
+    original_holes_in_mm = hole_select_mod.holes_in_mm
+
+    def _spy_holes(report, scale):
+        calls.append(True)
+        return original_holes_in_mm(report, scale)
+
+    hole_select_mod.holes_in_mm = _spy_holes
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "NoHoleMsg"})
+            pid = r.json()["id"]
+            conn = app_with_projects.state.conn
+            conn.raw.execute(
+                "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+                "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+                "part_report=? WHERE id=?",
+                (
+                    json.dumps({
+                        "hole_count": 1,
+                        "holes": [
+                            {"center": [1.0, 2.0, 0.5], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                        ],
+                        "bbox_file_units": [10.0, 5.0, 2.0],
+                    }),
+                    pid,
+                ),
+            )
+            conn.commit()
+            # A non-hole message: the pre-fetch gate must skip it.
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "make it taller"}
+            )
+            return r2.status_code, calls
+
+        status, _calls = _run_async(app_with_projects, _call)
+    finally:
+        hole_select_mod.holes_in_mm = original_holes_in_mm
+
+    # The gate must have skipped the pre-fetch for a non-hole message.
+    assert calls == [], (
+        f"a non-hole message must not trigger the hole pre-fetch; "
+        f"holes_in_mm was called {len(calls)} times"
+    )
+    assert status != 500
+
+
+def test_fill_recut_turn_corrupt_hole_center_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a stored hole entry whose ``center`` (or
+    ``axis``) carries a non-numeric component must not 500 the
+    fill-recut call path. The contract: malformed entries are OMITTED
+    by ``holes_in_mm`` — the old code let ``float("a")`` raise out of
+    the helper, and the fill-recut turn has no per-entry guard."""
+
+    async def _call(client):
+        r = await client.post("/api/projects", json={"name": "CorruptCenter"})
+        pid = r.json()["id"]
+        conn = app_with_projects.state.conn
+        conn.raw.execute(
+            "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+            "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+            "part_report=? WHERE id=?",
+            (
+                json.dumps({
+                    "hole_count": 1,
+                    "holes": [
+                        {"center": ["a", 1, 2], "axis": [0.0, 0.0, 1.0], "diameter_mm": 5.0},
+                    ],
+                    "bbox_file_units": [10.0, 5.0, 2.0],
+                }),
+                pid,
+            ),
+        )
+        conn.commit()
+        r2 = await client.post(
+            f"/api/projects/{pid}/chat", json={"message": "make the hole 30 mm"}
+        )
+        return r2.status_code
+
+    status = _run_async(app_with_projects, _call)
+    # The route must NOT 500 — the malformed entry is omitted, and the
+    # turn degrades to the no-hole-measured path (offer or point-at).
+    assert status != 500, (
+        f"a corrupt hole center must not 500 the chat route; got {status}"
+    )
+
+
+def test_chat_route_corrupt_part_report_does_not_500(app_with_projects):
+    """Issue #396 lens fix: a corrupt ``part_report`` blob (invalid JSON
+    that somehow bypassed the ``_loads_or_none`` guard, or an unexpected
+    ``part_public`` exception) must not 500 the chat route. The pre-fetch
+    guard in ``d33d.chat_loop`` wraps the ``part_public`` / ``holes_in_mm``
+    call in a broad ``except Exception`` that degrades to ``holes=None``."""
+    import d33d.hole_select as hole_select_mod
+
+    original_holes_in_mm = hole_select_mod.holes_in_mm
+
+    def _boom_holes(report, scale):
+        raise RuntimeError("simulated holes_in_mm failure")
+
+    hole_select_mod.holes_in_mm = _boom_holes
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "CorruptReport"})
+            pid = r.json()["id"]
+            conn = app_with_projects.state.conn
+            conn.raw.execute(
+                "UPDATE projects SET part_filename='part.stl', part_format='stl', "
+                "part_unit='mm', part_unit_status='settled', part_scale=1.0, "
+                "part_report=? WHERE id=?",
+                (json.dumps({"hole_count": 1}), pid),
+            )
+            conn.commit()
+            r2 = await client.post(
+                f"/api/projects/{pid}/chat", json={"message": "what size is the hole?"}
+            )
+            return r2.status_code
+
+        status = _run_async(app_with_projects, _call)
+    finally:
+        hole_select_mod.holes_in_mm = original_holes_in_mm
+
+    # The route must NOT 500 — the pre-fetch guard catches the exception.
+    assert status != 500, (
+        f"a corrupt part_report must not 500 the chat route; got {status}"
+    )
+
+
+def test_import_omits_holes_when_scipy_import_error(app_with_projects):
+    """Issue #396 lens fix: a missing ``scipy`` or ``shapely`` dependency
+    must FAIL LOUDLY as a 500 (a deployment error, not a client error),
+    NOT silently omit the holes list (201) or masquerade as a 422 with
+    a misleading "decode failed / try again" message.
+
+    The call chain: ``parse_and_repair`` → ``measure_holes`` →
+    ``_measure_genus_holes`` → ``measure_genus_holes`` → ``trimesh.
+    Trimesh.section`` (which imports scipy). Each level re-raises
+    ``ImportError`` (``except ImportError: raise`` before the broad
+    ``except Exception``) so it reaches ``_run_parse_and_repair``,
+    where it is likewise excluded from the broad 422-mapping handler
+    and propagates as a 500 — a broken deployment is visibly a server
+    error, not a client error the user can "fix" by retrying."""
+    from pathlib import Path
+
+    import d33d.part_mesh as part_mesh_mod
+
+    fixture = Path(__file__).parent / "fixtures" / "stl" / "holey.stl"
+    data = fixture.read_bytes()
+
+    original = part_mesh_mod.measure_holes
+
+    def _import_error(merged, components):
+        raise ImportError("No module named 'scipy'")
+
+    part_mesh_mod.measure_holes = _import_error
+    try:
+        async def _call(client):
+            r = await client.post("/api/projects", json={"name": "ImportErrorTest"})
+            pid = r.json()["id"]
+            files = {"file": ("holey.stl", data, "model/stl")}
+            return await client.post(f"/api/projects/{pid}/part", files=files)
+
+        r = _run_async(app_with_projects, _call)
+    finally:
+        part_mesh_mod.measure_holes = original
+
+    # A missing scipy/shapely is a DEPLOYMENT error, not a client error.
+    # The 500 (not 422) tells the operator the server is broken, not
+    # that the file needs to be retried. 201 (silent omission) and 422
+    # (misleading "try again") are both wrong.
+    assert r.status_code == 500, (
+        f"a missing scipy/shapely must fail loudly with 500 (a deployment "
+        f"error), not 201 (silent omission) or 422 (misleading client "
+        f"error); got {r.status_code}: {r.text}"
+    )

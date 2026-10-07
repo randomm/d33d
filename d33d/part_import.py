@@ -138,6 +138,16 @@ def _run_parse_and_repair(
             else PART_UPLOAD_UNPARSEABLE_DETAIL
         )
         raise HTTPException(status_code=422, detail=detail) from e
+    except ImportError as e:
+        # A missing scipy/shapely is a deployment error, not a client
+        # error — surface as a 500 (a 422 with "Try again" would
+        # mislead the user into retrying a perfectly valid file; the
+        # file is fine, the server is broken, and no retry will help).
+        # The decode contract is total for client-facing errors
+        # (PartUploadError → 422), but a broken deployment is a server
+        # error, not a decode failure.
+        logger.exception("part decode failed: missing dependency (%s)", type(e).__name__)
+        raise HTTPException(status_code=500, detail="Internal server error") from e
     except Exception as e:
         # A non-PartUploadError (MemoryError, a trimesh-internal failure)
         # must not leak as a raw 500: the decode contract is total.

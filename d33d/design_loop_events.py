@@ -1667,6 +1667,36 @@ async def _resolve_version_create(
     return int(version["id"])
 
 
+class _DeadlinedLoopResult:
+    """A synthetic exhausted ``DesignResult`` for the deadline-kill
+    archive (issue #396).
+
+    A whole-loop timeout (the ``run_design_loop_with_events`` deadline
+    cutting off a stalled loop) produces NO real loop result — the
+    loop never returned, so the hook the app wires at the loop seam
+    (``record_production_failure``) never sees it, and the timeout
+    would never reach ``failures.jsonl``. This stub carries just what
+    the hook reads (``status``, ``failure_reason``, ``best``) so the
+    deadline path can archive the stall with the loop-level
+    :data:`DESIGN_LOOP_TIMED_OUT_REASON` class and the best available
+    candidate text, never a fabricated full result.
+    """
+
+    status = "exhausted"
+    failure_reason = DESIGN_LOOP_TIMED_OUT_REASON
+
+    def __init__(self, scad: str = "") -> None:
+        self.scad_source = scad
+
+    @property
+    def best(self) -> Any:
+        # The hook reads ``best.scad_source`` for the archive row; a
+        # stall has no candidate of its own, so the row carries the
+        # last SCAD the loop's frames surfaced (``""`` when nothing
+        # rendered).
+        return self
+
+
 async def run_design_loop_with_events(
     app: Any,
     project_id: int,
@@ -2051,6 +2081,90 @@ async def run_design_loop_with_events(
             # consumer: a loop that keeps emitting liveness frames
             # (per-view progress, LLM tokens) while it never terminates
             # would evade a timeout placed only around ``render_task``.
+            # Issue #396 — the deadline emission must ALSO archive the
+            # stalled run to the failures.jsonl sink. The hook the app
+            # wires at the loop seam (``record_production_failure``)
+            # only sees a loop RESULT, and a deadline kill produces
+            # none (the loop never returned), so without this the
+            # whole-loop timeout would never reach the archive while
+            # every other failure class does. Best-effort: a failure
+            # here is logged and swallowed — the deadline frame is the
+            # user-visible guarantee (the hook's errors-swallowed
+            # contract elsewhere).
+            def _archive_deadline() -> None:
+                sink = getattr(app.state, "failures_jsonl_path", None)
+                if sink is None:
+                    return
+                try:
+                    from d33d.evals.failure_capture import (
+                        record_production_failure,
+                    )
+
+                    # The request text the loop was handed (the same
+                    # ``request`` kwarg the hook archives for
+                    # result-based failures); a blank request degrades
+                    # to the user's message.
+                    request = str(kwargs.get("request") or user_message or "")
+                    # The model id the app's production closure injects
+                    # for the hook (the ``model`` kwarg it pops before
+                    # the real loop runs — the hook archives it, the
+                    # loop never sees it): a bare-string id, an object
+                    # with a ``.model`` field, or ``None``.
+                    # Fallback: ``app.state.model_id`` — a plain
+                    # ``create_app`` without the closure (a test stub)
+                    # carries no ``model`` kwarg, so the archive reads
+                    # it from ``app.state`` instead (set by the test
+                    # harness; production always resolves the model via
+                    # the closure, so the kwarg path is the live one).
+                    raw_model = kwargs.get("model")
+                    model_id = getattr(raw_model, "model", None)
+                    if not isinstance(model_id, str) or not model_id:
+                        model_id = (
+                            raw_model
+                            if isinstance(raw_model, str) and raw_model
+                            else None
+                        )
+                    if not model_id:
+                        model_id = getattr(app.state, "model_id", None)
+                    if not model_id:
+                        # A row with an unidentifiable model is not
+                        # foldable — skip rather than fabricate an id
+                        # (the deadline frame still fires).
+                        logger.warning(
+                            "failures.jsonl deadline archive skipped for "
+                            "project %s: no model id available",
+                            project_id,
+                        )
+                        return
+                    # The last SCAD source the loop's frames have
+                    # surfaced (a token frame, on a pass, or a
+                    # progress frame carrying ``scad_source``) — the
+                    # stall has no result, so the best available
+                    # candidate text is ``""`` when nothing rendered.
+                    # Invariant: ``_last_scad_source`` is updated on
+                    # every yielded frame carrying a truthy
+                    # ``scad_source``, on both the ``get_nowait`` and
+                    # ``asyncio.wait`` paths; ``output_scad`` reads it
+                    # at deadline time.
+                    output_scad = _last_scad_source
+                    record_production_failure(
+                        design_result=_DeadlinedLoopResult(scad=output_scad),
+                        photo=photo,
+                        region_mark=kwargs.get("region_mark"),
+                        request=request,
+                        model=model_id,
+                        prompt_version="",
+                        output_scad=output_scad,
+                        path=sink,
+                    )
+                except Exception:
+                    logger.exception(
+                        "failures.jsonl deadline archive failed for "
+                        "project %s; emitting the timeout frame anyway",
+                        project_id,
+                    )
+
+            _last_scad_source: str = ""
             _deadline = _loop.time() + DESIGN_LOOP_TIMEOUT_SECONDS
             while True:
                 if render_task.done():
@@ -2060,6 +2174,9 @@ async def run_design_loop_with_events(
                 except asyncio.QueueEmpty:
                     _f = None
                 if _f is not None:
+                    _scad = _f[1].get("scad_source")
+                    if isinstance(_scad, str) and _scad:
+                        _last_scad_source = _scad
                     yield _f
                     continue
                 _remaining = _deadline - _loop.time()
@@ -2075,6 +2192,7 @@ async def run_design_loop_with_events(
                         project_id,
                         DESIGN_LOOP_TIMEOUT_SECONDS,
                     )
+                    _archive_deadline()
                     _deadline_frames: list[tuple[str, dict[str, Any]]] = (
                         _yield_notice()
                     )
@@ -2129,6 +2247,9 @@ async def run_design_loop_with_events(
                         # Sentinel: the render finished (the drain thread
                         # enqueued the ``None`` before the loop exited).
                         break
+                    _scad = _f[1].get("scad_source")
+                    if isinstance(_scad, str) and _scad:
+                        _last_scad_source = _scad
                     yield _f
                     continue
                 _get_task.cancel()
@@ -2149,6 +2270,9 @@ async def run_design_loop_with_events(
                 if _f is None:
                     # Sentinel: stop the drain, take the result.
                     break
+                _scad = _f[1].get("scad_source")
+                if isinstance(_scad, str) and _scad:
+                    _last_scad_source = _scad
                 yield _f
             result = render_task.result()
         else:

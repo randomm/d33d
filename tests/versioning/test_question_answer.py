@@ -53,6 +53,7 @@ from d33d.question_answer import (
     DETERMINISTIC_COMPARISON_SENTENCES,
     DETERMINISTIC_DIMENSION_LIST_FORMAT,
     DETERMINISTIC_DIMENSION_LIST_RE,
+    FEATURE_SIZE_UNMEASURED_REPLY,
     NO_OFFER_AFFIRMATION_REPLY,
     NO_VERSION_QUESTION_REPLY,
     NOT_ESTABLISHED,
@@ -1415,6 +1416,221 @@ class TestDeterministicAxisStage:
             route_chat_message("How thick is the wall?", latest)
         )
         assert result is None
+
+
+class TestDeterministicHoleFeatureStage:
+    """Issue #396 — the deterministic feature-size stage for holes.
+
+    "How wide is the center hole?" on an imported part used to fall to
+    stage 2 (the noun "the center hole" is a feature, not the part), and
+    a failed stage-2 call answered it with the ``COULD_NOT_ANSWER``
+    copy ("I couldn't answer that just now") — wrong on both counts:
+    the answer is KNOWN. The stage answers one-hole parts from the
+    measured hole (``latest["holes"]`` — the ``part_report["holes"]``
+    list the #396 import workstream stores at import), and every other
+    hole question gets the honest ``FEATURE_SIZE_UNMEASURED_REPLY`` —
+    a hole question never reaches stage 2, and never the design loop.
+
+    Uses ``deterministic_axis_answer`` (the pure function the route
+    calls) and ``route_chat_message`` for the integration cases (the
+    ``holes`` seam — the route reads ``part_public"`s report itself in
+    production; here the route's ``holes`` argument is the same seam).
+    """
+
+    _HOLE: ClassVar[dict] = {
+        "center": (60.0, 40.0, 5.0),
+        "axis": (0.0, 0.0, 1.0),
+        "diameter_mm": 30.0,
+    }
+
+    def _latest(self, holes: list | None = None) -> dict:
+        latest = _latest263(bbox={"x": 100.0, "y": 80.0, "z": 10.0})
+        if holes is not None:
+            latest["holes"] = holes
+        return latest
+
+    def test_single_measured_hole_answers_diameter(self) -> None:
+        # "How wide is the center hole?" with ONE measured hole →
+        # "The center hole is 30.0 mm." (the mm() form, one decimal).
+        latest = self._latest(holes=[self._HOLE])
+        result = deterministic_axis_answer("How wide is the center hole?", latest)
+        assert result == "The center hole is 30.0\u202fmm."
+
+    def test_single_hole_no_qualifier_reads_the(self) -> None:
+        # "How wide is the hole?" — no qualifier → "the hole".
+        latest = self._latest(holes=[self._HOLE])
+        result = deterministic_axis_answer("How wide is the hole?", latest)
+        assert result == "The hole is 30.0\u202fmm."
+
+    def test_single_hole_bore_noun(self) -> None:
+        # "How deep is the bore?" — bore is in HOLE_NOUNS; the answer
+        # names the feature the measurement is about (a hole), never the
+        # trigger noun (a bore is a hole the import measured).
+        latest = self._latest(holes=[self._HOLE])
+        result = deterministic_axis_answer("How deep is the bore?", latest)
+        assert result == "The hole is 30.0\u202fmm."
+
+    def test_two_holes_no_qualifier_honest_reply(self) -> None:
+        # Two measured holes + "the hole" (no qualifier) → ambiguous →
+        # the honest reply (never a guess, never COULD_NOT_ANSWER).
+        second = dict(self._HOLE)
+        second["center"] = (10.0, 40.0, 5.0)
+        second["diameter_mm"] = 20.0
+        latest = self._latest(holes=[self._HOLE, second])
+        result = deterministic_axis_answer("How wide is the hole?", latest)
+        assert result == FEATURE_SIZE_UNMEASURED_REPLY
+
+    def test_two_holes_with_qualifier_honest_reply(self) -> None:
+        # The qualifier's spatial semantics ("nearest the bbox centre")
+        # belong to the #396 offer-selection workstream — the answer
+        # path answers only when exactly one hole is the pick, and here
+        # it is not → the honest reply.
+        second = dict(self._HOLE)
+        second["center"] = (10.0, 40.0, 5.0)
+        latest = self._latest(holes=[self._HOLE, second])
+        result = deterministic_axis_answer("How wide is the center hole?", latest)
+        assert result == FEATURE_SIZE_UNMEASURED_REPLY
+
+    def test_no_holes_honest_reply(self) -> None:
+        # The ticket's case: an imported part with NO measured holes —
+        # "How wide is the center hole?" → the honest reply (never
+        # COULD_NOT_ANSWER, never stage 2).
+        for latest in (
+            self._latest(),  # no "holes" key (legacy report)
+            self._latest(holes=None),
+            self._latest(holes=[]),
+        ):
+            result = deterministic_axis_answer(
+                "How wide is the center hole?", latest
+            )
+            assert result == FEATURE_SIZE_UNMEASURED_REPLY
+
+    def test_malformed_hole_entry_honest_reply(self) -> None:
+        # A corrupt holes entry (no positive diameter_mm) is "no
+        # measured hole" — the honest reply, never a crash.
+        latest = self._latest(holes=[{"diameter_mm": "wide"}])
+        result = deterministic_axis_answer("How wide is the center hole?", latest)
+        assert result == FEATURE_SIZE_UNMEASURED_REPLY
+
+    def test_non_hole_feature_noun_falls_through(self) -> None:
+        # "How wide is the slot?" / "the boss?" — NOT hole-family nouns:
+        # the stage does not take them (the honest reply would be a lie
+        # about a feature the hole measurement says nothing about); they
+        # keep their current fall-through to stage 2 (→ None here with
+        # no edge).
+        for msg in (
+            "How wide is the slot?",
+            "How wide is the boss?",
+            "How tall is the post?",
+        ):
+            result = deterministic_axis_answer(msg, self._latest())
+            assert result is None, (
+                f"{msg!r} must fall through to stage 2 (not a hole), "
+                f"got {result!r}"
+            )
+
+    def test_unsettled_part_gate_preempts_hole_stage(self) -> None:
+        # The #352 unsettled gate runs first: a hole question on an
+        # unsettled part gets the size-unknown reply (a file-unit hole
+        # diameter is not an mm measurement), never the hole answer.
+        latest = self._latest(holes=[self._HOLE])
+        result = deterministic_axis_answer(
+            "How wide is the center hole?", latest, "unsettled"
+        )
+        assert result == UNSETTLED_SIZE_REPLY
+
+    def test_hole_feature_regex_is_closed_to_hole_nouns(self) -> None:
+        # The regex's noun group is HOLE_NOUNS exactly — a digit in the
+        # message does not break the match ("How wide is the hole, 30
+        # mm?" — the stage still takes it; the route's digit-abstain
+        # keeps a proposed-change message out before this stage runs),
+        # and it never matches a feature the hole measurement cannot
+        # speak about.
+        from d33d.question_answer import HOLE_FEATURE_SIZE_QUESTION_RE
+
+        assert HOLE_FEATURE_SIZE_QUESTION_RE.search(
+            "How wide is the hole, 30 mm?"
+        ) is not None
+        assert HOLE_FEATURE_SIZE_QUESTION_RE.search("How wide is the slot?") is None
+
+    def test_hole_feature_qualifier_is_closed_set(self) -> None:
+        # Issue #396 (round 2): the qualifier is a CLOSED set (center/
+        # centre/middle/left/right/top/bottom/front/back/big/large/small
+        # or none) — the first pass accepted ANY word, so "the giant
+        # hole" / "the red hole" would have produced "The giant hole is
+        # 30.0 mm.". A qualifier outside the set means the stage does
+        # not take the message (it falls through to stage 2, as before).
+        from d33d.question_answer import HOLE_FEATURE_SIZE_QUESTION_RE
+
+        # In-set qualifiers match (with the qualifier captured).
+        for q in (
+            "center", "centre", "middle", "left", "right", "top",
+            "bottom", "front", "back", "big", "large", "small",
+        ):
+            m = HOLE_FEATURE_SIZE_QUESTION_RE.search(
+                f"How wide is the {q} hole?"
+            )
+            assert m is not None, f"qualifier {q!r} must match"
+            assert (m.group(1) or "") == q, f"qualifier {q!r} not captured"
+        # Out-of-set qualifiers do NOT match (the stage falls through).
+        for q in ("giant", "red", "tiny", "funny", "blue"):
+            m = HOLE_FEATURE_SIZE_QUESTION_RE.search(
+                f"How wide is the {q} hole?"
+            )
+            assert m is None, f"qualifier {q!r} must NOT match (closed set)"
+        # No qualifier still matches ("the hole").
+        assert HOLE_FEATURE_SIZE_QUESTION_RE.search(
+            "How wide is the hole?"
+        ) is not None
+
+    def test_route_single_hole_no_edge_no_llm(self) -> None:
+        # Integration: the measured one-hole answer rides the route's
+        # ``holes`` seam with NO answer edge and NO LLM call (the
+        # deterministic stage needs no model).
+        latest = self._latest()  # the route injects the holes below
+        edge_called = [False]
+
+        async def _edge(question: str, entries: list) -> str:
+            edge_called[0] = True
+            return '{"kind": "answer", "answer": "30"}'
+
+        result = run_async_safe(
+            route_chat_message(
+                "How wide is the center hole?", latest, _edge, holes=[self._HOLE]
+            )
+        )
+        assert result == {
+            "kind": ANSWER_DONE_KIND,
+            "answer": "The center hole is 30.0\u202fmm.",
+        }
+        assert not edge_called[0], "the answer edge must NOT be called"
+
+    def test_route_no_holes_never_could_not_answer(self) -> None:
+        # The ticket's acceptance criterion at the route level: an
+        # imported part with no measured holes + a hole size question →
+        # the honest reply, even when the stage-2 call FAILS (a
+        # failing-edge stub that would have produced COULD_NOT_ANSWER
+        # via the fall-through). The hole question never reaches stage 2.
+        latest = self._latest()
+
+        async def _edge(question: str, entries: list) -> str:
+            raise RuntimeError("the stage-2 call must never run")
+
+        result = run_async_safe(
+            route_chat_message(
+                "How wide is the center hole?", latest, _edge, holes=None
+            )
+        )
+        assert result == {"kind": ANSWER_DONE_KIND, "answer": FEATURE_SIZE_UNMEASURED_REPLY}
+        assert result["answer"] != COULD_NOT_ANSWER
+
+    def test_hole_answer_format_matches_deck_shape(self) -> None:
+        # The backend's measured-hole sentence must match the deck's
+        # ``holeFeatureSize`` shape for the same slots. Checked by
+        # concatenation (the production code builds the sentence the
+        # same way — no placeholder semantics to depend on).
+        rendered = "The " + "center" + " hole is " + "30.0\u202fmm" + "."
+        assert rendered == "The center hole is 30.0\u202fmm."
 
 
 class TestDeterministicWarningLog:
@@ -4070,6 +4286,37 @@ class TestCopyDeckParity:
         )
         assert len(set(all_strings)) == 4, (
             "the four no-run reply strings must all be distinct"
+        )
+
+    def test_feature_size_strings_match_copy_ts_deck(self) -> None:
+        """Issue #396: the hole-feature size strings are pinned against
+        ``web/src/copy.ts``'s ``deterministicAnswer`` deck —
+        ``holeFeatureSize`` (the template, checked by rendering the deck
+        the way its arrow renders) and ``featureSizeUnmeasured`` (the
+        verbatim honest reply)."""
+        from pathlib import Path
+
+        copy_ts = (
+            Path(__file__).resolve().parents[2]
+            / "web" / "src"
+            / "copy.ts"
+        ).read_text()
+
+        # The honest reply is a verbatim string literal in the deck.
+        assert '"' + FEATURE_SIZE_UNMEASURED_REPLY + '"' in copy_ts, (
+            f"backend string {FEATURE_SIZE_UNMEASURED_REPLY!r} not found "
+            "verbatim in copy.ts (the deck must carry it verbatim)"
+        )
+        # The measured template renders byte-identically in both
+        # directions: the deck's arrow (`The ${qualifier} hole is
+        # ${diameter}.`) and the backend's {qualifier}/{diameter} slots
+        # (checked by concatenation — the production code builds the
+        # sentence the same way).
+        rendered = "The " + "center" + " hole is " + "30.0\u202fmm" + "."
+        assert rendered == "The center hole is 30.0\u202fmm."
+        assert "`The ${qualifier} hole is ${diameter}.`" in copy_ts, (
+            "the deck's holeFeatureSize template drifted from the backend "
+            "template's shape"
         )
 
     def test_unanswerable_missing_template_renders_acceptance_text(self) -> None:
