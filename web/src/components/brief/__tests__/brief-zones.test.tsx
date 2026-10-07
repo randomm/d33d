@@ -144,9 +144,14 @@ describe("BriefZones — part present (two zones)", () => {
     expect(
       screen.getByTestId("brief-part-row-H").querySelector("[data-testid='brief-value']")?.textContent,
     ).toBe("80.0\u202Fmm");
-    // The note is present (settled part).
+    // The note is present (settled part). Pinned against copy.ts AND as a
+    // literal string so a plural-map regression is caught here, not just in
+    // the design-contract test (issue #390, item 2).
     expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
       copy.brief.partBroughtNote("mm"),
+    );
+    expect(screen.getByTestId("brief-zone-part-note").textContent).toBe(
+      "Measured, in millimetres you confirmed. Its own features are fixed — I can add and cut, not resize.",
     );
     // The W/D/H rows carry measured provenance (a settled part).
     for (const axis of ["W", "D", "H"] as const) {

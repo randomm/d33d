@@ -169,6 +169,68 @@ describe("ChatPanel", () => {
       expect(screen.getByTestId("pass-card-source").textContent).toBe(source);
     });
 
+    it("a failure turn's survivor line freezes the label written on it, never the live latest version (issue #390)", () => {
+      // The pre-fix bug (QA 2026-10-05 §4): a turn-1 failure card written
+      // before any version existed (keptVersion absent at write time) later
+      // read the label of a version made in turn 2 — the line was computed
+      // from the live timeline on every render. The panel must render the
+      // survivor line ONLY from the label frozen on the message itself.
+      const v1 = {
+        id: 1,
+        name: "v1",
+        source_kind: null,
+      } as unknown as VersionTimelineEntry;
+      const v2 = {
+        id: 2,
+        name: "v2",
+        source_kind: null,
+      } as unknown as VersionTimelineEntry;
+
+      const cardWrittenBeforeAnyVersion: ChatMessage = {
+        id: "f1",
+        role: "assistant",
+        content: "",
+        failure: { message: copy.failure.reasons.timeout, retryable: true, reason: "timeout" },
+        // No keptVersion: the card was written when the timeline was empty.
+      };
+      const cardWrittenWhenV1WasLatest: ChatMessage = {
+        id: "f2",
+        role: "assistant",
+        content: "",
+        failure: { message: copy.failure.reasons.timeout, retryable: true, reason: "timeout" },
+        keptVersion: "v1",
+      };
+
+      // Turn 1 fails with no version yet; the card carries no frozen label.
+      let view = render(
+        <ChatPanel
+          messages={[cardWrittenBeforeAnyVersion]}
+          onSend={vi.fn()}
+          versions={[v1, v2]}
+          keptVersion="v2"
+        />,
+      );
+      // No survivor line at all — the panel must not fall back to the
+      // live latest label (v2) for a card written when nothing existed.
+      expect(view.queryByTestId("failure-turn-survived")).toBeNull();
+      view.unmount();
+
+      // The card that was written when v1 was the latest names v1 — even
+      // though v2 now sits at the head of the live timeline and the
+      // panel's keptVersion prop says v2.
+      view = render(
+        <ChatPanel
+          messages={[cardWrittenWhenV1WasLatest]}
+          onSend={vi.fn()}
+          versions={[v1, v2]}
+          keptVersion="v2"
+        />,
+      );
+      const line = view.getByTestId("failure-turn-survived");
+      expect(line.textContent).toBe(copy.failure.survived("v1"));
+      expect(line.textContent).not.toBe(copy.failure.survived("v2"));
+    });
+
     it("renders a plain message for an assistant turn that produced no version", () => {
       const messages: ChatMessage[] = [
         { id: "m1", role: "assistant", content: "What size do you need?" },

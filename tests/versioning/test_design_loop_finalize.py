@@ -373,15 +373,17 @@ def test_finalize_pass_yields_measured_design_state(app_with_versions) -> None:
     by_kind_name = {(e["kind"], e["name"]) for e in body}
     # Issue #316 de-dup: the W/D/H-named params (30) all AGREE with their
     # measured extents (30.4/30.0/30.0, within tolerance) → their param
-    # rows are DROPPED; only the axis rows remain (measured, one row per
-    # axis). The W param (30) vs measured W (30.4): within tolerance →
-    # DROPPED. The surviving W row is the axis row (measured 30.4).
+    # rows are DROPPED; only the axis rows remain (stated — the user said
+    # "30mm cube" so the axis rows are stated, issue #390 keeps the stated
+    # provenance and displays the user's number, the measured extent rides
+    # along in ``measured_value``).
     for axis in ("W", "D", "H"):
         assert ("param", axis) not in by_kind_name, f"param {axis} should be de-duped"
         axis_entry = next(e for e in body if e["kind"] == "axis" and e["name"] == axis)
-        assert axis_entry["provenance"] == "measured", (axis, axis_entry)
+        assert axis_entry["provenance"] == "stated", (axis, axis_entry)
     w_axis = next(e for e in body if e["kind"] == "axis" and e["name"] == "W")
-    assert w_axis["value"] == 30.4
+    assert w_axis["value"] == 30.0  # the stated number (issue #390)
+    assert w_axis["measured_value"] == 30.4  # the mesh confirmed it
 
 
 # ---------------------------------------------------------------------------

@@ -1307,6 +1307,12 @@ def _axis_value_for(
                 return "stated+measured", float(value), None
             return "measured", float(value), None
         if prov == "stated":
+            # Issue #390: a stated row with ``measured_value`` present was
+            # confirmed by the render — the sentence is "you said that, and
+            # I measured it" (the stated+measured case). Without it, the
+            # stated-only sentence.
+            if entry.get("measured_value") is not None:
+                return "stated+measured", float(value), None
             return "stated", float(value), None
         if prov == "disagrees":
             stated = entry.get("stated_value")

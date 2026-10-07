@@ -84,9 +84,11 @@ def test_guard_does_not_fire_in_normal_isolated_run(data_dir: Path) -> None:
     assert base.parent == data_dir, f"{base} not under the isolated {data_dir}"
     assert real_home not in base.parents
     # _default_git_path (APP_DATA_DIR=None → the env default) succeeds too
-    # (the autouse fixture keeps APP_DATA_DIR None in this test).
+    # (the autouse fixture keeps APP_DATA_DIR None in this test). Issue
+    # #390: the slug dir is no longer created by the resolver itself —
+    # only its location under the base is what this guard pins.
     repo = Path(db_mod._default_git_path("guard-no-fire"))
-    assert repo.is_dir()
+    assert not repo.exists()  # dir creation moved to the git init path
     assert repo.parent == base
     assert real_home not in repo.parents
 
@@ -103,7 +105,10 @@ def test_new_project_default_lands_under_data_dir(data_dir: Path):
         row = conn.get_project(pid)
         assert row is not None
         assert row["git_repo_path"].startswith(str(data_dir / "projects"))
-        assert Path(row["git_repo_path"]).is_dir()
+        # Issue #390: the slug dir is created by the git-init path, not by
+        # the DB row insert — a failed create must not orphan it, so here
+        # (no git init) the path is returned uncreated under the base.
+        assert not Path(row["git_repo_path"]).exists()
     finally:
         conn.close()
 
@@ -134,7 +139,7 @@ def test_new_project_default_via_api_lands_under_data_dir(
         return row["git_repo_path"]
 
     repo = Path(run_async(app, _call))
-    assert repo.is_dir() or repo.parent.is_dir()  # repo dir exists on disk
+    assert repo.parent == data_dir / "projects"  # repo lands under the base
     assert repo.parent == data_dir / "projects"
 
 

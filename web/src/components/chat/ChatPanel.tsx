@@ -65,6 +65,17 @@ export interface ChatMessage {
    *  turn in the conversation, not a card beside it. A message with this
    *  set renders as a FailureTurn. */
   failure?: DisplayError;
+  /** Issue #390 (operator decision 2026-10-05): the version label that
+   *  survived, FROZEN AT THE MOMENT THE FAILURE CARD IS WRITTEN. Present
+   *  only on a failure turn — the failure turn's survivor line renders
+   *  from this value, never from the live latest-version in the timeline
+   *  (the pre-fix bug: a turn-1 card written before any version existed
+   *  later read the label of a version made in turn 2). A later run that
+   *  creates a new version MUST NOT re-word this turn. The value is the
+   *  same label the shell computes from the timeline at write time; when
+   *  the timeline is empty the field is absent and the line is not
+   *  rendered (no invented survivor). */
+  keptVersion?: string;
   /** Issue #250: present when this plain assistant message is an assumed-value
    *  confirmation acknowledgement ("Got it — {label} stays {value}.").
    *  The rendered content is split into label and value spans so the value
@@ -123,8 +134,13 @@ interface ChatPanelProps {
   /** The build envelope (API-reported) for the failure turn's measured
    *  number (issue #124). Absent → no bars, no numbers. */
   envelope?: { x: number; y: number; z: number } | null;
-  /** The version label the failure turn says survived (the latest
-   *  version — the failure was never a version). */
+  /** The version label the failure turn says survived — FROZEN AT CARD
+   *  WRITE TIME (issue #390, operator decision 2026-10-05): each failure
+   *  message carries its own `keptVersion` (the label the shell computed
+   *  when the card was appended), so this panel-level prop is NOT used
+   *  by the failure turn. Retained in the interface so the
+   *  ConversationPane wiring compiles unchanged; the value is ignored —
+   *  the freeze lives on the message, never on the panel. */
   keptVersion?: string | null;
   /** Issue #352 (operator decision 4): false when the export button is
    *  actually disabled (the part's units are unsettled or a design pass
@@ -147,7 +163,12 @@ export function ChatPanel({
   onBesidePhoto,
   versions,
   envelope,
-  keptVersion,
+  // Issue #390: the panel-level `keptVersion` is deliberately NOT
+  // destructured — each failure message carries its own frozen label
+  // (`ChatMessage.keptVersion`), and the live timeline value must not
+  // reach the failure turn. The interface keeps the prop so the
+  // ConversationPane wiring compiles unchanged; it is accepted (and
+  // ignored) here.
   exportable,
   hideComposer,
 }: ChatPanelProps) {
@@ -213,7 +234,12 @@ export function ChatPanel({
                 <FailureTurn
                   error={msg.failure!}
                   envelope={envelope}
-                  keptVersion={keptVersion}
+                  // Issue #390: the survivor line renders from the label
+                  // FROZEN ON THE MESSAGE (captured at card-write time) —
+                  // never from the panel-level `keptVersion`, which tracks
+                  // the live timeline and would re-word older cards when a
+                  // later turn makes a new version.
+                  keptVersion={msg.keptVersion}
                   exportable={exportable}
                   inFlight={inFlight === true}
                   onAction={onSend}

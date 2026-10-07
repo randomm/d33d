@@ -494,9 +494,21 @@ describe("design contract", () => {
     expect(copy.brief.partBroughtNoteFromFile).toBe(
       "Measured, in the file's own millimetres. Its own features are fixed — I can add and cut, not resize.",
     );
+    // Issue #390, item 2: the note pluralises the settled unit — "in
+    // millimetres", "in centimetres", "in inches" (the bare wire token
+    // "inch" read "in inch", a grammar slip). All three are pinned with
+    // literal strings, not by re-calling the function under test.
     expect(copy.brief.partBroughtNote("mm")).toBe(
-      "Measured, in mm you confirmed. Its own features are fixed — I can add and cut, not resize.",
+      "Measured, in millimetres you confirmed. Its own features are fixed — I can add and cut, not resize.",
     );
+    expect(copy.brief.partBroughtNote("cm")).toBe(
+      "Measured, in centimetres you confirmed. Its own features are fixed — I can add and cut, not resize.",
+    );
+    expect(copy.brief.partBroughtNote("inch")).toBe(
+      "Measured, in inches you confirmed. Its own features are fixed — I can add and cut, not resize.",
+    );
+    // Never the bare singular token for the wire's inch case.
+    expect(copy.brief.partBroughtNote("inch")).not.toContain("in inch ");
     expect(copy.brief.partBroughtNoteFromFile).not.toBe(copy.brief.partBroughtNote("mm"));
     expect(copy.brief.partBroughtNoteFromFile).not.toContain("you confirmed");
     expect(copy.brief.partBroughtNote("mm")).not.toContain("the file's own millimetres");

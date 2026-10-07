@@ -4969,10 +4969,12 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     expect(screen.getByTestId("import-report")).toBeTruthy();
     // The plate hides while unsettled (the caption says the size is unknown).
     expect(screen.queryByTestId("plate-backdrop")).toBeNull();
-    // The unsettled caption renders.
-    expect(screen.getByTestId("import-report-unsettled-caption").textContent).toBe(
-      copy.partReport.unsettledCaption,
-    );
+    // Issue #390: the conversation has started (settleModelMount sends a
+    // message), so the card is collapsed — the unsettled caption is out of
+    // the viewport. The card's compact line carries the "I read…" title.
+    const card = screen.getByTestId("import-report");
+    expect(card.getAttribute("data-collapsed")).toBe("true");
+    expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
     // The viewport data comes from part.stl (the fetch fired; the mock viewer
     // has the fetched bytes — data-has-data=true, format stl).
     expect(fetchSpy).toHaveBeenCalled();
@@ -5084,10 +5086,13 @@ describe("App Screen 2 (issue #334, D6/D7/D8)", () => {
     // The unsettled caption is ABSENT (the assumed card carries the
     // read-as-mm line, never "Its size isn't…").
     expect(screen.queryByTestId("import-report-unsettled-caption")).toBeNull();
-    // The assumed branch of the report is up (read-as-mm line + the
-    // one-tap change affordance — now a choice, never a silent settle).
-    expect(screen.getByTestId("import-report-assumed")).toBeTruthy();
-    expect(screen.getByTestId("import-report-change-units")).toBeTruthy();
+    // Issue #390: the conversation has started (settleModelMount sends a
+    // message), so the card is collapsed to the compact line. The full
+    // assumed branch (metrics + change-units button) is out of the viewport;
+    // the part's facts stay reachable from the Brief's part zone.
+    const card = screen.getByTestId("import-report");
+    expect(card.getAttribute("data-collapsed")).toBe("true");
+    expect(screen.queryByTestId("import-report-assumed")).toBeNull();
     // The viewport data comes from part.stl.
     expect(fetchSpy).toHaveBeenCalled();
     const viewer = screen.getByTestId("model-viewer-mock");

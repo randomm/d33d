@@ -175,6 +175,11 @@ export interface DesignStateEntry {
   /** Issue #248: the model's stated reason for a value the user did not
    *  give — the Brief's expanded assumed row renders it. */
   reason?: string;
+  /** Issue #390: the measured extent that confirmed a stated value within
+   *  tolerance. Present on `stated` rows whose value was confirmed by a
+   *  render; the displayed `value` is the stated number, and this field
+   *  carries the measurement as the ride-along evidence. */
+  measured_value?: number | null;
 }
 
 /**

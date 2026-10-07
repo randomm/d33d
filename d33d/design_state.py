@@ -213,6 +213,10 @@ class StateEntry(TypedDict):
     on a ``stated`` axis row collapsed into by an agreeing param (the
     collapse never strips it), so it is ``NotRequired``: the common
     case carries no ``stated_value`` key at all.
+    ``measured_value`` rides alongside a ``stated`` row whose measurement
+    confirmed the stated value within tolerance (issue #390 — the
+    displayed value is the STATED number; the measured extent rides
+    along as audit evidence).
     """
 
     name: str
@@ -222,6 +226,11 @@ class StateEntry(TypedDict):
     unit: str | None
     provenance: Provenance
     stated_value: NotRequired[float | str | bool | None]
+    #: The measured extent that confirmed a stated value within tolerance
+    #: (issue #390). Present on ``stated`` rows whose value was confirmed
+    #: by a render; the displayed ``value`` is the stated number, and
+    #: this field carries the measurement as the ride-along evidence.
+    measured_value: NotRequired[float | None]
     #: Present ONLY on param rows with ``provenance == "disagrees"``
     #: (mirroring ``stated_value``): ``"user"`` when the stated value is
     #: the user's (the default — absent on the wire for backward
@@ -623,7 +632,13 @@ def state_block_for_version(
             axis_value = evidence[axis]
             tol = max(BBOX_TOLERANCE_REL * axis_value, BBOX_TOLERANCE_MIN_MM)
             if abs(extent - axis_value) <= tol:
-                out.append(_axis_row(axis, extent, "measured"))
+                # Issue #390: an agreeing stated axis keeps provenance
+                # "stated" (the user's number is displayed); the measured
+                # extent rides along in ``measured_value`` (the render
+                # confirmed it — audit evidence, not the display).
+                row = _axis_row(axis, axis_value, "stated")
+                row["measured_value"] = extent
+                out.append(row)
             else:
                 out.append(_axis_row(axis, extent, "disagrees", axis_value))
         else:
@@ -652,8 +667,19 @@ def state_block_for_version(
                 tol = max(BBOX_TOLERANCE_REL * stated_value, BBOX_TOLERANCE_MIN_MM)
                 e = dict(entry)
                 if abs(extent - stated_value) <= tol:
-                    e["value"] = extent
-                    e["provenance"] = "measured"
+                    if entry["provenance"] == "stated":
+                        # Issue #390: a STATED W/D/H-named param that
+                        # agrees with its measurement keeps provenance
+                        # "stated" (the user's number is displayed);
+                        # the measured extent rides along in
+                        # ``measured_value``.
+                        e["measured_value"] = extent
+                    else:
+                        # Non-stated W/D/H-named param (assumed/unknown)
+                        # that agrees → measured (the #137 path, unchanged
+                        # for non-stated rows).
+                        e["value"] = extent
+                        e["provenance"] = "measured"
                 else:
                     e["value"] = extent
                     e["provenance"] = "disagrees"

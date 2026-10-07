@@ -203,14 +203,14 @@ describe("PlateBackdrop", () => {
     const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
     const svg = container.querySelector("svg.plate-backdrop");
     expect(svg).not.toBeNull();
-    // The SVG's width cap is min(Nvh, 46vw); the vh term pins how tall the
+    // The SVG's width cap is min(Nvh, 44vw); the vh term pins how tall the
     // whole centred column (SVG + caption + note) can grow, which sets the
     // caption's vertical position against the FirstRun card's photo hint.
     // jsdom cannot lay out — this tripwire only pins the string so a silent
     // reversion of the vh term back to 52 or above is caught here; the real
     // geometric clearance gate is the manual-only Playwright spec.
     const width = (svg as unknown as { style: CSSStyleDeclaration }).style.width;
-    const match = /min\((\d+(?:\.\d+)?)vh,\s*46vw\)/.exec(width);
+    const match = /min\((\d+(?:\.\d+)?)vh,\s*44vw\)/.exec(width);
     expect(match).not.toBeNull();
     const vhTerm = Number(match![1]);
     expect(vhTerm).toBeLessThan(52);
@@ -218,6 +218,26 @@ describe("PlateBackdrop", () => {
     // (0vh, 0.5vh) would be a non-sensical reversion this tripwire should not
     // silently pass. 40 is the floor of the "reduced but meaningful" band.
     expect(vhTerm).toBeGreaterThanOrEqual(40);
+  });
+
+  it("caps the plate SVG's width cap's vw term at 44vw — the caption stays inside the card's bottom edge at the narrowest QA width (issue #390 item 3)", () => {
+    const { container } = render(<PlateBackdrop x={320} y={320} z={300} verified={true} />);
+    const svg = container.querySelector("svg.plate-backdrop");
+    expect(svg).not.toBeNull();
+    // The width cap is min(Nvh, Nvw). The vw term pins how wide the plate
+    // can grow at narrow viewports, which sets the caption's vertical
+    // position against the FirstRun card's photo line. At 1280×800 the
+    // card is min(900px, 92vw) = 736px and the plate column (SVG + caption
+    // + note) must end above the card's bottom edge — the 44vw cap is the
+    // value that holds this (46vw pushed the caption ~26px lower, into
+    // the band where it could kiss the photo hint). jsdom cannot lay out,
+    // so this tripwire only pins the vw term string; the real geometric
+    // gate is the manual-only Playwright spec.
+    const width = (svg as unknown as { style: CSSStyleDeclaration }).style.width;
+    const match = /min\((\d+(?:\.\d+)?)vh,\s*(\d+(?:\.\d+)?)vw\)/.exec(width);
+    expect(match).not.toBeNull();
+    const vwTerm = Number(match![2]);
+    expect(vwTerm).toBeLessThanOrEqual(44);
   });
 
   it("draws the plate to scale — the SVG viewBox matches the envelope dimensions", () => {

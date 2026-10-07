@@ -50,9 +50,16 @@ interface FailureTurnProps {
    *  beside the sentence. Absent (fetch failed) → no bars, no numbers —
    *  nothing is invented. */
   envelope?: { x: number; y: number; z: number } | null;
-  /** The version label that survived the failed pass (the latest version
-   *  in the timeline — the failure was never a version). Absent when no
-   *  version exists yet. */
+  /** The version label that survived the failed pass, FROZEN AT THE
+   *  MOMENT THE CARD WAS WRITTEN (issue #390, operator decision
+   *  2026-10-05): the label the shell computed from the timeline when
+   *  the failure turn was appended to the transcript. The line renders
+   *  from this value, never from a live latest-version — a later turn
+   *  that makes a new version must not re-word this card (the pre-fix
+   *  bug: a turn-1 card written before any version existed later read
+   *  the label of a version made in turn 2). Absent or null → no
+   *  version existed at write time → no line is rendered at all (no
+   *  invented survivor). */
   keptVersion?: string | null;
   /** True when the export is actually available (issue #352, operator
    *  decision 4: the part's units are settled AND no design pass is in
