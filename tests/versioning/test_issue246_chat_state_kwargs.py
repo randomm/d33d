@@ -328,6 +328,77 @@ def test_chat_adapter_passes_none_state_kwargs_for_fresh_project(app_with_versio
     assert captured["state_stated"] is None
 
 
+def test_chat_adapter_no_part_v2_baseline_uses_parent_render(app_with_versions, tmp_path):
+    """Issue #418 (the core seam bug): a NO-PART (designed) project with
+    an existing rendered version — the chat adapter's
+    ``through_baseline_genus`` must be the PARENT VERSION's rendered
+    genus, not omitted (the old ``part_filename`` guard omitted the
+    kwarg for part-less projects, so a scratch-design v2+ edit ran the
+    through-hole check with the implicit 0 baseline). The parent here
+    renders a genus-1 mesh; the loop must receive 1."""
+    captured: dict[str, Any] = {}
+    fixture_dir = Path(__file__).parent.parent / "fixtures" / "stl"
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        await svc.create_version(pid, {"W": 20.0}, name="v1")
+        conn = app_with_versions.state.conn
+        render_dir = tmp_path / "render_v1"
+        render_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(fixture_dir / "through_hole_genus1.stl", render_dir / "model.stl")
+        latest = svc.latest_version(pid)
+        assert latest is not None
+        conn.execute(
+            "UPDATE versions SET render_artifact_dir=? WHERE id=?",
+            (str(render_dir), latest["id"]),
+        )
+        conn.commit()
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    # The v2+ baseline: the parent version's rendered genus (1) — the
+    # part-less project must get the parent baseline, not the implicit 0.
+    assert captured.get("through_baseline_genus") == 1, (
+        f"no-part v2+ baseline should be the parent version's rendered "
+        f"genus (1), got {captured.get('through_baseline_genus')!r}"
+    )
+    # Issue #418: the baseline's SOURCE rides along so QA can see it.
+    source = captured.get("through_baseline_genus_source")
+    assert source is not None and "rendered genus: 1" in source, (
+        f"baseline source must name the parent's rendered genus, got {source!r}"
+    )
+
+
+def test_chat_adapter_no_part_v2_baseline_abstains_when_parent_never_rendered(
+    app_with_versions,
+):
+    """Issue #418: a NO-PART project whose version was never rendered
+    (no ``render_artifact_dir``) — no measurable parent mesh exists, so
+    the baseline carries the ``-1`` abstain sentinel (the check
+    abstains) — never a fabricated 0 baseline."""
+    captured: dict[str, Any] = {}
+
+    async def _call(client):
+        proj = await create_project(client)
+        pid = proj["id"]
+        svc = app_with_versions.state.versions
+        # A version with NO render_artifact_dir (never rendered).
+        await svc.create_version(pid, {"W": 20.0}, name="v1")
+        await _drive_adapter(app_with_versions, pid, _capturing_loop(captured))
+
+    run_async(app_with_versions, _call)
+    assert captured.get("through_baseline_genus") == -1, (
+        f"no-part v2+ with a never-rendered parent should carry the -1 "
+        f"abstain sentinel, got {captured.get('through_baseline_genus')!r}"
+    )
+    source = captured.get("through_baseline_genus_source")
+    assert source is not None and "abstain" in source, (
+        f"baseline source must name the abstain, got {source!r}"
+    )
+
+
 def test_chat_adapter_kwargs_render_the_state_block_in_the_live_prompt():
     """Prompt-level: the design messages BUILT FROM the kwargs the chat
     adapter captures (``state_params`` / ``state_bbox`` / ``state_stated``
@@ -655,3 +726,126 @@ def test_production_design_loop_forwards_part_kwargs():
     captured = _drive()
     assert captured.get("part_scale") is None
     assert captured.get("part_bbox_mm") is None
+
+
+def test_production_design_loop_forwards_through_baseline_genus_source():
+    """Issue #418 (CRITICAL): the production closure's hook call FORWARDS
+    ``through_baseline_genus_source`` (the adapter seam's baseline
+    provenance string) to the inner hook. Without the forward, the hook
+    would raise ``TypeError: run_design_loop_async() got an unexpected
+    keyword argument 'through_baseline_genus_source'`` — which now
+    happens for EVERY v2+ edit of any project (part or part-less) with
+    a baseline. The captured-hook pattern (``fc.default_run_design_loop_hook``
+    monkeypatched BEFORE the fresh ``_build_production_design_loop()``)
+    makes the drop visible."""
+    import asyncio
+    from pathlib import Path
+
+    import d33d.app as app_mod
+    import d33d.config.catalogue as cat_mod
+    import d33d.config.probes as probes_mod
+    import d33d.config.resolve as resolve_mod
+    from d33d.app import _build_production_design_loop
+    from d33d.config.catalogue import Catalogue, ModelEntry, Provider
+    from d33d.config.probes import CapabilityResult
+    from d33d.config.resolve import RoleResolution
+    from d33d.evals import failure_capture as fc
+
+    provider = Provider(name="stub", base="http://stub", key="stub")
+    entry = ModelEntry(id="design", provider="stub", model="stub-model")
+    catalogue = Catalogue(
+        source=Path("/dev/null"),
+        providers={"stub": provider},
+        models={"design": entry},
+        roles={"design": "design"},
+    )
+    resolution = RoleResolution(role="design", entry=entry, provider=provider)
+    capability = CapabilityResult(
+        tools=True, json_schema=True, vision=False, max_images=0,
+        fenced_json=True, validated=False,
+    )
+
+    def _stub_load_catalogue(_path):
+        return catalogue
+
+    def _stub_resolve_model(_cat, _role, **_kw):
+        return resolution
+
+    async def _stub_probe_capabilities(*_a, **_k):
+        return capability
+
+    def _stub_http_request_factory(_base, _key):
+        return (lambda *a, **k: None)
+
+    class _StubAppState:
+        catalogue_path = Path("/dev/null")
+        db_path = Path("/dev/null")
+        failures_jsonl_path = Path("/dev/null")
+
+    app = type("App", (), {"state": _StubAppState()})()
+
+    def _drive(**loop_kwargs):
+        captured: dict[str, Any] = {}
+
+        async def _inner_hook(**kwargs: Any) -> Any:
+            captured.update(kwargs)
+            return None
+
+        def _inner_hook_factory(*, path: Any = None) -> Any:
+            return _inner_hook
+
+        originals = {
+            "cat": cat_mod.load_catalogue,
+            "res": resolve_mod.resolve_model,
+            "probe": probes_mod.probe_capabilities,
+            "fc_hook": fc.default_run_design_loop_hook,
+            "app_lc": getattr(app_mod, "load_catalogue", None),
+            "app_rm": getattr(app_mod, "resolve_model", None),
+            "app_http": getattr(app_mod, "_http_request_factory", None),
+        }
+        try:
+            cat_mod.load_catalogue = _stub_load_catalogue
+            resolve_mod.resolve_model = _stub_resolve_model
+            probes_mod.probe_capabilities = _stub_probe_capabilities
+            if originals["app_lc"] is not None:
+                app_mod.load_catalogue = _stub_load_catalogue
+            if originals["app_rm"] is not None:
+                app_mod.resolve_model = _stub_resolve_model
+            if originals["app_http"] is not None:
+                app_mod._http_request_factory = _stub_http_request_factory
+            fc.default_run_design_loop_hook = _inner_hook_factory
+            wrapper = _build_production_design_loop()
+            asyncio.run(wrapper(app, **loop_kwargs))
+        finally:
+            cat_mod.load_catalogue = originals["cat"]
+            resolve_mod.resolve_model = originals["res"]
+            probes_mod.probe_capabilities = originals["probe"]
+            fc.default_run_design_loop_hook = originals["fc_hook"]
+            if originals["app_lc"] is not None:
+                app_mod.load_catalogue = originals["app_lc"]
+            if originals["app_rm"] is not None:
+                app_mod.resolve_model = originals["app_rm"]
+            if originals["app_http"] is not None:
+                app_mod._http_request_factory = originals["app_http"]
+        return captured
+
+    # A v2+ edit (the adapter sets both the baseline and its source):
+    # the hook call must forward BOTH kwargs — the source is what the
+    # check logs with its decision.
+    _src = "parent version v107 rendered genus: 1"
+    captured = _drive(
+        through_baseline_genus=1,
+        through_baseline_genus_source=_src,
+    )
+    assert captured.get("through_baseline_genus") == 1
+    assert captured.get("through_baseline_genus_source") == _src, (
+        f"the production closure must forward through_baseline_genus_source, "
+        f"got {captured.get('through_baseline_genus_source')!r}"
+    )
+
+    # A fresh design (no baseline): both kwargs absent → the loop's
+    # defaults (no baseline → 0; no source → None) — the call must NOT
+    # raise a TypeError.
+    captured = _drive()
+    assert captured.get("through_baseline_genus") is None
+    assert captured.get("through_baseline_genus_source") is None

@@ -1965,6 +1965,10 @@ def _build_production_design_loop():
             design_source=kwargs.get("design_source"),
             part_scale=kwargs.get("part_scale"),
             part_bbox_mm=kwargs.get("part_bbox_mm"),
+            through_baseline_genus=kwargs.get("through_baseline_genus"),
+            through_baseline_genus_source=kwargs.get(
+                "through_baseline_genus_source"
+            ),
             model=res.entry.model,
             prompt_version=prompt_version,
             on_progress=on_progress,
