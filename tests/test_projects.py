@@ -3021,8 +3021,12 @@ def test_fill_recut_no_match_lead_matches_copy_ts() -> None:
     )
     assert m is not None, "copy.ts must define fillRecut.noMatchLead"
     ts_template = m.group(1)
-    assert "${noun}" in ts_template, f"copy.ts noMatchLead must carry ${noun}: {ts_template!r}"
-    assert "${holes}" in ts_template, f"copy.ts noMatchLead must carry ${holes}: {ts_template!r}"
+    assert "${noun}" in ts_template, (
+        f"copy.ts noMatchLead must carry the ${{noun}} slot: {ts_template!r}"
+    )
+    assert "${holes}" in ts_template, (
+        f"copy.ts noMatchLead must carry the ${{holes}} slot: {ts_template!r}"
+    )
     ts_rendered = ts_template.replace("${noun}", "hole").replace("${holes}", "Ø4 mm at (8, 72)")
     assert fill_recut.FRILL_NO_MATCH_LEAD.format(noun="hole", holes="Ø4 mm at (8, 72)") == ts_rendered, (
         f"backend: {fill_recut.FRILL_NO_MATCH_LEAD.format(noun='hole', holes='Ø4 mm at (8, 72)')!r}\n"

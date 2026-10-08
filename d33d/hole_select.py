@@ -21,6 +21,7 @@ instruction without a location.
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from typing import Any
 
 #: The ambiguity threshold (mm) for the "nearest the centre" rule: two
@@ -46,13 +47,18 @@ _AMBIGUITY_MM = 0.1
 _CENTER_MATCH_MM = 30.0
 
 
+@dataclass(frozen=True)
 class NoMatchHole:
     """The issue #414 no-match sentinel: the user named a hole by
     position ("the center hole") but NO measured hole matches that
     position — the caller must say so and list the measured holes, and
     must NOT make a recut offer. Distinct from ``None`` (an ambiguous
     or unqualified message — the point-at fallback) so the two replies
-    never get conflated."""
+    never get conflated.
+
+    A frozen dataclass so a stray second instantiation is a VISIBLE
+    mistake (a different object, caught by ``is _NO_MATCH``) instead of
+    a second, indistinguishable sentinel."""
 
 
 _NO_MATCH = NoMatchHole()

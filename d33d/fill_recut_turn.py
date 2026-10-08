@@ -18,12 +18,12 @@ from d33d.fill_recut import (
     FRILL_POINT_AT_NO_DIM_TEMPLATE,
     FRILL_POINT_AT_TEMPLATE,
     _fmt_size,
-    no_match_hole_reply,
     boundary_sentence,
     fill_and_recut_instruction,
     fill_recut_trigger,
     is_clean_no,
     is_clean_yes,
+    no_match_hole_reply,
     own_feature_names,
 )
 from d33d.hole_select import NoMatchHole, holes_in_mm, select_measured_hole

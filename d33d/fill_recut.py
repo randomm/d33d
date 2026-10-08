@@ -175,6 +175,17 @@ def _fmt_size(value: float | None) -> str | None:
         return None
     return f"{value:g}"
 
+def _fmt_coord(value: float) -> str:
+    """A hole-centre coordinate, human-readable at any scale.
+
+    Uses ``:g`` (compact, no trailing zeros) but falls back to ``:f``
+    (fixed-point) when ``:g`` would switch to scientific notation —
+    a coordinate of 1e6 mm renders as ``1000000``, not ``1e+06``."""
+    g = f"{value:g}"
+    if "e" in g or "E" in g:
+        return f"{value:f}".rstrip("0").rstrip(".")
+    return g
+
 
 def boundary_sentence(
     noun: str,
@@ -326,7 +337,14 @@ def no_match_hole_reply(
     ``copy.ts``'s ``fillRecut.noMatchLead``) and lists every measured
     hole — its diameter and centre (mm, mono-formatted the way the deck
     renders numbers) — so the user can pick by name or point at it. No
-    recut offer is made for a hole that does not exist."""
+    recut offer is made for a hole that does not exist.
+
+    Callers pass the MEASURED holes (non-empty — the upstream
+    ``holes_in_mm`` guard already returns ``None`` for an empty list); a
+    list where EVERY entry is malformed degrades to the lead-in with an
+    honest ``none`` rather than a dangling ``"…find: "`` tail."""
+    if not holes:
+        return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="none")
     entries: list[str] = []
     for h in holes:
         center = h.get("center")
@@ -345,7 +363,8 @@ def no_match_hole_reply(
             and diameter > 0
         ):
             entries.append(
-                f"Ø{_fmt_size(float(diameter))} mm at ({float(center[0]):g}, {float(center[1]):g})"
+                f"Ø{_fmt_size(float(diameter))} mm at "
+                f"({_fmt_coord(float(center[0]))}, {_fmt_coord(float(center[1]))})"
             )
     return FRILL_NO_MATCH_LEAD.format(noun=noun, holes="; ".join(entries))
 
@@ -412,7 +431,6 @@ __all__ = [
     "FRILL_NO_MATCH_LEAD",
     "FRILL_POINT_AT_NO_DIM_TEMPLATE",
     "FRILL_POINT_AT_TEMPLATE",
-    "no_match_hole_reply",
     "TRIGGER_MAX_INSTRUCTION_CHARS",
     "UNSETTLED_PART_REPLY",
     "boundary_sentence",
@@ -420,6 +438,7 @@ __all__ = [
     "fill_recut_trigger",
     "is_clean_no",
     "is_clean_yes",
+    "no_match_hole_reply",
     "own_feature_names",
 ]
 

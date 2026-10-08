@@ -55,9 +55,10 @@ def _section_interior_rings(
 
     Returns a list of ``(u, v, diameter)`` tuples for the INTERIOR
     rings (the holes — every contour except the largest-area one,
-    which is the outer face outline). The in-plane coordinates are in
-    the 2D plane's frame; the caller maps them back to the body's 3D
-    frame (the two in-plane coords fill the non-slice axes).
+    which is the outer face outline), with the in-plane coordinates
+    ALREADY mapped back to the body's 3D frame (the full affine
+    transform is applied internally — the two in-plane coords fill the
+    non-slice axes, so the caller uses them directly).
 
     Raises: :class:`ImportError` propagates (a missing scipy / shapely
     is a deployment error, not a geometric failure); a degenerate
@@ -69,8 +70,10 @@ def _section_interior_rings(
     normal = np.zeros(3)
     normal[axis_index] = 1.0
     # The plane origin is the body's centroid (the mid-plane through the
-    # centroid cuts every through-hole cleanly; the 2D frame's origin is
-    # this point, so the in-plane coordinates are relative to it).
+    # centroid cuts every through-hole cleanly). The 2D frame's origin,
+    # by contrast, is the fitted plane's own point (see below) — the two
+    # are NOT the same point, so the in-plane coordinates are relative to
+    # the fitted origin, not to this one.
     centroid = np.asarray(body.centroid, dtype=float)
     origin = centroid.copy()
     origin[axis_index] = mid

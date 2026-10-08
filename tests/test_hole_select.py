@@ -188,9 +188,6 @@ def test_select_measured_hole_center_qualifier_no_match_returns_no_match():
     result = select_measured_hole(
         holes, "make the center hole 38 mm", bbox_mm=[120.0, 80.0], trigger_size=38.0
     )
-    # Distances to the centre (60, 40): (8,72)→63.0, (112,8)→68.8, (112,72)
-    # →68.8 mm — all far beyond the match threshold (the bbox's
-    # half-diagonal, hypot(60, 40) = 70.0 mm).
     # Distances to the centre (60, 40): (8,72)→61.1, (112,8)→61.1, (112,72)
     # →61.1 mm — all far beyond the 30 mm match threshold.
     assert isinstance(result, NoMatchHole), (
