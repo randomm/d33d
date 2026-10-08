@@ -1,4 +1,4 @@
-import "@testing-library/jest-dom";
+import "@testing-library/jest-dom/vitest";
 
 // jsdom does not implement ResizeObserver — provide a no-op stub.
 // The bar's anchoring uses it to read the stage element's clientWidth/Height.
